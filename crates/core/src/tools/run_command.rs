@@ -4,15 +4,15 @@ use crate::command::{
     infer_managed_artifact_command_kind, infer_managed_pdf_command_kind,
     infer_managed_pdf_workspace_inputs, is_presentation_editor_direct_command,
     normalize_command_text, validate_command_runtime_binding,
-    validate_managed_artifact_builder_output_scope, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
-    MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS, PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX,
-    PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH,
+    validate_managed_artifact_builder_output_scope, MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX,
+    MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS, MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
+    PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX, PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH,
 };
 use crate::file_input::{
     agent_file_input_ref_from_model_path, agent_file_input_ref_matches_model_path,
     default_agent_file_input_mount_path, normalize_agent_file_input_specs,
-    prepare_agent_file_input_bindings, AgentFileInputExecutionContext, MAX_AGENT_FILE_INPUTS,
-    MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
+    prepare_agent_file_input_bindings, resolve_verified_agent_file_input_path,
+    AgentFileInputExecutionContext, MAX_AGENT_FILE_INPUTS, MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandArtifactObservationKind,
@@ -34,7 +34,27 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TrustedManagedBuilderPurpose {
     Create,
+    EditDocument,
+    EditSpreadsheet,
     EditPresentation,
+}
+
+impl TrustedManagedBuilderPurpose {
+    fn is_editor(self) -> bool {
+        !matches!(self, Self::Create)
+    }
+
+    fn office_purpose(self) -> crate::office::OfficeManagedScriptPurpose {
+        match self {
+            Self::Create => crate::office::OfficeManagedScriptPurpose::Create,
+            Self::EditPresentation => {
+                crate::office::OfficeManagedScriptPurpose::EditPresentationPlan
+            }
+            Self::EditDocument | Self::EditSpreadsheet => {
+                crate::office::OfficeManagedScriptPurpose::Edit
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,6 +62,23 @@ struct TrustedManagedBuilder {
     profile: AgentCommandRuntimeProfile,
     purpose: TrustedManagedBuilderPurpose,
     workspace_script_path: String,
+}
+
+fn managed_office_script_mount(builder: &TrustedManagedBuilder) -> String {
+    if builder.purpose == TrustedManagedBuilderPurpose::EditPresentation {
+        return PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH.to_string();
+    }
+    let profile = match builder.profile {
+        AgentCommandRuntimeProfile::Documents => "documents",
+        AgentCommandRuntimeProfile::Spreadsheets => "spreadsheets",
+        AgentCommandRuntimeProfile::Presentations => "presentations",
+        AgentCommandRuntimeProfile::Pdf => "pdf",
+    };
+    let name = Path::new(&builder.workspace_script_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("script");
+    format!("{MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX}/{profile}/{name}")
 }
 
 pub(super) struct RunCommandTool;
@@ -376,15 +413,24 @@ fn command_request_from_call(
         .map(|reason| reason.trim().to_string())
         .filter(|reason| !reason.is_empty());
     let trusted_builder = trusted_materialized_builder_profile(context, &command, cwd.as_deref())?;
-    let trusted_editor_syntax_check = if trusted_builder
+    let trusted_builder_command = trusted_builder
+        .as_ref()
+        .map(|_| infer_managed_artifact_builder_command(&command).map_err(builder_contract_error))
+        .transpose()?
+        .flatten();
+    if let Some((builder, parsed)) = trusted_builder
+        .as_ref()
+        .zip(trusted_builder_command.as_ref())
+    {
+        validate_trusted_office_source_contract(builder, parsed)?;
+    }
+    let _trusted_editor_syntax_check = if trusted_builder
         .as_ref()
         .is_some_and(|builder| builder.purpose == TrustedManagedBuilderPurpose::EditPresentation)
     {
-        let parsed = infer_managed_artifact_builder_command(&command)
-            .map_err(builder_contract_error)?
-            .ok_or_else(|| {
-                builder_contract_error("后端验证的 Presentation Editor 命令无法解析。".to_string())
-            })?;
+        let parsed = trusted_builder_command.as_ref().ok_or_else(|| {
+            builder_contract_error("后端验证的 Presentation Editor 命令无法解析。".to_string())
+        })?;
         if parsed.node_syntax_check {
             true
         } else if is_presentation_editor_direct_command(&command) {
@@ -435,11 +481,11 @@ fn command_request_from_call(
     let mut input_specs = resolve_run_command_inputs(&input_context, args.inputs)?;
     if input_specs
         .iter()
-        .any(|input| is_presentation_editor_reserved_mount(&input.mount_path))
+        .any(|input| is_managed_office_script_reserved_mount(&input.mount_path))
     {
         return Err(AgentError::structured(
             "agent.fileInput.invalidRequest",
-            "Presentation Editor 的 Host 保留挂载命名空间不能由模型声明。",
+            "Managed Office Script 的 Host 保留挂载命名空间不能由模型声明。",
             json!({
                 "type": "agentFileInput",
                 "code": "agent.fileInput.invalidRequest",
@@ -447,13 +493,13 @@ fn command_request_from_call(
             }),
         ));
     }
-    if let Some(builder) = trusted_builder
+    let trusted_execution = trusted_builder
         .as_ref()
-        .filter(|builder| builder.purpose == TrustedManagedBuilderPurpose::EditPresentation)
-        .filter(|_| !trusted_editor_syntax_check)
-    {
+        .zip(trusted_builder_command.as_ref())
+        .filter(|(_, command)| !command.node_syntax_check && !command.output_paths.is_empty());
+    if let Some((builder, _)) = trusted_execution {
         input_specs.push(AgentFileInputSpec {
-            mount_path: crate::command::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH.to_string(),
+            mount_path: managed_office_script_mount(builder),
             source: AgentFileInputRef::Workspace {
                 path: builder.workspace_script_path.clone(),
             },
@@ -547,6 +593,19 @@ fn command_request_from_call(
             }),
         )
     })?;
+    let managed_office_script = trusted_execution
+        .map(|(builder, parsed)| {
+            prepare_managed_office_script_binding(
+                context,
+                workspace_root.clone(),
+                cwd.as_deref(),
+                builder,
+                parsed,
+                &input_specs,
+                &input_context,
+            )
+        })
+        .transpose()?;
 
     Ok(AgentCommandRequest {
         id: call.id.clone(),
@@ -559,6 +618,7 @@ fn command_request_from_call(
         observe: builder_config.observe,
         inputs,
         runtime_binding: runtime_binding.map(Box::new),
+        managed_office_script: managed_office_script.map(Box::new),
     })
 }
 
@@ -857,6 +917,14 @@ fn profile_for_bundled_builder_receipt(
                 TrustedManagedBuilderPurpose::Create,
             )
         }
+        (DOCUMENTS_LOCAL_ID, "templates/editor.py", crate::AgentCommandRuntimeKind::Python) => (
+            AgentCommandRuntimeProfile::Documents,
+            TrustedManagedBuilderPurpose::EditDocument,
+        ),
+        (SPREADSHEETS_LOCAL_ID, "templates/editor.py", crate::AgentCommandRuntimeKind::Python) => (
+            AgentCommandRuntimeProfile::Spreadsheets,
+            TrustedManagedBuilderPurpose::EditSpreadsheet,
+        ),
         (PRESENTATIONS_LOCAL_ID, "templates/builder.mjs", crate::AgentCommandRuntimeKind::Node) => {
             (
                 AgentCommandRuntimeProfile::Presentations,
@@ -1066,6 +1134,164 @@ fn office_profile_for_output(path: &str) -> Option<AgentCommandRuntimeProfile> {
     }
 }
 
+fn prepare_managed_office_script_binding(
+    context: &ToolExecutionContext,
+    workspace_root: Option<PathBuf>,
+    cwd: Option<&str>,
+    builder: &TrustedManagedBuilder,
+    command: &crate::command::ManagedArtifactBuilderCommand,
+    input_specs: &[AgentFileInputSpec],
+    input_context: &AgentFileInputExecutionContext,
+) -> AgentResult<crate::office::OfficeManagedScriptBinding> {
+    if command.output_paths.len() != 1 {
+        return Err(builder_contract_error(
+            "后端验证的 Managed Office Script 必须声明且只声明一个静态 --output。".to_string(),
+        ));
+    }
+    validate_trusted_office_source_contract(builder, command)?;
+    let source_mount_path = match builder.purpose {
+        TrustedManagedBuilderPurpose::Create => None,
+        TrustedManagedBuilderPurpose::EditDocument
+        | TrustedManagedBuilderPurpose::EditSpreadsheet
+        | TrustedManagedBuilderPurpose::EditPresentation => command.source_paths.first().cloned(),
+    };
+    if let Some(source) = source_mount_path.as_deref() {
+        let source_count = input_specs
+            .iter()
+            .filter(|input| input.mount_path == source)
+            .count();
+        if source_count != 1 {
+            return Err(builder_contract_error(
+                "Managed Office Script 的 --source 必须精确匹配一个冻结的 run_command.inputs mountPath。"
+                    .to_string(),
+            ));
+        }
+    }
+    let document_kind = match builder.profile {
+        AgentCommandRuntimeProfile::Documents => crate::office::OfficeDocumentKind::Document,
+        AgentCommandRuntimeProfile::Spreadsheets => crate::office::OfficeDocumentKind::Spreadsheet,
+        AgentCommandRuntimeProfile::Presentations => {
+            crate::office::OfficeDocumentKind::Presentation
+        }
+        AgentCommandRuntimeProfile::Pdf => {
+            return Err(builder_contract_error(
+                "PDF Runtime 不能创建 Managed Office Script 事务。".to_string(),
+            ))
+        }
+    };
+    if builder.purpose.is_editor() {
+        let source = source_mount_path
+            .as_deref()
+            .expect("editor source checked above");
+        if !document_kind.accepts_path(Path::new(source)) {
+            return Err(builder_contract_error(
+                "Managed Office Editor 的 --source 类型必须与来源 Skill 一致。".to_string(),
+            ));
+        }
+    }
+    let requested_output = &command.output_paths[0];
+    if source_mount_path.as_deref() == Some(requested_output.as_str()) {
+        return Err(builder_contract_error(
+            "Managed Office Editor 只允许另存为，--output 必须不同于 --source。".to_string(),
+        ));
+    }
+    let destination = managed_office_destination_logical_path(cwd, requested_output)
+        .map_err(builder_contract_error)?;
+    let office_context = crate::office::OfficeExecutionContext::new(
+        workspace_root.clone(),
+        context.permissions(),
+        context.attachment_library().cloned(),
+    );
+    let binding = crate::office::prepare_managed_script_binding(
+        &office_context,
+        document_kind,
+        builder.purpose.office_purpose(),
+        managed_office_script_mount(builder),
+        source_mount_path.clone(),
+        &destination,
+    )
+    .map_err(|error| {
+        AgentError::structured(
+            error.code().stable_name(),
+            error.message(),
+            json!({
+                "type": "managedOfficeScript",
+                "code": error.code().stable_name(),
+                "recovery": error.recovery().stable_name()
+            }),
+        )
+    })?;
+    if let Some(source_mount) = source_mount_path.as_deref() {
+        let source = input_specs
+            .iter()
+            .find(|input| input.mount_path == source_mount)
+            .expect("the exact Editor source input was counted above");
+        let physical_source = resolve_verified_agent_file_input_path(
+            workspace_root.as_deref(),
+            context.permissions(),
+            input_context,
+            &source.source,
+        )
+        .map_err(|error| {
+            builder_contract_error(format!(
+                "Managed Office Editor 无法验证 --source 的真实文件身份：{}",
+                error.message()
+            ))
+        })?;
+        if physical_source.as_deref() == Some(Path::new(&binding.destination.normalized_path)) {
+            return Err(builder_contract_error(
+                "Managed Office Editor 只允许另存为；--output 不能通过不同拼写指向真实 --source 文件。"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(binding)
+}
+
+fn managed_office_destination_logical_path(
+    cwd: Option<&str>,
+    requested_output: &str,
+) -> Result<String, String> {
+    let expanded = expand_system_path(requested_output)?;
+    let output = expanded.unwrap_or_else(|| PathBuf::from(requested_output));
+    let logical = if output.is_absolute() {
+        output
+    } else {
+        match cwd {
+            Some(cwd) => Path::new(cwd).join(output),
+            None => output,
+        }
+    };
+    Ok(logical.to_string_lossy().into_owned())
+}
+
+fn validate_trusted_office_source_contract(
+    builder: &TrustedManagedBuilder,
+    command: &crate::command::ManagedArtifactBuilderCommand,
+) -> AgentResult<()> {
+    if command.node_syntax_check {
+        return Ok(());
+    }
+    match builder.purpose {
+        TrustedManagedBuilderPurpose::Create if !command.source_paths.is_empty() => {
+            Err(builder_contract_error(
+                "Managed Office Builder 不允许声明 --source；编辑现有文件必须使用对应的固定 Editor。"
+                    .to_string(),
+            ))
+        }
+        TrustedManagedBuilderPurpose::EditDocument
+        | TrustedManagedBuilderPurpose::EditSpreadsheet
+        | TrustedManagedBuilderPurpose::EditPresentation
+            if command.source_paths.len() != 1 =>
+        {
+            Err(builder_contract_error(
+                "Managed Office Editor 必须声明且只声明一个静态 --source。".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_managed_builder_output_scope(
     context: &ToolExecutionContext,
     cwd: Option<&str>,
@@ -1191,20 +1417,24 @@ pub(crate) fn validate_frozen_command_trace_args(
         .transpose()
         .map_err(|_| "run_command frozen ToolCall observe hint is invalid".to_string())?;
     let mut frozen_inputs = Vec::with_capacity(frozen.inputs.len());
-    let mut editor_script = None;
+    let mut managed_script = None;
+    let managed_script_mount = frozen
+        .managed_office_script
+        .as_deref()
+        .map(|binding| binding.script_mount_path.as_str());
     for binding in &frozen.inputs {
-        if binding.mount_path == PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH {
-            if editor_script.replace(binding).is_some() {
+        if managed_script_mount == Some(binding.mount_path.as_str()) {
+            if managed_script.replace(binding).is_some() {
                 return Err(
-                    "run_command frozen command contains multiple Host-reserved Presentation Editor scripts"
+                    "run_command frozen command contains multiple Host-reserved Managed Office scripts"
                         .to_string(),
                 );
             }
             continue;
         }
-        if is_presentation_editor_reserved_mount(&binding.mount_path) {
+        if is_managed_office_script_reserved_mount(&binding.mount_path) {
             return Err(
-                "run_command frozen command contains an invalid Host-reserved Presentation Editor input"
+                "run_command frozen command contains an invalid Host-reserved Managed Office input"
                     .to_string(),
             );
         }
@@ -1213,23 +1443,73 @@ pub(crate) fn validate_frozen_command_trace_args(
             source: binding.source.clone(),
         });
     }
-    if let Some(editor_script) = editor_script {
-        let Some(binding) = frozen.runtime_binding.as_deref() else {
+    if let Some(transaction) = frozen.managed_office_script.as_deref() {
+        let Some(script) = managed_script else {
             return Err(
-                "run_command frozen Presentation Editor script has no managed runtime identity"
+                "run_command frozen Managed Office transaction has no frozen script".to_string(),
+            );
+        };
+        let Some(runtime) = frozen.runtime_binding.as_deref() else {
+            return Err(
+                "run_command frozen Managed Office script has no managed runtime identity"
                     .to_string(),
             );
         };
-        if binding.profile != AgentCommandRuntimeProfile::Presentations
-            || binding.kind != crate::AgentCommandRuntimeKind::Node
-            || !matches!(&editor_script.source, AgentFileInputRef::Workspace { .. })
-            || !is_presentation_editor_direct_command(&command)
+        let expected_profile = match transaction.document_kind {
+            crate::office::OfficeDocumentKind::Document => AgentCommandRuntimeProfile::Documents,
+            crate::office::OfficeDocumentKind::Spreadsheet => {
+                AgentCommandRuntimeProfile::Spreadsheets
+            }
+            crate::office::OfficeDocumentKind::Presentation => {
+                AgentCommandRuntimeProfile::Presentations
+            }
+        };
+        let parsed = infer_managed_artifact_builder_command(&command)
+            .map_err(|_| "run_command frozen Managed Office command is invalid".to_string())?
+            .ok_or_else(|| "run_command frozen Managed Office command is missing".to_string())?;
+        let AgentFileInputRef::Workspace {
+            path: script_workspace_path,
+        } = &script.source
+        else {
+            return Err(
+                "run_command frozen Managed Office script is not workspace-owned".to_string(),
+            );
+        };
+        let (expected_purpose, expected_script_mount, expected_source) =
+            frozen_managed_office_contract(runtime.profile, &parsed, script_workspace_path)
+                .ok_or_else(|| {
+                "run_command frozen Managed Office command has an invalid purpose or source contract"
+                    .to_string()
+            })?;
+        let expected_destination = managed_office_destination_logical_path(
+            cwd.as_deref(),
+            parsed.output_paths.first().ok_or_else(|| {
+                "run_command frozen Managed Office command has no output".to_string()
+            })?,
+        )
+        .map_err(|_| "run_command frozen Managed Office destination is invalid".to_string())?;
+        if transaction.schema_version != crate::office::OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION
+            || runtime.profile != expected_profile
+            || parsed.kind != runtime.kind
+            || parsed.node_syntax_check
+            || parsed.output_paths.len() != 1
+            || transaction.purpose != expected_purpose
+            || transaction.script_mount_path != expected_script_mount
+            || transaction.source_mount_path.as_deref() != expected_source
+            || transaction.destination.logical_path != expected_destination
+            || (transaction.purpose
+                == crate::office::OfficeManagedScriptPurpose::EditPresentationPlan
+                && !is_presentation_editor_direct_command(&command))
         {
             return Err(
-                "run_command frozen Presentation Editor script has an invalid Host identity"
-                    .to_string(),
+                "run_command frozen Managed Office script has an invalid Host identity".to_string(),
             );
         }
+    } else if managed_script.is_some() {
+        return Err(
+            "run_command frozen command contains an unbound Host-reserved Office script"
+                .to_string(),
+        );
     }
     let frozen_pdf = frozen
         .runtime_binding
@@ -1282,6 +1562,64 @@ fn is_presentation_editor_reserved_mount(mount_path: &str) -> bool {
     mount_path
         .strip_prefix(PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX)
         .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+}
+
+fn frozen_managed_office_contract<'a>(
+    profile: AgentCommandRuntimeProfile,
+    parsed: &'a crate::command::ManagedArtifactBuilderCommand,
+    script_workspace_path: &str,
+) -> Option<(
+    crate::office::OfficeManagedScriptPurpose,
+    String,
+    Option<&'a str>,
+)> {
+    use crate::office::OfficeManagedScriptPurpose;
+
+    let source = match parsed.source_paths.as_slice() {
+        [] => None,
+        [source] => Some(source.as_str()),
+        _ => return None,
+    };
+    let (purpose, profile_name) = match (profile, source) {
+        (AgentCommandRuntimeProfile::Documents, None) => {
+            (OfficeManagedScriptPurpose::Create, "documents")
+        }
+        (AgentCommandRuntimeProfile::Documents, Some(_)) => {
+            (OfficeManagedScriptPurpose::Edit, "documents")
+        }
+        (AgentCommandRuntimeProfile::Spreadsheets, None) => {
+            (OfficeManagedScriptPurpose::Create, "spreadsheets")
+        }
+        (AgentCommandRuntimeProfile::Spreadsheets, Some(_)) => {
+            (OfficeManagedScriptPurpose::Edit, "spreadsheets")
+        }
+        (AgentCommandRuntimeProfile::Presentations, None) => {
+            (OfficeManagedScriptPurpose::Create, "presentations")
+        }
+        (AgentCommandRuntimeProfile::Presentations, Some(_)) => {
+            return Some((
+                OfficeManagedScriptPurpose::EditPresentationPlan,
+                PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH.to_string(),
+                source,
+            ));
+        }
+        (AgentCommandRuntimeProfile::Pdf, _) => return None,
+    };
+    let script_name = Path::new(script_workspace_path)
+        .file_name()
+        .and_then(|name| name.to_str())?;
+    Some((
+        purpose,
+        format!("{MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX}/{profile_name}/{script_name}"),
+        source,
+    ))
+}
+
+fn is_managed_office_script_reserved_mount(mount_path: &str) -> bool {
+    is_presentation_editor_reserved_mount(mount_path)
+        || mount_path
+            .strip_prefix(MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1691,6 +2029,72 @@ mod tests {
         storage
             .upsert_agent_action_audit(AgentActionAuditRecord {
                 action_id: format!("materialize-editor-{source_id}"),
+                run_id: run_id.to_string(),
+                conversation_id: None,
+                assistant_message_id: None,
+                action_type: "skill_materialization".to_string(),
+                tool_name: "skills_materialize_resource".to_string(),
+                decision: Some("approved".to_string()),
+                status: "completed".to_string(),
+                action_json: "{}".to_string(),
+                patch_result_json: None,
+                command_result_json: None,
+                tool_result_json: Some(serde_json::to_string(&tool_result).unwrap()),
+                error: None,
+                created_at: 1,
+                decided_at: Some(2),
+                completed_at: Some(3),
+                effective_permissions_json: None,
+                path_scope: None,
+                command_cwd_scope: None,
+                blocked_reason: None,
+                decision_source: Some("manual".to_string()),
+            })
+            .unwrap();
+    }
+
+    fn record_materialized_python_editor(
+        storage: &StorageService,
+        run_id: &str,
+        profile: AgentCommandRuntimeProfile,
+        destination: &str,
+    ) {
+        let (local_id, template_path) = match profile {
+            AgentCommandRuntimeProfile::Documents => (DOCUMENTS_LOCAL_ID, "templates/editor.py"),
+            AgentCommandRuntimeProfile::Spreadsheets => {
+                (SPREADSHEETS_LOCAL_ID, "templates/editor.py")
+            }
+            _ => panic!("only Word and Excel use the Python Editor receipt helper"),
+        };
+        let revision = SkillRevision::parse(format!("revision-{local_id}-editor")).unwrap();
+        let source = SkillPackageUri::new(
+            SkillId::parse(format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{local_id}")).unwrap(),
+            revision.clone(),
+        )
+        .resource(SkillResourcePath::parse(template_path.to_string()).unwrap());
+        let result = AgentSkillMaterializationResult {
+            status: AgentSkillMaterializationResultStatus::Applied,
+            source_uri: source.to_string(),
+            source_prefix: None,
+            destination: destination.to_string(),
+            source_revision: revision.to_string(),
+            file_count: 1,
+            byte_count: 100,
+            plan_digest: Some("skill-materialization-sha256-v1:python-editor-test".to_string()),
+            error: None,
+            message: Some("created".to_string()),
+        };
+        let tool_result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: format!("materialize-{local_id}-editor"),
+            tool: "skills_materialize_resource".to_string(),
+            ok: true,
+            result: Some(serde_json::to_value(result).unwrap()),
+            error: None,
+        };
+        storage
+            .upsert_agent_action_audit(AgentActionAuditRecord {
+                action_id: format!("materialize-{local_id}-editor"),
                 run_id: run_id.to_string(),
                 conversation_id: None,
                 assistant_message_id: None,
@@ -2505,6 +2909,7 @@ mod tests {
         ];
         for case in cases {
             let workspace = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(workspace.path().join("outputs")).unwrap();
             let script_path = workspace.path().join(case.script);
             std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
             std::fs::write(&script_path, "# managed builder\n").unwrap();
@@ -2557,8 +2962,201 @@ mod tests {
     }
 
     #[test]
+    fn exact_bundled_builders_reject_source_and_python_editors_require_exactly_one_source() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("scripts")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("outputs")).unwrap();
+        std::fs::write(workspace.path().join("source.xlsx"), b"PK\x03\x04source").unwrap();
+
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+
+        let builder = "scripts/build.py";
+        std::fs::write(workspace.path().join(builder), b"# fixed builder\n").unwrap();
+        let builder_run_id = "run-excel-builder-source-contract";
+        record_materialized_builder(
+            &storage,
+            builder_run_id,
+            AgentCommandRuntimeProfile::Spreadsheets,
+            builder,
+        );
+        let builder_context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: None,
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("builder source contract".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Spreadsheets,
+                AgentCommandRuntimeKind::Python,
+                &[("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")],
+            ),
+        )
+        .with_runtime_services(builder_run_id.to_string(), Some(storage.clone()));
+        let builder_call = AgentToolCall {
+            id: "tool-excel-builder-with-source".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": format!(
+                    "python {builder} --source source.xlsx --output outputs/new.xlsx"
+                ),
+                "inputs": [{ "path": "source.xlsx", "mountPath": "source.xlsx" }]
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = command_request_from_call(&builder_context, &builder_call)
+            .expect_err("a fixed Builder must never be repurposed as an existing-file editor");
+        assert_eq!(error.code(), Some("managedBuilder.invalidOutputContract"));
+        assert!(error.to_string().contains("Builder"));
+
+        for (profile, editor, source, output) in [
+            (
+                AgentCommandRuntimeProfile::Documents,
+                "scripts/edit_doc.py",
+                "source.docx",
+                "outputs/edited.docx",
+            ),
+            (
+                AgentCommandRuntimeProfile::Spreadsheets,
+                "scripts/edit_sheet.py",
+                "source.xlsx",
+                "outputs/edited.xlsx",
+            ),
+        ] {
+            std::fs::write(workspace.path().join(editor), b"# fixed editor\n").unwrap();
+            if !workspace.path().join(source).exists() {
+                std::fs::write(workspace.path().join(source), b"PK\x03\x04source").unwrap();
+            }
+            let run_id = format!("run-{profile:?}-editor-source-contract");
+            record_materialized_python_editor(&storage, &run_id, profile, editor);
+            let context = with_profile_resolver(
+                ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                    collaboration_identity: None,
+                    conversation_id: None,
+                    project_id: None,
+                    workspace: Some(AgentWorkspaceContext {
+                        project_id: None,
+                        display_name: Some("editor source contract".to_string()),
+                        root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                    }),
+                    attachment_library: None,
+                    permissions: AgentPermissions {
+                        read: AgentReadPermission::WorkspaceOnly,
+                        write: AgentWritePermission::WorkspaceOnly,
+                        ..Default::default()
+                    },
+                })),
+                test_binding(
+                    profile,
+                    AgentCommandRuntimeKind::Python,
+                    match profile {
+                        AgentCommandRuntimeProfile::Documents => &[("python-docx", "1.2.0")],
+                        AgentCommandRuntimeProfile::Spreadsheets => {
+                            &[("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")]
+                        }
+                        _ => unreachable!(),
+                    },
+                ),
+            )
+            .with_runtime_services(run_id, Some(storage.clone()));
+
+            let missing_source = AgentToolCall {
+                id: format!("tool-{profile:?}-editor-missing-source"),
+                tool: "run_command".to_string(),
+                args: json!({ "command": format!("python {editor} --output {output}") }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let error = command_request_from_call(&context, &missing_source)
+                .expect_err("a fixed Editor must require exactly one source");
+            assert_eq!(error.code(), Some("managedBuilder.invalidOutputContract"));
+
+            let valid = AgentToolCall {
+                id: format!("tool-{profile:?}-editor-valid-source"),
+                tool: "run_command".to_string(),
+                args: json!({
+                    "command": format!(
+                        "python {editor} --source {source} --output {output}"
+                    ),
+                    "inputs": [{ "path": source, "mountPath": source }]
+                }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let request = command_request_from_call(&context, &valid)
+                .expect("an exact fixed Editor with one frozen source is authorized");
+            let transaction = request
+                .managed_office_script
+                .as_deref()
+                .expect("the Editor receives a Host publication contract");
+            assert_eq!(
+                transaction.purpose,
+                crate::office::OfficeManagedScriptPurpose::Edit
+            );
+            assert_eq!(transaction.source_mount_path.as_deref(), Some(source));
+            assert_eq!(
+                request.inputs.len(),
+                2,
+                "source and fixed script are frozen"
+            );
+            validate_frozen_command_trace_args(&request, &valid.args).unwrap();
+
+            let logical_source = format!(
+                "logical-source.{}",
+                Path::new(source).extension().unwrap().to_string_lossy()
+            );
+            let aliased_source = AgentToolCall {
+                id: format!("tool-{profile:?}-editor-physical-source-alias"),
+                tool: "run_command".to_string(),
+                args: json!({
+                    "command": format!(
+                        "python {editor} --source {logical_source} --output {source}"
+                    ),
+                    "inputs": [{ "path": source, "mountPath": logical_source }]
+                }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let error = command_request_from_call(&context, &aliased_source)
+                .expect_err("save-as must compare the physical source and destination identities");
+            assert_eq!(error.code(), Some("managedBuilder.invalidOutputContract"));
+
+            let mut tampered_purpose = request.clone();
+            tampered_purpose
+                .managed_office_script
+                .as_deref_mut()
+                .unwrap()
+                .purpose = crate::office::OfficeManagedScriptPurpose::Create;
+            validate_frozen_command_trace_args(&tampered_purpose, &valid.args)
+                .expect_err("restart trace must bind the hidden Editor purpose to the command");
+            let mut tampered_destination = request.clone();
+            tampered_destination
+                .managed_office_script
+                .as_deref_mut()
+                .unwrap()
+                .destination
+                .logical_path = format!("other-{output}");
+            validate_frozen_command_trace_args(&tampered_destination, &valid.args)
+                .expect_err("restart trace must bind the hidden destination to --output");
+        }
+    }
+
+    #[test]
     fn exact_bundled_editor_receipt_freezes_the_script_as_a_host_reserved_input() {
         let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("outputs")).unwrap();
         let editor = "scripts/edit_existing.mjs";
         std::fs::create_dir_all(workspace.path().join("scripts")).unwrap();
         let editor_bytes = b"// materialized fixed editor\n";
@@ -2642,11 +3240,46 @@ mod tests {
         assert_eq!(source.size_bytes, source_bytes.len() as u64);
         validate_frozen_command_trace_args(&request, &args).unwrap();
 
+        let aliased_source_args = json!({
+            "command": format!(
+                "node {editor} --source logical-source.pptx --output source.pptx"
+            ),
+            "inputs": [{ "path": "source.pptx", "mountPath": "logical-source.pptx" }]
+        });
+        let aliased_source_call = AgentToolCall {
+            id: "tool-presentation-editor-physical-source-alias".to_string(),
+            tool: "run_command".to_string(),
+            args: aliased_source_args,
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = command_request_from_call(&context, &aliased_source_call)
+            .expect_err("Presentation save-as must reject a physical source/output alias");
+        assert_eq!(error.code(), Some("managedBuilder.invalidOutputContract"));
+
         let restored: AgentCommandRequest =
             serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
         validate_frozen_command_trace_args(&restored, &args)
             .expect("restart reconciliation ignores only the exact Host-hidden script binding");
         assert_eq!(restored.inputs, request.inputs);
+
+        let mut tampered_source = request.clone();
+        tampered_source
+            .managed_office_script
+            .as_deref_mut()
+            .unwrap()
+            .source_mount_path = Some("other-source.pptx".to_string());
+        validate_frozen_command_trace_args(&tampered_source, &args)
+            .expect_err("restart trace must bind the hidden source mount to --source");
+        let mut tampered_destination = request.clone();
+        tampered_destination
+            .managed_office_script
+            .as_deref_mut()
+            .unwrap()
+            .destination
+            .logical_path = "outputs/other.pptx".to_string();
+        validate_frozen_command_trace_args(&tampered_destination, &args)
+            .expect_err("restart trace must bind the hidden destination to --output");
 
         let hidden = request
             .inputs
@@ -3058,6 +3691,7 @@ mod tests {
     #[test]
     fn activated_pdf_skill_does_not_intercept_a_provenance_bound_office_builder() {
         let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("outputs")).unwrap();
         let script = "scripts/build.py";
         let script_path = workspace.path().join(script);
         std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
@@ -3247,11 +3881,16 @@ mod tests {
             ),
         )
         .with_runtime_services(run_id.to_string(), Some(storage));
+        let external_output = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join("mycopilot-managed-builder.docx");
+        let external_output = external_output.to_string_lossy().into_owned();
         let external = AgentToolCall {
             id: "tool-external-output".to_string(),
             tool: "run_command".to_string(),
             args: json!({
-                "command": "python builder.py --output /tmp/mycopilot-managed-builder.docx"
+                "command": format!("python builder.py --output {external_output}")
             }),
             approval_status: AgentApprovalStatus::Required,
             reason: None,
@@ -3264,7 +3903,7 @@ mod tests {
                 .unwrap()
                 .expected_outputs
                 .as_slice(),
-            ["/tmp/mycopilot-managed-builder.docx"]
+            [external_output]
         );
     }
 
@@ -3342,16 +3981,23 @@ mod tests {
         .with_runtime_services(run_id.to_string(), Some(storage));
 
         let request = command_request_from_call(&context, &call).unwrap();
-        assert_eq!(request.inputs.len(), 1);
-        assert_eq!(request.inputs[0].mount_path, "images/campus.png");
-        assert_eq!(request.inputs[0].size_bytes, 12);
+        assert_eq!(request.inputs.len(), 2);
+        let image = request
+            .inputs
+            .iter()
+            .find(|input| input.mount_path == "images/campus.png")
+            .unwrap();
+        assert_eq!(image.size_bytes, 12);
         assert_eq!(
-            request.inputs[0].sha256,
+            image.sha256,
             format!("{:x}", Sha256::digest(b"campus-image"))
         );
         validate_frozen_command_trace_args(&request, &call.args).unwrap();
         let serialized = serde_json::to_string(&request).unwrap();
-        assert!(!serialized.contains(root.to_string_lossy().as_ref()));
+        assert!(
+            !serialized.contains(root.join("objects/campus.png").to_string_lossy().as_ref()),
+            "the Host may freeze the workspace-owned destination, but must not persist the private attachment storage path"
+        );
     }
 
     #[test]

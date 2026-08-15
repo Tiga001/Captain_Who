@@ -1180,6 +1180,7 @@ fn command_dispatch_fixture(command: &str) -> (AgentToolCall, AgentProposedActio
             observe: None,
             inputs: Vec::new(),
             runtime_binding: None,
+            managed_office_script: None,
         },
     };
     (call, action)

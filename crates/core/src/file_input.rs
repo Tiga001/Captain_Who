@@ -589,6 +589,102 @@ pub(crate) fn read_verified_agent_file_input(
     })
 }
 
+/// Resolves the physical identity of an already-authorized file input when one exists.
+///
+/// Callers use this only after the ordinary input binding path has verified content authority.
+/// Revision-bound Skill resources intentionally return `None`: they have no model-addressable
+/// filesystem identity and cannot alias a normal Office save-as destination.
+pub(crate) fn resolve_verified_agent_file_input_path(
+    workspace_root: Option<&Path>,
+    permissions: AgentPermissions,
+    context: &AgentFileInputExecutionContext,
+    source: &AgentFileInputRef,
+) -> Result<Option<PathBuf>, AgentFileInputError> {
+    let root = canonical_workspace_root(workspace_root)?;
+    let source = normalize_read_source_scope(root.as_deref(), normalize_source_ref(source)?)?;
+    match source {
+        AgentFileInputRef::Attachment { read_path } => {
+            resolve_attachment(context, &read_path).map(|(path, _)| Some(path))
+        }
+        AgentFileInputRef::Workspace { path } => {
+            let root = root.as_deref().ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_AUTHORIZATION_DENIED,
+                    "selectWorkspace",
+                    "workspace 输入需要先选择 workspace。",
+                )
+            })?;
+            let canonical = canonical_regular_path(&root.join(clean_relative_source_path(&path)?))?;
+            if !canonical.starts_with(root) {
+                return Err(AgentFileInputError::new(
+                    ERROR_AUTHORIZATION_DENIED,
+                    "changeRequest",
+                    "workspace 输入必须位于当前 workspace 内。",
+                ));
+            }
+            Ok(Some(canonical))
+        }
+        AgentFileInputRef::External { path } => {
+            if permissions.read != AgentReadPermission::All {
+                return Err(AgentFileInputError::new(
+                    ERROR_AUTHORIZATION_DENIED,
+                    "changePermissions",
+                    "external 输入需要 read=all 权限。",
+                ));
+            }
+            resolve_external_path(&path).map(Some)
+        }
+        AgentFileInputRef::GeneratedArtifact { uri, path } => {
+            let (scheme, expected) = artifact_uri_identity(&uri)?;
+            let storage = context.storage.as_ref().ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "生成物的权威 Artifact 注册表不可用。",
+                )
+            })?;
+            let artifact_id = format!("sha256:{expected}");
+            let registered = resolve_artifact_for_scheme(
+                storage,
+                &artifact_id,
+                context.conversation_id.as_deref(),
+                scheme,
+            )
+            .map_err(|_| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "无法读取生成物的权威 Artifact 发布记录。",
+                )
+            })?
+            .ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_NOT_FOUND,
+                    "regenerate",
+                    "权威 Artifact 注册表中不存在该已发布生成物。",
+                )
+            })?;
+            if registered.sha256 != expected {
+                return Err(AgentFileInputError::new(
+                    ERROR_INTEGRITY_MISMATCH,
+                    "regenerate",
+                    "生成物 URI 与权威 Artifact 发布记录不一致。",
+                ));
+            }
+            let registered_path = canonical_regular_path(&registered.path)?;
+            if resolve_generated_artifact_path(&path)? != registered_path {
+                return Err(AgentFileInputError::new(
+                    ERROR_INTEGRITY_MISMATCH,
+                    "regenerate",
+                    "generated_artifact.path 与权威 Artifact 发布位置不一致。",
+                ));
+            }
+            Ok(Some(registered_path))
+        }
+        AgentFileInputRef::SkillResource { .. } => Ok(None),
+    }
+}
+
 pub(crate) fn evidence_from_bindings(
     bindings: &[AgentFileInputBinding],
 ) -> Vec<AgentFileInputEvidence> {

@@ -32,12 +32,20 @@ const DOCUMENTS_RESOURCES: &[EmbeddedSkillResource] = &[
         bytes: include_bytes!("bundled/documents/office-capability.json"),
     },
     EmbeddedSkillResource {
+        path: "references/editing-existing.md",
+        bytes: include_bytes!("bundled/documents/references/editing-existing.md"),
+    },
+    EmbeddedSkillResource {
         path: "references/workflows.md",
         bytes: include_bytes!("bundled/documents/references/workflows.md"),
     },
     EmbeddedSkillResource {
         path: "templates/builder.py",
         bytes: include_bytes!("bundled/documents/templates/builder.py"),
+    },
+    EmbeddedSkillResource {
+        path: "templates/editor.py",
+        bytes: include_bytes!("bundled/documents/templates/editor.py"),
     },
 ];
 
@@ -97,12 +105,20 @@ const SPREADSHEETS_RESOURCES: &[EmbeddedSkillResource] = &[
         bytes: include_bytes!("bundled/spreadsheets/office-capability.json"),
     },
     EmbeddedSkillResource {
+        path: "references/editing-existing.md",
+        bytes: include_bytes!("bundled/spreadsheets/references/editing-existing.md"),
+    },
+    EmbeddedSkillResource {
         path: "references/workflows.md",
         bytes: include_bytes!("bundled/spreadsheets/references/workflows.md"),
     },
     EmbeddedSkillResource {
         path: "templates/builder.py",
         bytes: include_bytes!("bundled/spreadsheets/templates/builder.py"),
+    },
+    EmbeddedSkillResource {
+        path: "templates/editor.py",
+        bytes: include_bytes!("bundled/spreadsheets/templates/editor.py"),
     },
 ];
 
@@ -578,8 +594,8 @@ mod tests {
         assert!(!package.resources().is_empty());
         assert_eq!(package.source_text(), DOCUMENTS_SOURCE);
         assert!(package.instructions().contains("Route by intent:"));
-        assert!(package.instructions().contains("**Read:**"));
-        assert!(package.instructions().contains("**Create:**"));
+        assert!(package.instructions().contains("**Read or verify:**"));
+        assert!(package.instructions().contains("**Create a new `.docx`:**"));
         assert!(package
             .instructions()
             .contains("**Edit an existing `.docx`:**"));
@@ -863,14 +879,7 @@ mod tests {
                 .revision()
                 .as_str()
                 .starts_with("skill-package-sha256-v3:"));
-            assert_eq!(
-                package.resources().len(),
-                if local_id == PRESENTATIONS_LOCAL_ID {
-                    5
-                } else {
-                    3
-                }
-            );
+            assert_eq!(package.resources().len(), 5);
             assert_eq!(
                 package.resources().entries()[0].path(),
                 "office-capability.json"
@@ -923,6 +932,74 @@ mod tests {
                 );
                 assert!(package.instructions().contains("Managed Editor"));
             }
+            if local_id == DOCUMENTS_LOCAL_ID {
+                assert_eq!(
+                    package
+                        .resources()
+                        .entries()
+                        .iter()
+                        .map(|resource| resource.path())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        "office-capability.json",
+                        "references/editing-existing.md",
+                        "references/workflows.md",
+                        "templates/builder.py",
+                        "templates/editor.py",
+                    ]
+                );
+                assert_eq!(
+                    package
+                        .resources()
+                        .get("references/editing-existing.md")
+                        .unwrap()
+                        .kind(),
+                    SkillResourceKind::Reference
+                );
+                assert_eq!(
+                    package
+                        .resources()
+                        .get("templates/editor.py")
+                        .unwrap()
+                        .kind(),
+                    SkillResourceKind::Other
+                );
+                assert!(package.instructions().contains("Word Editor"));
+            }
+            if local_id == SPREADSHEETS_LOCAL_ID {
+                assert_eq!(
+                    package
+                        .resources()
+                        .entries()
+                        .iter()
+                        .map(|resource| resource.path())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        "office-capability.json",
+                        "references/editing-existing.md",
+                        "references/workflows.md",
+                        "templates/builder.py",
+                        "templates/editor.py",
+                    ]
+                );
+                assert_eq!(
+                    package
+                        .resources()
+                        .get("references/editing-existing.md")
+                        .unwrap()
+                        .kind(),
+                    SkillResourceKind::Reference
+                );
+                assert_eq!(
+                    package
+                        .resources()
+                        .get("templates/editor.py")
+                        .unwrap()
+                        .kind(),
+                    SkillResourceKind::Other
+                );
+                assert!(package.instructions().contains("Workbook Editor"));
+            }
             assert!(package.instructions().contains(tool));
             assert!(package.instructions().contains("flat semantic"));
             assert!(package.instructions().contains("Managed Builder"));
@@ -937,14 +1014,7 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(
-                capability["contractVersion"],
-                match local_id {
-                    PRESENTATIONS_LOCAL_ID => 10,
-                    DOCUMENTS_LOCAL_ID | SPREADSHEETS_LOCAL_ID => 9,
-                    _ => unreachable!("the Office package table contains only known Skills"),
-                }
-            );
+            assert_eq!(capability["contractVersion"], 10);
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
@@ -984,11 +1054,7 @@ mod tests {
             assert_eq!(script["runtimeProfile"], runtime_profile);
             assert_eq!(
                 script["runtimeProfileBinding"],
-                if local_id == PRESENTATIONS_LOCAL_ID {
-                    "host_from_materialized_script_receipt"
-                } else {
-                    "host_from_materialized_builder_receipt"
-                }
+                "host_from_materialized_script_receipt"
             );
             assert_eq!(script["outputArgument"], "--output");
             assert!(script.get("runtimeProfileField").is_none());
@@ -1059,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn document_and_spreadsheet_skills_define_first_round_builder_safety_contracts() {
+    fn document_and_spreadsheet_skills_define_second_round_python_script_contracts() {
         let source = BundledSkillSource::new().unwrap();
         for (
             local_id,
@@ -1095,17 +1161,17 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 9);
+            assert_eq!(capability["contractVersion"], 10);
 
             let script = &capability["modes"]["script"];
             assert_eq!(script["entrypoints"].as_array().unwrap().len(), 1);
             assert_eq!(script["entrypoints"][0]["command"], "python");
             assert_eq!(
-                capability["modes"]["native"]["transactionScope"],
-                "oneOperationPerCall"
+                capability["modes"]["native"]["operations"],
+                serde_json::json!(["status", "inspect", "validate", "render"])
             );
             assert_eq!(
-                capability["modes"]["native"]["multiOperationAtomicBatch"],
+                capability["modes"]["native"]["writeOperationsModelVisible"],
                 false
             );
             assert_eq!(
@@ -1137,7 +1203,7 @@ mod tests {
             );
             for required in [
                 "Host",
-                "syntax preflight",
+                "preflight",
                 "task-created",
                 "rmdir",
                 "recursive deletion",
@@ -1189,9 +1255,9 @@ mod tests {
         assert_eq!(
             documents["modes"]["script"]["routes"],
             serde_json::json!({
-                "createOrComplexGenerate": "builder",
-                "boundedExistingEdit": "native",
-                "unsupportedExistingEdit": "failClosedUntilFixedEditor"
+                "create": "builder",
+                "editExisting": "editor",
+                "inspectValidateRender": "native"
             })
         );
         assert_eq!(documents["validation"]["inspectFinal"], true);
@@ -1218,10 +1284,10 @@ mod tests {
         assert_eq!(
             spreadsheets["modes"]["script"]["routes"],
             serde_json::json!({
-                "createOrComplexGenerate": "builder",
-                "boundedExistingEdit": "native",
-                "sourceWorkbookTransform": "builderWithExplicitSourceAndSaveAs",
-                "fixedExistingEditor": "notAvailable"
+                "create": "builder",
+                "editExisting": "editor",
+                "inspectValidateRender": "native",
+                "nativeWrite": "forbidden"
             })
         );
         assert_eq!(spreadsheets["calculation"]["recalculation"], "notPerformed");
@@ -1236,6 +1302,337 @@ mod tests {
         assert_eq!(
             spreadsheets["validation"]["visual"]["unresolvedFloatingObjectBounds"],
             "discloseIncompleteCoverage"
+        );
+    }
+
+    #[test]
+    fn documents_skill_exposes_one_full_python_existing_document_editor() {
+        let workflows = include_str!("bundled/documents/references/workflows.md");
+        let editing = include_str!("bundled/documents/references/editing-existing.md");
+        let editor = include_str!("bundled/documents/templates/editor.py");
+        let capability: Value =
+            serde_json::from_str(include_str!("bundled/documents/office-capability.json")).unwrap();
+
+        for required in [
+            "**Edit an existing `.docx`:**",
+            "`templates/editor.py`",
+            "one mounted source and one distinct save-as output",
+            "never substitute native write calls",
+            "The Word Editor executes normal Python",
+            "it is not an AST or",
+            "Host automatically performs an isolated Python syntax preflight",
+            "wait with `command_session`",
+            "never use recursive deletion",
+        ] {
+            assert!(
+                DOCUMENTS_SOURCE.contains(required),
+                "document instructions are missing `{required}`"
+            );
+        }
+
+        for required in [
+            "Create every new\ndocument with the Managed Builder",
+            "Edit every existing document with the fixed Managed Editor",
+            "[editing-existing.md](editing-existing.md)",
+            "Use `office_document` only for `status`, `inspect`, `validate`, and `render`",
+        ] {
+            assert!(
+                workflows.contains(required),
+                "document workflow is missing `{required}`"
+            );
+        }
+
+        for required in [
+            "python word-work/edit_document.py --source source.docx --output report-edited.docx",
+            "`source.docx` is a logical mount",
+            "The Editor is real Python, not a serialized edit plan",
+            "functions, imports from the pinned runtime, loops, conditions",
+            "`mounted_input(\"media/replacement.png\")`",
+            "existing managed-command permission and approval boundary",
+            "does not publish its private candidate to the declared destination before every gate passes",
+            "does not make unrelated side effects\ntransactional",
+            "Fail closed instead of silently flattening, rebuilding, or approximating",
+            "raw OOXML only when the user explicitly requests that route",
+        ] {
+            assert!(
+                editing.contains(required),
+                "existing-document editing reference is missing `{required}`"
+            );
+        }
+
+        assert_eq!(editor.matches("# BEGIN EDIT REGION").count(), 1);
+        assert_eq!(editor.matches("# END EDIT REGION").count(), 1);
+        let begin = editor.find("# BEGIN EDIT REGION").unwrap();
+        let end = editor.find("# END EDIT REGION").unwrap();
+        assert!(begin < end, "the Editor edit region must be ordered");
+        let edit_region = &editor[begin..end];
+        for required in ["for paragraph", "if \"Old text\"", "for run"] {
+            assert!(
+                edit_region.contains(required),
+                "Editor example is missing normal Python construct `{required}`"
+            );
+        }
+        for required in [
+            "from docx import Document",
+            "def mounted_input(mount_path: str) -> Path:",
+            "MYCOPILOT_INPUT_ROOT",
+            "candidate = (root / relative).resolve(strict=True)",
+            "def edit_document(document, source_path: Path) -> None:",
+            "document = Document(source)",
+            "edit_document(document, source)",
+            "Replace the EDIT REGION with the requested document edits",
+            "tempfile.mkstemp(",
+            "Document(temporary)",
+            "os.replace(temporary, output)",
+        ] {
+            assert!(editor.contains(required), "Editor is missing `{required}`");
+        }
+        for forbidden in ["ast.parse", "json plan", "OfficeOperationParameters"] {
+            assert!(
+                !editor.contains(forbidden),
+                "full Python Editor must not compile a restricted `{forbidden}` plan"
+            );
+        }
+
+        assert_eq!(capability["contractVersion"], 10);
+        let native = &capability["modes"]["native"];
+        assert_eq!(
+            native["operations"],
+            serde_json::json!(["status", "inspect", "validate", "render"])
+        );
+        assert_eq!(native["writeOperationsModelVisible"], false);
+        let script = &capability["modes"]["script"];
+        assert_eq!(script["builderTemplate"], "templates/builder.py");
+        assert_eq!(script["editorTemplate"], "templates/editor.py");
+        assert_eq!(script["editingReference"], "references/editing-existing.md");
+        assert_eq!(script["routes"]["create"], "builder");
+        assert_eq!(script["routes"]["editExisting"], "editor");
+        assert_eq!(
+            script["runtimeProfileBinding"],
+            "host_from_materialized_script_receipt"
+        );
+        let editor_contract = &script["editor"];
+        assert_eq!(editor_contract["sourceArgument"], "--source");
+        assert_eq!(editor_contract["outputArgument"], "--output");
+        assert_eq!(editor_contract["sourceBinding"], "inputs.mountPath");
+        assert_eq!(editor_contract["defaultPublishMode"], "saveAs");
+        assert_eq!(
+            editor_contract["supportedPublishModes"],
+            serde_json::json!(["saveAs"])
+        );
+        assert_eq!(editor_contract["inPlace"], false);
+        assert_eq!(editor_contract["modelCode"]["execution"], "normalPython");
+        assert_eq!(editor_contract["modelCode"]["astOrJsonDsl"], false);
+        assert_eq!(
+            editor_contract["modelCode"]["supports"],
+            serde_json::json!([
+                "pinnedImports",
+                "functions",
+                "loops",
+                "conditions",
+                "comprehensions",
+                "dataTransformations",
+                "pythonDocxObjectModel"
+            ])
+        );
+        assert_eq!(editor_contract["transaction"]["candidate"], "hostPrivate");
+        assert_eq!(editor_contract["transaction"]["publication"], "atomic");
+        assert_eq!(
+            editor_contract["transaction"]["failureBeforePublish"],
+            "hostCandidateNotPublishedToDeclaredDestination"
+        );
+
+        let service = SkillsService::new().with_bundled_source().unwrap();
+        let descriptor = service
+            .list()
+            .unwrap()
+            .skills()
+            .iter()
+            .find(|skill| skill.id().local_id() == DOCUMENTS_LOCAL_ID)
+            .unwrap()
+            .clone();
+        let activated = service.activate(&[descriptor.selection()]).unwrap();
+        let resources = service.resource_session(&activated).unwrap();
+        let package = resources.package_uris().into_iter().next().unwrap();
+        let editor_uri = package.resource(SkillResourcePath::parse("templates/editor.py").unwrap());
+        let materialized_source = resources
+            .read_text(&editor_uri, SkillResourceTextReadOptions::default())
+            .unwrap();
+        assert_eq!(materialized_source.text(), editor);
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join("word-work")).unwrap();
+        let request = SkillMaterializationRequest::new(
+            editor_uri,
+            workspace.path(),
+            SkillMaterializationDestination::parse("word-work/edit_document.py").unwrap(),
+        )
+        .unwrap();
+        let outcome = SkillResourceMaterializer::new()
+            .materialize(&resources, &request)
+            .unwrap();
+        assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("word-work/edit_document.py")).unwrap(),
+            editor
+        );
+    }
+
+    #[test]
+    fn spreadsheets_skill_exposes_one_full_python_existing_workbook_editor() {
+        let workflows = include_str!("bundled/spreadsheets/references/workflows.md");
+        let editing = include_str!("bundled/spreadsheets/references/editing-existing.md");
+        let editor = include_str!("bundled/spreadsheets/templates/editor.py");
+        let capability: Value =
+            serde_json::from_str(include_str!("bundled/spreadsheets/office-capability.json"))
+                .unwrap();
+
+        for required in [
+            "**Edit an existing `.xlsx`:**",
+            "`templates/editor.py`",
+            "executes normal Python against the frozen source snapshot",
+            "Never convert it into an AST, JSON, or artificial operation DSL",
+            "automatic syntax preflight",
+            "wait on that same command session",
+            "never use recursive deletion",
+        ] {
+            assert!(
+                SPREADSHEETS_SOURCE.contains(required),
+                "spreadsheet instructions are missing `{required}`"
+            );
+        }
+        for required in [
+            "Use the fixed Python Managed Builder or Editor for every write",
+            "materialize `templates/editor.py` to edit an existing `.xlsx`",
+            "patch only `edit_workbook`",
+            "The edit region is normal Python",
+            "private staging",
+            "publishes atomically",
+            "not a claim that unrestricted Python is\na separate cross-platform OS sandbox",
+        ] {
+            assert!(
+                workflows.contains(required),
+                "spreadsheet workflow is missing `{required}`"
+            );
+        }
+        for required in [
+            "python workbook-work/edit_workbook.py --source source.xlsx --output workbook-edited.xlsx",
+            "The Editor executes\nnormal Python",
+            "helper functions, loops, conditions, comprehensions",
+            "existing\n`run_command` permission and approval boundary",
+            "redirects the intended output to private\nstaging",
+            "does not pretend unrestricted Python is a separate cross-platform OS sandbox",
+            "Stop rather than silently degrade",
+        ] {
+            assert!(
+                editing.contains(required),
+                "existing-workbook editing reference is missing `{required}`"
+            );
+        }
+
+        assert_eq!(editor.matches("# BEGIN EDIT REGION").count(), 1);
+        assert_eq!(editor.matches("# END EDIT REGION").count(), 1);
+        let begin = editor.find("# BEGIN EDIT REGION").unwrap();
+        let end = editor.find("# END EDIT REGION").unwrap();
+        assert!(begin < end, "the Editor edit region must be ordered");
+        let edit_region = &editor[begin..end];
+        for required in ["for row in range", "sheet.cell", "f\"=SUM("] {
+            assert!(
+                edit_region.contains(required),
+                "Editor example is missing normal Python construct `{required}`"
+            );
+        }
+        for required in [
+            "from openpyxl import load_workbook",
+            "def mounted_input(mount_path: str) -> tuple[Path, Path]:",
+            "MYCOPILOT_INPUT_ROOT",
+            "def edit_workbook(workbook, input_root: Path) -> None:",
+            "data_only=False",
+            "keep_links=True",
+            "rich_text=True",
+            "tempfile.mkstemp(",
+            "os.replace(temporary, output)",
+        ] {
+            assert!(editor.contains(required), "Editor is missing `{required}`");
+        }
+        for forbidden in ["ast.parse", "json plan", "OfficeOperationParameters"] {
+            assert!(
+                !editor.contains(forbidden),
+                "full Python Editor must not compile a restricted `{forbidden}` plan"
+            );
+        }
+
+        assert_eq!(capability["contractVersion"], 10);
+        assert_eq!(
+            capability["modes"]["native"]["operations"],
+            serde_json::json!(["status", "inspect", "validate", "render"])
+        );
+        assert_eq!(
+            capability["modes"]["native"]["writeOperationsModelVisible"],
+            false
+        );
+        let script = &capability["modes"]["script"];
+        assert_eq!(script["builderTemplate"], "templates/builder.py");
+        assert_eq!(script["editorTemplate"], "templates/editor.py");
+        assert_eq!(script["editingReference"], "references/editing-existing.md");
+        assert_eq!(script["routes"]["create"], "builder");
+        assert_eq!(script["routes"]["editExisting"], "editor");
+        assert_eq!(script["routes"]["nativeWrite"], "forbidden");
+        assert_eq!(
+            script["runtimeProfileBinding"],
+            "host_from_materialized_script_receipt"
+        );
+        assert_eq!(script["pythonSemantics"]["execution"], "normalPython");
+        assert_eq!(script["pythonSemantics"]["astOrJsonDsl"], "forbidden");
+        for field in ["functions", "loops", "conditions", "comprehensions"] {
+            assert_eq!(script["pythonSemantics"][field], true);
+        }
+        assert_eq!(
+            script["transaction"]["candidateOutput"],
+            "hostPrivateStaging"
+        );
+        assert_eq!(script["transaction"]["publish"], "atomic");
+        assert_eq!(
+            script["transaction"]["failureBeforePublish"],
+            "hostCandidateNotPublishedToDeclaredDestination"
+        );
+        assert_eq!(
+            script["transaction"]["pythonSideEffectScope"],
+            "outsideOfficePublicationNotTransactional"
+        );
+        assert_eq!(script["transaction"]["crossPlatformOsSandboxClaim"], false);
+
+        let service = SkillsService::new().with_bundled_source().unwrap();
+        let descriptor = service
+            .list()
+            .unwrap()
+            .skills()
+            .iter()
+            .find(|skill| skill.id().local_id() == SPREADSHEETS_LOCAL_ID)
+            .unwrap()
+            .clone();
+        let activated = service.activate(&[descriptor.selection()]).unwrap();
+        let resources = service.resource_session(&activated).unwrap();
+        let package = resources.package_uris().into_iter().next().unwrap();
+        let editor_uri = package.resource(SkillResourcePath::parse("templates/editor.py").unwrap());
+        let materialized_source = resources
+            .read_text(&editor_uri, SkillResourceTextReadOptions::default())
+            .unwrap();
+        assert_eq!(materialized_source.text(), editor);
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join("workbook-work")).unwrap();
+        let request = SkillMaterializationRequest::new(
+            editor_uri,
+            workspace.path(),
+            SkillMaterializationDestination::parse("workbook-work/edit_workbook.py").unwrap(),
+        )
+        .unwrap();
+        let outcome = SkillResourceMaterializer::new()
+            .materialize(&resources, &request)
+            .unwrap();
+        assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("workbook-work/edit_workbook.py")).unwrap(),
+            editor
         );
     }
 
@@ -1410,8 +1807,8 @@ mod tests {
             "exactly one static `--source` and one static `--output`",
             "`@mycopilot/presentation-sdk`",
             "The SDK writes a Host-only typed plan",
-            "Structural `add`, `remove`, `move`, and `swap` are element-only",
-            "Use native `addSlide`, `removeSlide`, or `moveSlide`",
+            "Whole-slide structure changes use the Editor's bounded slide operation",
+            "at most once and last in the transaction",
             "Do not unzip or rewrite OOXML",
         ] {
             assert!(
@@ -1454,7 +1851,10 @@ mod tests {
             "deck.replaceImage({ target, source: input(...) })",
             "deck.updateTableCell({ target, text })",
             "deck.updateChart({ target, properties: { categories, series } })",
-            "Editor v1 does not add,\nremove, move, or swap whole slides",
+            "deck.addSlide({ layout?, title?, body?, backgroundColor? })",
+            "deck.removeSlide({ slideNumber })",
+            "deck.moveSlide({ slideNumber, newIndex })",
+            "At most one whole-slide operation is\nallowed in a transaction",
             "discard every earlier element target and re-inspect",
             "Never recover from an unsupported or failed edit by",
             "render and read every final slide separately",
@@ -1475,6 +1875,9 @@ mod tests {
             "source: input(requiredValue('--source'))",
             "destination: output(requiredValue('--output'))",
             "mode: 'saveAs'",
+            "deck.addSlide({",
+            "deck.removeSlide({",
+            "deck.moveSlide({",
             "deck.replaceText({",
             "deck.replaceImage({",
             "deck.updateTableCell({",
@@ -1520,10 +1923,13 @@ mod tests {
         );
         assert_eq!(editor_contract["inPlace"], false);
         assert_eq!(editor_contract["positionShape"], "taggedIndexAfterOrBefore");
-        assert_eq!(editor_contract["structuralScope"], "elementsOnly");
+        assert_eq!(
+            editor_contract["structuralScope"],
+            "elementsAndOneTerminalWholeSlideMutation"
+        );
         assert_eq!(
             editor_contract["wholeSlideMutations"],
-            "nativeThenReinspect"
+            "editorAtMostOneAndLastThenReinspect"
         );
         assert_eq!(
             editor_contract["targetRules"]["elementTarget"],
@@ -1544,6 +1950,9 @@ mod tests {
                 "editPresentation",
                 "input",
                 "output",
+                "addSlide",
+                "removeSlide",
+                "moveSlide",
                 "set",
                 "replaceText",
                 "add",
@@ -1719,14 +2128,7 @@ mod tests {
             let listed = resources
                 .list(&package, &SkillResourceListOptions::default())
                 .unwrap();
-            assert_eq!(
-                listed.entries().len(),
-                if local_id == PRESENTATIONS_LOCAL_ID {
-                    5
-                } else {
-                    3
-                }
-            );
+            assert_eq!(listed.entries().len(), 5);
             assert!(listed
                 .entries()
                 .iter()
@@ -1750,10 +2152,16 @@ mod tests {
             assert!(!page.text().contains("\"provider\": \"managedArtifact\""));
             assert!(page.text().contains("\"inputs\":"));
             assert!(page.text().contains("MYCOPILOT_INPUT_ROOT"));
-            assert!(page.text().contains("observe.expectedOutputs"));
-            assert!(page.text().contains("observe.additionalRoots"));
-            assert!(page.text().contains("artifactObservation.expectedOutputs"));
-            assert!(page.text().contains("non-zero exit"));
+            if local_id == SPREADSHEETS_LOCAL_ID {
+                assert!(page.text().contains("Omit `runtimeProfile` and `observe`"));
+                assert!(page.text().contains("artifactObservation"));
+                assert!(page.text().contains("failure, timeout, or cancellation"));
+            } else {
+                assert!(page.text().contains("observe.expectedOutputs"));
+                assert!(page.text().contains("observe.additionalRoots"));
+                assert!(page.text().contains("artifactObservation.expectedOutputs"));
+                assert!(page.text().contains("non-zero exit"));
+            }
             assert!(!page.truncated());
             assert!(builder.text().contains(marker));
             assert!(builder.text().contains("MYCOPILOT_INPUT_ROOT"));

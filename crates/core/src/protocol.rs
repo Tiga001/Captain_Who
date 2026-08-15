@@ -2451,6 +2451,11 @@ pub struct AgentCommandRequest {
     pub inputs: Vec<AgentFileInputBinding>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub runtime_binding: Option<Box<AgentCommandRuntimeBinding>>,
+    /// Backend-only transaction identity for an exact bundled Office Skill script. The model
+    /// cannot supply this field; `run_command` derives it from a run-scoped materialization
+    /// receipt and freezes the destination before approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_office_script: Option<Box<crate::office::OfficeManagedScriptBinding>>,
 }
 
 /// Frozen request to copy one immutable Skill resource, or one resource-tree

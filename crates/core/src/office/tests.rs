@@ -292,10 +292,20 @@ fn frozen_presentation_edit_request(
         None,
     )
     .unwrap();
+    let destination_binding = prepare_managed_script_binding(
+        &workspace_context(fixture.workspace.path()),
+        OfficeDocumentKind::Presentation,
+        OfficeManagedScriptPurpose::EditPresentationPlan,
+        "__mycopilot/presentation-editor/editor.mjs".to_string(),
+        Some("source.pptx".to_string()),
+        "edited.pptx",
+    )
+    .unwrap();
     OfficePresentationEditRequest {
         source_path: "source.pptx".to_string(),
         source_binding: bindings.into_iter().next().unwrap(),
         destination_path: "edited.pptx".to_string(),
+        destination_binding,
         inputs: Vec::new(),
         input_bindings: Vec::new(),
         operations,
@@ -1224,6 +1234,179 @@ fn typed_operations_compile_to_deterministic_host_owned_argv() {
         compile_office_arguments(&contact_sheet).unwrap(),
         vec!["screenshot", "--page", "1-6", "--grid", "auto", "--json",]
     );
+}
+
+#[test]
+fn presentation_whole_slide_operations_compile_to_bounded_officecli_arguments() {
+    let fixture = Fixture::new(basic_script());
+    let cases = [
+        (
+            OfficeOperation::Add,
+            OfficeOperationParameters::Add {
+                parent: "/".to_string(),
+                element_type: "slide".to_string(),
+                copy_from: None,
+                position: None,
+                properties: [
+                    ("title".to_string(), serde_json::json!("Appendix")),
+                    ("background".to_string(), serde_json::json!("F8FAFC")),
+                ]
+                .into_iter()
+                .collect(),
+                force: false,
+            },
+            vec![
+                "/",
+                "--type",
+                "slide",
+                "--prop",
+                "background=F8FAFC",
+                "--prop",
+                "title=Appendix",
+                "--json",
+            ],
+        ),
+        (
+            OfficeOperation::Remove,
+            OfficeOperationParameters::Remove {
+                target: "/slide[7]".to_string(),
+                shift: None,
+                properties: BTreeMap::new(),
+            },
+            vec!["/slide[7]", "--json"],
+        ),
+        (
+            OfficeOperation::Move,
+            OfficeOperationParameters::Move {
+                target: "/slide[7]".to_string(),
+                new_parent: None,
+                position: Some(OfficeElementPosition::Index { index: 2 }),
+                properties: BTreeMap::new(),
+            },
+            vec!["/slide[7]", "--index", "2", "--json"],
+        ),
+    ];
+
+    for (operation, parameters, expected) in cases {
+        let mut request = fixture.request(operation);
+        request.document_kind = OfficeDocumentKind::Presentation;
+        request.document_path = Some("source.pptx".to_string());
+        request.parameters = parameters;
+        assert_eq!(
+            compile_office_arguments(&request).unwrap(),
+            expected.into_iter().map(str::to_string).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn managed_script_validation_cancellation_and_destination_conflict_never_publish() {
+    let script = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'OfficeCLI 1.2.3\n'; exit 0; fi
+if [ "$1" = "validate" ]; then printf '{"success":true}\n'; exit 0; fi
+exit 64
+"#;
+
+    // Invalid bytes fail the Host package gate before the provider validation command.
+    let invalid = Fixture::new(script);
+    let invalid_context = workspace_context(invalid.workspace.path());
+    let invalid_binding = prepare_managed_script_binding(
+        &invalid_context,
+        OfficeDocumentKind::Document,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/documents/builder.py".to_string(),
+        None,
+        "invalid.docx",
+    )
+    .unwrap();
+    let mut invalid_staging =
+        prepare_managed_script_staging(&invalid_context, &invalid_binding).unwrap();
+    fs::write(invalid_staging.candidate_path(), b"not an OOXML package").unwrap();
+    let invalid_result = invalid
+        .engine
+        .commit_managed_script_output(
+            &invalid_context,
+            &mut invalid_staging,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        invalid_result.error_code.as_deref(),
+        Some("office.invalid_output")
+    );
+    assert!(!invalid.workspace.path().join("invalid.docx").exists());
+
+    // A cancellation arriving after strict validation but before rename cannot publish.
+    let cancelled = Fixture::new(script);
+    let cancelled_context = workspace_context(cancelled.workspace.path());
+    let cancelled_binding = prepare_managed_script_binding(
+        &cancelled_context,
+        OfficeDocumentKind::Document,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/documents/builder.py".to_string(),
+        None,
+        "cancelled.docx",
+    )
+    .unwrap();
+    let mut cancelled_staging =
+        prepare_managed_script_staging(&cancelled_context, &cancelled_binding).unwrap();
+    write_docx(cancelled_staging.candidate_path(), "candidate");
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    install_commit_test_hook(
+        PathBuf::from(&cancelled_binding.destination.normalized_path),
+        CommitTestPhase::BeforeCancellationCheck,
+        cancel_flag.clone(),
+    );
+    let cancelled_result = cancelled
+        .engine
+        .commit_managed_script_output(
+            &cancelled_context,
+            &mut cancelled_staging,
+            AgentCancellationToken::new(),
+            Some(cancel_flag),
+        )
+        .unwrap();
+    assert!(cancelled_result.cancelled);
+    assert_eq!(
+        cancelled_result.error_code.as_deref(),
+        Some("office.cancelled")
+    );
+    assert!(!cancelled.workspace.path().join("cancelled.docx").exists());
+
+    // A destination created after approval wins; the private candidate is never allowed to
+    // overwrite it, and the conflict is reported as a frozen-precondition failure.
+    let conflicted = Fixture::new(script);
+    let conflicted_context = workspace_context(conflicted.workspace.path());
+    let conflicted_binding = prepare_managed_script_binding(
+        &conflicted_context,
+        OfficeDocumentKind::Document,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/documents/builder.py".to_string(),
+        None,
+        "conflicted.docx",
+    )
+    .unwrap();
+    let mut conflicted_staging =
+        prepare_managed_script_staging(&conflicted_context, &conflicted_binding).unwrap();
+    write_docx(conflicted_staging.candidate_path(), "candidate");
+    let target = conflicted.workspace.path().join("conflicted.docx");
+    write_docx(&target, "concurrent destination");
+    let concurrent_bytes = fs::read(&target).unwrap();
+    let conflicted_result = conflicted
+        .engine
+        .commit_managed_script_output(
+            &conflicted_context,
+            &mut conflicted_staging,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        conflicted_result.error_code.as_deref(),
+        Some("office.precondition_failed")
+    );
+    assert_eq!(fs::read(target).unwrap(), concurrent_bytes);
 }
 
 #[test]
@@ -3347,10 +3530,20 @@ fn real_presentation_edit_preserves_structure_validates_and_renders_every_page()
     )
     .unwrap();
     let context = workspace_context(workspace.path());
+    let destination_binding = prepare_managed_script_binding(
+        &context,
+        OfficeDocumentKind::Presentation,
+        OfficeManagedScriptPurpose::EditPresentationPlan,
+        "__mycopilot/presentation-editor/editor.mjs".to_string(),
+        Some("source.pptx".to_string()),
+        "edited.pptx",
+    )
+    .unwrap();
     let edit = OfficePresentationEditRequest {
         source_path: "source.pptx".to_string(),
         source_binding,
         destination_path: "edited.pptx".to_string(),
+        destination_binding,
         inputs: vec![image_spec],
         input_bindings: vec![image_binding],
         operations: vec![

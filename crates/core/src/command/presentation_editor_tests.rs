@@ -128,22 +128,87 @@ fn editor_plan_accepts_only_exact_stable_element_anchors() {
 }
 
 #[test]
-fn editor_plan_rejects_whole_slide_moves_in_the_p0_contract() {
-    let mut value = valid_plan_value("/slide[1]/shape[@id=1]");
-    value["operations"] = json!([{
-        "type": "move",
-        "target": "/slide[7]",
-        "newParent": null,
-        "position": {
-            "type": "after",
-            "target": "/slide[6]"
-        },
-        "properties": {}
-    }]);
+fn editor_plan_accepts_one_terminal_whole_slide_operation_and_rejects_target_drift() {
+    for operation in [
+        json!({
+            "type": "add",
+            "parent": "/",
+            "elementType": "slide",
+            "copyFrom": null,
+            "position": null,
+            "properties": {
+                "layout": "LAYOUT_WIDE",
+                "title": "Appendix",
+                "text": "Supporting detail",
+                "background": "F8FAFC"
+            },
+            "force": false
+        }),
+        json!({
+            "type": "remove",
+            "target": "/slide[7]",
+            "shift": null,
+            "properties": {}
+        }),
+        json!({
+            "type": "move",
+            "target": "/slide[7]",
+            "newParent": null,
+            "position": { "type": "index", "index": 2 },
+            "properties": {}
+        }),
+    ] {
+        let mut value = valid_plan_value("/slide[1]/shape[@id=1]");
+        value["operations"] = json!([value["operations"][0].clone(), operation]);
+        parse_and_validate(value).expect("one terminal whole-slide change is bounded and stable");
+    }
 
-    parse_and_validate(value).expect_err(
-        "whole-slide structure changes require the native tool and a fresh inspection in v1",
-    );
+    let structural = json!({
+        "type": "remove",
+        "target": "/slide[7]",
+        "shift": null,
+        "properties": {}
+    });
+    let element = valid_plan_value("/slide[1]/shape[@id=1]")["operations"][0].clone();
+    for operations in [
+        json!([structural.clone(), element.clone()]),
+        json!([structural.clone(), structural.clone()]),
+    ] {
+        let mut value = valid_plan_value("/slide[1]/shape[@id=1]");
+        value["operations"] = operations;
+        let error = parse_and_validate(value)
+            .expect_err("whole-slide changes must be unique and final to avoid target drift");
+        assert!(error.contains("at most one") || error.contains("must be last"));
+    }
+
+    for operation in [
+        json!({
+            "type": "move",
+            "target": "/slide[7]",
+            "newParent": null,
+            "position": { "type": "after", "target": "/slide[6]" },
+            "properties": {}
+        }),
+        json!({
+            "type": "add",
+            "parent": "/",
+            "elementType": "slide",
+            "copyFrom": "/slide[1]/shape[@id=1]",
+            "position": null,
+            "properties": {},
+            "force": false
+        }),
+        json!({
+            "type": "remove",
+            "target": "/slide[7]",
+            "shift": null,
+            "properties": { "text": "escape" }
+        }),
+    ] {
+        let mut value = valid_plan_value("/slide[1]/shape[@id=1]");
+        value["operations"] = json!([operation]);
+        parse_and_validate(value).expect_err("unbounded whole-slide shapes must fail closed");
+    }
 }
 
 #[test]

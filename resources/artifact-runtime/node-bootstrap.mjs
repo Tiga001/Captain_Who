@@ -1,8 +1,8 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type -- Node runtime hooks use JavaScript contracts. */
 
 import { realpathSync } from 'node:fs'
-import Module, { createRequire, isBuiltin, registerHooks } from 'node:module'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import Module, { isBuiltin, registerHooks } from 'node:module'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { initialize as initializeManagedLoader, resolve as resolveManagedLoader } from './node-loader.mjs'
 
 const moduleRoot = process.env.MYCOPILOT_ARTIFACT_NODE_MODULES
@@ -11,8 +11,11 @@ if (!moduleRoot) {
 }
 
 const managedModuleRoot = realpathSync(moduleRoot)
-const managedRequire = createRequire(join(managedModuleRoot, 'package.json'))
 const originalResolveFilename = Module._resolveFilename
+const managedCommonJsAnchor = join(dirname(managedModuleRoot), 'managed-entry.cjs')
+const managedCommonJsParent = new Module(managedCommonJsAnchor)
+managedCommonJsParent.filename = managedCommonJsAnchor
+managedCommonJsParent.paths = [managedModuleRoot]
 
 // A Host-verified Presentation Editor is a plan producer, not a general Node program. Node's
 // permission model covers filesystem/process capabilities but intentionally does not claim a
@@ -74,9 +77,15 @@ Module._resolveFilename = function resolveManagedCommonJs(request, parent, isMai
   }
 
   const parentPath = typeof parent?.filename === 'string' ? parent.filename : undefined
-  const resolved = isWithinManagedModules(parentPath)
-    ? Reflect.apply(originalResolveFilename, this, [request, parent, isMain, options])
-    : managedRequire.resolve(request)
+  const resolutionParent = isWithinManagedModules(parentPath) ? parent : managedCommonJsParent
+  // Use the pre-hook resolver directly. managedRequire.resolve() eventually dispatches through
+  // Module._resolveFilename and re-enters this hook on newer Node releases.
+  const resolved = Reflect.apply(originalResolveFilename, this, [
+    request,
+    resolutionParent,
+    isWithinManagedModules(parentPath) ? isMain : false,
+    options
+  ])
   if (typeof resolved !== 'string' || !isWithinManagedModules(resolved)) {
     throw new Error(
       `Managed Artifact Runtime refused CommonJS package resolution outside moduleRoot: ${request}`

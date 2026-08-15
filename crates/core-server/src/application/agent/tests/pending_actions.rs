@@ -662,6 +662,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
             }),
             inputs: Vec::new(),
             runtime_binding: Some(Box::new(binding.clone())),
+            managed_office_script: None,
         },
     };
 

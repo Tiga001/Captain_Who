@@ -384,6 +384,7 @@ fn approved_command(call_id: &str, command: &str) -> AgentCommandRequest {
         observe: None,
         inputs: Vec::new(),
         runtime_binding: None,
+        managed_office_script: None,
     }
 }
 
@@ -3798,6 +3799,7 @@ fn aspen_pdf_runs_a_five_step_managed_session_workflow() {
             observe: None,
             inputs: inputs.to_vec(),
             runtime_binding: Some(Box::new(binding.clone())),
+            managed_office_script: None,
         };
         let tracker = Arc::new(FileEffectTracker::default());
         let mut file_effect_guard = Some(tracker.register(

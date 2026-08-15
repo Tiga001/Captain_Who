@@ -12,12 +12,14 @@ mod semantic;
 mod types;
 
 pub use discovery::{office_cli_component_relative_path, OfficeCliDiscoveryOptions};
-pub(crate) use execution::validate_office_request;
+pub(crate) use execution::{
+    prepare_managed_script_binding, prepare_managed_script_staging, validate_office_request,
+};
 pub use execution::{
-    DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_ARGUMENTS, MAX_OFFICE_ARGUMENT_BYTES,
-    MAX_OFFICE_DOCUMENT_BYTES, MAX_OFFICE_GRID_COLUMNS, MAX_OFFICE_LIST_VALUES,
-    MAX_OFFICE_PAGE_NUMBER, MAX_OFFICE_PROPERTIES, MAX_OFFICE_SCREENSHOT_DIMENSION,
-    MAX_OFFICE_TIMEOUT_MS, MAX_OFFICE_TOTAL_PAGES,
+    OfficeManagedScriptStaging, DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_ARGUMENTS,
+    MAX_OFFICE_ARGUMENT_BYTES, MAX_OFFICE_DOCUMENT_BYTES, MAX_OFFICE_GRID_COLUMNS,
+    MAX_OFFICE_LIST_VALUES, MAX_OFFICE_PAGE_NUMBER, MAX_OFFICE_PROPERTIES,
+    MAX_OFFICE_SCREENSHOT_DIMENSION, MAX_OFFICE_TIMEOUT_MS, MAX_OFFICE_TOTAL_PAGES,
 };
 pub use render_runtime::{
     office_browser_proxy_mode_requested, office_render_component_relative_path,
@@ -47,15 +49,16 @@ pub use types::{
     OfficeEngineAvailability, OfficeEngineCapabilities, OfficeEngineError, OfficeEngineErrorCode,
     OfficeEngineRecovery, OfficeEngineSource, OfficeEngineStatus, OfficeExecutionContext,
     OfficeExecutionRequest, OfficeExecutionResult, OfficeFileState, OfficeFrozenPath,
-    OfficeGridLayout, OfficeHelpVerb, OfficeOperation, OfficeOperationAccess,
-    OfficeOperationParameters, OfficePageRange, OfficePathIdentity, OfficePathPurpose,
-    OfficePathScope, OfficePathSlot, OfficePreparedExecution, OfficePresentationEditRequest,
-    OfficePresentationEditResult, OfficePresentationRenderPlan, OfficePropertyMap,
-    OfficePublishedOutput, OfficePublishedOutputKind, OfficePublishedOutputRole,
-    OfficeRenderGridGeometry, OfficeRenderLayoutCoverage, OfficeRenderLayoutEvidence,
-    OfficeRenderPageSelection, OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode,
-    OfficeViewport, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
-    OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+    OfficeGridLayout, OfficeHelpVerb, OfficeManagedScriptBinding, OfficeManagedScriptOutputResult,
+    OfficeManagedScriptPurpose, OfficeOperation, OfficeOperationAccess, OfficeOperationParameters,
+    OfficePageRange, OfficePathIdentity, OfficePathPurpose, OfficePathScope, OfficePathSlot,
+    OfficePreparedExecution, OfficePresentationEditRequest, OfficePresentationEditResult,
+    OfficePresentationRenderPlan, OfficePropertyMap, OfficePublishedOutput,
+    OfficePublishedOutputKind, OfficePublishedOutputRole, OfficeRenderGridGeometry,
+    OfficeRenderLayoutCoverage, OfficeRenderLayoutEvidence, OfficeRenderPageSelection,
+    OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode, OfficeViewport,
+    OfficeWriteDisposition, OFFICECLI_PROVIDER_ID, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
+    OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
 
 pub use discovery::{resolve_office_engine, OfficeCliEngine, UnavailableOfficeEngine};

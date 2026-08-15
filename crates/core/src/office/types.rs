@@ -355,6 +355,7 @@ pub struct OfficePresentationEditRequest {
     pub source_path: String,
     pub source_binding: AgentFileInputBinding,
     pub destination_path: String,
+    pub destination_binding: OfficeManagedScriptBinding,
     pub inputs: Vec<AgentFileInputSpec>,
     pub input_bindings: Vec<AgentFileInputBinding>,
     pub operations: Vec<OfficeOperationParameters>,
@@ -364,6 +365,48 @@ pub struct OfficePresentationEditRequest {
 /// Bounded provider outcome for the Host-owned presentation edit transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfficePresentationEditResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub cancelled: bool,
+    pub duration_ms: u64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Purpose and immutable publication target for one provenance-bound Office Skill script.
+///
+/// The script itself and every declared input are frozen separately as ordinary
+/// [`AgentFileInputBinding`] values on the command request. This binding exists so the final
+/// Office destination is frozen before approval as well, then revalidated immediately before
+/// atomic publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeManagedScriptPurpose {
+    Create,
+    Edit,
+    EditPresentationPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficeManagedScriptBinding {
+    pub schema_version: u32,
+    pub document_kind: OfficeDocumentKind,
+    pub purpose: OfficeManagedScriptPurpose,
+    pub script_mount_path: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub source_mount_path: Option<String>,
+    pub destination: OfficeFrozenPath,
+}
+
+pub const OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION: u32 = 1;
+
+/// Stable diagnostics returned by the strict validation and atomic publication gate for a
+/// provenance-bound Office Skill script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfficeManagedScriptOutputResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
@@ -1079,6 +1122,23 @@ pub trait OfficeEngine: Send + Sync {
         cancellation: AgentCancellationToken,
         action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeExecutionResult, OfficeEngineError>;
+
+    /// Validates and atomically publishes one Host-private candidate produced by a
+    /// provenance-bound Office Skill script. Engines without the pinned validation surface fail
+    /// closed; the private candidate is removed when its staging owner is dropped.
+    fn commit_managed_script_output(
+        &self,
+        _context: &OfficeExecutionContext,
+        _staging: &mut super::OfficeManagedScriptStaging,
+        _cancellation: AgentCancellationToken,
+        _action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {
+        Err(OfficeEngineError::new(
+            OfficeEngineErrorCode::UnsupportedOperation,
+            OfficeEngineRecovery::ChangeRequest,
+            "This Office engine does not support managed Skill script publication.",
+        ))
+    }
 
     /// Applies one fixed-facade presentation edit as a single Host-owned transaction.
     ///

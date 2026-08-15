@@ -33,7 +33,10 @@ def mounted_input(mount_path: str) -> Path:
     if not root_value:
         raise RuntimeError("MYCOPILOT_INPUT_ROOT is required when --image is used")
     root = Path(root_value).resolve()
-    candidate = (root / mount_path).resolve()
+    relative = Path(mount_path)
+    if relative.is_absolute():
+        raise ValueError(f"input mountPath must be relative: {mount_path}")
+    candidate = (root / relative).resolve()
     if candidate != root and root not in candidate.parents:
         raise ValueError(f"input escapes MYCOPILOT_INPUT_ROOT: {mount_path}")
     if not candidate.is_file():

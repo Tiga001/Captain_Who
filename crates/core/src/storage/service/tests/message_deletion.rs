@@ -48,6 +48,7 @@ fn persist_settled_manual_command(
             observe: None,
             inputs: Vec::new(),
             runtime_binding: None,
+            managed_office_script: None,
         },
     };
     let action_json = serde_json::to_string(&action).unwrap();

@@ -168,7 +168,17 @@ pub(crate) fn validate_presentation_editor_plan(
             "Presentation Editor plan must contain between 1 and {MAX_PRESENTATION_EDITOR_OPERATIONS} operations."
         ));
     }
-    for operation in &plan.operations {
+    let mut whole_slide_operations = 0usize;
+    for (index, operation) in plan.operations.iter().enumerate() {
+        if is_whole_slide_operation(operation) {
+            whole_slide_operations += 1;
+            if whole_slide_operations > 1 || index + 1 != plan.operations.len() {
+                return Err(
+                    "Presentation Editor permits at most one whole-slide operation and it must be last."
+                        .to_string(),
+                );
+            }
+        }
         validate_operation(operation)?;
         let encoded = serde_json::to_vec(operation).map_err(|error| {
             format!("Cannot canonicalize Presentation Editor operation: {error}")
@@ -178,6 +188,21 @@ pub(crate) fn validate_presentation_editor_plan(
         }
     }
     Ok(())
+}
+
+fn is_whole_slide_operation(operation: &OfficeOperationParameters) -> bool {
+    match operation {
+        OfficeOperationParameters::Add {
+            parent,
+            element_type,
+            ..
+        } => parent == "/" && element_type == "slide",
+        OfficeOperationParameters::Remove { target, .. }
+        | OfficeOperationParameters::Move { target, .. } => {
+            validate_exact_slide_target(target, "whole-slide target").is_ok()
+        }
+        _ => false,
+    }
 }
 
 fn validate_operation(operation: &OfficeOperationParameters) -> Result<(), String> {
@@ -227,6 +252,21 @@ fn validate_operation(operation: &OfficeOperationParameters) -> Result<(), Strin
             properties,
             force,
         } => {
+            if parent == "/" && element_type == "slide" {
+                if copy_from.is_some() || position.is_some() {
+                    return Err(
+                        "Presentation addSlide cannot copy or position another slide in v1."
+                            .to_string(),
+                    );
+                }
+                validate_slide_properties(properties)?;
+                if *force {
+                    return Err(
+                        "Presentation Editor cannot force protected-file mutations.".to_string()
+                    );
+                }
+                return Ok(());
+            }
             if !matches!(
                 element_type.as_str(),
                 "textbox" | "shape" | "picture" | "table" | "chart" | "connector"
@@ -252,8 +292,14 @@ fn validate_operation(operation: &OfficeOperationParameters) -> Result<(), Strin
             shift,
             properties,
         } => {
-            validate_element_target(target, "remove target")?;
+            let whole_slide = validate_exact_slide_target(target, "remove target").is_ok();
+            if !whole_slide {
+                validate_element_target(target, "remove target")?;
+            }
             validate_properties(properties, Some(target))?;
+            if whole_slide && !properties.is_empty() {
+                return Err("Presentation removeSlide cannot carry properties.".to_string());
+            }
             if shift.is_some() {
                 return Err(
                     "Presentation Editor does not support spreadsheet cell shift.".to_string(),
@@ -266,7 +312,20 @@ fn validate_operation(operation: &OfficeOperationParameters) -> Result<(), Strin
             position,
             properties,
         } => {
-            validate_element_target(target, "move target")?;
+            let whole_slide = validate_exact_slide_target(target, "move target").is_ok();
+            if !whole_slide {
+                validate_element_target(target, "move target")?;
+            }
+            if whole_slide
+                && (new_parent.is_some()
+                    || !properties.is_empty()
+                    || !matches!(position, Some(OfficeElementPosition::Index { .. })))
+            {
+                return Err(
+                    "Presentation moveSlide requires only one zero-based index position."
+                        .to_string(),
+                );
+            }
             if let Some(parent) = new_parent {
                 validate_exact_slide_target(parent, "move newParent")?;
             }
@@ -287,6 +346,30 @@ fn validate_operation(operation: &OfficeOperationParameters) -> Result<(), Strin
         | OfficeOperationParameters::Query { .. }
         | OfficeOperationParameters::Validate => {
             return Err("Presentation Editor plan contains a non-mutation operation.".to_string())
+        }
+    }
+    Ok(())
+}
+
+fn validate_slide_properties(properties: &OfficePropertyMap) -> Result<(), String> {
+    for (name, value) in properties {
+        if !matches!(name.as_str(), "layout" | "title" | "text" | "background") {
+            return Err(format!(
+                "Presentation addSlide property `{name}` is not supported."
+            ));
+        }
+        let Some(value) = value.as_str() else {
+            return Err(format!(
+                "Presentation addSlide property `{name}` must be a string."
+            ));
+        };
+        if value.chars().count() > MAX_PRESENTATION_EDITOR_STRING_CHARS
+            || value.contains('\0')
+            || value.contains('\r')
+        {
+            return Err(format!(
+                "Presentation addSlide property `{name}` is invalid."
+            ));
         }
     }
     Ok(())

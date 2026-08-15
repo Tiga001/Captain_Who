@@ -28,6 +28,10 @@ await editPresentation({
     // BEGIN EDIT REGION
     // Copy stable targets verbatim from the latest `office_presentation` inspect result.
     // Do not invent paths or use positional shape indexes when an inspected id exists.
+    // A whole-slide add/remove/move is allowed at most once and must be the final operation.
+    // deck.addSlide({ title: 'Appendix', body: 'Supporting detail', backgroundColor: 'F8FAFC' })
+    // deck.removeSlide({ slideNumber: 8 })
+    // deck.moveSlide({ slideNumber: 7, newIndex: 3 })
     //
     // deck.replaceText({
     //   target: '/slide[1]/shape[@id=42]',

@@ -1,38 +1,21 @@
 {
-  "contractVersion": 9,
+  "contractVersion": 10,
   "engine": "officecli",
   "tool": "office_spreadsheet",
   "extensions": [".xlsx"],
   "modes": {
     "native": {
       "tool": "office_spreadsheet",
-      "bestFor": "bounded_high_frequency_tasks",
+      "bestFor": "authoritative_read_validate_render",
       "requestStyle": "flat_semantic_v1",
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
-      "transactionScope": "oneOperationPerCall",
-      "multiOperationAtomicBatch": false,
-      "operations": [
-        "status",
-        "create",
-        "inspect",
-        "validate",
-        "render",
-        "addSheet",
-        "writeCell",
-        "setFormula",
-        "formatRange",
-        "freezePanes",
-        "addConditionalFormat",
-        "addTable",
-        "addChart",
-        "insertImage",
-        "removeSheet",
-        "moveSheet"
-      ],
+      "operations": ["status", "inspect", "validate", "render"],
+      "writeOperationsModelVisible": false,
+      "modelVisibleWrites": "forbidden",
+      "writeRoute": "managedScripts",
       "unsupportedRecovery": "useManagedScript",
-      "unsupportedExistingEditRecovery": "builderWithExplicitSourceOrFailClosed",
       "renderOutput": {
         "resultField": "outputs",
         "role": "render",
@@ -49,16 +32,43 @@
     },
     "script": {
       "builderTemplate": "templates/builder.py",
+      "editorTemplate": "templates/editor.py",
+      "editingReference": "references/editing-existing.md",
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
       "runtimeProfile": "spreadsheets",
-      "runtimeProfileBinding": "host_from_materialized_builder_receipt",
+      "runtimeProfileBinding": "host_from_materialized_script_receipt",
       "outputArgument": "--output",
+      "sourceArgument": "--source",
       "routes": {
-        "createOrComplexGenerate": "builder",
-        "boundedExistingEdit": "native",
-        "sourceWorkbookTransform": "builderWithExplicitSourceAndSaveAs",
-        "fixedExistingEditor": "notAvailable"
+        "create": "builder",
+        "editExisting": "editor",
+        "inspectValidateRender": "native",
+        "nativeWrite": "forbidden"
+      },
+      "pythonSemantics": {
+        "execution": "normalPython",
+        "astOrJsonDsl": "forbidden",
+        "functions": true,
+        "loops": true,
+        "conditions": true,
+        "comprehensions": true,
+        "pinnedDependencyImports": true,
+        "modelPatchRegion": "edit_workbook"
+      },
+      "transaction": {
+        "scriptBytesFrozenBeforeExecution": true,
+        "runtimeAndInputsFrozen": true,
+        "sourceSnapshot": "hostReadOnlyInput",
+        "candidateOutput": "hostPrivateStaging",
+        "validation": "pinnedOfficeEngineBeforePublish",
+        "targetPreconditionRechecked": true,
+        "cancellationRechecked": true,
+        "publish": "atomic",
+        "failureBeforePublish": "hostCandidateNotPublishedToDeclaredDestination",
+        "pythonSideEffectScope": "outsideOfficePublicationNotTransactional",
+        "permissionBoundary": "existingRunCommandApprovalAndPermissions",
+        "crossPlatformOsSandboxClaim": false
       },
       "lifecycle": {
         "prepareDirectoryBeforeMaterialize": true,
@@ -75,13 +85,11 @@
         "executionOnFailure": "forbidden"
       },
       "existingWorkbookEdit": {
-        "sourceArgument": "--source",
         "sourceBinding": "inputs.mountPath",
         "loader": "openpyxl.load_workbook(data_only=false)",
-        "implementation": "generalBuilderNotFixedEditor",
-        "hostTypedTransaction": false,
+        "implementation": "fixedNormalPythonEditor",
         "inspectBeforeEdit": true,
-        "defaultPublishMode": "saveAs",
+        "publishMode": "saveAsOnly",
         "rebuildToImitateEdit": "forbidden",
         "unsupportedFeaturePolicy": "failClosed"
       },
@@ -146,12 +154,7 @@
       "consumeEveryReturnedReadPath": true,
       "requiredLedger": "oneVerdictOrExplicitIncompleteCoveragePerFinalSheet",
       "unresolvedFloatingObjectBounds": "discloseIncompleteCoverage",
-      "pageSelectionSemantics": "requestedNotVerifiedCoverage",
-      "coverageCannotBeInferredFrom": [
-        "pageSelection",
-        "outputFilename",
-        "combinedRequest"
-      ]
+      "pageSelectionSemantics": "requestedNotVerifiedCoverage"
     },
     "evidenceInvalidation": "anyFinalWorkbookEdit"
   }

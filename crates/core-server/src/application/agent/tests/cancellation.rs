@@ -580,6 +580,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         observe: None,
         inputs: Vec::new(),
         runtime_binding: None,
+        managed_office_script: None,
     };
     let call = checkpoint_call_for_command(&command);
     let mut checkpoint = AgentRunCheckpoint {
@@ -935,6 +936,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         observe: None,
         inputs: Vec::new(),
         runtime_binding: None,
+        managed_office_script: None,
     };
     let call = checkpoint_call_for_command(&command);
     let mut checkpoint = AgentRunCheckpoint {

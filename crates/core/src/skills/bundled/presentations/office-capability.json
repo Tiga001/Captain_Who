@@ -6,27 +6,15 @@
   "modes": {
     "native": {
       "tool": "office_presentation",
-      "bestFor": "bounded_high_frequency_tasks",
+      "bestFor": "authoritative_read_validate_render",
       "requestStyle": "flat_semantic_v1",
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
-      "operations": [
-        "status",
-        "create",
-        "inspect",
-        "validate",
-        "render",
-        "addSlide",
-        "addText",
-        "insertImage",
-        "addTable",
-        "addChart",
-        "addShape",
-        "addFooter",
-        "removeSlide",
-        "moveSlide"
-      ],
+      "operations": ["status", "inspect", "validate", "render"],
+      "writeOperationsModelVisible": false,
+      "modelVisibleWrites": "forbidden",
+      "writeRoute": "managedScripts",
       "unsupportedRecovery": "useManagedScript",
       "renderOutput": {
         "resultField": "outputs",
@@ -68,7 +56,8 @@
       "routes": {
         "create": "builder",
         "editExisting": "editor",
-        "inspectValidateRender": "native"
+        "inspectValidateRender": "native",
+        "nativeWrite": "forbidden"
       },
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
@@ -88,12 +77,13 @@
         "inspectBeforeEdit": true,
         "stableInspectedTargetsRequired": true,
         "positionShape": "taggedIndexAfterOrBefore",
-        "structuralScope": "elementsOnly",
-        "wholeSlideMutations": "nativeThenReinspect",
+        "structuralScope": "elementsAndOneTerminalWholeSlideMutation",
+        "wholeSlideMutations": "editorAtMostOneAndLastThenReinspect",
         "targetRules": {
           "elementTarget": "inspectedIdRequired",
           "copyFrom": "inspectedIdRequired",
           "positionReference": "inspectedIdRequired",
+          "wholeSlideTarget": "inspectedOneBasedSlideNumber",
           "parent": "slideContainerAllowed",
           "newParent": "slideContainerAllowed"
         },
@@ -113,8 +103,11 @@
           "operations": [
             "editPresentation",
             "input",
-            "output",
-            "set",
+          "output",
+          "addSlide",
+          "removeSlide",
+          "moveSlide",
+          "set",
             "replaceText",
             "add",
             "remove",

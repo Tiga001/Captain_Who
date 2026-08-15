@@ -603,6 +603,7 @@ mod tests {
                     observe: None,
                     inputs: Vec::new(),
                     runtime_binding: None,
+                    managed_office_script: None,
                 },
             }
         ));

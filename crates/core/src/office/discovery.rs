@@ -1,5 +1,6 @@
 use super::execution::{
-    prepare_office_cli, probe_engine, run_office_presentation_edit, run_prepared_office_cli,
+    prepare_office_cli, probe_engine, run_managed_script_output_commit,
+    run_office_presentation_edit, run_prepared_office_cli,
 };
 use super::render_runtime::{OfficeRenderRuntime, OfficeRenderRuntimeDiscoveryOptions};
 use super::types::{
@@ -191,6 +192,16 @@ impl OfficeEngine for OfficeCliEngine {
         action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficePresentationEditResult, OfficeEngineError> {
         run_office_presentation_edit(self, context, request, cancellation, action_cancel_flag)
+    }
+
+    fn commit_managed_script_output(
+        &self,
+        context: &OfficeExecutionContext,
+        staging: &mut crate::office::OfficeManagedScriptStaging,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<crate::office::OfficeManagedScriptOutputResult, OfficeEngineError> {
+        run_managed_script_output_commit(self, context, staging, cancellation, action_cancel_flag)
     }
 
     fn prepare(

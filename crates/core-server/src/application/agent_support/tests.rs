@@ -191,6 +191,7 @@ fn renderer_command_projection_excludes_host_runtime_authority_and_private_input
                 version: "5.0.0".to_string(),
             }],
         })),
+        managed_office_script: None,
     };
 
     let renderer_event = agent_event_notification(AgentEvent::Done {
@@ -263,6 +264,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
             runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
             resolved_packages,
         })),
+        managed_office_script: None,
     };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(serde_json::json!({
         "apiUrl": "https://example.test/v1/chat/completions",
@@ -421,6 +423,7 @@ fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
         observe: None,
         inputs: Vec::new(),
         runtime_binding: None,
+        managed_office_script: None,
     };
     let evaluation = evaluate_command_policy(
         &request.command,

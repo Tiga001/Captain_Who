@@ -407,9 +407,9 @@ impl OfficeTool {
 
     fn description(&self) -> &'static str {
         match self.document_kind {
-            OfficeDocumentKind::Document => "Create, inspect, validate, render, and edit Word-compatible .docx documents with a flat provider-neutral semantic request. Use operations such as addText, insertImage, addTable, addHeader, addFooter, replaceText, formatText, removeBlock, and moveBlock. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, or arbitrary property maps. Read-only operations run immediately; writes compile into the same frozen, permission-checked Host action. If a requested long-tail capability is unsupported, use the structured recommendedRoute=managedScript recovery.",
-            OfficeDocumentKind::Spreadsheet => "Create, inspect, validate, render, and edit Excel-compatible .xlsx/.xlsm/.csv files with a flat provider-neutral semantic request. Use operations such as addSheet, writeCell, setFormula, formatRange, freezePanes, addConditionalFormat, addTable, addChart, insertImage, removeSheet, and moveSheet. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, or arbitrary property maps. Read-only operations run immediately; writes compile into the same frozen, permission-checked Host action. If a requested long-tail capability is unsupported, use the structured recommendedRoute=managedScript recovery.",
-            OfficeDocumentKind::Presentation => "Create, inspect, validate, render, and edit PowerPoint-compatible .pptx presentations with a flat provider-neutral semantic request. Use operations such as addSlide, addText, insertImage, addTable, addChart, addShape, addFooter, removeSlide, and moveSlide. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, or arbitrary property maps. Read-only operations run immediately; writes compile into the same frozen, permission-checked Host action. If a requested long-tail capability is unsupported, use the structured recommendedRoute=managedScript recovery.",
+            OfficeDocumentKind::Document => "Inspect, validate, and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
+            OfficeDocumentKind::Spreadsheet => "Inspect, validate, and render Excel-compatible .xlsx workbooks with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
+            OfficeDocumentKind::Presentation => "Inspect, validate, and render PowerPoint-compatible .pptx presentations with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed MJS Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
         }
     }
 }
@@ -1547,9 +1547,49 @@ fn parse_args_with_model_path_resolver(
     tool_name: &str,
     resolve_model_path: impl Fn(&str) -> AgentResult<AgentFileInputRef>,
 ) -> AgentResult<OfficeToolArgs> {
+    parse_args_with_scope(
+        value,
+        tool_name,
+        resolve_model_path,
+        OfficeSemanticParseScope::ModelVisible,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OfficeSemanticParseScope {
+    ModelVisible,
+    FrozenApprovedSnapshot,
+}
+
+fn parse_args_with_scope(
+    value: Value,
+    tool_name: &str,
+    resolve_model_path: impl Fn(&str) -> AgentResult<AgentFileInputRef>,
+    scope: OfficeSemanticParseScope,
+) -> AgentResult<OfficeToolArgs> {
     let object = value
         .as_object()
         .ok_or_else(|| AgentError::new(format!("{tool_name} parameters must be a JSON object.")))?;
+    let operation = object
+        .get("operation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AgentError::new(format!("{tool_name}.operation must be a string.")))?;
+    if scope == OfficeSemanticParseScope::ModelVisible
+        && !matches!(operation, "status" | "inspect" | "validate" | "render")
+    {
+        return Err(AgentError::structured(
+            "office.model_write_removed",
+            format!(
+                "{tool_name}.{operation} is not model-visible; create or edit Office files with the activated Skill's managed Builder or Editor."
+            ),
+            json!({
+                "type": "office_semantic_request",
+                "code": "modelWriteRemoved",
+                "recovery": "useManagedScript",
+                "canonicalOperations": ["status", "inspect", "validate", "render"],
+            }),
+        ));
+    }
     let raw_reason = match object.get("reason") {
         Some(Value::String(reason)) => reason.clone(),
         Some(_) => {
@@ -1713,17 +1753,22 @@ pub(crate) fn validate_frozen_office_trace_args(
         .inputs
         .first()
         .map(|input| &input.source);
-    let args = parse_args_with_model_path_resolver(operation.clone(), tool_name, |path| {
-        let source = frozen_source.ok_or_else(|| {
-            AgentError::new("The frozen Office request has no matching image input.")
-        })?;
-        if !agent_file_input_ref_matches_model_path(source, path).map_err(AgentError::from)? {
-            return Err(AgentError::new(
-                "Office imagePath differs from the frozen image input.",
-            ));
-        }
-        Ok(source.clone())
-    })
+    let args = parse_args_with_scope(
+        operation.clone(),
+        tool_name,
+        |path| {
+            let source = frozen_source.ok_or_else(|| {
+                AgentError::new("The frozen Office request has no matching image input.")
+            })?;
+            if !agent_file_input_ref_matches_model_path(source, path).map_err(AgentError::from)? {
+                return Err(AgentError::new(
+                    "Office imagePath differs from the frozen image input.",
+                ));
+            }
+            Ok(source.clone())
+        },
+        OfficeSemanticParseScope::FrozenApprovedSnapshot,
+    )
     .map_err(|_| format!("{tool_name} frozen ToolCall arguments are invalid"))?;
     let reason = args.reason.clone();
     let request = args
@@ -1799,7 +1844,6 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
         ),
         ("reason", reason_schema()),
         ("filePath", file_path_schema(document_kind)),
-        ("destinationPath", destination_path_schema(document_kind)),
         ("timeoutMs", timeout_schema()),
         (
             "outputPath",
@@ -1824,125 +1868,46 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
         ),
     ]);
 
-    properties.insert(
-        "overwriteExisting".to_string(),
-        json!({
-            "type": "boolean",
-            "description": "create only. Replacing an existing target still uses approval, conflict checks, staging, and atomic publication.",
-        }),
-    );
-    properties.insert(
-        "locale".to_string(),
-        json!({
-            "type": "string",
-            "minLength": 1,
-            "description": "Document create only. Optional BCP-47 locale such as zh-CN.",
-        }),
-    );
-    properties.insert("style".to_string(), semantic_style_schema());
-    properties.insert(
-        "imagePath".to_string(),
-        json!({
-            "type": "string",
-            "minLength": 1,
-            "description": "insertImage only. Pass one workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI. The Host resolves authority and mounts the verified bytes automatically.",
-        }),
-    );
-    properties.insert(
-        "altText".to_string(),
-        json!({
-            "type": "string",
-            "description": "Accessible description for insertImage.",
-        }),
-    );
-    for (name, description) in [
-        ("x", "Presentation element x position, for example 1in."),
-        ("y", "Presentation element y position, for example 1in."),
-        ("width", "Element width, for example 15cm or 6in."),
-        ("height", "Element height, for example 3in."),
-        (
-            "anchor",
-            "Spreadsheet chart or image anchor such as G2:N18.",
-        ),
-    ] {
-        properties.insert(
-            name.to_string(),
-            json!({ "type": "string", "minLength": 1, "description": description }),
-        );
-    }
-
     match document_kind {
         OfficeDocumentKind::Document => {
+            properties.insert(
+                "blockIndex".to_string(),
+                positive_integer_schema("Optional one-based body block inspected by inspect."),
+            );
+        }
+        OfficeDocumentKind::Spreadsheet => {
             properties.extend(schema_properties([
                 (
-                    "blockKind",
-                    json!({
-                        "type": "string",
-                        "enum": ["paragraph", "heading1", "heading2", "heading3", "bullet", "numbered"],
-                        "description": "addText block kind; defaults to paragraph.",
-                    }),
-                ),
-                (
-                    "text",
-                    json!({
-                        "type": "string",
-                        "description": "Text for addText, addHeader, or addFooter.",
-                    }),
-                ),
-                ("data", table_data_schema()),
-                (
-                    "headerFill",
-                    json!({
-                        "type": "string",
-                        "description": "Optional table header fill color.",
-                    }),
-                ),
-                (
-                    "pageNumber",
-                    json!({
-                        "type": "boolean",
-                        "description": "addHeader/addFooter: include the PAGE field.",
-                    }),
-                ),
-                (
-                    "findText",
+                    "sheetName",
                     json!({
                         "type": "string",
                         "minLength": 1,
-                        "description": "replaceText literal search text.",
+                        "maxLength": 31,
+                        "description": "Optional worksheet selected by inspect or render.",
                     }),
                 ),
                 (
-                    "replaceText",
+                    "range",
                     json!({
                         "type": "string",
-                        "description": "replaceText replacement.",
+                        "minLength": 2,
+                        "description": "Optional A1 cell or contiguous range selected by inspect or render.",
                     }),
-                ),
-                (
-                    "blockIndex",
-                    positive_integer_schema(
-                        "One-based body block for inspect, formatText, removeBlock, or moveBlock.",
-                    ),
-                ),
-                (
-                    "newIndex",
-                    positive_integer_schema("One-based destination for moveBlock."),
                 ),
             ]));
         }
-        OfficeDocumentKind::Spreadsheet => {
-            properties.extend(spreadsheet_semantic_schema_properties());
-        }
         OfficeDocumentKind::Presentation => {
-            properties.extend(presentation_semantic_schema_properties());
+            properties.insert(
+                "slideNumber".to_string(),
+                positive_integer_schema("Optional one-based slide inspected by inspect."),
+            );
         }
     }
 
     json!({
         "type": "object",
         "description": format!(
-            "Versioned provider-neutral semantic {:?} request. Keep operation, filePath, operation fields, and reason at this single flat root. The Host validates conditional requirements, compiles the intent to a canonical frozen Office action, and never accepts OfficeCLI argv, DOM paths, or provider property maps. Unsupported long-tail capabilities return capabilityNotSupported with recommendedRoute=managedScript.",
+            "Versioned provider-neutral read/verification {:?} request. Keep operation, filePath, selectors, and reason at this single flat root. The Host never accepts OfficeCLI argv, DOM paths, provider property maps, create, or mutation operations; use the activated Skill's managed Builder or Editor for writes.",
             document_kind
         ),
         "properties": properties,
@@ -1952,328 +1917,8 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
 }
 
 fn semantic_operation_names(document_kind: OfficeDocumentKind) -> Vec<&'static str> {
-    let mut operations = vec!["status", "create", "inspect", "validate", "render"];
-    operations.extend(match document_kind {
-        OfficeDocumentKind::Document => vec![
-            "addText",
-            "insertImage",
-            "addTable",
-            "addHeader",
-            "addFooter",
-            "replaceText",
-            "formatText",
-            "removeBlock",
-            "moveBlock",
-        ],
-        OfficeDocumentKind::Spreadsheet => vec![
-            "addSheet",
-            "writeCell",
-            "setFormula",
-            "formatRange",
-            "freezePanes",
-            "addConditionalFormat",
-            "addTable",
-            "addChart",
-            "insertImage",
-            "removeSheet",
-            "moveSheet",
-        ],
-        OfficeDocumentKind::Presentation => vec![
-            "addSlide",
-            "addText",
-            "insertImage",
-            "addTable",
-            "addChart",
-            "addShape",
-            "addFooter",
-            "removeSlide",
-            "moveSlide",
-        ],
-    });
-    operations
-}
-
-fn semantic_style_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "fontName": { "type": "string", "minLength": 1 },
-            "fontSize": { "type": "number", "minimum": 1, "maximum": 400 },
-            "fontColor": { "type": "string", "minLength": 1 },
-            "fillColor": { "type": "string", "minLength": 1 },
-            "bold": { "type": "boolean" },
-            "italic": { "type": "boolean" },
-            "alignment": {
-                "type": "string",
-                "enum": ["left", "center", "right", "justify"]
-            },
-            "wrapText": { "type": "boolean" },
-            "numberFormat": { "type": "string", "minLength": 1 },
-            "lineSpacing": { "type": "number", "minimum": 0.5, "maximum": 10 }
-        },
-        "additionalProperties": false,
-        "description": "Small cross-format style vocabulary. The backend rejects fields that do not apply to the selected file kind.",
-    })
-}
-
-fn table_data_schema() -> Value {
-    json!({
-        "type": "array",
-        "minItems": 1,
-        "maxItems": 2000,
-        "items": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 256,
-            "items": { "type": "string", "maxLength": 32768 }
-        },
-        "description": "Rectangular table rows. Cells containing commas, semicolons, or line breaks require managedScript.",
-    })
-}
-
-fn spreadsheet_semantic_schema_properties() -> Map<String, Value> {
-    schema_properties([
-        (
-            "sheetName",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 31,
-                "description": "Worksheet name used by spreadsheet semantic operations.",
-            }),
-        ),
-        (
-            "cell",
-            json!({
-                "type": "string",
-                "minLength": 2,
-                "description": "A1 cell reference for writeCell or setFormula.",
-            }),
-        ),
-        (
-            "range",
-            json!({
-                "type": "string",
-                "minLength": 2,
-                "description": "A1 cell or contiguous range for inspect, render, formatRange, addConditionalFormat, or addTable.",
-            }),
-        ),
-        (
-            "value",
-            json!({
-                "oneOf": [
-                    { "type": "string" },
-                    { "type": "number" },
-                    { "type": "boolean" }
-                ],
-                "description": "writeCell value or a conditional-format threshold.",
-            }),
-        ),
-        (
-            "secondValue",
-            json!({
-                "oneOf": [
-                    { "type": "string" },
-                    { "type": "number" },
-                    { "type": "boolean" }
-                ],
-                "description": "Optional second conditional-format threshold.",
-            }),
-        ),
-        (
-            "formula",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "setFormula expression. Leading '=' is optional.",
-            }),
-        ),
-        (
-            "numberFormat",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional setFormula number format.",
-            }),
-        ),
-        (
-            "freezeAt",
-            json!({
-                "type": "string",
-                "minLength": 2,
-                "description": "freezePanes anchor, for example A2 to freeze the first row.",
-            }),
-        ),
-        (
-            "kind",
-            json!({
-                "type": "string",
-                "enum": ["cellValue", "colorScale", "dataBar", "containsText"],
-                "description": "addConditionalFormat rule kind.",
-            }),
-        ),
-        (
-            "operator",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "cellValue operator such as greaterThan or between.",
-            }),
-        ),
-        (
-            "text",
-            json!({
-                "type": "string",
-                "description": "containsText conditional-format text.",
-            }),
-        ),
-        ("fillColor", json!({ "type": "string", "minLength": 1 })),
-        ("minColor", json!({ "type": "string", "minLength": 1 })),
-        ("midColor", json!({ "type": "string", "minLength": 1 })),
-        ("maxColor", json!({ "type": "string", "minLength": 1 })),
-        (
-            "name",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional spreadsheet table display name.",
-            }),
-        ),
-        (
-            "headerRow",
-            json!({ "type": "boolean", "description": "addTable; defaults to true." }),
-        ),
-        (
-            "totalRow",
-            json!({ "type": "boolean", "description": "addTable; defaults to false." }),
-        ),
-        ("chartType", chart_type_schema()),
-        (
-            "title",
-            json!({ "type": "string", "minLength": 1, "description": "Chart title." }),
-        ),
-        (
-            "dataRange",
-            json!({
-                "type": "string",
-                "minLength": 2,
-                "description": "addChart data range without a sheet prefix; sheetName is authoritative.",
-            }),
-        ),
-        (
-            "categoryRange",
-            json!({
-                "type": "string",
-                "minLength": 2,
-                "description": "Optional addChart category range without a sheet prefix.",
-            }),
-        ),
-        (
-            "newIndex",
-            positive_integer_schema("One-based destination for moveSheet."),
-        ),
-    ])
-}
-
-fn presentation_semantic_schema_properties() -> Map<String, Value> {
-    schema_properties([
-        (
-            "slideNumber",
-            positive_integer_schema(
-                "One-based slide used by inspect and presentation element operations.",
-            ),
-        ),
-        (
-            "newIndex",
-            positive_integer_schema("One-based destination for moveSlide."),
-        ),
-        (
-            "layout",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional addSlide layout name.",
-            }),
-        ),
-        (
-            "title",
-            json!({
-                "type": "string",
-                "description": "addSlide title or addChart title.",
-            }),
-        ),
-        (
-            "body",
-            json!({
-                "type": "string",
-                "description": "Optional addSlide body text.",
-            }),
-        ),
-        (
-            "backgroundColor",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional addSlide background color.",
-            }),
-        ),
-        (
-            "text",
-            json!({
-                "type": "string",
-                "description": "Text for addText, addShape, or addFooter.",
-            }),
-        ),
-        ("data", table_data_schema()),
-        ("headerFill", json!({ "type": "string", "minLength": 1 })),
-        ("chartType", chart_type_schema()),
-        (
-            "series",
-            json!({
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 64,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "minLength": 1 },
-                        "values": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 10000,
-                            "items": { "type": "number" }
-                        }
-                    },
-                    "required": ["name", "values"],
-                    "additionalProperties": false
-                }
-            }),
-        ),
-        (
-            "categories",
-            json!({
-                "type": "array",
-                "maxItems": 10000,
-                "items": { "type": "string" }
-            }),
-        ),
-        (
-            "shapeType",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "addShape geometry such as rect, roundRect, ellipse, or line.",
-            }),
-        ),
-        ("lineColor", json!({ "type": "string", "minLength": 1 })),
-    ])
-}
-
-fn chart_type_schema() -> Value {
-    json!({
-        "type": "string",
-        "enum": ["column", "bar", "line", "pie", "area", "scatter"],
-    })
+    let _ = document_kind;
+    vec!["status", "inspect", "validate", "render"]
 }
 
 fn schema_properties<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
@@ -2314,31 +1959,17 @@ fn file_path_schema(document_kind: OfficeDocumentKind) -> Value {
     })
 }
 
-fn destination_path_schema(document_kind: OfficeDocumentKind) -> Value {
-    let extensions = document_kind.accepted_extensions().join(", ");
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "description": format!("Optional save-as target (expected extension: {extensions}). The frozen source remains unchanged and the new target is staged and atomically published. Omit for an in-place edit."),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::office::{
         OfficeEngineAvailability, OfficeEngineCapabilities, OfficeEngineSource, OfficeEngineStatus,
-        OfficeOperation, OfficeOperationParameters, OfficePreparedExecution, OFFICECLI_PROVIDER_ID,
+        OfficeOperation, OfficePreparedExecution, OFFICECLI_PROVIDER_ID,
         OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
     };
-    use crate::protocol::{
-        AgentApprovalStatus, AgentCommandPermission, AgentCommandSafetyPolicy,
-        AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentRunContext,
-        AgentWorkspaceContext, AgentWritePermission,
-    };
+    use crate::protocol::AgentApprovalStatus;
     use crate::AgentCancellationToken;
     use std::sync::atomic::AtomicBool;
-    use tempfile::tempdir;
 
     #[derive(Clone)]
     struct PreparingOfficeEngine;
@@ -2496,7 +2127,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_raw_help_is_rejected_with_semantic_recovery() {
+    fn retired_raw_help_is_rejected_with_managed_script_recovery() {
         let error = parse_args(
             json!({
             "operation": "help",
@@ -2507,10 +2138,10 @@ mod tests {
             "office_document",
         )
         .expect_err("raw provider help is not part of the semantic model surface");
-        assert_eq!(error.code(), Some("office.semantic_invalid_request"));
+        assert_eq!(error.code(), Some("office.model_write_removed"));
         assert_eq!(
             error.details().expect("structured semantic error")["recovery"],
-            "changeRequest"
+            "useManagedScript"
         );
     }
 
@@ -2611,13 +2242,13 @@ mod tests {
     }
 
     #[test]
-    fn office_reason_content_does_not_change_read_write_approval_classification() {
+    fn office_reason_content_does_not_change_read_only_approval_classification() {
         let tool = OfficeTool::new(
             OfficeDocumentKind::Spreadsheet,
             Arc::new(PreparingOfficeEngine),
         );
 
-        for operation in ["status", "get"] {
+        for operation in ["status", "inspect"] {
             let first = office_args(operation, Some(json!("Inspect the workbook")));
             let second = office_args(operation, Some(json!("检查工作簿")));
             assert_eq!(
@@ -2626,63 +2257,6 @@ mod tests {
             );
             assert!(!tool.requires_approval_for_call(&first));
         }
-
-        let first = office_args("set", Some(json!("Update the title")));
-        let second = office_args("set", Some(json!("更新标题")));
-        assert_eq!(
-            tool.requires_approval_for_call(&first),
-            tool.requires_approval_for_call(&second)
-        );
-        assert!(tool.requires_approval_for_call(&first));
-    }
-
-    #[test]
-    fn write_proposal_binds_the_trimmed_reason_to_the_frozen_action() {
-        let fixture = tempdir().unwrap();
-        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
-            collaboration_identity: None,
-            conversation_id: None,
-            project_id: None,
-            workspace: Some(AgentWorkspaceContext {
-                project_id: None,
-                display_name: Some("workspace".to_string()),
-                root_path: Some(fixture.path().to_string_lossy().to_string()),
-            }),
-            attachment_library: None,
-            permissions: AgentPermissions {
-                read: AgentReadPermission::WorkspaceOnly,
-                write: AgentWritePermission::WorkspaceOnly,
-                command: AgentCommandPermission::RequireApproval,
-                command_safety: AgentCommandSafetyPolicy::Guarded,
-                patch: AgentPatchPermission::RequireApproval,
-            },
-        }));
-        let tool = OfficeTool::new(
-            OfficeDocumentKind::Spreadsheet,
-            Arc::new(PreparingOfficeEngine),
-        );
-        let call = AgentToolCall {
-            id: "office-reason".to_string(),
-            tool: "office_spreadsheet".to_string(),
-            args: office_args("set", Some(json!("  Update the workbook title  "))),
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        };
-
-        let action = tool
-            .proposed_action(&context, &call)
-            .expect("valid write call should freeze an Office action");
-        let AgentProposedAction::OfficeOperation { office_operation } = action else {
-            panic!("Office write must produce a typed Office action");
-        };
-        assert_eq!(office_operation.reason, "Update the workbook title");
-        assert_eq!(
-            office_operation.schema_version,
-            AGENT_OFFICE_OPERATION_SCHEMA_VERSION
-        );
-        assert!(crate::is_valid_agent_office_reason(
-            &office_operation.reason
-        ));
     }
 
     #[test]
@@ -2703,13 +2277,29 @@ mod tests {
             assert_eq!(schema["type"], "object");
             assert_eq!(schema["additionalProperties"], false);
             assert_eq!(schema["required"], json!(["operation", "reason"]));
-            assert!(schema["properties"]["operation"]["enum"]
-                .as_array()
-                .is_some_and(|operations| operations.len() >= 14));
+            assert_eq!(
+                schema["properties"]["operation"]["enum"],
+                json!(["status", "inspect", "validate", "render"])
+            );
             for field in ["operation", "reason", "filePath", "outputPath", "timeoutMs"] {
                 assert!(schema["properties"].get(field).is_some(), "missing {field}");
             }
-            assert!(schema["properties"]["imagePath"].is_object());
+            for removed in [
+                "destinationPath",
+                "imagePath",
+                "source",
+                "style",
+                "text",
+                "value",
+                "formula",
+                "data",
+                "overwriteExisting",
+            ] {
+                assert!(
+                    schema["properties"].get(removed).is_none(),
+                    "retired model write field {removed} leaked into the schema"
+                );
+            }
             assert!(schema["properties"].get("source").is_none());
         }
     }
@@ -2720,30 +2310,25 @@ mod tests {
         let spreadsheet = office_input_schema(OfficeDocumentKind::Spreadsheet);
         let presentation = office_input_schema(OfficeDocumentKind::Presentation);
 
-        assert!(document["properties"].get("blockKind").is_some());
+        assert!(document["properties"].get("blockIndex").is_some());
         assert!(document["properties"].get("sheetName").is_none());
         assert!(document["properties"].get("slideNumber").is_none());
 
         assert!(spreadsheet["properties"].get("sheetName").is_some());
-        assert!(spreadsheet["properties"].get("formula").is_some());
-        assert!(spreadsheet["properties"].get("blockKind").is_none());
+        assert!(spreadsheet["properties"].get("range").is_some());
+        assert!(spreadsheet["properties"].get("formula").is_none());
+        assert!(spreadsheet["properties"].get("blockIndex").is_none());
         assert!(spreadsheet["properties"].get("slideNumber").is_none());
 
         assert!(presentation["properties"].get("slideNumber").is_some());
-        assert!(presentation["properties"].get("shapeType").is_some());
+        assert!(presentation["properties"].get("shapeType").is_none());
         assert!(presentation["properties"].get("sheetName").is_none());
-        assert!(presentation["properties"].get("blockKind").is_none());
+        assert!(presentation["properties"].get("blockIndex").is_none());
     }
 
     #[test]
     fn every_model_operation_parses_into_the_matching_typed_request() {
         let calls = [
-            json!({
-                "operation": "create",
-                "filePath": "budget.xlsx",
-                "overwriteExisting": true,
-                "reason": "Create the workbook"
-            }),
             json!({
                 "operation": "render",
                 "filePath": "budget.xlsx",
@@ -2766,67 +2351,11 @@ mod tests {
                 "filePath": "budget.xlsx",
                 "reason": "Validate the workbook"
             }),
-            json!({
-                "operation": "addSheet",
-                "filePath": "budget.xlsx",
-                "sheetName": "预算",
-                "reason": "Add the budget sheet"
-            }),
-            json!({
-                "operation": "writeCell",
-                "filePath": "budget.xlsx",
-                "sheetName": "预算",
-                "cell": "A1",
-                "value": "Budget",
-                "style": { "bold": true },
-                "reason": "Update the workbook title"
-            }),
-            json!({
-                "operation": "setFormula",
-                "filePath": "budget.xlsx",
-                "sheetName": "预算",
-                "cell": "E2",
-                "formula": "=SUM(B2:D2)",
-                "reason": "Set the quarterly formula"
-            }),
-            json!({
-                "operation": "formatRange",
-                "filePath": "budget.xlsx",
-                "sheetName": "预算",
-                "range": "A1:E1",
-                "style": { "bold": true, "fillColor": "1F4E79" },
-                "reason": "Format the header"
-            }),
-            json!({
-                "operation": "freezePanes",
-                "filePath": "budget.xlsx",
-                "sheetName": "预算",
-                "freezeAt": "A2",
-                "reason": "Freeze the header row"
-            }),
-            json!({
-                "operation": "addChart",
-                "filePath": "budget.xlsx",
-                "sheetName": "预算",
-                "chartType": "column",
-                "title": "Quarterly budget",
-                "dataRange": "E2:E5",
-                "categoryRange": "A2:A5",
-                "anchor": "G2:N18",
-                "reason": "Add the budget chart"
-            }),
         ];
         let expected = [
-            OfficeOperation::Create,
             OfficeOperation::View,
             OfficeOperation::Get,
             OfficeOperation::Validate,
-            OfficeOperation::Add,
-            OfficeOperation::Set,
-            OfficeOperation::Set,
-            OfficeOperation::Set,
-            OfficeOperation::Set,
-            OfficeOperation::Add,
         ];
 
         for (call, expected) in calls.into_iter().zip(expected) {
@@ -2840,16 +2369,131 @@ mod tests {
     }
 
     #[test]
+    fn retired_model_write_operations_fail_closed_with_managed_script_recovery() {
+        for (tool_name, operations) in [
+            (
+                "office_document",
+                &[
+                    "create",
+                    "addText",
+                    "insertImage",
+                    "addTable",
+                    "addHeader",
+                    "addFooter",
+                    "replaceText",
+                    "formatText",
+                    "removeBlock",
+                    "moveBlock",
+                ][..],
+            ),
+            (
+                "office_spreadsheet",
+                &[
+                    "create",
+                    "addSheet",
+                    "writeCell",
+                    "setFormula",
+                    "formatRange",
+                    "freezePanes",
+                    "addConditionalFormat",
+                    "addTable",
+                    "addChart",
+                    "insertImage",
+                    "removeSheet",
+                    "moveSheet",
+                ][..],
+            ),
+            (
+                "office_presentation",
+                &[
+                    "create",
+                    "addSlide",
+                    "addText",
+                    "insertImage",
+                    "addTable",
+                    "addChart",
+                    "addShape",
+                    "addFooter",
+                    "removeSlide",
+                    "moveSlide",
+                ][..],
+            ),
+        ] {
+            for operation in operations {
+                let error = parse_args(
+                    json!({
+                        "operation": operation,
+                        "filePath": "artifact.bin",
+                        "reason": "Retired model write must use the managed script"
+                    }),
+                    tool_name,
+                )
+                .expect_err("a retired model write must fail before semantic parsing");
+                assert_eq!(error.code(), Some("office.model_write_removed"));
+                let details = error.details().expect("structured migration guidance");
+                assert_eq!(details["code"], "modelWriteRemoved");
+                assert_eq!(details["recovery"], "useManagedScript");
+                assert_eq!(
+                    details["canonicalOperations"],
+                    json!(["status", "inspect", "validate", "render"])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retired_writes_remain_replayable_only_as_exact_frozen_approved_snapshots() {
+        let semantic_args = office_args(
+            "writeCell",
+            Some(json!("Replay the already approved workbook edit")),
+        );
+        let parsed = parse_args_with_scope(
+            semantic_args.clone(),
+            "office_spreadsheet",
+            |_| Err(AgentError::new("this fixture has no file input")),
+            OfficeSemanticParseScope::FrozenApprovedSnapshot,
+        )
+        .expect("the frozen compatibility parser retains the historical write grammar");
+        let reason = parsed.reason.clone();
+        let request = parsed.into_request().unwrap();
+        let frozen = AgentOfficeOperationRequest {
+            schema_version: crate::protocol::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
+            id: "approved-retired-write".to_string(),
+            semantic_args: semantic_args.clone(),
+            prepared: OfficePreparedExecution {
+                schema_version: OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+                provider_id: OFFICECLI_PROVIDER_ID.to_string(),
+                engine_revision: "office-frozen-compatibility-test".to_string(),
+                workspace_revision: None,
+                access: request.access(),
+                request,
+                argv: vec!["set".to_string()],
+                resolved_render_plan: None,
+                paths: Vec::new(),
+                input_bindings: Vec::new(),
+            },
+            approval_status: AgentApprovalStatus::Approved,
+            reason,
+        };
+
+        validate_frozen_office_trace_args(&frozen, &semantic_args)
+            .expect("an exact historical approved snapshot must remain restart-safe");
+        let error = parse_args(semantic_args, "office_spreadsheet")
+            .expect_err("the same write must remain unavailable to a new model call");
+        assert_eq!(error.code(), Some("office.model_write_removed"));
+    }
+
+    #[test]
     fn model_input_rejects_legacy_argv_and_ambiguous_file_path_names() {
         for unexpected in [
             json!({
-                "operation": "get",
+                "operation": "inspect",
                 "filePath": "budget.xlsx",
                 "arguments": ["/Sheet1", "--json"],
                 "reason": "Inspect the workbook"
             }),
             json!({
-                "operation": "get",
+                "operation": "inspect",
                 "path": "budget.xlsx",
                 "target": "/Sheet1",
                 "reason": "Inspect the workbook"
@@ -2868,160 +2512,13 @@ mod tests {
 
         parse_args(
             json!({
-                "operation": "get",
+                "operation": "inspect",
                 "filePath": "budget.xlsx",
                 "reason": "Inspect the workbook"
             }),
             "office_spreadsheet",
         )
-        .expect_err("the retired flat model envelope must fail closed");
-    }
-
-    #[test]
-    fn semantic_image_input_compiles_without_model_visible_provider_tokens() {
-        let fixture = tempdir().unwrap();
-        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
-            collaboration_identity: None,
-            conversation_id: None,
-            project_id: None,
-            workspace: Some(AgentWorkspaceContext {
-                project_id: None,
-                display_name: Some("workspace".to_string()),
-                root_path: Some(fixture.path().to_string_lossy().to_string()),
-            }),
-            attachment_library: None,
-            permissions: AgentPermissions::default(),
-        }));
-        let request = parse_args_with_context(
-            &context,
-            json!({
-                "operation": "insertImage",
-                "filePath": "deck.pptx",
-                "slideNumber": 1,
-                "imagePath": "assets/hero.png",
-                "x": "1in",
-                "y": "1in",
-                "width": "12cm",
-                "height": "7cm",
-                "altText": "Hero illustration",
-                "reason": "Add the local hero image"
-            }),
-            "office_presentation",
-        )
-        .unwrap()
-        .into_request()
-        .unwrap();
-
-        let OfficeOperationParameters::Add { properties, .. } = request.typed_parameters() else {
-            panic!("add must remain a typed add request");
-        };
-        assert_eq!(
-            properties["src"]["resourcePath"],
-            "__mycopilot_agent_input__/office/image-input-1.png"
-        );
-        assert_eq!(properties["alt"], "Hero illustration");
-        assert_eq!(properties["width"], "12cm");
-        assert_eq!(request.inputs.len(), 1);
-        assert_eq!(request.inputs[0].mount_path, "office/image-input-1.png");
-        assert_eq!(
-            request.inputs[0].source,
-            AgentFileInputRef::Workspace {
-                path: "assets/hero.png".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn semantic_image_inputs_preserve_all_unified_source_variants() {
-        let sources = [
-            json!({ "type": "attachment", "readPath": "@attachments/a/hero.png" }),
-            json!({ "type": "workspace", "path": "assets/hero.png" }),
-            json!({ "type": "external", "path": "/tmp/hero.png" }),
-            json!({
-                "type": "generated_artifact",
-                "uri": format!("image-artifact://sha256/{}", "a".repeat(64)),
-                "path": "/app-data/image-generation-artifacts/objects/hero.png"
-            }),
-            json!({
-                "type": "skill_resource",
-                "uri": "skill://bundled:documents/references/hero.png?revision=abc"
-            }),
-        ];
-        for source in sources {
-            let request = parse_args(
-                json!({
-                    "operation": "insertImage",
-                    "filePath": "document.docx",
-                    "source": source,
-                    "reason": "Insert the authorized image"
-                }),
-                "office_document",
-            )
-            .unwrap()
-            .into_request()
-            .unwrap();
-            assert_eq!(request.inputs.len(), 1);
-            let OfficeOperationParameters::Add { properties, .. } = request.typed_parameters()
-            else {
-                panic!("insertImage must compile to add");
-            };
-            assert_eq!(
-                properties["src"]["resourcePath"],
-                format!("__mycopilot_agent_input__/{}", request.inputs[0].mount_path)
-            );
-        }
-    }
-
-    #[test]
-    fn model_image_path_survives_frozen_approval_validation() {
-        let fixture = tempdir().unwrap();
-        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
-            collaboration_identity: None,
-            conversation_id: None,
-            project_id: None,
-            workspace: Some(AgentWorkspaceContext {
-                project_id: None,
-                display_name: Some("workspace".to_string()),
-                root_path: Some(fixture.path().to_string_lossy().to_string()),
-            }),
-            attachment_library: None,
-            permissions: AgentPermissions {
-                read: AgentReadPermission::WorkspaceOnly,
-                write: AgentWritePermission::WorkspaceOnly,
-                ..AgentPermissions::default()
-            },
-        }));
-        let tool = OfficeTool::new(
-            OfficeDocumentKind::Presentation,
-            Arc::new(PreparingOfficeEngine),
-        );
-        let call = AgentToolCall {
-            id: "office-image-path".to_string(),
-            tool: "office_presentation".to_string(),
-            args: json!({
-                "operation": "insertImage",
-                "filePath": "deck.pptx",
-                "imagePath": "assets/hero.png",
-                "slideNumber": 1,
-                "x": "1in",
-                "y": "1in",
-                "width": "6in",
-                "height": "3in",
-                "reason": "Insert the hero image"
-            }),
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        };
-        let AgentProposedAction::OfficeOperation { office_operation } =
-            tool.proposed_action(&context, &call).unwrap()
-        else {
-            panic!("insertImage must create an Office approval action");
-        };
-
-        validate_frozen_office_trace_args(&office_operation, &call.args).unwrap();
-        let mut changed = call.args;
-        changed["imagePath"] = json!("assets/other.png");
-        assert!(validate_frozen_office_trace_args(&office_operation, &changed).is_err());
+        .expect("the flat read-only semantic envelope remains supported");
     }
 
     #[test]

@@ -74,8 +74,76 @@ function pushOperation(operations, operation) {
   operations.push(operation)
 }
 
+function slideTarget(slideNumber) {
+  return `/slide[${requiredPositiveInteger(slideNumber, 'slideNumber')}]`
+}
+
+function isWholeSlideOperation(operation) {
+  return (
+    (operation.type === 'add' && operation.parent === '/' && operation.elementType === 'slide') ||
+    (operation.type === 'remove' && /^\/slide\[[1-9][0-9]*\]$/.test(operation.target)) ||
+    (operation.type === 'move' && /^\/slide\[[1-9][0-9]*\]$/.test(operation.target))
+  )
+}
+
+function validateWholeSlideOrdering(operations) {
+  const structural = operations
+    .map((operation, index) => ({ operation, index }))
+    .filter(({ operation }) => isWholeSlideOperation(operation))
+  if (structural.length > 1 || (structural.length === 1 && structural[0].index !== operations.length - 1)) {
+    throw new Error('a presentation edit may contain at most one whole-slide operation and it must be last')
+  }
+}
+
 function facade(operations) {
   return Object.freeze({
+    addSlide({ layout = null, title = null, body = null, backgroundColor = null } = {}) {
+      const properties = {}
+      if (layout != null) properties.layout = requiredString(layout, 'addSlide.layout')
+      if (title != null) properties.title = requiredString(title, 'addSlide.title')
+      if (body != null) properties.text = String(body)
+      if (backgroundColor != null) {
+        properties.background = requiredString(backgroundColor, 'addSlide.backgroundColor')
+      }
+      pushOperation(
+        operations,
+        record('add', {
+          parent: '/',
+          elementType: 'slide',
+          copyFrom: null,
+          position: null,
+          properties,
+          force: false
+        })
+      )
+    },
+
+    removeSlide({ slideNumber }) {
+      pushOperation(
+        operations,
+        record('remove', {
+          target: slideTarget(slideNumber),
+          shift: null,
+          properties: {}
+        })
+      )
+    },
+
+    moveSlide({ slideNumber, newIndex }) {
+      pushOperation(
+        operations,
+        record('move', {
+          target: slideTarget(slideNumber),
+          newParent: null,
+          position: {
+            type: 'index',
+            index: requiredPositiveInteger(newIndex, 'moveSlide.newIndex') - 1
+          },
+          properties: {}
+        })
+      )
+    },
+
     set({ target, properties = {} }) {
       pushOperation(
         operations,
@@ -249,6 +317,7 @@ export async function editPresentation({ source, destination, mode = 'saveAs', e
   const operations = []
   await edit(facade(operations))
   if (operations.length === 0) throw new Error('presentation edit plan contains no operations')
+  validateWholeSlideOrdering(operations)
 
   const planPath = process.env[PLAN_ENV]
   if (!planPath) throw new Error(`${PLAN_ENV} is missing from the managed Host runtime`)

@@ -1,51 +1,89 @@
 ---
 name: documents
-description: Create, edit, inspect, render, and validate Microsoft Word-compatible .docx documents. Use for professional document authoring, formatting, tables, images, page layout, headers and footers, repeated or data-driven generation, and any other Word document task.
+description: Create, edit, inspect, render, and validate Microsoft Word-compatible .docx documents. Use for professional document authoring, existing-document changes, formatting, tables, images, page layout, headers and footers, repeated or data-driven generation, and any other Word document task.
 ---
 
 # Documents
 
 Route by intent:
 
-- **Read:** use the flat semantic `office_document` tool to inspect, render, and validate a document.
-- **Create:** use native operations for a small bounded document, or one saved Managed Builder for complex layouts, repeated sections, bulk generation, or advanced generation features.
-- **Edit an existing `.docx`:** inspect first and use only supported native edit operations. The current Builder is creation-oriented, not a fidelity-preserving existing-document Editor. If the requested edit is outside the native surface, preserve the source and report it as unsupported until a fixed Editor exists; never rebuild the document to imitate an edit.
+- **Read or verify:** use the flat semantic `office_document` surface for `status`, `inspect`,
+  `validate`, and `render`.
+- **Create a new `.docx`:** materialize and run the Managed Builder from `templates/builder.py`. Do not assemble a new
+  document through a sequence of native write calls.
+- **Edit an existing `.docx`:** inspect first, then materialize and run `templates/editor.py` with
+  one mounted source and one distinct save-as output. Never rebuild the source with the Builder and
+  never substitute native write calls for the Editor transaction.
 
-Combine the paths only at their intended boundaries: native inspect/render/validate around one Builder creation, or native inspect/edit/verify for a bounded existing-document change.
-Each native mutation is an independent atomic file transaction, not a multi-operation batch. After `removeBlock` or `moveBlock`, re-inspect before using another `blockIndex` because indices may shift.
+Do not expose OfficeCLI arguments, DOM paths, executable paths, runtime versions, or package
+versions to model-facing Office calls. Native read calls use flat top-level semantic fields and a
+required non-empty user-facing `reason` of at most 240 characters; never wrap them in `request`.
 
-Never expose OfficeCLI arguments, DOM paths, executable paths, runtime versions, or package versions to the model-facing call. Every native call uses flat top-level semantic fields plus a required `reason`; never wrap it in `request`. Keep `reason` to one non-empty user-facing sentence of at most 240 characters. For a new document, `capabilityNotSupported` with `recovery=useManagedScript` may route to the Builder. For an existing document, do not treat that recovery hint as permission to rebuild it; fail closed when no native operation can preserve fidelity.
+## Managed Python scripts
 
-## Managed Builder
+Choose one dedicated workspace-relative script directory for the task. Reuse it when it already
+exists as a plain directory; otherwise create it first with one separate idempotent
+`mkdir -p <script-directory>` `run_command`. The directory name is not fixed.
 
-Before materializing, choose one dedicated workspace-relative script directory. Reuse it if it is already a plain directory; otherwise create it first with one separate idempotent `mkdir -p <script-directory>` `run_command`. The directory name is not fixed. Materialize `templates/builder.py` once into a new path inside it, then patch and rerun that same Builder.
+Locate the exact revision-bound template URI with `skills_list_resources`, then materialize the
+selected Builder or Editor once into a new path. Patch and rerun that same file after corrections;
+do not rematerialize over a modified script or create a new script per retry.
 
-The Host automatically runs an isolated Python syntax preflight before every Builder execution. A script change invalidates the earlier result; a failed preflight forbids execution, so patch the same Builder and run it again. Do not issue a separate model-authored syntax command or invoke system Python, `python -m`, `python -c`, inline code, or shell composition for this gate.
+The Host automatically performs an isolated Python syntax preflight on every frozen script
+revision before execution. A patch invalidates the prior result. On failure, patch the same script
+and submit its normal command again. Do not issue a separate model-authored syntax command or use
+system Python, `python -m`, `python -c`, inline code, heredocs, shell composition, `pip`, or `npm`.
 
-Execute that materialized file with `run_command` and a direct logical `python <builder>.py --output <file.docx>` command. Omit `runtimeProfile` and `observe`: the host verifies this run's materialization receipt, derives the `documents` profile from the static Office output, binds the pinned runtime, and observes that output automatically. Never use system Python, `pip`, `npm`, inline code, heredocs, or shell redirection.
+Run the materialized file with a direct logical command:
 
-Bind every non-workspace input through `run_command.inputs`:
+- Builder: `python <builder>.py --output <new.docx>`
+- Editor: `python <editor>.py --source <mounted-source.docx> --output <edited.docx>`
 
-```json
-{
-  "mountPath": "images/campus.jpg",
-  "path": "@attachments/<attachment-id>/campus.jpg"
-}
-```
+Every run declares exactly one static `--output`. An Editor also declares exactly one static
+`--source`, equal to one `run_command.inputs[].mountPath`, and a distinct `.docx` output. Omit
+`runtimeProfile` and `observe`: the Host verifies the run-scoped materialization receipt, derives
+the pinned `documents` runtime, freezes the script and inputs, runs preflight, directs Office output
+through a private candidate, validates it, publishes atomically, and binds observation.
 
-Use the exact path returned by the producing tool or supplied by the user. The Host automatically recognizes workspace, absolute/system, `@attachments/...`, `image-artifact://...`, and revision-bound `skill://...` paths. `mountPath` is optional and defaults to the source filename. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
+Bind every non-workspace input through `run_command.inputs`. Scripts resolve only declared logical
+mount names below `MYCOPILOT_INPUT_ROOT`; never pass or open `@attachments`, `skill://`, artifact
+URIs, attachment-library paths, or Host-private paths directly.
 
-Every Builder command must declare its generated document with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
+The Word Editor executes normal Python with the pinned `python-docx` runtime. Its marked edit region
+may use functions, pinned imports, loops, conditions, and data transformations; it is not an AST or
+JSON operation DSL. This freedom remains inside the existing managed-command permission and
+approval boundary and does not make unrelated Python side effects transactional. Read
+[references/editing-existing.md](references/editing-existing.md) before editing for the exact
+workflow, preservation rules, and unsupported OOXML boundaries.
 
-After the final checks, delete the exact Builder and task-created temporary files. If this task created the script directory and it is then empty, remove it with `rmdir`. Preserve pre-existing directories and unrelated files, never use recursive deletion, and keep the Builder only when the user explicitly asks for it.
+Inspect `artifactObservation` even after failure, timeout, or cancellation. When `run_command`
+returns `status: "running"`, follow its `continueWith` receipt and wait with `command_session` for
+the terminal result. A process exit, filename, preliminary observation, or running receipt is not
+publication evidence.
+
+After final checks, delete the exact Builder or Editor and task-created temporary files. If this
+task created the script directory and it is then empty, remove it with `rmdir`. Preserve
+pre-existing directories and unrelated files; never use recursive deletion. Keep scripts only when
+the user explicitly asks for them.
 
 ## Completion gate
 
-1. Inspect an existing source before a supported native edit and prefer a distinct output unless the user requested in-place editing. Never route an existing-document edit through the Builder.
-2. Generate the document or apply the bounded native edit.
-3. Confirm the expected file effect in the native result or `artifactObservation`.
-4. Inspect the final document and validate the package. The current semantic surface does not provide an authoritative rendered page count; never infer one from `pageSelection`, a filename, or a contact sheet. When comments, tracked changes, or fields are present or required, run an explicit structural check; rendering alone does not verify them.
-5. Render the whole document once for an overview, then render any known or affected page individually with one `pageOrSlide` per request. Pass only exact returned `outputs[].readPath` values to `read_image.path`, and keep a numbered ledger of the pages actually read. Unless a future trusted result explicitly supplies the final page count, disclose that exhaustive all-page coverage was unavailable rather than claiming a complete `1..N` review.
-6. Any final edit invalidates the earlier structural, validation, and visual evidence. Repeat the affected checks, then report only what actually succeeded and disclose unavailable structural or visual verification.
+1. Inspect an existing source before editing and establish a structural and visual baseline for
+   the affected content.
+2. Create with the Builder or edit with the Editor. Confirm terminal success and an
+   `artifactObservation` file effect for the declared output.
+3. Inspect the final document and validate the package. For comments, tracked changes, fields,
+   content controls, or other fidelity-sensitive parts, run an explicit structural check;
+   rendering is not structural evidence.
+4. Render the whole document once for overview, then render every known or affected page
+   individually. Consume only exact `outputs[].readPath` values with `read_image.path` and keep a
+   numbered ledger of pages actually read. The current semantic surface has no authoritative final
+   page count, so do not claim exhaustive all-page coverage from a contact sheet or guessed count.
+5. Compare requested changes and unrelated content with the baseline. Any final edit invalidates
+   earlier inspection, validation, structural, and visual evidence; repeat the affected checks.
+6. Report only checks that actually succeeded and disclose unsupported fidelity or unavailable
+   visual coverage.
 
-Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and Word-specific quality checks.
+Read [references/workflows.md](references/workflows.md) for creation, input binding, observation,
+render consumption, and quality checks. Read
+[references/editing-existing.md](references/editing-existing.md) for every existing-document edit.

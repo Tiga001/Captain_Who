@@ -140,10 +140,10 @@ Keep element kinds exactly as returned. For example, a picture target is
 `/slide[2]/picture[@id=17]`, a chart target is `/slide[4]/chart[@id=11]`, and a table-cell target may
 be `/slide[3]/table[@id=9]/row[2]/cell[3]`. Do not rewrite those targets as generic shapes.
 
-Slide numbers are one-based and identify the inspected source order. Editor v1 does not add,
-remove, move, or swap whole slides. Use native `addSlide`, `removeSlide`, or `moveSlide` first;
-because that changes slide ordering, discard every earlier element target and re-inspect before
-opening an Editor transaction.
+Slide numbers are one-based and identify the inspected source order. For a whole-slide change,
+use `deck.addSlide`, `deck.removeSlide`, or `deck.moveSlide`. At most one whole-slide operation is
+allowed in a transaction and it must be the final operation. Because it changes slide structure,
+discard every earlier element target and re-inspect before opening another Editor transaction.
 
 Never use XPath, relationship IDs, XML part names, ZIP entry names, OfficeCLI argv, `raw-set`, or a
 target invented from provider documentation. Use only the exact target strings returned by the
@@ -175,6 +175,12 @@ await editPresentation({
 
 - `editPresentation({ source: input(...), destination: output(...), mode: 'saveAs', edit })`
   declares one frozen source, one logical destination, and one transaction.
+- `deck.addSlide({ layout?, title?, body?, backgroundColor? })` appends one slide. It must be the
+  final operation, and no other whole-slide operation may appear in the same transaction.
+- `deck.removeSlide({ slideNumber })` removes one inspected one-based slide. It must be the final
+  operation and is the only whole-slide operation in that transaction.
+- `deck.moveSlide({ slideNumber, newIndex })` moves one inspected one-based slide to a one-based
+  destination. It must be the final and only whole-slide operation in that transaction.
 - `deck.set({ target, properties })` updates Host-validated properties on one exact target.
 - `deck.replaceText({ target, find, replace })` replaces expected text inside one exact target.
 - `deck.add({ parent, elementType, copyFrom?, position?, properties? })` adds one typed element;
@@ -239,8 +245,8 @@ capability, and offer the nearest safe alternative rather than claiming success.
 
 After the edit, compare source and result intentionally:
 
-- Verify that an Editor transaction preserves slide count and order. If a separate native slide
-  operation intentionally changed them, compare against the post-native, re-inspected baseline.
+- Verify that slide count and order are unchanged unless the one terminal whole-slide operation
+  intentionally changed them; then re-inspect and compare the exact requested structural effect.
 - Confirm changed text is neither clipped nor unexpectedly restyled.
 - Confirm replacement images retain the requested crop, aspect ratio, transparency, and geometry.
 - Confirm table cell borders, fills, fonts, merged cells, and dimensions remain intact outside the

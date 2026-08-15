@@ -15,22 +15,17 @@ from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 
 
-def arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", required=True)
-    parser.add_argument(
-        "--source",
-        help="Optional input mountPath relative to MYCOPILOT_INPUT_ROOT.",
-    )
-    return parser.parse_args()
-
-
 def mounted_input(mount_path: str) -> Path:
+    """Resolve one declared run_command.inputs mount for task-specific Builder code."""
+
     root_value = os.environ.get("MYCOPILOT_INPUT_ROOT")
     if not root_value:
-        raise RuntimeError("MYCOPILOT_INPUT_ROOT is required when --source is used")
+        raise RuntimeError("MYCOPILOT_INPUT_ROOT is required for mounted inputs")
     root = Path(root_value).resolve()
-    candidate = (root / mount_path).resolve()
+    relative = Path(mount_path)
+    if relative.is_absolute():
+        raise ValueError(f"input mountPath must be relative: {mount_path}")
+    candidate = (root / relative).resolve(strict=True)
     if candidate != root and root not in candidate.parents:
         raise ValueError(f"input escapes MYCOPILOT_INPUT_ROOT: {mount_path}")
     if not candidate.is_file():
@@ -38,8 +33,14 @@ def mounted_input(mount_path: str) -> Path:
     return candidate
 
 
-def build_workbook(source: Path | None):
-    workbook = load_workbook(source, data_only=False) if source else Workbook()
+def arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", required=True)
+    return parser.parse_args()
+
+
+def build_workbook():
+    workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "数据"
 
@@ -50,9 +51,6 @@ def build_workbook(source: Path | None):
         ["B", 900, 1100, 1050, None],
         ["C", 700, 800, 950, None],
     ]
-    for row in worksheet.iter_rows():
-        for cell in row:
-            cell.value = None
     for row in rows:
         worksheet.append(row)
     for row_number in range(2, len(rows) + 1):
@@ -120,13 +118,12 @@ def publish(workbook, output: Path) -> None:
 
 def main() -> None:
     args = arguments()
-    source = mounted_input(args.source) if args.source else None
     output = Path(args.output).resolve()
-    workbook = build_workbook(source)
+    workbook = build_workbook()
     publish(workbook, output)
     print(
         json.dumps(
-            {"status": "created", "output": str(output), "source": bool(source)},
+            {"status": "created", "output": str(output)},
             ensure_ascii=False,
         )
     )

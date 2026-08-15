@@ -67,12 +67,11 @@ async function runManagedEditor(source) {
   const args = [
     '--import',
     join(canonicalRuntimeRoot, 'node-bootstrap.mjs'),
-    '--experimental-permission',
+    '--permission',
     `--allow-fs-read=${canonicalComponentRoot}`,
     `--allow-fs-read=${canonicalScriptPath}`,
     `--allow-fs-write=${canonicalPlanRoot}`,
     '--disallow-code-generation-from-strings',
-    '--no-experimental-fetch',
     canonicalScriptPath
   ]
   const result = await new Promise((resolvePromise, rejectPromise) => {
@@ -259,6 +258,72 @@ test('fixed presentation editor SDK uses zero-based integer z-order indices', as
         })
       }),
       /non-negative integer/
+    )
+  }
+})
+
+test('fixed presentation editor SDK emits one terminal whole-slide operation', async () => {
+  for (const apply of [
+    (deck) => deck.addSlide({
+      layout: 'LAYOUT_WIDE',
+      title: 'Appendix',
+      body: 'Supporting detail',
+      backgroundColor: 'F8FAFC'
+    }),
+    (deck) => deck.removeSlide({ slideNumber: 8 }),
+    (deck) => deck.moveSlide({ slideNumber: 7, newIndex: 3 })
+  ]) {
+    const plan = await withPlan(async ({ editPresentation, input, output }) => {
+      await editPresentation({
+        source: input('source.pptx'),
+        destination: output('outputs/source-edited.pptx'),
+        edit(deck) {
+          deck.replaceText({
+            target: '/slide[1]/shape[@id=7]',
+            find: 'old',
+            replace: 'new'
+          })
+          apply(deck)
+        }
+      })
+    })
+    assert.equal(plan.operations.length, 2)
+    const structural = plan.operations[1]
+    assert.ok(
+      structural.elementType === 'slide' || /^\/slide\[[1-9][0-9]*\]$/.test(structural.target)
+    )
+  }
+
+  const moved = await withPlan(async ({ editPresentation, input, output }) => {
+    await editPresentation({
+      source: input('source.pptx'),
+      destination: output('outputs/source-edited.pptx'),
+      edit(deck) { deck.moveSlide({ slideNumber: 7, newIndex: 3 }) }
+    })
+  })
+  assert.deepEqual(moved.operations[0].position, { type: 'index', index: 2 })
+})
+
+test('fixed presentation editor SDK rejects whole-slide target drift before writing a plan', async () => {
+  for (const edit of [
+    (deck) => {
+      deck.removeSlide({ slideNumber: 8 })
+      deck.replaceText({ target: '/slide[1]/shape[@id=7]', find: 'old', replace: 'new' })
+    },
+    (deck) => {
+      deck.removeSlide({ slideNumber: 8 })
+      deck.moveSlide({ slideNumber: 7, newIndex: 3 })
+    }
+  ]) {
+    await assert.rejects(
+      withPlan(async ({ editPresentation, input, output }) => {
+        await editPresentation({
+          source: input('source.pptx'),
+          destination: output('outputs/source-edited.pptx'),
+          edit
+        })
+      }),
+      /at most one whole-slide operation and it must be last/
     )
   }
 })

@@ -16,11 +16,9 @@
 
 ## Route the task
 
-Use `office_presentation` for reading, inspection, validation, rendering, and bounded creation
-operations:
-
-`create`, `inspect`, `validate`, `render`, `addSlide`, `addText`, `insertImage`, `addTable`,
-`addChart`, `addShape`, `addFooter`, `removeSlide`, and `moveSlide`.
+Use `office_presentation` only for `status`, `inspect`, `validate`, and `render`. The
+model-facing Office tool is intentionally read/verification-only; do not call or invent create or
+mutation operations.
 
 Use the Managed Builder for a new complete visual narrative, repeated layouts, a coordinated
 theme, complex diagrams, template population, many slides or media items, or batch generation.
@@ -33,13 +31,13 @@ one Builder creation or one Editor transaction is the supported hybrid flow.
 
 ## Native semantic contract
 
-Call `office_presentation` with a flat object:
+Call `office_presentation` with a flat read/verification object:
 
 ```json
 {
-  "operation": "create",
-  "filePath": "outputs/product-intro.pptx",
-  "reason": "Create the requested PowerPoint presentation"
+  "operation": "inspect",
+  "filePath": "product-intro.pptx",
+  "reason": "Inspect the presentation before editing it"
 }
 ```
 
@@ -47,43 +45,8 @@ Keep `operation`, its semantic fields, and `reason` at the root. Never add a `re
 provider arguments, an executable, slide DOM paths, or shell flags. `reason` is required,
 user-visible audit text only; it never grants permission.
 
-Image, template, data, and deck inputs use one path string. For an attachment, call
-`attachments_list` and copy its exact `readPath`; for a generated image, copy its exact
-`image-artifact://...` path. If the backend returns
-`office.capability_not_supported`, `capabilityNotSupported`, or
-`recovery=useManagedScript`, preserve the error and switch to the correct fixed script: Builder for
-a new deck, Editor for an existing deck. Do not repeat the same failed call with invented fields.
-
-Add a slide, then place a registered image with explicit presentation geometry:
-
-```json
-{
-  "operation": "addSlide",
-  "filePath": "outputs/product-intro.pptx",
-  "title": "核心能力",
-  "body": "Agent 对话、文件编辑、终端执行和内嵌浏览器",
-  "backgroundColor": "0F172A",
-  "reason": "Add the core capabilities slide"
-}
-```
-
-```json
-{
-  "operation": "insertImage",
-  "filePath": "outputs/product-intro.pptx",
-  "imagePath": "@attachments/<attachment-id>/hero.png",
-  "slideNumber": 2,
-  "x": "7in",
-  "y": "1.6in",
-  "width": "5.5in",
-  "height": "4.2in",
-  "altText": "Product illustration",
-  "reason": "Place the supplied illustration on the core capabilities slide"
-}
-```
-
-Inspect an existing deck before mutation. Prefer save-as for transformations unless the user
-explicitly requests in-place editing. Establish the audience, purpose, slide count, aspect ratio,
+Bind image, template, data, and deck inputs through the selected Builder or Editor command. Inspect
+an existing deck before mutation. Establish the audience, purpose, slide count, aspect ratio,
 narrative, and visual direction before creating slides.
 
 ## Create and reuse one Builder
@@ -177,12 +140,10 @@ staging, final package validation, and atomic publication. The MJS must import o
 filesystem, process-launch, archive, XML, network, or `pptxgenjs` modules and must not invoke
 OfficeCLI.
 
-Editor structural operations are element-only. Element `target`, `copyFrom`, and position
-references must contain an inspected `[@id=…]`; only `add.parent` and `move.newParent` may be a
-whole-slide `/slide[N]` container. Perform whole-slide additions, removals, or reordering with the
-existing native `addSlide`, `removeSlide`, or `moveSlide` operation. Any native slide mutation
-invalidates every earlier element target: re-inspect the resulting deck before opening an Editor
-transaction.
+Element `target`, `copyFrom`, and position references must contain inspected identities. A
+whole-slide addition, removal, or reordering must use the documented bounded Editor operation; at
+most one whole-slide structural operation is allowed and it must be last. Re-inspect before any
+following Editor transaction because slide indices and element targets may have changed.
 
 Editor v1 supports save-as only. Use a distinct output and never point `--output` at the mounted
 source. Prefer a workspace-root output name unless its parent directory already exists. If the user

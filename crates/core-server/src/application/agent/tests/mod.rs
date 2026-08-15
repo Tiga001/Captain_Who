@@ -103,6 +103,7 @@ fn command_request(id: &str, command: &str) -> AgentCommandRequest {
         observe: None,
         inputs: Vec::new(),
         runtime_binding: None,
+        managed_office_script: None,
     }
 }
 

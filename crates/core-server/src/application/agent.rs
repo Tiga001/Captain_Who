@@ -40,7 +40,8 @@ use mycopilot_core::image_generation::{ImageGenerationExecutionService, ImageGen
 use mycopilot_core::office::{
     resolve_office_engine, OfficeCliDiscoveryOptions, OfficeEngine, OfficeEngineError,
     OfficeEngineErrorCode, OfficeEngineRecovery, OfficeExecutionResult,
-    OfficePresentationEditRequest, OfficePresentationEditResult,
+    OfficeManagedScriptOutputResult, OfficeManagedScriptStaging, OfficePresentationEditRequest,
+    OfficePresentationEditResult,
 };
 use mycopilot_core::skills::{
     execute_skill_python_script, SkillInstallationService, SkillInstallationWorkflow,
@@ -386,6 +387,32 @@ impl OfficeEngine for RefreshableOfficeEngine {
                     OfficeEngineErrorCode::PreconditionFailed,
                     OfficeEngineRecovery::Retry,
                     "The Office engine changed before the presentation edit transaction settled. The Host refreshed it but did not replay the approved edit; run the Editor again.",
+                ))
+            }
+            result => result,
+        }
+    }
+
+    fn commit_managed_script_output(
+        &self,
+        context: &mycopilot_core::office::OfficeExecutionContext,
+        staging: &mut OfficeManagedScriptStaging,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {
+        let current = self.current();
+        match current.commit_managed_script_output(
+            context,
+            staging,
+            cancellation,
+            action_cancel_flag,
+        ) {
+            Err(error) if error.code() == OfficeEngineErrorCode::InvalidConfiguration => {
+                self.refresh_if_current(&current);
+                Err(OfficeEngineError::new(
+                    OfficeEngineErrorCode::PreconditionFailed,
+                    OfficeEngineRecovery::Retry,
+                    "The Office engine changed before the managed script output settled. The Host refreshed it but did not replay the approved script transaction; run the Builder or Editor again.",
                 ))
             }
             result => result,

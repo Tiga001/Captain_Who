@@ -177,6 +177,7 @@ fn execute(
         }),
         inputs: Vec::new(),
         runtime_binding: Some(Box::new(runtime_binding)),
+        managed_office_script: None,
     };
     let manager = CommandSessionManager::default();
     let outcome = manager

@@ -18,6 +18,7 @@ fn request(command: &str, timeout_ms: Option<u64>) -> AgentCommandRequest {
         observe: None,
         inputs: Vec::new(),
         runtime_binding: None,
+        managed_office_script: None,
     }
 }
 

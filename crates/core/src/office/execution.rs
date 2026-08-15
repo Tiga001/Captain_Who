@@ -10,7 +10,8 @@ use super::types::{
     office_agent_input_placeholder, OfficeDocumentKind, OfficeElementPosition, OfficeEngine,
     OfficeEngineAvailability, OfficeEngineError, OfficeEngineErrorCode, OfficeEngineRecovery,
     OfficeEngineStatus, OfficeExecutionContext, OfficeExecutionRequest, OfficeExecutionResult,
-    OfficeFileState, OfficeFrozenPath, OfficeGridLayout, OfficeOperation, OfficeOperationAccess,
+    OfficeFileState, OfficeFrozenPath, OfficeGridLayout, OfficeManagedScriptBinding,
+    OfficeManagedScriptOutputResult, OfficeOperation, OfficeOperationAccess,
     OfficeOperationParameters, OfficePathIdentity, OfficePathPurpose, OfficePathScope,
     OfficePathSlot, OfficePreparedExecution, OfficePresentationEditRequest,
     OfficePresentationEditResult, OfficePresentationRenderPlan, OfficePropertyMap,
@@ -79,6 +80,93 @@ const FILE_REVISION_PREFIX: &str = "office-file-sha256-v1:";
 static OFFICE_COMMIT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 const WORKSPACE_REVISION_PREFIX: &str = "office-workspace-sha256-v1:";
 const PATH_IDENTITY_PREFIX: &str = "office-path-identity-sha256-v1:";
+
+/// Same-directory private candidate owned by the Host for one approved Office Skill script.
+/// Dropping this value before publication removes the candidate and its private directory.
+pub struct OfficeManagedScriptStaging {
+    binding: OfficeManagedScriptBinding,
+    staging: StagingArea,
+}
+
+impl OfficeManagedScriptStaging {
+    pub(crate) fn candidate_path(&self) -> &Path {
+        self.staging.path()
+    }
+
+    pub(crate) fn private_directory(&self) -> &Path {
+        self.staging.directory()
+    }
+}
+
+/// Freezes the destination identity before command approval. This grants no script authority and
+/// does not create a file; command execution must re-resolve the exact same binding.
+pub(crate) fn prepare_managed_script_binding(
+    context: &OfficeExecutionContext,
+    document_kind: OfficeDocumentKind,
+    purpose: super::types::OfficeManagedScriptPurpose,
+    script_mount_path: String,
+    source_mount_path: Option<String>,
+    destination_path: &str,
+) -> Result<OfficeManagedScriptBinding, OfficeEngineError> {
+    let resolved = ResolvedExecutionContext::resolve(context)?;
+    let destination = freeze_path(
+        &resolved,
+        OfficePathSlot::Destination,
+        destination_path,
+        OfficePathPurpose::WriteTarget,
+    )?;
+    if !document_kind.accepts_path(Path::new(&destination.normalized_path)) {
+        return Err(invalid_request(format!(
+            "Managed Office script output must use one of: {}.",
+            document_kind.accepted_extensions().join(", ")
+        )));
+    }
+    Ok(OfficeManagedScriptBinding {
+        schema_version: super::types::OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION,
+        document_kind,
+        purpose,
+        script_mount_path,
+        source_mount_path,
+        destination,
+    })
+}
+
+/// Revalidates the approved target and allocates its same-directory private candidate.
+pub(crate) fn prepare_managed_script_staging(
+    context: &OfficeExecutionContext,
+    binding: &OfficeManagedScriptBinding,
+) -> Result<OfficeManagedScriptStaging, OfficeEngineError> {
+    if binding.schema_version != super::types::OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION {
+        return Err(invalid_request(
+            "Managed Office script binding uses an unsupported schema version.",
+        ));
+    }
+    let resolved = ResolvedExecutionContext::resolve(context)?;
+    let current = freeze_path(
+        &resolved,
+        OfficePathSlot::Destination,
+        &binding.destination.logical_path,
+        OfficePathPurpose::WriteTarget,
+    )?;
+    if current != binding.destination {
+        return Err(precondition_error(
+            "Managed Office script destination changed after approval.",
+        ));
+    }
+    if !binding
+        .document_kind
+        .accepts_path(Path::new(&current.normalized_path))
+    {
+        return Err(invalid_request(
+            "Managed Office script destination extension changed after approval.",
+        ));
+    }
+    let target = PathBuf::from(&current.normalized_path);
+    Ok(OfficeManagedScriptStaging {
+        binding: binding.clone(),
+        staging: StagingArea::new(&target)?,
+    })
+}
 
 pub(super) fn probe_engine(
     engine: &OfficeCliEngine,
@@ -334,6 +422,17 @@ pub(super) fn run_office_presentation_edit(
             "Presentation edit source and save-as destination must differ.",
         ));
     }
+    if request.destination_binding.schema_version
+        != super::types::OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION
+        || request.destination_binding.document_kind != OfficeDocumentKind::Presentation
+        || request.destination_binding.purpose
+            != super::types::OfficeManagedScriptPurpose::EditPresentationPlan
+        || request.destination_binding.destination.logical_path != request.destination_path
+    {
+        return Err(precondition_error(
+            "Presentation edit destination does not match its approval-time binding.",
+        ));
+    }
     let resolved_context = ResolvedExecutionContext::resolve(context)?;
     let source_spec = crate::AgentFileInputSpec {
         mount_path: request.source_binding.mount_path.clone(),
@@ -368,6 +467,11 @@ pub(super) fn run_office_presentation_edit(
         &request.destination_path,
         OfficePathPurpose::WriteTarget,
     )?;
+    if destination != request.destination_binding.destination {
+        return Err(precondition_error(
+            "Presentation edit destination changed after approval.",
+        ));
+    }
     if !OfficeDocumentKind::Presentation.accepts_path(Path::new(&destination.normalized_path)) {
         return Err(invalid_request(
             "Presentation edit destination must use the .pptx extension.",
@@ -746,6 +850,171 @@ pub(super) fn run_office_presentation_edit(
         materialized_inputs.as_ref(),
     );
     Ok(result)
+}
+
+/// Strictly validates and atomically publishes the candidate produced by one real
+/// provenance-bound Python/Node Office Skill script. The script process has already terminated;
+/// this function is the only path from its private candidate to the approved destination.
+pub(super) fn run_managed_script_output_commit(
+    engine: &OfficeCliEngine,
+    context: &OfficeExecutionContext,
+    staging: &mut OfficeManagedScriptStaging,
+    cancellation: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {
+    validate_platform()?;
+    engine.verify_engine_revision()?;
+    let started = Instant::now();
+    if cancellation_requested(&cancellation, action_cancel_flag.as_ref()) {
+        return Ok(OfficeManagedScriptOutputResult {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: true,
+            duration_ms: 0,
+            error_code: Some("office.cancelled".to_string()),
+            error: Some(
+                "Managed Office script output was cancelled before validation.".to_string(),
+            ),
+        });
+    }
+    if let Err(error) =
+        validate_document_artifact(staging.staging.path(), staging.binding.document_kind)
+    {
+        return Ok(managed_script_output_error(started, error));
+    }
+
+    let candidate_name = staging
+        .staging
+        .path()
+        .file_name()
+        .ok_or_else(|| invalid_output("Managed Office script candidate has no file name."))?
+        .to_string_lossy()
+        .into_owned();
+    let timeout = Duration::from_millis(DEFAULT_OFFICE_TIMEOUT_MS);
+    let output = run_process(
+        engine.executable_path(),
+        Some(staging.staging.directory()),
+        &["validate".to_string(), candidate_name, "--json".to_string()],
+        timeout,
+        &cancellation,
+        action_cancel_flag.as_ref(),
+        None,
+    )?;
+    let (process_error_code, process_error) = execution_error(&output);
+    let semantic_success = strict_validation_succeeded(&output.stdout);
+    let mut result = OfficeManagedScriptOutputResult {
+        exit_code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        timed_out: output.timed_out,
+        cancelled: output.cancelled,
+        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        error_code: process_error_code,
+        error: process_error,
+    };
+    if result.error_code.is_none() && !semantic_success {
+        result.error_code = Some(
+            OfficeEngineErrorCode::InvalidOutput
+                .stable_name()
+                .to_string(),
+        );
+        result.error = Some(
+            "Managed Office script output failed the pinned OfficeCLI validation gate.".to_string(),
+        );
+    }
+    if result.error_code.is_some() {
+        redact_managed_script_paths(&mut result, staging);
+        return Ok(result);
+    }
+
+    let resolved = ResolvedExecutionContext::resolve(context)?;
+    let target = PathBuf::from(&staging.binding.destination.normalized_path);
+    let commit_lock = office_target_commit_lock(&target);
+    let _commit_guard = commit_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current = freeze_path(
+        &resolved,
+        OfficePathSlot::Destination,
+        &staging.binding.destination.logical_path,
+        OfficePathPurpose::WriteTarget,
+    )?;
+    if current != staging.binding.destination {
+        let error =
+            precondition_error("Managed Office script destination changed before publication.");
+        result.error_code = Some(error.code().stable_name().to_string());
+        result.error = Some(error.message().to_string());
+        redact_managed_script_paths(&mut result, staging);
+        return Ok(result);
+    }
+    run_commit_test_hook(&target, CommitTestPhase::BeforeCancellationCheck);
+    if cancellation_requested(&cancellation, action_cancel_flag.as_ref()) {
+        result.cancelled = true;
+        result.error_code = Some("office.cancelled".to_string());
+        result.error = Some(
+            "Managed Office script output was cancelled after validation and before atomic publication."
+                .to_string(),
+        );
+        redact_managed_script_paths(&mut result, staging);
+        return Ok(result);
+    }
+    run_commit_test_hook(&target, CommitTestPhase::AfterCancellationCheck);
+    if let Err(error) = staging
+        .staging
+        .publish(&target, staging.binding.destination.state)
+    {
+        result.exit_code = result.exit_code.filter(|code| *code != 0).or(Some(1));
+        result.error_code = Some(error.code().stable_name().to_string());
+        result.error = Some(error.message().to_string());
+    }
+    redact_managed_script_paths(&mut result, staging);
+    Ok(result)
+}
+
+fn strict_validation_succeeded(stdout: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
+        return false;
+    };
+    if let Some(success) = value.get("success").and_then(Value::as_bool) {
+        return success;
+    }
+    value.get("count").and_then(Value::as_u64) == Some(0)
+}
+
+fn managed_script_output_error(
+    started: Instant,
+    error: OfficeEngineError,
+) -> OfficeManagedScriptOutputResult {
+    OfficeManagedScriptOutputResult {
+        exit_code: Some(1),
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        cancelled: false,
+        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        error_code: Some(error.code().stable_name().to_string()),
+        error: Some(error.message().to_string()),
+    }
+}
+
+fn redact_managed_script_paths(
+    result: &mut OfficeManagedScriptOutputResult,
+    staging: &OfficeManagedScriptStaging,
+) {
+    for private in [staging.staging.path(), staging.staging.directory()] {
+        let spelling = private.to_string_lossy();
+        result.stdout = result
+            .stdout
+            .replace(spelling.as_ref(), "<office-candidate>");
+        result.stderr = result
+            .stderr
+            .replace(spelling.as_ref(), "<office-candidate>");
+        if let Some(error) = result.error.as_mut() {
+            *error = error.replace(spelling.as_ref(), "<office-candidate>");
+        }
+    }
 }
 
 fn presentation_edit_inputs_for_operation(

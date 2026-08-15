@@ -1,36 +1,19 @@
 {
-  "contractVersion": 9,
+  "contractVersion": 10,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
   "modes": {
     "native": {
       "tool": "office_document",
-      "bestFor": "bounded_high_frequency_tasks",
+      "bestFor": "read_inspect_validate_render",
       "requestStyle": "flat_semantic_v1",
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
-      "transactionScope": "oneOperationPerCall",
-      "multiOperationAtomicBatch": false,
-      "operations": [
-        "status",
-        "create",
-        "inspect",
-        "validate",
-        "render",
-        "addText",
-        "insertImage",
-        "addTable",
-        "addHeader",
-        "addFooter",
-        "replaceText",
-        "formatText",
-        "removeBlock",
-        "moveBlock"
-      ],
+      "writeOperationsModelVisible": false,
+      "operations": ["status", "inspect", "validate", "render"],
       "unsupportedRecovery": "useManagedScript",
-      "unsupportedExistingEditRecovery": "failClosedUntilFixedEditor",
       "renderOutput": {
         "resultField": "outputs",
         "role": "render",
@@ -47,16 +30,17 @@
     },
     "script": {
       "builderTemplate": "templates/builder.py",
-      "builderScope": "newDocumentCreationOnly",
+      "editorTemplate": "templates/editor.py",
+      "editingReference": "references/editing-existing.md",
       "routes": {
-        "createOrComplexGenerate": "builder",
-        "boundedExistingEdit": "native",
-        "unsupportedExistingEdit": "failClosedUntilFixedEditor"
+        "create": "builder",
+        "editExisting": "editor",
+        "inspectValidateRender": "native"
       },
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
       "runtimeProfile": "documents",
-      "runtimeProfileBinding": "host_from_materialized_builder_receipt",
+      "runtimeProfileBinding": "host_from_materialized_script_receipt",
       "outputArgument": "--output",
       "lifecycle": {
         "prepareDirectoryBeforeMaterialize": true,
@@ -71,6 +55,59 @@
         "modelCommand": "forbidden",
         "invalidatesOnScriptChange": true,
         "executionOnFailure": "forbidden"
+      },
+      "editor": {
+        "sourceArgument": "--source",
+        "sourceArgumentCardinality": 1,
+        "outputArgument": "--output",
+        "outputArgumentCardinality": 1,
+        "sourceBinding": "inputs.mountPath",
+        "sourceRequired": true,
+        "inspectBeforeEdit": true,
+        "defaultPublishMode": "saveAs",
+        "supportedPublishModes": ["saveAs"],
+        "inPlace": false,
+        "boundedEditRegion": {
+          "begin": "# BEGIN EDIT REGION",
+          "end": "# END EDIT REGION"
+        },
+        "modelCode": {
+          "language": "python",
+          "execution": "normalPython",
+          "astOrJsonDsl": false,
+          "supports": [
+            "pinnedImports",
+            "functions",
+            "loops",
+            "conditions",
+            "comprehensions",
+            "dataTransformations",
+            "pythonDocxObjectModel"
+          ],
+          "dependencyPolicy": "profilePinned",
+          "permissionBoundary": "managedCommandApproval"
+        },
+        "fixedWrapper": {
+          "sourceResolution": "MYCOPILOT_INPUT_ROOT",
+          "auxiliaryInputResolution": "mounted_input",
+          "temporarySave": true,
+          "candidateReopen": true,
+          "modelPatchScope": "boundedEditRegionOnly"
+        },
+        "transaction": {
+          "script": "frozenBeforeLaunch",
+          "source": "frozenReadOnlyMount",
+          "candidate": "hostPrivate",
+          "packageValidation": "requiredBeforePublish",
+          "publication": "atomic",
+          "failureBeforePublish": "hostCandidateNotPublishedToDeclaredDestination",
+          "pythonSideEffectScope": "outsideOfficePublicationNotTransactional"
+        },
+        "fidelity": {
+          "roundTripIsProof": false,
+          "unsupportedMustFailClosed": true,
+          "rawOoxmlFallback": "onlyWithExplicitRequestAndFeatureSpecificVerifier"
+        }
       },
       "entrypoints": [
         {
@@ -122,9 +159,15 @@
       "exhaustiveCoverageClaim": "forbiddenWithoutTrustedFinalPageCount"
     },
     "structuralChecks": {
-      "requiredFor": ["comments", "trackedChanges", "fields"],
+      "requiredFor": [
+        "comments",
+        "trackedChanges",
+        "fields",
+        "contentControls",
+        "advancedOoxml"
+      ],
       "renderingSufficient": false,
-      "unavailableHandling": "discloseUnverified"
+      "unavailableHandling": "discloseUnverifiedOrFailClosedWhenRequired"
     },
     "evidenceInvalidation": "anyFinalDocumentEdit"
   }

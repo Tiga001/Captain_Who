@@ -1,6 +1,6 @@
 use crate::file_input::{
-    evidence_from_bindings, materialize_agent_file_inputs, AgentFileInputExecutionContext,
-    PreparedAgentFileInputs, AGENT_FILE_INPUT_ROOT_ENV,
+    evidence_from_bindings, materialize_agent_file_inputs, prepare_agent_file_input_bindings,
+    AgentFileInputExecutionContext, PreparedAgentFileInputs, AGENT_FILE_INPUT_ROOT_ENV,
 };
 use crate::system_paths::expand_system_path;
 use crate::{
@@ -67,7 +67,10 @@ pub(crate) use managed_runtime::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
     infer_managed_pdf_command_kind, infer_managed_pdf_workspace_inputs,
     is_presentation_editor_direct_command, validate_managed_artifact_builder_output_scope,
+    ManagedArtifactBuilderCommand,
 };
+pub(crate) const MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX: &str =
+    "__mycopilot/managed-office-script";
 pub use output_capture::{
     join_process_output_capture, materialize_process_tool_result_archive,
     process_output_spool_substitutions, spawn_process_output_capture,
