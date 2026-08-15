@@ -471,6 +471,7 @@ mod tests {
     };
     use serde_json::Value;
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn markdown_json_examples(document_name: &str, markdown: &str) -> Vec<(usize, Value)> {
@@ -576,9 +577,12 @@ mod tests {
         assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
         assert!(!package.resources().is_empty());
         assert_eq!(package.source_text(), DOCUMENTS_SOURCE);
+        assert!(package.instructions().contains("Route by intent:"));
+        assert!(package.instructions().contains("**Read:**"));
+        assert!(package.instructions().contains("**Create:**"));
         assert!(package
             .instructions()
-            .contains("Use one of two supported paths"));
+            .contains("**Edit an existing `.docx`:**"));
         assert!(!package.instructions().contains("description:"));
         assert_eq!(package.revision(), descriptor.revision());
     }
@@ -935,10 +939,10 @@ mod tests {
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
             assert_eq!(
                 capability["contractVersion"],
-                if local_id == PRESENTATIONS_LOCAL_ID {
-                    10
-                } else {
-                    8
+                match local_id {
+                    PRESENTATIONS_LOCAL_ID => 10,
+                    DOCUMENTS_LOCAL_ID | SPREADSHEETS_LOCAL_ID => 9,
+                    _ => unreachable!("the Office package table contains only known Skills"),
                 }
             );
             assert_eq!(capability["engine"], "officecli");
@@ -1052,6 +1056,187 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn document_and_spreadsheet_skills_define_first_round_builder_safety_contracts() {
+        let source = BundledSkillSource::new().unwrap();
+        for (
+            local_id,
+            workflow_source,
+            directory_command,
+            materialized_destination,
+            template_path,
+        ) in [
+            (
+                DOCUMENTS_LOCAL_ID,
+                include_str!("bundled/documents/references/workflows.md"),
+                "\"command\": \"mkdir -p scripts\"",
+                "\"destination\": \"scripts/build_report.py\"",
+                "templates/builder.py",
+            ),
+            (
+                SPREADSHEETS_LOCAL_ID,
+                include_str!("bundled/spreadsheets/references/workflows.md"),
+                "\"command\": \"mkdir -p workbook-work\"",
+                "\"destination\": \"workbook-work/build_workbook.py\"",
+                "templates/builder.py",
+            ),
+        ] {
+            let descriptor = source
+                .list()
+                .unwrap()
+                .skills()
+                .iter()
+                .find(|skill| skill.id().local_id() == local_id)
+                .unwrap()
+                .clone();
+            let package = source.resolve(&descriptor.selection()).unwrap();
+            let reader = source.open_resource_reader(&package).unwrap().unwrap();
+            let capability = reader.read(&package.resources().entries()[0]).unwrap();
+            let capability: Value = serde_json::from_slice(&capability).unwrap();
+            assert_eq!(capability["contractVersion"], 9);
+
+            let script = &capability["modes"]["script"];
+            assert_eq!(script["entrypoints"].as_array().unwrap().len(), 1);
+            assert_eq!(script["entrypoints"][0]["command"], "python");
+            assert_eq!(
+                capability["modes"]["native"]["transactionScope"],
+                "oneOperationPerCall"
+            );
+            assert_eq!(
+                capability["modes"]["native"]["multiOperationAtomicBatch"],
+                false
+            );
+            assert_eq!(
+                script["lifecycle"],
+                serde_json::json!({
+                    "prepareDirectoryBeforeMaterialize": true,
+                    "reuseSingleScript": true,
+                    "cleanupTaskOwnedFiles": true,
+                    "removeDirectoryOnlyIfTaskCreatedAndEmpty": true,
+                    "recursiveDelete": "forbidden"
+                })
+            );
+            assert_eq!(
+                script["syntaxPreflight"],
+                serde_json::json!({
+                    "binding": "hostAutomaticBeforeExecution",
+                    "language": "python",
+                    "modelCommand": "forbidden",
+                    "invalidatesOnScriptChange": true,
+                    "executionOnFailure": "forbidden"
+                })
+            );
+
+            let prepare = workflow_source.find(directory_command).unwrap();
+            let materialize = workflow_source.find(materialized_destination).unwrap();
+            assert!(
+                prepare < materialize,
+                "{local_id} must prepare the selected directory before materialization"
+            );
+            for required in [
+                "Host",
+                "syntax preflight",
+                "task-created",
+                "rmdir",
+                "recursive deletion",
+            ] {
+                assert!(
+                    workflow_source.contains(required),
+                    "{local_id} workflow is missing `{required}`"
+                );
+            }
+
+            let session = SkillsService::new().with_bundled_source().unwrap();
+            let activated = session.activate(&[descriptor.selection()]).unwrap();
+            let resource_session = session.resource_session(&activated).unwrap();
+            let package_uri = resource_session.package_uris().into_iter().next().unwrap();
+            let template_uri =
+                package_uri.resource(SkillResourcePath::parse(template_path).unwrap());
+            let workspace = tempdir().unwrap();
+            let destination = materialized_destination
+                .trim_start_matches("\"destination\": \"")
+                .trim_end_matches('"');
+            fs::create_dir(
+                workspace
+                    .path()
+                    .join(Path::new(destination).parent().unwrap()),
+            )
+            .unwrap();
+            let request = SkillMaterializationRequest::new(
+                template_uri,
+                workspace.path(),
+                SkillMaterializationDestination::parse(destination).unwrap(),
+            )
+            .unwrap();
+            let outcome = SkillResourceMaterializer::new()
+                .materialize(&resource_session, &request)
+                .unwrap();
+            assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
+            let materialized = workspace.path().join(destination);
+            assert!(materialized.is_file());
+            if local_id == SPREADSHEETS_LOCAL_ID {
+                let builder = fs::read_to_string(materialized).unwrap();
+                assert!(builder.contains("if not verified.sheetnames:"));
+                assert!(!builder.contains("verified[\"数据\"][\"E2\"]"));
+                assert!(!builder.contains("formula verification failed"));
+            }
+        }
+
+        let documents: Value =
+            serde_json::from_str(include_str!("bundled/documents/office-capability.json")).unwrap();
+        assert_eq!(
+            documents["modes"]["script"]["routes"],
+            serde_json::json!({
+                "createOrComplexGenerate": "builder",
+                "boundedExistingEdit": "native",
+                "unsupportedExistingEdit": "failClosedUntilFixedEditor"
+            })
+        );
+        assert_eq!(documents["validation"]["inspectFinal"], true);
+        assert_eq!(
+            documents["validation"]["pageCountSource"],
+            "notAvailableInCurrentSemanticSurface"
+        );
+        assert_eq!(
+            documents["validation"]["authoritativePageCountAvailable"],
+            false
+        );
+        assert_eq!(
+            documents["validation"]["visual"]["pageRangeRequests"],
+            "notSupported"
+        );
+        assert_eq!(
+            documents["validation"]["structuralChecks"]["renderingSufficient"],
+            false
+        );
+
+        let spreadsheets: Value =
+            serde_json::from_str(include_str!("bundled/spreadsheets/office-capability.json"))
+                .unwrap();
+        assert_eq!(
+            spreadsheets["modes"]["script"]["routes"],
+            serde_json::json!({
+                "createOrComplexGenerate": "builder",
+                "boundedExistingEdit": "native",
+                "sourceWorkbookTransform": "builderWithExplicitSourceAndSaveAs",
+                "fixedExistingEditor": "notAvailable"
+            })
+        );
+        assert_eq!(spreadsheets["calculation"]["recalculation"], "notPerformed");
+        assert_eq!(
+            spreadsheets["validation"]["visual"]["coverage"],
+            "everyResolvableFinalSheetVisualExtent"
+        );
+        assert_eq!(
+            spreadsheets["validation"]["visual"]["visualExtent"],
+            "populatedUsedRangeUnionReportedChartAndImageBounds"
+        );
+        assert_eq!(
+            spreadsheets["validation"]["visual"]["unresolvedFloatingObjectBounds"],
+            "discloseIncompleteCoverage"
+        );
     }
 
     #[test]

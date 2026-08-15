@@ -1,5 +1,5 @@
 {
-  "contractVersion": 8,
+  "contractVersion": 9,
   "engine": "officecli",
   "tool": "office_spreadsheet",
   "extensions": [".xlsx"],
@@ -11,6 +11,8 @@
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
+      "transactionScope": "oneOperationPerCall",
+      "multiOperationAtomicBatch": false,
       "operations": [
         "status",
         "create",
@@ -30,6 +32,7 @@
         "moveSheet"
       ],
       "unsupportedRecovery": "useManagedScript",
+      "unsupportedExistingEditRecovery": "builderWithExplicitSourceOrFailClosed",
       "renderOutput": {
         "resultField": "outputs",
         "role": "render",
@@ -51,6 +54,37 @@
       "runtimeProfile": "spreadsheets",
       "runtimeProfileBinding": "host_from_materialized_builder_receipt",
       "outputArgument": "--output",
+      "routes": {
+        "createOrComplexGenerate": "builder",
+        "boundedExistingEdit": "native",
+        "sourceWorkbookTransform": "builderWithExplicitSourceAndSaveAs",
+        "fixedExistingEditor": "notAvailable"
+      },
+      "lifecycle": {
+        "prepareDirectoryBeforeMaterialize": true,
+        "reuseSingleScript": true,
+        "cleanupTaskOwnedFiles": true,
+        "removeDirectoryOnlyIfTaskCreatedAndEmpty": true,
+        "recursiveDelete": "forbidden"
+      },
+      "syntaxPreflight": {
+        "binding": "hostAutomaticBeforeExecution",
+        "language": "python",
+        "modelCommand": "forbidden",
+        "invalidatesOnScriptChange": true,
+        "executionOnFailure": "forbidden"
+      },
+      "existingWorkbookEdit": {
+        "sourceArgument": "--source",
+        "sourceBinding": "inputs.mountPath",
+        "loader": "openpyxl.load_workbook(data_only=false)",
+        "implementation": "generalBuilderNotFixedEditor",
+        "hostTypedTransaction": false,
+        "inspectBeforeEdit": true,
+        "defaultPublishMode": "saveAs",
+        "rebuildToImitateEdit": "forbidden",
+        "unsupportedFeaturePolicy": "failClosed"
+      },
       "entrypoints": [
         {
           "command": "python",
@@ -60,12 +94,6 @@
             { "name": "openpyxl", "version": "3.1.5" },
             { "name": "xlsxwriter", "version": "3.2.9" }
           ]
-        },
-        {
-          "command": "node",
-          "extension": ".mjs",
-          "runtimeVersion": "22.23.1",
-          "dependencies": [{ "name": "exceljs", "version": "4.4.0" }]
         }
       ],
       "resolution": {
@@ -94,5 +122,37 @@
         "resultField": "artifactObservation"
       }
     }
+  },
+  "calculation": {
+    "authoringEngine": "openpyxl",
+    "formulaWriteSemantics": "expressionStoredNotEvaluated",
+    "recalculation": "notPerformed",
+    "cachedValues": "notAuthoritative",
+    "evidenceRequiredToClaimCalculated": "explicitAuthoritativeCalculationEngineResult",
+    "claimWithoutEvidence": "forbidden"
+  },
+  "validation": {
+    "inspectFinal": true,
+    "sheetListSource": "nativeInspect",
+    "usedRangeSource": "nativeInspect",
+    "floatingObjectSource": "nativeInspectWhenReported",
+    "packageValidation": "nativeValidate",
+    "formulaText": "nativeInspectExactExpression",
+    "calculationEvidence": "separateAuthoritativeEngineResult",
+    "visual": {
+      "coverage": "everyResolvableFinalSheetVisualExtent",
+      "visualExtent": "populatedUsedRangeUnionReportedChartAndImageBounds",
+      "requestMode": "oneResolvedVisualExtentPerFinalSheet",
+      "consumeEveryReturnedReadPath": true,
+      "requiredLedger": "oneVerdictOrExplicitIncompleteCoveragePerFinalSheet",
+      "unresolvedFloatingObjectBounds": "discloseIncompleteCoverage",
+      "pageSelectionSemantics": "requestedNotVerifiedCoverage",
+      "coverageCannotBeInferredFrom": [
+        "pageSelection",
+        "outputFilename",
+        "combinedRequest"
+      ]
+    },
+    "evidenceInvalidation": "anyFinalWorkbookEdit"
   }
 }

@@ -110,10 +110,8 @@ def publish(workbook, output: Path) -> None:
     try:
         workbook.save(temporary)
         verified = load_workbook(temporary, data_only=False, read_only=False)
-        if not isinstance(verified["数据"]["E2"].value, str) or not verified["数据"][
-            "E2"
-        ].value.startswith("="):
-            raise RuntimeError("formula verification failed")
+        if not verified.sheetnames:
+            raise RuntimeError("published workbook has no worksheets")
         verified.close()
         os.replace(temporary, output)
     finally:

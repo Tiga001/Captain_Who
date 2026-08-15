@@ -4,7 +4,7 @@
 
 - [Route the task](#route-the-task)
 - [Native semantic contract](#native-semantic-contract)
-- [Create and reuse one Builder](#create-and-reuse-one-builder)
+- [Prepare, create, and reuse one Builder](#prepare-create-and-reuse-one-builder)
 - [Bind inputs declaratively](#bind-inputs-declaratively)
 - [Observe every file effect](#observe-every-file-effect)
 - [Consume render outputs](#consume-render-outputs)
@@ -13,16 +13,20 @@
 
 ## Route the task
 
-Use `office_document` first when the request is a bounded combination of its semantic operations:
+Use `office_document` for reads, validation, rendering, and bounded combinations of its semantic
+write operations:
 
 `create`, `inspect`, `validate`, `render`, `addText`, `insertImage`, `addTable`, `addHeader`,
 `addFooter`, `replaceText`, `formatText`, `removeBlock`, and `moveBlock`.
 
-Use the Managed Builder when the task needs coordinated page design, many repeated sections,
-advanced OOXML features, mail-merge-like generation, large batches, or a semantic operation that
-the backend reports as unsupported. Do not emulate an unsupported operation with low-level
-OfficeCLI fields. A hybrid flow—Builder write, native inspect/validate/render—is usually best for
-complex deliverables.
+Use the Managed Builder only to create a new document that needs coordinated page design, many
+repeated sections, advanced generation features, mail-merge-like generation, or large batches. It
+is not a fidelity-preserving Editor for an existing `.docx`.
+
+For an existing document, inspect first and use only supported native edit operations. If the
+requested change is outside that surface, preserve the source and report the operation as
+unsupported until a fixed Editor is available. Do not rebuild the document, unzip or patch OOXML,
+or use low-level OfficeCLI fields to imitate an edit.
 
 ## Native semantic contract
 
@@ -43,8 +47,9 @@ user-visible audit text only; it never grants permission.
 File and image inputs use one path string. For an attachment, call `attachments_list` and copy its
 exact `readPath`; for a generated image, copy the exact `image-artifact://...` path. If the backend returns
 `office.capability_not_supported`, `capabilityNotSupported`, or
-`recovery=useManagedScript`, preserve the error and switch to the Builder path. Do not repeat the
-same failed call with invented fields.
+`recovery=useManagedScript`, preserve the error. Switch to the Builder only when creating a new
+document; fail closed for an existing-document edit. Do not repeat the same failed call with
+invented fields.
 
 Insert a registered attachment with its exact path:
 
@@ -60,13 +65,29 @@ Insert a registered attachment with its exact path:
 ```
 
 Inspect an existing document before mutation. Prefer save-as for transformations unless the user
-explicitly requests in-place editing. Use the semantic result's canonical block identity for later
-targeted operations instead of inventing positional identities.
+explicitly requests in-place editing. Copy the exact `blockIndex` from a fresh inspect result for a
+targeted operation instead of inventing an index. `removeBlock` and `moveBlock` can shift later
+indices, so re-inspect before another targeted operation. Each native mutation is an independent
+atomic file transaction; several calls are not one all-or-nothing batch for the whole request. A
+`capabilityNotSupported`/`useManagedScript` response may route a new-document request to the
+Builder, but it must fail closed for an existing-document edit.
 
-## Create and reuse one Builder
+## Prepare, create, and reuse one Builder
 
 The bundled `templates/builder.py` is a compact `python-docx` starting point. Locate its exact
-revision-bound URI with `skills_list_resources`, then copy it once into a new workspace path:
+revision-bound URI with `skills_list_resources`. First select a dedicated workspace-relative
+script directory. Reuse it if it is already a plain directory; otherwise create it with a separate
+idempotent command:
+
+```json
+{
+  "command": "mkdir -p scripts",
+  "cwd": ".",
+  "reason": "Prepare a workspace directory for the Word Builder"
+}
+```
+
+The directory name is not fixed. Materialize the Builder once into a new path inside it:
 
 ```json
 {
@@ -81,16 +102,24 @@ URI. `skills_materialize_resource` is create-only. After materialization, patch
 `scripts/build_report.py` and rerun that same file. Do not rematerialize over a modified Builder or
 create a new script for every correction.
 
-The host-owned `documents` profile pins:
+The Host performs an isolated Python syntax preflight automatically before every Builder
+execution. A materialization or patch makes that script revision require a new preflight. If the
+preflight fails, execution is blocked: patch the same Builder, then submit its normal build command
+again. Do not issue a model-authored syntax command, use system Python, invoke `python -m` or
+`python -c`, or combine a check and build in one shell command.
 
-- Python 3.12.13 with `python-docx` 1.2.0.
-- Node.js 22.23.1 with `docx` 9.6.1.
+The bundled Builder route pins Python 3.12.13 with `python-docx` 1.2.0.
 
 These versions describe the immutable profile; never send or install them. Run the materialized
 template with a direct logical `python <script>.py --output <file.docx>` command. The Host verifies
 the run-scoped materialization receipt, derives and freezes the `documents` profile from the static
 Office output, and binds observation; omit `runtimeProfile` and `observe`. Never call a private
-executable path, system Python/Node.js, `pip`, `npm`, inline code, a heredoc, or shell redirection.
+executable path, system Python, `pip`, inline code, a heredoc, or shell redirection.
+
+After final verification, delete the exact Builder and every task-created temporary file. If this
+task created the script directory and it is empty, remove it with `rmdir`. Preserve a pre-existing
+directory and every unrelated file, never use recursive deletion, and retain the Builder only when
+the user explicitly requests it.
 
 ## Bind inputs declaratively
 
@@ -142,14 +171,17 @@ prove that the document is valid.
 
 ## Consume render outputs
 
-Render to an explicit review image:
+The current semantic surface does not expose an authoritative rendered page count. First render the
+whole document as an overview, then render any known or affected page to its own explicit review
+image. A single-page request looks like:
 
 ```json
 {
   "operation": "render",
   "filePath": "outputs/report.docx",
-  "outputPath": "outputs/report-preview.png",
-  "reason": "Render every final page for visual review"
+  "pageOrSlide": 1,
+  "outputPath": "outputs/report-page-1.png",
+  "reason": "Render page 1 of the final Word report for visual review"
 }
 ```
 
@@ -158,7 +190,7 @@ After a successful render, take the exact path from `outputs[].readPath` and pas
 
 ```json
 {
-  "path": "outputs/report-preview.png"
+  "path": "outputs/report-page-1.png"
 }
 ```
 
@@ -168,37 +200,54 @@ Treat the returned output as authoritative:
 - Use only its `readPath`; never reconstruct a path from the render request, `source`, `argv`,
   `cwd`, `stdout`, or a file search.
 - Never rerender merely to discover where the first render was published.
-- `pageSelection` records the requested selection (`all` or explicit page numbers); it is not an
-  independent proof of the document's actual page count. Establish the final page count with
-  `inspect`, compare it with the request, and then inspect the returned image.
+- `pageSelection` records only the requested selection (`all` or one explicit page); it is not an
+  independent proof of the document's actual page count. Native inspect does not currently provide
+  that count either.
+- Keep a numbered visual ledger for every individual page image actually read. A whole-document
+  contact sheet is overview-only and does not prove page count, coverage, or legibility. The current
+  request schema does not support page ranges or bounded page groups.
+- Unless a future trusted output explicitly returns the final rendered page count, state that
+  exhaustive all-page coverage was unavailable. Never promote a visually guessed contact-sheet
+  count into authoritative `1..N` evidence.
 - If the output is absent, not readable, or `read_image` reports an unsupported model capability,
   state that visual verification was unavailable.
-- If a preview exceeds the visual-input limit, render bounded page groups rather than repeating the
-  same oversized request. Do not claim inspection of unread images.
+- If the overview image exceeds the visual-input limit, rely only on individual known-page renders
+  that fit. Do not claim inspection of unread images or infer coverage from filenames.
 
 ## Generate, verify, render, iterate
 
 Use this fixed loop for a final document:
 
-1. Generate or edit the `.docx`.
-2. Confirm the expected file effect.
-3. Inspect headings, body order, tables, headers, footers, media, and required content.
-4. Run native `validate`.
-5. Run one native `render` request covering all final pages with a contact-sheet grid.
-6. Read the exact returned render output with `read_image`, then visually inspect every rendered
-   page for clipping, overflow, blank pages, broken images, font substitution, weak hierarchy, and
-   inconsistent spacing.
-7. If a defect exists, patch the same Builder or issue one corrected semantic operation, regenerate,
-   and repeat validation and rendering.
+1. Inspect an existing source before any supported native edit; never edit an existing `.docx`
+   through the current Builder.
+2. Generate a new `.docx` or apply the bounded native edit.
+3. Confirm the expected file effect.
+4. Inspect headings, body order, tables, headers, footers, media, and required content. Do not claim
+   a final rendered page count from this structural inspection.
+5. Run native `validate`.
+6. When comments, tracked changes, or fields exist or are required, run an explicit structural
+   check for those features. Rendering is not structural evidence; if no supported checker is
+   available, report that verification as unavailable.
+7. Render the whole document once for overview, then render and read every known or affected page
+   separately. Record only those individually read pages in the ledger and disclose that exhaustive
+   coverage is unavailable without a trusted final page count.
+8. Inspect the overview and individual page evidence for clipping, overflow, blank pages, broken
+   images, font substitution, weak hierarchy, and inconsistent spacing.
+9. If a defect exists, patch the same Builder for a new document or issue a corrected native edit.
+   Discard stale structural, validation, and visual evidence, then repeat the applicable checks on
+   the new final file.
 
 Do not claim visual quality from package validation alone. If rendering returns an
-`office.render_backend_*` error, report that visual verification was unavailable; do not launch a
-user browser or render every page in separate retry calls.
+`office.render_backend_*` error, report the affected pages as unverified; do not launch a user
+browser or repeat an unchanged render call.
 
 ## Word quality checks
 
 - Use real heading styles, lists, tables, page breaks, headers, footers, and page fields.
 - Preserve sections, relationships, media, styles, and unrelated content during edits.
+- Treat comments, tracked changes, fields, content controls, numbering, and section linkage as
+  structural features; visual rendering alone cannot verify their preservation or behavior.
 - Keep images proportional and within page margins; add useful alt text when supported.
 - Check table widths, cell content, page breaks, orphaned headings, and accidental empty pages.
-- Reopen or inspect the final package and report only checks that actually ran.
+- Reopen or inspect the final package and report only checks that actually ran; do not invent a
+  rendered page count that the current tools did not return.

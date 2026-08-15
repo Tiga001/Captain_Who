@@ -1,5 +1,5 @@
 {
-  "contractVersion": 8,
+  "contractVersion": 9,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
@@ -11,6 +11,8 @@
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
+      "transactionScope": "oneOperationPerCall",
+      "multiOperationAtomicBatch": false,
       "operations": [
         "status",
         "create",
@@ -28,6 +30,7 @@
         "moveBlock"
       ],
       "unsupportedRecovery": "useManagedScript",
+      "unsupportedExistingEditRecovery": "failClosedUntilFixedEditor",
       "renderOutput": {
         "resultField": "outputs",
         "role": "render",
@@ -44,23 +47,37 @@
     },
     "script": {
       "builderTemplate": "templates/builder.py",
+      "builderScope": "newDocumentCreationOnly",
+      "routes": {
+        "createOrComplexGenerate": "builder",
+        "boundedExistingEdit": "native",
+        "unsupportedExistingEdit": "failClosedUntilFixedEditor"
+      },
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
       "runtimeProfile": "documents",
       "runtimeProfileBinding": "host_from_materialized_builder_receipt",
       "outputArgument": "--output",
+      "lifecycle": {
+        "prepareDirectoryBeforeMaterialize": true,
+        "reuseSingleScript": true,
+        "cleanupTaskOwnedFiles": true,
+        "removeDirectoryOnlyIfTaskCreatedAndEmpty": true,
+        "recursiveDelete": "forbidden"
+      },
+      "syntaxPreflight": {
+        "binding": "hostAutomaticBeforeExecution",
+        "language": "python",
+        "modelCommand": "forbidden",
+        "invalidatesOnScriptChange": true,
+        "executionOnFailure": "forbidden"
+      },
       "entrypoints": [
         {
           "command": "python",
           "extension": ".py",
           "runtimeVersion": "3.12.13",
           "dependencies": [{ "name": "python-docx", "version": "1.2.0" }]
-        },
-        {
-          "command": "node",
-          "extension": ".mjs",
-          "runtimeVersion": "22.23.1",
-          "dependencies": [{ "name": "docx", "version": "9.6.1" }]
         }
       ],
       "resolution": {
@@ -89,5 +106,26 @@
         "resultField": "artifactObservation"
       }
     }
+  },
+  "validation": {
+    "inspectFinal": true,
+    "pageCountSource": "notAvailableInCurrentSemanticSurface",
+    "authoritativePageCountAvailable": false,
+    "packageValidation": "nativeValidate",
+    "visual": {
+      "coverage": "overviewPlusIndividuallyVerifiedKnownPages",
+      "renderModes": ["wholeDocumentOverview", "oneKnownPagePerRequest"],
+      "consumeEveryReturnedReadPath": true,
+      "requiredLedger": "numberedPagesActuallyRead",
+      "contactSheetSemantics": "overviewOnlyNotPageCountOrCoverageEvidence",
+      "pageRangeRequests": "notSupported",
+      "exhaustiveCoverageClaim": "forbiddenWithoutTrustedFinalPageCount"
+    },
+    "structuralChecks": {
+      "requiredFor": ["comments", "trackedChanges", "fields"],
+      "renderingSufficient": false,
+      "unavailableHandling": "discloseUnverified"
+    },
+    "evidenceInvalidation": "anyFinalDocumentEdit"
   }
 }
