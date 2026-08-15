@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 11;
+pub const STORAGE_SCHEMA_VERSION: i32 = 13;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:6028c8d1097b61d6fd9812a07297ce3cfb38d36a0a60be8a607ee403b8a9cb20";
+    "sha256:85f3d034ef5194becb604fc1515a2a06407a58a64b6fabe88831da3b78dfbae9";
 
 /// Opens the single supported development schema.
 ///
@@ -248,6 +248,11 @@ mod tests {
             "validate_agent_mailbox_acknowledgement",
             "prevent_agent_bound_conversation_fork_insert",
             "prevent_conversation_fork_update",
+            "agent_member_conversation_forks",
+            "agent_member_conversation_forks_source_root",
+            "agent_member_conversation_forks_target_root",
+            "validate_agent_member_conversation_fork_insert",
+            "prevent_agent_member_conversation_fork_update",
             "conversations_revision_after_business_update",
             "conversations_revision_after_message_insert",
             "conversations_revision_after_message_update",
@@ -315,6 +320,437 @@ mod tests {
             .unwrap()
             .is_some();
         assert!(!maintenance_table_exists);
+    }
+
+    #[test]
+    fn canonical_agent_member_fork_receipts_enforce_tree_authority_and_snapshot_inserts() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+
+        connection
+            .execute_batch(
+                "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
+                 VALUES
+                    ('project-a', 'Project A', NULL, 1, NULL, 1),
+                    ('project-b', 'Project B', NULL, 1, NULL, 1);",
+            )
+            .unwrap();
+
+        let insert_conversation = |id: &str, project_id: &str, model_id: Option<&str>| {
+            connection.execute(
+                "INSERT INTO conversations (
+                         id, project_id, model_id, title, created_at, updated_at,
+                         pinned_at, archived_at, unread_at
+                     ) VALUES (?1, ?2, ?3, 'Fork fixture', 1, 1, NULL, NULL, NULL)",
+                rusqlite::params![id, project_id, model_id],
+            )
+        };
+        for (id, project_id, model_id) in [
+            ("source-root-conversation", "project-a", None),
+            ("target-root-conversation", "project-a", None),
+            ("source-child-conversation", "project-a", Some("model-a")),
+            ("target-child-conversation", "project-a", Some("model-a")),
+            ("source-grand-conversation", "project-a", Some("model-a")),
+            ("target-grand-conversation", "project-a", Some("model-a")),
+            ("target-wrong-conversation", "project-a", Some("model-a")),
+            ("other-root-conversation", "project-b", None),
+            ("other-child-conversation", "project-b", Some("model-a")),
+        ] {
+            insert_conversation(id, project_id, model_id).unwrap();
+        }
+
+        let insert_root =
+            |agent_id: &str, conversation_id: &str, project_id: &str, request_id: &str| {
+                connection.execute(
+                    "INSERT INTO agent_nodes (
+                         agent_id, schema_version, root_agent_id, root_conversation_id,
+                         parent_agent_id, conversation_id, project_id, creation_request_id,
+                         task_name, task_path, lifecycle, revision, created_at, updated_at
+                     ) VALUES (
+                         ?1, 1, ?1, ?2, NULL, ?2, ?3, ?4,
+                         'Root', '/root', 'active', 1, 1, 1
+                     )",
+                    rusqlite::params![agent_id, conversation_id, project_id, request_id],
+                )
+            };
+        insert_root(
+            "source-root-agent",
+            "source-root-conversation",
+            "project-a",
+            "create-source-root",
+        )
+        .unwrap();
+        insert_root(
+            "target-root-agent",
+            "target-root-conversation",
+            "project-a",
+            "create-target-root",
+        )
+        .unwrap();
+        insert_root(
+            "other-root-agent",
+            "other-root-conversation",
+            "project-b",
+            "create-other-root",
+        )
+        .unwrap();
+
+        let insert_member = |agent_id: &str,
+                             root_agent_id: &str,
+                             root_conversation_id: &str,
+                             parent_agent_id: &str,
+                             conversation_id: &str,
+                             project_id: &str,
+                             request_id: &str,
+                             task_name: &str,
+                             task_path: &str| {
+            connection.execute(
+                "INSERT INTO agent_nodes (
+                         agent_id, schema_version, root_agent_id, root_conversation_id,
+                         parent_agent_id, conversation_id, project_id, creation_request_id,
+                         task_name, task_path,
+                         model_config_id_snapshot, model_display_name_snapshot,
+                         model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                         model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                         provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                         lifecycle, revision, created_at, updated_at
+                     ) VALUES (
+                         ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                         'model-a', 'Model A', 0, 4096,
+                         'settings-v1', 'connection-v1', 'protocol-v1', 'explicit',
+                         'active', 1, 2, 2
+                     )",
+                rusqlite::params![
+                    agent_id,
+                    root_agent_id,
+                    root_conversation_id,
+                    parent_agent_id,
+                    conversation_id,
+                    project_id,
+                    request_id,
+                    task_name,
+                    task_path,
+                ],
+            )
+        };
+        for fixture in [
+            (
+                "source-child-agent",
+                "source-root-agent",
+                "source-root-conversation",
+                "source-root-agent",
+                "source-child-conversation",
+                "project-a",
+                "create-source-child",
+                "child",
+                "/root/child",
+            ),
+            (
+                "target-child-agent",
+                "target-root-agent",
+                "target-root-conversation",
+                "target-root-agent",
+                "target-child-conversation",
+                "project-a",
+                "create-target-child",
+                "child",
+                "/root/child",
+            ),
+            (
+                "source-grand-agent",
+                "source-root-agent",
+                "source-root-conversation",
+                "source-child-agent",
+                "source-grand-conversation",
+                "project-a",
+                "create-source-grand",
+                "grand",
+                "/root/child/grand",
+            ),
+            (
+                "target-grand-agent",
+                "target-root-agent",
+                "target-root-conversation",
+                "target-child-agent",
+                "target-grand-conversation",
+                "project-a",
+                "create-target-grand",
+                "grand",
+                "/root/child/grand",
+            ),
+            (
+                "target-wrong-agent",
+                "target-root-agent",
+                "target-root-conversation",
+                "target-root-agent",
+                "target-wrong-conversation",
+                "project-a",
+                "create-target-wrong",
+                "wrong",
+                "/root/wrong",
+            ),
+            (
+                "other-child-agent",
+                "other-root-agent",
+                "other-root-conversation",
+                "other-root-agent",
+                "other-child-conversation",
+                "project-b",
+                "create-other-child",
+                "child",
+                "/root/child",
+            ),
+        ] {
+            insert_member(
+                fixture.0, fixture.1, fixture.2, fixture.3, fixture.4, fixture.5, fixture.6,
+                fixture.7, fixture.8,
+            )
+            .unwrap();
+        }
+
+        connection
+            .execute_batch(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES
+                    ('source-root-boundary', 'source-root-conversation',
+                     'assistant', 'root boundary', 'complete', 3, 0),
+                    ('target-root-boundary', 'target-root-conversation',
+                     'assistant', 'root boundary', 'complete', 3, 0),
+                    ('source-child-history', 'source-child-conversation',
+                     'assistant', 'member history', 'complete', 4, 0);
+                 INSERT INTO conversation_forks (
+                     request_id, target_conversation_id, source_conversation_id,
+                     source_message_id, target_message_id, fork_authority,
+                     source_root_agent_id, target_root_agent_id,
+                     source_fork_point_json, created_at
+                 ) VALUES (
+                     'root-fork-request', 'target-root-conversation',
+                     'source-root-conversation', 'source-root-boundary',
+                     'target-root-boundary', 'collaboration_root',
+                     'source-root-agent', 'target-root-agent', '{}', 10
+                 );",
+            )
+            .unwrap();
+
+        const INSERT_MEMBER_RECEIPT: &str = "INSERT INTO agent_member_conversation_forks (
+                 root_fork_request_id, source_conversation_id, target_conversation_id,
+                 source_root_agent_id, target_root_agent_id,
+                 source_member_agent_id, target_member_agent_id, created_at
+             ) VALUES (
+                 'root-fork-request', ?1, ?2, ?3, ?4, ?5, ?6, 10
+             )";
+        let insert_receipt = |source_conversation_id: &str,
+                              target_conversation_id: &str,
+                              source_root_agent_id: &str,
+                              target_root_agent_id: &str,
+                              source_member_agent_id: &str,
+                              target_member_agent_id: &str| {
+            connection.execute(
+                INSERT_MEMBER_RECEIPT,
+                rusqlite::params![
+                    source_conversation_id,
+                    target_conversation_id,
+                    source_root_agent_id,
+                    target_root_agent_id,
+                    source_member_agent_id,
+                    target_member_agent_id,
+                ],
+            )
+        };
+
+        for (label, invalid_mapping) in [
+            (
+                "root node cannot masquerade as a member",
+                (
+                    "source-root-conversation",
+                    "target-child-conversation",
+                    "source-root-agent",
+                    "target-root-agent",
+                    "source-root-agent",
+                    "target-child-agent",
+                ),
+            ),
+            (
+                "member must belong to the corresponding root and project",
+                (
+                    "source-child-conversation",
+                    "other-child-conversation",
+                    "source-root-agent",
+                    "other-root-agent",
+                    "source-child-agent",
+                    "other-child-agent",
+                ),
+            ),
+            (
+                "member task path and name must match",
+                (
+                    "source-child-conversation",
+                    "target-wrong-conversation",
+                    "source-root-agent",
+                    "target-root-agent",
+                    "source-child-agent",
+                    "target-wrong-agent",
+                ),
+            ),
+            (
+                "grandchild receipt requires its parent mapping first",
+                (
+                    "source-grand-conversation",
+                    "target-grand-conversation",
+                    "source-root-agent",
+                    "target-root-agent",
+                    "source-grand-agent",
+                    "target-grand-agent",
+                ),
+            ),
+        ] {
+            let error = insert_receipt(
+                invalid_mapping.0,
+                invalid_mapping.1,
+                invalid_mapping.2,
+                invalid_mapping.3,
+                invalid_mapping.4,
+                invalid_mapping.5,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid Agent member Conversation fork authority"),
+                "{label}: {error}"
+            );
+        }
+
+        let unauthorized_snapshot = connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, input_origin_kind,
+                     snapshot_source_conversation_id, snapshot_source_message_id,
+                     created_at, position
+                 ) VALUES (
+                     'unauthorized-snapshot', 'target-wrong-conversation',
+                     'assistant', 'member history', 'complete', 'snapshot',
+                     'source-child-conversation', 'source-child-history', 4, 0
+                 )",
+                [],
+            )
+            .unwrap_err();
+        assert!(unauthorized_snapshot
+            .to_string()
+            .contains("invalid child context snapshot message"));
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM messages
+                     WHERE conversation_id = 'target-child-conversation'",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        insert_receipt(
+            "source-child-conversation",
+            "target-child-conversation",
+            "source-root-agent",
+            "target-root-agent",
+            "source-child-agent",
+            "target-child-agent",
+        )
+        .unwrap();
+        insert_receipt(
+            "source-grand-conversation",
+            "target-grand-conversation",
+            "source-root-agent",
+            "target-root-agent",
+            "source-grand-agent",
+            "target-grand-agent",
+        )
+        .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, input_origin_kind,
+                     snapshot_source_conversation_id, snapshot_source_message_id,
+                     created_at, position
+                 ) VALUES (
+                     'target-child-snapshot', 'target-child-conversation',
+                     'assistant', 'member history', 'complete', 'snapshot',
+                     'source-child-conversation', 'source-child-history', 4, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT input_origin_kind, snapshot_source_conversation_id,
+                            snapshot_source_message_id
+                     FROM messages WHERE id = 'target-child-snapshot'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "snapshot".to_string(),
+                "source-child-conversation".to_string(),
+                "source-child-history".to_string(),
+            )
+        );
+
+        let update_error = connection
+            .execute(
+                "UPDATE agent_member_conversation_forks
+                 SET created_at = 11
+                 WHERE root_fork_request_id = 'root-fork-request'
+                   AND source_member_agent_id = 'source-child-agent'",
+                [],
+            )
+            .unwrap_err();
+        assert!(update_error
+            .to_string()
+            .contains("Agent member Conversation fork receipt is immutable"));
+
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM agent_member_conversation_forks
+                     WHERE root_fork_request_id = 'root-fork-request'
+                       AND source_member_agent_id = 'source-grand-agent'",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM agent_member_conversation_forks
+                     WHERE root_fork_request_id = 'root-fork-request'
+                       AND source_member_agent_id = 'source-child-agent'",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        ensure_foreign_keys_are_valid(&connection).unwrap();
     }
 
     #[test]
@@ -406,24 +842,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_goal_revision_actor_is_required() {
-        let connection = Connection::open_in_memory().unwrap();
-        run_migrations(&connection).unwrap();
-
-        let (not_null, default_value): (i64, Option<String>) = connection
-            .query_row(
-                "SELECT [notnull], dflt_value
-                 FROM pragma_table_info('conversation_goal_revisions')
-                 WHERE name = 'actor'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(not_null, 1);
-        assert_eq!(default_value, None);
-    }
-
-    #[test]
     fn reopening_the_current_schema_does_not_mutate_the_catalog() {
         let connection = Connection::open_in_memory().unwrap();
         run_migrations(&connection).unwrap();
@@ -502,7 +920,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 3"));
+            .contains("expected schema version 13, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -551,7 +969,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 4"));
+            .contains("expected schema version 13, found 4"));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -593,7 +1011,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 5"));
+            .contains("expected schema version 13, found 5"));
         assert_eq!(read_schema_version(&connection).unwrap(), 5);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -644,7 +1062,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 6"));
+            .contains("expected schema version 13, found 6"));
         assert_eq!(read_schema_version(&connection).unwrap(), 6);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -695,7 +1113,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 7"));
+            .contains("expected schema version 13, found 7"));
         assert_eq!(read_schema_version(&connection).unwrap(), 7);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -738,7 +1156,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 8"));
+            .contains("expected schema version 13, found 8"));
         assert_eq!(read_schema_version(&connection).unwrap(), 8);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -783,7 +1201,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 9"));
+            .contains("expected schema version 13, found 9"));
         assert_eq!(read_schema_version(&connection).unwrap(), 9);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -826,7 +1244,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 11, found 10"));
+            .contains("expected schema version 13, found 10"));
         assert_eq!(read_schema_version(&connection).unwrap(), 10);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -843,6 +1261,61 @@ mod tests {
         assert!(connection
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE name = 'conversation_turn_rewrites'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_v11_database_requires_reset_without_rewriting_existing_fork_facts() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v11.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE conversation_forks (
+                         request_id TEXT PRIMARY KEY,
+                         payload TEXT NOT NULL
+                     );
+                     INSERT INTO conversation_forks (request_id, payload)
+                     VALUES ('fork-v11', 'must remain untouched');
+                     PRAGMA user_version = 11;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error
+            .to_string()
+            .contains("expected schema version 13, found 11"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 11);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload FROM conversation_forks WHERE request_id = 'fork-v11'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "must remain untouched"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema
+                 WHERE name = 'agent_member_conversation_forks'",
                 [],
                 |_| Ok(()),
             )

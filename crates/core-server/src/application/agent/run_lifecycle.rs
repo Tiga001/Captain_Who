@@ -360,9 +360,9 @@ impl AgentService {
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
-        self.storage
-            .ensure_agent_project_deletable(project_id)
-            .map_err(|error| error.to_string())?;
+        // Agent-bound projects are deletable: after this layer drains live execution and file
+        // effects, StorageService removes every owned Agent tree in the same deletion transaction.
+        // A graph-presence precheck here would bypass that authoritative cascade entirely.
         // Marking and effect registration use the same lock. Therefore every effect is either
         // already represented in `file_effects`, or observes the marker and never starts.
         {
@@ -499,9 +499,8 @@ impl AgentService {
     pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
         self.authorize_user_conversation_write(conversation_id)
             .map_err(|error| error.to_string())?;
-        self.storage
-            .ensure_agent_conversation_deletable(conversation_id)
-            .map_err(|error| error.to_string())?;
+        // Root Agent conversations follow the same graph-aware storage transaction as project
+        // deletion. Authorization above still prevents direct deletion of a child conversation.
         let project_id = self
             .storage
             .load_conversation(conversation_id)?

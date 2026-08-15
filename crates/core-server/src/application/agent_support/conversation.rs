@@ -822,7 +822,14 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 ContextJournalCursor::Message { .. } => None,
                 ContextJournalCursor::TraceItem { sequence, .. } => {
                     let mut trace = trace?;
-                    trace.items.retain(|item| item.sequence() > *sequence);
+                    // The durable trace is an audit log, while this projection is model input.
+                    // Host-only lifecycle rows can legitimately reference ToolCalls already
+                    // covered by the active summary, so retaining those rows would turn a valid
+                    // full trace into an invalid standalone suffix. The complete trace is still
+                    // validated below before this model-visible suffix is accepted.
+                    trace
+                        .items
+                        .retain(|item| item.sequence() > *sequence && item.is_model_visible());
                     model_context_items.retain(|item| item.sequence > *sequence);
                     let has_uncovered_completion = trace.terminal_status.is_terminal();
                     (!trace.items.is_empty() || has_uncovered_completion).then_some((
@@ -857,19 +864,38 @@ pub(crate) fn conversation_history_messages_with_model_context(
                     message.id
                 ));
             };
-            if trace.conversation_id != conversation.id || trace.assistant_message_id != message.id
+            let raw_trace = traces.get(message.id.as_str()).copied().ok_or_else(|| {
+                format!(
+                    "conversation_history_corrupt: assistant message `{}` is missing its trace",
+                    message.id
+                )
+            })?;
+            if raw_trace.conversation_id != conversation.id
+                || raw_trace.assistant_message_id != message.id
             {
                 return Err(format!(
                     "conversation_history_corrupt: assistant message `{}` has mismatched trace identity",
                     message.id
                 ));
             }
-            trace.validate().map_err(|_| {
+            raw_trace.validate().map_err(|_| {
                 format!(
                     "conversation_history_corrupt: assistant message `{}` has an invalid trace",
                     message.id
                 )
             })?;
+            if raw_trace != trace {
+                // A compacted trace suffix is a model-facing projection, not the original audit
+                // record. It must remain internally valid after audit-only lifecycle rows are
+                // removed, but the strict corruption decision above always uses the complete
+                // trace. Uncompacted traces avoid a redundant second validation here.
+                trace.validate().map_err(|_| {
+                    format!(
+                        "conversation_history_corrupt: assistant message `{}` has an invalid projected trace",
+                        message.id
+                    )
+                })?;
+            }
             trace
                 .validate_complete_model_context(&conversation_model_context_items)
                 .map_err(|_| {

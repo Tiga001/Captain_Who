@@ -1191,53 +1191,82 @@ fn deleting_conversation_and_project_removes_composer_drafts() {
 }
 
 #[test]
-fn graph_bound_conversation_and_project_deletes_fail_before_existing_cleanup_side_effects() {
+fn graph_bound_root_conversation_and_project_deletes_remove_owned_agent_trees() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
-    service
-        .save_conversation(conversation(
-            "conversation-graph-root",
-            Some("project-1"),
-            "message-graph-root",
-        ))
-        .unwrap();
-    service
-        .save_composer_draft(composer_draft(
-            "conversation-graph-root",
-            Some("project-1"),
-            "must remain",
-        ))
-        .unwrap();
-    service
-        .ensure_root_agent(&EnsureRootAgentInput {
-            agent_id: "agent-graph-root".to_string(),
-            conversation_id: "conversation-graph-root".to_string(),
-            creation_request_id: "ensure-agent-graph-root".to_string(),
-            task_name: "Root".to_string(),
-        })
-        .unwrap();
+    for (project_id, suffix) in [("project-1", "conversation"), ("project-2", "project")] {
+        let conversation_id = format!("conversation-graph-{suffix}");
+        let message_id = format!("message-graph-{suffix}");
+        let agent_id = format!("agent-graph-{suffix}");
+        service
+            .save_conversation(conversation(
+                &conversation_id,
+                Some(project_id),
+                &message_id,
+            ))
+            .unwrap();
+        service
+            .save_composer_draft(composer_draft(
+                &conversation_id,
+                Some(project_id),
+                "owned draft",
+            ))
+            .unwrap();
+        service
+            .ensure_root_agent(&EnsureRootAgentInput {
+                agent_id,
+                conversation_id,
+                creation_request_id: format!("ensure-agent-graph-{suffix}"),
+                task_name: "Root".to_string(),
+            })
+            .unwrap();
+    }
 
+    service
+        .delete_conversation("conversation-graph-conversation")
+        .unwrap();
     assert!(service
-        .delete_conversation("conversation-graph-root")
-        .unwrap_err()
-        .contains("persistent Agent tree"));
-    assert!(service
-        .delete_project("project-1")
-        .unwrap_err()
-        .contains("persistent Agent tree"));
-    assert!(service
-        .load_conversation("conversation-graph-root")
+        .load_conversation("conversation-graph-conversation")
         .unwrap()
-        .is_some());
+        .is_none());
     assert!(service
-        .get_agent_node("agent-graph-root")
+        .get_agent_node("agent-graph-conversation")
         .unwrap()
-        .is_some());
+        .is_none());
+    assert!(service
+        .load_projects()
+        .unwrap()
+        .iter()
+        .any(|project| project.id == "project-1"));
+
+    service.delete_project("project-2").unwrap();
+    assert!(service
+        .load_conversation("conversation-graph-project")
+        .unwrap()
+        .is_none());
+    assert!(service
+        .get_agent_node("agent-graph-project")
+        .unwrap()
+        .is_none());
+    assert!(service
+        .load_projects()
+        .unwrap()
+        .iter()
+        .all(|project| project.id != "project-2"));
     assert!(service
         .load_composer_drafts()
         .unwrap()
         .iter()
-        .any(|draft| draft.scope_id == "conversation-graph-root"));
+        .all(|draft| !draft.scope_id.starts_with("conversation-graph-")));
+
+    let connection = service.state.connection().unwrap();
+    let violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .unwrap()
+        .query_map([], |_| Ok(()))
+        .unwrap()
+        .count();
+    assert_eq!(violations, 0);
 }
 
 #[test]
@@ -1974,6 +2003,218 @@ fn conversation_fork_blocks_source_wide_active_command_without_mutating_it() {
         .unwrap()
         .conversation;
     assert_eq!(idempotent_retry.id, forked.id);
+}
+
+#[test]
+fn agent_tree_fork_rejects_an_active_member_command_without_partial_target_state() {
+    const SOURCE_CONVERSATION_ID: &str = "conversation-active-member-tree";
+    const SOURCE_ROOT_AGENT_ID: &str = "agent-active-member-tree-root";
+    const CHILD_CONVERSATION_ID: &str = "conversation-active-member-tree-child";
+    const CHILD_AGENT_ID: &str = "agent-active-member-tree-child";
+    const CHILD_ASSISTANT_MESSAGE_ID: &str = "assistant-active-member-tree-child";
+    const ACTIVE_SESSION_ID: &str = "cmd_000000000000000000000000000000d1";
+    const FORK_REQUEST_ID: &str = "fork-active-member-tree-request";
+
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let created_at = now_ms();
+    let fork_boundary_at = created_at.saturating_add(60_000);
+    service
+        .save_conversation(ChatConversationRecord {
+            id: SOURCE_CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "active member tree".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-active-member-tree-root".to_string(),
+                    role: "user".to_string(),
+                    content: "start the root task".to_string(),
+                    created_at,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-active-member-tree-root".to_string(),
+                    role: "assistant".to_string(),
+                    content: "fork boundary".to_string(),
+                    created_at: fork_boundary_at,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some(
+                        serde_json::json!({
+                            "runId": "run-active-member-tree-root",
+                            "status": "completed"
+                        })
+                        .to_string(),
+                    ),
+                    ui_state_json: None,
+                },
+            ],
+            created_at,
+            updated_at: fork_boundary_at,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    service
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: SOURCE_ROOT_AGENT_ID.to_string(),
+            conversation_id: SOURCE_CONVERSATION_ID.to_string(),
+            creation_request_id: "ensure-active-member-tree-root".to_string(),
+            task_name: "Active member tree".to_string(),
+        })
+        .unwrap();
+    service
+        .save_conversation(ChatConversationRecord {
+            id: CHILD_CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "active child".to_string(),
+            messages: Vec::new(),
+            created_at: created_at.saturating_add(1),
+            updated_at: created_at.saturating_add(1),
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    {
+        let connection = service.state.connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_nodes (
+                     agent_id, schema_version, root_agent_id, root_conversation_id,
+                     parent_agent_id, conversation_id, project_id, creation_request_id,
+                     task_name, task_path,
+                     model_config_id_snapshot, model_display_name_snapshot,
+                     model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                     model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                     provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                     lifecycle, revision, created_at, updated_at
+                 ) VALUES (
+                     ?1, 1, ?2, ?3, ?2, ?4, NULL, ?5,
+                     'active_child', '/root/active_child',
+                     'model-1', 'Model 1', 0, 4096,
+                     'settings-v1', 'connection-v1', 'protocol-v1', 'explicit',
+                     'active', 1, ?6, ?6
+                 )",
+                rusqlite::params![
+                    CHILD_AGENT_ID,
+                    SOURCE_ROOT_AGENT_ID,
+                    SOURCE_CONVERSATION_ID,
+                    CHILD_CONVERSATION_ID,
+                    "create-active-member-tree-child",
+                    created_at.saturating_add(1),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, agent_run_json,
+                     created_at, position
+                 ) VALUES (
+                     ?1, ?2, 'assistant', '', 'sent',
+                     json_object('runId', 'run-active-member-tree-child',
+                                 'status', 'completed'),
+                     ?3, 0
+                 )",
+                rusqlite::params![
+                    CHILD_ASSISTANT_MESSAGE_ID,
+                    CHILD_CONVERSATION_ID,
+                    created_at.saturating_add(2),
+                ],
+            )
+            .unwrap();
+    }
+    create_fork_test_command_session(
+        &service,
+        ACTIVE_SESSION_ID,
+        CHILD_CONVERSATION_ID,
+        CHILD_ASSISTANT_MESSAGE_ID,
+        10,
+    );
+
+    let durable_fork_state = || {
+        let connection = service.state.connection().unwrap();
+        let read_ids = |sql: &str| {
+            connection
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        (
+            read_ids("SELECT id FROM conversations ORDER BY id"),
+            read_ids("SELECT agent_id FROM agent_nodes ORDER BY agent_id"),
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversation_forks WHERE request_id = ?1",
+                    [FORK_REQUEST_ID],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_member_conversation_forks
+                     WHERE root_fork_request_id = ?1",
+                    [FORK_REQUEST_ID],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+        )
+    };
+    let before = durable_fork_state();
+    assert_eq!(before.2, 0);
+    assert_eq!(before.3, 0);
+    assert_eq!(
+        service.list_agent_tree(SOURCE_ROOT_AGENT_ID).unwrap().len(),
+        2
+    );
+
+    let error = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            FORK_REQUEST_ID,
+            SOURCE_CONVERSATION_ID,
+            "assistant-active-member-tree-root",
+        ))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        crate::storage::conversation_fork_repository::ConversationForkError::ActiveCommandSession {
+            conversation_id: CHILD_CONVERSATION_ID.to_string(),
+            active_session_count: 1,
+        }
+    );
+
+    let after = durable_fork_state();
+    assert_eq!(
+        after, before,
+        "a rejected tree fork must leave no target state"
+    );
+    assert_eq!(
+        service
+            .load_agent_command_session(CHILD_CONVERSATION_ID, ACTIVE_SESSION_ID)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .status,
+        crate::AgentCommandSessionStatus::Starting
+    );
+    let connection = service.state.connection().unwrap();
+    let violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .unwrap()
+        .query_map([], |_| Ok(()))
+        .unwrap()
+        .count();
+    assert_eq!(violations, 0);
 }
 
 #[test]

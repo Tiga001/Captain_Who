@@ -29,6 +29,7 @@ mod collaboration_harness;
 mod command_sessions;
 mod context_history;
 mod context_runtime;
+mod deletion;
 mod file_write_permissions;
 mod historical_compatibility_boundary;
 mod image_generation;

@@ -725,7 +725,6 @@ impl AgentRuntime {
                 trace_assistant_message_id.clone(),
             )
             .with_steer_input(steer_input.clone())
-            .with_goal_runtime_state_reader(runtime_extensions.goal_runtime_state_reader())
             .with_text_output_budget(tool_output_budget);
         event_stream.emit(state_event(
             &run_id,

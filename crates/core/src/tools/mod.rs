@@ -9,7 +9,6 @@ mod conversation_history;
 mod document_text;
 mod filesystem;
 mod git_diff;
-mod goal;
 mod image_generation;
 mod input_stream;
 mod limits;
@@ -50,7 +49,6 @@ use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use command_session::CommandSessionTool;
 use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
-use goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
 use image_generation::ImageGenerationTool;
 pub use image_generation::{
     agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
@@ -100,7 +98,7 @@ use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
 use write_file::WriteFileTool;
 
-pub(super) use context::{GoalRuntimeState, GoalRuntimeStateReader, ToolExecutionContext};
+pub(super) use context::ToolExecutionContext;
 use document_text::{
     complete_document_text_result, extract_with_textutil, join_named_text, normalize_text_output,
     read_zip_xml_text_parts, reserve_zip_xml_entry, resolve_document_path, NamedText,
@@ -1015,19 +1013,6 @@ impl ToolRegistry {
     pub(crate) fn register_conversation_history(&mut self) {
         if !self.contains_tool("conversation_history") {
             self.register(ConversationHistoryTool);
-        }
-    }
-
-    pub(crate) fn register_goal_tools(&mut self) {
-        for tool in [
-            Box::new(GetGoalTool) as Box<dyn AgentTool>,
-            Box::new(CreateGoalTool),
-            Box::new(UpdateGoalTool),
-        ] {
-            if !self.contains_tool(&tool.definition().name) {
-                self.register_boxed("core".to_string(), tool)
-                    .expect("goal tool definitions must be valid");
-            }
         }
     }
 

@@ -20,10 +20,11 @@ use crate::{
         PreparedProviderContinuationClone, ProviderContinuationForkMapping,
     },
     root_agent_creation_request_id, root_agent_id_for_conversation, AgentGuidanceStatus,
-    AgentLifecycle, ContextCompactionReceipt, ContextCompactionReceiptStage,
+    AgentLifecycle, AgentNodeRecord, ContextCompactionReceipt, ContextCompactionReceiptStage,
     ContextCompactionReceiptStatus, ConversationMessageOrigin, ConversationModelContextItem,
     ConversationTurnTrace, EnsureRootAgentInput, ModelRequestObservation, ProviderContinuationRef,
-    WorldStateRecord,
+    WorldStateDiff, WorldStateRecord, WorldStateReducer, WorldStateSectionEnvelope,
+    WorldStateSnapshot,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
@@ -88,12 +89,35 @@ struct ForkGuidance {
 }
 
 #[derive(Debug)]
+struct ForkFileDraft {
+    target: AgentFileDraftRecord,
+    history: file_draft_repository::AgentFileDraftHistorySnapshot,
+}
+
+impl std::ops::Deref for ForkFileDraft {
+    type Target = AgentFileDraftRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.target
+    }
+}
+
+#[derive(Debug)]
 struct ForkProviderTransitionReceipt {
     source_receipt: ContextCompactionReceipt,
     source_observation: ModelRequestObservation,
     target_operation_id: String,
     target_run_id: String,
     target_observation_id: String,
+}
+
+#[derive(Debug)]
+struct ForkContextCompactionReceipt {
+    source_receipt: ContextCompactionReceipt,
+    source_observation: Option<ModelRequestObservation>,
+    target_operation_id: String,
+    target_run_id: String,
+    target_observation_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -112,6 +136,82 @@ struct ForkSnapshotOrigin {
 }
 
 #[derive(Debug)]
+struct ConversationHistoryForkPlan {
+    source_conversation_id: String,
+    source_message_id: Option<String>,
+    target: ChatConversationRecord,
+    attachments: Vec<ForkAttachmentCopy>,
+    archives: Vec<conversation_history_archive_repository::ConversationHistoryArchiveForkCopy>,
+    traces: Vec<ForkTrace>,
+    turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
+    guidances: Vec<ForkGuidance>,
+    file_drafts: Vec<ForkFileDraft>,
+    summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
+    compaction_receipts: Vec<ForkContextCompactionReceipt>,
+    provider_transition_receipts: Vec<ForkProviderTransitionReceipt>,
+    world_state_records: Vec<world_state_repository::ConversationWorldStateJournalEntry>,
+    requires_context_adaptation: bool,
+    adaptation_source_summary_id: Option<String>,
+    message_id_map: HashMap<String, String>,
+    snapshot_origins: Vec<ForkSnapshotOrigin>,
+    id_replacements: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+struct MemberAgentForkPlan {
+    source_agent: AgentNodeRecord,
+    target_agent: AgentNodeRecord,
+    history: ConversationHistoryForkPlan,
+}
+
+#[derive(Clone, Copy)]
+struct ConversationHistoryForkPlanRef<'a> {
+    source_conversation_id: &'a str,
+    source_message_id: Option<&'a str>,
+    target: &'a ChatConversationRecord,
+    attachments: &'a [ForkAttachmentCopy],
+    archives: &'a [conversation_history_archive_repository::ConversationHistoryArchiveForkCopy],
+    traces: &'a [ForkTrace],
+    turn_diffs: &'a [turn_diff_repository::AgentTurnDiffForkCopy],
+    guidances: &'a [ForkGuidance],
+    file_drafts: &'a [ForkFileDraft],
+    summaries: &'a [context_compaction_repository::ContextCompactionSummaryVersion],
+    compaction_receipts: &'a [ForkContextCompactionReceipt],
+    provider_transition_receipts: &'a [ForkProviderTransitionReceipt],
+    world_state_records: &'a [world_state_repository::ConversationWorldStateJournalEntry],
+    requires_context_adaptation: bool,
+    adaptation_source_summary_id: Option<&'a str>,
+    message_id_map: &'a HashMap<String, String>,
+    snapshot_origins: &'a [ForkSnapshotOrigin],
+    id_replacements: &'a HashMap<String, String>,
+}
+
+impl ConversationHistoryForkPlan {
+    fn as_ref(&self) -> ConversationHistoryForkPlanRef<'_> {
+        ConversationHistoryForkPlanRef {
+            source_conversation_id: &self.source_conversation_id,
+            source_message_id: self.source_message_id.as_deref(),
+            target: &self.target,
+            attachments: &self.attachments,
+            archives: &self.archives,
+            traces: &self.traces,
+            turn_diffs: &self.turn_diffs,
+            guidances: &self.guidances,
+            file_drafts: &self.file_drafts,
+            summaries: &self.summaries,
+            compaction_receipts: &self.compaction_receipts,
+            provider_transition_receipts: &self.provider_transition_receipts,
+            world_state_records: &self.world_state_records,
+            requires_context_adaptation: self.requires_context_adaptation,
+            adaptation_source_summary_id: self.adaptation_source_summary_id.as_deref(),
+            message_id_map: &self.message_id_map,
+            snapshot_origins: &self.snapshot_origins,
+            id_replacements: &self.id_replacements,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct ConversationForkPlan {
     pub request_id: String,
     pub source_conversation_id: String,
@@ -123,11 +223,11 @@ pub(crate) struct ConversationForkPlan {
     traces: Vec<ForkTrace>,
     turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
     guidances: Vec<ForkGuidance>,
-    file_drafts: Vec<AgentFileDraftRecord>,
+    file_drafts: Vec<ForkFileDraft>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
+    compaction_receipts: Vec<ForkContextCompactionReceipt>,
     provider_transition_receipts: Vec<ForkProviderTransitionReceipt>,
     world_state_records: Vec<world_state_repository::ConversationWorldStateJournalEntry>,
-    pub(crate) provider_continuation_mappings: Vec<ProviderContinuationForkMapping>,
     pub(crate) requires_context_adaptation: bool,
     adaptation_source_summary_id: Option<String>,
     message_id_map: HashMap<String, String>,
@@ -136,6 +236,41 @@ pub(crate) struct ConversationForkPlan {
     #[cfg(test)]
     run_id_map: HashMap<String, String>,
     id_replacements: HashMap<String, String>,
+    members: Vec<MemberAgentForkPlan>,
+    pub(crate) provider_continuation_mappings: Vec<ProviderContinuationForkMapping>,
+}
+
+impl ConversationForkPlan {
+    fn root_history_ref(&self) -> ConversationHistoryForkPlanRef<'_> {
+        ConversationHistoryForkPlanRef {
+            source_conversation_id: &self.source_conversation_id,
+            source_message_id: Some(&self.source_message_id),
+            target: &self.target,
+            attachments: &self.attachments,
+            archives: &self.archives,
+            traces: &self.traces,
+            turn_diffs: &self.turn_diffs,
+            guidances: &self.guidances,
+            file_drafts: &self.file_drafts,
+            summaries: &self.summaries,
+            compaction_receipts: &self.compaction_receipts,
+            provider_transition_receipts: &self.provider_transition_receipts,
+            world_state_records: &self.world_state_records,
+            requires_context_adaptation: self.requires_context_adaptation,
+            adaptation_source_summary_id: self.adaptation_source_summary_id.as_deref(),
+            message_id_map: &self.message_id_map,
+            snapshot_origins: &self.snapshot_origins,
+            id_replacements: &self.id_replacements,
+        }
+    }
+
+    pub(crate) fn attachments_mut(&mut self) -> impl Iterator<Item = &mut ForkAttachmentCopy> {
+        self.attachments.iter_mut().chain(
+            self.members
+                .iter_mut()
+                .flat_map(|member| member.history.attachments.iter_mut()),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -152,6 +287,459 @@ struct ResolvedConversationForkPoint {
     assistant_message_id: String,
     summary_id: Option<String>,
     model_id: Option<String>,
+}
+
+pub(crate) fn build_fork_plan_at_point(
+    connection: &Connection,
+    request_id: &str,
+    source_conversation_id: &str,
+    fork_point: &ConversationForkPoint,
+    created_at: i64,
+) -> Result<ConversationForkPlan, ConversationForkError> {
+    validate_fork_point_input(request_id, source_conversation_id, fork_point)?;
+    let source_root =
+        agent_graph_repository::get_agent_node_by_conversation(connection, source_conversation_id)
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+    if source_root
+        .as_ref()
+        .is_some_and(|node| node.parent_agent_id.is_some())
+    {
+        return Err(ConversationForkError::Other(
+            "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
+        ));
+    }
+    let cutoff_at = authoritative_fork_cutoff_at(connection, source_conversation_id, fork_point)?;
+
+    let target_root_conversation_id = new_id("conversation");
+    let mut global_id_replacements = HashMap::new();
+    insert_global_replacement(
+        &mut global_id_replacements,
+        source_conversation_id,
+        &target_root_conversation_id,
+    )?;
+
+    let mut visible_members = Vec::new();
+    let mut target_member_identities = HashMap::new();
+    if let Some(root) = &source_root {
+        let target_root_agent_id = root_agent_id_for_conversation(&target_root_conversation_id);
+        insert_global_replacement(
+            &mut global_id_replacements,
+            &root.agent_id,
+            &target_root_agent_id,
+        )?;
+        let tree = agent_graph_repository::list_agent_tree(connection, &root.root_agent_id)
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        visible_members = visible_member_agents(&tree, root, cutoff_at)?;
+        for source_member in &visible_members {
+            let target_agent_id = new_id("agent");
+            let target_conversation_id = new_id("conversation");
+            insert_global_replacement(
+                &mut global_id_replacements,
+                &source_member.agent_id,
+                &target_agent_id,
+            )?;
+            insert_global_replacement(
+                &mut global_id_replacements,
+                &source_member.conversation_id,
+                &target_conversation_id,
+            )?;
+            target_member_identities.insert(
+                source_member.agent_id.clone(),
+                (target_agent_id, target_conversation_id),
+            );
+        }
+        let source = chat_repository::get_active_conversation(connection, source_conversation_id)
+            .map_err(database_error)?
+            .ok_or_else(|| ConversationForkError::Other("原任务不存在。".to_string()))?;
+        let active_chain =
+            context_compaction_repository::list_active_summary_chain(connection, &source.id)
+                .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        let resolved = resolve_fork_point(connection, &source, fork_point, &active_chain)?;
+        let root_message_limit = source
+            .messages
+            .iter()
+            .position(|message| message.id == resolved.assistant_message_id)
+            .ok_or_else(|| ConversationForkError::Other("所选回复不属于原任务。".to_string()))?;
+        preallocate_conversation_prefix_identities(
+            connection,
+            &source,
+            Some(root_message_limit),
+            &mut global_id_replacements,
+        )?;
+        for source_member in &visible_members {
+            let member_conversation = chat_repository::get_active_conversation(
+                connection,
+                &source_member.conversation_id,
+            )
+            .map_err(database_error)?
+            .ok_or_else(|| {
+                ConversationForkError::Other("成员 Agent Conversation 不存在。".to_string())
+            })?;
+            let boundary =
+                visible_member_message_boundary(connection, &member_conversation, cutoff_at)?;
+            preallocate_conversation_prefix_identities(
+                connection,
+                &member_conversation,
+                boundary.message_limit,
+                &mut global_id_replacements,
+            )?;
+        }
+    }
+
+    let mut plan = build_single_conversation_fork_plan_at_point(
+        connection,
+        request_id,
+        source_conversation_id,
+        fork_point,
+        created_at,
+        false,
+        Some(&target_root_conversation_id),
+        None,
+        Some(cutoff_at),
+        Some(cutoff_at),
+        &global_id_replacements,
+    )?;
+
+    let Some(source_root) = source_root else {
+        return Ok(plan);
+    };
+    let target_root_agent_id = root_agent_id_for_conversation(&target_root_conversation_id);
+    if let Some(collaboration) = &mut plan.collaboration_root {
+        collaboration.target_root.task_name = source_root.task_name.clone();
+    }
+
+    let copied_conversation_ids = std::iter::once(source_root.conversation_id.clone())
+        .chain(
+            visible_members
+                .iter()
+                .map(|member| member.conversation_id.clone()),
+        )
+        .collect::<Vec<_>>();
+    let copied_agent_ids = std::iter::once(source_root.agent_id.clone())
+        .chain(visible_members.iter().map(|member| member.agent_id.clone()))
+        .collect::<Vec<_>>();
+    ensure_agent_tree_stable(connection, &copied_conversation_ids, &copied_agent_ids)?;
+
+    for source_member in visible_members {
+        let (target_agent_id, target_conversation_id) = target_member_identities
+            .get(&source_member.agent_id)
+            .cloned()
+            .ok_or_else(|| {
+                ConversationForkError::Other(
+                    "成员 Agent 的目标身份映射不完整，已安全取消分叉。".to_string(),
+                )
+            })?;
+        let source_parent_agent_id = source_member
+            .parent_agent_id
+            .as_deref()
+            .ok_or_else(|| ConversationForkError::Other("成员 Agent 缺少父节点。".to_string()))?;
+        let target_parent_agent_id = if source_parent_agent_id == source_root.agent_id {
+            target_root_agent_id.clone()
+        } else {
+            target_member_identities
+                .get(source_parent_agent_id)
+                .map(|(agent_id, _)| agent_id.clone())
+                .ok_or_else(|| {
+                    ConversationForkError::Other(
+                        "成员 Agent 的目标父节点映射不完整，已安全取消分叉。".to_string(),
+                    )
+                })?
+        };
+        let model_id = source_member
+            .model_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.model_config_id.clone())
+            .ok_or_else(|| {
+                ConversationForkError::Other("成员 Agent 缺少冻结模型快照。".to_string())
+            })?;
+        let source_conversation =
+            chat_repository::get_active_conversation(connection, &source_member.conversation_id)
+                .map_err(database_error)?
+                .ok_or_else(|| {
+                    ConversationForkError::Other("成员 Agent Conversation 不存在。".to_string())
+                })?;
+        if source_conversation.project_id != source_member.project_id
+            || source_conversation.model_id.as_deref() != Some(model_id.as_str())
+        {
+            return Err(ConversationForkError::Other(
+                "成员 Agent Conversation 的项目或模型身份无效。".to_string(),
+            ));
+        }
+        let boundary =
+            visible_member_message_boundary(connection, &source_conversation, cutoff_at)?;
+        let (history, member_mappings) = if let Some((assistant_message_id, message_limit)) =
+            boundary.last_assistant.as_ref().map(|message_id| {
+                (
+                    message_id.clone(),
+                    boundary
+                        .message_limit
+                        .expect("a visible assistant always establishes a message boundary"),
+                )
+            }) {
+            let member_plan = build_single_conversation_fork_plan_at_point(
+                connection,
+                &new_id("member-fork-plan"),
+                &source_member.conversation_id,
+                &ConversationForkPoint::AssistantReply {
+                    assistant_message_id,
+                },
+                created_at,
+                true,
+                Some(&target_conversation_id),
+                Some(message_limit),
+                Some(cutoff_at),
+                Some(cutoff_at),
+                &global_id_replacements,
+            )?;
+            history_from_single_plan(member_plan)?
+        } else {
+            (
+                build_message_only_history_plan(
+                    connection,
+                    &source_conversation,
+                    boundary.message_limit,
+                    &target_conversation_id,
+                    created_at,
+                    &global_id_replacements,
+                )?,
+                Vec::new(),
+            )
+        };
+        if history.target.model_id.as_deref() != Some(model_id.as_str()) {
+            return Err(ConversationForkError::Other(
+                "成员历史边界模型与冻结 Agent 模型不一致。".to_string(),
+            ));
+        }
+        plan.provider_continuation_mappings.extend(member_mappings);
+        plan.members.push(MemberAgentForkPlan {
+            source_agent: source_member.clone(),
+            target_agent: AgentNodeRecord {
+                agent_id: target_agent_id,
+                root_agent_id: target_root_agent_id.clone(),
+                root_conversation_id: target_root_conversation_id.clone(),
+                parent_agent_id: Some(target_parent_agent_id),
+                conversation_id: target_conversation_id,
+                project_id: source_member.project_id.clone(),
+                creation_request_id: new_id("agent-fork-request"),
+                task_name: source_member.task_name.clone(),
+                task_path: source_member.task_path.clone(),
+                template_snapshot: source_member.template_snapshot.clone(),
+                model_snapshot: source_member.model_snapshot.clone(),
+                model_selection_source: source_member.model_selection_source,
+                reasoning_effort_snapshot: source_member.reasoning_effort_snapshot,
+                lifecycle: AgentLifecycle::Active,
+                revision: source_member.revision,
+                created_at: source_member.created_at,
+                updated_at: source_member.updated_at,
+            },
+            history,
+        });
+    }
+    Ok(plan)
+}
+
+#[derive(Debug)]
+struct VisibleMemberMessageBoundary {
+    message_limit: Option<usize>,
+    last_assistant: Option<String>,
+}
+
+fn visible_member_message_boundary(
+    connection: &Connection,
+    source: &ChatConversationRecord,
+    cutoff_at: i64,
+) -> Result<VisibleMemberMessageBoundary, ConversationForkError> {
+    let mut message_limit = None;
+    let mut last_assistant = None;
+    for (position, message) in source.messages.iter().enumerate() {
+        if message.created_at > cutoff_at {
+            break;
+        }
+        if message.role == "assistant" {
+            let trace =
+                conversation_trace_repository::get_trace_for_message(connection, &message.id)
+                    .map_err(database_error)?;
+            ensure_settled_assistant(message, trace.as_ref())?;
+            if trace.is_some() && trace_times(connection, &message.id)?.1 > cutoff_at {
+                break;
+            }
+            last_assistant = Some(message.id.clone());
+        }
+        message_limit = Some(position);
+    }
+    Ok(VisibleMemberMessageBoundary {
+        message_limit,
+        last_assistant,
+    })
+}
+
+fn visible_member_agents(
+    tree: &[AgentNodeRecord],
+    root: &AgentNodeRecord,
+    cutoff_at: i64,
+) -> Result<Vec<AgentNodeRecord>, ConversationForkError> {
+    let mut candidates = tree
+        .iter()
+        .filter(|node| node.parent_agent_id.is_some() && node.created_at <= cutoff_at)
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.task_path
+            .matches('/')
+            .count()
+            .cmp(&right.task_path.matches('/').count())
+            .then_with(|| left.created_at.cmp(&right.created_at))
+            .then_with(|| left.agent_id.cmp(&right.agent_id))
+    });
+    let mut visible_ids = HashSet::from([root.agent_id.clone()]);
+    let mut visible = Vec::new();
+    for candidate in candidates {
+        let parent = candidate
+            .parent_agent_id
+            .as_deref()
+            .ok_or_else(|| ConversationForkError::Other("成员 Agent 缺少父节点。".to_string()))?;
+        if visible_ids.contains(parent) {
+            visible_ids.insert(candidate.agent_id.clone());
+            visible.push(candidate);
+        }
+    }
+    Ok(visible)
+}
+
+fn insert_global_replacement(
+    replacements: &mut HashMap<String, String>,
+    source: &str,
+    target: &str,
+) -> Result<(), ConversationForkError> {
+    if let Some(existing) = replacements.insert(source.to_string(), target.to_string()) {
+        if existing != target {
+            return Err(ConversationForkError::Other(
+                "分叉树存在冲突的跨实体身份，已安全取消。".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn preallocate_conversation_prefix_identities(
+    connection: &Connection,
+    source: &ChatConversationRecord,
+    message_limit: Option<usize>,
+    replacements: &mut HashMap<String, String>,
+) -> Result<(), ConversationForkError> {
+    let messages = match message_limit {
+        Some(limit) => source.messages.get(..=limit).ok_or_else(|| {
+            ConversationForkError::Other("预分配的 Conversation 历史边界无效。".to_string())
+        })?,
+        None => &[],
+    };
+    let mut run_ids = HashSet::new();
+    let mut archive_refs = HashSet::new();
+    for message in messages {
+        insert_global_replacement(replacements, &message.id, &new_id("message"))?;
+        if let Some(trace) =
+            conversation_trace_repository::get_trace_for_message(connection, &message.id)
+                .map_err(database_error)?
+        {
+            let target_run_id = replacements
+                .get(&trace.run_id)
+                .cloned()
+                .unwrap_or_else(|| new_id("run"));
+            insert_global_replacement(replacements, &trace.run_id, &target_run_id)?;
+            run_ids.insert(trace.run_id.clone());
+            for item in &trace.items {
+                let archive = match item {
+                    crate::ConversationTurnTraceItem::ToolResult { archive, .. }
+                    | crate::ConversationTurnTraceItem::CommandSessionLifecycle {
+                        archive, ..
+                    } => archive,
+                    _ => continue,
+                };
+                if let Some(archive_ref) = archive.archive_ref.as_deref() {
+                    archive_refs.insert(archive_ref.to_string());
+                }
+            }
+        }
+        if let Some(run_id) = agent_run_id(message.agent_run_json.as_deref()) {
+            let target_run_id = replacements
+                .get(&run_id)
+                .cloned()
+                .unwrap_or_else(|| new_id("run"));
+            insert_global_replacement(replacements, &run_id, &target_run_id)?;
+            run_ids.insert(run_id);
+        }
+        for guidance in
+            guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
+                .map_err(database_error)?
+        {
+            if guidance.status == AgentGuidanceStatus::Applied {
+                insert_global_replacement(
+                    replacements,
+                    &guidance.guidance_id,
+                    &new_id("guidance"),
+                )?;
+            }
+        }
+    }
+    for run_id in run_ids {
+        for draft in file_draft_repository::list_drafts_for_run(connection, &run_id)
+            .map_err(database_error)?
+        {
+            insert_global_replacement(replacements, &draft.id, &new_id("file-draft"))?;
+        }
+    }
+    for archive_ref in archive_refs {
+        insert_global_replacement(replacements, &archive_ref, &new_id("history-archive"))?;
+    }
+    let message_ids = messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    for attachment in attachment_repository::list_message_attachments_for_fork(
+        connection,
+        &source.id,
+        &message_ids,
+    )
+    .map_err(database_error)?
+    {
+        insert_global_replacement(replacements, &attachment.id, &new_id("attachment"))?;
+    }
+    Ok(())
+}
+
+fn authoritative_fork_cutoff_at(
+    connection: &Connection,
+    source_conversation_id: &str,
+    fork_point: &ConversationForkPoint,
+) -> Result<i64, ConversationForkError> {
+    match fork_point {
+        ConversationForkPoint::AssistantReply {
+            assistant_message_id,
+        } => connection
+            .query_row(
+                "SELECT MAX(message.created_at,
+                            COALESCE(trace.completed_at, trace.updated_at, message.created_at))
+                 FROM messages AS message
+                 LEFT JOIN conversation_turn_traces AS trace
+                   ON trace.assistant_message_id = message.id
+                 WHERE message.conversation_id = ?1 AND message.id = ?2",
+                params![source_conversation_id, assistant_message_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(database_error)
+            .map_err(Into::into),
+        ConversationForkPoint::ProviderTransitionBoundary { operation_id } => {
+            let receipt =
+                context_compaction_receipt_repository::get_receipt(connection, operation_id)
+                    .map_err(|error| ConversationForkError::Other(error.to_string()))?
+                    .ok_or_else(|| {
+                        ConversationForkError::Other(
+                            "找不到指定的 Provider transition 分叉边界。".to_string(),
+                        )
+                    })?;
+            Ok(receipt.completed_at.unwrap_or(receipt.updated_at))
+        }
+    }
 }
 
 pub(crate) fn find_existing_fork(
@@ -269,23 +857,35 @@ pub(crate) fn get_continuation_origin(
         .optional()
 }
 
-pub(crate) fn build_fork_plan_at_point(
+#[allow(clippy::too_many_arguments)]
+fn build_single_conversation_fork_plan_at_point(
     connection: &Connection,
     request_id: &str,
     source_conversation_id: &str,
     fork_point: &ConversationForkPoint,
     created_at: i64,
+    allow_member_source: bool,
+    target_conversation_id: Option<&str>,
+    source_message_limit: Option<usize>,
+    history_cutoff_at: Option<i64>,
+    receipt_cutoff_at: Option<i64>,
+    global_id_replacements: &HashMap<String, String>,
 ) -> Result<ConversationForkPlan, ConversationForkError> {
     validate_fork_point_input(request_id, source_conversation_id, fork_point)?;
     let source_agent =
         agent_graph_repository::get_agent_node_by_conversation(connection, source_conversation_id)
             .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+    let snapshot_authorized = source_agent.is_some();
     let source_root = match source_agent {
         None => None,
         Some(node) if node.parent_agent_id.is_some() => {
-            return Err(ConversationForkError::Other(
-                "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
-            ));
+            if !allow_member_source {
+                return Err(ConversationForkError::Other(
+                    "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
+                ));
+            }
+            ensure_no_active_conversation_turn(connection, source_conversation_id)?;
+            None
         }
         Some(node) if node.lifecycle != AgentLifecycle::Active => {
             return Err(ConversationForkError::Other(
@@ -320,13 +920,27 @@ pub(crate) fn build_fork_plan_at_point(
         .enumerate()
         .map(|(position, message)| (message.id.clone(), position))
         .collect::<HashMap<_, _>>();
-    let source_messages = source.messages[..=cutoff].to_vec();
-    let target_conversation_id = new_id("conversation");
+    let message_limit = source_message_limit.unwrap_or(cutoff);
+    if message_limit < cutoff || message_limit >= source.messages.len() {
+        return Err("成员对话的可见消息边界无效。".to_string().into());
+    }
+    let source_messages = source.messages[..=message_limit].to_vec();
+    let target_conversation_id = target_conversation_id
+        .map(str::to_string)
+        .unwrap_or_else(|| new_id("conversation"));
     let message_id_map = source_messages
         .iter()
-        .map(|message| (message.id.clone(), new_id("message")))
+        .map(|message| {
+            (
+                message.id.clone(),
+                global_id_replacements
+                    .get(&message.id)
+                    .cloned()
+                    .unwrap_or_else(|| new_id("message")),
+            )
+        })
         .collect::<HashMap<_, _>>();
-    let snapshot_origins = if source_root.is_some() {
+    let snapshot_origins = if snapshot_authorized {
         fork_snapshot_origins(connection, &source, &source_messages, &message_id_map)?
     } else {
         Vec::new()
@@ -336,7 +950,7 @@ pub(crate) fn build_fork_plan_at_point(
         .iter()
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
-    let summaries = match resolved.summary_id.as_deref() {
+    let mut summaries = match resolved.summary_id.as_deref() {
         Some(summary_id) => summaries_visible_through_transition_boundary(
             active_chain,
             &source_positions,
@@ -351,6 +965,9 @@ pub(crate) fn build_fork_plan_at_point(
             cutoff,
         )?,
     };
+    if let Some(cutoff_at) = history_cutoff_at {
+        summaries = summaries_visible_at_time(connection, &source.id, summaries, cutoff_at)?;
+    }
     // Provider-transition receipts are part of the visible timeline, not disposable audit noise.
     // Copy every transition whose summary is visible at the selected fork point so a later fork
     // of the child conversation retains the same semantic history and UI boundary.
@@ -418,7 +1035,15 @@ pub(crate) fn build_fork_plan_at_point(
     .map_err(database_error)?;
     let attachment_id_map = source_attachments
         .iter()
-        .map(|attachment| (attachment.id.clone(), new_id("attachment")))
+        .map(|attachment| {
+            (
+                attachment.id.clone(),
+                global_id_replacements
+                    .get(&attachment.id)
+                    .cloned()
+                    .unwrap_or_else(|| new_id("attachment")),
+            )
+        })
         .collect::<HashMap<_, _>>();
 
     let mut traces = Vec::new();
@@ -436,7 +1061,10 @@ pub(crate) fn build_fork_plan_at_point(
                     .to_string()
                     .into());
             }
-            let new_run_id = new_id("run");
+            let new_run_id = global_id_replacements
+                .get(&trace.run_id)
+                .cloned()
+                .unwrap_or_else(|| new_id("run"));
             run_id_map.insert(trace.run_id.clone(), new_run_id.clone());
             let (trace_created_at, committed_at) = trace_times(connection, &message.id)?;
             let model_context_items =
@@ -460,9 +1088,21 @@ pub(crate) fn build_fork_plan_at_point(
                 committed_at,
             });
         } else if let Some(run_id) = agent_run_id(message.agent_run_json.as_deref()) {
-            run_id_map.entry(run_id).or_insert_with(|| new_id("run"));
+            let target_run_id = global_id_replacements
+                .get(&run_id)
+                .cloned()
+                .unwrap_or_else(|| new_id("run"));
+            run_id_map.entry(run_id).or_insert(target_run_id);
         }
     }
+    let compaction_receipts = collect_visible_context_compaction_receipts(
+        connection,
+        &source.id,
+        &message_id_map,
+        &run_id_map,
+        &summaries,
+        receipt_cutoff_at,
+    )?;
 
     // A recursive fork needs every visible turn diff, not only the boundary turn.
     let mut turn_diffs = turn_diff_repository::list_fork_copies_through_message(
@@ -501,31 +1141,68 @@ pub(crate) fn build_fork_plan_at_point(
             if source_draft.conversation_id != source.id {
                 return Err("文件草稿的任务归属与历史回复不一致。".to_string().into());
             }
-            let target_draft_id = new_id("file-draft");
+            if history_cutoff_at.is_some_and(|cutoff| source_draft.created_at > cutoff) {
+                continue;
+            }
+            if history_cutoff_at.is_some_and(|cutoff| source_draft.updated_at > cutoff) {
+                return Err(ConversationForkError::Other(
+                    "文件草稿在分叉点后发生过不可版本化的变化，无法生成精确历史快照。".to_string(),
+                ));
+            }
+            let target_draft_id = global_id_replacements
+                .get(&source_draft.id)
+                .cloned()
+                .unwrap_or_else(|| new_id("file-draft"));
+            let history = file_draft_repository::load_draft_history_snapshot(
+                connection,
+                &source_draft.id,
+                history_cutoff_at,
+            )
+            .map_err(database_error)?;
+            if history.chunks.len() as u64 != source_draft.chunk_count
+                || history.chunks.len() as u64 != source_draft.next_chunk_index
+                || history
+                    .chunks
+                    .iter()
+                    .enumerate()
+                    .any(|(index, chunk)| chunk.chunk_index != index as u64)
+                || history
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .any(|(index, operation)| operation.sequence != index as u64)
+            {
+                return Err(ConversationForkError::Other(
+                    "文件草稿在分叉点处的 chunk 快照与主记录不一致。".to_string(),
+                ));
+            }
             draft_id_map.insert(source_draft.id.clone(), target_draft_id.clone());
-            file_drafts.push(AgentFileDraftRecord {
-                id: target_draft_id,
-                conversation_id: target_conversation_id.clone(),
-                project_id: source.project_id.clone(),
-                run_id: target_run_id.clone(),
-                file_path: source_draft.file_path,
-                mode: source_draft.mode,
-                status: source_draft.status,
-                base_revision: source_draft.base_revision,
-                base_content: source_draft.base_content,
-                content: source_draft.content,
-                additions: source_draft.additions,
-                deletions: source_draft.deletions,
-                line_count: source_draft.line_count,
-                byte_count: source_draft.byte_count,
-                chunk_count: source_draft.chunk_count,
-                next_chunk_index: source_draft.next_chunk_index,
-                stats_final: source_draft.stats_final,
-                summary: source_draft.summary,
-                final_action_id: source_draft.final_action_id,
-                created_at: source_draft.created_at,
-                updated_at: source_draft.updated_at,
-                expires_at: source_draft.expires_at,
+            file_drafts.push(ForkFileDraft {
+                target: AgentFileDraftRecord {
+                    id: target_draft_id,
+                    conversation_id: target_conversation_id.clone(),
+                    project_id: source.project_id.clone(),
+                    run_id: target_run_id.clone(),
+                    file_path: source_draft.file_path,
+                    mode: source_draft.mode,
+                    status: source_draft.status,
+                    base_revision: source_draft.base_revision,
+                    base_content: source_draft.base_content,
+                    content: source_draft.content,
+                    additions: source_draft.additions,
+                    deletions: source_draft.deletions,
+                    line_count: source_draft.line_count,
+                    byte_count: source_draft.byte_count,
+                    chunk_count: source_draft.chunk_count,
+                    next_chunk_index: source_draft.next_chunk_index,
+                    stats_final: source_draft.stats_final,
+                    summary: source_draft.summary,
+                    final_action_id: source_draft.final_action_id,
+                    created_at: source_draft.created_at,
+                    updated_at: source_draft.updated_at,
+                    expires_at: source_draft.expires_at,
+                },
+                history,
             });
         }
     }
@@ -540,7 +1217,10 @@ pub(crate) fn build_fork_plan_at_point(
             if guidance.status != AgentGuidanceStatus::Applied {
                 continue;
             }
-            let target_guidance_id = new_id("guidance");
+            let target_guidance_id = global_id_replacements
+                .get(&guidance.guidance_id)
+                .cloned()
+                .unwrap_or_else(|| new_id("guidance"));
             let target_run_id = mapped_id(&run_id_map, &guidance.run_id, "引导所属运行")?;
             let target_assistant_message_id = mapped_id(
                 &message_id_map,
@@ -593,7 +1273,7 @@ pub(crate) fn build_fork_plan_at_point(
             if archive_id_map.contains_key(source_archive_ref) {
                 continue;
             }
-            let copy = conversation_history_archive_repository::load_fork_copy(
+            let mut copy = conversation_history_archive_repository::load_fork_copy(
                 connection,
                 &source.id,
                 source_archive_ref,
@@ -601,6 +1281,9 @@ pub(crate) fn build_fork_plan_at_point(
                 &trace.trace.assistant_message_id,
             )
             .map_err(database_error)?;
+            if let Some(target_archive_ref) = global_id_replacements.get(source_archive_ref) {
+                copy.target_archive_ref = target_archive_ref.clone();
+            }
             archive_id_map.insert(
                 source_archive_ref.to_string(),
                 copy.target_archive_ref.clone(),
@@ -609,13 +1292,57 @@ pub(crate) fn build_fork_plan_at_point(
         }
     }
 
-    let mut replacements = message_id_map.clone();
+    let mut replacements = global_id_replacements.clone();
+    replacements.extend(message_id_map.clone());
     replacements.extend(run_id_map.clone());
     replacements.extend(attachment_id_map.clone());
     replacements.extend(guidance_id_map);
     replacements.extend(draft_id_map);
     replacements.extend(archive_id_map);
     replacements.insert(source.id.clone(), target_conversation_id.clone());
+    for version in &summaries {
+        let target_summary_id = new_id("context-summary");
+        insert_global_replacement(&mut replacements, &version.summary.id, &target_summary_id)?;
+    }
+    for copy in &compaction_receipts {
+        insert_global_replacement(
+            &mut replacements,
+            &copy.source_receipt.operation_id,
+            &copy.target_operation_id,
+        )?;
+        insert_global_replacement(
+            &mut replacements,
+            &copy.source_receipt.run_id,
+            &copy.target_run_id,
+        )?;
+        if let (Some(source_observation_id), Some(target_observation_id)) = (
+            copy.source_receipt.generation_observation_id.as_deref(),
+            copy.target_observation_id.as_deref(),
+        ) {
+            insert_global_replacement(
+                &mut replacements,
+                source_observation_id,
+                target_observation_id,
+            )?;
+        }
+    }
+    for copy in &provider_transition_receipts {
+        insert_global_replacement(
+            &mut replacements,
+            &copy.source_receipt.operation_id,
+            &copy.target_operation_id,
+        )?;
+        insert_global_replacement(
+            &mut replacements,
+            &copy.source_receipt.run_id,
+            &copy.target_run_id,
+        )?;
+        insert_global_replacement(
+            &mut replacements,
+            &copy.source_observation.id,
+            &copy.target_observation_id,
+        )?;
+    }
     for fork_trace in &mut traces {
         rewrite_trace_items(&mut fork_trace.trace, &replacements)?;
         rewrite_model_context_items(&mut fork_trace.model_context_items, &replacements)?;
@@ -653,13 +1380,15 @@ pub(crate) fn build_fork_plan_at_point(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    let world_state_records = world_state_records_visible_at_cutoff(
+    let mut world_state_records = world_state_records_visible_at_cutoff(
         connection,
         &source.id,
         &source_positions,
-        cutoff,
+        message_limit,
         &summaries,
+        history_cutoff_at,
     )?;
+    rewrite_world_state_records(&mut world_state_records, &replacements)?;
     let provider_continuation_mappings = if requires_context_adaptation {
         // The exact old payload was already released, so a partial clone of whatever happens to
         // remain replayable would create a misleading mixed snapshot and unnecessarily depend on
@@ -734,6 +1463,7 @@ pub(crate) fn build_fork_plan_at_point(
         guidances,
         file_drafts,
         summaries,
+        compaction_receipts,
         provider_transition_receipts,
         world_state_records,
         provider_continuation_mappings,
@@ -744,6 +1474,158 @@ pub(crate) fn build_fork_plan_at_point(
         snapshot_origins,
         #[cfg(test)]
         run_id_map,
+        id_replacements: replacements,
+        members: Vec::new(),
+    })
+}
+
+fn history_from_single_plan(
+    plan: ConversationForkPlan,
+) -> Result<
+    (
+        ConversationHistoryForkPlan,
+        Vec<ProviderContinuationForkMapping>,
+    ),
+    ConversationForkError,
+> {
+    if plan.collaboration_root.is_some() || !plan.members.is_empty() {
+        return Err(ConversationForkError::Other(
+            "成员历史计划意外包含新的 Agent 树身份。".to_string(),
+        ));
+    }
+    Ok((
+        ConversationHistoryForkPlan {
+            source_conversation_id: plan.source_conversation_id,
+            source_message_id: Some(plan.source_message_id),
+            target: plan.target,
+            attachments: plan.attachments,
+            archives: plan.archives,
+            traces: plan.traces,
+            turn_diffs: plan.turn_diffs,
+            guidances: plan.guidances,
+            file_drafts: plan.file_drafts,
+            summaries: plan.summaries,
+            compaction_receipts: plan.compaction_receipts,
+            provider_transition_receipts: plan.provider_transition_receipts,
+            world_state_records: plan.world_state_records,
+            requires_context_adaptation: plan.requires_context_adaptation,
+            adaptation_source_summary_id: plan.adaptation_source_summary_id,
+            message_id_map: plan.message_id_map,
+            snapshot_origins: plan.snapshot_origins,
+            id_replacements: plan.id_replacements,
+        },
+        plan.provider_continuation_mappings,
+    ))
+}
+
+fn build_message_only_history_plan(
+    connection: &Connection,
+    source: &ChatConversationRecord,
+    message_limit: Option<usize>,
+    target_conversation_id: &str,
+    created_at: i64,
+    global_id_replacements: &HashMap<String, String>,
+) -> Result<ConversationHistoryForkPlan, ConversationForkError> {
+    let source_messages = message_limit
+        .map(|limit| source.messages[..=limit].to_vec())
+        .unwrap_or_default();
+    let source_message_ids = source_messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<Vec<_>>();
+    let message_id_map = source_messages
+        .iter()
+        .map(|message| {
+            (
+                message.id.clone(),
+                global_id_replacements
+                    .get(&message.id)
+                    .cloned()
+                    .unwrap_or_else(|| new_id("message")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let source_attachments = attachment_repository::list_message_attachments_for_fork(
+        connection,
+        &source.id,
+        &source_message_ids,
+    )
+    .map_err(database_error)?;
+    let attachment_id_map = source_attachments
+        .iter()
+        .map(|attachment| {
+            (
+                attachment.id.clone(),
+                global_id_replacements
+                    .get(&attachment.id)
+                    .cloned()
+                    .unwrap_or_else(|| new_id("attachment")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut replacements = global_id_replacements.clone();
+    replacements.extend(message_id_map.clone());
+    replacements.extend(attachment_id_map.clone());
+    replacements.insert(source.id.clone(), target_conversation_id.to_string());
+    let snapshot_origins =
+        fork_snapshot_origins(connection, source, &source_messages, &message_id_map)?;
+    let target_messages = source_messages
+        .iter()
+        .map(|message| clone_message(message, &message_id_map, &replacements))
+        .collect::<Result<Vec<_>, _>>()?;
+    let attachments = source_attachments
+        .into_iter()
+        .map(|source_attachment| {
+            Ok(ForkAttachmentCopy {
+                target: AttachmentRecord {
+                    id: mapped_id(&attachment_id_map, &source_attachment.id, "附件")?,
+                    conversation_id: target_conversation_id.to_string(),
+                    message_id: mapped_id(
+                        &message_id_map,
+                        &source_attachment.message_id,
+                        "附件所属消息",
+                    )?,
+                    project_id: source.project_id.clone(),
+                    kind: source_attachment.kind.clone(),
+                    original_name: source_attachment.original_name.clone(),
+                    mime_type: source_attachment.mime_type.clone(),
+                    size_bytes: source_attachment.size_bytes,
+                    storage_rel_path: String::new(),
+                    created_at: source_attachment.created_at,
+                },
+                source: source_attachment,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(ConversationHistoryForkPlan {
+        source_conversation_id: source.id.clone(),
+        source_message_id: source_messages.last().map(|message| message.id.clone()),
+        target: ChatConversationRecord {
+            id: target_conversation_id.to_string(),
+            project_id: source.project_id.clone(),
+            model_id: source.model_id.clone(),
+            title: source.title.clone(),
+            messages: target_messages,
+            created_at,
+            updated_at: created_at,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        },
+        attachments,
+        archives: Vec::new(),
+        traces: Vec::new(),
+        turn_diffs: Vec::new(),
+        guidances: Vec::new(),
+        file_drafts: Vec::new(),
+        summaries: Vec::new(),
+        compaction_receipts: Vec::new(),
+        provider_transition_receipts: Vec::new(),
+        world_state_records: Vec::new(),
+        requires_context_adaptation: false,
+        adaptation_source_summary_id: None,
+        message_id_map,
+        snapshot_origins,
         id_replacements: replacements,
     })
 }
@@ -791,9 +1673,27 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
-    ensure_no_active_command_sessions(&transaction, &plan.source_conversation_id)?;
+    let source_conversation_ids = std::iter::once(plan.source_conversation_id.clone())
+        .chain(
+            plan.members
+                .iter()
+                .map(|member| member.source_agent.conversation_id.clone()),
+        )
+        .collect::<Vec<_>>();
+    let source_agent_ids = plan
+        .collaboration_root
+        .iter()
+        .map(|root| root.source_agent_id.clone())
+        .chain(
+            plan.members
+                .iter()
+                .map(|member| member.source_agent.agent_id.clone()),
+        )
+        .collect::<Vec<_>>();
     if plan.collaboration_root.is_some() {
-        ensure_no_active_conversation_turn(&transaction, &plan.source_conversation_id)?;
+        ensure_agent_tree_stable(&transaction, &source_conversation_ids, &source_agent_ids)?;
+    } else {
+        ensure_no_active_command_sessions(&transaction, &plan.source_conversation_id)?;
     }
     insert_conversation(&transaction, &plan.target)?;
     if let Some(collaboration) = &plan.collaboration_root {
@@ -822,6 +1722,33 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         )
         .map_err(|error| ConversationForkError::Other(error.to_string()))?;
     }
+    insert_root_fork_receipt(&transaction, plan, &target_message_id)?;
+    apply_fork_snapshot_origins(
+        &transaction,
+        &plan.source_conversation_id,
+        &plan.target.id,
+        &plan.snapshot_origins,
+    )?;
+
+    for member in &plan.members {
+        let current_source =
+            agent_graph_repository::get_agent_node(&transaction, &member.source_agent.agent_id)
+                .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        if current_source.as_ref() != Some(&member.source_agent) {
+            return Err(ConversationForkError::Other(
+                "成员 Agent 身份在分叉提交前已改变，请重试。".to_string(),
+            ));
+        }
+        insert_empty_conversation(&transaction, &member.history.target)?;
+        agent_graph_repository::insert_forked_agent_node_in_transaction(
+            &transaction,
+            &member.target_agent,
+        )
+        .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        insert_member_fork_receipt(&transaction, plan, member)?;
+        insert_snapshot_messages(&transaction, member.history.as_ref())?;
+    }
+
     for prepared in provider_continuations {
         match provider_continuation_repository::store_active_in_connection(
             &transaction,
@@ -842,130 +1769,11 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
             }
         }
     }
-    for archive in &plan.archives {
-        conversation_history_archive_repository::clone_archive_in_connection(&transaction, archive)
-            .map_err(database_error)?;
+    apply_history_facts(&transaction, plan.root_history_ref())?;
+    for member in &plan.members {
+        apply_history_facts(&transaction, member.history.as_ref())?;
     }
-    for trace in &plan.traces {
-        conversation_trace_repository::commit_trace_in_connection(
-            &transaction,
-            &trace.trace,
-            trace.created_at,
-            trace.committed_at,
-        )
-        .map_err(database_error)?;
-        conversation_model_context_repository::commit_items_in_connection(
-            &transaction,
-            &trace.trace.conversation_id,
-            &trace.trace.assistant_message_id,
-            &trace.model_context_items,
-        )
-        .map_err(database_error)?;
-    }
-    for turn_diff in &plan.turn_diffs {
-        turn_diff_repository::insert_fork_copy(&transaction, turn_diff).map_err(database_error)?;
-    }
-    for draft in &plan.file_drafts {
-        file_draft_repository::insert_draft(&transaction, draft).map_err(database_error)?;
-    }
-    let summary_id_map = clone_summary_chain(&transaction, plan)?;
-    clone_provider_transition_receipts(&transaction, plan, &summary_id_map)?;
-    clone_world_state_records(&transaction, plan, &summary_id_map)?;
-    if plan.requires_context_adaptation {
-        conversation_context_adaptation_repository::insert_in_connection(
-            &transaction,
-            &conversation_context_adaptation_repository::ConversationContextAdaptationRequirement {
-                conversation_id: plan.target.id.clone(),
-                reason:
-                    conversation_context_adaptation_repository::FORK_RELEASED_PROVIDER_STATE_REASON
-                        .to_string(),
-                source_conversation_id: plan.source_conversation_id.clone(),
-                source_message_id: plan.source_message_id.clone(),
-                created_at: plan.target.created_at,
-                resolved_summary_id: None,
-                resolved_at: None,
-            },
-        )
-        .map_err(database_error)?;
-    } else if let Some(source_summary_id) = plan.adaptation_source_summary_id.as_deref() {
-        let target_summary_id = mapped_id(
-            &summary_id_map,
-            source_summary_id,
-            "Provider-neutral 适配摘要",
-        )?;
-        conversation_context_adaptation_repository::insert_in_connection(
-            &transaction,
-            &conversation_context_adaptation_repository::ConversationContextAdaptationRequirement {
-                conversation_id: plan.target.id.clone(),
-                reason:
-                    conversation_context_adaptation_repository::FORK_RELEASED_PROVIDER_STATE_REASON
-                        .to_string(),
-                source_conversation_id: plan.source_conversation_id.clone(),
-                source_message_id: plan.source_message_id.clone(),
-                created_at: plan.target.created_at,
-                resolved_summary_id: Some(target_summary_id),
-                resolved_at: Some(plan.target.created_at),
-            },
-        )
-        .map_err(database_error)?;
-    }
-    for attachment in &plan.attachments {
-        attachment_repository::save_attachment(&transaction, &attachment.target)
-            .map_err(database_error)?;
-    }
-    for guidance in &plan.guidances {
-        match guidance_repository::store_guidance_in_connection(&transaction, &guidance.record)
-            .map_err(database_error)?
-        {
-            guidance_repository::AgentRunGuidanceStoreOutcome::Inserted => {}
-            outcome => {
-                return Err(format!("克隆用户引导 journal 时发生意外冲突：{outcome:?}").into());
-            }
-        }
-        match guidance_repository::mark_guidance_applied(
-            &transaction,
-            &guidance.record.guidance_id,
-            guidance.applied_trace_sequence,
-            guidance.record.updated_at,
-        )
-        .map_err(database_error)?
-        {
-            guidance_repository::AgentRunGuidanceTransitionOutcome::Updated => {}
-            outcome => {
-                return Err(format!("克隆用户引导 trace 状态时发生意外冲突：{outcome:?}").into());
-            }
-        }
-    }
-    transaction
-        .execute(
-            "INSERT INTO conversation_forks (
-                request_id, target_conversation_id, source_conversation_id,
-                source_message_id, target_message_id, created_at, source_fork_point_json,
-                fork_authority, source_root_agent_id, target_root_agent_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                &plan.request_id,
-                &plan.target.id,
-                &plan.source_conversation_id,
-                &plan.source_message_id,
-                &target_message_id,
-                plan.target.created_at,
-                serde_json::to_string(&plan.source_fork_point)
-                    .map_err(|error| format!("无法序列化分叉时间线边界：{error}"))?,
-                plan.collaboration_root
-                    .as_ref()
-                    .map(|_| "collaboration_root")
-                    .unwrap_or("legacy"),
-                plan.collaboration_root
-                    .as_ref()
-                    .map(|root| root.source_agent_id.as_str()),
-                plan.collaboration_root
-                    .as_ref()
-                    .map(|root| root.target_root.agent_id.as_str()),
-            ],
-        )
-        .map_err(database_error)?;
-    apply_fork_snapshot_origins(&transaction, plan)?;
+    settle_forked_member_lifecycles(&transaction, plan)?;
     transaction
         .commit()
         .map_err(database_error)
@@ -1128,6 +1936,55 @@ fn ensure_no_active_conversation_turn(
     Ok(())
 }
 
+fn ensure_agent_tree_stable(
+    connection: &Connection,
+    conversation_ids: &[String],
+    agent_ids: &[String],
+) -> Result<(), ConversationForkError> {
+    for conversation_id in conversation_ids {
+        ensure_no_active_conversation_turn(connection, conversation_id)?;
+        ensure_no_active_command_sessions(connection, conversation_id)?;
+        let has_unsettled_execution = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_pending_actions
+                     WHERE conversation_id = ?1
+                       AND status IN ('pending', 'approved', 'executing')
+                     UNION ALL
+                     SELECT 1 FROM context_compaction_receipts
+                     WHERE conversation_id = ?1 AND status = 'in_progress'
+                 )",
+                [conversation_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(database_error)?;
+        if has_unsettled_execution {
+            return Err(ConversationForkError::Other(
+                "Agent 树仍有未稳定的执行事实，结束后才能继续新任务。".to_string(),
+            ));
+        }
+    }
+    for agent_id in agent_ids {
+        let has_unsettled_wake = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_wake_requests
+                     WHERE agent_id = ?1
+                       AND status IN ('queued', 'claimed', 'running', 'waiting_for_approval')
+                 )",
+                [agent_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(database_error)?;
+        if has_unsettled_wake {
+            return Err(ConversationForkError::Other(
+                "Agent 树仍有未稳定的 Wake 执行，结束后才能继续新任务。".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_fork_point_input(
     request_id: &str,
     source_conversation_id: &str,
@@ -1264,6 +2121,44 @@ fn summaries_visible_through_transition_boundary(
     Ok(visible)
 }
 
+fn summaries_visible_at_time(
+    connection: &Connection,
+    conversation_id: &str,
+    summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
+    cutoff_at: i64,
+) -> Result<Vec<context_compaction_repository::ContextCompactionSummaryVersion>, String> {
+    let receipt_completed_at_by_summary =
+        context_compaction_receipt_repository::list_receipts_for_conversation(
+            connection,
+            conversation_id,
+        )
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter_map(|receipt| {
+            receipt.summary_id.clone().map(|summary_id| {
+                (
+                    summary_id,
+                    receipt.completed_at.unwrap_or(receipt.updated_at),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let mut visible = Vec::new();
+    for version in summaries {
+        if version.summary.created_at > cutoff_at {
+            break;
+        }
+        if receipt_completed_at_by_summary
+            .get(&version.summary.id)
+            .is_some_and(|completed_at| *completed_at > cutoff_at)
+        {
+            break;
+        }
+        visible.push(version);
+    }
+    Ok(visible)
+}
+
 fn collect_visible_provider_transition_receipts(
     connection: &Connection,
     source_conversation_id: &str,
@@ -1315,17 +2210,96 @@ fn collect_visible_provider_transition_receipts(
     Ok(receipts)
 }
 
+fn collect_visible_context_compaction_receipts(
+    connection: &Connection,
+    source_conversation_id: &str,
+    message_id_map: &HashMap<String, String>,
+    run_id_map: &HashMap<String, String>,
+    visible_summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
+    cutoff_at: Option<i64>,
+) -> Result<Vec<ForkContextCompactionReceipt>, String> {
+    let visible_summary_ids = visible_summaries
+        .iter()
+        .map(|version| version.summary.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut copies = Vec::new();
+    let mut receipt_run_id_map = run_id_map.clone();
+    for receipt in context_compaction_receipt_repository::list_receipts_for_conversation(
+        connection,
+        source_conversation_id,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        if receipt.operation_id.starts_with("provider-transition-")
+            || !receipt.status.is_terminal()
+            || !message_id_map.contains_key(&receipt.assistant_message_id)
+            || cutoff_at
+                .is_some_and(|cutoff| receipt.completed_at.unwrap_or(receipt.updated_at) > cutoff)
+        {
+            continue;
+        }
+        if receipt.conversation_id != source_conversation_id {
+            return Err("上下文压缩 receipt 的 Conversation 身份无效。".to_string());
+        }
+        remap_cursor(&receipt.plan.covered_through, message_id_map)?;
+        if receipt
+            .plan
+            .previous_summary_id
+            .as_deref()
+            .is_some_and(|summary_id| !visible_summary_ids.contains(summary_id))
+            || receipt
+                .summary_id
+                .as_deref()
+                .is_some_and(|summary_id| !visible_summary_ids.contains(summary_id))
+        {
+            continue;
+        }
+        let source_observation = receipt
+            .generation_observation_id
+            .as_deref()
+            .map(|observation_id| {
+                model_request_observation_repository::get_observation(connection, observation_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "上下文压缩 receipt 引用的模型请求观测不存在。".to_string())
+            })
+            .transpose()?;
+        if let Some(observation) = &source_observation {
+            receipt
+                .validate_generation_observation(observation)
+                .map_err(|error| error.to_string())?;
+            if cutoff_at.is_some_and(|cutoff| observation.completed_at > cutoff) {
+                continue;
+            }
+        }
+        let target_run_id = receipt_run_id_map
+            .entry(receipt.run_id.clone())
+            .or_insert_with(|| new_id("context-compaction-run"))
+            .clone();
+        copies.push(ForkContextCompactionReceipt {
+            target_run_id,
+            target_operation_id: new_id("context-compaction"),
+            target_observation_id: source_observation
+                .as_ref()
+                .map(|_| new_id("model-request-observation")),
+            source_receipt: receipt,
+            source_observation,
+        });
+    }
+    Ok(copies)
+}
+
 fn world_state_records_visible_at_cutoff(
     connection: &Connection,
     conversation_id: &str,
     source_positions: &HashMap<String, usize>,
     cutoff: usize,
     visible_summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
+    cutoff_at: Option<i64>,
 ) -> Result<Vec<world_state_repository::ConversationWorldStateJournalEntry>, String> {
     let epochs = {
         let mut statement = connection
             .prepare(
-                "SELECT epoch_id, base_summary_id
+                "SELECT epoch_id, base_summary_id, created_at
                  FROM conversation_world_state_epochs
                  WHERE conversation_id = ?1
                  ORDER BY generation DESC",
@@ -1333,7 +2307,11 @@ fn world_state_records_visible_at_cutoff(
             .map_err(database_error)?;
         let rows = statement
             .query_map([conversation_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })
             .map_err(database_error)?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -1347,14 +2325,16 @@ fn world_state_records_visible_at_cutoff(
         .iter()
         .map(|version| version.summary.id.as_str())
         .collect::<HashSet<_>>();
-    let (epoch_id, selected_base_summary_id) = epochs
-        .into_iter()
-        .find(|(_, base_summary_id)| {
-            base_summary_id
-                .as_deref()
-                .is_none_or(|summary_id| visible_summary_ids.contains(summary_id))
+    let Some((epoch_id, selected_base_summary_id, _)) =
+        epochs.into_iter().find(|(_, base_summary_id, created_at)| {
+            cutoff_at.is_none_or(|cutoff| *created_at <= cutoff)
+                && base_summary_id
+                    .as_deref()
+                    .is_none_or(|summary_id| visible_summary_ids.contains(summary_id))
         })
-        .ok_or_else(|| "没有任何 World State epoch 的压缩边界在分叉 cutoff 内可见。".to_string())?;
+    else {
+        return Ok(Vec::new());
+    };
     let mut entries =
         world_state_repository::list_records_for_epoch(connection, conversation_id, &epoch_id)
             .map_err(|error| error.to_string())?
@@ -1400,6 +2380,10 @@ fn world_state_records_visible_at_cutoff(
     let mut visible = Vec::new();
     let mut crossed_cutoff = false;
     for entry in entries {
+        if cutoff_at.is_some_and(|cutoff_at| entry.created_at > cutoff_at) {
+            crossed_cutoff = true;
+            continue;
+        }
         let is_visible =
             match entry.effective_before_message_id.as_deref() {
                 None => true,
@@ -1431,6 +2415,11 @@ fn clone_message(
         .as_deref()
         .map(|raw| clone_agent_run_json(raw, replacements))
         .transpose()?;
+    let ui_state_json = source
+        .ui_state_json
+        .as_deref()
+        .map(|raw| clone_structured_json(raw, replacements, "历史 UI 状态"))
+        .transpose()?;
     Ok(ChatMessageRecord {
         id: mapped_id(message_id_map, &source.id, "消息")?,
         role: source.role.clone(),
@@ -1439,7 +2428,7 @@ fn clone_message(
         status: source.status.clone(),
         attachments: Vec::new(),
         agent_run_json,
-        ui_state_json: source.ui_state_json.clone(),
+        ui_state_json,
     })
 }
 
@@ -1520,6 +2509,7 @@ fn clone_agent_run_json(
     let mut value = serde_json::from_str::<Value>(raw)
         .map_err(|error| format!("历史 agent 状态不是有效 JSON：{error}"))?;
     rewrite_exact_ids(&mut value, replacements);
+    rewrite_history_open_tokens(&mut value, replacements)?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| "历史 agent 状态必须是 JSON 对象。".to_string())?;
@@ -1540,6 +2530,18 @@ fn clone_agent_run_json(
         state.insert("activeRunId".to_string(), Value::Null);
     }
     serde_json::to_string(&value).map_err(|error| format!("无法序列化复制后的 agent 状态：{error}"))
+}
+
+fn clone_structured_json(
+    raw: &str,
+    replacements: &HashMap<String, String>,
+    label: &str,
+) -> Result<String, String> {
+    let mut value = serde_json::from_str::<Value>(raw)
+        .map_err(|error| format!("{label}不是有效 JSON：{error}"))?;
+    rewrite_exact_ids(&mut value, replacements);
+    rewrite_history_open_tokens(&mut value, replacements)?;
+    serde_json::to_string(&value).map_err(|error| format!("无法序列化复制后的{label}：{error}"))
 }
 
 fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {
@@ -1590,22 +2592,7 @@ fn insert_conversation(
     connection: &Connection,
     target: &ChatConversationRecord,
 ) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT INTO conversations (
-                id, project_id, model_id, title, created_at, updated_at,
-                pinned_at, archived_at, unread_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
-            params![
-                &target.id,
-                &target.project_id,
-                &target.model_id,
-                &target.title,
-                target.created_at,
-                target.updated_at,
-            ],
-        )
-        .map_err(database_error)?;
+    insert_empty_conversation(connection, target)?;
     for (position, message) in target.messages.iter().enumerate() {
         connection
             .execute(
@@ -1630,11 +2617,317 @@ fn insert_conversation(
     Ok(())
 }
 
-fn apply_fork_snapshot_origins(
+fn insert_empty_conversation(
+    connection: &Connection,
+    target: &ChatConversationRecord,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO conversations (
+                id, project_id, model_id, title, created_at, updated_at,
+                pinned_at, archived_at, unread_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
+            params![
+                &target.id,
+                &target.project_id,
+                &target.model_id,
+                &target.title,
+                target.created_at,
+                target.updated_at,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn insert_root_fork_receipt(
+    connection: &Connection,
+    plan: &ConversationForkPlan,
+    target_message_id: &str,
+) -> Result<(), ConversationForkError> {
+    connection
+        .execute(
+            "INSERT INTO conversation_forks (
+                request_id, target_conversation_id, source_conversation_id,
+                source_message_id, target_message_id, created_at, source_fork_point_json,
+                fork_authority, source_root_agent_id, target_root_agent_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                &plan.request_id,
+                &plan.target.id,
+                &plan.source_conversation_id,
+                &plan.source_message_id,
+                target_message_id,
+                plan.target.created_at,
+                serde_json::to_string(&plan.source_fork_point)
+                    .map_err(|error| format!("无法序列化分叉时间线边界：{error}"))?,
+                plan.collaboration_root
+                    .as_ref()
+                    .map(|_| "collaboration_root")
+                    .unwrap_or("legacy"),
+                plan.collaboration_root
+                    .as_ref()
+                    .map(|root| root.source_agent_id.as_str()),
+                plan.collaboration_root
+                    .as_ref()
+                    .map(|root| root.target_root.agent_id.as_str()),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn insert_member_fork_receipt(
+    connection: &Connection,
+    plan: &ConversationForkPlan,
+    member: &MemberAgentForkPlan,
+) -> Result<(), ConversationForkError> {
+    let source_root_agent_id = plan
+        .collaboration_root
+        .as_ref()
+        .map(|root| root.source_agent_id.as_str())
+        .ok_or_else(|| {
+            ConversationForkError::Other("成员 fork 缺少源根 Agent 凭据。".to_string())
+        })?;
+    let target_root_agent_id = plan
+        .collaboration_root
+        .as_ref()
+        .map(|root| root.target_root.agent_id.as_str())
+        .ok_or_else(|| {
+            ConversationForkError::Other("成员 fork 缺少目标根 Agent 凭据。".to_string())
+        })?;
+    connection
+        .execute(
+            "INSERT INTO agent_member_conversation_forks (
+                 root_fork_request_id, source_conversation_id, target_conversation_id,
+                 source_root_agent_id, target_root_agent_id,
+                 source_member_agent_id, target_member_agent_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &plan.request_id,
+                &member.source_agent.conversation_id,
+                &member.target_agent.conversation_id,
+                source_root_agent_id,
+                target_root_agent_id,
+                &member.source_agent.agent_id,
+                &member.target_agent.agent_id,
+                plan.target.created_at,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn insert_snapshot_messages(
+    connection: &Connection,
+    history: ConversationHistoryForkPlanRef<'_>,
+) -> Result<(), ConversationForkError> {
+    if history.target.messages.len() != history.snapshot_origins.len() {
+        return Err(ConversationForkError::Other(
+            "成员 fork 的消息与来源计划数量不一致。".to_string(),
+        ));
+    }
+    for (position, (message, origin)) in history
+        .target
+        .messages
+        .iter()
+        .zip(history.snapshot_origins)
+        .enumerate()
+    {
+        if message.id != origin.target_message_id {
+            return Err(ConversationForkError::Other(
+                "成员 fork 的消息来源身份不一致。".to_string(),
+            ));
+        }
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, input_origin_kind,
+                     snapshot_source_conversation_id, snapshot_source_message_id,
+                     snapshot_original_origin_kind, snapshot_original_agent_id,
+                     snapshot_original_mailbox_message_id,
+                     agent_run_json, ui_state_json, created_at, position
+                 ) VALUES (
+                     ?1, ?2, ?3, ?4, ?5, 'snapshot', ?6, ?7, ?8, ?9, ?10,
+                     ?11, ?12, ?13, ?14
+                 )",
+                params![
+                    &message.id,
+                    &history.target.id,
+                    &message.role,
+                    &message.content,
+                    &message.status,
+                    history.source_conversation_id,
+                    &origin.source_message_id,
+                    origin.original_kind,
+                    &origin.original_agent_id,
+                    &origin.original_mailbox_message_id,
+                    &message.agent_run_json,
+                    &message.ui_state_json,
+                    message.created_at,
+                    position as i64,
+                ],
+            )
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+fn apply_history_facts(
+    connection: &Connection,
+    history: ConversationHistoryForkPlanRef<'_>,
+) -> Result<(), ConversationForkError> {
+    for archive in history.archives {
+        conversation_history_archive_repository::clone_archive_in_connection(connection, archive)
+            .map_err(database_error)?;
+    }
+    for trace in history.traces {
+        conversation_trace_repository::commit_trace_in_connection(
+            connection,
+            &trace.trace,
+            trace.created_at,
+            trace.committed_at,
+        )
+        .map_err(database_error)?;
+        conversation_model_context_repository::commit_items_in_connection(
+            connection,
+            &trace.trace.conversation_id,
+            &trace.trace.assistant_message_id,
+            &trace.model_context_items,
+        )
+        .map_err(database_error)?;
+    }
+    for turn_diff in history.turn_diffs {
+        turn_diff_repository::insert_fork_copy(connection, turn_diff).map_err(database_error)?;
+    }
+    for draft in history.file_drafts {
+        file_draft_repository::insert_draft(connection, &draft.target).map_err(database_error)?;
+        file_draft_repository::insert_draft_history_snapshot(
+            connection,
+            &draft.target.id,
+            &draft.history,
+        )
+        .map_err(database_error)?;
+    }
+    let summary_id_map = clone_summary_chain_for_history(connection, history)?;
+    clone_context_compaction_receipts_for_history(connection, history, &summary_id_map)?;
+    clone_provider_transition_receipts_for_history(connection, history, &summary_id_map)?;
+    clone_world_state_records_for_history(connection, history, &summary_id_map)?;
+    if history.requires_context_adaptation {
+        let source_message_id = history.source_message_id.ok_or_else(|| {
+            ConversationForkError::Other("Provider continuation 适配缺少源消息边界。".to_string())
+        })?;
+        conversation_context_adaptation_repository::insert_in_connection(
+            connection,
+            &conversation_context_adaptation_repository::ConversationContextAdaptationRequirement {
+                conversation_id: history.target.id.clone(),
+                reason:
+                    conversation_context_adaptation_repository::FORK_RELEASED_PROVIDER_STATE_REASON
+                        .to_string(),
+                source_conversation_id: history.source_conversation_id.to_string(),
+                source_message_id: source_message_id.to_string(),
+                created_at: history.target.created_at,
+                resolved_summary_id: None,
+                resolved_at: None,
+            },
+        )
+        .map_err(database_error)?;
+    } else if let Some(source_summary_id) = history.adaptation_source_summary_id {
+        let source_message_id = history.source_message_id.ok_or_else(|| {
+            ConversationForkError::Other("Provider continuation 适配缺少源消息边界。".to_string())
+        })?;
+        let target_summary_id = mapped_id(
+            &summary_id_map,
+            source_summary_id,
+            "Provider-neutral 适配摘要",
+        )?;
+        conversation_context_adaptation_repository::insert_in_connection(
+            connection,
+            &conversation_context_adaptation_repository::ConversationContextAdaptationRequirement {
+                conversation_id: history.target.id.clone(),
+                reason:
+                    conversation_context_adaptation_repository::FORK_RELEASED_PROVIDER_STATE_REASON
+                        .to_string(),
+                source_conversation_id: history.source_conversation_id.to_string(),
+                source_message_id: source_message_id.to_string(),
+                created_at: history.target.created_at,
+                resolved_summary_id: Some(target_summary_id),
+                resolved_at: Some(history.target.created_at),
+            },
+        )
+        .map_err(database_error)?;
+    }
+    for attachment in history.attachments {
+        attachment_repository::save_attachment(connection, &attachment.target)
+            .map_err(database_error)?;
+    }
+    for guidance in history.guidances {
+        match guidance_repository::store_guidance_in_connection(connection, &guidance.record)
+            .map_err(database_error)?
+        {
+            guidance_repository::AgentRunGuidanceStoreOutcome::Inserted => {}
+            outcome => {
+                return Err(format!("克隆用户引导 journal 时发生意外冲突：{outcome:?}").into());
+            }
+        }
+        match guidance_repository::mark_guidance_applied(
+            connection,
+            &guidance.record.guidance_id,
+            guidance.applied_trace_sequence,
+            guidance.record.updated_at,
+        )
+        .map_err(database_error)?
+        {
+            guidance_repository::AgentRunGuidanceTransitionOutcome::Updated => {}
+            outcome => {
+                return Err(format!("克隆用户引导 trace 状态时发生意外冲突：{outcome:?}").into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn settle_forked_member_lifecycles(
     connection: &Connection,
     plan: &ConversationForkPlan,
 ) -> Result<(), ConversationForkError> {
-    for origin in &plan.snapshot_origins {
+    for member in plan.members.iter().rev() {
+        if member.source_agent.lifecycle == AgentLifecycle::Active {
+            continue;
+        }
+        let updated_at = plan
+            .target
+            .created_at
+            .max(member.target_agent.updated_at.saturating_add(1));
+        let affected = connection
+            .execute(
+                "UPDATE agent_nodes
+                 SET lifecycle = ?1, revision = revision + 1, updated_at = ?2
+                 WHERE agent_id = ?3 AND lifecycle = 'active' AND revision = ?4",
+                params![
+                    member.source_agent.lifecycle.as_str(),
+                    updated_at,
+                    &member.target_agent.agent_id,
+                    member.target_agent.revision,
+                ],
+            )
+            .map_err(database_error)?;
+        if affected != 1 {
+            return Err(ConversationForkError::Other(
+                "成员 Agent 生命周期快照写入不完整。".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_fork_snapshot_origins(
+    connection: &Connection,
+    source_conversation_id: &str,
+    target_conversation_id: &str,
+    origins: &[ForkSnapshotOrigin],
+) -> Result<(), ConversationForkError> {
+    for origin in origins {
         let affected = connection
             .execute(
                 "UPDATE messages
@@ -1646,9 +2939,9 @@ fn apply_fork_snapshot_origins(
                      snapshot_original_mailbox_message_id = ?7
                  WHERE conversation_id = ?1 AND id = ?2",
                 params![
-                    &plan.target.id,
+                    target_conversation_id,
                     &origin.target_message_id,
-                    &plan.source_conversation_id,
+                    source_conversation_id,
                     &origin.source_message_id,
                     origin.original_kind,
                     &origin.original_agent_id,
@@ -1665,18 +2958,18 @@ fn apply_fork_snapshot_origins(
     Ok(())
 }
 
-fn clone_summary_chain(
+fn clone_summary_chain_for_history(
     connection: &Connection,
-    plan: &ConversationForkPlan,
+    history: ConversationHistoryForkPlanRef<'_>,
 ) -> Result<HashMap<String, String>, String> {
     clone_summary_chain_core(
         connection,
-        &plan.source_conversation_id,
-        &plan.target.id,
-        plan.target.created_at,
-        &plan.summaries,
-        &plan.message_id_map,
-        &plan.id_replacements,
+        history.source_conversation_id,
+        &history.target.id,
+        history.target.created_at,
+        history.summaries,
+        history.message_id_map,
+        history.id_replacements,
     )
 }
 
@@ -1717,7 +3010,10 @@ fn clone_summary_chain_core(
     let mut latest_summary_id = None;
     for version in summaries {
         let source = &version.summary;
-        let summary_id = new_id("context-summary");
+        let summary_id = id_replacements
+            .get(&source.id)
+            .cloned()
+            .unwrap_or_else(|| new_id("context-summary"));
         let covered_through = remap_cursor(&source.covered_through, message_id_map)?;
         let continuity = remap_continuity(&source.continuity, message_id_map, id_replacements)?;
         let previous_summary_id = source
@@ -1780,12 +3076,122 @@ fn clone_summary_chain_core(
     Ok(summary_id_map)
 }
 
-fn clone_provider_transition_receipts(
+fn clone_context_compaction_receipts_for_history(
     connection: &Connection,
-    plan: &ConversationForkPlan,
+    history: ConversationHistoryForkPlanRef<'_>,
     summary_id_map: &HashMap<String, String>,
 ) -> Result<(), String> {
-    for copy in &plan.provider_transition_receipts {
+    for copy in history.compaction_receipts {
+        let source = &copy.source_receipt;
+        let target_assistant_message_id = mapped_id(
+            history.message_id_map,
+            &source.assistant_message_id,
+            "上下文压缩所属消息",
+        )?;
+        let target_covered_through =
+            remap_cursor(&source.plan.covered_through, history.message_id_map)?;
+        let target_previous_summary_id = source
+            .plan
+            .previous_summary_id
+            .as_ref()
+            .map(|summary_id| mapped_id(summary_id_map, summary_id, "上一版上下文压缩摘要"))
+            .transpose()?;
+        let target_source_revision = context_compaction_repository::source_revision_for_cursor(
+            connection,
+            &history.target.id,
+            &target_covered_through,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut receipt = source.clone();
+        receipt.operation_id = copy.target_operation_id.clone();
+        receipt.run_id = copy.target_run_id.clone();
+        receipt.conversation_id = history.target.id.clone();
+        receipt.assistant_message_id = target_assistant_message_id.clone();
+        receipt.plan.context_revision = target_source_revision.clone();
+        receipt.plan.persistent_revision = target_source_revision.clone();
+        receipt.plan.previous_summary_id = target_previous_summary_id;
+        receipt.plan.covered_through = target_covered_through;
+        if receipt.source_revision.is_some() {
+            receipt.source_revision = Some(target_source_revision.clone());
+        }
+        receipt.summary_id = source
+            .summary_id
+            .as_ref()
+            .map(|summary_id| mapped_id(summary_id_map, summary_id, "上下文压缩摘要"))
+            .transpose()?;
+        if let Some(result) = receipt.result.as_mut() {
+            result.summary_id = receipt
+                .summary_id
+                .clone()
+                .ok_or_else(|| "上下文压缩 receipt 的结果缺少目标摘要。".to_string())?;
+        }
+        receipt.generation_observation_id = copy.target_observation_id.clone();
+
+        let observation = copy
+            .source_observation
+            .as_ref()
+            .zip(copy.target_observation_id.as_ref())
+            .map(|(source_observation, target_observation_id)| {
+                let mut target = source_observation.clone();
+                target.id = target_observation_id.clone();
+                target.run_id = copy.target_run_id.clone();
+                target.conversation_id = Some(history.target.id.clone());
+                target.assistant_message_id = Some(target_assistant_message_id.clone());
+                target.operation_id = Some(copy.target_operation_id.clone());
+                if let Some(estimate) = target.estimate.as_mut() {
+                    estimate.context_revision = target_source_revision.clone();
+                    estimate.persistent_revision = target_source_revision.clone();
+                }
+                target
+            });
+        if copy.source_observation.is_some() != observation.is_some() {
+            return Err("上下文压缩 receipt 的目标观测映射不完整。".to_string());
+        }
+        if let Some(observation) = &observation {
+            receipt
+                .validate_generation_observation(observation)
+                .map_err(|error| error.to_string())?;
+        }
+        receipt.validate().map_err(|error| error.to_string())?;
+        record_cloned_compaction_receipt(connection, &receipt, observation.as_ref())?;
+    }
+    Ok(())
+}
+
+fn record_cloned_compaction_receipt(
+    connection: &Connection,
+    receipt: &ContextCompactionReceipt,
+    observation: Option<&ModelRequestObservation>,
+) -> Result<(), String> {
+    let mut planned = receipt.clone();
+    planned.status = ContextCompactionReceiptStatus::InProgress;
+    planned.stage = ContextCompactionReceiptStage::Planned;
+    planned.source_revision = None;
+    planned.generation_observation_id = None;
+    planned.summary_id = None;
+    planned.result = None;
+    planned.error = None;
+    planned.updated_at = planned.started_at;
+    planned.completed_at = None;
+    planned.validate().map_err(|error| error.to_string())?;
+    context_compaction_receipt_repository::record_receipt_in_connection(connection, &planned, None)
+        .map_err(|error| error.to_string())?;
+    context_compaction_receipt_repository::record_receipt_in_connection(
+        connection,
+        receipt,
+        observation,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn clone_provider_transition_receipts_for_history(
+    connection: &Connection,
+    history: ConversationHistoryForkPlanRef<'_>,
+    summary_id_map: &HashMap<String, String>,
+) -> Result<(), String> {
+    for copy in history.provider_transition_receipts {
         let source_receipt = &copy.source_receipt;
         let source_summary_id = source_receipt
             .summary_id
@@ -1797,12 +3203,12 @@ fn clone_provider_transition_receipts(
             "Provider transition 摘要",
         )?;
         let target_assistant_message_id = mapped_id(
-            &plan.message_id_map,
+            history.message_id_map,
             &source_receipt.assistant_message_id,
             "Provider transition 所属消息",
         )?;
         let target_covered_through =
-            remap_cursor(&source_receipt.plan.covered_through, &plan.message_id_map)?;
+            remap_cursor(&source_receipt.plan.covered_through, history.message_id_map)?;
         let target_previous_summary_id = source_receipt
             .plan
             .previous_summary_id
@@ -1817,7 +3223,7 @@ fn clone_provider_transition_receipts(
             .transpose()?;
         let target_source_revision = context_compaction_repository::source_revision_for_cursor(
             connection,
-            &plan.target.id,
+            &history.target.id,
             &target_covered_through,
         )
         .map_err(|error| error.to_string())?;
@@ -1825,7 +3231,7 @@ fn clone_provider_transition_receipts(
         let mut receipt = source_receipt.clone();
         receipt.operation_id = copy.target_operation_id.clone();
         receipt.run_id = copy.target_run_id.clone();
-        receipt.conversation_id = plan.target.id.clone();
+        receipt.conversation_id = history.target.id.clone();
         receipt.assistant_message_id = target_assistant_message_id.clone();
         receipt.plan.context_revision = target_source_revision.clone();
         receipt.plan.persistent_revision = target_source_revision.clone();
@@ -1843,7 +3249,7 @@ fn clone_provider_transition_receipts(
         let mut observation = copy.source_observation.clone();
         observation.id = copy.target_observation_id.clone();
         observation.run_id = copy.target_run_id.clone();
-        observation.conversation_id = Some(plan.target.id.clone());
+        observation.conversation_id = Some(history.target.id.clone());
         observation.assistant_message_id = Some(target_assistant_message_id);
         observation.operation_id = Some(copy.target_operation_id.clone());
         if let Some(estimate) = observation.estimate.as_mut() {
@@ -1855,40 +3261,19 @@ fn clone_provider_transition_receipts(
             .map_err(|error| error.to_string())?;
         receipt.validate().map_err(|error| error.to_string())?;
 
-        // Use the same receipt state machine as a live transition. The planned row and terminal
-        // update remain inside the fork transaction, so readers can never observe a half-cloned
-        // transition while recursive forks still receive a fully valid operation boundary.
-        let mut planned = receipt.clone();
-        planned.status = ContextCompactionReceiptStatus::InProgress;
-        planned.stage = ContextCompactionReceiptStage::Planned;
-        planned.source_revision = None;
-        planned.generation_observation_id = None;
-        planned.summary_id = None;
-        planned.result = None;
-        planned.error = None;
-        planned.updated_at = planned.started_at;
-        planned.completed_at = None;
-        planned.validate().map_err(|error| error.to_string())?;
-        context_compaction_receipt_repository::record_receipt_in_connection(
-            connection, &planned, None,
-        )
-        .map_err(|error| error.to_string())?;
-        context_compaction_receipt_repository::record_receipt_in_connection(
-            connection,
-            &receipt,
-            Some(&observation),
-        )
-        .map_err(|error| error.to_string())?;
+        // Planned and terminal rows stay inside the caller's fork transaction, so readers can
+        // never observe a half-cloned receipt while recursive forks retain a valid boundary.
+        record_cloned_compaction_receipt(connection, &receipt, Some(&observation))?;
     }
     Ok(())
 }
 
-fn clone_world_state_records(
+fn clone_world_state_records_for_history(
     connection: &Connection,
-    plan: &ConversationForkPlan,
+    history: ConversationHistoryForkPlanRef<'_>,
     summary_id_map: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let Some(first) = plan.world_state_records.first() else {
+    let Some(first) = history.world_state_records.first() else {
         return Ok(());
     };
     let source_base_summary_id = first.base_summary_id.as_deref();
@@ -1896,8 +3281,8 @@ fn clone_world_state_records(
         .map(|summary_id| mapped_id(summary_id_map, summary_id, "World State 基础摘要"))
         .transpose()?;
 
-    for (index, entry) in plan.world_state_records.iter().enumerate() {
-        if entry.conversation_id != plan.source_conversation_id
+    for (index, entry) in history.world_state_records.iter().enumerate() {
+        if entry.conversation_id != history.source_conversation_id
             || entry.epoch_generation != first.epoch_generation
             || entry.base_summary_id.as_deref() != source_base_summary_id
             || entry.record.epoch_id() != first.record.epoch_id()
@@ -1908,12 +3293,12 @@ fn clone_world_state_records(
         let target_anchor = entry
             .effective_before_message_id
             .as_ref()
-            .map(|message_id| mapped_id(&plan.message_id_map, message_id, "World State anchor"))
+            .map(|message_id| mapped_id(history.message_id_map, message_id, "World State anchor"))
             .transpose()?;
         let outcome = world_state_repository::append_record_in_connection(
             connection,
             &world_state_repository::ConversationWorldStateRecordWrite {
-                conversation_id: &plan.target.id,
+                conversation_id: &history.target.id,
                 epoch_generation: 1,
                 base_summary_id: target_base_summary_id.as_deref(),
                 effective_before_message_id: target_anchor.as_deref(),
@@ -1927,6 +3312,81 @@ fn clone_world_state_records(
         }
     }
     Ok(())
+}
+
+fn rewrite_world_state_records(
+    entries: &mut [world_state_repository::ConversationWorldStateJournalEntry],
+    replacements: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(first) = entries.first() else {
+        return Ok(());
+    };
+    let source_initial = match &first.record {
+        WorldStateRecord::Full(source_initial) => source_initial.clone(),
+        WorldStateRecord::Diff(_) => {
+            return Err("待克隆的 World State journal 缺少 initial full snapshot。".to_string());
+        }
+    };
+    let target_epoch_id = new_id("world-state-epoch");
+    let mut world_replacements = replacements.clone();
+    world_replacements.insert(source_initial.epoch_id.clone(), target_epoch_id.clone());
+    let mut source_current = source_initial;
+    let mut target_current =
+        rewrite_world_state_snapshot(&source_current, &target_epoch_id, &world_replacements)?;
+    entries[0].record = WorldStateRecord::Full(target_current.clone());
+
+    for entry in entries.iter_mut().skip(1) {
+        let WorldStateRecord::Diff(source_diff) = &entry.record else {
+            return Err(
+                "待克隆的 World State journal 在初始记录后包含 full snapshot。".to_string(),
+            );
+        };
+        source_current = WorldStateReducer::fold(source_current, std::slice::from_ref(source_diff))
+            .map_err(|error| format!("无法折叠待克隆的 World State diff：{error}"))?;
+        let target_next =
+            rewrite_world_state_snapshot(&source_current, &target_epoch_id, &world_replacements)?;
+        let target_diff = WorldStateDiff::between(&target_current, &target_next)
+            .map_err(|error| format!("无法重建复制后的 World State diff：{error}"))?;
+        entry.record = WorldStateRecord::Diff(target_diff);
+        target_current = target_next;
+    }
+    Ok(())
+}
+
+fn rewrite_world_state_snapshot(
+    source: &WorldStateSnapshot,
+    target_epoch_id: &str,
+    replacements: &HashMap<String, String>,
+) -> Result<WorldStateSnapshot, String> {
+    let sections = source
+        .sections
+        .iter()
+        .map(|section| {
+            let mut state = section.state.clone();
+            rewrite_exact_ids(&mut state, replacements);
+            rewrite_history_open_tokens(&mut state, replacements)?;
+            let model_projection = section
+                .model_projection
+                .as_ref()
+                .map(|projection| {
+                    let mut projection = projection.clone();
+                    rewrite_exact_ids(&mut projection, replacements);
+                    rewrite_history_open_tokens(&mut projection, replacements)?;
+                    Ok::<_, String>(projection)
+                })
+                .transpose()?;
+            WorldStateSectionEnvelope::new(
+                section.id.clone(),
+                section.lifetime,
+                section.visibility,
+                state,
+                model_projection,
+            )
+            .map_err(|error| format!("复制后的 World State section 无效：{error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    WorldStateSnapshot::new(target_epoch_id, source.sequence, sections)
+        .map_err(|error| format!("复制后的 World State snapshot 无效：{error}"))
 }
 
 fn remap_continuity(
@@ -2658,6 +4118,23 @@ mod tests {
         )
         .unwrap();
 
+        connection
+            .execute(
+                "INSERT INTO agent_file_draft_chunks (
+                     draft_id, chunk_index, content_hash, byte_count, created_at
+                 ) VALUES ('draft-source', 0, 'sha256:draft-chunk', 6, 4)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_file_draft_operations (
+                     draft_id, sequence, operation, payload_hash, created_at
+                 ) VALUES ('draft-source', 0, 'append', 'sha256:draft-operation', 4)",
+                [],
+            )
+            .unwrap();
+
         let first_prefix = context_compaction_repository::prepare_prefix(
             &connection,
             &source.id,
@@ -2698,6 +4175,18 @@ mod tests {
         assert_eq!(plan.file_drafts.len(), 1);
         assert_ne!(plan.file_drafts[0].id, "draft-source");
         commit_fork_plan(&mut connection, &plan).unwrap();
+        for table in ["agent_file_draft_chunks", "agent_file_draft_operations"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE draft_id = ?1"),
+                        [&plan.file_drafts[0].id],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
 
         let target_chain =
             context_compaction_repository::list_active_summary_chain(&connection, &plan.target.id)
@@ -2811,6 +4300,465 @@ mod tests {
     }
 
     #[test]
+    fn fork_clones_applied_capacity_compaction_receipt_and_keeps_it_recursive() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+
+        let visible_prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::message("user-b"),
+        )
+        .unwrap();
+        let visible_receipt = record_applied_capacity_compaction(
+            &mut connection,
+            &visible_prefix,
+            "summary-visible-receipt",
+            "context-compaction-visible",
+            "run-source-1",
+            "assistant-b",
+            40,
+        );
+        let after_cutoff_prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::message("user-d"),
+        )
+        .unwrap();
+        let after_cutoff_receipt = record_applied_capacity_compaction(
+            &mut connection,
+            &after_cutoff_prefix,
+            "summary-after-receipt-cutoff",
+            "context-compaction-after-cutoff",
+            "run-source-3",
+            "assistant-d",
+            80,
+        );
+        assert_eq!(
+            context_compaction_receipt_repository::list_receipts_for_conversation(
+                &connection,
+                &source.id,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+
+        let first = build_assistant_reply_fork_plan(
+            &connection,
+            "fork-capacity-receipt",
+            &source.id,
+            "assistant-c",
+            100,
+        )
+        .unwrap();
+        assert_eq!(first.compaction_receipts.len(), 1);
+        assert_eq!(
+            first.compaction_receipts[0].source_receipt.operation_id,
+            visible_receipt.operation_id
+        );
+        assert_ne!(
+            first.compaction_receipts[0].source_receipt.operation_id,
+            after_cutoff_receipt.operation_id
+        );
+        commit_fork_plan(&mut connection, &first).unwrap();
+
+        let first_chain =
+            context_compaction_repository::list_active_summary_chain(&connection, &first.target.id)
+                .unwrap();
+        assert_eq!(first_chain.len(), 1);
+        assert_eq!(
+            first_chain[0].lineage.source_summary_id.as_deref(),
+            visible_receipt.summary_id.as_deref()
+        );
+        let first_receipts = context_compaction_receipt_repository::list_receipts_for_conversation(
+            &connection,
+            &first.target.id,
+        )
+        .unwrap();
+        assert_eq!(first_receipts.len(), 1);
+        let first_receipt = &first_receipts[0];
+        assert_cloned_capacity_compaction_receipt(
+            &connection,
+            &visible_receipt,
+            first_receipt,
+            &first.target.id,
+            &first.message_id_map["assistant-b"],
+            &first.message_id_map["user-b"],
+            &first_chain[0].summary.id,
+            &first.run_id_map["run-source-1"],
+        );
+        assert_eq!(
+            context_compaction_repository::get_active_summary(&connection, &first.target.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            first_chain[0].summary.id
+        );
+        let first_head = connection
+            .query_row(
+                "SELECT conversation_id, summary_id
+                 FROM conversation_context_compaction_heads
+                 WHERE conversation_id = ?1",
+                [&first.target.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(first_head.0, first.target.id);
+        assert_eq!(first_head.1, first_chain[0].summary.id);
+
+        let recursive = build_assistant_reply_fork_plan(
+            &connection,
+            "fork-capacity-receipt-recursive",
+            &first.target.id,
+            &first.message_id_map["assistant-c"],
+            110,
+        )
+        .unwrap();
+        assert_eq!(recursive.compaction_receipts.len(), 1);
+        assert_eq!(
+            recursive.compaction_receipts[0].source_receipt.operation_id,
+            first_receipt.operation_id
+        );
+        commit_fork_plan(&mut connection, &recursive).unwrap();
+
+        let recursive_chain = context_compaction_repository::list_active_summary_chain(
+            &connection,
+            &recursive.target.id,
+        )
+        .unwrap();
+        assert_eq!(recursive_chain.len(), 1);
+        assert_eq!(
+            recursive_chain[0].lineage.source_summary_id.as_deref(),
+            first_receipt.summary_id.as_deref()
+        );
+        let recursive_receipts =
+            context_compaction_receipt_repository::list_receipts_for_conversation(
+                &connection,
+                &recursive.target.id,
+            )
+            .unwrap();
+        assert_eq!(recursive_receipts.len(), 1);
+        assert_cloned_capacity_compaction_receipt(
+            &connection,
+            first_receipt,
+            &recursive_receipts[0],
+            &recursive.target.id,
+            &recursive.message_id_map[&first_receipt.assistant_message_id],
+            &recursive.message_id_map[&first.message_id_map["user-b"]],
+            &recursive_chain[0].summary.id,
+            &recursive.run_id_map[&first_receipt.run_id],
+        );
+        let recursive_head = connection
+            .query_row(
+                "SELECT conversation_id, summary_id
+                 FROM conversation_context_compaction_heads
+                 WHERE conversation_id = ?1",
+                [&recursive.target.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recursive_head.0, recursive.target.id);
+        assert_eq!(recursive_head.1, recursive_chain[0].summary.id);
+    }
+
+    #[test]
+    fn root_fork_time_cutoff_excludes_late_summary_receipt_and_future_unanchored_epoch() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+
+        let visible = fork_world_state_snapshot("world-visible-at-cutoff", 0, "visible");
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 1,
+                base_summary_id: None,
+                effective_before_message_id: None,
+                record: &WorldStateRecord::Full(visible.clone()),
+                created_at: 10,
+            },
+        )
+        .unwrap();
+
+        let late_prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::message("user-b"),
+        )
+        .unwrap();
+        let late_receipt = record_applied_capacity_compaction(
+            &mut connection,
+            &late_prefix,
+            "summary-owned-by-b-but-completed-after-c",
+            "context-compaction-after-root-cutoff",
+            "run-source-1",
+            "assistant-b",
+            70,
+        );
+        let future = fork_world_state_snapshot("world-future-unanchored", 0, "future");
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 3,
+                base_summary_id: None,
+                effective_before_message_id: None,
+                record: &WorldStateRecord::Full(future.clone()),
+                created_at: 80,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            authoritative_fork_cutoff_at(
+                &connection,
+                &source.id,
+                &ConversationForkPoint::AssistantReply {
+                    assistant_message_id: "assistant-c".to_string(),
+                },
+            )
+            .unwrap(),
+            60
+        );
+        let source_chain =
+            context_compaction_repository::list_active_summary_chain(&connection, &source.id)
+                .unwrap();
+        assert_eq!(source_chain.len(), 1);
+        assert_eq!(source_chain[0].summary.created_at, 70);
+        assert!(
+            summaries_visible_at_time(&connection, &source.id, source_chain, 60)
+                .unwrap()
+                .is_empty()
+        );
+
+        let plan = build_assistant_reply_fork_plan(
+            &connection,
+            "fork-before-late-root-facts",
+            &source.id,
+            "assistant-c",
+            100,
+        )
+        .unwrap();
+        assert!(plan.summaries.is_empty());
+        assert!(plan.compaction_receipts.is_empty());
+        assert_eq!(plan.world_state_records.len(), 1);
+        assert_eq!(
+            plan.world_state_records[0].record.revision(),
+            visible.revision
+        );
+        commit_fork_plan(&mut connection, &plan).unwrap();
+
+        assert!(
+            context_compaction_repository::get_active_summary(&connection, &plan.target.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            context_compaction_receipt_repository::list_receipts_for_conversation(
+                &connection,
+                &plan.target.id,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(context_compaction_receipt_repository::get_receipt(
+            &connection,
+            &late_receipt.operation_id,
+        )
+        .unwrap()
+        .is_some());
+        let forked_world =
+            world_state_repository::fold_active_snapshot(&connection, &plan.target.id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(forked_world.revision, visible.revision);
+        assert_ne!(forked_world.revision, future.revision);
+    }
+
+    #[test]
+    fn root_fork_rejects_a_visible_run_draft_mutated_after_the_time_cutoff() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+        file_draft_repository::insert_draft(
+            &connection,
+            &AgentFileDraftRecord {
+                id: "draft-mutated-after-cutoff".to_string(),
+                conversation_id: source.id.clone(),
+                project_id: None,
+                run_id: "run-source-1".to_string(),
+                file_path: "late.md".to_string(),
+                mode: "update".to_string(),
+                status: "applied".to_string(),
+                base_revision: None,
+                base_content: "before".to_string(),
+                content: "after".to_string(),
+                additions: 1,
+                deletions: 1,
+                line_count: 1,
+                byte_count: 5,
+                chunk_count: 0,
+                next_chunk_index: 0,
+                stats_final: true,
+                summary: None,
+                final_action_id: None,
+                created_at: 30,
+                updated_at: 70,
+                expires_at: i64::MAX,
+            },
+        )
+        .unwrap();
+
+        let error = build_assistant_reply_fork_plan(
+            &connection,
+            "fork-reject-late-draft",
+            &source.id,
+            "assistant-c",
+            100,
+        )
+        .unwrap_err();
+        assert!(error
+            .message()
+            .contains("文件草稿在分叉点后发生过不可版本化的变化"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM conversations", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversation_forks WHERE request_id = ?1",
+                    ["fork-reject-late-draft"],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn fork_commit_uses_the_file_draft_history_frozen_in_the_plan() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+        let mut draft = AgentFileDraftRecord {
+            id: "draft-plan-snapshot".to_string(),
+            conversation_id: source.id.clone(),
+            project_id: None,
+            run_id: "run-source-1".to_string(),
+            file_path: "snapshot.md".to_string(),
+            mode: "update".to_string(),
+            status: "applied".to_string(),
+            base_revision: None,
+            base_content: "before".to_string(),
+            content: "planned".to_string(),
+            additions: 1,
+            deletions: 1,
+            line_count: 1,
+            byte_count: 7,
+            chunk_count: 1,
+            next_chunk_index: 1,
+            stats_final: true,
+            summary: Some("planned snapshot".to_string()),
+            final_action_id: Some("action-0".to_string()),
+            created_at: 30,
+            updated_at: 40,
+            expires_at: i64::MAX,
+        };
+        file_draft_repository::insert_draft(&connection, &draft).unwrap();
+        file_draft_repository::save_draft_progress(
+            &mut connection,
+            &draft,
+            Some(&crate::storage::models::AgentFileDraftChunkRecord {
+                draft_id: draft.id.clone(),
+                chunk_index: 0,
+                content_hash: "chunk-before-plan".to_string(),
+                byte_count: 7,
+                created_at: 40,
+            }),
+            Some(&crate::storage::models::AgentFileDraftOperationRecord {
+                draft_id: draft.id.clone(),
+                sequence: 0,
+                operation: "append".to_string(),
+                payload_hash: "operation-before-plan".to_string(),
+                created_at: 40,
+            }),
+        )
+        .unwrap();
+
+        let plan = build_assistant_reply_fork_plan(
+            &connection,
+            "fork-frozen-draft-plan",
+            &source.id,
+            "assistant-c",
+            100,
+        )
+        .unwrap();
+        assert_eq!(plan.file_drafts.len(), 1);
+        assert_eq!(plan.file_drafts[0].history.chunks.len(), 1);
+        assert_eq!(plan.file_drafts[0].history.operations.len(), 1);
+
+        draft.content = "mutated-after-plan".to_string();
+        draft.chunk_count = 2;
+        draft.next_chunk_index = 2;
+        draft.updated_at = 50;
+        file_draft_repository::save_draft_progress(
+            &mut connection,
+            &draft,
+            Some(&crate::storage::models::AgentFileDraftChunkRecord {
+                draft_id: draft.id.clone(),
+                chunk_index: 1,
+                content_hash: "chunk-after-plan".to_string(),
+                byte_count: 10,
+                created_at: 50,
+            }),
+            Some(&crate::storage::models::AgentFileDraftOperationRecord {
+                draft_id: draft.id.clone(),
+                sequence: 1,
+                operation: "append".to_string(),
+                payload_hash: "operation-after-plan".to_string(),
+                created_at: 50,
+            }),
+        )
+        .unwrap();
+
+        commit_fork_plan(&mut connection, &plan).unwrap();
+        let target_draft =
+            file_draft_repository::get_draft(&connection, &plan.file_drafts[0].target.id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(target_draft.content, "planned");
+        assert_eq!(target_draft.chunk_count, 1);
+        assert_eq!(target_draft.next_chunk_index, 1);
+        assert_eq!(
+            file_draft_repository::get_chunk_hash(&connection, &target_draft.id, 0)
+                .unwrap()
+                .as_deref(),
+            Some("chunk-before-plan")
+        );
+        assert!(
+            file_draft_repository::get_chunk_hash(&connection, &target_draft.id, 1)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            file_draft_repository::next_operation_sequence(&connection, &target_draft.id).unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn fork_clones_only_world_state_visible_at_cutoff_and_remaps_anchors_and_summary() {
         let mut connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
@@ -2826,7 +4774,7 @@ mod tests {
                 base_summary_id: None,
                 effective_before_message_id: None,
                 record: &WorldStateRecord::Full(initial),
-                created_at: 9,
+                created_at: 10,
             },
         )
         .unwrap();
@@ -2839,7 +4787,7 @@ mod tests {
         context_compaction_repository::commit_prefix_replacement(
             &mut connection,
             &prefix,
-            summary_draft(&prefix, "summary-world-state", 20),
+            summary_draft(&prefix, "summary-world-state", 40),
             "assistant-b",
         )
         .unwrap();
@@ -2858,7 +4806,7 @@ mod tests {
                 base_summary_id: Some("summary-world-state"),
                 effective_before_message_id: Some("user-c"),
                 record: &WorldStateRecord::Diff(diff_at_c),
-                created_at: 21,
+                created_at: 50,
             },
         )
         .unwrap();
@@ -2873,7 +4821,7 @@ mod tests {
                 base_summary_id: Some("summary-world-state"),
                 effective_before_message_id: Some("user-d"),
                 record: &WorldStateRecord::Diff(diff_after_cutoff),
-                created_at: 22,
+                created_at: 70,
             },
         )
         .unwrap();
@@ -2947,7 +4895,7 @@ mod tests {
                 base_summary_id: None,
                 effective_before_message_id: None,
                 record: &WorldStateRecord::Full(initial.clone()),
-                created_at: 9,
+                created_at: 10,
             },
         )
         .unwrap();
@@ -2959,7 +4907,7 @@ mod tests {
                 base_summary_id: None,
                 effective_before_message_id: Some("user-b"),
                 record: &WorldStateRecord::Diff(WorldStateDiff::between(&initial, &at_b).unwrap()),
-                created_at: 10,
+                created_at: 30,
             },
         )
         .unwrap();
@@ -2973,7 +4921,7 @@ mod tests {
         context_compaction_repository::commit_prefix_replacement(
             &mut connection,
             &first_prefix,
-            summary_draft(&first_prefix, "summary-world-state-1", 20),
+            summary_draft(&first_prefix, "summary-world-state-1", 40),
             "assistant-b",
         )
         .unwrap();
@@ -2992,7 +4940,7 @@ mod tests {
                 record: &WorldStateRecord::Diff(
                     WorldStateDiff::between(&epoch_two, &at_c).unwrap(),
                 ),
-                created_at: 21,
+                created_at: 50,
             },
         )
         .unwrap();
@@ -3006,7 +4954,7 @@ mod tests {
         context_compaction_repository::commit_prefix_replacement(
             &mut connection,
             &second_prefix,
-            summary_draft(&second_prefix, "summary-world-state-2", 40),
+            summary_draft(&second_prefix, "summary-world-state-2", 80),
             "assistant-d",
         )
         .unwrap();
@@ -3109,14 +5057,14 @@ mod tests {
 
     fn source_conversation() -> ChatConversationRecord {
         let messages = [
-            ("user-a", "user", 1),
-            ("assistant-a", "assistant", 2),
-            ("user-b", "user", 3),
-            ("assistant-b", "assistant", 4),
-            ("user-c", "user", 5),
-            ("assistant-c", "assistant", 6),
-            ("user-d", "user", 7),
-            ("assistant-d", "assistant", 8),
+            ("user-a", "user", 10),
+            ("assistant-a", "assistant", 20),
+            ("user-b", "user", 30),
+            ("assistant-b", "assistant", 40),
+            ("user-c", "user", 50),
+            ("assistant-c", "assistant", 60),
+            ("user-d", "user", 70),
+            ("assistant-d", "assistant", 80),
         ]
         .into_iter()
         .map(|(id, role, created_at)| ChatMessageRecord {
@@ -3128,7 +5076,7 @@ mod tests {
             attachments: Vec::new(),
             agent_run_json: (role == "assistant").then(|| {
                 json!({
-                    "runId": format!("run-source-{}", (created_at / 2) - 1),
+                    "runId": format!("run-source-{}", (created_at / 20) - 1),
                     "status": "completed",
                     "toolDefinitions": [],
                     "toolCalls": [],
@@ -3157,8 +5105,8 @@ mod tests {
             model_id: Some("model-1".to_string()),
             title: "Source task".to_string(),
             messages,
-            created_at: 1,
-            updated_at: 8,
+            created_at: 10,
+            updated_at: 80,
             pinned_at: None,
             archived_at: None,
             unread_at: None,
@@ -3183,6 +5131,163 @@ mod tests {
             replacement_input_tokens: 200,
             created_at,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_applied_capacity_compaction(
+        connection: &mut Connection,
+        prefix: &crate::ContextCompactionPrefix,
+        summary_id: &str,
+        operation_id: &str,
+        run_id: &str,
+        assistant_message_id: &str,
+        completed_at: i64,
+    ) -> ContextCompactionReceipt {
+        assert!(!operation_id.starts_with("provider-transition-"));
+        let started_at = completed_at.saturating_sub(2);
+        let mut receipt = ContextCompactionReceipt {
+            schema_version: crate::CONTEXT_COMPACTION_RECEIPT_SCHEMA_VERSION,
+            operation_id: operation_id.to_string(),
+            run_id: run_id.to_string(),
+            conversation_id: prefix.conversation_id.clone(),
+            assistant_message_id: assistant_message_id.to_string(),
+            request_index: 1,
+            attempt_index: 1,
+            model: "model-1".to_string(),
+            provider_transition_source_model_display_name: None,
+            provider_transition_target_model_display_name: None,
+            api_style: crate::AgentApiStyle::OpenAiCompatible,
+            status: ContextCompactionReceiptStatus::InProgress,
+            stage: ContextCompactionReceiptStage::Planned,
+            plan: crate::ContextCompactionReceiptPlan {
+                context_revision: prefix.source_revision.clone(),
+                persistent_revision: prefix.source_revision.clone(),
+                request_input_tokens: 1_000,
+                available_input_tokens: Some(1_000),
+                request_trigger_input_tokens: Some(900),
+                request_target_input_tokens: Some(200),
+                source_input_tokens: 1_000,
+                retained_input_tokens: 0,
+                target_replacement_tokens: 200,
+                expected_reclaimed_tokens: 800,
+                planned_reclaimed_tokens: 800,
+                projected_request_input_tokens: 200,
+                best_effort: false,
+                protected_input_tokens: 0,
+                protected_reasons: Default::default(),
+                atomic_unit_count: prefix.source_items.len().max(1),
+                previous_summary_id: prefix
+                    .previous_summary
+                    .as_ref()
+                    .map(|summary| summary.id.clone()),
+                covered_through: prefix.covered_through.clone(),
+            },
+            source_revision: None,
+            generation_observation_id: None,
+            summary_id: None,
+            result: None,
+            error: None,
+            started_at,
+            updated_at: started_at,
+            completed_at: None,
+        };
+        receipt.validate().unwrap();
+        context_compaction_receipt_repository::record_receipt(connection, &receipt, None).unwrap();
+        receipt
+            .attach_prepared_prefix(prefix, completed_at.saturating_sub(1))
+            .unwrap();
+        let draft = summary_draft(prefix, summary_id, completed_at);
+        let observation = crate::model_request_observation::ModelRequestObservationBuilder::new(
+            format!("observation-{operation_id}"),
+            run_id,
+            Some(prefix.conversation_id.clone()),
+            Some(assistant_message_id.to_string()),
+            Some(operation_id.to_string()),
+            1,
+            crate::ModelRequestPurpose::ContextCompaction,
+            "model-1",
+            crate::AgentApiStyle::OpenAiCompatible,
+            None,
+            completed_at.saturating_sub(1),
+        )
+        .completed(None, Some("stop".to_string()), completed_at)
+        .unwrap();
+        receipt
+            .complete_applied(&draft, &observation, completed_at)
+            .unwrap();
+        context_compaction_repository::commit_prefix_replacement_with_receipt(
+            connection,
+            prefix,
+            draft,
+            &receipt,
+            &observation,
+        )
+        .unwrap();
+        receipt
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_cloned_capacity_compaction_receipt(
+        connection: &Connection,
+        source: &ContextCompactionReceipt,
+        target: &ContextCompactionReceipt,
+        target_conversation_id: &str,
+        target_assistant_message_id: &str,
+        target_covered_message_id: &str,
+        target_summary_id: &str,
+        target_run_id: &str,
+    ) {
+        assert_eq!(target.status, ContextCompactionReceiptStatus::Applied);
+        assert_eq!(target.stage, ContextCompactionReceiptStage::Completed);
+        assert_ne!(target.operation_id, source.operation_id);
+        assert_ne!(target.run_id, source.run_id);
+        assert_ne!(target.conversation_id, source.conversation_id);
+        assert_ne!(target.assistant_message_id, source.assistant_message_id);
+        assert_ne!(target.summary_id, source.summary_id);
+        assert_ne!(
+            target.generation_observation_id,
+            source.generation_observation_id
+        );
+        assert_eq!(target.run_id, target_run_id);
+        assert_eq!(target.conversation_id, target_conversation_id);
+        assert_eq!(target.assistant_message_id, target_assistant_message_id);
+        assert_eq!(target.summary_id.as_deref(), Some(target_summary_id));
+        assert_eq!(
+            target
+                .result
+                .as_ref()
+                .map(|result| result.summary_id.as_str()),
+            Some(target_summary_id)
+        );
+        assert_eq!(
+            target.plan.covered_through,
+            ContextJournalCursor::message(target_covered_message_id)
+        );
+        let observation = model_request_observation_repository::get_observation(
+            connection,
+            target
+                .generation_observation_id
+                .as_deref()
+                .expect("cloned capacity receipt observation"),
+        )
+        .unwrap()
+        .expect("cloned capacity receipt observation row");
+        assert_eq!(observation.run_id, target_run_id);
+        assert_eq!(
+            observation.conversation_id.as_deref(),
+            Some(target_conversation_id)
+        );
+        assert_eq!(
+            observation.assistant_message_id.as_deref(),
+            Some(target_assistant_message_id)
+        );
+        assert_eq!(
+            observation.operation_id.as_deref(),
+            Some(target.operation_id.as_str())
+        );
+        target
+            .validate_generation_observation(&observation)
+            .unwrap();
     }
 
     fn record_agent_loop_model(

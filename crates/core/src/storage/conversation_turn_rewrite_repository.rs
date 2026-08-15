@@ -225,28 +225,6 @@ pub(crate) fn validate_source_is_editable_tail(
         );
     }
 
-    let active_goal_from_source = connection
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM conversation_goals
-                WHERE conversation_id = ?1
-                  AND source_message_id = ?2
-                  AND status IN ('active', 'blocked')
-            )",
-            params![
-                &admission.conversation_id,
-                &admission.source_user_message_id
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(|error| error.to_string())?;
-    if active_goal_from_source {
-        return Err(
-            "edit_turn_goal_busy: complete or cancel the goal created by this Turn before editing"
-                .to_string(),
-        );
-    }
-
     let active_command_session = connection
         .query_row(
             "SELECT EXISTS(

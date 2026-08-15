@@ -337,6 +337,38 @@ pub fn list_project_deletion_attachments(
     attachments
 }
 
+/// Returns every physical attachment owned by conversations that are about to be removed.
+///
+/// Agent-tree deletion differs from ordinary message deletion: guidance-owned attachments are
+/// part of the deleted tree too, so they must not be filtered out before the database cascade.
+pub fn list_conversations_deletion_attachments(
+    connection: &Connection,
+    conversation_ids: &[String],
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    if conversation_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", conversation_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT
+             id, conversation_id, message_id, project_id, kind, original_name,
+             mime_type, size_bytes, storage_rel_path, created_at
+         FROM attachments
+         WHERE conversation_id IN ({placeholders})
+         ORDER BY created_at ASC, id ASC"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let attachments = statement
+        .query_map(
+            rusqlite::params_from_iter(conversation_ids.iter()),
+            attachment_from_row,
+        )?
+        .collect();
+    attachments
+}
+
 pub fn list_attachment_storage_rel_paths(connection: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut statement = connection.prepare(
         "

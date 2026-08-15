@@ -353,6 +353,161 @@ pub(crate) fn create_agent_node_in_transaction(
     Ok(IdempotentCreate::Created(record))
 }
 
+/// Inserts one child node while cloning a durable Conversation branch.
+///
+/// Unlike a new spawn, a fork must preserve the source node's frozen template/model facts even
+/// when the current template catalog has changed. The caller supplies fresh tree identities and
+/// creates the empty target Conversation first; this function still validates the target parent,
+/// project, model and task-path invariants before writing the node.
+pub(crate) fn insert_forked_agent_node_in_transaction(
+    transaction: &Connection,
+    record: &AgentNodeRecord,
+) -> Result<AgentNodeRecord, AgentGraphError> {
+    validate_id("agent_id", &record.agent_id)?;
+    validate_id("root_agent_id", &record.root_agent_id)?;
+    validate_id("root_conversation_id", &record.root_conversation_id)?;
+    validate_id("conversation_id", &record.conversation_id)?;
+    validate_request_id(&record.creation_request_id)?;
+    validate_identity_task_name(&record.task_name)?;
+    validate_time(record.created_at)?;
+    validate_time(record.updated_at)?;
+    if record.revision == 0 || record.updated_at < record.created_at {
+        return Err(invalid(
+            "record",
+            "revision and timestamps must describe a valid forked node",
+        ));
+    }
+
+    let parent_agent_id = record
+        .parent_agent_id
+        .as_deref()
+        .ok_or_else(|| invalid("parent_agent_id", "forked child must have a parent"))?;
+    let parent = query_node(transaction, parent_agent_id)?
+        .ok_or_else(|| AgentGraphError::AgentNotFound(parent_agent_id.to_string()))?;
+    if parent.root_agent_id != record.root_agent_id
+        || parent.root_conversation_id != record.root_conversation_id
+    {
+        return Err(conflict(
+            "forked child parent does not belong to the target tree",
+        ));
+    }
+    let expected_path = format!("{}/{}", parent.task_path, record.task_name);
+    if record.task_path != expected_path || record.task_name.contains('/') {
+        return Err(invalid(
+            "task_path",
+            "must be exactly one task-name segment below the forked parent",
+        ));
+    }
+    let project_id = conversation_project(transaction, &record.conversation_id)?;
+    if project_id != parent.project_id || project_id != record.project_id {
+        return Err(conflict(
+            "forked child Conversation project does not match the target tree",
+        ));
+    }
+    let conversation_model_id = transaction
+        .query_row(
+            "SELECT model_id FROM conversations WHERE id = ?1",
+            [&record.conversation_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(read_error)?;
+    let model = record
+        .model_snapshot
+        .as_ref()
+        .ok_or_else(|| corrupt("forked child is missing its frozen model snapshot"))?;
+    if conversation_model_id.as_deref() != Some(model.model_config_id.as_str()) {
+        return Err(conflict(
+            "forked child Conversation model does not match its frozen model snapshot",
+        ));
+    }
+    if record.model_selection_source.is_none() {
+        return Err(corrupt(
+            "forked child is missing model selection provenance",
+        ));
+    }
+    if query_node(transaction, &record.agent_id)?.is_some()
+        || query_node_by_conversation(transaction, &record.conversation_id)?.is_some()
+    {
+        return Err(conflict("forked Agent identity is already in use"));
+    }
+    if query_node_by_request(
+        transaction,
+        &record.root_agent_id,
+        &record.creation_request_id,
+    )?
+    .is_some()
+    {
+        return Err(conflict(
+            "forked Agent creation request identity is already in use",
+        ));
+    }
+
+    let template = record.template_snapshot.as_ref();
+    transaction
+        .execute(
+            "INSERT INTO agent_nodes (
+                 agent_id, schema_version, root_agent_id, root_conversation_id,
+                 parent_agent_id, conversation_id, project_id, creation_request_id,
+                 task_name, task_path,
+                 template_id_snapshot, template_project_id_snapshot,
+                 template_machine_key_snapshot, template_name_snapshot,
+                 template_description_snapshot, template_instructions_snapshot,
+                 template_revision_snapshot, template_model_config_id_snapshot,
+                 model_config_id_snapshot, model_display_name_snapshot,
+                 model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                 model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                 provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                 reasoning_effort_snapshot, lifecycle, revision, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31
+             )",
+            params![
+                &record.agent_id,
+                i64::from(AGENT_GRAPH_SCHEMA_VERSION),
+                &record.root_agent_id,
+                &record.root_conversation_id,
+                parent_agent_id,
+                &record.conversation_id,
+                &record.project_id,
+                &record.creation_request_id,
+                &record.task_name,
+                &record.task_path,
+                template.map(|value| value.template_id.as_str()),
+                template.map(|value| value.project_id.as_str()),
+                template.map(|value| value.machine_key.as_str()),
+                template.map(|value| value.name.as_str()),
+                template.map(|value| value.description.as_str()),
+                template.map(|value| value.instructions.as_str()),
+                template
+                    .map(|value| revision_to_sql(value.template_revision))
+                    .transpose()?,
+                template.map(|value| value.model_config_id.as_str()),
+                &model.model_config_id,
+                &model.display_name,
+                model.supports_image,
+                i64::from(model.effective_context_window_tokens),
+                &model.model_settings_configuration_revision,
+                &model.provider_connection_revision,
+                &model.provider_protocol_revision,
+                record
+                    .model_selection_source
+                    .map(AgentModelSelectionSource::as_str),
+                record
+                    .reasoning_effort_snapshot
+                    .map(reasoning_effort_as_str),
+                record.lifecycle.as_str(),
+                revision_to_sql(record.revision)?,
+                record.created_at,
+                record.updated_at,
+            ],
+        )
+        .map_err(write_error)?;
+    query_node(transaction, &record.agent_id)?
+        .ok_or_else(|| corrupt("forked child Agent could not be read back"))
+}
+
 pub fn get_agent_node(
     connection: &Connection,
     agent_id: &str,

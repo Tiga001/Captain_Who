@@ -22,8 +22,8 @@ use crate::storage::{
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
     context_compaction_receipt_repository, context_compaction_repository,
     conversation_context_adaptation_repository, conversation_fork_repository,
-    conversation_goal_repository, conversation_history_archive_repository,
-    conversation_history_repository, conversation_model_context_repository,
+    conversation_history_archive_repository, conversation_history_repository,
+    conversation_model_context_repository,
     conversation_trace_repository, conversation_turn_rewrite_repository, file_draft_repository,
     guidance_repository, image_generation_repository, mcp_approval_envelope_repository,
     model_request_observation_repository, now_ms, pending_action_repository,
@@ -37,14 +37,13 @@ use crate::{
     AgentToolResult, AgentTurnDiffIdentity, AgentTurnDiffRecord, AgentTurnFileChange,
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionPrefix, ContextCompactionReceipt, ContextCompactionSummary,
-    ContextCompactionSummaryDraft, ContextJournalCursor, ConversationGoal,
-    ConversationGoalMutationActor, ConversationGoalRevision, ConversationGoalStatus,
-    ConversationModelContextItem, ConversationModelContextLog, ConversationTurnTrace,
+    ContextCompactionSummaryDraft, ContextJournalCursor, ConversationModelContextItem,
+    ConversationModelContextLog, ConversationTurnTrace,
     ConversationTurnTraceItem, ModelRequestObservation, ProviderContinuationVault,
     WorldStateRecord,
 };
 use base64::Engine;
-use rusqlite::OptionalExtension;
+use rusqlite::{config::DbConfig, OptionalExtension};
 use uuid::Uuid;
 
 mod agent_collaboration_events;
@@ -57,7 +56,6 @@ mod command_sessions;
 mod compaction;
 mod conversations;
 mod file_drafts;
-mod goals;
 mod guidance;
 mod image_generation;
 mod lifecycle;

@@ -1,5 +1,349 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+struct AgentTreeDeletionScope {
+    root_agent_id: String,
+    conversation_ids: Vec<String>,
+}
+
+fn resolve_agent_tree_deletion_scope(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+) -> Result<Option<AgentTreeDeletionScope>, String> {
+    let Some(node) =
+        agent_graph_repository::get_agent_node_by_conversation(connection, conversation_id)
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if node.parent_agent_id.is_some() {
+        return Err(
+            "child Agent conversations are owned by their root task and cannot be removed independently"
+                .to_string(),
+        );
+    }
+    let tree = agent_graph_repository::list_agent_tree(connection, &node.root_agent_id)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(AgentTreeDeletionScope {
+        root_agent_id: node.root_agent_id,
+        conversation_ids: tree
+            .into_iter()
+            .map(|agent| agent.conversation_id)
+            .collect(),
+    }))
+}
+
+fn project_agent_tree_deletion_scopes(
+    connection: &rusqlite::Connection,
+    project_id: &str,
+) -> Result<Vec<AgentTreeDeletionScope>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT agent_id
+             FROM agent_nodes
+             WHERE project_id = ?1 AND parent_agent_id IS NULL
+             ORDER BY created_at, agent_id",
+        )
+        .map_err(storage_error)?;
+    let root_agent_ids = statement
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .map_err(storage_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage_error)?;
+    root_agent_ids
+        .into_iter()
+        .map(|root_agent_id| {
+            let tree = agent_graph_repository::list_agent_tree(connection, &root_agent_id)
+                .map_err(|error| error.to_string())?;
+            Ok(AgentTreeDeletionScope {
+                root_agent_id,
+                conversation_ids: tree
+                    .into_iter()
+                    .map(|agent| agent.conversation_id)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn project_conversation_ids(
+    connection: &rusqlite::Connection,
+    project_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT id FROM conversations WHERE project_id = ?1 ORDER BY created_at, id")
+        .map_err(storage_error)?;
+    let conversation_ids = statement
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .map_err(storage_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage_error)?;
+    Ok(conversation_ids)
+}
+
+fn ensure_deletion_scope_has_no_active_execution(
+    connection: &rusqlite::Connection,
+    conversation_ids: &[String],
+) -> Result<(), String> {
+    if conversation_ids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = std::iter::repeat_n("?", conversation_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT EXISTS(
+             SELECT 1 FROM conversation_turn_traces
+             WHERE conversation_id IN ({placeholders}) AND terminal_status = 'in_progress'
+             UNION ALL
+             SELECT 1 FROM agent_command_sessions
+             WHERE conversation_id IN ({placeholders}) AND status IN ('starting', 'running')
+             UNION ALL
+             SELECT 1 FROM agent_pending_actions
+             WHERE conversation_id IN ({placeholders})
+               AND status IN ('pending', 'approved', 'executing')
+         )"
+    );
+    let mut values = Vec::with_capacity(conversation_ids.len() * 3);
+    for _ in 0..3 {
+        values.extend(conversation_ids.iter().cloned());
+    }
+    let active = connection
+        .query_row(&sql, rusqlite::params_from_iter(values), |row| {
+            row.get::<_, bool>(0)
+        })
+        .map_err(storage_error)?;
+    if active {
+        Err(
+            "the Agent task still has an active execution; stop it before removing the task"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn cleanup_conversation_owned_records(
+    connection: &rusqlite::Connection,
+    conversation_ids: &[String],
+) -> Result<(), String> {
+    let deleted_at = now_ms();
+    for conversation_id in conversation_ids {
+        usage_repository::roll_up_deleted_usage_for_conversation(
+            connection,
+            conversation_id,
+            deleted_at,
+        )
+        .map_err(storage_error)?;
+        pending_action_repository::delete_pending_actions_for_conversation(
+            connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        agent_action_audit_repository::delete_action_audit_for_conversation(
+            connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        provider_continuation_repository::delete_for_conversation(connection, conversation_id)
+            .map_err(storage_error)?;
+        composer_draft_repository::delete_composer_draft(connection, conversation_id)
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn delete_agent_tree_records(
+    connection: &rusqlite::Connection,
+    scope: &AgentTreeDeletionScope,
+) -> Result<(), String> {
+    let root_agent_id = &scope.root_agent_id;
+    // Fork receipts express lineage, not ownership. Removing either endpoint retires only the
+    // receipt; the other independently-owned root tree must remain intact.
+    connection
+        .execute(
+            "DELETE FROM agent_member_conversation_forks
+             WHERE source_root_agent_id = ?1 OR target_root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM conversation_forks
+             WHERE source_root_agent_id = ?1 OR target_root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_model_batch_receipt_replays
+             WHERE receipt_id IN (
+                 SELECT receipt_id FROM agent_model_batch_receipts
+                 WHERE agent_id IN (SELECT agent_id FROM agent_nodes WHERE root_agent_id = ?1)
+             ) OR source_receipt_id IN (
+                 SELECT receipt_id FROM agent_model_batch_receipts
+                 WHERE agent_id IN (SELECT agent_id FROM agent_nodes WHERE root_agent_id = ?1)
+             )",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    for table in [
+        "agent_model_batch_receipt_items",
+        "agent_model_batch_receipt_targets",
+    ] {
+        connection
+            .execute(
+                &format!(
+                    "DELETE FROM {table}
+                     WHERE receipt_id IN (
+                         SELECT receipt_id FROM agent_model_batch_receipts
+                         WHERE agent_id IN (
+                             SELECT agent_id FROM agent_nodes WHERE root_agent_id = ?1
+                         )
+                     )"
+                ),
+                [root_agent_id],
+            )
+            .map_err(storage_error)?;
+    }
+    connection
+        .execute(
+            "DELETE FROM agent_model_batch_receipts
+             WHERE agent_id IN (SELECT agent_id FROM agent_nodes WHERE root_agent_id = ?1)",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_interrupt_requests WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_wake_requests WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_collaboration_cursors
+             WHERE caller_agent_id IN (
+                 SELECT agent_id FROM agent_nodes WHERE root_agent_id = ?1
+             ) OR target_agent_id IN (
+                 SELECT agent_id FROM agent_nodes WHERE root_agent_id = ?1
+             )",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_collaboration_events WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_collaboration_event_sequences WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
+            "DELETE FROM agent_mailbox_messages WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+
+    if !scope.conversation_ids.is_empty() {
+        let placeholders = std::iter::repeat_n("?", scope.conversation_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection
+            .execute(
+                &format!(
+                    "DELETE FROM conversation_history_fts
+                     WHERE conversation_id IN ({placeholders})"
+                ),
+                rusqlite::params_from_iter(scope.conversation_ids.iter()),
+            )
+            .map_err(storage_error)?;
+        connection
+            .execute(
+                &format!("DELETE FROM conversations WHERE id IN ({placeholders})"),
+                rusqlite::params_from_iter(scope.conversation_ids.iter()),
+            )
+            .map_err(storage_error)?;
+    }
+    connection
+        .execute(
+            "DELETE FROM agent_nodes WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn verify_foreign_keys(connection: &rusqlite::Connection) -> Result<(), String> {
+    let violation = connection
+        .query_row(
+            "SELECT \"table\", rowid, parent, fkid FROM pragma_foreign_key_check LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage_error)?;
+    if let Some((table, row_id, parent, foreign_key_id)) = violation {
+        return Err(format!(
+            "Agent tree deletion would violate foreign key {foreign_key_id} from {table} row {row_id:?} to {parent}"
+        ));
+    }
+    Ok(())
+}
+
+fn with_agent_deletion_transaction<T>(
+    connection: &mut rusqlite::Connection,
+    operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, String>,
+) -> Result<T, String> {
+    let triggers_were_enabled = connection
+        .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+        .map_err(storage_error)?;
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)
+        .map_err(storage_error)?;
+    let result = (|| {
+        let transaction = connection.transaction().map_err(storage_error)?;
+        transaction
+            .execute_batch("PRAGMA defer_foreign_keys = ON")
+            .map_err(storage_error)?;
+        let value = operation(&transaction)?;
+        verify_foreign_keys(&transaction)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(value)
+    })();
+    let restore_result = connection
+        .set_db_config(
+            DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+            triggers_were_enabled,
+        )
+        .map_err(storage_error);
+    match (result, restore_result) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation_error), Err(restore_error)) => Err(format!(
+            "{operation_error}; additionally failed to restore SQLite triggers: {restore_error}"
+        )),
+    }
+}
+
 fn conversation_matches_previous_after_removing(
     current: &ChatConversationRecord,
     previous: &ChatConversationRecord,
@@ -61,10 +405,9 @@ impl StorageService {
         let attachments =
             attachment_repository::list_project_deletion_attachments(&connection, project_id)
                 .map_err(storage_error)?;
-        {
+        let tree_scopes = project_agent_tree_deletion_scopes(&connection, project_id)?;
+        if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
-            agent_graph_repository::ensure_project_unbound(&transaction, project_id)
-                .map_err(|error| error.to_string())?;
             usage_repository::roll_up_deleted_usage_for_project(&transaction, project_id, now_ms())
                 .map_err(storage_error)?;
             pending_action_repository::delete_pending_actions_for_project(&transaction, project_id)
@@ -78,6 +421,49 @@ impl StorageService {
                 .map_err(storage_error)?;
             project_repository::delete_project(&transaction, project_id).map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
+        } else {
+            let conversation_ids = project_conversation_ids(&connection, project_id)?;
+            ensure_deletion_scope_has_no_active_execution(&connection, &conversation_ids)?;
+            with_agent_deletion_transaction(&mut connection, |transaction| {
+                usage_repository::roll_up_deleted_usage_for_project(
+                    transaction,
+                    project_id,
+                    now_ms(),
+                )
+                .map_err(storage_error)?;
+                pending_action_repository::delete_pending_actions_for_project(
+                    transaction,
+                    project_id,
+                )
+                .map_err(storage_error)?;
+                agent_action_audit_repository::delete_action_audit_for_project(
+                    transaction,
+                    project_id,
+                )
+                .map_err(storage_error)?;
+                composer_draft_repository::delete_project_composer_drafts(transaction, project_id)
+                    .map_err(storage_error)?;
+                if !conversation_ids.is_empty() {
+                    let placeholders = std::iter::repeat_n("?", conversation_ids.len())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    transaction
+                        .execute(
+                            &format!(
+                                "DELETE FROM conversation_history_fts
+                                 WHERE conversation_id IN ({placeholders})"
+                            ),
+                            rusqlite::params_from_iter(conversation_ids.iter()),
+                        )
+                        .map_err(storage_error)?;
+                }
+                for scope in &tree_scopes {
+                    delete_agent_tree_records(transaction, scope)?;
+                }
+                project_repository::delete_project(transaction, project_id)
+                    .map_err(storage_error)?;
+                Ok(())
+            })?;
         }
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted project attachment files: {error}");
@@ -373,7 +759,7 @@ impl StorageService {
         let mut staged_files = Vec::new();
         let mut committed_files = Vec::new();
         let prepare_files = (|| -> Result<(), String> {
-            for attachment in &mut plan.attachments {
+            for attachment in plan.attachments_mut() {
                 let source_path = safe_existing_attachment_storage_path(
                     &self.attachment_root,
                     &attachment.source.storage_rel_path,
@@ -1444,13 +1830,25 @@ impl StorageService {
 
     pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
         let mut connection = self.state.connection()?;
-        let attachments =
+        let tree_scope = resolve_agent_tree_deletion_scope(&connection, conversation_id)?;
+        let attachments = if let Some(scope) = &tree_scope {
+            attachment_repository::list_conversations_deletion_attachments(
+                &connection,
+                &scope.conversation_ids,
+            )
+            .map_err(storage_error)?
+        } else {
             attachment_repository::list_conversation_attachments(&connection, conversation_id)
-                .map_err(storage_error)?;
-        {
+                .map_err(storage_error)?
+        };
+        if let Some(scope) = tree_scope {
+            ensure_deletion_scope_has_no_active_execution(&connection, &scope.conversation_ids)?;
+            with_agent_deletion_transaction(&mut connection, |transaction| {
+                cleanup_conversation_owned_records(transaction, &scope.conversation_ids)?;
+                delete_agent_tree_records(transaction, &scope)
+            })?;
+        } else {
             let transaction = connection.transaction().map_err(storage_error)?;
-            agent_graph_repository::ensure_conversation_unbound(&transaction, conversation_id)
-                .map_err(|error| error.to_string())?;
             usage_repository::roll_up_deleted_usage_for_conversation(
                 &transaction,
                 conversation_id,

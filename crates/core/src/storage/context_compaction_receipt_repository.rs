@@ -102,6 +102,28 @@ pub fn get_receipt(
     row.map(decode_receipt).transpose()
 }
 
+pub(crate) fn list_receipts_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<ContextCompactionReceipt>, ContextCompactionReceiptRepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT status, stage, receipt_json
+         FROM context_compaction_receipts
+         WHERE conversation_id = ?1
+         ORDER BY started_at ASC, operation_id ASC",
+    )?;
+    let rows = statement
+        .query_map([conversation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter().map(decode_receipt).collect()
+}
+
 /// Resolves the one applied Provider-transition receipt that authoritatively introduced a summary.
 /// Duplicate bindings are treated as corruption instead of choosing one by timestamp.
 pub(crate) fn get_applied_provider_transition_receipt_for_summary(
@@ -581,6 +603,38 @@ mod tests {
             provider_transition_failed_attempt_count(&connection, "conversation-1", "target-model")
                 .unwrap(),
             2
+        );
+    }
+
+    #[test]
+    fn lists_all_conversation_receipts_in_stable_chronological_order() {
+        let mut connection = setup();
+        for (operation_id, run_id, started_at) in [
+            ("operation-later-b", "run-later-b", 5),
+            ("operation-earlier", "run-earlier", 2),
+            ("operation-later-a", "run-later-a", 5),
+        ] {
+            let mut receipt = planned_receipt();
+            receipt.operation_id = operation_id.to_string();
+            receipt.run_id = run_id.to_string();
+            receipt.started_at = started_at;
+            receipt.updated_at = started_at;
+            record_receipt(&mut connection, &receipt, None).unwrap();
+        }
+
+        let operation_ids = list_receipts_for_conversation(&connection, "conversation-1")
+            .unwrap()
+            .into_iter()
+            .map(|receipt| receipt.operation_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            operation_ids,
+            vec![
+                "operation-earlier",
+                "operation-later-a",
+                "operation-later-b"
+            ]
         );
     }
 

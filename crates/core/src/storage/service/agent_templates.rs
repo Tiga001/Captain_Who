@@ -828,14 +828,15 @@ mod tests {
             }
         );
 
-        let project_delete_error = service.delete_project("project-a").unwrap_err();
-        assert!(project_delete_error.contains("persistent Agent tree"));
+        service.delete_project("project-a").unwrap();
         assert_eq!(
             service
                 .get_agent_template("project-a", "template-1")
-                .unwrap(),
-            disabled
+                .unwrap_err(),
+            AgentTemplateError::ProjectNotFound("project-a".to_string())
         );
+        assert!(service.get_agent_node("root-agent").unwrap().is_none());
+        assert!(service.get_agent_node("child-agent").unwrap().is_none());
     }
 
     #[test]

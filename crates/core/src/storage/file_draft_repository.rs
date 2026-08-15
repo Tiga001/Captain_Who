@@ -5,6 +5,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 const EXPIRED_DRAFT_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+#[derive(Debug, Clone)]
+pub(crate) struct AgentFileDraftHistorySnapshot {
+    pub chunks: Vec<AgentFileDraftChunkRecord>,
+    pub operations: Vec<AgentFileDraftOperationRecord>,
+}
+
 pub fn insert_draft(connection: &Connection, draft: &AgentFileDraftRecord) -> rusqlite::Result<()> {
     connection.execute(
         r#"
@@ -43,6 +49,92 @@ pub fn insert_draft(connection: &Connection, draft: &AgentFileDraftRecord) -> ru
             draft.expires_at,
         ],
     )?;
+    Ok(())
+}
+
+pub(crate) fn load_draft_history_snapshot(
+    connection: &Connection,
+    draft_id: &str,
+    cutoff_at: Option<i64>,
+) -> rusqlite::Result<AgentFileDraftHistorySnapshot> {
+    let mut chunks_statement = connection.prepare(
+        r#"
+        SELECT chunk_index, content_hash, byte_count, created_at
+        FROM agent_file_draft_chunks
+        WHERE draft_id = ?1 AND (?2 IS NULL OR created_at <= ?2)
+        ORDER BY chunk_index ASC
+        "#,
+    )?;
+    let chunks = chunks_statement
+        .query_map(params![draft_id, cutoff_at], |row| {
+            Ok(AgentFileDraftChunkRecord {
+                draft_id: draft_id.to_string(),
+                chunk_index: row.get::<_, i64>(0)?.max(0) as u64,
+                content_hash: row.get(1)?,
+                byte_count: row.get::<_, i64>(2)?.max(0) as u64,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut operations_statement = connection.prepare(
+        r#"
+        SELECT sequence, operation, payload_hash, created_at
+        FROM agent_file_draft_operations
+        WHERE draft_id = ?1 AND (?2 IS NULL OR created_at <= ?2)
+        ORDER BY sequence ASC
+        "#,
+    )?;
+    let operations = operations_statement
+        .query_map(params![draft_id, cutoff_at], |row| {
+            Ok(AgentFileDraftOperationRecord {
+                draft_id: draft_id.to_string(),
+                sequence: row.get::<_, i64>(0)?.max(0) as u64,
+                operation: row.get(1)?,
+                payload_hash: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(AgentFileDraftHistorySnapshot { chunks, operations })
+}
+
+pub(crate) fn insert_draft_history_snapshot(
+    connection: &Connection,
+    target_draft_id: &str,
+    snapshot: &AgentFileDraftHistorySnapshot,
+) -> rusqlite::Result<()> {
+    for chunk in &snapshot.chunks {
+        connection.execute(
+            r#"
+            INSERT INTO agent_file_draft_chunks (
+                draft_id, chunk_index, content_hash, byte_count, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                target_draft_id,
+                chunk.chunk_index as i64,
+                chunk.content_hash,
+                chunk.byte_count as i64,
+                chunk.created_at,
+            ],
+        )?;
+    }
+    for operation in &snapshot.operations {
+        connection.execute(
+            r#"
+            INSERT INTO agent_file_draft_operations (
+                draft_id, sequence, operation, payload_hash, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                target_draft_id,
+                operation.sequence as i64,
+                operation.operation,
+                operation.payload_hash,
+                operation.created_at,
+            ],
+        )?;
+    }
     Ok(())
 }
 

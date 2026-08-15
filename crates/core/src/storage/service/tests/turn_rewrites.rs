@@ -746,48 +746,6 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
 }
 
 #[test]
-fn rewrite_rejects_an_active_goal_derived_from_the_source_turn() {
-    let fixture = tempfile::tempdir().unwrap();
-    let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
-    service
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "project-1".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
-        .unwrap();
-    let conversation_id = "conversation-rewrite-goal";
-    completed_source_turn(&service, conversation_id);
-    service
-        .create_conversation_goal(
-            crate::ConversationGoalMutationActor::User,
-            conversation_id,
-            "Finish the source task before editing it.",
-            4,
-        )
-        .unwrap();
-    let (candidate, revision, trace) = replacement_candidate(&service, conversation_id);
-    let error = service
-        .rewrite_conversation_turn_and_begin_turn(
-            candidate,
-            revision,
-            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
-                crate::AgentPermissions::default(),
-            ),
-            &[],
-            &trace,
-            5,
-            5,
-            &rewrite_admission(conversation_id),
-            &no_rewrite_attachments(&service, conversation_id),
-        )
-        .unwrap_err();
-    assert!(error.contains("edit_turn_goal_busy"), "{error}");
-}
-
-#[test]
 fn rewrite_rejects_an_active_command_session_without_hiding_the_source() {
     let fixture = tempfile::tempdir().unwrap();
     let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();

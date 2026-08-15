@@ -1062,6 +1062,241 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
 }
 
 #[test]
+fn compaction_projection_drops_command_session_audit_that_references_the_covered_prefix() {
+    let conversation = ChatConversationRecord {
+        id: "conversation-command-audit-tail".to_string(),
+        project_id: None,
+        model_id: None,
+        title: "Command audit tail".to_string(),
+        messages: vec![
+            ChatMessageRecord {
+                id: "user-command-audit-tail".to_string(),
+                role: "user".to_string(),
+                content: "Run the command.".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            },
+            ChatMessageRecord {
+                id: "assistant-command-audit-tail".to_string(),
+                role: "assistant".to_string(),
+                content: "The command completed.".to_string(),
+                created_at: 2,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            },
+        ],
+        created_at: 1,
+        updated_at: 2,
+        pinned_at: None,
+        archived_at: None,
+        unread_at: None,
+    };
+    let call_id = history_call_id();
+    let session_id = "cmd_0123456789abcdef0123456789abcdef";
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-command-audit-tail".to_string(),
+        conversation_id: conversation.id.clone(),
+        assistant_message_id: "assistant-command-audit-tail".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call_id.clone(),
+                tool: "run_command".to_string(),
+                operation: json!({ "command": "sleep 30" }),
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
+                approval_status: AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: call_id.clone(),
+                tool: "run_command".to_string(),
+                status: ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: json!({ "status": "running", "sessionId": session_id }),
+                approval_status: AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 2,
+                content: "The remaining model-visible tail.".to_string(),
+                truncated: false,
+            },
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 3,
+                phase: mycopilot_core::ConversationCommandSessionLifecyclePhase::Started,
+                session_id: session_id.to_string(),
+                call_id: call_id.clone(),
+                status: AgentCommandSessionStatus::Running,
+                exit_code: None,
+                latest_sequence: 0,
+                output_truncated: false,
+                archive: Default::default(),
+                created_at: 2,
+            },
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 4,
+                phase: mycopilot_core::ConversationCommandSessionLifecyclePhase::Terminal,
+                session_id: session_id.to_string(),
+                call_id: call_id.clone(),
+                status: AgentCommandSessionStatus::Exited,
+                exit_code: Some(0),
+                latest_sequence: 1,
+                output_truncated: false,
+                archive: Default::default(),
+                created_at: 3,
+            },
+        ],
+    };
+    trace.validate().unwrap();
+
+    let prefix = ContextCompactionPrefix {
+        conversation_id: conversation.id.clone(),
+        source_revision: "revision-command-audit-tail".to_string(),
+        covered_through: ContextJournalCursor::trace_item("assistant-command-audit-tail", 1),
+        previous_summary: None,
+        source_items: vec![
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("user-command-audit-tail"),
+                role: "user".to_string(),
+                content: "Run the command.".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+            ContextCompactionSourceItem::TraceItem {
+                cursor: ContextJournalCursor::trace_item("assistant-command-audit-tail", 0),
+                run_id: trace.run_id.clone(),
+                created_at: 2,
+                item: Box::new(trace.items[0].clone()),
+            },
+            ContextCompactionSourceItem::TraceItem {
+                cursor: ContextJournalCursor::trace_item("assistant-command-audit-tail", 1),
+                run_id: trace.run_id.clone(),
+                created_at: 2,
+                item: Box::new(trace.items[1].clone()),
+            },
+        ],
+    };
+    prefix.validate().unwrap();
+    let summary = ContextCompactionSummary {
+        schema_version: CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        id: "summary-command-audit-tail".to_string(),
+        conversation_id: conversation.id.clone(),
+        source_revision: prefix.source_revision.clone(),
+        previous_summary_id: None,
+        covered_through: prefix.covered_through.clone(),
+        content: "The command was started successfully.".to_string(),
+        continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(&prefix).unwrap(),
+        generation: ContextCompactionGeneration::test(),
+        source_input_tokens: 100,
+        summary_input_tokens: 10,
+        continuity_input_tokens: 10,
+        uncovered_tail_input_tokens: 10,
+        replacement_input_tokens: 20,
+        created_at: 4,
+    };
+    summary.validate().unwrap();
+    let model_context_items = vec![
+        ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: call_id.clone(),
+                name: "run_command".to_string(),
+                args: json!({ "command": "sleep 30" }),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: "provider-command-audit-tail".to_string(),
+                    runtime_call_id: call_id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: r#"{"status":"running"}"#.to_string(),
+            tool_call_id: Some(call_id),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            sequence: 2,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: "The remaining model-visible tail.".to_string(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ];
+    trace
+        .validate_complete_model_context(&model_context_items)
+        .unwrap();
+
+    let projected = conversation_history_messages_with_model_context(
+        &conversation,
+        std::slice::from_ref(&trace),
+        &[mycopilot_core::ConversationModelContextLog {
+            assistant_message_id: trace.assistant_message_id.clone(),
+            items: model_context_items.clone(),
+        }],
+        Some(&summary),
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(projected.len(), 1);
+    let projected_trace = projected[0].conversation_turn_trace.as_ref().unwrap();
+    assert_eq!(projected_trace.items.len(), 1);
+    assert!(matches!(
+        &projected_trace.items[0],
+        ConversationTurnTraceItem::AssistantNarration { sequence: 2, .. }
+    ));
+    assert_eq!(trace.items.len(), 5, "the durable audit trace stays intact");
+
+    let mut invalid_raw_trace = trace.clone();
+    let ConversationTurnTraceItem::CommandSessionLifecycle { call_id, .. } =
+        &mut invalid_raw_trace.items[3]
+    else {
+        panic!("expected command session lifecycle fixture");
+    };
+    *call_id = format!("tc1_{}", "B".repeat(43));
+    let error = conversation_history_messages_with_model_context(
+        &conversation,
+        &[invalid_raw_trace],
+        &[mycopilot_core::ConversationModelContextLog {
+            assistant_message_id: trace.assistant_message_id.clone(),
+            items: model_context_items,
+        }],
+        Some(&summary),
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.contains("has an invalid trace"));
+    assert!(!error.contains("invalid projected trace"));
+}
+
+#[test]
 fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete_request() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

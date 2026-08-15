@@ -14,7 +14,6 @@ pub mod exact_capture;
 pub mod file_input;
 pub mod file_write;
 pub mod git_review;
-mod goal;
 pub mod image_generation;
 mod llm;
 mod model_request_observation;
@@ -84,12 +83,6 @@ pub use conversation_trace::{
     ConversationTraceSnapshot, ConversationTraceToolResultStatus, ConversationTurnTrace,
     ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     TerminalConversationTraceProjection, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
-};
-pub use goal::{
-    fold_conversation_goal_revisions, ConversationGoal, ConversationGoalMutationActor,
-    ConversationGoalRevision, ConversationGoalRevisionEvent, ConversationGoalStatus,
-    CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS, CONVERSATION_GOAL_CONTEXT_TARGET_TOKENS,
-    CONVERSATION_GOAL_REVISION_SCHEMA_VERSION, MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS,
 };
 pub use model_request_observation::{
     ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,

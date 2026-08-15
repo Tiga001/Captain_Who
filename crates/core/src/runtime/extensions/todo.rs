@@ -9,7 +9,6 @@ use crate::protocol::{
     AgentToolApprovalMode, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::tools::{AgentTool, ToolExecutionContext};
-use crate::tools::{GoalRuntimeState, GoalRuntimeStateReader};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,31 +147,6 @@ impl TodoStateHandle {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-impl GoalRuntimeStateReader for TodoStateHandle {
-    fn goal_runtime_state(&self) -> GoalRuntimeState {
-        let state = self.state();
-        let unfinished_todo_items = state
-            .items
-            .iter()
-            .filter(|item| item.status != AgentTodoStatus::Completed)
-            .count();
-        let blocked_reason = state
-            .items
-            .iter()
-            .find(|item| item.status == AgentTodoStatus::Blocked)
-            .map(|item| {
-                item.note.as_deref().map_or_else(
-                    || item.title.clone(),
-                    |note| format!("{}: {note}", item.title),
-                )
-            });
-        GoalRuntimeState {
-            unfinished_todo_items,
-            blocked_reason,
-        }
     }
 }
 
@@ -836,29 +810,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn todo_is_the_only_source_for_goal_completion_and_blocker_checks() {
-        let (_extension, handle) = TodoExtension::new("run-1".to_string());
-        let tool = TodoTool {
-            state: handle.clone(),
-        };
-        assert!(execute(
-            &tool,
-            json!({
-                "items": [
-                    { "title": "Finished", "status": "completed" },
-                    { "title": "Need credentials", "status": "blocked", "note": "token missing" },
-                    { "title": "Continue work", "status": "pending" }
-                ]
-            })
-        )
-        .ok);
-
-        let runtime = handle.goal_runtime_state();
-        assert_eq!(runtime.unfinished_todo_items, 2);
-        assert_eq!(
-            runtime.blocked_reason.as_deref(),
-            Some("Need credentials: token missing")
-        );
-    }
 }

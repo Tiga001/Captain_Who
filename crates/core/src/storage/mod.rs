@@ -16,7 +16,6 @@ pub mod context_compaction_receipt_repository;
 pub mod context_compaction_repository;
 pub(crate) mod conversation_context_adaptation_repository;
 pub mod conversation_fork_repository;
-pub mod conversation_goal_repository;
 pub mod conversation_history_archive_repository;
 pub(crate) mod conversation_history_open;
 pub mod conversation_history_repository;

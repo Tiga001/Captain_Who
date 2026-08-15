@@ -933,18 +933,38 @@ CREATE TRIGGER validate_agent_node_parent_path_insert
         END;
 CREATE TRIGGER validate_agent_node_template_snapshot_insert
         BEFORE INSERT ON agent_nodes
-        WHEN NEW.template_id_snapshot IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM agent_templates AS template
-            WHERE template.template_id = NEW.template_id_snapshot
-              AND template.project_id = NEW.template_project_id_snapshot
-              AND template.machine_key = NEW.template_machine_key_snapshot
-              AND template.name = NEW.template_name_snapshot
-              AND template.description = NEW.template_description_snapshot
-              AND template.instructions = NEW.template_instructions_snapshot
-              AND template.revision = NEW.template_revision_snapshot
-              AND template.model_config_id = NEW.template_model_config_id_snapshot
-              AND template.enabled = 1
-        )
+        WHEN NEW.template_id_snapshot IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_templates AS template
+              WHERE template.template_id = NEW.template_id_snapshot
+                AND template.project_id = NEW.template_project_id_snapshot
+                AND template.machine_key = NEW.template_machine_key_snapshot
+                AND template.name = NEW.template_name_snapshot
+                AND template.description = NEW.template_description_snapshot
+                AND template.instructions = NEW.template_instructions_snapshot
+                AND template.revision = NEW.template_revision_snapshot
+                AND template.model_config_id = NEW.template_model_config_id_snapshot
+                AND template.enabled = 1
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM conversation_forks AS fork
+              INNER JOIN agent_nodes AS source
+                  ON source.root_agent_id = fork.source_root_agent_id
+              WHERE fork.fork_authority = 'collaboration_root'
+                AND fork.target_root_agent_id = NEW.root_agent_id
+                AND source.parent_agent_id IS NOT NULL
+                AND source.task_name = NEW.task_name
+                AND source.task_path = NEW.task_path
+                AND source.template_id_snapshot IS NEW.template_id_snapshot
+                AND source.template_project_id_snapshot IS NEW.template_project_id_snapshot
+                AND source.template_machine_key_snapshot IS NEW.template_machine_key_snapshot
+                AND source.template_name_snapshot IS NEW.template_name_snapshot
+                AND source.template_description_snapshot IS NEW.template_description_snapshot
+                AND source.template_instructions_snapshot IS NEW.template_instructions_snapshot
+                AND source.template_revision_snapshot IS NEW.template_revision_snapshot
+                AND source.template_model_config_id_snapshot IS NEW.template_model_config_id_snapshot
+          )
         BEGIN
             SELECT RAISE(ABORT, 'Agent template snapshot is stale or unavailable');
         END;
@@ -2144,6 +2164,10 @@ CREATE TRIGGER validate_child_context_snapshot_message_insert
                 WHERE fork.fork_authority = 'collaboration_root'
                   AND fork.target_conversation_id = NEW.conversation_id
                   AND fork.source_conversation_id = NEW.snapshot_source_conversation_id
+            ) AND NOT EXISTS (
+                SELECT 1 FROM agent_member_conversation_forks AS fork
+                WHERE fork.target_conversation_id = NEW.conversation_id
+                  AND fork.source_conversation_id = NEW.snapshot_source_conversation_id
             ) THEN RAISE(ABORT, 'invalid child context snapshot message') END;
             SELECT CASE WHEN NOT EXISTS (
                 SELECT 1
@@ -3200,6 +3224,96 @@ CREATE TRIGGER prevent_conversation_fork_update
         BEGIN
             SELECT RAISE(ABORT, 'Conversation fork receipt is immutable');
         END;
+CREATE TABLE agent_member_conversation_forks (
+            root_fork_request_id TEXT NOT NULL,
+            source_conversation_id TEXT NOT NULL,
+            target_conversation_id TEXT NOT NULL UNIQUE,
+            source_root_agent_id TEXT NOT NULL,
+            target_root_agent_id TEXT NOT NULL,
+            source_member_agent_id TEXT NOT NULL,
+            target_member_agent_id TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (root_fork_request_id, source_member_agent_id),
+            UNIQUE(root_fork_request_id, source_conversation_id),
+            FOREIGN KEY (root_fork_request_id)
+                REFERENCES conversation_forks(request_id) ON DELETE RESTRICT,
+            FOREIGN KEY (source_conversation_id)
+                REFERENCES conversations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_conversation_id)
+                REFERENCES conversations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (source_root_agent_id)
+                REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_root_agent_id)
+                REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (source_member_agent_id, source_root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_member_agent_id, target_root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            CHECK (source_conversation_id != target_conversation_id),
+            CHECK (source_root_agent_id != target_root_agent_id),
+            CHECK (source_member_agent_id != target_member_agent_id)
+        );
+CREATE INDEX agent_member_conversation_forks_source_root
+            ON agent_member_conversation_forks(source_root_agent_id);
+CREATE INDEX agent_member_conversation_forks_target_root
+            ON agent_member_conversation_forks(target_root_agent_id);
+CREATE TRIGGER validate_agent_member_conversation_fork_insert
+        BEFORE INSERT ON agent_member_conversation_forks
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM conversation_forks AS root_fork
+                INNER JOIN agent_nodes AS source_root
+                    ON source_root.agent_id = NEW.source_root_agent_id
+                INNER JOIN agent_nodes AS target_root
+                    ON target_root.agent_id = NEW.target_root_agent_id
+                INNER JOIN agent_nodes AS source_member
+                    ON source_member.agent_id = NEW.source_member_agent_id
+                INNER JOIN agent_nodes AS target_member
+                    ON target_member.agent_id = NEW.target_member_agent_id
+                WHERE root_fork.request_id = NEW.root_fork_request_id
+                  AND root_fork.fork_authority = 'collaboration_root'
+                  AND root_fork.source_root_agent_id = source_root.agent_id
+                  AND root_fork.target_root_agent_id = target_root.agent_id
+                  AND root_fork.created_at = NEW.created_at
+                  AND source_root.parent_agent_id IS NULL
+                  AND target_root.parent_agent_id IS NULL
+                  AND source_member.parent_agent_id IS NOT NULL
+                  AND target_member.parent_agent_id IS NOT NULL
+                  AND source_member.root_agent_id = source_root.agent_id
+                  AND target_member.root_agent_id = target_root.agent_id
+                  AND source_member.root_conversation_id = source_root.conversation_id
+                  AND target_member.root_conversation_id = target_root.conversation_id
+                  AND source_member.conversation_id = NEW.source_conversation_id
+                  AND target_member.conversation_id = NEW.target_conversation_id
+                  AND source_member.project_id IS source_root.project_id
+                  AND target_member.project_id IS target_root.project_id
+                  AND target_member.project_id IS source_member.project_id
+                  AND target_member.task_name = source_member.task_name
+                  AND target_member.task_path = source_member.task_path
+                  AND NOT EXISTS (
+                      SELECT 1 FROM messages
+                      WHERE conversation_id = NEW.target_conversation_id
+                  )
+                  AND (
+                      (
+                          source_member.parent_agent_id = source_root.agent_id
+                          AND target_member.parent_agent_id = target_root.agent_id
+                      ) OR EXISTS (
+                          SELECT 1
+                          FROM agent_member_conversation_forks AS parent_fork
+                          WHERE parent_fork.root_fork_request_id = NEW.root_fork_request_id
+                            AND parent_fork.source_member_agent_id = source_member.parent_agent_id
+                            AND parent_fork.target_member_agent_id = target_member.parent_agent_id
+                      )
+                  )
+            ) THEN RAISE(ABORT, 'invalid Agent member Conversation fork authority') END;
+        END;
+CREATE TRIGGER prevent_agent_member_conversation_fork_update
+        BEFORE UPDATE ON agent_member_conversation_forks
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent member Conversation fork receipt is immutable');
+        END;
 CREATE TABLE conversation_context_adaptation_requirements (
             conversation_id TEXT PRIMARY KEY,
             schema_version INTEGER NOT NULL CHECK (schema_version = 1),
@@ -3325,84 +3439,6 @@ CREATE TRIGGER validate_agent_usage_message_update
                 ABORT,
                 'agent usage message must belong to the same conversation'
             );
-        END;
-CREATE TABLE conversation_goals (
-            conversation_id TEXT PRIMARY KEY,
-            goal_id TEXT NOT NULL UNIQUE,
-            objective TEXT NOT NULL,
-            source_message_id TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (
-                status IN ('active', 'blocked', 'completed', 'cancelled')
-            ),
-            stopped_reason TEXT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-            FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
-        );
-CREATE TRIGGER validate_conversation_goal_source_insert
-        BEFORE INSERT ON conversation_goals
-        WHEN NOT EXISTS (
-            SELECT 1
-            FROM messages
-            WHERE id = NEW.source_message_id
-              AND conversation_id = NEW.conversation_id
-              AND role = 'user'
-        )
-        BEGIN
-            SELECT RAISE(
-                ABORT,
-                'goal source must be a user message in the same conversation'
-            );
-        END;
-CREATE TRIGGER validate_conversation_goal_source_update
-        BEFORE UPDATE OF conversation_id, source_message_id
-        ON conversation_goals
-        WHEN NOT EXISTS (
-            SELECT 1
-            FROM messages
-            WHERE id = NEW.source_message_id
-              AND conversation_id = NEW.conversation_id
-              AND role = 'user'
-        )
-        BEGIN
-            SELECT RAISE(
-                ABORT,
-                'goal source must be a user message in the same conversation'
-            );
-        END;
-CREATE TABLE conversation_goal_revisions (
-            conversation_id TEXT NOT NULL,
-            goal_id TEXT NOT NULL,
-            sequence INTEGER NOT NULL CHECK (sequence > 0),
-            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-            actor TEXT NOT NULL CHECK (actor IN ('model', 'user')),
-            event_kind TEXT NOT NULL CHECK (
-                event_kind IN ('initial', 'objective_changed', 'status_changed')
-            ),
-            event_json TEXT NOT NULL CHECK (json_valid(event_json)),
-            created_at INTEGER NOT NULL CHECK (created_at >= 0),
-            PRIMARY KEY (goal_id, sequence),
-            CHECK (
-                (sequence = 1 AND event_kind = 'initial')
-                OR (sequence > 1 AND event_kind != 'initial')
-            ),
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-        );
-CREATE INDEX conversation_goal_revisions_conversation
-        ON conversation_goal_revisions(conversation_id, created_at, goal_id, sequence);
-CREATE TRIGGER prevent_conversation_goal_revision_update
-        BEFORE UPDATE ON conversation_goal_revisions
-        BEGIN
-            SELECT RAISE(ABORT, 'goal revisions are append-only');
-        END;
-CREATE TRIGGER prevent_conversation_goal_revision_delete
-        BEFORE DELETE ON conversation_goal_revisions
-        WHEN EXISTS (
-            SELECT 1 FROM conversations WHERE id = OLD.conversation_id
-        )
-        BEGIN
-            SELECT RAISE(ABORT, 'goal revisions are append-only');
         END;
 CREATE TABLE agent_command_sessions (
             session_id TEXT PRIMARY KEY CHECK (

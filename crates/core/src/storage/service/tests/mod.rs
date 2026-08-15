@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod attachments;
 mod conversations;
-mod goals;
 mod guidance;
 mod message_deletion;
 mod reconciliation;
