@@ -919,6 +919,7 @@ export const zhCNTranslations = {
   'agent.llmRetry.temporarilyUnavailable':
     '模型服务暂时不可用，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',
   'agent.llmRetry.retrying': '模型服务正在自动重试（{attempt}/{maxAttempts}）',
+  'agent.llmRetry.reconnecting': '正在重新连接（{attempt}/{maxAttempts}）',
   'agent.command.waitingForCompletion': '正在等待命令完成',
   'agent.contextCompaction.running': '正在自动压缩上下文',
   'agent.contextCompaction.completed': '上下文已自动压缩',

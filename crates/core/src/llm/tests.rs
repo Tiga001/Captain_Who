@@ -709,8 +709,64 @@ async fn broken_429_body_still_preserves_status_and_retry_after() {
 }
 
 #[tokio::test]
-async fn streaming_partial_output_is_never_transparently_replayed() {
+async fn streaming_partial_output_is_reset_before_retrying() {
     const CANARY: &str = "PARTIAL_STREAM_SECRET_CANARY";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let body = if attempt == 1 {
+                format!(
+                    "data: {}\n\ndata: {{not-json-{CANARY}\n\n",
+                    json!({"choices":[{"delta":{"content":"partial"}}]})
+                )
+            } else {
+                format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"delta":{"content":"recovered"}}]}),
+                    json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                )
+            };
+            stream.write_all(body.as_bytes()).await.unwrap();
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    let mut events = Vec::new();
+
+    let response = complete_chat_streaming(request, AgentCancellationToken::new(), |event| {
+        events.push(event);
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.content(), "recovered");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::Delta(delta) if delta == "partial")));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::Retrying { attempt: 2, .. })));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::Delta(delta) if delta == "recovered")));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        LlmStreamEvent::AttemptReset { reason } if reason.contains(CANARY)
+    )));
+}
+
+#[tokio::test]
+async fn streaming_activity_refreshes_the_idle_timeout_without_a_total_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -722,11 +778,24 @@ async fn streaming_partial_output_is_never_transparently_replayed() {
             )
             .await
             .unwrap();
+        for content in ["a", "b", "c"] {
+            stream
+                .write_all(
+                    format!(
+                        "data: {}\n\n",
+                        json!({"choices":[{"delta":{"content":content}}]})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         stream
             .write_all(
                 format!(
-                    "data: {}\n\ndata: {{not-json-{CANARY}\n\n",
-                    json!({"choices":[{"delta":{"content":"partial"}}]})
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
                 )
                 .as_bytes(),
             )
@@ -735,27 +804,327 @@ async fn streaming_partial_output_is_never_transparently_replayed() {
     });
     let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
     request.api_url = format!("http://{address}/v1/chat/completions");
-    let mut events = Vec::new();
+    let mut retries = 0_usize;
 
-    let error = complete_chat_streaming(request, AgentCancellationToken::new(), |event| {
-        events.push(event);
-    })
+    let response = complete_chat_streaming_with_validation_and_timeout(
+        request,
+        AgentCancellationToken::new(),
+        LlmResponseValidation::RequireModelAction,
+        Duration::from_millis(40),
+        |event| {
+            if matches!(event, LlmStreamEvent::Retrying { .. }) {
+                retries += 1;
+            }
+        },
+    )
     .await
-    .unwrap_err();
+    .unwrap();
     server.await.unwrap();
 
+    assert_eq!(response.content(), "abc");
+    assert_eq!(retries, 0);
+}
+
+#[tokio::test]
+async fn streaming_response_header_timeout_retries_and_recovers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            if attempt == 1 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{"content":"connected"}}]}),
+                            json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    let mut events = Vec::new();
+
+    let response = complete_chat_streaming_with_validation_and_timeout(
+        request,
+        AgentCancellationToken::new(),
+        LlmResponseValidation::RequireModelAction,
+        Duration::from_millis(35),
+        |event| events.push(event),
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.content(), "connected");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LlmStreamEvent::Retrying {
+            attempt: 2,
+            provider_code: Some(code),
+            ..
+        } if code == "stream_idle_timeout"
+    )));
+}
+
+#[tokio::test]
+async fn streaming_idle_timeout_rolls_back_partial_tool_input_and_recovers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            if attempt == 1 {
+                stream
+                    .write_all(
+                        format!(
+                            "data: {}\n\n",
+                            json!({
+                                "choices":[{
+                                    "delta":{
+                                        "tool_calls":[{
+                                            "index":0,
+                                            "id":"stale-call",
+                                            "function":{
+                                                "name":"read_file",
+                                                "arguments":"{\"path\":\"stale"
+                                            }
+                                        }]
+                                    }
+                                }]
+                            })
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            } else {
+                stream
+                    .write_all(
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{"content":"recovered"}}]}),
+                            json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    let mut events = Vec::new();
+
+    let response = complete_chat_streaming_with_validation_and_timeout(
+        request,
+        AgentCancellationToken::new(),
+        LlmResponseValidation::RequireModelAction,
+        Duration::from_millis(35),
+        |event| events.push(event),
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.content(), "recovered");
     assert!(events
         .iter()
-        .any(|event| matches!(event, LlmStreamEvent::Delta(delta) if delta == "partial")));
-    assert!(!events
+        .any(|event| matches!(event, LlmStreamEvent::ToolInputProgress { .. })));
+    assert!(events
         .iter()
-        .any(|event| matches!(event, LlmStreamEvent::Retrying { .. })));
-    assert!(events.iter().all(|event| !matches!(
+        .any(|event| matches!(event, LlmStreamEvent::AttemptReset { .. })));
+    assert!(events.iter().any(|event| matches!(
         event,
-        LlmStreamEvent::AttemptReset { reason } if reason.contains(CANARY)
+        LlmStreamEvent::Retrying {
+            attempt: 2,
+            provider_code: Some(code),
+            ..
+        } if code == "stream_idle_timeout"
     )));
-    assert!(!error.to_string().contains(CANARY));
-    assert!(!format!("{:?}", error.details()).contains(CANARY));
+}
+
+#[tokio::test]
+async fn streaming_keepalives_do_not_hide_an_idle_model() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            if attempt == 1 {
+                for _ in 0..8 {
+                    if stream.write_all(b": keepalive\n\n").await.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } else {
+                stream
+                    .write_all(
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{"content":"reconnected"}}]}),
+                            json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+
+    let response = complete_chat_streaming_with_validation_and_timeout(
+        request,
+        AgentCancellationToken::new(),
+        LlmResponseValidation::RequireModelAction,
+        Duration::from_millis(35),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.content(), "reconnected");
+}
+
+#[tokio::test]
+async fn streaming_metadata_frames_do_not_refresh_the_idle_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let frames = [
+            "event: ping\ndata: {\"type\":\"ping\"}\n\n".to_string(),
+            "data: {}\n\n".to_string(),
+            format!(
+                "data: {}\n\n",
+                json!({"choices":[],"usage":{"prompt_tokens":1}})
+            ),
+            format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+            ),
+        ];
+        for index in 0..20 {
+            if stream
+                .write_all(frames[index % frames.len()].as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(120),
+        complete_chat_streaming_once(
+            &request,
+            AgentCancellationToken::new(),
+            LlmResponseValidation::RequireModelAction,
+            Duration::from_millis(35),
+            |_| {},
+        ),
+    )
+    .await
+    .expect("metadata-only frames must not keep the stream alive");
+    let error = result.unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("providerCode"))
+            .and_then(Value::as_str),
+        Some("stream_idle_timeout")
+    );
+}
+
+#[tokio::test]
+async fn streaming_idle_window_spans_response_headers_and_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(115),
+        complete_chat_streaming_once(
+            &request,
+            AgentCancellationToken::new(),
+            LlmResponseValidation::RequireModelAction,
+            Duration::from_millis(80),
+            |_| {},
+        ),
+    )
+    .await
+    .expect("headers must not restart the model inactivity window");
+    let error = result.unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("providerCode"))
+            .and_then(Value::as_str),
+        Some("stream_idle_timeout")
+    );
 }
 
 #[test]

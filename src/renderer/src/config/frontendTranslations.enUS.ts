@@ -966,6 +966,7 @@ export const enUSTranslations = {
   'agent.llmRetry.temporarilyUnavailable':
     'Model service temporarily unavailable; retrying automatically in {seconds}s ({attempt}/{maxAttempts})',
   'agent.llmRetry.retrying': 'Retrying the model request automatically ({attempt}/{maxAttempts})',
+  'agent.llmRetry.reconnecting': 'Reconnecting ({attempt}/{maxAttempts})',
   'agent.command.waitingForCompletion': 'Waiting for command to finish',
   'agent.contextCompaction.running': 'Automatically compacting context',
   'agent.contextCompaction.completed': 'Context automatically compacted',

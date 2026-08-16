@@ -3,6 +3,7 @@ use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::time::Duration;
 use time::format_description::well_known::Rfc2822;
 use time::OffsetDateTime;
 
@@ -225,6 +226,31 @@ impl LlmProviderFailure {
             }),
         )
     }
+}
+
+pub(super) fn stream_inactivity_timeout_error(
+    timeout: Duration,
+    timeout_phase: &'static str,
+) -> AgentError {
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    AgentError::structured(
+        PROVIDER_FAILURE_ERROR_CODE,
+        format!("模型服务连续 {} 秒没有返回有效数据。", timeout.as_secs()),
+        json!({
+            "type": "llm_provider_failure",
+            "category": LlmProviderFailureCategory::Network,
+            "retryable": true,
+            "retryAfterMs": null,
+            "httpStatus": null,
+            "providerCode": "stream_idle_timeout",
+            "requestId": null,
+            "bodyBytes": 0,
+            "bodyHash": null,
+            "bodyArchived": false,
+            "timeoutPhase": timeout_phase,
+            "timeoutMs": timeout_ms,
+        }),
+    )
 }
 
 fn canonical_provider_code(value: &str) -> Option<String> {

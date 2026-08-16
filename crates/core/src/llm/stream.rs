@@ -1,6 +1,6 @@
 // Server-sent event parsing and stream accumulation for LLM responses.
 use super::adapter::{ProviderAdapter, ProviderAdapterRegistry};
-use super::provider_error::LlmProviderFailure;
+use super::provider_error::{stream_inactivity_timeout_error, LlmProviderFailure};
 use super::response::{extract_api_error, parse_tool_arguments};
 use super::{
     LlmAssistantTurn, LlmChatResponse, LlmStreamEvent, LlmToolCall, MAX_PROVIDER_CONTINUATION_BYTES,
@@ -15,12 +15,15 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub(super) async fn parse_sse_response<F>(
     response: reqwest::Response,
     provider_profile: &ProviderProfileConfig,
     provider_protocol: &ProviderProtocolKey,
     cancellation_token: AgentCancellationToken,
+    inactivity_timeout: Duration,
+    mut inactivity_deadline: tokio::time::Instant,
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
 where
@@ -34,6 +37,12 @@ where
         cancellation_token.check()?;
         let chunk = tokio::select! {
             _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+            _ = tokio::time::sleep_until(inactivity_deadline) => {
+                return Err(
+                    stream_inactivity_timeout_error(inactivity_timeout, "stream_body")
+                        .with_usage(accumulator.usage().cloned())
+                );
+            },
             chunk = stream.next() => {
                 let Some(chunk) = chunk else {
                     break;
@@ -47,6 +56,7 @@ where
         };
         buffer.extend_from_slice(&chunk);
 
+        let mut received_model_activity = false;
         while let Some((frame_end, separator_len)) = find_sse_frame_end(&buffer) {
             cancellation_token.check()?;
             let frame_bytes = buffer[..frame_end].to_vec();
@@ -58,8 +68,12 @@ where
                 .to_agent_error()
                 .with_usage(accumulator.usage().cloned())
             })?;
-            process_sse_frame(&frame, &mut accumulator, &mut on_delta)
-                .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
+            received_model_activity |=
+                process_sse_frame(&frame, &mut accumulator, &mut on_delta)
+                    .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
+        }
+        if received_model_activity {
+            inactivity_deadline = tokio::time::Instant::now() + inactivity_timeout;
         }
     }
 
@@ -72,7 +86,7 @@ where
             .to_agent_error()
             .with_usage(accumulator.usage().cloned())
         })?;
-        process_sse_frame(&frame, &mut accumulator, &mut on_delta)
+        let _ = process_sse_frame(&frame, &mut accumulator, &mut on_delta)
             .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
     }
 
@@ -83,14 +97,14 @@ pub(super) fn process_sse_frame<F>(
     frame: &str,
     accumulator: &mut LlmStreamAccumulator,
     on_delta: &mut F,
-) -> AgentResult<()>
+) -> AgentResult<bool>
 where
     F: FnMut(LlmStreamEvent),
 {
     let frame = parse_sse_frame(frame);
     let data = frame.data.trim();
     if data.is_empty() || data == "[DONE]" {
-        return Ok(());
+        return Ok(false);
     }
 
     let value: Value = serde_json::from_str(data).map_err(|error| {
@@ -106,7 +120,95 @@ where
             LlmProviderFailure::from_embedded_error(accumulator.api_style(), data).to_agent_error(),
         );
     }
-    accumulator.process(frame.event.as_deref(), &value, on_delta)
+    let is_model_activity = is_meaningful_model_activity(frame.event.as_deref(), &value);
+    accumulator.process(frame.event.as_deref(), &value, on_delta)?;
+    Ok(is_model_activity)
+}
+
+fn is_meaningful_model_activity(event: Option<&str>, value: &Value) -> bool {
+    if event.is_some_and(|event| event.eq_ignore_ascii_case("ping"))
+        || value
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|event| event.eq_ignore_ascii_case("ping"))
+    {
+        return false;
+    }
+
+    if value
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                let Some(delta) = choice.get("delta") else {
+                    return false;
+                };
+                delta
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.is_empty())
+                    || delta
+                        .get("reasoning_content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|reasoning| !reasoning.is_empty())
+                    || delta
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|calls| {
+                            calls.iter().any(|call| {
+                                call.get("id")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|id| !id.is_empty())
+                                    || call.get("function").is_some_and(|function| {
+                                        ["name", "arguments"].iter().any(|field| {
+                                            function
+                                                .get(field)
+                                                .and_then(Value::as_str)
+                                                .is_some_and(|value| !value.is_empty())
+                                        })
+                                    })
+                            })
+                        })
+            })
+        })
+    {
+        return true;
+    }
+
+    match event
+        .filter(|event| !event.trim().is_empty())
+        .or_else(|| value.get("type").and_then(Value::as_str))
+        .unwrap_or_default()
+    {
+        "content_block_start" => value.get("content_block").is_some_and(|block| {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty()),
+                Some("tool_use") => {
+                    block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.is_empty())
+                        || block.get("input").is_some_and(|input| {
+                            !input.is_null()
+                                && input.as_object().is_none_or(|input| !input.is_empty())
+                        })
+                }
+                _ => false,
+            }
+        }),
+        "content_block_delta" => value.get("delta").is_some_and(|delta| {
+            ["text", "partial_json"].iter().any(|field| {
+                delta
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            })
+        }),
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
@@ -1090,5 +1192,34 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.total_tokens, Some(17));
         assert_eq!(usage.billable_request_count, Some(1));
+    }
+
+    #[test]
+    fn meaningful_activity_includes_reasoning_and_tool_fragments_but_not_metadata() {
+        assert!(is_meaningful_model_activity(
+            None,
+            &json!({"choices":[{"delta":{"reasoning_content":"thinking"}}]})
+        ));
+        assert!(is_meaningful_model_activity(
+            None,
+            &json!({
+                "choices":[{
+                    "delta":{
+                        "tool_calls":[{
+                            "index":0,
+                            "function":{"name":"write_file","arguments":""}
+                        }]
+                    }
+                }]
+            })
+        ));
+        assert!(!is_meaningful_model_activity(
+            None,
+            &json!({"choices":[],"usage":{"prompt_tokens":12}})
+        ));
+        assert!(!is_meaningful_model_activity(
+            Some("ping"),
+            &json!({"type":"ping"})
+        ));
     }
 }

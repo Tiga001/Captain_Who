@@ -1210,7 +1210,7 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'message_stream_started') {
-    if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId] && !currentRun.llmRetry) {
+    if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId]) {
       return message
     }
     const currentContent = message.content === THINKING_PLACEHOLDER ? '' : message.content
@@ -1218,7 +1218,6 @@ export function applyAgentEventToChatMessage(
       ...message,
       agentRun: {
         ...currentRun,
-        llmRetry: undefined,
         messageStreamCheckpoints: {
           ...currentRun.messageStreamCheckpoints,
           [agentEvent.streamId]: {
@@ -1274,7 +1273,18 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'tool_input_progress') {
-    return message
+    if (!currentRun.llmRetry) return message
+    const receivedAt = Date.now()
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        llmRetry: undefined,
+        ...getRunResponseTimestamps(currentRun, receivedAt)
+      }
+    }
   }
 
   if (agentEvent.type === 'file_write_preview_updated') {
@@ -1285,6 +1295,8 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'running',
+        llmRetry: undefined,
+        ...getRunResponseTimestamps(currentRun, receivedAt),
         fileWritePreviews: upsertFileWritePreview(
           currentRun.fileWritePreviews ?? [],
           agentEvent.preview,

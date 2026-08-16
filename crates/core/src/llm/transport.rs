@@ -1,3 +1,4 @@
+use super::provider_error::stream_inactivity_timeout_error;
 use super::*;
 use crate::provider_registration::ProviderUsageSemantics;
 use futures_util::StreamExt;
@@ -5,6 +6,7 @@ use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_PROVIDER_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
+pub(super) const LLM_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(super) const LLM_MAX_ATTEMPTS: usize = 6;
 pub(super) const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
@@ -161,6 +163,26 @@ pub(super) async fn complete_chat_streaming_with_validation<F>(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
     validation: LlmResponseValidation,
+    on_event: F,
+) -> AgentResult<LlmChatResponse>
+where
+    F: FnMut(LlmStreamEvent) + Send,
+{
+    complete_chat_streaming_with_validation_and_timeout(
+        request,
+        cancellation_token,
+        validation,
+        LLM_STREAM_INACTIVITY_TIMEOUT,
+        on_event,
+    )
+    .await
+}
+
+pub(super) async fn complete_chat_streaming_with_validation_and_timeout<F>(
+    request: LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
+    inactivity_timeout: Duration,
     mut on_event: F,
 ) -> AgentResult<LlmChatResponse>
 where
@@ -175,31 +197,21 @@ where
     let mut last_error = None;
     let mut total_usage = None;
     let mut total_retry_sleep = Duration::ZERO;
-    let deadline = tokio::time::Instant::now() + LLM_LOGICAL_REQUEST_TIMEOUT;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
         on_event(LlmStreamEvent::AttemptStarted {
             attempt,
             max_attempts: LLM_MAX_ATTEMPTS,
         });
-        let mut emitted_model_output = false;
-        let request_attempt = complete_chat_streaming_once(
+        let result = complete_chat_streaming_once(
             &request,
             cancellation_token.clone(),
             validation,
+            inactivity_timeout,
             |event| {
-                if matches!(
-                    event,
-                    LlmStreamEvent::Delta(_) | LlmStreamEvent::ToolInputProgress { .. }
-                ) {
-                    emitted_model_output = true;
-                }
                 on_event(event);
             },
-        );
-        let result = tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => Err(logical_request_timeout_error()),
-            result = request_attempt => result,
-        };
+        )
+        .await;
 
         match result {
             Ok(mut response) => {
@@ -221,18 +233,8 @@ where
                 on_event(LlmStreamEvent::AttemptReset {
                     reason: reason.clone(),
                 });
-                // Once any user-visible model output or Tool input has arrived, replaying the
-                // request can duplicate semantic work or a provider Tool Call. The provisional UI
-                // reset is not a sufficient safety boundary for transport-level replay.
-                if emitted_model_output {
-                    return Err(retry_exhausted_error(error, attempt));
-                }
-                let Some(plan) = retry_plan(
-                    &error,
-                    attempt,
-                    total_retry_sleep,
-                    deadline.saturating_duration_since(tokio::time::Instant::now()),
-                ) else {
+                let Some(plan) = retry_plan(&error, attempt, total_retry_sleep, Duration::MAX)
+                else {
                     return Err(retry_exhausted_error(error, attempt));
                 };
                 register_retry_cooldown(&request, &plan);
@@ -263,6 +265,7 @@ pub(super) async fn complete_chat_streaming_once<F>(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
     validation: LlmResponseValidation,
+    inactivity_timeout: Duration,
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
 where
@@ -271,13 +274,24 @@ where
     let provider_protocol = request.provider_protocol.clone();
     let provider_profile = request.provider_profile.clone();
     validate_request(request)?;
-    let response = send_llm_request(request, cancellation_token.clone())
+    let inactivity_deadline = tokio::time::Instant::now() + inactivity_timeout;
+    let response = send_llm_request_with_stream_timeout(
+        request,
+        cancellation_token.clone(),
+        inactivity_timeout,
+        inactivity_deadline,
+    )
+    .await
+    .map_err(with_request_usage)?;
+    if !is_sse_response(&response) {
+        let body = response_text_with_inactivity_timeout(
+            response,
+            cancellation_token.clone(),
+            "读取模型响应失败",
+            Some((inactivity_timeout, inactivity_deadline)),
+        )
         .await
         .map_err(with_request_usage)?;
-    if !is_sse_response(&response) {
-        let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
-            .await
-            .map_err(with_request_usage)?;
         let parsed = parse_non_stream_response_with_profile(
             &body,
             &provider_profile,
@@ -295,6 +309,8 @@ where
         &provider_profile,
         &provider_protocol,
         cancellation_token,
+        inactivity_timeout,
+        inactivity_deadline,
         on_delta,
     )
     .await
@@ -405,13 +421,34 @@ pub(super) async fn send_llm_request(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<reqwest::Response> {
+    let inactivity_deadline = tokio::time::Instant::now() + LLM_STREAM_INACTIVITY_TIMEOUT;
+    send_llm_request_with_stream_timeout(
+        request,
+        cancellation_token,
+        LLM_STREAM_INACTIVITY_TIMEOUT,
+        inactivity_deadline,
+    )
+    .await
+}
+
+async fn send_llm_request_with_stream_timeout(
+    request: &LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    inactivity_timeout: Duration,
+    inactivity_deadline: tokio::time::Instant,
+) -> AgentResult<reqwest::Response> {
     cancellation_token.check()?;
     validate_request(request)?;
     let adapter = ProviderAdapterRegistry::resolve(request)?;
     let payload = adapter.prepare_request(request)?;
     let headers = adapter.build_headers(request.api_token.trim())?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+    let client_builder = reqwest::Client::builder();
+    let client_builder = if request.stream {
+        client_builder
+    } else {
+        client_builder.timeout(Duration::from_secs(120))
+    };
+    let client = client_builder
         .build()
         .map_err(|error| AgentError::new(format!("创建 HTTP 客户端失败：{error}")))?;
 
@@ -427,24 +464,50 @@ pub(super) async fn send_llm_request(
         .headers(headers)
         .json(&payload)
         .send();
-    let response = tokio::select! {
-        _ = cancellation_token.cancelled() => {
-            complete_provider_cooldown(cooldown_permit);
-            return Err(AgentError::cancelled());
-        },
-        response = send => match response {
-            Ok(response) => response,
-            Err(error) => {
+    let response = if request.stream {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
                 complete_provider_cooldown(cooldown_permit);
-                return Err(LlmProviderFailure::from_network_error(error).to_agent_error());
-            }
-        },
+                return Err(AgentError::cancelled());
+            },
+            _ = tokio::time::sleep_until(inactivity_deadline) => {
+                complete_provider_cooldown(cooldown_permit);
+                return Err(stream_inactivity_timeout_error(
+                    inactivity_timeout,
+                    "response_headers",
+                ));
+            },
+            response = send => response,
+        }
+    } else {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                complete_provider_cooldown(cooldown_permit);
+                return Err(AgentError::cancelled());
+            },
+            response = send => response,
+        }
+    };
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            complete_provider_cooldown(cooldown_permit);
+            return Err(LlmProviderFailure::from_network_error(error).to_agent_error());
+        }
     };
 
     let status = response.status();
     if !status.is_success() {
         let response_headers = response.headers().clone();
-        let body = match error_response_text_bounded(response, cancellation_token.clone()).await {
+        let body = match error_response_text_bounded(
+            response,
+            cancellation_token.clone(),
+            request
+                .stream
+                .then_some((inactivity_timeout, inactivity_deadline)),
+        )
+        .await
+        {
             Ok(body) => body,
             Err(error) if error.is_cancelled() => {
                 complete_provider_cooldown(cooldown_permit);
@@ -483,11 +546,40 @@ pub(super) async fn response_text(
     cancellation_token: AgentCancellationToken,
     error_prefix: &str,
 ) -> AgentResult<String> {
+    response_text_with_inactivity_timeout(response, cancellation_token, error_prefix, None).await
+}
+
+async fn response_text_with_inactivity_timeout(
+    response: reqwest::Response,
+    cancellation_token: AgentCancellationToken,
+    error_prefix: &str,
+    inactivity_window: Option<(Duration, tokio::time::Instant)>,
+) -> AgentResult<String> {
     cancellation_token.check()?;
-    let read = response.text();
-    tokio::select! {
-        _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
-        body = read => body.map_err(|error| {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    loop {
+        let chunk = if let Some((inactivity_timeout, inactivity_deadline)) = inactivity_window {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+                _ = tokio::time::sleep_until(inactivity_deadline) => {
+                    return Err(stream_inactivity_timeout_error(
+                        inactivity_timeout,
+                        "response_body",
+                    ));
+                },
+                chunk = stream.next() => chunk,
+            }
+        } else {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+                chunk = stream.next() => chunk,
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| {
             let failure = LlmProviderFailure::from_network_error(error);
             let mut agent_error = failure.to_agent_error();
             if let Some(details) = agent_error.details().cloned() {
@@ -498,21 +590,37 @@ pub(super) async fn response_text(
                 );
             }
             agent_error
-        }),
+        })?;
+        body.extend_from_slice(&chunk);
     }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 async fn error_response_text_bounded(
     response: reqwest::Response,
     cancellation_token: AgentCancellationToken,
+    inactivity_window: Option<(Duration, tokio::time::Instant)>,
 ) -> AgentResult<String> {
     cancellation_token.check()?;
     let mut stream = response.bytes_stream();
     let mut body = Vec::with_capacity(MAX_PROVIDER_ERROR_RESPONSE_BYTES.min(4 * 1024));
     while body.len() < MAX_PROVIDER_ERROR_RESPONSE_BYTES {
-        let chunk = tokio::select! {
-            _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
-            chunk = stream.next() => chunk,
+        let chunk = if let Some((inactivity_timeout, inactivity_deadline)) = inactivity_window {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+                _ = tokio::time::sleep_until(inactivity_deadline) => {
+                    return Err(stream_inactivity_timeout_error(
+                        inactivity_timeout,
+                        "error_response_body",
+                    ));
+                },
+                chunk = stream.next() => chunk,
+            }
+        } else {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+                chunk = stream.next() => chunk,
+            }
         };
         let Some(chunk) = chunk else {
             break;

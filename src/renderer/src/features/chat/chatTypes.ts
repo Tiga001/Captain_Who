@@ -236,7 +236,7 @@ export interface ChatAgentRunView {
   /** Safe lifecycle-only MCP views. Never store MCP arguments or result bodies here. */
   mcpInvocations?: ChatMcpToolInvocationView[]
   messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
-  /** Ephemeral, model-safe retry status. Cleared at the next request or terminal boundary. */
+  /** Ephemeral retry status. Cleared by the next model output or a terminal boundary. */
   llmRetry?: {
     category: AgentLlmRetryCategory
     providerCode?: string

@@ -751,23 +751,11 @@ function AgentRunView({
   const llmRetryLabel = useMemo(() => {
     const retry = run?.llmRetry
     if (!retry) return null
-    const substitutions = {
-      attempt: String(retry.attempt),
-      maxAttempts: String(retry.maxAttempts)
-    }
-    if (retry.retryAt <= 0 && retry.delayMs <= 0) {
-      return formatTranslation(t, 'agent.llmRetry.retrying', substitutions)
-    }
-    const remainingMs = retry.retryAt > 0 ? Math.max(0, retry.retryAt - now) : retry.delayMs
-    const key =
-      retry.category === 'rate_limited'
-        ? 'agent.llmRetry.rateLimited'
-        : 'agent.llmRetry.temporarilyUnavailable'
-    return formatTranslation(t, key, {
-      ...substitutions,
-      seconds: String(Math.max(0, Math.ceil(remainingMs / 1000)))
+    return formatTranslation(t, 'agent.llmRetry.reconnecting', {
+      attempt: String(Math.max(1, retry.attempt - 1)),
+      maxAttempts: String(Math.max(1, retry.maxAttempts - 1))
     })
-  }, [now, run?.llmRetry, t])
+  }, [run?.llmRetry, t])
 
   const headerState = useMemo(() => {
     if (llmRetryLabel) {

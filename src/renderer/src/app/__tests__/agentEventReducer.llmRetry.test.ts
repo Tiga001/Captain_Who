@@ -50,15 +50,25 @@ describe('LLM retry Renderer projection', () => {
     })
   })
 
-  it('clears the transient retry at the next model attempt and terminal boundary', () => {
+  it('keeps retry status through reconnect and clears it on first model output', () => {
     const nextAttempt = applyAgentEventToChatMessage(retryingMessage(), {
       type: 'message_stream_started',
       runId: 'run-retry',
       streamId: 'stream-1',
       attempt: 2
     })
-    expect(nextAttempt.agentRun?.llmRetry).toBeUndefined()
+    expect(nextAttempt.agentRun?.llmRetry).toEqual(retryingMessage().agentRun?.llmRetry)
 
+    const firstOutput = applyAgentEventToChatMessage(nextAttempt, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      delta: '已重新连接'
+    })
+    expect(firstOutput.agentRun?.llmRetry).toBeUndefined()
+  })
+
+  it('clears the transient retry at a terminal boundary', () => {
     const completed = applyAgentEventToChatMessage(retryingMessage(), {
       type: 'done',
       runId: 'run-retry',
@@ -67,6 +77,94 @@ describe('LLM retry Renderer projection', () => {
       content: 'done'
     })
     expect(completed.agentRun?.llmRetry).toBeUndefined()
+  })
+
+  it('clears retry status when a reconnected response starts with tool input', () => {
+    const toolInput = applyAgentEventToChatMessage(retryingMessage(), {
+      type: 'tool_input_progress',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      attempt: 2,
+      toolCallIndex: 0,
+      tool: 'run_command',
+      receivedBytes: 12
+    })
+    expect(toolInput.agentRun?.llmRetry).toBeUndefined()
+    expect(toolInput.agentRun?.firstResponseAt).toBeTypeOf('number')
+  })
+
+  it('clears retry status when write_file starts streaming a preview', () => {
+    const preview = applyAgentEventToChatMessage(retryingMessage(), {
+      type: 'file_write_preview_updated',
+      runId: 'run-retry',
+      preview: {
+        previewId: 'stream-1:2:0',
+        streamId: 'stream-1',
+        attempt: 2,
+        toolCallIndex: 0,
+        draftId: 'draft-1',
+        filePath: 'src/main.ts',
+        additions: 1,
+        deletions: 0,
+        lineCount: 1,
+        byteCount: 12,
+        generatedBytes: 12,
+        contentOffsetBytes: 0,
+        contentDelta: 'export {}',
+        updatedAt: 10
+      }
+    })
+    expect(preview.agentRun?.llmRetry).toBeUndefined()
+    expect(preview.agentRun?.fileWritePreviews).toHaveLength(1)
+  })
+
+  it('rolls back the failed attempt before projecting the reconnected output', () => {
+    const firstAttempt = applyAgentEventToChatMessage(runningMessage(), {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      attempt: 1
+    })
+    const staleOutput = applyAgentEventToChatMessage(firstAttempt, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      delta: '旧的半截回复'
+    })
+    const reset = applyAgentEventToChatMessage(staleOutput, {
+      type: 'message_stream_reset',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      reason: 'retrying_model_request'
+    })
+    const reconnecting = applyAgentEventToChatMessage(reset, {
+      type: 'llm_retry',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      category: 'network',
+      delayMs: 350,
+      retryAt: 1_350,
+      attempt: 2,
+      maxAttempts: 3
+    })
+    const secondAttempt = applyAgentEventToChatMessage(reconnecting, {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      attempt: 2
+    })
+
+    expect(secondAttempt.content).toBe('')
+    expect(secondAttempt.agentRun?.llmRetry).toBeDefined()
+
+    const recovered = applyAgentEventToChatMessage(secondAttempt, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      delta: '新的完整回复'
+    })
+    expect(recovered.content).toBe('新的完整回复')
+    expect(recovered.agentRun?.llmRetry).toBeUndefined()
   })
 
   it('does not let a late retry resurrect a terminal run', () => {

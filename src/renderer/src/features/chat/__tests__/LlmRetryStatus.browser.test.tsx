@@ -9,7 +9,8 @@ const translations: Record<string, string> = {
   'agent.llmRetry.rateLimited': '服务限流，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',
   'agent.llmRetry.temporarilyUnavailable':
     '模型服务暂时不可用，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',
-  'agent.llmRetry.retrying': '模型服务正在自动重试（{attempt}/{maxAttempts}）'
+  'agent.llmRetry.retrying': '模型服务正在自动重试（{attempt}/{maxAttempts}）',
+  'agent.llmRetry.reconnecting': '正在重新连接（{attempt}/{maxAttempts}）'
 }
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -57,24 +58,23 @@ function retryMessage(category: 'rate_limited' | 'network'): ChatMessage {
 }
 
 describe('LLM retry transient status', () => {
-  it('shows a concise rate-limit countdown without provider diagnostics', async () => {
+  it('shows a concise reconnect status without provider diagnostics', async () => {
     const screen = await render(
       <ChatMessageItem message={retryMessage('rate_limited')} showTokenUsageDetails={false} />
     )
 
     const text = screen.container.textContent ?? ''
-    expect(text).toContain('服务限流')
-    expect(text).toContain('秒后自动重试')
-    expect(text).toContain('2/3')
+    expect(text).toContain('正在重新连接')
+    expect(text).toContain('1/2')
     expect(screen.container.textContent).not.toContain('provider_secret_code')
   })
 
-  it('uses a generic safe label for transport and unknown service failures', async () => {
+  it('uses the same stable label for transport failures', async () => {
     const screen = await render(
       <ChatMessageItem message={retryMessage('network')} showTokenUsageDetails={false} />
     )
 
-    expect(screen.container.textContent).toContain('模型服务暂时不可用')
+    expect(screen.container.textContent).toContain('正在重新连接（1/2）')
     expect(screen.container.textContent).not.toContain('provider_secret_code')
   })
 })
