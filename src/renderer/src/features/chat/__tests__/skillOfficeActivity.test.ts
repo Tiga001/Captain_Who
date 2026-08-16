@@ -546,6 +546,45 @@ describe('Skill and Office activity derivation', () => {
     ])
   })
 
+  it('does not expose a temporary Word QA PDF as a final artifact card', () => {
+    const render = toolCall({
+      id: 'word-qa-render',
+      tool: 'office_document',
+      args: {
+        operation: 'render',
+        filePath: 'reports/final.docx',
+        outputPath: 'word-work/final-qa.pdf',
+        outputFormat: 'pdf'
+      }
+    })
+    const currentRun = run({
+      toolCalls: [render],
+      toolResults: [
+        toolResult({
+          callId: render.id,
+          tool: render.tool,
+          result: {
+            documentKind: 'document',
+            operation: 'render',
+            outputs: [
+              {
+                role: 'render',
+                kind: 'document',
+                mimeType: 'application/pdf',
+                readPath: 'word-work/final-qa.pdf',
+                pageCount: 3,
+                sourceSha256: 'ab'.repeat(32),
+                rendererRevision: 'word-pdf-render-runtime-sha256-v1:test'
+              }
+            ]
+          }
+        })
+      ]
+    })
+
+    expect(getOfficeArtifactEntries(currentRun)).toEqual([])
+  })
+
   it('creates a presentation card from a successful handed-off Editor Session receipt', () => {
     const command = toolCall({ id: 'editor-command', tool: 'run_command' })
     const currentRun = run({

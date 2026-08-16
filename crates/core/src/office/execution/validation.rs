@@ -201,15 +201,13 @@ fn validate_render_output_extension(
     path: &Path,
     mode: Option<&str>,
 ) -> Result<(), OfficeEngineError> {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase);
+    let raw_extension = path.extension().and_then(|value| value.to_str());
+    let extension = raw_extension.map(str::to_ascii_lowercase);
     let matches = match mode {
         Some("html") => matches!(extension.as_deref(), Some("html" | "htm")),
         Some("screenshot") => extension.as_deref() == Some("png"),
         Some("svg") => extension.as_deref() == Some("svg"),
-        Some("pdf") => extension.as_deref() == Some("pdf"),
+        Some("pdf") => raw_extension == Some("pdf"),
         _ => false,
     };
     if matches {

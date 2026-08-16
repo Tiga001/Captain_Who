@@ -50,8 +50,8 @@ export function isMacCodeSigningExplicitlyDisabled(context) {
 
 export async function afterPack(context) {
   await verifyOfficeRendererAfterPack(context)
+  await verifyPackagedWordPdfRenderer(context)
   if (context.electronPlatformName === 'darwin') {
-    await verifyPackagedWordPdfRenderer(context)
     await verifyPackagedMacIcon(context)
   }
 }
@@ -61,5 +61,7 @@ export async function afterSign(context) {
   if (context.electronPlatformName === 'darwin' && !isMacCodeSigningExplicitlyDisabled(context)) {
     await verifyPackagedWordPdfRenderer(context)
     await verifyPackagedMacSignatures(context)
+  } else if (context.electronPlatformName !== 'darwin') {
+    await verifyPackagedWordPdfRenderer(context)
   }
 }

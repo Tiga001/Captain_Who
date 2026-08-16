@@ -48,9 +48,9 @@
     "build:core": "cargo build --locked --release -p mycopilot-core-server --bin core-server && pnpm verify:core",
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:word-pdf-renderer-if-supported && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --dir --config.mac.identity=null",
-    "build:win": "node scripts/assert-package-platform.mjs win32 && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --win",
+    "build:win": "node scripts/assert-package-platform.mjs win32 && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:word-pdf-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --win",
     "build:mac": "node scripts/assert-package-platform.mjs darwin && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:word-pdf-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --mac --config.forceCodeSigning=true",
-    "build:linux": "node scripts/assert-package-platform.mjs linux && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --linux"
+    "build:linux": "node scripts/assert-package-platform.mjs linux && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:word-pdf-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --linux"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",

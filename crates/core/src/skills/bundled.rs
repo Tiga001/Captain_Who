@@ -846,7 +846,7 @@ mod tests {
                 "python",
                 "python-docx",
                 "1.2.0",
-                12,
+                13,
             ),
             (
                 PRESENTATIONS_LOCAL_ID,
@@ -1168,7 +1168,7 @@ mod tests {
             assert_eq!(
                 capability["contractVersion"],
                 if local_id == DOCUMENTS_LOCAL_ID {
-                    12
+                    13
                 } else {
                     11
                 }
@@ -1320,6 +1320,22 @@ mod tests {
             "outputs[].pageCount"
         );
         assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["oneCallPerFinalDocumentRevision"],
+            true
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["requiredPdfOutputFields"],
+            serde_json::json!(["readPath", "pageCount", "sourceSha256", "rendererRevision"])
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["sourceRevisionField"],
+            "outputs[].sourceSha256"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["rendererRevisionField"],
+            "outputs[].rendererRevision"
+        );
+        assert_eq!(
             documents["modes"]["native"]["pdfQaOutput"]["handoff"]["runtimeEnforced"],
             false
         );
@@ -1334,6 +1350,38 @@ mod tests {
         assert_eq!(
             documents["modes"]["script"]["exceptionalFallback"]["visualQaConversion"],
             "managedOnly"
+        );
+        assert_eq!(
+            documents["modes"]["script"]["exceptionalFallback"]["forbiddenVisualQaConverters"],
+            serde_json::json!([
+                "reportlabReconstruction",
+                "pageImageStitching",
+                "modelAuthoredDocxToPdf"
+            ])
+        );
+        assert_eq!(
+            documents["validation"]["conversionAndPdfinfoMustAgree"],
+            true
+        );
+        assert_eq!(
+            documents["validation"]["visual"]["fieldChecks"]["PAGE"],
+            "visibleAndCorrectForDocumentNumberingRules"
+        );
+        assert_eq!(
+            documents["validation"]["visual"]["fieldChecks"]["NUMPAGES"],
+            "visibleAndEqualsAuthoritativeN"
+        );
+        assert_eq!(
+            documents["validation"]["evidenceInvalidation"]["invalidates"],
+            serde_json::json!(["temporaryPdf", "pageCount", "pageImages", "pageLedger"])
+        );
+        assert_eq!(
+            documents["validation"]["temporaryArtifactCleanup"]["qaPdfIsFinalArtifact"],
+            false
+        );
+        assert_eq!(
+            documents["modes"]["native"]["renderOutput"]["finalVisualQaEvidence"],
+            "forbidden"
         );
         assert_eq!(
             documents["validation"]["structuralChecks"]["renderingSufficient"],
@@ -1396,6 +1444,12 @@ mod tests {
             "activate and follow the PDF Skill",
             "`outputFormat: \"pdf\"`",
             "model-authored DOCX-to-PDF converters are",
+            "`outputs[].sourceSha256`",
+            "`outputs[].rendererRevision`",
+            "contiguous batches of at most 32 pages",
+            "verdict per page",
+            "The QA PDF is temporary evidence, not a final artifact",
+            "`PAGE` or `NUMPAGES`",
         ] {
             assert!(
                 DOCUMENTS_SOURCE.contains(required),
@@ -1415,6 +1469,13 @@ mod tests {
             "## Convert once and follow the PDF Skill",
             "use `pdfinfo` to obtain authoritative page count",
             "Render all\npages `1..N` with `pdftoppm`",
+            "outputs[].sourceSha256",
+            "outputs[].rendererRevision",
+            "Bind the visual evidence ledger to `sourceSha256`",
+            "contiguous batches of at most 32 pages",
+            "consume\nevery exact returned page-image path with `read_image.path`",
+            "Do not use ReportLab, image stitching, or a self-authored converter",
+            "Do not present the QA PDF as a\nfinal artifact",
             "## Clean up exact task artifacts",
         ] {
             assert!(
@@ -1477,7 +1538,7 @@ mod tests {
         assert!(!editor.contains("tempfile"));
         assert!(!editor.contains("os.replace"));
 
-        assert_eq!(capability["contractVersion"], 12);
+        assert_eq!(capability["contractVersion"], 13);
         let native = &capability["modes"]["native"];
         assert_eq!(
             native["operations"],
@@ -2296,7 +2357,8 @@ mod tests {
                         .count(),
                     1
                 );
-                assert!(page.text().contains("Omit `runtimeProfile` and `observe`"));
+                assert!(page.text().contains("Omit `runtimeProfile`"));
+                assert!(page.text().contains("`observe`: the Host"));
             } else {
                 assert!(!page.text().contains("\"runtimeProfile\":"));
             }

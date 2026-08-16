@@ -4,13 +4,15 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { chmod, mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import {
   computeWordPdfRendererRevision,
   downloadPinnedWordPdfRendererArchive,
+  installLinuxDebArchive,
+  installWindowsMsi,
   loadWordPdfRendererManifest,
   prepareWordPdfRenderer,
   selectWordPdfRendererTarget,
@@ -26,8 +28,14 @@ async function rawManifest() {
 
 async function fixtureInstaller({ installRoot, target, manifest }) {
   const installed = join(installRoot, 'fixture')
+  await writeInstalledLayout(installed, target, manifest.libreOffice.version)
+  await symlink('fixture.txt', join(installed, 'libreoffice', 'share', 'fixture-link.txt'))
+  return installed
+}
+
+async function writeInstalledLayout(installed, target, version = '26.2.4.2') {
   for (const [relative, content] of [
-    [target.executable, `#!/bin/sh\necho 'LibreOffice ${manifest.libreOffice.version}'\n`],
+    [target.executable, `#!/bin/sh\necho 'LibreOffice ${version}'\n`],
     [target.license, 'MPL-2.0\n'],
     [target.notice, 'LibreOffice notices\n'],
     ['libreoffice/share/fixture.txt', 'fixture\n']
@@ -36,17 +44,41 @@ async function fixtureInstaller({ installRoot, target, manifest }) {
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, content, { mode: relative === target.executable ? 0o755 : 0o644 })
   }
-  await symlink('fixture.txt', join(installed, 'libreoffice', 'share', 'fixture-link.txt'))
-  return installed
 }
 
-test('manifest freezes real LibreOffice archives for the two supported macOS targets', async () => {
+async function writeNativeLibreOfficeLayout(officeRoot, target, version = '26.2.4.2') {
+  const nativeTarget = Object.fromEntries(
+    ['executable', 'license', 'notice'].map((field) => [
+      field,
+      target[field].slice('libreoffice/'.length)
+    ])
+  )
+  await writeInstalledLayout(
+    dirname(officeRoot),
+    {
+      ...nativeTarget,
+      executable: `${basename(officeRoot)}/${nativeTarget.executable}`,
+      license: `${basename(officeRoot)}/${nativeTarget.license}`,
+      notice: `${basename(officeRoot)}/${nativeTarget.notice}`
+    },
+    version
+  )
+}
+
+test('manifest freezes real LibreOffice archives for every supported desktop target', async () => {
   const manifest = await loadWordPdfRendererManifest(manifestPath)
   assert.equal(manifest.providerId, 'mycopilot.word-pdf-render-runtime')
   assert.equal(manifest.bundleVersion, '2026.08.1')
   assert.equal(manifest.libreOffice.version, '26.2.4.2')
-  assert.deepEqual(Object.keys(manifest.targets).sort(), ['darwin-arm64', 'darwin-x64'])
-  for (const platform of ['darwin']) {
+  assert.deepEqual(Object.keys(manifest.targets).sort(), [
+    'darwin-arm64',
+    'darwin-x64',
+    'linux-arm64',
+    'linux-x64',
+    'win32-arm64',
+    'win32-x64'
+  ])
+  for (const platform of ['darwin', 'linux', 'win32']) {
     for (const arch of ['arm64', 'x64']) {
       const target = selectWordPdfRendererTarget(manifest, platform, arch)
       assert.match(target.executable, /^libreoffice\//)
@@ -55,8 +87,6 @@ test('manifest freezes real LibreOffice archives for the two supported macOS tar
       assert.match(target.archive.sha256, /^[a-f0-9]{64}$/)
     }
   }
-  assert.throws(() => selectWordPdfRendererTarget(manifest, 'linux', 'arm64'), /not packaged/)
-  assert.throws(() => selectWordPdfRendererTarget(manifest, 'win32', 'x64'), /not packaged/)
   assert.throws(() => selectWordPdfRendererTarget(manifest, 'freebsd', 'x64'), /not packaged/)
 })
 
@@ -76,6 +106,67 @@ test('manifest rejects mutable versions, path escapes, and fake archive identiti
   const weak = await rawManifest()
   weak.targets['darwin-arm64'].archive.sha256 = 'latest'
   assert.throws(() => validateWordPdfRendererManifest(weak), /lowercase SHA-256/)
+})
+
+test('Linux DEB and Windows MSI installers normalize their native layouts', async () => {
+  const manifest = await loadWordPdfRendererManifest(manifestPath)
+
+  const linuxRoot = await mkdtemp(join(tmpdir(), 'word-pdf-linux-installer-'))
+  const linuxTarget = selectWordPdfRendererTarget(manifest, 'linux', 'x64')
+  const linuxCalls = []
+  const linuxInstalled = await installLinuxDebArchive(
+    linuxRoot,
+    join(linuxRoot, 'libreoffice.tar.gz'),
+    linuxTarget,
+    {
+      extract: async ({ cwd }) => {
+        const debs = join(cwd, linuxTarget.payload, 'DEBS')
+        await mkdir(debs, { recursive: true })
+        await writeFile(join(debs, 'libreoffice.deb'), 'fixture')
+      },
+      run: async (executable, args) => {
+        linuxCalls.push({ executable, args })
+        const packageRoot = args[2]
+        await writeNativeLibreOfficeLayout(join(packageRoot, 'opt', 'libreoffice26.2'), linuxTarget)
+      }
+    }
+  )
+  assert.deepEqual(
+    linuxCalls.map(({ executable, args }) => [executable, args[0]]),
+    [['dpkg-deb', '--extract']]
+  )
+  assert.equal(
+    await readFile(join(linuxInstalled, ...linuxTarget.license.split('/')), 'utf8'),
+    'MPL-2.0\n'
+  )
+
+  const windowsRoot = await mkdtemp(join(tmpdir(), 'word-pdf-windows-installer-'))
+  const windowsTarget = selectWordPdfRendererTarget(manifest, 'win32', 'x64')
+  const windowsCalls = []
+  const windowsInstalled = await installWindowsMsi(
+    windowsRoot,
+    join(windowsRoot, 'libreoffice.msi'),
+    windowsTarget,
+    {
+      run: async (executable, args) => {
+        windowsCalls.push({ executable, args })
+        const targetArgument = args.find((argument) => argument.startsWith('TARGETDIR='))
+        const administrativeRoot = targetArgument.slice('TARGETDIR='.length)
+        await writeNativeLibreOfficeLayout(
+          join(administrativeRoot, 'Program Files', 'LibreOffice'),
+          windowsTarget
+        )
+      }
+    }
+  )
+  assert.deepEqual(
+    windowsCalls.map(({ executable, args }) => [executable, args.slice(0, 3)]),
+    [['msiexec.exe', ['/a', join(windowsRoot, 'libreoffice.msi'), '/qn']]]
+  )
+  assert.equal(
+    await readFile(join(windowsInstalled, ...windowsTarget.notice.split('/')), 'utf8'),
+    'LibreOffice notices\n'
+  )
 })
 
 test('streaming download checks exact size and SHA-256 after HTTPS mirror redirects', async () => {

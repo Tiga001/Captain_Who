@@ -24,6 +24,8 @@ extraResources:
     to: components/officecli
   - from: .cache/office-renderer/current
     to: components/office-renderer
+  - from: .cache/word-pdf-renderer/current
+    to: components/word-pdf-renderer
   - from: .cache/artifact-runtime/current
     to: components/artifact-runtime
   - from: THIRD_PARTY_NOTICES.txt
@@ -67,8 +69,6 @@ mac:
   extraResources:
     - from: target/release/core-server
       to: core-server
-    - from: .cache/word-pdf-renderer/current
-      to: components/word-pdf-renderer
   extendInfo:
     - NSDocumentsFolderUsageDescription: MyCopilot accesses files you select in Documents.
     - NSDownloadsFolderUsageDescription: MyCopilot accesses files you select in Downloads.

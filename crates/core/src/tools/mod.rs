@@ -1495,7 +1495,11 @@ mod tests {
         ] {
             let definition = registry.definition_for(tool_name).unwrap();
             let properties = definition.input_schema["properties"].as_object().unwrap();
-            assert!(properties["imagePath"].is_object());
+            assert!(properties["filePath"].is_object());
+            assert!(
+                !properties.contains_key("imagePath"),
+                "{tool_name} exposed a retired model-side write input"
+            );
             assert!(
                 !properties.contains_key("source"),
                 "{tool_name} exposed internal file-source routing"
@@ -1667,25 +1671,11 @@ mod tests {
             assert!(definition.input_schema["required"]
                 .as_array()
                 .is_some_and(|required| required.contains(&json!("reason"))));
-            assert!(!registry.requires_approval_for_call(
-                tool_name,
-                &office_tool_args(
-                    json!({ "operation": "status" }),
-                    Some(json!("Check Office engine status")),
-                )
-            ));
-            for args in [
-                office_tool_args(
-                    json!({ "operation": "inspect", "filePath": document_path }),
-                    Some(json!("Inspect document structure")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "validate", "filePath": document_path }),
-                    Some(json!("Validate the document")),
-                ),
-            ] {
-                assert!(!registry.requires_approval_for_call(tool_name, &args));
-            }
+            let inspect_args = office_tool_args(
+                json!({ "operation": "inspect", "filePath": document_path }),
+                Some(json!("Inspect document structure")),
+            );
+            assert!(!registry.requires_approval_for_call(tool_name, &inspect_args));
             assert!(!registry.requires_approval_for_call(
                 tool_name,
                 &office_tool_args(

@@ -737,6 +737,11 @@ pub fn compile_office_semantic_request(
                     OfficeDocumentKind::Document,
                     semantic.operation_name(),
                 )?;
+                if !output.ends_with(".pdf") {
+                    return Err(OfficeSemanticError::invalid(
+                        "Word PDF render outputPath must end with the lowercase .pdf extension.",
+                    ));
+                }
                 if intent.page_or_slide.is_some()
                     || intent.sheet_name.is_some()
                     || intent.range.is_some()
@@ -2061,6 +2066,22 @@ mod tests {
         );
         let error = compile_office_semantic_request(&partial).unwrap_err();
         assert!(error.message().contains("complete frozen DOCX"));
+
+        for output_path in ["qa/report.png", "qa/report.PDF", "qa/report"] {
+            let invalid_extension = request(
+                OfficeDocumentKind::Document,
+                OfficeSemanticIntent::Render(OfficeRenderIntent {
+                    output_path: output_path.to_string(),
+                    output_format: Some(OfficeRenderOutputFormat::Pdf),
+                    page_or_slide: None,
+                    sheet_name: None,
+                    range: None,
+                    viewport: None,
+                }),
+            );
+            let error = compile_office_semantic_request(&invalid_extension).unwrap_err();
+            assert!(error.message().contains("lowercase .pdf"));
+        }
     }
 
     #[test]

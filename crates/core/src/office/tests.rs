@@ -264,11 +264,54 @@ fn write_docx(path: &Path, text: &str) {
     archive.finish().unwrap();
 }
 
-#[cfg(target_os = "macos")]
-fn write_renderable_word_pdf_smoke_docx(path: &Path) {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_renderable_word_pdf_smoke_docx(path: &Path, page_count: u32) {
+    assert!(page_count > 0);
     let file = fs::File::create(path).unwrap();
     let mut archive = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
+    let mut document = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+"#,
+    );
+    for page in 1..=page_count {
+        document.push_str(&format!(
+            "    <w:p><w:r><w:t>Managed Host transaction page {page}</w:t></w:r></w:p>\n"
+        ));
+        if page < page_count {
+            document.push_str("    <w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\n");
+        }
+    }
+    document.push_str(
+        r#"    <w:sectPr>
+      <w:footerReference w:type="default" r:id="rId1"/>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"#,
+    );
+    let footer = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:r><w:t xml:space="preserve">Page </w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:t>1</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    <w:r><w:t xml:space="preserve"> / </w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:t>{page_count}</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+</w:ftr>"#
+    );
     for (name, contents) in [
         (
             "[Content_Types].xml",
@@ -294,49 +337,259 @@ fn write_renderable_word_pdf_smoke_docx(path: &Path) {
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
 </Relationships>"#,
         ),
-        (
-            "word/document.xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <w:body>
-    <w:p><w:r><w:t>Managed Host transaction page 1</w:t></w:r></w:p>
-    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
-    <w:p><w:r><w:t>Managed Host transaction page 2</w:t></w:r></w:p>
-    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
-    <w:p><w:r><w:t>Managed Host transaction page 3</w:t></w:r></w:p>
-    <w:sectPr>
-      <w:footerReference w:type="default" r:id="rId1"/>
-      <w:pgSz w:w="11906" w:h="16838"/>
-      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
-    </w:sectPr>
-  </w:body>
-</w:document>"#,
-        ),
-        (
-            "word/footer1.xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:p>
-    <w:r><w:t xml:space="preserve">Page </w:t></w:r>
-    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
-    <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
-    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
-    <w:r><w:t>1</w:t></w:r>
-    <w:r><w:fldChar w:fldCharType="end"/></w:r>
-    <w:r><w:t xml:space="preserve"> / </w:t></w:r>
-    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
-    <w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>
-    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
-    <w:r><w:t>3</w:t></w:r>
-    <w:r><w:fldChar w:fldCharType="end"/></w:r>
-  </w:p>
-</w:ftr>"#,
-        ),
+        ("word/document.xml", document.as_str()),
+        ("word/footer1.xml", footer.as_str()),
     ] {
         archive.start_file(name, options).unwrap();
         archive.write_all(contents.as_bytes()).unwrap();
     }
     archive.finish().unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn managed_artifact_runtime_paths() -> Option<(PathBuf, PathBuf)> {
+    let runtime_root = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(".cache/artifact-runtime/current")
+        });
+    let receipt_path = runtime_root.join("component-receipt.json");
+    if !receipt_path.is_file() {
+        return None;
+    }
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+    let relative_path = |pointer: &str| {
+        let relative = receipt
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        relative
+            .split('/')
+            .fold(runtime_root.clone(), |path, part| path.join(part))
+    };
+    let python = relative_path("/runtimes/python/executable");
+    let pdf_cli = relative_path("/tools/pdfCli/path");
+    Some((python, pdf_cli))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn assert_managed_pdf_skill_page_coverage(pdf_path: &Path, expected_pages: u32) {
+    let (python, pdf_cli) = managed_artifact_runtime_paths()
+        .expect("real Word PDF acceptance requires MYCOPILOT_ARTIFACT_RUNTIME_DIR");
+    let run = tempfile::tempdir().unwrap();
+    let input = run.path().join("input.pdf");
+    fs::copy(pdf_path, &input).unwrap();
+    fs::create_dir(run.path().join("outputs")).unwrap();
+    let invoke = |arguments: &[String]| {
+        let mut command = std::process::Command::new(&python);
+        command
+            .arg(&pdf_cli)
+            .args(arguments)
+            .current_dir(run.path());
+        command.env_clear();
+        command.env("HOME", run.path());
+        command.env("TMPDIR", run.path());
+        command.env("TEMP", run.path());
+        command.env("TMP", run.path());
+        command.env("PYTHONDONTWRITEBYTECODE", "1");
+        command.output().unwrap()
+    };
+
+    let info = invoke(&["pdfinfo".to_string(), "input.pdf".to_string()]);
+    assert!(
+        info.status.success(),
+        "{}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    let info = String::from_utf8(info.stdout).unwrap();
+    assert!(info.contains("Encrypted: no"), "{info}");
+    let pdfinfo_pages = info
+        .lines()
+        .find_map(|line| line.strip_prefix("Pages: "))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert_eq!(pdfinfo_pages, expected_pages);
+
+    if expected_pages > 32 {
+        let oversized = invoke(&[
+            "pdftoppm".to_string(),
+            "-f".to_string(),
+            "1".to_string(),
+            "-l".to_string(),
+            expected_pages.to_string(),
+            "-r".to_string(),
+            "36".to_string(),
+            "-png".to_string(),
+            "input.pdf".to_string(),
+            "outputs/oversized".to_string(),
+        ]);
+        assert!(!oversized.status.success());
+        assert!(
+            String::from_utf8_lossy(&oversized.stderr).contains("at most 32 pages"),
+            "{}",
+            String::from_utf8_lossy(&oversized.stderr)
+        );
+    }
+
+    let mut ledger_entries = 0_u32;
+    let mut first = 1_u32;
+    while first <= expected_pages {
+        let last = expected_pages.min(first + 31);
+        let rendered = invoke(&[
+            "pdftoppm".to_string(),
+            "-f".to_string(),
+            first.to_string(),
+            "-l".to_string(),
+            last.to_string(),
+            "-r".to_string(),
+            "36".to_string(),
+            "-png".to_string(),
+            "input.pdf".to_string(),
+            "outputs/page".to_string(),
+        ]);
+        assert!(
+            rendered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rendered.stderr)
+        );
+        ledger_entries += String::from_utf8(rendered.stdout)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("Generated outputs/page-"))
+            .count() as u32;
+        first = last + 1;
+    }
+
+    let page_images = fs::read_dir(run.path().join("outputs"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|value| value == "png"))
+        .collect::<Vec<_>>();
+    for image in &page_images {
+        let decoded = image::ImageReader::open(image.path())
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert!(decoded.width() > 0 && decoded.height() > 0);
+    }
+    assert_eq!(page_images.len() as u32, pdfinfo_pages);
+    assert_eq!(ledger_entries, pdfinfo_pages);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_complex_word_pdf_acceptance_docx(path: &Path) {
+    let (python, _) = managed_artifact_runtime_paths()
+        .expect("complex Word PDF acceptance requires MYCOPILOT_ARTIFACT_RUNTIME_DIR");
+    let run = tempfile::tempdir().unwrap();
+    let script = run.path().join("build-complex-docx.py");
+    fs::write(
+        &script,
+        r#"from pathlib import Path
+import sys
+
+from docx import Document
+from docx.enum.section import WD_ORIENT, WD_SECTION_START
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Pt
+
+
+def set_numbering(section, fmt, start):
+    sect_pr = section._sectPr
+    for existing in list(sect_pr.findall(qn("w:pgNumType"))):
+        sect_pr.remove(existing)
+    page_numbering = OxmlElement("w:pgNumType")
+    page_numbering.set(qn("w:fmt"), fmt)
+    page_numbering.set(qn("w:start"), str(start))
+    sect_pr.append(page_numbering)
+
+
+def append_field(paragraph, instruction, fallback):
+    run = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instruction_element = OxmlElement("w:instrText")
+    instruction_element.set(qn("xml:space"), "preserve")
+    instruction_element.text = f" {instruction} "
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    value = OxmlElement("w:t")
+    value.text = fallback
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    for element in (begin, instruction_element, separate, value, end):
+        run._r.append(element)
+
+
+def install_footer(section):
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    paragraph = footer.paragraphs[0]
+    for child in list(paragraph._p):
+        paragraph._p.remove(child)
+    paragraph.add_run("Page ")
+    append_field(paragraph, "PAGE", "1")
+    paragraph.add_run(" / ")
+    append_field(paragraph, "NUMPAGES", "1")
+
+
+document = Document()
+first = document.sections[0]
+set_numbering(first, "lowerRoman", 1)
+install_footer(first)
+document.add_heading("Roman-numbered portrait section", level=1)
+document.add_paragraph("Roman section marker")
+
+landscape = document.add_section(WD_SECTION_START.NEW_PAGE)
+landscape.orientation = WD_ORIENT.LANDSCAPE
+landscape.page_width, landscape.page_height = landscape.page_height, landscape.page_width
+set_numbering(landscape, "decimal", 1)
+install_footer(landscape)
+document.add_heading("Landscape table section", level=1)
+document.add_paragraph("Landscape section marker")
+table = document.add_table(rows=1, cols=2)
+table.rows[0].cells[0].text = "Index"
+table.rows[0].cells[1].text = "Cross-page table content"
+for index in range(1, 181):
+    cells = table.add_row().cells
+    cells[0].text = str(index)
+    cells[1].text = f"Cross-page table row {index} with stable acceptance text"
+    for paragraph in cells[1].paragraphs:
+        for run in paragraph.runs:
+            run.font.size = Pt(8)
+
+last = document.add_section(WD_SECTION_START.NEW_PAGE)
+set_numbering(last, "upperRoman", 1)
+install_footer(last)
+document.add_paragraph("After landscape marker")
+document.add_page_break()
+document.add_paragraph("")
+
+document.save(Path(sys.argv[1]))
+"#,
+    )
+    .unwrap();
+    let output = std::process::Command::new(python)
+        .arg(script)
+        .arg(path)
+        .current_dir(run.path())
+        .env_clear()
+        .env("HOME", run.path())
+        .env("TMPDIR", run.path())
+        .env("TEMP", run.path())
+        .env("TMP", run.path())
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn write_xlsx_package(path: &Path) {
@@ -1105,6 +1358,9 @@ fn word_pdf_render_uses_only_the_pinned_runtime_and_returns_authoritative_page_c
         b"frozen-docx-revision",
     )
     .unwrap();
+    let uppercase_extension = word_pdf_request(&fixture, "word-qa.PDF");
+    let error = validate_office_request(&uppercase_extension).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
     let mut request = fixture.request(OfficeOperation::View);
     request.parameters = OfficeOperationParameters::View {
         mode: OfficeViewMode::Pdf,
@@ -1172,7 +1428,7 @@ fn word_pdf_render_uses_only_the_pinned_runtime_and_returns_authoritative_page_c
     assert!(result.stderr.contains("<word-pdf-runtime>"));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn real_managed_word_pdf_runtime_completes_the_host_transaction_when_configured() {
     let Some(configured_runtime) = std::env::var_os("MYCOPILOT_WORD_PDF_RENDERER_DIR") else {
@@ -1185,6 +1441,8 @@ fn real_managed_word_pdf_runtime_completes_the_host_transaction_when_configured(
         std::env::current_dir().unwrap().join(configured_runtime)
     };
     let configured_runtime = configured_runtime.canonicalize().unwrap();
+    managed_artifact_runtime_paths()
+        .expect("real Word PDF acceptance also requires MYCOPILOT_ARTIFACT_RUNTIME_DIR");
 
     let workspace = tempfile::tempdir().unwrap();
     let engine_directory = tempfile::tempdir().unwrap();
@@ -1208,62 +1466,180 @@ fn real_managed_word_pdf_runtime_completes_the_host_transaction_when_configured(
     )
     .unwrap();
 
-    let source = workspace.path().join("managed-host-smoke.docx");
-    write_renderable_word_pdf_smoke_docx(&source);
-    let request = OfficeExecutionRequest {
-        document_kind: OfficeDocumentKind::Document,
-        operation: OfficeOperation::View,
-        document_path: Some("managed-host-smoke.docx".to_string()),
-        parameters: OfficeOperationParameters::View {
-            mode: OfficeViewMode::Pdf,
-            start: None,
-            end: None,
-            max_lines: None,
-            issue_type: None,
-            limit: None,
-            columns: Vec::new(),
-            pages: Vec::new(),
-            range: None,
-            viewport: None,
-            grid: None,
-            render_mode: None,
-            page_count: false,
-        },
-        output_path: Some("managed-host-smoke.pdf".to_string()),
-        destination_path: None,
-        inputs: Vec::new(),
-        timeout_ms: Some(120_000),
-    };
-    let result = engine
-        .execute(
-            &workspace_context(workspace.path()),
-            &request,
-            AgentCancellationToken::new(),
-            None,
-        )
-        .unwrap();
+    for page_count in [1_u32, 3, 10, 33] {
+        let source_name = format!("managed-host-{page_count}.docx");
+        let output_name = format!("managed-host-{page_count}.pdf");
+        let source = workspace.path().join(&source_name);
+        write_renderable_word_pdf_smoke_docx(&source, page_count);
+        let request = OfficeExecutionRequest {
+            document_kind: OfficeDocumentKind::Document,
+            operation: OfficeOperation::View,
+            document_path: Some(source_name),
+            parameters: OfficeOperationParameters::View {
+                mode: OfficeViewMode::Pdf,
+                start: None,
+                end: None,
+                max_lines: None,
+                issue_type: None,
+                limit: None,
+                columns: Vec::new(),
+                pages: Vec::new(),
+                range: None,
+                viewport: None,
+                grid: None,
+                render_mode: None,
+                page_count: false,
+            },
+            output_path: Some(output_name.clone()),
+            destination_path: None,
+            inputs: Vec::new(),
+            timeout_ms: Some(120_000),
+        };
+        let result = engine
+            .execute(
+                &workspace_context(workspace.path()),
+                &request,
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
 
-    assert!(result.error_code.is_none(), "{:?}", result.error);
-    assert_eq!(result.outputs.len(), 1);
-    assert_eq!(result.outputs[0].read_path, "managed-host-smoke.pdf");
-    assert_eq!(result.outputs[0].page_count, Some(3));
-    assert_eq!(
-        result.outputs[0].renderer_revision.as_deref(),
-        Some(engine.word_pdf_render_runtime().unwrap().runtime_revision())
-    );
-    let published = workspace.path().join("managed-host-smoke.pdf");
-    let pdf = lopdf::Document::load(&published).unwrap();
-    assert_eq!(pdf.get_pages().len(), 3);
-    let text = pdf
-        .extract_text(&[1, 2, 3])
+        assert!(result.error_code.is_none(), "{:?}", result.error);
+        assert_eq!(result.outputs.len(), 1);
+        assert_eq!(result.outputs[0].read_path, output_name);
+        assert_eq!(result.outputs[0].page_count, Some(page_count));
+        assert!(result.outputs[0].source_sha256.is_some());
+        assert_eq!(
+            result.outputs[0].renderer_revision.as_deref(),
+            Some(engine.word_pdf_render_runtime().unwrap().runtime_revision())
+        );
+        let published = workspace.path().join(&result.outputs[0].read_path);
+        let pdf = lopdf::Document::load(&published).unwrap();
+        assert_eq!(pdf.get_pages().len(), page_count as usize);
+        let text = pdf
+            .extract_text(&[1, page_count])
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Managed Host transaction page 1"), "{text}");
+        assert!(
+            text.contains(&format!("Managed Host transaction page {page_count}")),
+            "{text}"
+        );
+        assert!(text.contains(&format!("Page 1 / {page_count}")), "{text}");
+        assert!(
+            text.contains(&format!("Page {page_count} / {page_count}")),
+            "{text}"
+        );
+        if page_count == 33 {
+            assert_managed_pdf_skill_page_coverage(&published, page_count);
+        }
+    }
+    let complex_source = workspace.path().join("managed-host-complex.docx");
+    write_complex_word_pdf_acceptance_docx(&complex_source);
+    {
+        let request = OfficeExecutionRequest {
+            document_kind: OfficeDocumentKind::Document,
+            operation: OfficeOperation::View,
+            document_path: Some("managed-host-complex.docx".to_string()),
+            parameters: OfficeOperationParameters::View {
+                mode: OfficeViewMode::Pdf,
+                start: None,
+                end: None,
+                max_lines: None,
+                issue_type: None,
+                limit: None,
+                columns: Vec::new(),
+                pages: Vec::new(),
+                range: None,
+                viewport: None,
+                grid: None,
+                render_mode: None,
+                page_count: false,
+            },
+            output_path: Some("managed-host-complex.pdf".to_string()),
+            destination_path: None,
+            inputs: Vec::new(),
+            timeout_ms: Some(120_000),
+        };
+        let result = engine
+            .execute(
+                &workspace_context(workspace.path()),
+                &request,
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+        assert!(result.error_code.is_none(), "{:?}", result.error);
+        let page_count = result.outputs[0].page_count.unwrap();
+        assert!(
+            page_count >= 6,
+            "cross-page table did not span enough pages"
+        );
+        let published = workspace.path().join(&result.outputs[0].read_path);
+        let pdf = lopdf::Document::load(&published).unwrap();
+        let page_text = (1..=page_count)
+            .map(|page| {
+                pdf.extract_text(&[page])
+                    .unwrap()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>();
+        assert!(page_text[0].contains("Roman section marker"));
+        assert!(
+            page_text[0].contains("Page i / "),
+            "first section did not render a lower-Roman PAGE field: {}",
+            page_text[0],
+        );
+        let first_table_page = page_text
+            .iter()
+            .position(|text| text.contains("Cross-page table row 1 with"))
+            .unwrap();
+        let last_table_page = page_text
+            .iter()
+            .position(|text| text.contains("Cross-page table row 180 with"))
+            .unwrap();
+        assert!(
+            last_table_page > first_table_page,
+            "table must cross a physical page boundary"
+        );
+        assert!(
+            page_text[first_table_page].contains("Page 1 / "),
+            "{}",
+            page_text[first_table_page]
+        );
+        assert!(page_text
+            .iter()
+            .any(|text| text.contains("After landscape marker")));
+        assert!(!page_text.last().unwrap().contains("After landscape marker"));
+
+        let mut has_portrait = false;
+        let mut has_landscape = false;
+        for object_id in pdf.get_pages().values() {
+            let mut current = *object_id;
+            loop {
+                let dictionary = pdf.get_object(current).unwrap().as_dict().unwrap();
+                if let Ok(media_box) = dictionary.get(b"MediaBox") {
+                    let bounds = media_box.as_array().unwrap();
+                    let width = bounds[2].as_float().unwrap() - bounds[0].as_float().unwrap();
+                    let height = bounds[3].as_float().unwrap() - bounds[1].as_float().unwrap();
+                    has_portrait |= height > width;
+                    has_landscape |= width > height;
+                    break;
+                }
+                current = dictionary.get(b"Parent").unwrap().as_reference().unwrap();
+            }
+        }
+        assert!(has_portrait && has_landscape);
+    }
+    engine
+        .word_pdf_render_runtime()
         .unwrap()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(text.contains("Managed Host transaction page 1"), "{text}");
-    assert!(text.contains("Managed Host transaction page 3"), "{text}");
-    assert!(text.contains("Page 1 / 3"), "{text}");
-    assert!(text.contains("Page 3 / 3"), "{text}");
+        .verify_integrity()
+        .unwrap();
     assert!(
         fs::read_dir(workspace.path()).unwrap().all(|entry| !entry
             .unwrap()

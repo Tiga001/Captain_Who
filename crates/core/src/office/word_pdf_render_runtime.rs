@@ -71,6 +71,11 @@ struct VerifiedLink {
     resolved_identity: FileIdentity,
 }
 
+type VerifiedComponentTree = (
+    BTreeMap<String, VerifiedFile>,
+    BTreeMap<String, VerifiedLink>,
+);
+
 #[derive(Debug)]
 struct CollectedTree {
     files: BTreeMap<String, PathBuf>,
@@ -573,13 +578,7 @@ fn write_canonical_json(
 fn verify_component_tree(
     root: &Path,
     receipt: &ComponentReceipt,
-) -> Result<
-    (
-        BTreeMap<String, VerifiedFile>,
-        BTreeMap<String, VerifiedLink>,
-    ),
-    OfficeEngineError,
-> {
+) -> Result<VerifiedComponentTree, OfficeEngineError> {
     let actual = collect_component_tree(root)?;
     let expected = receipt
         .files
@@ -961,7 +960,7 @@ fn freeze_safe_link_with_hook<F: FnOnce()>(
         })?);
     if !after.file_type().is_symlink()
         || file_identity(&after) != identity
-        || target_after != PathBuf::from(target)
+        || target_after != *target
         || resolved_after != resolved
         || !resolved_after.starts_with(canonical_root)
         || resolved_identity_after != resolved_identity
@@ -1008,7 +1007,10 @@ fn current_platform() -> &'static str {
 }
 
 fn word_pdf_render_runtime_supported() -> bool {
-    cfg!(target_os = "macos") || cfg!(test)
+    cfg!(target_os = "macos")
+        || cfg!(target_os = "linux")
+        || cfg!(target_os = "windows")
+        || cfg!(test)
 }
 
 fn current_arch() -> &'static str {
@@ -1042,7 +1044,11 @@ fn expected_notice() -> &'static str {
 }
 
 fn expected_archive_receipt() -> ArchiveReceipt {
-    let (url, size, sha256) = match (current_platform(), current_arch()) {
+    expected_archive_receipt_for(current_platform(), current_arch())
+}
+
+fn expected_archive_receipt_for(platform: &str, arch: &str) -> ArchiveReceipt {
+    let (url, size, sha256) = match (platform, arch) {
         ("darwin", "arm64") => (
             "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/mac/aarch64/LibreOffice_26.2.4.2_MacOS_aarch64.dmg",
             295_019_039,
@@ -1073,7 +1079,7 @@ fn expected_archive_receipt() -> ArchiveReceipt {
             372_539_392,
             "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f",
         ),
-        _ => unreachable!("Word PDF renderer supports fixed desktop targets"),
+        _ => panic!("Word PDF renderer supports only fixed desktop targets: {platform}-{arch}"),
     };
     ArchiveReceipt {
         url: url.to_string(),
@@ -1211,6 +1217,28 @@ pub(super) fn write_test_word_pdf_render_runtime_with_executable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_archive_contract_matches_every_cross_platform_manifest_target() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../resources/word-pdf-renderer-manifest.json"
+        ))
+        .unwrap();
+        for (platform, arch) in [
+            ("darwin", "arm64"),
+            ("darwin", "x64"),
+            ("linux", "arm64"),
+            ("linux", "x64"),
+            ("win32", "arm64"),
+            ("win32", "x64"),
+        ] {
+            let target = &manifest["targets"][format!("{platform}-{arch}")]["archive"];
+            let expected = expected_archive_receipt_for(platform, arch);
+            assert_eq!(target["url"], expected.url);
+            assert_eq!(target["size"], expected.size);
+            assert_eq!(target["sha256"], expected.sha256);
+        }
+    }
 
     #[test]
     fn discovers_and_reverifies_a_frozen_word_pdf_runtime() {

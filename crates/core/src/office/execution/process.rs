@@ -408,13 +408,18 @@ fn configure_private_environment(command: &mut Command, private_home: &Path) {
     command.env_clear();
     command.env("HOME", private_home);
     command.env("XDG_CONFIG_HOME", private_home.join("config"));
+    command.env("XDG_CACHE_HOME", private_home.join("cache"));
     command.env("TMPDIR", private_home);
     command.env("TEMP", private_home);
     command.env("TMP", private_home);
+    command.env("PYTHONDONTWRITEBYTECODE", "1");
+    command.env("PYTHONPYCACHEPREFIX", private_home.join("python-cache"));
     command.env("LANG", "C.UTF-8");
     command.env("LC_ALL", "C.UTF-8");
     command.env("TERM", "dumb");
     command.env("CI", "1");
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin");
     command.env("OFFICECLI_SKIP_UPDATE", "1");
     command.env("OFFICECLI_NO_AUTO_RESIDENT", "1");
     command.env("DOTNET_EnableDiagnostics", "0");

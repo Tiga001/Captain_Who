@@ -1,5 +1,5 @@
 {
-  "contractVersion": 12,
+  "contractVersion": 13,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
@@ -44,8 +44,15 @@
         "resultField": "outputs",
         "pathField": "readPath",
         "pageCountField": "outputs[].pageCount",
+        "sourceRevisionField": "outputs[].sourceSha256",
+        "rendererRevisionField": "outputs[].rendererRevision",
         "requiredResultFields": ["outputs"],
-        "requiredPdfOutputFields": ["readPath", "pageCount"],
+        "requiredPdfOutputFields": [
+          "readPath",
+          "pageCount",
+          "sourceSha256",
+          "rendererRevision"
+        ],
         "pathInference": "forbidden",
         "handoff": {
           "skill": "pdf",

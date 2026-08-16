@@ -172,9 +172,11 @@ inside the task-owned temporary directory and call `office_document.render` exac
 ```
 
 The request must contain all five fields shown above; `outputPath` must end in `.pdf`. Accept only a
-successful result containing a PDF output with both an exact readable `outputs[].readPath` and its
-nested `outputs[].pageCount`. Do not reconstruct the PDF path from `outputPath`, stdout, a filename,
-or a directory scan.
+successful result containing a PDF output with an exact readable `outputs[].readPath`, its nested
+`outputs[].pageCount`, the frozen DOCX identity `outputs[].sourceSha256`, and the managed runtime
+identity `outputs[].rendererRevision`. Bind the visual evidence ledger to `sourceSha256`; a changed
+DOCX can never reuse an older PDF or ledger. Do not reconstruct the PDF path from `outputPath`,
+stdout, a filename, or a directory scan.
 
 Then activate and follow the PDF Skill. This handoff is an instruction, not a runtime-enforced
 state transition. Bind the exact PDF `readPath`, use `pdfinfo` to obtain authoritative page count

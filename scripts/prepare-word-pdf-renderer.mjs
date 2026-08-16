@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { x as extractTar } from 'tar'
 
 const RECEIPT_NAME = 'component-receipt.json'
 const PROVIDER_ID = 'mycopilot.word-pdf-render-runtime'
@@ -149,7 +150,11 @@ export function validateWordPdfRendererManifest(value) {
   const targets = plainObject(manifest.targets, 'manifest.targets')
   const targetDefinitions = {
     'darwin-arm64': ['dmg', 'LibreOffice.app'],
-    'darwin-x64': ['dmg', 'LibreOffice.app']
+    'darwin-x64': ['dmg', 'LibreOffice.app'],
+    'linux-arm64': ['tar.gz', 'LibreOffice_26.2.4.2_Linux_aarch64_deb'],
+    'linux-x64': ['tar.gz', 'LibreOffice_26.2.4.2_Linux_x86-64_deb'],
+    'win32-arm64': ['msi', 'LibreOffice'],
+    'win32-x64': ['msi', 'LibreOffice']
   }
   exactKeys(targets, Object.keys(targetDefinitions), 'manifest.targets')
   const validatedTargets = Object.fromEntries(
@@ -406,15 +411,30 @@ export async function downloadPinnedWordPdfRendererArchive(archive, outputPath, 
 }
 
 export async function installPinnedWordPdfRenderer({ installRoot, platform, arch, target }) {
-  if (platform !== 'darwin' || platform !== process.platform || arch !== process.arch) {
+  if (platform !== process.platform || arch !== process.arch) {
     throw new Error(
       `LibreOffice can prepare only the current host target (${process.platform}-${process.arch})`
     )
   }
-  const archivePath = join(installRoot, 'libreoffice.dmg')
+  const archiveName =
+    target.archiveFormat === 'dmg'
+      ? 'libreoffice.dmg'
+      : target.archiveFormat === 'tar.gz'
+        ? 'libreoffice.tar.gz'
+        : 'libreoffice.msi'
+  const archivePath = join(installRoot, archiveName)
   await downloadPinnedWordPdfRendererArchive(target.archive, archivePath)
   try {
-    return await installMacDmg(installRoot, archivePath, target)
+    if (platform === 'darwin' && target.archiveFormat === 'dmg') {
+      return await installMacDmg(installRoot, archivePath, target)
+    }
+    if (platform === 'linux' && target.archiveFormat === 'tar.gz') {
+      return await installLinuxDebArchive(installRoot, archivePath, target)
+    }
+    if (platform === 'win32' && target.archiveFormat === 'msi') {
+      return await installWindowsMsi(installRoot, archivePath, target)
+    }
+    throw new Error(`Unsupported LibreOffice archive layout for ${platform}-${arch}`)
   } finally {
     await rm(archivePath, { force: true })
   }
@@ -463,6 +483,139 @@ async function installMacDmg(installRoot, archivePath, target) {
   return extracted
 }
 
+export async function installLinuxDebArchive(
+  installRoot,
+  archivePath,
+  target,
+  { extract = extractTar, run = runProcess, dpkgDebExecutable = 'dpkg-deb' } = {}
+) {
+  const archiveRoot = join(installRoot, 'archive')
+  const packageRoot = join(installRoot, 'debian-root')
+  const extracted = join(installRoot, 'extracted')
+  await mkdir(archiveRoot, { mode: 0o700 })
+  await mkdir(packageRoot, { mode: 0o700 })
+  await mkdir(extracted, { mode: 0o700 })
+  try {
+    await extract({
+      file: archivePath,
+      cwd: archiveRoot,
+      strict: true,
+      preservePaths: false
+    })
+    const payloadRoot = join(archiveRoot, target.payload)
+    const payloadMetadata = await lstat(payloadRoot)
+    if (!payloadMetadata.isDirectory() || payloadMetadata.isSymbolicLink()) {
+      throw new Error('Authenticated LibreOffice archive does not contain the pinned DEB payload')
+    }
+    const debDirectory = join(payloadRoot, 'DEBS')
+    const packages = (await readdir(debDirectory, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith('.deb'))
+      .map((entry) => join(debDirectory, entry.name))
+      .sort()
+    if (packages.length === 0 || packages.length > 256) {
+      throw new Error('Pinned LibreOffice DEB payload has an invalid package count')
+    }
+    for (const packagePath of packages) {
+      try {
+        await run(dpkgDebExecutable, ['--extract', packagePath, packageRoot])
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          throw new Error(
+            'Preparing the pinned Linux LibreOffice archive requires dpkg-deb on the build host',
+            { cause: error }
+          )
+        }
+        throw error
+      }
+    }
+    const officeRoot = await locateInstalledLibreOfficeRoot(
+      join(packageRoot, 'opt'),
+      'program/soffice'
+    )
+    await rename(officeRoot, join(extracted, 'libreoffice'))
+    await assertInstalledLibreOfficeLayout(extracted, target)
+    return extracted
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true })
+    await rm(packageRoot, { recursive: true, force: true })
+  }
+}
+
+export async function installWindowsMsi(
+  installRoot,
+  archivePath,
+  target,
+  { run = runProcess } = {}
+) {
+  const administrativeRoot = join(installRoot, 'msi-image')
+  const extracted = join(installRoot, 'extracted')
+  await mkdir(administrativeRoot, { mode: 0o700 })
+  await mkdir(extracted, { mode: 0o700 })
+  try {
+    await run('msiexec.exe', ['/a', archivePath, '/qn', `TARGETDIR=${administrativeRoot}`], {
+      timeoutMs: 900_000
+    })
+    const officeRoot = await locateInstalledLibreOfficeRoot(
+      administrativeRoot,
+      'program/soffice.exe'
+    )
+    await rename(officeRoot, join(extracted, 'libreoffice'))
+    await assertInstalledLibreOfficeLayout(extracted, target)
+    return extracted
+  } finally {
+    await rm(administrativeRoot, { recursive: true, force: true })
+  }
+}
+
+async function locateInstalledLibreOfficeRoot(searchRoot, executableRelativePath) {
+  const rootMetadata = await lstat(searchRoot)
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    throw new Error('Pinned LibreOffice installer root is not a real directory')
+  }
+  const pending = [{ path: searchRoot, depth: 0 }]
+  const matches = []
+  while (pending.length > 0) {
+    const current = pending.pop()
+    const executable = join(current.path, ...executableRelativePath.split('/'))
+    const executableMetadata = await lstat(executable).catch(() => undefined)
+    if (
+      executableMetadata?.isFile() &&
+      !executableMetadata.isSymbolicLink() &&
+      (await hasRegularFile(join(current.path, 'LICENSE'))) &&
+      (await hasRegularFile(join(current.path, 'NOTICE')))
+    ) {
+      matches.push(current.path)
+      continue
+    }
+    if (current.depth >= 6) continue
+    const entries = await readdir(current.path, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        pending.push({ path: join(current.path, entry.name), depth: current.depth + 1 })
+      }
+    }
+  }
+  if (matches.length !== 1) {
+    throw new Error(
+      `Pinned LibreOffice installer must contain exactly one complete application root; found ${matches.length}`
+    )
+  }
+  return matches[0]
+}
+
+async function hasRegularFile(path) {
+  const metadata = await lstat(path).catch(() => undefined)
+  return metadata?.isFile() === true && !metadata.isSymbolicLink()
+}
+
+async function assertInstalledLibreOfficeLayout(componentRoot, target) {
+  for (const relative of [target.executable, target.license, target.notice]) {
+    if (!(await hasRegularFile(join(componentRoot, ...relative.split('/'))))) {
+      throw new Error(`Prepared LibreOffice payload is missing ${relative}`)
+    }
+  }
+}
+
 export async function verifyWordPdfRendererCodeSignature(componentRoot, target) {
   const appRoot = join(componentRoot, 'libreoffice', target.payload)
   const metadata = await lstat(appRoot)
@@ -509,7 +662,9 @@ async function probeExecutable(path, expectedVersion) {
           HOME: home,
           TMPDIR: isolation,
           XDG_CACHE_HOME: cache,
-          XDG_CONFIG_HOME: join(isolation, 'config')
+          XDG_CONFIG_HOME: join(isolation, 'config'),
+          PYTHONDONTWRITEBYTECODE: '1',
+          PYTHONPYCACHEPREFIX: join(isolation, 'python-cache')
         }
       }
     )
@@ -687,13 +842,28 @@ async function verifyReceipt(root, manifest, target, platform, arch) {
     throw new Error('Word PDF renderer executable must have a Unix execute bit')
   }
   const actual = await inspectComponentTree(root)
-  if (
-    JSON.stringify(actual.files) !== JSON.stringify(receipt.files) ||
-    JSON.stringify(actual.links) !== JSON.stringify(receipt.links)
-  ) {
-    throw new Error('Word PDF renderer files do not match the frozen receipt')
+  const fileDifference = firstReceiptDifference(receipt.files, actual.files)
+  const linkDifference = firstReceiptDifference(receipt.links, actual.links)
+  if (fileDifference || linkDifference) {
+    throw new Error(
+      `Word PDF renderer files do not match the frozen receipt: ${fileDifference ?? linkDifference}`
+    )
   }
   return receipt
+}
+
+function firstReceiptDifference(expected, actual) {
+  const length = Math.max(expected.length, actual.length)
+  for (let index = 0; index < length; index += 1) {
+    const frozen = expected[index]
+    const observed = actual[index]
+    if (frozen === undefined) return `unexpected ${JSON.stringify(observed)}`
+    if (observed === undefined) return `missing ${JSON.stringify(frozen)}`
+    if (JSON.stringify(frozen) !== JSON.stringify(observed)) {
+      return `expected ${JSON.stringify(frozen)}, observed ${JSON.stringify(observed)}`
+    }
+  }
+  return undefined
 }
 
 async function publishDirectoryAtomically(staging, outputDirectory, hooks) {

@@ -83,7 +83,8 @@ managed Artifact `readPath` values are not workspace files: keep those paths unt
 read, then let the Host clean its managed Run workspace instead of searching for or deleting them.
 If this task created the script directory and it is then empty, remove it with `rmdir`. Preserve
 pre-existing directories and unrelated files; never use recursive deletion. Keep scripts only when
-the user explicitly asks for them.
+the user explicitly asks for them. The QA PDF is temporary evidence, not a final artifact; do not
+present it as a delivery card unless the user explicitly requested a PDF.
 
 ## Completion gate
 
@@ -96,13 +97,14 @@ the user explicitly asks for them.
    For comments, tracked changes, fields, content controls, or other fidelity-sensitive parts, run
    an explicit structural check; rendering is not structural evidence.
 4. Convert the final `.docx` once to a task-temporary PDF with `office_document.render`, supplying
-   `outputFormat: "pdf"` and a `.pdf` `outputPath`. Require one returned PDF output containing both
-   `outputs[].readPath` and its nested `outputs[].pageCount`; use only that exact `readPath`, then
-   activate and follow the PDF Skill. Treat `pdfinfo` as the authoritative page count `N`, require
-   it to agree with the returned PDF output's `pageCount`, render pages `1..N` with `pdftoppm` in
-   contiguous batches of at most 32 pages, consume every returned page image with
-   `read_image.path` before cleaning that batch, and keep one verdict per page. This is a Skill
-   workflow instruction, not a runtime-enforced handoff.
+   `outputFormat: "pdf"` and a `.pdf` `outputPath`. Require one returned PDF output containing
+   `outputs[].readPath`, `outputs[].pageCount`, `outputs[].sourceSha256`, and
+   `outputs[].rendererRevision`; use only that exact `readPath`, then activate and follow the PDF Skill.
+   Bind the evidence ledger to `sourceSha256` and invalidate it after any DOCX change. Treat
+   `pdfinfo` as the authoritative page count `N`, require it to agree with the returned PDF output's
+   `pageCount`, render pages `1..N` with `pdftoppm` in contiguous batches of at most 32 pages,
+   consume every returned page image with `read_image.path` before cleaning that batch, and keep one
+   verdict per page. This is a Skill workflow instruction, not a runtime-enforced handoff.
 5. Compare requested changes and unrelated content with the baseline. Any final edit invalidates
    the prior PDF, page count, page images, ledger, inspection, Host publication, structural, and
    visual evidence; regenerate them from the new final file.

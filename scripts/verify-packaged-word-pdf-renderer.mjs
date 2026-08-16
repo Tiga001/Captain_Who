@@ -15,11 +15,18 @@ const ARCHITECTURES = new Map([
 ])
 
 export function packagedWordPdfRendererDirectory(context) {
-  if (!context || typeof context !== 'object' || context.electronPlatformName !== 'darwin') {
-    throw new Error('A macOS electron-builder pack context is required')
+  if (
+    !context ||
+    typeof context !== 'object' ||
+    !['darwin', 'linux', 'win32'].includes(context.electronPlatformName)
+  ) {
+    throw new Error('A supported desktop electron-builder pack context is required')
   }
   if (typeof context.appOutDir !== 'string' || context.appOutDir.length === 0) {
     throw new Error('electron-builder appOutDir is required')
+  }
+  if (context.electronPlatformName !== 'darwin') {
+    return join(context.appOutDir, 'resources', 'components', 'word-pdf-renderer')
   }
   const productFilename = context.packager?.appInfo?.productFilename
   if (
@@ -51,20 +58,23 @@ export function packagedWordPdfRendererTargetArch(context, hostArch = process.ar
 }
 
 export async function verifyPackagedWordPdfRenderer(context, hostArch = process.arch) {
-  if (process.platform !== 'darwin') {
-    throw new Error('Word PDF renderer packaging is currently supported only on macOS')
+  const platform = context?.electronPlatformName
+  if (!['darwin', 'linux', 'win32'].includes(platform) || process.platform !== platform) {
+    throw new Error(`Word PDF renderer packaging must run on its target host platform: ${platform}`)
   }
   const arch = packagedWordPdfRendererTargetArch(context, hostArch)
   const outputDirectory = packagedWordPdfRendererDirectory(context)
   const result = await prepareWordPdfRenderer({
     outputDirectory,
     verifyOnly: true,
-    platform: 'darwin',
+    platform,
     arch
   })
   const manifest = await loadWordPdfRendererManifest()
-  const target = selectWordPdfRendererTarget(manifest, 'darwin', arch)
-  await verifyWordPdfRendererCodeSignature(outputDirectory, target)
+  const target = selectWordPdfRendererTarget(manifest, platform, arch)
+  if (platform === 'darwin') {
+    await verifyWordPdfRendererCodeSignature(outputDirectory, target)
+  }
   console.log(
     `Verified packaged Word PDF renderer ${result.receipt.runtime.version} ` +
       `(${result.receipt.bundleRevision}) at ${outputDirectory}`

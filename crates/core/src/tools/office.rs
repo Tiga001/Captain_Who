@@ -210,6 +210,8 @@ fn project_office_execution(value: &Value) -> Option<Value> {
                         "width",
                         "height",
                         "pageCount",
+                        "sourceSha256",
+                        "rendererRevision",
                         "pageSelection",
                         "layoutCoverage",
                     ],
@@ -409,7 +411,7 @@ impl OfficeTool {
 
     fn description(&self) -> &'static str {
         match self.document_kind {
-            OfficeDocumentKind::Document => "Inspect and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. For exhaustive visual QA, render with outputFormat='pdf' and a .pdf outputPath; the Host returns authoritative outputs[].readPath and outputs[].pageCount. Omit outputFormat only for the legacy PNG preview route. Always include a concise user-facing reason. Never guess a path from argv, cwd, stdout, or a file search, and never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
+            OfficeDocumentKind::Document => "Inspect and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. For exhaustive visual QA, render with outputFormat='pdf' and a lowercase .pdf outputPath; the Host returns outputs[].readPath, outputs[].pageCount, outputs[].sourceSha256, and outputs[].rendererRevision. Omit outputFormat only for the legacy PNG preview route. Always include a concise user-facing reason. Never guess a path from argv, cwd, stdout, or a file search, and never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
             OfficeDocumentKind::Spreadsheet => "Inspect and render Excel-compatible .xlsx workbooks with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
             OfficeDocumentKind::Presentation => "Inspect, validate, and render PowerPoint-compatible .pptx presentations with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed MJS Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
         }
@@ -2705,6 +2707,8 @@ mod tests {
         assert_eq!(model["outputs"][0]["readPath"], "report.png");
         assert_eq!(model["outputs"][0]["width"], 800);
         assert_eq!(model["outputs"][0]["pageCount"], 3);
+        assert_eq!(model["outputs"][0]["sourceSha256"], "source-private");
+        assert_eq!(model["outputs"][0]["rendererRevision"], "renderer-private");
         assert_eq!(
             model["outputs"][0]["layoutCoverage"]["requestedPages"],
             json!([1])
@@ -2719,8 +2723,6 @@ mod tests {
         assert!(model.get("cwd").is_none());
         assert!(model["outputs"][0].get("source").is_none());
         assert!(model["outputs"][0].get("sha256").is_none());
-        assert!(model["outputs"][0].get("sourceSha256").is_none());
-        assert!(model["outputs"][0].get("rendererRevision").is_none());
         assert_eq!(model["originalBytes"], 200000);
         assert_eq!(model["truncatedAtSource"], false);
         assert_eq!(model["stdoutPreviewTruncated"], true);

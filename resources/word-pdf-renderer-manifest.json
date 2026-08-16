@@ -30,6 +30,54 @@
         "size": 305573151,
         "sha256": "f92ba40fdada173232fe929bf77973a1ffcccec55ae7971957a6de84d33f0f1e"
       }
+    },
+    "linux-arm64": {
+      "archiveFormat": "tar.gz",
+      "payload": "LibreOffice_26.2.4.2_Linux_aarch64_deb",
+      "executable": "libreoffice/program/soffice",
+      "license": "libreoffice/LICENSE",
+      "notice": "libreoffice/NOTICE",
+      "archive": {
+        "url": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/deb/aarch64/LibreOffice_26.2.4.2_Linux_aarch64_deb.tar.gz",
+        "size": 206721044,
+        "sha256": "038d9d6c9045094f90d26b443c5f76f7ef09ffd8f81de6a2b89c09a37a7bc6b9"
+      }
+    },
+    "linux-x64": {
+      "archiveFormat": "tar.gz",
+      "payload": "LibreOffice_26.2.4.2_Linux_x86-64_deb",
+      "executable": "libreoffice/program/soffice",
+      "license": "libreoffice/LICENSE",
+      "notice": "libreoffice/NOTICE",
+      "archive": {
+        "url": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/deb/x86_64/LibreOffice_26.2.4.2_Linux_x86-64_deb.tar.gz",
+        "size": 217982126,
+        "sha256": "810ef197e190d7804a60e0016052c46ff33792303a200fddda9d5216a64b9900"
+      }
+    },
+    "win32-arm64": {
+      "archiveFormat": "msi",
+      "payload": "LibreOffice",
+      "executable": "libreoffice/program/soffice.exe",
+      "license": "libreoffice/LICENSE",
+      "notice": "libreoffice/NOTICE",
+      "archive": {
+        "url": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/win/aarch64/LibreOffice_26.2.4.2_Win_aarch64.msi",
+        "size": 358891520,
+        "sha256": "1cd35d4d2821f6b6e7e65a2fc7c0faa2b5074ecd0ad90c5eb30af8a4f86d3b0d"
+      }
+    },
+    "win32-x64": {
+      "archiveFormat": "msi",
+      "payload": "LibreOffice",
+      "executable": "libreoffice/program/soffice.exe",
+      "license": "libreoffice/LICENSE",
+      "notice": "libreoffice/NOTICE",
+      "archive": {
+        "url": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/win/x86_64/LibreOffice_26.2.4.2_Win_x86-64.msi",
+        "size": 372539392,
+        "sha256": "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f"
+      }
     }
   }
 }

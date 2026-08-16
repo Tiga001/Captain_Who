@@ -279,15 +279,11 @@ export class CoreJsonRpcClient {
         'components',
         'office-renderer'
       )
-      if (process.platform === 'darwin') {
-        environment.MYCOPILOT_WORD_PDF_RENDERER_DIR = join(
-          process.resourcesPath,
-          'components',
-          'word-pdf-renderer'
-        )
-      } else {
-        deleteEnvironmentVariableCaseInsensitively(environment, 'MYCOPILOT_WORD_PDF_RENDERER_DIR')
-      }
+      environment.MYCOPILOT_WORD_PDF_RENDERER_DIR = join(
+        process.resourcesPath,
+        'components',
+        'word-pdf-renderer'
+      )
       // Production never accepts an inherited configured-component override.
       // The Rust layer treats this application resource root as a packaged,
       // code-signed trust boundary and appends `artifact-runtime` itself.
@@ -317,7 +313,7 @@ export class CoreJsonRpcClient {
           'current'
         )
       }
-      if (configuredWordPdfRendererDirectory === undefined && process.platform === 'darwin') {
+      if (configuredWordPdfRendererDirectory === undefined) {
         environment.MYCOPILOT_WORD_PDF_RENDERER_DIR = join(
           __dirname,
           '../..',
