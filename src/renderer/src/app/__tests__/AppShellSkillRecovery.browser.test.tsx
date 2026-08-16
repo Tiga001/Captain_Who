@@ -182,18 +182,26 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
   LeftSidebar: ({
     conversations,
     onArchiveConversation,
+    onNewConversation,
     onRenameConversation,
     onSelectConversation,
     uiPreferences
   }: {
     conversations: ChatConversation[]
     onArchiveConversation: (conversationId: string) => void
+    onNewConversation: (projectId?: string | null) => void
     onRenameConversation: (conversationId: string, title: string) => void
     onSelectConversation: (conversationId: string) => void
     uiPreferences: { translucentSidebar: boolean }
   }) => (
     <div>
       <output data-testid="sidebar-translucent">{String(uiPreferences.translucentSidebar)}</output>
+      <button type="button" onClick={() => onNewConversation(null)}>
+        new-conversation
+      </button>
+      <button type="button" onClick={() => onNewConversation('project-a')}>
+        new-conversation-project-a
+      </button>
       {conversations.map((conversation: ChatConversation) => (
         <div key={conversation.id}>
           <button type="button" onClick={() => onSelectConversation(conversation.id)}>
@@ -231,6 +239,16 @@ vi.mock('../../features/chat/NewConversationPage', () => ({
     <div>
       <output data-testid="new-conversation-draft">{draft.message}</output>
       <output data-testid="new-conversation-project">{draft.projectId ?? 'none'}</output>
+      <output data-testid="new-conversation-payload">
+        {JSON.stringify({
+          attachments: draft.attachments,
+          message: draft.message,
+          modelId: draft.modelId,
+          permissionMode: draft.permissionMode,
+          projectId: draft.projectId,
+          skills: draft.skills
+        })}
+      </output>
     </div>
   )
 }))
@@ -1297,6 +1315,114 @@ describe('conversation startup loading', () => {
 
     conversationMetas.resolve([])
   })
+
+  it('restores the complete new-conversation draft after visiting an existing conversation', async () => {
+    const attachment = {
+      id: 'new-task-attachment',
+      kind: 'file' as const,
+      name: 'requirements.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 12,
+      encoding: 'base64' as const,
+      data: 'cmVxdWlyZW1lbnRz'
+    }
+    const bundledSkill: SkillSelection = {
+      id: 'bundled:application:documents',
+      revision: 'skill-package-sha256-v2:documents'
+    }
+    const newConversationDraft = createComposerDraft({
+      attachments: [attachment],
+      message: 'unfinished new task',
+      modelId: 'model-2',
+      permissionMode: 'custom',
+      projectId: 'project-a',
+      skills: [bundledSkill]
+    })
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({ modelId: 'model-1', projectId: 'project-a' }),
+      'new-conversation': newConversationDraft
+    })
+
+    const screen = await render(<AppShell />)
+    await expect
+      .element(screen.getByTestId('new-conversation-draft'))
+      .toHaveTextContent(newConversationDraft.message)
+
+    await screen.getByRole('button', { name: 'select-conversation-a', exact: true }).click()
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    await screen.getByRole('button', { name: 'new-conversation', exact: true }).click()
+
+    expect(
+      JSON.parse(screen.getByTestId('new-conversation-payload').element().textContent ?? '{}')
+    ).toEqual({
+      attachments: newConversationDraft.attachments,
+      message: newConversationDraft.message,
+      modelId: newConversationDraft.modelId,
+      permissionMode: newConversationDraft.permissionMode,
+      projectId: newConversationDraft.projectId,
+      skills: newConversationDraft.skills
+    })
+  })
+
+  it('changes only the workspace when opening a project-specific new conversation', async () => {
+    const bundledSkill: SkillSelection = {
+      id: 'bundled:application:spreadsheets',
+      revision: 'skill-package-sha256-v2:spreadsheets'
+    }
+    const workspaceSkill: SkillSelection = {
+      id: 'workspace:old-project:local-skill',
+      revision: 'skill-package-sha256-v2:local-skill'
+    }
+    const newConversationDraft = createComposerDraft({
+      attachments: [
+        {
+          id: 'new-task-image',
+          kind: 'image',
+          name: 'reference.png',
+          mimeType: 'image/png',
+          sizeBytes: 8,
+          encoding: 'base64',
+          data: 'aW1hZ2U='
+        }
+      ],
+      message: 'continue this new task',
+      modelId: 'model-2',
+      permissionMode: 'full',
+      projectId: null,
+      skills: [bundledSkill, workspaceSkill]
+    })
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({ modelId: 'model-1', projectId: 'project-a' }),
+      'new-conversation': newConversationDraft
+    })
+
+    const screen = await render(<AppShell />)
+    await screen.getByRole('button', { name: 'new-conversation-project-a', exact: true }).click()
+
+    expect(
+      JSON.parse(screen.getByTestId('new-conversation-payload').element().textContent ?? '{}')
+    ).toEqual({
+      attachments: newConversationDraft.attachments,
+      message: newConversationDraft.message,
+      modelId: newConversationDraft.modelId,
+      permissionMode: newConversationDraft.permissionMode,
+      projectId: 'project-a',
+      skills: [bundledSkill]
+    })
+    await expect.poll(() => testState.saveComposerDraft.mock.calls.length).toBe(1)
+    expect(testState.saveComposerDraft).toHaveBeenLastCalledWith(
+      'new-conversation',
+      expect.objectContaining({
+        attachments: newConversationDraft.attachments,
+        message: newConversationDraft.message,
+        modelId: newConversationDraft.modelId,
+        projectId: 'project-a',
+        skills: [bundledSkill]
+      })
+    )
+  })
 })
 
 describe('conversation archive navigation', () => {
@@ -1335,9 +1461,7 @@ describe('conversation archive navigation', () => {
     archiveSave.resolve(undefined)
 
     await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
-    await expect
-      .element(screen.getByTestId('new-conversation-project'))
-      .toHaveTextContent('project-a')
+    await expect.element(screen.getByTestId('new-conversation-project')).toHaveTextContent('none')
     await expect
       .element(screen.getByTestId('right-sidebar-conversation-id'))
       .toHaveTextContent('none')

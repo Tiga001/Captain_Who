@@ -95,12 +95,13 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. The command string may contain multiple lines; the Host normalizes line endings and evaluates every newline, pipeline, `&&`, `||`, and `;` segment before execution. A safely quoted heredoc delimiter such as `<<'PY'` is supported for ordinary commands; unquoted delimiters, here-strings, background execution, and shell-interpreter heredocs are denied. Command policy may execute the command automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The Host owns process lifetime and its short initial yield; do not add a deadline merely to bound tool waiting or confirm startup. A command that outlives that initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. Trusted activated built-in Skills may also bind a managed runtime, private working directory, and output publication contract; follow the activated Skill instructions rather than guessing Host paths or runtimeProfile. inputs may bind authorized files read-only for a Host-bound managed workflow. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, attachment, artifact, and revision-bound Skill paths automatically.".to_string(),
+            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. For an ordinary call, inspect World State workspace.binding before constructing arguments. When a workspace is selected, cwd may be omitted to use the workspace root, or set to a workspace-relative directory; permitted absolute directories and system path aliases also retain their current meaning. When no workspace is selected, cwd is mandatory and must not be omitted even when the command, executable, or arguments already use absolute paths. Set cwd to the existing directory where the command should run, normally the target file's parent directory, using an absolute directory or one of the supported system path aliases @home, @desktop, @documents, or @downloads, optionally followed by a safe child path such as @desktop/project-dir. A no-workspace ordinary call also requires the current write scope to allow all locations. A relative cwd or `.` is invalid without a workspace. The only omission exception is a backend-recognized managed PDF command whose activated PDF Skill supplies a private working directory through its Host-owned contract; follow that Skill's instructions and do not invent a Host path. The command string may contain multiple lines; the Host normalizes line endings and evaluates every newline, pipeline, `&&`, `||`, and `;` segment before execution. A safely quoted heredoc delimiter such as `<<'PY'` is supported for ordinary commands; unquoted delimiters, here-strings, background execution, and shell-interpreter heredocs are denied. Command policy may execute the command automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The Host owns process lifetime and its short initial yield; do not add a deadline merely to bound tool waiting or confirm startup. A command that outlives that initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. Trusted activated built-in Skills may also bind a managed runtime and output publication contract; follow the activated Skill instructions rather than guessing Host paths or runtimeProfile. inputs may bind authorized files read-only for a Host-bound managed workflow. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, attachment, artifact, and revision-bound Skill paths automatically.".to_string(),
             input_schema: json!({
                 "type": "object",
+                "description": "Workspace-aware command request. For an ordinary call, inspect World State workspace.binding first. When a workspace is selected, cwd may be omitted or workspace-relative. When no workspace is selected, cwd is mandatory even when command arguments already use absolute paths; set it to the existing directory where the command should run, normally the target file's parent, using an absolute directory or @home, @desktop, @documents, or @downloads (for example @desktop/project-dir). Relative paths and `.` are invalid, and the current write scope must allow all locations. Only a backend-recognized managed PDF command whose activated PDF Skill supplies a Host-owned private working directory may omit cwd.",
                 "properties": {
                     "command": { "type": "string", "maxLength": MAX_COMMAND_CHARS, "description": "One bounded, non-interactive shell command. Literal newlines are allowed; CRLF/CR are normalized to LF and every newline, pipeline, `&&`, `||`, and `;` segment is evaluated by Host policy. A quoted heredoc delimiter such as `<<'PY'` is supported for ordinary commands; unquoted heredocs, here-strings, background execution, and NUL are rejected." },
-                    "cwd": { "type": "string", "description": "Working directory. May be workspace-relative, absolute, or @home/@desktop/@documents/@downloads when permissions allow. Required when no workspace exists unless a trusted activated built-in Skill explicitly supplies a private working directory." },
+                    "cwd": { "type": "string", "description": "Working directory. For an ordinary call, inspect World State workspace.binding first. When a workspace is selected, omit cwd to use its root or provide a workspace-relative directory; permitted absolute directories and aliases keep their current meaning. When no workspace is selected, cwd is mandatory and cannot be omitted even when the command, executable, or arguments already use absolute paths; it also cannot be relative or `.`. Set it to the existing directory where the command should run, normally the target file's parent, using an absolute directory or @home, @desktop, @documents, or @downloads, optionally followed by a safe child path such as @desktop/project-dir. Absolute directories and system aliases require the current write scope to allow all locations. Only a backend-recognized managed PDF command whose activated PDF Skill supplies a Host-owned private working directory may omit cwd." },
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
@@ -4290,6 +4291,40 @@ mod tests {
             definition.input_schema["properties"]["command"]["maxLength"],
             json!(MAX_COMMAND_CHARS)
         );
+    }
+
+    #[test]
+    fn definition_exposes_the_workspace_dependent_cwd_contract() {
+        let definition = RunCommandTool.definition();
+        let cwd_description = definition.input_schema["properties"]["cwd"]["description"]
+            .as_str()
+            .unwrap();
+        let schema_description = definition.input_schema["description"].as_str().unwrap();
+
+        for contract in [&definition.description, schema_description, cwd_description] {
+            assert!(contract.contains("When no workspace is selected"));
+            assert!(contract.contains("cwd is mandatory"));
+            for alias in ["@home", "@desktop", "@documents", "@downloads"] {
+                assert!(contract.contains(alias));
+            }
+            assert!(contract.contains("@desktop/project-dir"));
+            assert!(contract.contains("backend-recognized managed PDF command"));
+            assert!(contract.contains("activated PDF Skill"));
+            assert!(contract.contains("private working directory"));
+            assert!(contract.contains("write scope"));
+        }
+        assert!(definition
+            .description
+            .contains("cwd may be omitted to use the workspace root"));
+        assert!(definition.description.contains(
+            "must not be omitted even when the command, executable, or arguments already use absolute paths"
+        ));
+        assert!(cwd_description.contains(
+            "cannot be omitted even when the command, executable, or arguments already use absolute paths"
+        ));
+        assert!(cwd_description.contains("it also cannot be relative or `.`"));
+        assert!(cwd_description.contains("normally the target file's parent"));
+        assert_eq!(definition.input_schema["required"], json!(["command"]));
     }
 
     #[test]

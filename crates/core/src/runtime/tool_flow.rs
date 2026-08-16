@@ -563,6 +563,51 @@ mod tests {
     }
 
     #[test]
+    fn structured_apply_patch_failure_keeps_typed_code_out_of_user_error_text() {
+        let call = AgentToolCall {
+            id: "patch-existing".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({
+                "operation": "create",
+                "filePath": "existing.txt",
+                "content": "replacement"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = AgentError::structured(
+            "agent.apply_patch.file_exists",
+            "文件已存在。",
+            json!({
+                "type": "structured_edit_error",
+                "code": "file_exists",
+                "errorCode": "agent.apply_patch.file_exists",
+                "recovery": "useUpdateOrChooseAnotherPath",
+            }),
+        );
+
+        let result = failed_tool_call_result(&call, error);
+
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some("文件已存在。"));
+        let details = result.result.expect("structured apply_patch failure");
+        assert_eq!(details["type"], "structured_edit_error");
+        assert_eq!(details["code"], "file_exists");
+        assert_eq!(details["errorCode"], "agent.apply_patch.file_exists");
+        assert_eq!(details["recovery"], "useUpdateOrChooseAnotherPath");
+        assert!(!result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("structured_edit_error"));
+        assert!(!result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("file_exists"));
+    }
+
+    #[test]
     fn native_tool_calls_replace_untrusted_unicode_ids_and_disambiguate_duplicates() {
         let provider_id = format!("重复/unsafe:{}", "工具调用🔧".repeat(80));
         let calls = tool_calls_from_response(

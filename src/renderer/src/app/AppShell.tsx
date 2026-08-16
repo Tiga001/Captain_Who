@@ -45,7 +45,10 @@ import {
   reconcileSkillActivationSelections,
   type SkillActivationRecoveryPlan
 } from '../features/skills/skillActivationRecovery'
-import { mergeSkillSelections } from '../features/skills/skillSelection'
+import {
+  mergeSkillSelections,
+  retainGlobalSkillSelections
+} from '../features/skills/skillSelection'
 import {
   defaultUiPreferences,
   loadConversation,
@@ -1325,21 +1328,40 @@ export function AppShell() {
     ]
   )
 
-  const handleActiveConversationArchived = useCallback(
-    (conversation: ChatConversation) => {
-      // Archiving changes navigation only. Existing Run/provider bindings remain alive so a task
-      // already in flight can durably settle in the background without being cancelled or retired.
-      setRightSidebarAgentNavigationRequest(null)
+  const handleActiveConversationArchived = useCallback(() => {
+    // Archiving changes navigation only. Existing Run/provider bindings remain alive so a task
+    // already in flight can durably settle in the background without being cancelled or retired.
+    // The new-task composer is an independent persisted workspace and must not inherit or erase
+    // state merely because another conversation was archived.
+    setRightSidebarAgentNavigationRequest(null)
+    activeConversationIdRef.current = null
+    setActiveConversationId(null)
+    setScrollTargetMessageId(null)
+    setActiveConversationInitialScrollTop(null)
+  }, [])
+
+  const openNewConversation = useCallback(
+    (projectId: string | null = null) => {
       activeConversationIdRef.current = null
       setActiveConversationId(null)
       setScrollTargetMessageId(null)
       setActiveConversationInitialScrollTop(null)
-      updateDraft(
-        NEW_CONVERSATION_DRAFT_ID,
-        createComposerDraft({ projectId: conversation.projectId })
-      )
+
+      // Returning through the global New Conversation entry restores the existing draft verbatim.
+      // A project-specific entry is an explicit scope change, so only that scope is updated; the
+      // user's text, model, attachments and other draft choices remain intact.
+      if (projectId !== null) {
+        const currentDraft = draftsRef.current[NEW_CONVERSATION_DRAFT_ID]
+        if (currentDraft?.projectId !== projectId) {
+          mutateDraft(NEW_CONVERSATION_DRAFT_ID, (draft) => ({
+            ...draft,
+            projectId,
+            skills: retainGlobalSkillSelections(draft.skills)
+          }))
+        }
+      }
     },
-    [updateDraft]
+    [mutateDraft]
   )
 
   const {
@@ -1664,13 +1686,7 @@ export function AppShell() {
             onMarkConversationUnread={(conversationId) =>
               patchConversation(conversationId, { unreadAt: Date.now() })
             }
-            onNewConversation={(projectId = null) => {
-              activeConversationIdRef.current = null
-              setActiveConversationId(null)
-              setScrollTargetMessageId(null)
-              setActiveConversationInitialScrollTop(null)
-              updateDraft(NEW_CONVERSATION_DRAFT_ID, createComposerDraft({ projectId }))
-            }}
+            onNewConversation={openNewConversation}
             onOpenSettings={() => openSettings('general')}
             onRemoveProject={removeProject}
             onRenameConversation={(conversationId, title) =>

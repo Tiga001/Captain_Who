@@ -11,6 +11,66 @@ struct DiffLine {
     terminated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StructuredEditErrorCode {
+    AmbiguousMatch,
+    ConflictingInput,
+    ContentTooLarge,
+    FileExists,
+    FileTooLarge,
+    InvalidCreate,
+    InvalidDelete,
+    InvalidEdit,
+    MatchNotFound,
+    MissingContent,
+    MissingEdit,
+    NoChange,
+    NotAFile,
+    ReadFailed,
+    StaleFile,
+    UseStagedWrite,
+}
+
+impl StructuredEditErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AmbiguousMatch => "ambiguous_match",
+            Self::ConflictingInput => "conflicting_input",
+            Self::ContentTooLarge => "content_too_large",
+            Self::FileExists => "file_exists",
+            Self::FileTooLarge => "file_too_large",
+            Self::InvalidCreate => "invalid_create",
+            Self::InvalidDelete => "invalid_delete",
+            Self::InvalidEdit => "invalid_edit",
+            Self::MatchNotFound => "match_not_found",
+            Self::MissingContent => "missing_content",
+            Self::MissingEdit => "missing_edit",
+            Self::NoChange => "no_change",
+            Self::NotAFile => "not_a_file",
+            Self::ReadFailed => "read_failed",
+            Self::StaleFile => "stale_file",
+            Self::UseStagedWrite => "use_staged_write",
+        }
+    }
+
+    fn recovery(self) -> &'static str {
+        match self {
+            Self::FileExists => "useUpdateOrChooseAnotherPath",
+            Self::StaleFile | Self::MatchNotFound | Self::AmbiguousMatch => "rereadFile",
+            Self::FileTooLarge | Self::ContentTooLarge | Self::UseStagedWrite => "useWriteFile",
+            Self::NoChange => "skipOrReviseEdit",
+            Self::NotAFile => "chooseRegularFile",
+            Self::ReadFailed => "retry",
+            Self::ConflictingInput
+            | Self::InvalidCreate
+            | Self::InvalidDelete
+            | Self::InvalidEdit
+            | Self::MissingContent
+            | Self::MissingEdit => "correctArguments",
+        }
+    }
+}
+
 pub(super) fn build_unified_diff(
     file_path: &str,
     operation: AgentPatchOperation,
@@ -35,7 +95,7 @@ pub(super) fn build_unified_diff(
                 "diff --git a/{relative} b/{relative}\ndeleted file mode 100644\n--- {old_header}\n+++ {new_header}\n"
             )),
             AgentPatchOperation::Update => Err(edit_error(
-                "no_change",
+                StructuredEditErrorCode::NoChange,
                 "编辑后的内容与当前文件完全相同。",
             )),
         };
@@ -134,7 +194,7 @@ fn push_diff_line(patch: &mut String, prefix: char, line: &DiffLine) {
 
 pub(super) fn sanitize_patch(patch: String) -> AgentResult<String> {
     if patch.trim().is_empty() {
-        return Err(AgentError::new("apply_patch.patch 不能为空。"));
+        return Err(AgentError::new("补丁不能为空。"));
     }
     let mut patch = patch;
     if !patch.ends_with('\n') {
@@ -142,15 +202,15 @@ pub(super) fn sanitize_patch(patch: String) -> AgentResult<String> {
     }
     if patch.chars().count() > MAX_PATCH_CHARS {
         return Err(AgentError::new(format!(
-            "apply_patch.patch 过长，最多允许 {MAX_PATCH_CHARS} 个字符。"
+            "补丁过长，最多允许 {MAX_PATCH_CHARS} 个字符。"
         )));
     }
     if patch.contains('\0') {
-        return Err(AgentError::new("apply_patch.patch 不能包含空字符。"));
+        return Err(AgentError::new("补丁不能包含空字符。"));
     }
     if !looks_like_unified_diff(&patch) {
         return Err(AgentError::new(
-            "apply_patch.patch 必须是 unified diff，至少包含 ---、+++，以及 @@ hunk 或文件模式变更。",
+            "补丁必须是 unified diff，至少包含 ---、+++，以及 @@ hunk 或文件模式变更。",
         ));
     }
 
@@ -177,12 +237,12 @@ pub(super) fn validate_patch_operation(
         .lines()
         .find_map(|line| line.strip_prefix("--- "))
         .map(normalize_header_path)
-        .ok_or_else(|| AgentError::new("apply_patch.patch 缺少 --- header。"))?;
+        .ok_or_else(|| AgentError::new("补丁缺少 --- header。"))?;
     let new_path = patch
         .lines()
         .find_map(|line| line.strip_prefix("+++ "))
         .map(normalize_header_path)
-        .ok_or_else(|| AgentError::new("apply_patch.patch 缺少 +++ header。"))?;
+        .ok_or_else(|| AgentError::new("补丁缺少 +++ header。"))?;
     let old_is_null = old_path == "/dev/null";
     let new_is_null = new_path == "/dev/null";
 
@@ -203,7 +263,7 @@ pub(super) fn validate_patch_operation(
 
     if !valid {
         return Err(AgentError::new(format!(
-            "apply_patch.patch 与 operation={operation:?} 或 filePath 不匹配。create 必须从 /dev/null 创建；update 的新旧路径都必须是目标文件；delete 必须写入 /dev/null。"
+            "补丁与 operation={operation:?} 或 filePath 不匹配。create 必须从 /dev/null 创建；update 的新旧路径都必须是目标文件；delete 必须写入 /dev/null。"
         )));
     }
 
@@ -228,9 +288,18 @@ fn patch_path_matches(candidate: &str, file_path: &str) -> bool {
             .is_some_and(|candidate| candidate == file_path)
 }
 
-fn edit_error(code: &str, message: impl AsRef<str>) -> AgentError {
-    AgentError::new(format!(
-        "apply_patch structured_edit_error code={code}: {}",
-        message.as_ref()
-    ))
+pub(super) fn edit_error(code: StructuredEditErrorCode, message: impl AsRef<str>) -> AgentError {
+    let recovery = code.recovery();
+    let code = code.as_str();
+    let error_code = format!("agent.apply_patch.{code}");
+    AgentError::structured(
+        error_code.clone(),
+        message.as_ref(),
+        serde_json::json!({
+            "type": "structured_edit_error",
+            "code": code,
+            "errorCode": error_code,
+            "recovery": recovery,
+        }),
+    )
 }

@@ -278,8 +278,8 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
     }
     if has_tool(tool_definitions, "apply_patch") {
-        rules.push("- 创建、编辑或删除可 diff 文件必须使用 apply_patch。create 直接提供完整 content；update 优先提供 structured edits（replace、insert_before、insert_after、append、prepend）或完整 content；delete 只提供 filePath。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。不要自行计算 unified diff hunk，除非结构化输入无法表达。".to_string());
-        rules.push("- update 使用 replace、insert_before、insert_after 或完整 content 时，先读取目标文件以确认当前内容、唯一锚点和 oldText。用户明确要求无条件在文件首尾添加内容时可直接使用 prepend/append，删除已知目标也不必为生成 diff 额外读取。".to_string());
+        rules.push("- 创建、编辑或删除可 diff 文件必须使用 apply_patch。每次调用 create、update 或 delete 前，都必须先对准确目标路径使用 read_file 确认当前状态和内容；不得把 create 当作存在性探测。只有 read_file 对该准确路径明确报告目标不存在或无法找到后才能使用 create；read_file 确认目标已存在时，修改必须使用 update，删除则使用 delete，绝不能对已有文件使用 create。".to_string());
+        rules.push("- create 直接提供完整 content；update 必须基于刚读取的当前内容，优先提供 structured edits（replace、insert_before、insert_after、append、prepend）或完整 content，并确认唯一锚点和 oldText；delete 在必需的读取后只提供 filePath。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。不要自行计算 unified diff hunk，除非结构化输入无法表达。".to_string());
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "write_file") {
@@ -290,6 +290,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     }
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确允许的短暂检查或结构化产物转换可以使用有界内联代码；需要复用、审查或修改项目源文件的逻辑仍应先用文件编辑工具保存脚本，再用 run_command 执行。产物观察只记录结果，不授予任何权限。".to_string());
+        rules.push("- 普通 run_command 的 cwd 必须根据可信 World State 的 workspace.binding 选择：有 workspace 时可以省略 cwd 以使用 workspace 根目录，也可提供 workspace 相对目录；绝对目录和系统路径别名仍受当前权限约束。没有 workspace 时 cwd 必填且不得省略，即使 command、可执行文件或参数已经使用绝对路径也不得省略；不得使用 `.` 或相对路径。把 cwd 设为命令应在其中运行的现有目录，通常是目标文件的父目录，并明确指定绝对目录，或使用现行支持的系统路径别名 @home、@desktop、@documents、@downloads 及其安全子路径，例如 @desktop/project-dir；这还要求当前写入范围允许“所有位置”。唯一例外是后端识别的受管 PDF 命令由已激活的 PDF Skill 在 Host-owned 契约中提供私有工作目录；此时按 Skill 指令省略 cwd，不得猜测 Host 路径。".to_string());
         rules.push("- run_command.command 是一个可包含多行的命令字符串；Host 会规范化换行并分别审查 newline、pipeline、&&、|| 和 ; 的每个片段。普通命令需要 heredoc 时必须引用 delimiter（例如 <<'PY'）；受管 Skill 若要求直接调用则遵循 Skill 的更窄规则。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
     }
     if has_tool(tool_definitions, "command_session") {
@@ -663,12 +664,19 @@ mod tests {
         ];
         let prompt = build_system_prompt(None, &tools);
 
+        assert!(prompt.contains("每次调用 create、update 或 delete 前"));
+        assert!(prompt.contains("先对准确目标路径使用 read_file"));
+        assert!(prompt.contains("不得把 create 当作存在性探测"));
+        assert!(prompt.contains("明确报告目标不存在或无法找到后才能使用 create"));
+        assert!(!prompt.contains("read_file 明确返回 not_found"));
+        assert!(prompt.contains("目标已存在时，修改必须使用 update"));
         assert!(prompt.contains("create 直接提供完整 content"));
-        assert!(prompt.contains("确认当前内容、唯一锚点和 oldText"));
+        assert!(prompt.contains("确认唯一锚点和 oldText"));
         assert!(!prompt.contains("read_file 返回的 revision"));
         assert!(!prompt.contains("expectedRevision"));
         assert!(!prompt.contains("baseRevision"));
-        assert!(prompt.contains("可直接使用 prepend/append"));
+        assert!(!prompt.contains("可直接使用 prepend/append"));
+        assert!(!prompt.contains("删除已知目标也不必"));
         assert!(prompt.contains("陌生实体"));
         assert!(prompt.contains("定位和比较来源"));
         assert!(prompt.contains("少量关键页面"));
@@ -765,6 +773,31 @@ mod tests {
 
         let without_session = build_system_prompt(None, &[tool_definition("run_command")]);
         assert!(!without_session.contains("command Session 的 wait"));
+    }
+
+    #[test]
+    fn run_command_prompt_exposes_the_workspace_dependent_cwd_contract() {
+        let prompt = build_system_prompt(None, &[tool_definition("run_command")]);
+
+        assert!(prompt.contains("有 workspace 时可以省略 cwd"));
+        assert!(prompt.contains("使用 workspace 根目录"));
+        assert!(prompt.contains("没有 workspace 时 cwd 必填且不得省略"));
+        assert!(prompt.contains("即使 command、可执行文件或参数已经使用绝对路径也不得省略"));
+        assert!(prompt.contains("不得使用 `.` 或相对路径"));
+        assert!(prompt.contains("明确指定绝对目录"));
+        for alias in ["@home", "@desktop", "@documents", "@downloads"] {
+            assert!(prompt.contains(alias));
+        }
+        assert!(prompt.contains("@desktop/project-dir"));
+        assert!(prompt.contains("workspace.binding"));
+        assert!(prompt.contains("通常是目标文件的父目录"));
+        assert!(prompt.contains("写入范围允许“所有位置”"));
+        assert!(prompt.contains("受管 PDF 命令"));
+        assert!(prompt.contains("PDF Skill"));
+        assert!(prompt.contains("提供私有工作目录"));
+
+        let without_run_command = build_system_prompt(None, &[]);
+        assert!(!without_run_command.contains("普通 run_command 的 cwd"));
     }
 
     #[test]

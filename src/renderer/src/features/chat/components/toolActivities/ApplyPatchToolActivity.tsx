@@ -12,6 +12,7 @@ import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
 import { revealStoredProjectFile } from '../../../storage/storageClient'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
+import { getSafeApplyPatchFailureMessage } from './applyPatchFailurePresentation'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface ApplyPatchToolActivityProps {
@@ -208,7 +209,6 @@ export function getApplyPatchItemView(item: ApplyPatchToolActivityGroupItem) {
   return {
     additions,
     deletions,
-    error: patchResult?.error ?? item.result?.error ?? '',
     filePath,
     message: patchResult?.message ?? '',
     operation,
@@ -279,7 +279,10 @@ function ApplyPatchFileRow({
   const { t } = useFrontendConfig()
   const [isRejectionReasonOpen, setIsRejectionReasonOpen] = useState(false)
   const view = getApplyPatchItemView(item)
-  const note = view.error
+  const note =
+    view.status === 'failed' || view.status === 'conflict'
+      ? getSafeApplyPatchFailureMessage(view.status, item.result, t)
+      : ''
   const rejectionReason = view.status === 'rejected' ? view.message.trim() : ''
   const showLineStats = view.status !== 'rejected'
   const canReveal = Boolean(view.filePath && (projectId || isAbsoluteLocalPath(view.filePath)))

@@ -1,4 +1,7 @@
-use super::apply_patch_diff::{build_unified_diff, sanitize_patch, validate_patch_operation};
+use super::apply_patch_diff::{
+    build_unified_diff, edit_error, sanitize_patch, validate_patch_operation,
+    StructuredEditErrorCode,
+};
 use super::apply_patch_paths::sanitize_file_path;
 #[cfg(test)]
 use super::apply_patch_paths::validate_text_patch_path;
@@ -30,7 +33,7 @@ impl AgentTool for ApplyPatchTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Request one create, update, or delete operation for a text/code/config file. Prefer structured content/edits; Rust generates the unified diff. update supports replace, insert_before, insert_after, append, and prepend. The same tool call remains active through approval and host execution. This tool never writes before host approval.".to_string(),
+            description: "Request one create, update, or delete operation for a text/code/config file. Before calling create, update, or delete, use read_file on the exact target to confirm its current state and content. Never use create as an existence probe: call create only after read_file explicitly reports that the exact target does not exist or cannot be found. If read_file finds an existing target, use update for edits or delete for deletion; never use create for an existing file. Prefer structured content/edits; Rust generates the unified diff. update supports replace, insert_before, insert_after, append, and prepend. The same tool call remains active through approval and host execution. This tool never writes before host approval.".to_string(),
             input_schema: patch_input_schema(),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
@@ -67,7 +70,7 @@ fn patch_input_schema() -> Value {
             "operation": {
                 "type": "string",
                 "enum": ["create", "update", "delete"],
-                "description": "Requested operation. create uses content; update uses edits or complete content; delete only needs filePath."
+                "description": "Requested operation. Read the exact target with read_file first. create uses content and is valid only after read_file explicitly reports that target does not exist or cannot be found; an existing target must use update for edits. update uses edits or complete content; delete only needs filePath after the required read."
             },
             "filePath": { "type": "string", "description": "Workspace-relative path, absolute local path, or a system alias such as @desktop/file.txt when permissions allow it." },
             "content": { "type": "string", "maxLength": 32768, "description": "Complete UTF-8 file content for small files only. Required for create; optional for update. Use write_file for content above 32 KiB or content that should be generated in chunks." },
@@ -158,7 +161,7 @@ fn build_patch(
     if let Some(patch) = args.patch.as_ref() {
         if args.content.is_some() || args.edits.is_some() {
             return Err(edit_error(
-                "conflicting_input",
+                StructuredEditErrorCode::ConflictingInput,
                 "patch 不能和 content 或 edits 同时提供。",
             ));
         }
@@ -177,19 +180,22 @@ fn build_patch(
         AgentPatchOperation::Create => {
             if args.edits.is_some() {
                 return Err(edit_error(
-                    "invalid_create",
+                    StructuredEditErrorCode::InvalidCreate,
                     "create 只接受完整 content，不接受 edits。",
                 ));
             }
             let content = args.content.as_deref().ok_or_else(|| {
-                edit_error("missing_content", "create 操作必须提供完整 content。")
+                edit_error(
+                    StructuredEditErrorCode::MissingContent,
+                    "create 操作必须提供完整 content。",
+                )
             })?;
             validate_inline_content_size(content)?;
             let target = target_path_for_create(context, file_path)?;
             if target.exists() {
                 return Err(edit_error(
-                    "file_exists",
-                    "create 操作要求目标文件当前不存在。",
+                    StructuredEditErrorCode::FileExists,
+                    "文件已存在。",
                 ));
             }
             Ok((
@@ -204,7 +210,7 @@ fn build_patch(
             let updated = match (args.content.as_deref(), args.edits.as_deref()) {
                 (Some(_), Some(_)) => {
                     return Err(edit_error(
-                        "conflicting_input",
+                        StructuredEditErrorCode::ConflictingInput,
                         "update 的 content 和 edits 只能提供一种。",
                     ))
                 }
@@ -217,14 +223,17 @@ fn build_patch(
                 }
                 _ => {
                     return Err(edit_error(
-                        "missing_edit",
+                        StructuredEditErrorCode::MissingEdit,
                         "update 必须提供 content 或至少一个 structured edit。",
                     ))
                 }
             };
             validate_content_size(&updated)?;
             if updated == current {
-                return Err(edit_error("no_change", "编辑后的内容与当前文件完全相同。"));
+                return Err(edit_error(
+                    StructuredEditErrorCode::NoChange,
+                    "编辑后的内容与当前文件完全相同。",
+                ));
             }
             Ok((
                 build_unified_diff(file_path, AgentPatchOperation::Update, &current, &updated)?,
@@ -234,7 +243,7 @@ fn build_patch(
         AgentPatchOperation::Delete => {
             if args.content.is_some() || args.edits.is_some() {
                 return Err(edit_error(
-                    "invalid_delete",
+                    StructuredEditErrorCode::InvalidDelete,
                     "delete 只需要 filePath，不接受 content 或 edits。",
                 ));
             }
@@ -252,14 +261,21 @@ fn build_patch(
 fn read_current_text(context: &ToolExecutionContext, file_path: &str) -> AgentResult<String> {
     context.check_cancelled()?;
     let resolved = context.resolve_existing_path(file_path)?;
-    let metadata = fs::metadata(&resolved)
-        .map_err(|error| edit_error("read_failed", format!("读取目标文件元数据失败：{error}")))?;
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        edit_error(
+            StructuredEditErrorCode::ReadFailed,
+            format!("读取目标文件元数据失败：{error}"),
+        )
+    })?;
     if !metadata.is_file() {
-        return Err(edit_error("not_a_file", "目标路径不是文件。"));
+        return Err(edit_error(
+            StructuredEditErrorCode::NotAFile,
+            "目标路径不是文件。",
+        ));
     }
     if metadata.len() > MAX_EDIT_CONTENT_BYTES as u64 {
         return Err(edit_error(
-            "file_too_large",
+            StructuredEditErrorCode::FileTooLarge,
             format!(
                 "目标文件为 {} bytes，超过结构化编辑限制 {} bytes。",
                 metadata.len(),
@@ -267,8 +283,12 @@ fn read_current_text(context: &ToolExecutionContext, file_path: &str) -> AgentRe
             ),
         ));
     }
-    let content = fs::read_to_string(&resolved)
-        .map_err(|error| edit_error("read_failed", format!("读取 UTF-8 文件失败：{error}")))?;
+    let content = fs::read_to_string(&resolved).map_err(|error| {
+        edit_error(
+            StructuredEditErrorCode::ReadFailed,
+            format!("读取 UTF-8 文件失败：{error}"),
+        )
+    })?;
     context.check_cancelled()?;
     Ok(content)
 }
@@ -290,7 +310,7 @@ fn validate_expected_revision(content: &str, expected: Option<&str>) -> AgentRes
     let actual = content_revision(content.as_bytes());
     if expected != actual {
         return Err(edit_error(
-            "stale_file",
+            StructuredEditErrorCode::StaleFile,
             format!(
                 "文件已发生变化：expectedRevision={expected}，currentRevision={actual}。请重新读取后再编辑。"
             ),
@@ -302,7 +322,7 @@ fn validate_expected_revision(content: &str, expected: Option<&str>) -> AgentRes
 fn validate_content_size(content: &str) -> AgentResult<()> {
     if content.len() > MAX_EDIT_CONTENT_BYTES {
         return Err(edit_error(
-            "content_too_large",
+            StructuredEditErrorCode::ContentTooLarge,
             format!(
                 "编辑内容为 {} bytes，超过 {} bytes 限制。",
                 content.len(),
@@ -316,7 +336,7 @@ fn validate_content_size(content: &str) -> AgentResult<()> {
 fn validate_inline_content_size(content: &str) -> AgentResult<()> {
     if content.len() > MAX_INLINE_CONTENT_BYTES {
         return Err(edit_error(
-            "use_staged_write",
+            StructuredEditErrorCode::UseStagedWrite,
             format!(
                 "完整 content 为 {} bytes，超过 apply_patch 的 {} bytes 内联限制；请使用 write_file 分块生成草稿。",
                 content.len(),
@@ -348,14 +368,24 @@ fn apply_structured_edit(
             let new_text = required_edit_text(edit.new_text.as_deref(), "newText", index, true)?;
             let count = content.match_indices(old_text).count();
             if count == 0 {
-                return Err(edit_match_error("match_not_found", index, "oldText", 0));
+                return Err(edit_match_error(
+                    StructuredEditErrorCode::MatchNotFound,
+                    index,
+                    "oldText",
+                    0,
+                ));
             }
             if edit.replace_all.unwrap_or(false) {
                 content = content.replace(old_text, new_text);
             } else if count == 1 {
                 content = content.replacen(old_text, new_text, 1);
             } else {
-                return Err(edit_match_error("ambiguous_match", index, "oldText", count));
+                return Err(edit_match_error(
+                    StructuredEditErrorCode::AmbiguousMatch,
+                    index,
+                    "oldText",
+                    count,
+                ));
             }
         }
         TextEditKind::InsertBefore | TextEditKind::InsertAfter => {
@@ -364,11 +394,16 @@ fn apply_structured_edit(
             let text = required_edit_text(edit.text.as_deref(), "text", index, true)?;
             let matches = content.match_indices(anchor).collect::<Vec<_>>();
             if matches.is_empty() {
-                return Err(edit_match_error("match_not_found", index, "anchor", 0));
+                return Err(edit_match_error(
+                    StructuredEditErrorCode::MatchNotFound,
+                    index,
+                    "anchor",
+                    0,
+                ));
             }
             if matches.len() > 1 {
                 return Err(edit_match_error(
-                    "ambiguous_match",
+                    StructuredEditErrorCode::AmbiguousMatch,
                     index,
                     "anchor",
                     matches.len(),
@@ -402,13 +437,13 @@ fn required_edit_text<'a>(
 ) -> AgentResult<&'a str> {
     let value = value.ok_or_else(|| {
         edit_error(
-            "invalid_edit",
+            StructuredEditErrorCode::InvalidEdit,
             format!("edits[{index}].{field} 是必填字段。"),
         )
     })?;
     if !allow_empty && value.is_empty() {
         return Err(edit_error(
-            "invalid_edit",
+            StructuredEditErrorCode::InvalidEdit,
             format!("edits[{index}].{field} 不能为空。"),
         ));
     }
@@ -433,7 +468,7 @@ fn reject_unexpected_fields(
         .collect::<Vec<_>>();
     if !unexpected.is_empty() {
         return Err(edit_error(
-            "invalid_edit",
+            StructuredEditErrorCode::InvalidEdit,
             format!(
                 "edits[{index}] 包含不适用于当前 kind 的字段：{}。",
                 unexpected.join(", ")
@@ -443,20 +478,18 @@ fn reject_unexpected_fields(
     Ok(())
 }
 
-fn edit_match_error(code: &str, index: usize, field: &str, count: usize) -> AgentError {
+fn edit_match_error(
+    code: StructuredEditErrorCode,
+    index: usize,
+    field: &str,
+    count: usize,
+) -> AgentError {
     edit_error(
         code,
         format!(
             "edits[{index}].{field} 在当前文件中匹配 {count} 次；请重新读取文件并提供唯一、精确的文本。"
         ),
     )
-}
-
-fn edit_error(code: &str, message: impl AsRef<str>) -> AgentError {
-    AgentError::new(format!(
-        "apply_patch structured_edit_error code={code}: {}",
-        message.as_ref()
-    ))
 }
 
 fn sanitize_summary(summary: Option<String>) -> Option<String> {
@@ -485,6 +518,33 @@ mod tests {
         let properties = schema["properties"].as_object().unwrap();
 
         assert!(!properties.contains_key("expectedRevision"));
+    }
+
+    #[test]
+    fn definition_requires_read_before_selecting_the_patch_operation() {
+        let definition = ApplyPatchTool.definition();
+
+        assert!(definition.description.contains(
+            "Before calling create, update, or delete, use read_file on the exact target"
+        ));
+        assert!(definition
+            .description
+            .contains("Never use create as an existence probe"));
+        assert!(definition
+            .description
+            .contains("call create only after read_file explicitly reports that the exact target does not exist or cannot be found"));
+        assert!(definition
+            .description
+            .contains("If read_file finds an existing target, use update for edits"));
+
+        let operation_description = definition.input_schema["properties"]["operation"]
+            ["description"]
+            .as_str()
+            .unwrap();
+        assert!(operation_description.contains("Read the exact target with read_file first"));
+        assert!(operation_description.contains(
+            "read_file explicitly reports that target does not exist or cannot be found"
+        ));
     }
 
     #[test]
@@ -550,6 +610,29 @@ mod tests {
 
         assert!(proposal.patch.contains("new file mode 100644"));
         assert_git_apply_check(&workspace.root, &proposal.patch);
+    }
+
+    #[test]
+    fn structured_create_reports_existing_file_with_safe_typed_error() {
+        let workspace = TestWorkspace::new();
+        workspace.write("existing.txt", "keep me\n");
+        let call = tool_call(json!({
+            "operation": "create",
+            "filePath": "existing.txt",
+            "content": "replacement\n"
+        }));
+
+        let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
+
+        assert_eq!(error.to_string(), "文件已存在。");
+        assert_eq!(error.code(), Some("agent.apply_patch.file_exists"));
+        let details = error.details().expect("typed structured-edit details");
+        assert_eq!(details["type"], "structured_edit_error");
+        assert_eq!(details["code"], "file_exists");
+        assert_eq!(details["errorCode"], "agent.apply_patch.file_exists");
+        assert_eq!(details["recovery"], "useUpdateOrChooseAnotherPath");
+        assert!(!error.to_string().contains("structured_edit_error"));
+        assert!(!error.to_string().contains("file_exists"));
     }
 
     #[test]
@@ -633,8 +716,11 @@ mod tests {
 
         let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
 
-        assert!(error.to_string().contains("code=ambiguous_match"));
+        assert_eq!(error.code(), Some("agent.apply_patch.ambiguous_match"));
+        assert_eq!(error.details().unwrap()["code"], "ambiguous_match");
+        assert_eq!(error.details().unwrap()["recovery"], "rereadFile");
         assert!(error.to_string().contains("匹配 2 次"));
+        assert!(!error.to_string().contains("structured_edit_error"));
     }
 
     #[test]
@@ -654,8 +740,11 @@ mod tests {
 
         let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
 
-        assert!(error.to_string().contains("code=stale_file"));
+        assert_eq!(error.code(), Some("agent.apply_patch.stale_file"));
+        assert_eq!(error.details().unwrap()["code"], "stale_file");
+        assert_eq!(error.details().unwrap()["recovery"], "rereadFile");
         assert!(error.to_string().contains("currentRevision="));
+        assert!(!error.to_string().contains("structured_edit_error"));
     }
 
     #[test]
@@ -708,6 +797,7 @@ mod tests {
         let error = sanitize_patch("replace hello with world".to_string()).unwrap_err();
 
         assert!(error.to_string().contains("unified diff"));
+        assert!(!error.to_string().contains("apply_patch.patch"));
     }
 
     #[test]
@@ -720,6 +810,7 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("不匹配"));
+        assert!(!error.to_string().contains("apply_patch.patch"));
     }
 
     #[test]
