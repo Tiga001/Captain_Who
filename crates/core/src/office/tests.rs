@@ -12,6 +12,7 @@ use crate::{
     AgentFileInputRef, AgentFileInputSpec, AgentInputAttachmentKind, AgentPermissions,
     AgentReadPermission, AgentWritePermission,
 };
+use lopdf::dictionary;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -28,11 +29,16 @@ struct Fixture {
     engine_dir: tempfile::TempDir,
     _proxy_dir: tempfile::TempDir,
     _render_runtime_dir: tempfile::TempDir,
+    _word_pdf_runtime_dir: tempfile::TempDir,
     engine: OfficeCliEngine,
 }
 
 impl Fixture {
     fn new(script: &str) -> Self {
+        Self::new_with_word_pdf_renderer(script, b"#!/bin/sh\necho 'LibreOffice 26.2.4.2'\n")
+    }
+
+    fn new_with_word_pdf_renderer(script: &str, renderer: &[u8]) -> Self {
         let workspace = tempfile::tempdir().unwrap();
         let engine_dir = tempfile::tempdir().unwrap();
         let executable = engine_dir.path().join("officecli");
@@ -45,9 +51,15 @@ impl Fixture {
         );
         let render_runtime_dir = tempfile::tempdir().unwrap();
         super::render_runtime::write_test_render_runtime(render_runtime_dir.path());
+        let word_pdf_runtime_dir = tempfile::tempdir().unwrap();
+        super::word_pdf_render_runtime::write_test_word_pdf_render_runtime_with_executable(
+            word_pdf_runtime_dir.path(),
+            renderer,
+        );
         let options = OfficeCliDiscoveryOptions::new()
             .with_configured_executable(&executable)
             .with_configured_render_runtime_dir(render_runtime_dir.path())
+            .with_configured_word_pdf_render_runtime_dir(word_pdf_runtime_dir.path())
             .with_browser_proxy_executable(&proxy)
             .with_workspace_root(workspace.path());
         let engine = OfficeCliEngine::discover(&options).unwrap();
@@ -56,6 +68,7 @@ impl Fixture {
             engine_dir,
             _proxy_dir: proxy_dir,
             _render_runtime_dir: render_runtime_dir,
+            _word_pdf_runtime_dir: word_pdf_runtime_dir,
             engine,
         }
     }
@@ -180,6 +193,27 @@ fn screenshot_request(fixture: &Fixture, output_path: &str) -> OfficeExecutionRe
     request
 }
 
+fn word_pdf_request(fixture: &Fixture, output_path: &str) -> OfficeExecutionRequest {
+    let mut request = fixture.request(OfficeOperation::View);
+    request.parameters = OfficeOperationParameters::View {
+        mode: OfficeViewMode::Pdf,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    };
+    request.output_path = Some(output_path.to_string());
+    request
+}
+
 fn permission_context(
     workspace: Option<&Path>,
     read: AgentReadPermission,
@@ -230,6 +264,81 @@ fn write_docx(path: &Path, text: &str) {
     archive.finish().unwrap();
 }
 
+#[cfg(target_os = "macos")]
+fn write_renderable_word_pdf_smoke_docx(path: &Path) {
+    let file = fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, contents) in [
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+</Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>"#,
+        ),
+        (
+            "word/document.xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>Managed Host transaction page 1</w:t></w:r></w:p>
+    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+    <w:p><w:r><w:t>Managed Host transaction page 2</w:t></w:r></w:p>
+    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+    <w:p><w:r><w:t>Managed Host transaction page 3</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:footerReference w:type="default" r:id="rId1"/>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"#,
+        ),
+        (
+            "word/footer1.xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:r><w:t xml:space="preserve">Page </w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:t>1</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    <w:r><w:t xml:space="preserve"> / </w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:t>3</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+</w:ftr>"#,
+        ),
+    ] {
+        archive.start_file(name, options).unwrap();
+        archive.write_all(contents.as_bytes()).unwrap();
+    }
+    archive.finish().unwrap();
+}
+
 fn write_xlsx_package(path: &Path) {
     let file = fs::File::create(path).unwrap();
     let mut archive = zip::ZipWriter::new(file);
@@ -267,6 +376,34 @@ fn write_png(path: &Path, width: u32, height: u32) {
     image
         .save_with_format(path, image::ImageFormat::Png)
         .unwrap();
+}
+
+fn write_pdf(path: &Path, page_count: u32) {
+    let mut document = lopdf::Document::with_version("1.7");
+    let pages_id = document.new_object_id();
+    let page_ids = (0..page_count)
+        .map(|_| {
+            document.add_object(lopdf::dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            })
+        })
+        .collect::<Vec<_>>();
+    document.objects.insert(
+        pages_id,
+        lopdf::Object::Dictionary(lopdf::dictionary! {
+            "Type" => "Pages",
+            "Kids" => page_ids.iter().copied().map(lopdf::Object::Reference).collect::<Vec<_>>(),
+            "Count" => i64::from(page_count),
+        }),
+    );
+    let catalog_id = document.add_object(lopdf::dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    document.trailer.set("Root", catalog_id);
+    document.save(path).unwrap();
 }
 
 fn copy_render_script(path: &Path) -> String {
@@ -947,6 +1084,415 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
         output["pageSelection"],
         serde_json::json!({ "type": "explicit", "pages": [1, 2] })
     );
+}
+
+#[test]
+fn word_pdf_render_uses_only_the_pinned_runtime_and_returns_authoritative_page_count() {
+    let rendered_pdf = tempfile::NamedTempFile::new().unwrap();
+    write_pdf(rendered_pdf.path(), 3);
+    let evidence = tempfile::tempdir().unwrap();
+    let officecli_marker = evidence.path().join("officecli-started");
+    let renderer_argv = evidence.path().join("renderer-argv");
+    let officecli = format!("#!/bin/sh\n: > '{}'\nexit 97\n", officecli_marker.display());
+    let renderer = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'runtime:%s\\n' \"$0\"\nprintf 'runtime-neighbor:%s/../share\\n' \"$(/usr/bin/dirname \"$0\")\" >&2\noutdir=''\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--outdir' ]; then outdir=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$outdir\" ] || exit 41\n/bin/cp '{}' \"$outdir/document.pdf\"\n",
+        renderer_argv.display(),
+        rendered_pdf.path().display(),
+    );
+    let fixture = Fixture::new_with_word_pdf_renderer(&officecli, renderer.as_bytes());
+    fs::write(
+        fixture.workspace.path().join("sample.docx"),
+        b"frozen-docx-revision",
+    )
+    .unwrap();
+    let mut request = fixture.request(OfficeOperation::View);
+    request.parameters = OfficeOperationParameters::View {
+        mode: OfficeViewMode::Pdf,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    };
+    request.output_path = Some("word-qa.pdf".to_string());
+
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert!(
+        !officecli_marker.exists(),
+        "OfficeCLI exporter must not run"
+    );
+    assert!(fixture.workspace.path().join("word-qa.pdf").is_file());
+    assert_eq!(result.outputs.len(), 1);
+    let output = &result.outputs[0];
+    assert_eq!(output.kind, OfficePublishedOutputKind::Document);
+    assert_eq!(output.mime_type, "application/pdf");
+    assert_eq!(output.read_path, "word-qa.pdf");
+    assert_eq!(output.page_count, Some(3));
+    assert!(output
+        .source_sha256
+        .as_ref()
+        .is_some_and(|value| value.len() == 64));
+    assert_eq!(
+        output.renderer_revision.as_deref(),
+        Some(
+            fixture
+                .engine
+                .word_pdf_render_runtime()
+                .unwrap()
+                .runtime_revision()
+        )
+    );
+    assert_eq!(output.page_selection, OfficeRenderPageSelection::All);
+    let argv = fs::read_to_string(renderer_argv).unwrap();
+    assert!(argv.contains("pdf:writer_pdf_Export"));
+    assert!(argv.contains("--headless"));
+    assert!(argv.contains("-env:UserInstallation=file://"));
+    assert!(!result.stdout.contains("mycopilot-word-pdf-render-"));
+    let runtime_root = fixture._word_pdf_runtime_dir.path().to_string_lossy();
+    assert!(!result.stdout.contains(runtime_root.as_ref()));
+    assert!(!result.stderr.contains(runtime_root.as_ref()));
+    assert!(result.stdout.contains("<word-pdf-runtime>"));
+    assert!(result.stderr.contains("<word-pdf-runtime>"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn real_managed_word_pdf_runtime_completes_the_host_transaction_when_configured() {
+    let Some(configured_runtime) = std::env::var_os("MYCOPILOT_WORD_PDF_RENDERER_DIR") else {
+        return;
+    };
+    let configured_runtime = PathBuf::from(configured_runtime);
+    let configured_runtime = if configured_runtime.is_absolute() {
+        configured_runtime
+    } else {
+        std::env::current_dir().unwrap().join(configured_runtime)
+    };
+    let configured_runtime = configured_runtime.canonicalize().unwrap();
+
+    let workspace = tempfile::tempdir().unwrap();
+    let engine_directory = tempfile::tempdir().unwrap();
+    let officecli = engine_directory.path().join("officecli");
+    write_executable(&officecli, basic_script());
+    let proxy_directory = tempfile::tempdir().unwrap();
+    let proxy = proxy_directory.path().join("core-server");
+    write_executable(
+        &proxy,
+        "#!/bin/sh\nprintf 'mycopilot-office-browser-proxy-v1\\n'\n",
+    );
+    let render_runtime = tempfile::tempdir().unwrap();
+    super::render_runtime::write_test_render_runtime(render_runtime.path());
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(&officecli)
+            .with_configured_render_runtime_dir(render_runtime.path())
+            .with_configured_word_pdf_render_runtime_dir(&configured_runtime)
+            .with_browser_proxy_executable(&proxy)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+
+    let source = workspace.path().join("managed-host-smoke.docx");
+    write_renderable_word_pdf_smoke_docx(&source);
+    let request = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Document,
+        operation: OfficeOperation::View,
+        document_path: Some("managed-host-smoke.docx".to_string()),
+        parameters: OfficeOperationParameters::View {
+            mode: OfficeViewMode::Pdf,
+            start: None,
+            end: None,
+            max_lines: None,
+            issue_type: None,
+            limit: None,
+            columns: Vec::new(),
+            pages: Vec::new(),
+            range: None,
+            viewport: None,
+            grid: None,
+            render_mode: None,
+            page_count: false,
+        },
+        output_path: Some("managed-host-smoke.pdf".to_string()),
+        destination_path: None,
+        inputs: Vec::new(),
+        timeout_ms: Some(120_000),
+    };
+    let result = engine
+        .execute(
+            &workspace_context(workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_eq!(result.outputs.len(), 1);
+    assert_eq!(result.outputs[0].read_path, "managed-host-smoke.pdf");
+    assert_eq!(result.outputs[0].page_count, Some(3));
+    assert_eq!(
+        result.outputs[0].renderer_revision.as_deref(),
+        Some(engine.word_pdf_render_runtime().unwrap().runtime_revision())
+    );
+    let published = workspace.path().join("managed-host-smoke.pdf");
+    let pdf = lopdf::Document::load(&published).unwrap();
+    assert_eq!(pdf.get_pages().len(), 3);
+    let text = pdf
+        .extract_text(&[1, 2, 3])
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(text.contains("Managed Host transaction page 1"), "{text}");
+    assert!(text.contains("Managed Host transaction page 3"), "{text}");
+    assert!(text.contains("Page 1 / 3"), "{text}");
+    assert!(text.contains("Page 3 / 3"), "{text}");
+    assert!(
+        fs::read_dir(workspace.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".mycopilot-office-")),
+        "same-directory staging must be removed after atomic publication"
+    );
+}
+
+#[test]
+fn invalid_word_pdf_candidate_is_not_published_and_never_falls_back_to_officecli() {
+    let evidence = tempfile::tempdir().unwrap();
+    let officecli_marker = evidence.path().join("officecli-started");
+    let officecli = format!("#!/bin/sh\n: > '{}'\nexit 97\n", officecli_marker.display());
+    let renderer = b"#!/bin/sh\noutdir=''\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--outdir' ]; then outdir=\"$argument\"; fi\n  previous=\"$argument\"\ndone\nprintf 'not-a-pdf' > \"$outdir/document.pdf\"\n";
+    let fixture = Fixture::new_with_word_pdf_renderer(&officecli, renderer);
+    fs::write(fixture.workspace.path().join("sample.docx"), b"docx").unwrap();
+    let mut request = fixture.request(OfficeOperation::View);
+    request.parameters = OfficeOperationParameters::View {
+        mode: OfficeViewMode::Pdf,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    };
+    request.output_path = Some("invalid.pdf".to_string());
+
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(result.error_code.as_deref(), Some("office.invalid_output"));
+    assert!(result.outputs.is_empty());
+    assert!(!fixture.workspace.path().join("invalid.pdf").exists());
+    assert!(
+        !officecli_marker.exists(),
+        "OfficeCLI exporter must not run"
+    );
+}
+
+#[test]
+fn word_pdf_process_failures_name_the_managed_renderer_not_officecli() {
+    let nonzero = Fixture::new_with_word_pdf_renderer(basic_script(), b"#!/bin/sh\nexit 17\n");
+    fs::write(nonzero.workspace.path().join("sample.docx"), b"docx").unwrap();
+    let result = nonzero
+        .engine
+        .execute(
+            &workspace_context(nonzero.workspace.path()),
+            &word_pdf_request(&nonzero, "nonzero.pdf"),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.error_code.as_deref(), Some("office.nonzero_exit"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Managed Word PDF renderer exited with non-zero status 17.")
+    );
+    assert!(!result.error.as_deref().unwrap().contains("OfficeCLI"));
+
+    let timed_out =
+        Fixture::new_with_word_pdf_renderer(basic_script(), b"#!/bin/sh\n/bin/sleep 5\n");
+    fs::write(timed_out.workspace.path().join("sample.docx"), b"docx").unwrap();
+    let mut timeout_request = word_pdf_request(&timed_out, "timeout.pdf");
+    timeout_request.timeout_ms = Some(40);
+    let result = timed_out
+        .engine
+        .execute(
+            &workspace_context(timed_out.workspace.path()),
+            &timeout_request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.timed_out);
+    assert_eq!(result.error_code.as_deref(), Some("office.timeout"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Managed Word PDF renderer execution exceeded its timeout.")
+    );
+
+    let cancelled = Fixture::new_with_word_pdf_renderer(basic_script(), b"#!/bin/sh\nexit 23\n");
+    fs::write(cancelled.workspace.path().join("sample.docx"), b"docx").unwrap();
+    let cancellation = AgentCancellationToken::new();
+    cancellation.cancel();
+    let result = cancelled
+        .engine
+        .execute(
+            &workspace_context(cancelled.workspace.path()),
+            &word_pdf_request(&cancelled, "cancelled.pdf"),
+            cancellation,
+            None,
+        )
+        .unwrap();
+    assert!(result.cancelled);
+    assert_eq!(result.error_code.as_deref(), Some("office.cancelled"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Managed Word PDF renderer execution was cancelled before launch.")
+    );
+}
+
+#[test]
+fn word_pdf_render_preserves_concurrent_output_and_honors_precommit_cancellation() {
+    let rendered_pdf = tempfile::NamedTempFile::new().unwrap();
+    write_pdf(rendered_pdf.path(), 1);
+
+    let renderer_template = |target: Option<&Path>| {
+        format!(
+            "#!/bin/sh\noutdir=''\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--outdir' ]; then outdir=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n{}\n/bin/cp '{}' \"$outdir/document.pdf\"\n",
+            target.map_or_else(String::new, |path| format!(
+                "printf 'concurrent-output' > '{}'",
+                path.display()
+            )),
+            rendered_pdf.path().display(),
+        )
+    };
+
+    // A target created after preparation must win; the private candidate is discarded.
+    let mut concurrent =
+        Fixture::new_with_word_pdf_renderer(basic_script(), renderer_template(None).as_bytes());
+    fs::write(concurrent.workspace.path().join("sample.docx"), b"docx").unwrap();
+    let target = concurrent.workspace.path().join("concurrent.pdf");
+    // Rebuild only the fake runtime so its conversion process simulates an external actor
+    // creating the frozen-missing target while conversion is in flight.
+    let renderer = renderer_template(Some(&target));
+    let word_runtime = tempfile::tempdir().unwrap();
+    super::word_pdf_render_runtime::write_test_word_pdf_render_runtime_with_executable(
+        word_runtime.path(),
+        renderer.as_bytes(),
+    );
+    let options = OfficeCliDiscoveryOptions::new()
+        .with_configured_executable(concurrent.engine.executable_path())
+        .with_configured_render_runtime_dir(concurrent._render_runtime_dir.path())
+        .with_configured_word_pdf_render_runtime_dir(word_runtime.path())
+        .with_browser_proxy_executable(concurrent._proxy_dir.path().join("core-server"))
+        .with_workspace_root(concurrent.workspace.path());
+    concurrent.engine = OfficeCliEngine::discover(&options).unwrap();
+    let result = concurrent
+        .engine
+        .execute(
+            &workspace_context(concurrent.workspace.path()),
+            &word_pdf_request(&concurrent, "concurrent.pdf"),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some("office.precondition_failed")
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"concurrent-output");
+    assert!(result.outputs.is_empty());
+
+    // Cancellation at the existing transaction linearization point must not publish.
+    let cancelled =
+        Fixture::new_with_word_pdf_renderer(basic_script(), renderer_template(None).as_bytes());
+    fs::write(cancelled.workspace.path().join("sample.docx"), b"docx").unwrap();
+    let context = workspace_context(cancelled.workspace.path());
+    let request = word_pdf_request(&cancelled, "cancel-before-commit.pdf");
+    let prepared = cancelled.engine.prepare(&context, &request).unwrap();
+    let target = PathBuf::from(&prepared_path(&prepared, &OfficePathSlot::Output).normalized_path);
+    let cancellation = Arc::new(AtomicBool::new(false));
+    install_commit_test_hook(
+        target.clone(),
+        CommitTestPhase::BeforeCancellationCheck,
+        cancellation.clone(),
+    );
+    let result = cancelled
+        .engine
+        .execute_prepared(
+            &context,
+            &prepared,
+            AgentCancellationToken::new(),
+            Some(cancellation),
+        )
+        .unwrap();
+    assert!(result.cancelled);
+    assert_eq!(result.error_code.as_deref(), Some("office.cancelled"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Office operation was cancelled after validation and before the atomic commit.")
+    );
+    assert!(result.outputs.is_empty());
+    assert!(!target.exists());
+}
+
+#[test]
+fn word_pdf_render_rejects_runtime_mutation_before_publication() {
+    let rendered_pdf = tempfile::NamedTempFile::new().unwrap();
+    write_pdf(rendered_pdf.path(), 1);
+    let renderer = format!(
+        "#!/bin/sh\noutdir=''\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--outdir' ]; then outdir=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n/bin/cp '{}' \"$outdir/document.pdf\"\nprintf '\\n# mutated after conversion\\n' >> \"$0\"\n",
+        rendered_pdf.path().display(),
+    );
+    let fixture = Fixture::new_with_word_pdf_renderer(basic_script(), renderer.as_bytes());
+    fs::write(fixture.workspace.path().join("sample.docx"), b"docx").unwrap();
+
+    let error = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &word_pdf_request(&fixture, "runtime-mutated.pdf"),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), OfficeEngineErrorCode::RenderBackendInvalid);
+    assert!(!fixture
+        .workspace
+        .path()
+        .join("runtime-mutated.pdf")
+        .exists());
 }
 
 #[test]

@@ -846,7 +846,7 @@ mod tests {
                 "python",
                 "python-docx",
                 "1.2.0",
-                11,
+                12,
             ),
             (
                 PRESENTATIONS_LOCAL_ID,
@@ -1165,7 +1165,14 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 11);
+            assert_eq!(
+                capability["contractVersion"],
+                if local_id == DOCUMENTS_LOCAL_ID {
+                    12
+                } else {
+                    11
+                }
+            );
 
             let script = &capability["modes"]["script"];
             assert_eq!(script["entrypoints"].as_array().unwrap().len(), 1);
@@ -1280,15 +1287,53 @@ mod tests {
         assert_eq!(documents["validation"]["modelNativeValidate"], "forbidden");
         assert_eq!(
             documents["validation"]["pageCountSource"],
-            "notAvailableInCurrentSemanticSurface"
+            "pdfSkillPdfinfoOnExactReturnedPdf"
         );
         assert_eq!(
             documents["validation"]["authoritativePageCountAvailable"],
-            false
+            true
         );
         assert_eq!(
             documents["validation"]["visual"]["pageRangeRequests"],
-            "notSupported"
+            "pdfSkillOneThroughN"
+        );
+        assert_eq!(
+            documents["validation"]["visual"]["maxPagesPerRasterBatch"],
+            32
+        );
+        assert_eq!(
+            documents["validation"]["temporaryArtifactCleanup"]["managedPdfPageImages"],
+            "hostRunWorkspaceCleanupAfterRead"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["requestRequiredFields"],
+            serde_json::json!([
+                "operation",
+                "filePath",
+                "outputPath",
+                "outputFormat",
+                "reason"
+            ])
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["pageCountField"],
+            "outputs[].pageCount"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["handoff"]["runtimeEnforced"],
+            false
+        );
+        assert_eq!(
+            documents["modes"]["script"]["exceptionalFallback"]["scope"],
+            serde_json::json!(["create", "editExisting"])
+        );
+        assert_eq!(
+            documents["modes"]["script"]["exceptionalFallback"]["runtimeProfileRequired"],
+            "documents"
+        );
+        assert_eq!(
+            documents["modes"]["script"]["exceptionalFallback"]["visualQaConversion"],
+            "managedOnly"
         );
         assert_eq!(
             documents["validation"]["structuralChecks"]["renderingSufficient"],
@@ -1348,6 +1393,9 @@ mod tests {
             "Host automatically performs an isolated Python syntax preflight",
             "wait with `command_session`",
             "never use recursive deletion",
+            "activate and follow the PDF Skill",
+            "`outputFormat: \"pdf\"`",
+            "model-authored DOCX-to-PDF converters are",
         ] {
             assert!(
                 DOCUMENTS_SOURCE.contains(required),
@@ -1363,6 +1411,11 @@ mod tests {
             "Host's pinned OfficeCLI schema gate",
             "stable OfficeCLI `type`",
             "`description`, `path`, `part`, `code`, `error`, and `message` fields",
+            "## Use exceptional Python fallback",
+            "## Convert once and follow the PDF Skill",
+            "use `pdfinfo` to obtain authoritative page count",
+            "Render all\npages `1..N` with `pdftoppm`",
+            "## Clean up exact task artifacts",
         ] {
             assert!(
                 workflows.contains(required),
@@ -1424,7 +1477,7 @@ mod tests {
         assert!(!editor.contains("tempfile"));
         assert!(!editor.contains("os.replace"));
 
-        assert_eq!(capability["contractVersion"], 11);
+        assert_eq!(capability["contractVersion"], 12);
         let native = &capability["modes"]["native"];
         assert_eq!(
             native["operations"],
@@ -2236,7 +2289,17 @@ mod tests {
 
             assert!(page.text().contains(heading));
             assert!(page.text().contains("Managed Builder"));
-            assert!(!page.text().contains("\"runtimeProfile\":"));
+            if local_id == DOCUMENTS_LOCAL_ID {
+                assert_eq!(
+                    page.text()
+                        .matches("\"runtimeProfile\": \"documents\"")
+                        .count(),
+                    1
+                );
+                assert!(page.text().contains("Omit `runtimeProfile` and `observe`"));
+            } else {
+                assert!(!page.text().contains("\"runtimeProfile\":"));
+            }
             assert!(page.text().contains("--output"));
             assert!(!page.text().contains("runtime.requiredPackages"));
             assert!(!page.text().contains("\"provider\": \"managedArtifact\""));

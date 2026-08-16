@@ -96,6 +96,17 @@ pub(super) fn request_requires_browser_runtime(request: &OfficeExecutionRequest)
             && request.document_kind == OfficeDocumentKind::Document)
 }
 
+pub(super) fn request_requires_word_pdf_runtime(request: &OfficeExecutionRequest) -> bool {
+    request.document_kind == OfficeDocumentKind::Document
+        && matches!(
+            request.typed_parameters(),
+            OfficeOperationParameters::View {
+                mode: OfficeViewMode::Pdf,
+                ..
+            }
+        )
+}
+
 pub(super) fn run_process(
     executable: &Path,
     cwd: Option<&Path>,
@@ -472,16 +483,23 @@ fn synthetic_cancelled_status() -> Result<ProcessOutput, OfficeEngineError> {
 }
 
 pub(super) fn execution_error(output: &ProcessOutput) -> (Option<String>, Option<String>) {
+    execution_error_for_process(output, "OfficeCLI")
+}
+
+pub(super) fn execution_error_for_process(
+    output: &ProcessOutput,
+    process_name: &str,
+) -> (Option<String>, Option<String>) {
     if output.cancelled {
         return (
             Some("office.cancelled".to_string()),
-            Some("OfficeCLI execution was cancelled.".to_string()),
+            Some(format!("{process_name} execution was cancelled.")),
         );
     }
     if output.timed_out {
         return (
             Some("office.timeout".to_string()),
-            Some("OfficeCLI execution exceeded its timeout.".to_string()),
+            Some(format!("{process_name} execution exceeded its timeout.")),
         );
     }
     if let Some(failure) = &output.render_failure {
@@ -495,12 +513,12 @@ pub(super) fn execution_error(output: &ProcessOutput) -> (Option<String>, Option
         Some(exit_code) => (
             Some("office.nonzero_exit".to_string()),
             Some(format!(
-                "OfficeCLI exited with non-zero status {exit_code}."
+                "{process_name} exited with non-zero status {exit_code}."
             )),
         ),
         None => (
             Some("office.terminated_without_exit_code".to_string()),
-            Some("OfficeCLI terminated without an exit code.".to_string()),
+            Some(format!("{process_name} terminated without an exit code.")),
         ),
     }
 }
@@ -510,6 +528,11 @@ pub(super) fn cancelled_result(
     request: &OfficeExecutionRequest,
     argv: Vec<String>,
 ) -> OfficeExecutionResult {
+    let process_name = if request_requires_word_pdf_runtime(request) {
+        "Managed Word PDF renderer"
+    } else {
+        "OfficeCLI"
+    };
     OfficeExecutionResult {
         provider_id: OFFICECLI_PROVIDER_ID.to_string(),
         engine_revision: engine_revision.to_string(),
@@ -529,7 +552,9 @@ pub(super) fn cancelled_result(
         stdout_spool: ProcessOutputSpool::default(),
         stderr_spool: ProcessOutputSpool::default(),
         error_code: Some("office.cancelled".to_string()),
-        error: Some("OfficeCLI execution was cancelled before launch.".to_string()),
+        error: Some(format!(
+            "{process_name} execution was cancelled before launch."
+        )),
         outputs: Vec::new(),
     }
 }

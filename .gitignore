@@ -17,6 +17,7 @@ coverage
 
 .cache/officecli/
 .cache/office-renderer/
+.cache/word-pdf-renderer/
 .cache/artifact-runtime/
 
 __pycache__/

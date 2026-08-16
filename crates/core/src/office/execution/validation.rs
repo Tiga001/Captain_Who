@@ -49,11 +49,18 @@ pub(super) fn validate_request_syntax(
                 ));
             }
             let mode = request.view_mode();
+            if mode == Some(OfficeViewMode::Pdf)
+                && request.document_kind != OfficeDocumentKind::Document
+            {
+                return Err(invalid_request(
+                    "Managed PDF render is available only for Word-compatible .docx documents.",
+                ));
+            }
             let writes_render = mode.is_some_and(OfficeViewMode::writes_output);
             match (request.output_path.is_some(), writes_render) {
                 (true, false) => {
                     return Err(invalid_request(
-                        "Office view output paths are supported only for html, screenshot, or svg modes.",
+                        "Office view output paths are supported only for html, screenshot, svg, or managed Word PDF modes.",
                     ))
                 }
                 (false, true) => {
@@ -202,13 +209,14 @@ fn validate_render_output_extension(
         Some("html") => matches!(extension.as_deref(), Some("html" | "htm")),
         Some("screenshot") => extension.as_deref() == Some("png"),
         Some("svg") => extension.as_deref() == Some("svg"),
+        Some("pdf") => extension.as_deref() == Some("pdf"),
         _ => false,
     };
     if matches {
         Ok(())
     } else {
         Err(invalid_request(
-            "Office render output extension must match the requested html, screenshot, or svg mode.",
+            "Office render output extension must match the requested html, screenshot, svg, or managed Word PDF mode.",
         ))
     }
 }
@@ -488,6 +496,9 @@ fn validate_operation_arguments(
                 | "html"
                 | "svg"
                 | "screenshot"
+                // Host-managed Word PDF mode. This logical token is frozen in
+                // the approval plan but is never forwarded to OfficeCLI.
+                | "pdf"
                 | "forms"
         ) {
             return Err(invalid_request(format!(

@@ -1555,6 +1555,9 @@ fn resolve_default_office_engine() -> Arc<dyn OfficeEngine> {
     if let Some(directory) = std::env::var_os("MYCOPILOT_OFFICE_RENDERER_DIR") {
         options = options.with_configured_render_runtime_dir(directory);
     }
+    if let Some(directory) = std::env::var_os("MYCOPILOT_WORD_PDF_RENDERER_DIR") {
+        options = options.with_configured_word_pdf_render_runtime_dir(directory);
+    }
     if let Ok(executable) = std::env::current_exe() {
         options = options.with_browser_proxy_executable(executable);
     }

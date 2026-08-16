@@ -5,10 +5,12 @@
 - [Route the task](#route-the-task)
 - [Native read and verification contract](#native-read-and-verification-contract)
 - [Prepare and run one Managed Builder](#prepare-and-run-one-managed-builder)
+- [Use exceptional Python fallback](#use-exceptional-python-fallback)
 - [Bind inputs declaratively](#bind-inputs-declaratively)
 - [Observe every file effect](#observe-every-file-effect)
-- [Consume render outputs](#consume-render-outputs)
+- [Convert once and follow the PDF Skill](#convert-once-and-follow-the-pdf-skill)
 - [Generate, verify, and iterate](#generate-verify-and-iterate)
+- [Clean up exact task artifacts](#clean-up-exact-task-artifacts)
 - [Word quality checks](#word-quality-checks)
 
 ## Route the task
@@ -78,6 +80,39 @@ After final verification, delete the exact Builder and task-created temporary fi
 created the script directory and it is empty, remove it with `rmdir`. Preserve pre-existing
 directories and unrelated files; never use recursive deletion.
 
+## Use exceptional Python fallback
+
+Use a task-scoped self-authored Python script only when an unexpected limitation prevents the
+fixed Builder or Editor from creating or editing the requested `.docx`. Keep it in the task's
+existing temporary script directory and run it as one direct `python <script>.py ...`
+`run_command` with `runtimeProfile: "documents"`. Full Python, `python-docx`, and feature-specific
+OOXML are allowed.
+
+Bind non-workspace inputs through `run_command.inputs`; never open attachment or Host-private paths
+directly. For an edit, freeze one mounted source and save to a distinct `.docx`. Because a
+self-authored script has no template materialization receipt, Host-private candidate validation and
+publication do not apply. Within the script, save to a task-temporary `.docx`, reopen and
+sanity-check it, then use `os.replace` to publish the declared save-as output atomically. After the
+command reaches terminal success, require the expected `artifactObservation`, inspect the output,
+and complete PDF visual QA. The fallback does not bypass command permissions and is not an
+alternate visual-QA converter: never use ReportLab reconstruction, page-image stitching, or another
+model-authored DOCX-to-PDF script as evidence of the Word layout.
+
+```json
+{
+  "command": "python word-work/custom_edit.py --source source.docx --output outputs/report-edited.docx",
+  "cwd": ".",
+  "runtimeProfile": "documents",
+  "inputs": [
+    {
+      "mountPath": "source.docx",
+      "path": "@attachments/<attachment-id>/source.docx"
+    }
+  ],
+  "reason": "Run the task-scoped fallback to edit the Word document"
+}
+```
+
 ## Bind inputs declaratively
 
 Every non-workspace input used by a Builder or Editor must appear in `run_command.inputs`:
@@ -121,29 +156,39 @@ Inspect `artifactObservation` after success, non-zero exit, timeout, and cancell
 When a command returns `status: "running"`, wait through its returned `continueWith` receipt. A
 running result is not terminal publication evidence.
 
-## Consume render outputs
+## Convert once and follow the PDF Skill
 
-The current semantic surface does not expose an authoritative rendered page count. Render the
-whole document once for overview, then render each known or affected page individually:
+After the final `.docx` passes publication and structural inspection, create a `.pdf` destination
+inside the task-owned temporary directory and call `office_document.render` exactly once:
 
 ```json
 {
   "operation": "render",
   "filePath": "outputs/report.docx",
-  "pageOrSlide": 1,
-  "outputPath": "outputs/report-page-1.png",
-  "reason": "Render page 1 of the final Word report for visual review"
+  "outputPath": "word-work/report-visual-qa.pdf",
+  "outputFormat": "pdf",
+  "reason": "Convert the final Word report to PDF for complete visual review"
 }
 ```
 
-For each successful render, select the output whose `role` is `render` and `kind` is `image`, then
-pass only its exact `outputs[].readPath` to `read_image.path`. Never reconstruct a path from the
-request, stdout, filename, or directory search. Keep a numbered ledger of pages actually read.
+The request must contain all five fields shown above; `outputPath` must end in `.pdf`. Accept only a
+successful result containing a PDF output with both an exact readable `outputs[].readPath` and its
+nested `outputs[].pageCount`. Do not reconstruct the PDF path from `outputPath`, stdout, a filename,
+or a directory scan.
 
-`pageSelection` records the requested selection, not the document's actual page count. A
-whole-document contact sheet is overview-only and does not prove count, coverage, or small-text
-legibility. Disclose that exhaustive coverage is unavailable unless a future trusted output
-explicitly reports the final count.
+Then activate and follow the PDF Skill. This handoff is an instruction, not a runtime-enforced
+state transition. Bind the exact PDF `readPath`, use `pdfinfo` to obtain authoritative page count
+`N`, and fail verification if it disagrees with that PDF output's nested `pageCount`. Render all
+pages `1..N` with `pdftoppm` in contiguous batches of at most 32 pages. For each batch, consume
+every exact returned page-image path with `read_image.path` before cleanup, then record one visual
+verdict for every page in the document-wide ledger. A contact sheet, guessed range, file size, or
+partial sample never proves complete coverage.
+
+Check clipping, overflow, empty pages, tables across page boundaries, image placement, font
+substitution, headers, and footers. If `PAGE` or `NUMPAGES` fields exist, confirm that they render
+visibly and follow the document's numbering rules; `NUMPAGES` must agree with authoritative `N`.
+Do not use ReportLab, image stitching, or a self-authored converter. If managed conversion is
+unavailable, report visual QA as incomplete instead of manufacturing evidence.
 
 ## Generate, verify, and iterate
 
@@ -155,18 +200,29 @@ explicitly reports the final count.
 3. Inspect headings, body order, tables, sections, headers/footers, media, and requested content.
 4. Run explicit structural checks for comments, tracked changes, fields, content controls, or other
    features whose semantics matter; rendering cannot verify them.
-5. Render and read the overview plus every known or affected page separately. Check clipping,
-   overflow, blank pages, broken images, font substitution, hierarchy, and spacing.
-6. If a defect exists, patch the same script. Discard stale evidence and repeat all affected checks
-   on the new final file.
-7. Clean up the task-owned script and temporary files only after verification.
+5. Convert the final DOCX once, follow the PDF Skill, and read every page `1..N` into a numbered
+   ledger.
+6. If a defect exists, patch the same script. Any DOCX change invalidates the PDF, `N`, page images,
+   and ledger; delete stale evidence and repeat conversion plus all affected checks.
+7. Clean up exact task-owned artifacts only after verification.
 
 On a prepublish schema failure, use the bounded Host diagnostics: the stable OfficeCLI `type`,
 `description`, `path`, `part`, `code`, `error`, and `message` fields plus the Host error code/message
 when present. Patch the same script from those details; do not retry unchanged or expose provider
-arguments. A schema gate does not prove semantic fidelity or visual quality. When rendering or
-image reading is unavailable, report the affected coverage as unverified rather than inventing a
-verdict.
+arguments. A schema gate does not prove semantic fidelity or visual quality. When PDF conversion,
+rendering, or image reading is unavailable, report the affected coverage as unverified rather than
+inventing a verdict.
+
+## Clean up exact task artifacts
+
+Keep the temporary PDF and every returned page-image `readPath` until every page has been read and
+the ledger is complete. Then delete the exact task-created Builder, Editor or fallback script, QA
+PDF, any workspace page images, and other task-created workspace files. PDF Skill page images are
+Host-managed Artifacts, not workspace files; do not search for, copy, or delete their private
+physical files, and let the Host clean that managed Run workspace. Remove the task directory with
+`rmdir` only when this task created it and it is empty. Preserve the final `.docx`, pre-existing
+directories, and unrelated files; never use recursive deletion. Do not present the QA PDF as a
+final artifact unless the user explicitly requested it.
 
 ## Word quality checks
 
@@ -176,4 +232,6 @@ verdict.
 - During edits, preserve sections, relationships, media, styles, and unrelated content.
 - Treat comments, tracked changes, fields, content controls, numbering, and section linkage as
   structural features. Visual rendering alone cannot prove preservation.
+- Verify rendered `PAGE` and `NUMPAGES` fields against the PDF's authoritative page count and the
+  document's section-numbering rules.
 - Reopen or inspect the final package and report only checks that actually ran.

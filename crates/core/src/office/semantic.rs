@@ -182,6 +182,10 @@ pub struct OfficeInspectIntent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficeRenderIntent {
     pub output_path: String,
+    /// Optional Host-managed output format. Omission preserves the legacy PNG
+    /// screenshot behavior; `pdf` is accepted only for Word documents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OfficeRenderOutputFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_or_slide: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +194,12 @@ pub struct OfficeRenderIntent {
     pub range: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewport: Option<OfficeViewport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeRenderOutputFormat {
+    Pdf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -721,6 +731,22 @@ pub fn compile_office_semantic_request(
         ),
         OfficeSemanticIntent::Render(intent) => {
             let output = non_empty(&intent.output_path, "outputPath")?.to_string();
+            if intent.output_format == Some(OfficeRenderOutputFormat::Pdf) {
+                require_kind(
+                    semantic.document_kind,
+                    OfficeDocumentKind::Document,
+                    semantic.operation_name(),
+                )?;
+                if intent.page_or_slide.is_some()
+                    || intent.sheet_name.is_some()
+                    || intent.range.is_some()
+                    || intent.viewport.is_some()
+                {
+                    return Err(OfficeSemanticError::invalid(
+                        "Word PDF render does not accept pageOrSlide, sheetName, range, or viewport; it always converts the complete frozen DOCX.",
+                    ));
+                }
+            }
             let mut pages = Vec::new();
             if let Some(page) = intent.page_or_slide {
                 require_one_based(page, "pageOrSlide")?;
@@ -732,7 +758,11 @@ pub fn compile_office_semantic_request(
             (
                 OfficeOperation::View,
                 OfficeOperationParameters::View {
-                    mode: OfficeViewMode::Screenshot,
+                    mode: if intent.output_format == Some(OfficeRenderOutputFormat::Pdf) {
+                        OfficeViewMode::Pdf
+                    } else {
+                        OfficeViewMode::Screenshot
+                    },
                     start: None,
                     end: None,
                     max_lines: None,
@@ -742,10 +772,12 @@ pub fn compile_office_semantic_request(
                     pages,
                     range: render_range(semantic.document_kind, intent)?,
                     viewport: intent.viewport.clone(),
-                    grid: (semantic.document_kind != OfficeDocumentKind::Spreadsheet
+                    grid: (intent.output_format.is_none()
+                        && semantic.document_kind != OfficeDocumentKind::Spreadsheet
                         && intent.page_or_slide.is_none())
                     .then_some(OfficeGridLayout::Auto),
-                    render_mode: (semantic.document_kind != OfficeDocumentKind::Spreadsheet)
+                    render_mode: (intent.output_format.is_none()
+                        && semantic.document_kind != OfficeDocumentKind::Spreadsheet)
                         .then_some(OfficeViewRenderMode::Auto),
                     page_count: false,
                 },
@@ -1935,6 +1967,7 @@ mod tests {
             OfficeDocumentKind::Presentation,
             OfficeSemanticIntent::Render(OfficeRenderIntent {
                 output_path: "slide-4.png".to_string(),
+                output_format: None,
                 page_or_slide: Some(4),
                 sheet_name: None,
                 range: None,
@@ -1953,6 +1986,7 @@ mod tests {
             OfficeDocumentKind::Presentation,
             OfficeSemanticIntent::Render(OfficeRenderIntent {
                 output_path: "all-slides.png".to_string(),
+                output_format: None,
                 page_or_slide: None,
                 sheet_name: None,
                 range: None,
@@ -1966,6 +2000,67 @@ mod tests {
         };
         assert!(pages.is_empty());
         assert_eq!(grid, &Some(OfficeGridLayout::Auto));
+    }
+
+    #[test]
+    fn word_pdf_render_compiles_to_a_complete_host_managed_view() {
+        let semantic = request(
+            OfficeDocumentKind::Document,
+            OfficeSemanticIntent::Render(OfficeRenderIntent {
+                output_path: "qa/report.pdf".to_string(),
+                output_format: Some(OfficeRenderOutputFormat::Pdf),
+                page_or_slide: None,
+                sheet_name: None,
+                range: None,
+                viewport: None,
+            }),
+        );
+        let compiled = compile_office_semantic_request(&semantic).unwrap();
+        assert_eq!(compiled.output_path.as_deref(), Some("qa/report.pdf"));
+        let OfficeOperationParameters::View {
+            mode,
+            pages,
+            grid,
+            render_mode,
+            ..
+        } = compiled.typed_parameters()
+        else {
+            panic!("expected view");
+        };
+        assert_eq!(*mode, OfficeViewMode::Pdf);
+        assert!(pages.is_empty());
+        assert_eq!(*grid, None);
+        assert_eq!(*render_mode, None);
+    }
+
+    #[test]
+    fn pdf_render_rejects_non_word_kinds_and_partial_view_selectors() {
+        let presentation = request(
+            OfficeDocumentKind::Presentation,
+            OfficeSemanticIntent::Render(OfficeRenderIntent {
+                output_path: "deck.pdf".to_string(),
+                output_format: Some(OfficeRenderOutputFormat::Pdf),
+                page_or_slide: None,
+                sheet_name: None,
+                range: None,
+                viewport: None,
+            }),
+        );
+        assert!(compile_office_semantic_request(&presentation).is_err());
+
+        let partial = request(
+            OfficeDocumentKind::Document,
+            OfficeSemanticIntent::Render(OfficeRenderIntent {
+                output_path: "page.pdf".to_string(),
+                output_format: Some(OfficeRenderOutputFormat::Pdf),
+                page_or_slide: Some(1),
+                sheet_name: None,
+                range: None,
+                viewport: None,
+            }),
+        );
+        let error = compile_office_semantic_request(&partial).unwrap_err();
+        assert!(error.message().contains("complete frozen DOCX"));
     }
 
     #[test]

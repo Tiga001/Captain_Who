@@ -672,6 +672,9 @@ mod tests {
             sha256: sha256_hex(&bytes),
             width: Some(1),
             height: Some(1),
+            page_count: None,
+            source_sha256: None,
+            renderer_revision: None,
             page_selection: OfficeRenderPageSelection::All,
             layout_coverage: None,
         };

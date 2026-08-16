@@ -10,6 +10,7 @@ mod execution;
 mod render_runtime;
 mod semantic;
 mod types;
+mod word_pdf_render_runtime;
 
 pub use discovery::{office_cli_component_relative_path, OfficeCliDiscoveryOptions};
 pub(crate) use execution::{
@@ -36,13 +37,13 @@ pub use semantic::{
     OfficePresentationMoveSlideIntent, OfficePresentationShapeIntent,
     OfficePresentationSlideIndexIntent, OfficePresentationSlideIntent,
     OfficePresentationTableIntent, OfficePresentationTextIntent, OfficeRenderIntent,
-    OfficeReplaceTextIntent, OfficeSemanticError, OfficeSemanticErrorCode, OfficeSemanticIntent,
-    OfficeSemanticRequest, OfficeSemanticStyle, OfficeSpreadsheetCellIntent,
-    OfficeSpreadsheetChartIntent, OfficeSpreadsheetConditionalFormatIntent,
-    OfficeSpreadsheetFormulaIntent, OfficeSpreadsheetFreezeIntent, OfficeSpreadsheetImageIntent,
-    OfficeSpreadsheetMoveSheetIntent, OfficeSpreadsheetRangeFormatIntent,
-    OfficeSpreadsheetSheetIntent, OfficeSpreadsheetTableIntent, OfficeTableIntent,
-    OFFICE_SEMANTIC_REQUEST_SCHEMA_VERSION,
+    OfficeRenderOutputFormat, OfficeReplaceTextIntent, OfficeSemanticError,
+    OfficeSemanticErrorCode, OfficeSemanticIntent, OfficeSemanticRequest, OfficeSemanticStyle,
+    OfficeSpreadsheetCellIntent, OfficeSpreadsheetChartIntent,
+    OfficeSpreadsheetConditionalFormatIntent, OfficeSpreadsheetFormulaIntent,
+    OfficeSpreadsheetFreezeIntent, OfficeSpreadsheetImageIntent, OfficeSpreadsheetMoveSheetIntent,
+    OfficeSpreadsheetRangeFormatIntent, OfficeSpreadsheetSheetIntent, OfficeSpreadsheetTableIntent,
+    OfficeTableIntent, OFFICE_SEMANTIC_REQUEST_SCHEMA_VERSION,
 };
 pub use types::{
     OfficeCellShift, OfficeDocumentKind, OfficeElementPosition, OfficeEngine,
@@ -59,6 +60,11 @@ pub use types::{
     OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode, OfficeViewport,
     OfficeWriteDisposition, OFFICECLI_PROVIDER_ID, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
     OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+};
+pub use word_pdf_render_runtime::{
+    word_pdf_render_component_relative_path, WordPdfRenderRuntime,
+    WordPdfRenderRuntimeDiscoveryOptions, WORD_PDF_RENDER_RUNTIME_BUNDLE_VERSION,
+    WORD_PDF_RENDER_RUNTIME_LIBREOFFICE_VERSION, WORD_PDF_RENDER_RUNTIME_PROVIDER_ID,
 };
 
 pub use discovery::{resolve_office_engine, OfficeCliEngine, UnavailableOfficeEngine};

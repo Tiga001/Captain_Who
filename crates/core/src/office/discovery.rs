@@ -10,6 +10,7 @@ use super::types::{
     OfficePresentationEditRequest, OfficePresentationEditResult, OFFICECLI_PROVIDER_ID,
     OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
 };
+use super::word_pdf_render_runtime::{WordPdfRenderRuntime, WordPdfRenderRuntimeDiscoveryOptions};
 use crate::AgentCancellationToken;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -29,6 +30,7 @@ pub struct OfficeCliDiscoveryOptions {
     configured_executable: Option<PathBuf>,
     application_resources_dir: Option<PathBuf>,
     configured_render_runtime_dir: Option<PathBuf>,
+    configured_word_pdf_render_runtime_dir: Option<PathBuf>,
     browser_proxy_executable: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
     allow_path_fallback: bool,
@@ -51,6 +53,14 @@ impl OfficeCliDiscoveryOptions {
 
     pub fn with_configured_render_runtime_dir(mut self, directory: impl Into<PathBuf>) -> Self {
         self.configured_render_runtime_dir = Some(directory.into());
+        self
+    }
+
+    pub fn with_configured_word_pdf_render_runtime_dir(
+        mut self,
+        directory: impl Into<PathBuf>,
+    ) -> Self {
+        self.configured_word_pdf_render_runtime_dir = Some(directory.into());
         self
     }
 
@@ -82,6 +92,7 @@ pub struct OfficeCliEngine {
     officecli_revision: String,
     engine_revision: String,
     render_runtime: Result<OfficeRenderRuntime, OfficeEngineError>,
+    word_pdf_render_runtime: Result<WordPdfRenderRuntime, OfficeEngineError>,
     browser_proxy_executable: Option<PathBuf>,
 }
 
@@ -138,6 +149,12 @@ impl OfficeCliEngine {
         self.render_runtime.as_ref().ok()
     }
 
+    pub(crate) fn word_pdf_render_runtime(
+        &self,
+    ) -> Result<&WordPdfRenderRuntime, OfficeEngineError> {
+        self.word_pdf_render_runtime.as_ref().map_err(Clone::clone)
+    }
+
     pub(crate) fn browser_proxy_executable(&self) -> Option<&Path> {
         self.browser_proxy_executable.as_deref()
     }
@@ -162,6 +179,7 @@ impl OfficeCliEngine {
         let current = combined_engine_revision(
             &officecli_revision,
             self.render_runtime.as_ref().ok(),
+            self.word_pdf_render_runtime.as_ref().ok(),
             proxy_revision.as_deref(),
         );
         if current != self.engine_revision {
@@ -423,6 +441,7 @@ fn build_engine(
 ) -> Result<OfficeCliEngine, OfficeEngineError> {
     let officecli_revision = executable_revision(&executable)?;
     let render_runtime = discover_render_runtime(options);
+    let word_pdf_render_runtime = discover_word_pdf_render_runtime(options);
     let browser_proxy_executable = options
         .browser_proxy_executable
         .as_deref()
@@ -435,6 +454,7 @@ fn build_engine(
     let engine_revision = combined_engine_revision(
         &officecli_revision,
         render_runtime.as_ref().ok(),
+        word_pdf_render_runtime.as_ref().ok(),
         proxy_revision.as_deref(),
     );
     Ok(OfficeCliEngine {
@@ -443,8 +463,24 @@ fn build_engine(
         officecli_revision,
         engine_revision,
         render_runtime,
+        word_pdf_render_runtime,
         browser_proxy_executable,
     })
+}
+
+fn discover_word_pdf_render_runtime(
+    options: &OfficeCliDiscoveryOptions,
+) -> Result<WordPdfRenderRuntime, OfficeEngineError> {
+    let mut runtime_options = WordPdfRenderRuntimeDiscoveryOptions::new();
+    if let Some(workspace) = options.workspace_root.as_deref() {
+        runtime_options = runtime_options.with_workspace_root(workspace);
+    }
+    if let Some(directory) = options.configured_word_pdf_render_runtime_dir.as_deref() {
+        runtime_options = runtime_options.with_configured_component_dir(directory);
+    } else if let Some(resources) = options.application_resources_dir.as_deref() {
+        runtime_options = runtime_options.with_application_resources_dir(resources);
+    }
+    WordPdfRenderRuntime::discover(&runtime_options)
 }
 
 fn discover_render_runtime(
@@ -465,11 +501,19 @@ fn discover_render_runtime(
 fn combined_engine_revision(
     officecli_revision: &str,
     render_runtime: Option<&OfficeRenderRuntime>,
+    word_pdf_render_runtime: Option<&WordPdfRenderRuntime>,
     proxy_revision: Option<&str>,
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"mycopilot.office.engine\0v2\0");
     digest.update(officecli_revision.as_bytes());
+    digest.update(b"\0");
+    digest.update(
+        word_pdf_render_runtime
+            .map(WordPdfRenderRuntime::runtime_revision)
+            .unwrap_or("word-pdf-render-runtime-unavailable")
+            .as_bytes(),
+    );
     digest.update(b"\0");
     digest.update(
         render_runtime

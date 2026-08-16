@@ -8,6 +8,7 @@ import {
   afterPack as verifyOfficeRendererAfterPack,
   afterSign as verifyOfficeRendererAfterSign
 } from './verify-packaged-office-renderer.mjs'
+import { verifyPackagedWordPdfRenderer } from './verify-packaged-word-pdf-renderer.mjs'
 import { verifyPackagedMacSignatures } from './verify-packaged-macos-signatures.mjs'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -50,6 +51,7 @@ export function isMacCodeSigningExplicitlyDisabled(context) {
 export async function afterPack(context) {
   await verifyOfficeRendererAfterPack(context)
   if (context.electronPlatformName === 'darwin') {
+    await verifyPackagedWordPdfRenderer(context)
     await verifyPackagedMacIcon(context)
   }
 }
@@ -57,6 +59,7 @@ export async function afterPack(context) {
 export async function afterSign(context) {
   await verifyOfficeRendererAfterSign(context)
   if (context.electronPlatformName === 'darwin' && !isMacCodeSigningExplicitlyDisabled(context)) {
+    await verifyPackagedWordPdfRenderer(context)
     await verifyPackagedMacSignatures(context)
   }
 }

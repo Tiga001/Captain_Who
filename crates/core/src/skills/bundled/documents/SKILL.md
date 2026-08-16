@@ -63,8 +63,25 @@ returns `status: "running"`, follow its `continueWith` receipt and wait with `co
 the terminal result. A process exit, filename, preliminary observation, or running receipt is not
 publication evidence.
 
-After final checks, delete the exact Builder or Editor and task-created temporary files. If this
-task created the script directory and it is then empty, remove it with `rmdir`. Preserve
+If an unexpected limitation makes the fixed Builder, Editor, or standard workflow unable to
+create or edit the `.docx`, use one task-scoped self-authored `.py` file in the same temporary
+directory as the exceptional fallback. Run it with a direct `python <script>.py ...` `run_command`;
+set `runtimeProfile: "documents"`; normal Python, `python-docx`, and feature-specific OOXML are
+available. Bind every non-workspace input through `run_command.inputs` and save an edited source to
+a distinct `.docx`. A self-authored script has no template materialization receipt, so it does not
+receive the template path's Host-private candidate transaction: make the script save to a
+task-temporary `.docx`, reopen and sanity-check it, then atomically replace the declared output.
+After terminal success, require the expected `artifactObservation`, inspect the output, and run the
+normal PDF visual QA before cleanup. Do not use this fallback merely to replace a working template
+path, and never use it to replace the managed DOCX-to-PDF visual-QA conversion. ReportLab
+reconstruction, page-image stitching, and other model-authored DOCX-to-PDF converters are
+forbidden as visual evidence.
+
+After final checks, delete the exact Builder, Editor or fallback script, temporary QA PDF, any
+workspace page images, and other task-created workspace files. PDF Skill page images returned as
+managed Artifact `readPath` values are not workspace files: keep those paths until they have been
+read, then let the Host clean its managed Run workspace instead of searching for or deleting them.
+If this task created the script directory and it is then empty, remove it with `rmdir`. Preserve
 pre-existing directories and unrelated files; never use recursive deletion. Keep scripts only when
 the user explicitly asks for them.
 
@@ -78,16 +95,22 @@ the user explicitly asks for them.
    private candidate before publication. Do not call native `validate`. Inspect the final document.
    For comments, tracked changes, fields, content controls, or other fidelity-sensitive parts, run
    an explicit structural check; rendering is not structural evidence.
-4. Render the whole document once for overview, then render every known or affected page
-   individually. Consume only exact `outputs[].readPath` values with `read_image.path` and keep a
-   numbered ledger of pages actually read. The current semantic surface has no authoritative final
-   page count, so do not claim exhaustive all-page coverage from a contact sheet or guessed count.
+4. Convert the final `.docx` once to a task-temporary PDF with `office_document.render`, supplying
+   `outputFormat: "pdf"` and a `.pdf` `outputPath`. Require one returned PDF output containing both
+   `outputs[].readPath` and its nested `outputs[].pageCount`; use only that exact `readPath`, then
+   activate and follow the PDF Skill. Treat `pdfinfo` as the authoritative page count `N`, require
+   it to agree with the returned PDF output's `pageCount`, render pages `1..N` with `pdftoppm` in
+   contiguous batches of at most 32 pages, consume every returned page image with
+   `read_image.path` before cleaning that batch, and keep one verdict per page. This is a Skill
+   workflow instruction, not a runtime-enforced handoff.
 5. Compare requested changes and unrelated content with the baseline. Any final edit invalidates
-   earlier inspection, Host publication, structural, and visual evidence; repeat the affected
-   checks.
+   the prior PDF, page count, page images, ledger, inspection, Host publication, structural, and
+   visual evidence; regenerate them from the new final file.
 6. Report only checks that actually succeeded and disclose unsupported fidelity or unavailable
-   visual coverage.
+   visual coverage. For documents containing `PAGE` or `NUMPAGES`, verify in the rendered PDF that
+   each field is visible and correct for the document's page-numbering rules and that `NUMPAGES`
+   agrees with authoritative `N`.
 
 Read [references/workflows.md](references/workflows.md) for creation, input binding, observation,
-render consumption, and quality checks. Read
+PDF handoff, render consumption, exceptional fallback, cleanup, and quality checks. Read
 [references/editing-existing.md](references/editing-existing.md) for every existing-document edit.

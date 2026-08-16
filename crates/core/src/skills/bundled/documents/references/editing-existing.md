@@ -18,9 +18,9 @@ generation workflow.
 
 1. Inspect the source before writing. Record its paragraph, table, section, header/footer, media,
    field, comment, and tracked-change structure where available.
-2. Render and read every known page that may change to establish a visual baseline. The current
-   semantic surface does not return an authoritative final page count, so do not infer exhaustive
-   coverage from a contact sheet.
+2. When a visual baseline is needed, apply the managed PDF route in
+   [workflows.md](workflows.md#convert-once-and-follow-the-pdf-skill) to the frozen source and keep a
+   separate all-page baseline ledger.
 3. Choose one workspace-relative script directory. Reuse it when it is already a plain directory;
    otherwise create it first with a separate idempotent `mkdir -p <script-directory>` command.
 4. Locate the active revision's `templates/editor.py` with `skills_list_resources`, materialize it
@@ -34,8 +34,9 @@ generation workflow.
    `command_session` until the authoritative terminal result. Only terminal success plus
    `artifactObservation` for the declared destination proves publication.
 8. The Host's pinned OfficeCLI schema gate runs before publication; do not call native `validate`.
-   Inspect the result, then render and read every known or affected final page. Compare it with the
-   source baseline and check that unrelated content remains intact.
+   Inspect the result, then apply the one-conversion PDF workflow and read every final page into the
+   required ledger. Compare it with the source baseline and check that unrelated content remains
+   intact.
 9. Delete the exact Editor and task-created temporary files after the final checks. If this task
    created the script directory and it is then empty, remove it with `rmdir`. Preserve pre-existing
    directories and unrelated files; never use recursive deletion.
@@ -171,10 +172,10 @@ explain the unsupported boundary when proof is unavailable.
   not call native `validate`.
 - Run feature-specific structural checks for comments, tracked changes, fields, content controls,
   or other fidelity-sensitive parts. Rendering is not structural proof.
-- Render the whole document once for overview, then render and read every known or affected page
-  individually. Keep a numbered ledger of pages actually seen and disclose that exhaustive coverage
-  is unavailable without a trusted final page count.
+- Follow the one-conversion PDF workflow, use `pdfinfo` for authoritative `N`, and read every page
+  `1..N` in contiguous batches of at most 32 pages into the numbered final ledger.
 - Compare typography, spacing, pagination, tables, images, and unchanged regions with the baseline.
 
-Any correction invalidates earlier inspection, Host publication, structural, and visual evidence.
-Repeat the affected checks on the new final output before delivery.
+Any correction invalidates earlier inspection, Host publication, structural evidence, temporary
+PDF, page count, page images, and visual ledger. Repeat the affected checks on the new final output
+before delivery.

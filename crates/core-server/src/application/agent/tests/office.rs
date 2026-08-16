@@ -293,6 +293,9 @@ fn test_published_render_output() -> OfficePublishedOutput {
         sha256: "ab".repeat(32),
         width: Some(640),
         height: Some(360),
+        page_count: None,
+        source_sha256: None,
+        renderer_revision: None,
         page_selection: OfficeRenderPageSelection::Explicit { pages: vec![1] },
         layout_coverage: Some(OfficeRenderLayoutCoverage {
             requested_pages: vec![1],

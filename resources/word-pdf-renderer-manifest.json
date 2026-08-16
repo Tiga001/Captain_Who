@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "providerId": "mycopilot.word-pdf-render-runtime",
+  "bundleVersion": "2026.08.1",
+  "libreOffice": {
+    "family": "libreoffice",
+    "version": "26.2.4.2"
+  },
+  "targets": {
+    "darwin-arm64": {
+      "archiveFormat": "dmg",
+      "payload": "LibreOffice.app",
+      "executable": "libreoffice/LibreOffice.app/Contents/MacOS/soffice",
+      "license": "libreoffice/LibreOffice.app/Contents/Resources/LICENSE",
+      "notice": "libreoffice/LibreOffice.app/Contents/Resources/NOTICE",
+      "archive": {
+        "url": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/mac/aarch64/LibreOffice_26.2.4.2_MacOS_aarch64.dmg",
+        "size": 295019039,
+        "sha256": "64e0ad05564554eeee639d49b08b20908a38d4722ec95f1620d05c99bcbe9fb1"
+      }
+    },
+    "darwin-x64": {
+      "archiveFormat": "dmg",
+      "payload": "LibreOffice.app",
+      "executable": "libreoffice/LibreOffice.app/Contents/MacOS/soffice",
+      "license": "libreoffice/LibreOffice.app/Contents/Resources/LICENSE",
+      "notice": "libreoffice/LibreOffice.app/Contents/Resources/NOTICE",
+      "archive": {
+        "url": "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/mac/x86_64/LibreOffice_26.2.4.2_MacOS_x86-64.dmg",
+        "size": 305573151,
+        "sha256": "f92ba40fdada173232fe929bf77973a1ffcccec55ae7971957a6de84d33f0f1e"
+      }
+    }
+  }
+}

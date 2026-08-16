@@ -228,6 +228,10 @@ pub enum OfficeViewMode {
     Html,
     Svg,
     Screenshot,
+    /// Host-managed direct DOCX-to-PDF conversion. This mode never crosses the
+    /// OfficeCLI provider boundary; execution is delegated to the pinned Word
+    /// PDF render runtime.
+    Pdf,
     Forms,
 }
 
@@ -242,12 +246,13 @@ impl OfficeViewMode {
             Self::Html => "html",
             Self::Svg => "svg",
             Self::Screenshot => "screenshot",
+            Self::Pdf => "pdf",
             Self::Forms => "forms",
         }
     }
 
     pub fn writes_output(self) -> bool {
-        matches!(self, Self::Html | Self::Svg | Self::Screenshot)
+        matches!(self, Self::Html | Self::Svg | Self::Screenshot | Self::Pdf)
     }
 }
 
@@ -756,8 +761,11 @@ pub struct OfficeExecutionResult {
     /// path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<OfficePublishedOutput>,
-    /// Exact argv passed after the executable. This is diagnostic data, not a
-    /// command string and cannot be replayed through a shell.
+    /// Frozen logical argv used for diagnostics and approval review. It is the
+    /// exact provider argv for ordinary OfficeCLI operations; Host-managed
+    /// adapters such as Word PDF conversion retain canonical logical tokens so
+    /// private runtime paths are never exposed. This is not a command string
+    /// and cannot be replayed through a shell.
     pub argv: Vec<String>,
     pub cwd: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -886,6 +894,18 @@ pub struct OfficePublishedOutput {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// Authoritative physical PDF page count verified by the Host. Present
+    /// only for the managed Word-to-PDF render path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
+    /// SHA-256 of the frozen source DOCX bytes used for this render. This lets
+    /// consumers invalidate QA evidence after any source revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
+    /// Immutable revision of the Host-managed renderer which produced this
+    /// artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renderer_revision: Option<String>,
     pub page_selection: OfficeRenderPageSelection,
     /// Host-verified renderer layout geometry. This is not visual-quality or
     /// per-slide content evidence; final slides still require individual visual

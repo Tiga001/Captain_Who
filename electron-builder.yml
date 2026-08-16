@@ -63,9 +63,12 @@ mac:
   # frozen Chromium component because codesign would change bytes covered by its receipt.
   signIgnore:
     - /Contents/Resources/components/office-renderer/
+    - /Contents/Resources/components/word-pdf-renderer/
   extraResources:
     - from: target/release/core-server
       to: core-server
+    - from: .cache/word-pdf-renderer/current
+      to: components/word-pdf-renderer
   extendInfo:
     - NSDocumentsFolderUsageDescription: MyCopilot accesses files you select in Documents.
     - NSDownloadsFolderUsageDescription: MyCopilot accesses files you select in Downloads.

@@ -73,6 +73,30 @@ pub(crate) fn compile_office_arguments(
             render_mode,
             page_count,
         } => {
+            if *mode == OfficeViewMode::Pdf {
+                if request.document_kind != OfficeDocumentKind::Document {
+                    return Err(invalid_request(
+                        "Managed PDF render is available only for Word-compatible .docx documents.",
+                    ));
+                }
+                if start.is_some()
+                    || end.is_some()
+                    || max_lines.is_some()
+                    || issue_type.is_some()
+                    || limit.is_some()
+                    || !columns.is_empty()
+                    || !pages.is_empty()
+                    || range.is_some()
+                    || viewport.is_some()
+                    || grid.is_some()
+                    || render_mode.is_some()
+                    || *page_count
+                {
+                    return Err(invalid_request(
+                        "Managed Word PDF render always converts the complete DOCX and does not accept view selectors or screenshot options.",
+                    ));
+                }
+            }
             arguments.push(mode.cli_name().to_string());
             if let (Some(start), Some(end)) = (start, end) {
                 if start > end {

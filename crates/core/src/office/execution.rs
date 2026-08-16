@@ -301,7 +301,9 @@ pub(super) fn prepare_office_cli(
         None,
     )
     .map_err(office_input_prepare_error)?;
-    if request_requires_browser_runtime(request) {
+    if request_requires_word_pdf_runtime(request) {
+        engine.word_pdf_render_runtime()?.verify_integrity()?;
+    } else if request_requires_browser_runtime(request) {
         engine.render_runtime()?.verify_integrity()?;
     }
     Ok(OfficePreparedExecution {
@@ -328,7 +330,9 @@ pub(super) fn run_prepared_office_cli(
     validate_platform()?;
     validate_prepared_identity(engine, prepared)?;
     let _ = compile_office_arguments(&prepared.request)?;
-    if request_requires_browser_runtime(&prepared.request) {
+    if request_requires_word_pdf_runtime(&prepared.request) {
+        engine.word_pdf_render_runtime()?.verify_integrity()?;
+    } else if request_requires_browser_runtime(&prepared.request) {
         engine.render_runtime()?.verify_integrity()?;
     }
     let context = ResolvedExecutionContext::resolve(context)?;
@@ -1676,6 +1680,16 @@ fn execute_render_transaction(
     cancellation: &AgentCancellationToken,
     action_cancel_flag: Option<&Arc<AtomicBool>>,
 ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+    if request_requires_word_pdf_runtime(&prepared.request) {
+        return execute_word_pdf_render_transaction(
+            engine,
+            context,
+            prepared,
+            timeout,
+            cancellation,
+            action_cancel_flag,
+        );
+    }
     let document = frozen_path(prepared, &OfficePathSlot::Document)
         .ok_or_else(|| precondition_error("Office render input precondition is missing."))?;
     let output_precondition = frozen_path(prepared, &OfficePathSlot::Output)
@@ -1754,13 +1768,14 @@ fn execute_render_transaction(
         attach_post_process_error(&mut result, error);
         return Ok(result);
     }
-    let staged_output = match prepare_published_render_output(context, prepared, staging.path()) {
-        Ok(output) => output,
-        Err(error) => {
-            attach_post_process_error(&mut result, error);
-            return Ok(result);
-        }
-    };
+    let staged_output =
+        match prepare_published_render_output(context, prepared, staging.path(), None) {
+            Ok(output) => output,
+            Err(error) => {
+                attach_post_process_error(&mut result, error);
+                return Ok(result);
+            }
+        };
     let commit_lock = office_target_commit_lock(&target);
     let _commit_guard = commit_lock
         .lock()
@@ -1777,7 +1792,7 @@ fn execute_render_transaction(
     // See the document transaction: after this point cancellation is intentionally ignored.
     run_commit_test_hook(&target, CommitTestPhase::AfterCancellationCheck);
     match staging.publish(&target, output_precondition.state) {
-        Ok(()) => match prepare_published_render_output(context, prepared, &target) {
+        Ok(()) => match prepare_published_render_output(context, prepared, &target, None) {
             Ok(published_output) if published_output == staged_output => {
                 result.outputs.push(published_output);
             }
@@ -1800,6 +1815,165 @@ fn execute_render_transaction(
     Ok(result)
 }
 
+/// Converts one frozen DOCX snapshot to PDF with the application-managed LibreOffice runtime.
+///
+/// The model cannot supply converter argv or runtime paths. The source, profile, HOME/TMP,
+/// conversion output, and publication candidate are all Host-private. Only a parsed,
+/// non-encrypted, non-empty PDF is atomically published to the separately frozen output target.
+fn execute_word_pdf_render_transaction(
+    engine: &OfficeCliEngine,
+    context: &ResolvedExecutionContext,
+    prepared: &OfficePreparedExecution,
+    timeout: Duration,
+    cancellation: &AgentCancellationToken,
+    action_cancel_flag: Option<&Arc<AtomicBool>>,
+) -> Result<OfficeExecutionResult, OfficeEngineError> {
+    let document = frozen_path(prepared, &OfficePathSlot::Document)
+        .ok_or_else(|| precondition_error("Word PDF render input precondition is missing."))?;
+    let output_precondition = frozen_path(prepared, &OfficePathSlot::Output)
+        .ok_or_else(|| precondition_error("Word PDF render output precondition is missing."))?;
+    let runtime = engine.word_pdf_render_runtime()?;
+
+    let private = tempfile::Builder::new()
+        .prefix("mycopilot-word-pdf-render-")
+        .tempdir()
+        .map_err(|error| io_error("create private Word PDF render directory", error))?;
+    let source_snapshot = private.path().join("document.docx");
+    copy_file_snapshot(Path::new(&document.normalized_path), &source_snapshot)?;
+    let (revision, size) = file_revision(&source_snapshot)?;
+    if document.content_revision.as_deref() != Some(&revision) || document.size != Some(size) {
+        return Err(precondition_error(
+            "Word input changed while the private PDF render snapshot was created.",
+        ));
+    }
+
+    let profile = private.path().join("profile");
+    let converted = private.path().join("converted");
+    fs::create_dir(&profile)
+        .map_err(|error| io_error("create private Word PDF renderer profile", error))?;
+    fs::create_dir(&converted)
+        .map_err(|error| io_error("create private Word PDF conversion directory", error))?;
+    let profile_uri = private_directory_file_uri(&profile)?;
+    let generated_pdf = converted.join("document.pdf");
+    let actual_argv = vec![
+        format!("-env:UserInstallation={profile_uri}"),
+        "--headless".to_string(),
+        "--nologo".to_string(),
+        "--nodefault".to_string(),
+        "--nolockcheck".to_string(),
+        "--norestore".to_string(),
+        "--convert-to".to_string(),
+        "pdf:writer_pdf_Export".to_string(),
+        "--outdir".to_string(),
+        converted.to_string_lossy().into_owned(),
+        source_snapshot.to_string_lossy().into_owned(),
+    ];
+    let target = PathBuf::from(&output_precondition.normalized_path);
+    let mut staging = StagingArea::new(&target)?;
+    let renderer_revision = runtime.runtime_revision().to_string();
+    let started = Instant::now();
+    let mut output = run_process_with_options(
+        runtime.executable_path(),
+        Some(private.path()),
+        &actual_argv,
+        timeout,
+        cancellation,
+        action_cancel_flag,
+        ProcessRunOptions {
+            browser_policy: None,
+            environment: None,
+            process_name: "managed Word PDF renderer",
+        },
+    )?;
+    redact_private_render_paths(
+        &mut output,
+        [
+            (runtime.component_root(), "<word-pdf-runtime>"),
+            (source_snapshot.as_path(), "<frozen-word-document>"),
+            (generated_pdf.as_path(), "<word-pdf-candidate>"),
+            (profile.as_path(), "<word-pdf-profile>"),
+            (converted.as_path(), "<word-pdf-output-directory>"),
+            (private.path(), "<word-pdf-private>"),
+        ],
+    );
+    let mut result = process_result_for_process(
+        engine,
+        prepared,
+        output,
+        started,
+        "Managed Word PDF renderer",
+    );
+    if result.error_code.is_some() {
+        return Ok(result);
+    }
+    if let Err(error) = copy_file_snapshot(&generated_pdf, staging.path()) {
+        attach_post_process_error(
+            &mut result,
+            redact_private_office_error(error, private.path(), "<word-pdf-private>"),
+        );
+        return Ok(result);
+    }
+    if let Err(error) = validate_pdf_render_artifact(staging.path()) {
+        attach_post_process_error(&mut result, error);
+        return Ok(result);
+    }
+    let staged_output = match prepare_published_render_output(
+        context,
+        prepared,
+        staging.path(),
+        Some(&renderer_revision),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            attach_post_process_error(&mut result, error);
+            return Ok(result);
+        }
+    };
+
+    let commit_lock = office_target_commit_lock(&target);
+    let _commit_guard = commit_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Err(error) = verify_preconditions(context, prepared) {
+        attach_post_process_error(&mut result, error);
+        return Ok(result);
+    }
+    runtime.verify_integrity()?;
+    run_commit_test_hook(&target, CommitTestPhase::BeforeCancellationCheck);
+    if cancellation_requested(cancellation, action_cancel_flag) {
+        mark_cancelled_before_commit(&mut result);
+        return Ok(result);
+    }
+    run_commit_test_hook(&target, CommitTestPhase::AfterCancellationCheck);
+    match staging.publish(&target, output_precondition.state) {
+        Ok(()) => match prepare_published_render_output(
+            context,
+            prepared,
+            &target,
+            Some(&renderer_revision),
+        ) {
+            Ok(published_output) if published_output == staged_output => {
+                result.outputs.push(published_output);
+            }
+            Ok(_) => attach_post_process_error(
+                &mut result,
+                published_output_verification_error(
+                    "The final Word PDF bytes or verification receipt changed during atomic publication.",
+                ),
+            ),
+            Err(error) => attach_post_process_error(
+                &mut result,
+                published_output_verification_error(format!(
+                    "The final Word PDF identity could not be verified: {}",
+                    error.message()
+                )),
+            ),
+        },
+        Err(error) => attach_post_process_error(&mut result, error),
+    }
+    Ok(result)
+}
+
 fn published_output_verification_error(message: impl Into<String>) -> OfficeEngineError {
     OfficeEngineError::new(
         OfficeEngineErrorCode::CommitIndeterminate,
@@ -1808,10 +1982,37 @@ fn published_output_verification_error(message: impl Into<String>) -> OfficeEngi
     )
 }
 
+fn redact_private_office_error(
+    error: OfficeEngineError,
+    private_root: &Path,
+    replacement: &str,
+) -> OfficeEngineError {
+    let mut message = error
+        .message()
+        .replace(private_root.to_string_lossy().as_ref(), replacement);
+    #[cfg(target_vendor = "apple")]
+    {
+        let spelling = private_root.to_string_lossy();
+        let alias = if spelling.starts_with("/var/") || spelling.starts_with("/tmp/") {
+            Some(format!("/private{spelling}"))
+        } else {
+            spelling
+                .strip_prefix("/private")
+                .filter(|path| path.starts_with("/var/") || path.starts_with("/tmp/"))
+                .map(str::to_string)
+        };
+        if let Some(alias) = alias {
+            message = message.replace(&alias, replacement);
+        }
+    }
+    OfficeEngineError::new(error.code(), error.recovery(), message)
+}
+
 fn prepare_published_render_output(
     context: &ResolvedExecutionContext,
     prepared: &OfficePreparedExecution,
     staged_path: &Path,
+    renderer_revision: Option<&str>,
 ) -> Result<OfficePublishedOutput, OfficeEngineError> {
     let output = frozen_path(prepared, &OfficePathSlot::Output)
         .ok_or_else(|| precondition_error("Office render output precondition is missing."))?;
@@ -1864,14 +2065,26 @@ fn prepare_published_render_output(
         .ok_or_else(|| precondition_error("Office render output has an invalid content identity."))?
         .to_string();
     let mode = prepared.request.view_mode().map(OfficeViewMode::cli_name);
-    let (kind, mime_type, dimensions) = match mode {
+    let (kind, mime_type, dimensions, page_count) = match mode {
         Some("screenshot") => (
             OfficePublishedOutputKind::Image,
             "image/png",
             Some(png_dimensions(staged_path)?),
+            None,
         ),
-        Some("svg") => (OfficePublishedOutputKind::Image, "image/svg+xml", None),
-        Some("html") => (OfficePublishedOutputKind::Document, "text/html", None),
+        Some("svg") => (
+            OfficePublishedOutputKind::Image,
+            "image/svg+xml",
+            None,
+            None,
+        ),
+        Some("html") => (OfficePublishedOutputKind::Document, "text/html", None, None),
+        Some("pdf") => (
+            OfficePublishedOutputKind::Document,
+            "application/pdf",
+            None,
+            Some(validate_pdf_render_artifact(staged_path)?),
+        ),
         _ => {
             return Err(precondition_error(
                 "Office render output has an unsupported managed render mode.",
@@ -1880,6 +2093,20 @@ fn prepare_published_render_output(
     };
     let (width, height) =
         dimensions.map_or((None, None), |(width, height)| (Some(width), Some(height)));
+    let source_sha256 = if mode == Some("pdf") {
+        let document = frozen_path(prepared, &OfficePathSlot::Document)
+            .ok_or_else(|| precondition_error("Word PDF source identity is missing."))?;
+        Some(
+            document
+                .content_revision
+                .as_deref()
+                .and_then(|revision| revision.strip_prefix(FILE_REVISION_PREFIX))
+                .ok_or_else(|| precondition_error("Word PDF source identity is invalid."))?
+                .to_string(),
+        )
+    } else {
+        None
+    };
     let layout_coverage = if prepared.request.document_kind == OfficeDocumentKind::Presentation
         && mode == Some("screenshot")
     {
@@ -1913,6 +2140,9 @@ fn prepare_published_render_output(
         sha256,
         width,
         height,
+        page_count,
+        source_sha256,
+        renderer_revision: renderer_revision.map(str::to_string),
         page_selection: requested_page_selection(&prepared.request),
         layout_coverage,
     })
@@ -1974,6 +2204,104 @@ fn png_dimensions(path: &Path) -> Result<(u32, u32), OfficeEngineError> {
     Ok(dimensions)
 }
 
+fn validate_pdf_render_artifact(path: &Path) -> Result<u32, OfficeEngineError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| invalid_output("Managed Word PDF renderer did not produce a PDF file."))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_OFFICE_DOCUMENT_BYTES
+    {
+        return Err(invalid_output(format!(
+            "Managed Word PDF output must be a non-empty regular file no larger than {MAX_OFFICE_DOCUMENT_BYTES} bytes."
+        )));
+    }
+    let mut file = fs::File::open(path).map_err(|_| {
+        invalid_output("Managed Word PDF output cannot be opened for verification.")
+    })?;
+    let mut magic = [0_u8; 5];
+    file.read_exact(&mut magic)
+        .map_err(|_| invalid_output("Managed Word PDF output has a truncated header."))?;
+    if magic != *b"%PDF-" {
+        return Err(invalid_output(
+            "Managed Word PDF output does not have a PDF header.",
+        ));
+    }
+    let pdf = lopdf::Document::load(path)
+        .map_err(|_| invalid_output("Managed Word PDF output is not a parsable PDF document."))?;
+    if pdf.is_encrypted() || pdf.was_encrypted() || pdf.trailer.has(b"Encrypt") {
+        return Err(invalid_output(
+            "Managed Word PDF output must not be encrypted.",
+        ));
+    }
+    let page_count = u32::try_from(pdf.get_pages().len())
+        .map_err(|_| invalid_output("Managed Word PDF page count exceeds the Host limit."))?;
+    if page_count == 0 || page_count > MAX_OFFICE_PAGE_NUMBER {
+        return Err(invalid_output(format!(
+            "Managed Word PDF output must contain between 1 and {MAX_OFFICE_PAGE_NUMBER} physical pages."
+        )));
+    }
+    Ok(page_count)
+}
+
+fn private_directory_file_uri(path: &Path) -> Result<String, OfficeEngineError> {
+    let absolute = path.canonicalize().map_err(|error| {
+        io_error(
+            "resolve the private Word PDF renderer profile directory",
+            error,
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let encoded = percent_encode_file_uri_path(absolute.as_os_str().as_bytes(), false);
+        if !encoded.starts_with('/') {
+            return Err(precondition_error(
+                "Private Word PDF renderer profile path is not absolute.",
+            ));
+        }
+        return Ok(format!("file://{encoded}"));
+    }
+    #[cfg(windows)]
+    {
+        return windows_absolute_path_file_uri(&absolute.to_string_lossy());
+    }
+    #[allow(unreachable_code)]
+    Err(precondition_error(
+        "Managed Word PDF renderer profile URI is unsupported on this platform.",
+    ))
+}
+
+fn percent_encode_file_uri_path(bytes: &[u8], allow_colon: bool) -> String {
+    let mut encoded = String::with_capacity(bytes.len() + 8);
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else if allow_colon && byte == b':' {
+            encoded.push(':');
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+#[cfg(any(windows, test))]
+fn windows_absolute_path_file_uri(path: &str) -> Result<String, OfficeEngineError> {
+    let normalized = path.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'/' {
+        return Err(precondition_error(
+            "Private Word PDF renderer profile must be an absolute drive path.",
+        ));
+    }
+    Ok(format!(
+        "file:///{}",
+        percent_encode_file_uri_path(bytes, true)
+    ))
+}
+
 fn redact_private_render_paths<'a, const N: usize>(
     output: &mut ProcessOutput,
     replacements: [(&'a Path, &'a str); N],
@@ -2030,7 +2358,17 @@ fn process_result(
     output: ProcessOutput,
     started: Instant,
 ) -> OfficeExecutionResult {
-    let (error_code, error) = execution_error(&output);
+    process_result_for_process(engine, prepared, output, started, "OfficeCLI")
+}
+
+fn process_result_for_process(
+    engine: &OfficeCliEngine,
+    prepared: &OfficePreparedExecution,
+    output: ProcessOutput,
+    started: Instant,
+    process_name: &str,
+) -> OfficeExecutionResult {
+    let (error_code, error) = execution_error_for_process(&output, process_name);
     OfficeExecutionResult {
         provider_id: OFFICECLI_PROVIDER_ID.to_string(),
         engine_revision: engine.engine_revision().to_string(),
@@ -2068,8 +2406,7 @@ fn mark_cancelled_before_commit(result: &mut OfficeExecutionResult) {
     result.cancelled = true;
     result.error_code = Some("office.cancelled".to_string());
     result.error = Some(
-        "OfficeCLI execution was cancelled after validation and before the atomic commit."
-            .to_string(),
+        "Office operation was cancelled after validation and before the atomic commit.".to_string(),
     );
 }
 
@@ -2218,9 +2555,9 @@ fn prepare_request(
             ));
         }
         let mode = request.view_mode().map(OfficeViewMode::cli_name);
-        if !matches!(mode, Some("html" | "screenshot" | "svg")) {
+        if !matches!(mode, Some("html" | "screenshot" | "svg" | "pdf")) {
             return Err(invalid_request(
-                "Office view output paths are supported only for html, screenshot, or svg modes.",
+                "Office view output paths are supported only for html, screenshot, svg, or managed Word PDF modes.",
             ));
         }
         paths.push(freeze_path(
@@ -2234,7 +2571,7 @@ fn prepare_request(
     } else if request.operation == OfficeOperation::View
         && matches!(
             request.view_mode().map(OfficeViewMode::cli_name),
-            Some("html" | "screenshot" | "svg")
+            Some("html" | "screenshot" | "svg" | "pdf")
         )
     {
         return Err(invalid_request(
@@ -2389,5 +2726,70 @@ mod page_range_limit_tests {
         ];
 
         assert_eq!(canonical_page_ranges(&ranges).unwrap(), "1-127,10000");
+    }
+}
+
+#[cfg(test)]
+mod word_pdf_uri_tests {
+    use super::*;
+    use lopdf::{dictionary, Document, Object};
+
+    fn write_pdf(path: &Path, page_count: u32) {
+        let mut document = Document::with_version("1.7");
+        let pages_id = document.new_object_id();
+        let page_ids = (0..page_count)
+            .map(|_| {
+                document.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                })
+            })
+            .collect::<Vec<_>>();
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+                "Count" => i64::from(page_count),
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        document.save(path).unwrap();
+    }
+
+    #[test]
+    fn windows_private_profile_uses_a_canonical_file_uri() {
+        assert_eq!(
+            windows_absolute_path_file_uri(r"C:\Program Data\Word QA\profile").unwrap(),
+            "file:///C:/Program%20Data/Word%20QA/profile"
+        );
+        assert!(windows_absolute_path_file_uri(r"relative\profile").is_err());
+    }
+
+    #[test]
+    fn pdf_validation_returns_the_physical_page_count_and_rejects_invalid_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let valid = directory.path().join("valid.pdf");
+        write_pdf(&valid, 3);
+        assert_eq!(validate_pdf_render_artifact(&valid).unwrap(), 3);
+
+        let empty = directory.path().join("empty.pdf");
+        write_pdf(&empty, 0);
+        assert_eq!(
+            validate_pdf_render_artifact(&empty).unwrap_err().code(),
+            OfficeEngineErrorCode::InvalidOutput
+        );
+
+        let invalid = directory.path().join("invalid.pdf");
+        fs::write(&invalid, b"not a pdf").unwrap();
+        assert_eq!(
+            validate_pdf_render_artifact(&invalid).unwrap_err().code(),
+            OfficeEngineErrorCode::InvalidOutput
+        );
     }
 }

@@ -1,5 +1,5 @@
 {
-  "contractVersion": 11,
+  "contractVersion": 12,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
@@ -25,7 +25,33 @@
         "sizeField": "sizeBytes",
         "selectionField": "pageSelection",
         "selectionSemantics": "requested_not_verified_coverage",
-        "pathInference": "forbidden"
+        "pathInference": "forbidden",
+        "finalVisualQaEvidence": "forbidden"
+      },
+      "pdfQaOutput": {
+        "operation": "render",
+        "requestRequiredFields": [
+          "operation",
+          "filePath",
+          "outputPath",
+          "outputFormat",
+          "reason"
+        ],
+        "outputFormat": "pdf",
+        "outputPathExtension": ".pdf",
+        "outputPathScope": "taskOwnedTemporaryDirectory",
+        "oneCallPerFinalDocumentRevision": true,
+        "resultField": "outputs",
+        "pathField": "readPath",
+        "pageCountField": "outputs[].pageCount",
+        "requiredResultFields": ["outputs"],
+        "requiredPdfOutputFields": ["readPath", "pageCount"],
+        "pathInference": "forbidden",
+        "handoff": {
+          "skill": "pdf",
+          "instructionOnly": true,
+          "runtimeEnforced": false
+        }
       }
     },
     "script": {
@@ -133,6 +159,30 @@
           "rawOoxmlFallback": "onlyWithExplicitRequestAndFeatureSpecificVerifier"
         }
       },
+      "exceptionalFallback": {
+        "trigger": "unexpectedBuilderOrEditorLimitation",
+        "scope": ["create", "editExisting"],
+        "script": "taskScopedSelfAuthoredPython",
+        "executionTool": "run_command",
+        "runtimeProfileRequired": "documents",
+        "fullPython": true,
+        "inputBinding": "run_command.inputs",
+        "editPublishMode": "saveAsDistinctDocx",
+        "permissionBoundary": "unchanged",
+        "templateMaterializationReceipt": false,
+        "hostPrivateCandidateTransaction": false,
+        "scriptPublication": "temporarySaveReopenSanityCheckThenOsReplace",
+        "artifactObservationRequired": true,
+        "finalInspectionRequired": true,
+        "pdfVisualQaRequired": true,
+        "cleanupRequired": true,
+        "visualQaConversion": "managedOnly",
+        "forbiddenVisualQaConverters": [
+          "reportlabReconstruction",
+          "pageImageStitching",
+          "modelAuthoredDocxToPdf"
+        ]
+      },
       "entrypoints": [
         {
           "command": "python",
@@ -170,18 +220,30 @@
   },
   "validation": {
     "inspectFinal": true,
-    "pageCountSource": "notAvailableInCurrentSemanticSurface",
-    "authoritativePageCountAvailable": false,
+    "pageCountSource": "pdfSkillPdfinfoOnExactReturnedPdf",
+    "authoritativePageCountAvailable": true,
+    "conversionPageCountField": "outputs[].pageCount",
+    "conversionAndPdfinfoMustAgree": true,
     "packageValidation": "hostPrepublishPinnedOfficeCliSchemaGate",
     "modelNativeValidate": "forbidden",
     "visual": {
-      "coverage": "overviewPlusIndividuallyVerifiedKnownPages",
-      "renderModes": ["wholeDocumentOverview", "oneKnownPagePerRequest"],
+      "coverage": "everyPdfPageOneThroughAuthoritativeN",
+      "renderModes": ["managedDocxToPdfOnce", "pdfSkillPdftoppmAllPages"],
       "consumeEveryReturnedReadPath": true,
-      "requiredLedger": "numberedPagesActuallyRead",
-      "contactSheetSemantics": "overviewOnlyNotPageCountOrCoverageEvidence",
-      "pageRangeRequests": "notSupported",
-      "exhaustiveCoverageClaim": "forbiddenWithoutTrustedFinalPageCount"
+      "requiredLedger": "oneVerdictPerPageOneThroughN",
+      "contactSheetSemantics": "neverPageCountOrCompleteCoverageEvidence",
+      "pageRangeRequests": "pdfSkillOneThroughN",
+      "exhaustiveCoverageClaim": "allowedOnlyAfterEveryPageOneThroughNIsRead",
+      "handoffSkill": "pdf",
+      "handoffRuntimeEnforced": false,
+      "authoritativePageCountCommand": "pdfinfo",
+      "pageRasterizer": "pdftoppm",
+      "maxPagesPerRasterBatch": 32,
+      "fieldChecks": {
+        "PAGE": "visibleAndCorrectForDocumentNumberingRules",
+        "NUMPAGES": "visibleAndEqualsAuthoritativeN"
+      },
+      "modelAuthoredDocxToPdf": "forbidden"
     },
     "structuralChecks": {
       "requiredFor": [
@@ -194,6 +256,17 @@
       "renderingSufficient": false,
       "unavailableHandling": "discloseUnverifiedOrFailClosedWhenRequired"
     },
-    "evidenceInvalidation": "anyFinalDocumentEdit"
+    "evidenceInvalidation": {
+      "trigger": "anyFinalDocumentEdit",
+      "invalidates": ["temporaryPdf", "pageCount", "pageImages", "pageLedger"]
+    },
+    "temporaryArtifactCleanup": {
+      "afterCompleteLedger": true,
+      "deleteExact": ["builderOrEditorOrFallbackScript", "qaPdf", "workspacePageImages"],
+      "managedPdfPageImages": "hostRunWorkspaceCleanupAfterRead",
+      "preserve": ["finalDocx", "preExistingFiles"],
+      "qaPdfIsFinalArtifact": false,
+      "recursiveDelete": "forbidden"
+    }
   }
 }

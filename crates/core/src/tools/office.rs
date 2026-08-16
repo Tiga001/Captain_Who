@@ -10,12 +10,13 @@ use crate::office::{
     OfficePresentationMoveSlideIntent, OfficePresentationShapeIntent,
     OfficePresentationSlideIndexIntent, OfficePresentationSlideIntent,
     OfficePresentationTableIntent, OfficePresentationTextIntent, OfficeRenderIntent,
-    OfficeReplaceTextIntent, OfficeSemanticError, OfficeSemanticIntent, OfficeSemanticRequest,
-    OfficeSemanticStyle, OfficeSpreadsheetCellIntent, OfficeSpreadsheetChartIntent,
-    OfficeSpreadsheetConditionalFormatIntent, OfficeSpreadsheetFormulaIntent,
-    OfficeSpreadsheetFreezeIntent, OfficeSpreadsheetImageIntent, OfficeSpreadsheetMoveSheetIntent,
-    OfficeSpreadsheetRangeFormatIntent, OfficeSpreadsheetSheetIntent, OfficeSpreadsheetTableIntent,
-    OfficeTableIntent, OfficeViewport, DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_TIMEOUT_MS,
+    OfficeRenderOutputFormat, OfficeReplaceTextIntent, OfficeSemanticError, OfficeSemanticIntent,
+    OfficeSemanticRequest, OfficeSemanticStyle, OfficeSpreadsheetCellIntent,
+    OfficeSpreadsheetChartIntent, OfficeSpreadsheetConditionalFormatIntent,
+    OfficeSpreadsheetFormulaIntent, OfficeSpreadsheetFreezeIntent, OfficeSpreadsheetImageIntent,
+    OfficeSpreadsheetMoveSheetIntent, OfficeSpreadsheetRangeFormatIntent,
+    OfficeSpreadsheetSheetIntent, OfficeSpreadsheetTableIntent, OfficeTableIntent, OfficeViewport,
+    DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_TIMEOUT_MS,
 };
 use crate::protocol::{
     has_unsafe_agent_office_reason_character, normalize_agent_office_reason, AgentError,
@@ -208,6 +209,7 @@ fn project_office_execution(value: &Value) -> Option<Value> {
                         "sizeBytes",
                         "width",
                         "height",
+                        "pageCount",
                         "pageSelection",
                         "layoutCoverage",
                     ],
@@ -407,7 +409,7 @@ impl OfficeTool {
 
     fn description(&self) -> &'static str {
         match self.document_kind {
-            OfficeDocumentKind::Document => "Inspect and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
+            OfficeDocumentKind::Document => "Inspect and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. For exhaustive visual QA, render with outputFormat='pdf' and a .pdf outputPath; the Host returns authoritative outputs[].readPath and outputs[].pageCount. Omit outputFormat only for the legacy PNG preview route. Always include a concise user-facing reason. Never guess a path from argv, cwd, stdout, or a file search, and never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
             OfficeDocumentKind::Spreadsheet => "Inspect and render Excel-compatible .xlsx workbooks with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
             OfficeDocumentKind::Presentation => "Inspect, validate, and render PowerPoint-compatible .pptx presentations with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed MJS Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
         }
@@ -473,6 +475,7 @@ enum OfficeSemanticOperationWire {
     Render {
         file_path: String,
         output_path: String,
+        output_format: Option<OfficeRenderOutputFormat>,
         page_or_slide: Option<u32>,
         sheet_name: Option<String>,
         range: Option<String>,
@@ -777,6 +780,7 @@ impl OfficeSemanticOperationWire {
             Self::Render {
                 file_path,
                 output_path,
+                output_format,
                 page_or_slide,
                 sheet_name,
                 range,
@@ -788,6 +792,7 @@ impl OfficeSemanticOperationWire {
                 timeout_ms,
                 OfficeSemanticIntent::Render(OfficeRenderIntent {
                     output_path,
+                    output_format,
                     page_or_slide,
                     sheet_name,
                     range,
@@ -1801,7 +1806,7 @@ fn office_execution_value(result: OfficeExecutionResult) -> AgentResult<Value> {
     let message = result
         .error
         .clone()
-        .unwrap_or_else(|| format!("OfficeCLI exited with code {:?}.", result.exit_code));
+        .unwrap_or_else(|| format!("Office operation exited with code {:?}.", result.exit_code));
     let execution = serde_json::to_value(&result).unwrap_or_else(|_| {
         json!({
             "exitCode": result.exit_code,
@@ -1874,6 +1879,14 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
             properties.insert(
                 "blockIndex".to_string(),
                 positive_integer_schema("Optional one-based body block inspected by inspect."),
+            );
+            properties.insert(
+                "outputFormat".to_string(),
+                json!({
+                    "type": "string",
+                    "enum": ["pdf"],
+                    "description": "Optional render output format. Set to `pdf` with a .pdf outputPath to convert the complete frozen DOCX through the Host-managed renderer. Omit only for the legacy PNG preview route.",
+                }),
             );
         }
         OfficeDocumentKind::Spreadsheet => {
@@ -2330,6 +2343,10 @@ mod tests {
         let presentation = office_input_schema(OfficeDocumentKind::Presentation);
 
         assert!(document["properties"].get("blockIndex").is_some());
+        assert_eq!(
+            document["properties"]["outputFormat"]["enum"],
+            json!(["pdf"])
+        );
         assert!(document["properties"].get("sheetName").is_none());
         assert!(document["properties"].get("slideNumber").is_none());
 
@@ -2338,11 +2355,36 @@ mod tests {
         assert!(spreadsheet["properties"].get("formula").is_none());
         assert!(spreadsheet["properties"].get("blockIndex").is_none());
         assert!(spreadsheet["properties"].get("slideNumber").is_none());
+        assert!(spreadsheet["properties"].get("outputFormat").is_none());
 
         assert!(presentation["properties"].get("slideNumber").is_some());
         assert!(presentation["properties"].get("shapeType").is_none());
         assert!(presentation["properties"].get("sheetName").is_none());
         assert!(presentation["properties"].get("blockIndex").is_none());
+        assert!(presentation["properties"].get("outputFormat").is_none());
+    }
+
+    #[test]
+    fn model_word_render_accepts_the_explicit_pdf_contract() {
+        let request = parse_args(
+            json!({
+                "operation": "render",
+                "filePath": "report.docx",
+                "outputFormat": "pdf",
+                "outputPath": "qa/report.pdf",
+                "reason": "Convert the final Word revision for exhaustive visual QA"
+            }),
+            "office_document",
+        )
+        .unwrap()
+        .into_request()
+        .unwrap();
+        assert_eq!(request.document_kind, OfficeDocumentKind::Document);
+        assert_eq!(
+            request.view_mode(),
+            Some(crate::office::OfficeViewMode::Pdf)
+        );
+        assert_eq!(request.output_path.as_deref(), Some("qa/report.pdf"));
     }
 
     #[test]
@@ -2629,6 +2671,9 @@ mod tests {
                     "sha256": "private",
                     "width": 800,
                     "height": 600,
+                    "pageCount": 3,
+                    "sourceSha256": "source-private",
+                    "rendererRevision": "renderer-private",
                     "pageSelection": { "type": "all" },
                     "layoutCoverage": {
                         "requestedPages": [1],
@@ -2659,6 +2704,7 @@ mod tests {
         let model = model.result.as_ref().unwrap();
         assert_eq!(model["outputs"][0]["readPath"], "report.png");
         assert_eq!(model["outputs"][0]["width"], 800);
+        assert_eq!(model["outputs"][0]["pageCount"], 3);
         assert_eq!(
             model["outputs"][0]["layoutCoverage"]["requestedPages"],
             json!([1])
@@ -2673,6 +2719,8 @@ mod tests {
         assert!(model.get("cwd").is_none());
         assert!(model["outputs"][0].get("source").is_none());
         assert!(model["outputs"][0].get("sha256").is_none());
+        assert!(model["outputs"][0].get("sourceSha256").is_none());
+        assert!(model["outputs"][0].get("rendererRevision").is_none());
         assert_eq!(model["originalBytes"], 200000);
         assert_eq!(model["truncatedAtSource"], false);
         assert_eq!(model["stdoutPreviewTruncated"], true);

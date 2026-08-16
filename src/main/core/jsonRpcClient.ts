@@ -240,6 +240,7 @@ export class CoreJsonRpcClient {
     const configuredOfficeCliPath = process.env.MYCOPILOT_OFFICECLI_PATH
     const configuredComponentsDirectory = process.env.MYCOPILOT_OFFICE_COMPONENTS_DIR
     const configuredOfficeRendererDirectory = process.env.MYCOPILOT_OFFICE_RENDERER_DIR
+    const configuredWordPdfRendererDirectory = process.env.MYCOPILOT_WORD_PDF_RENDERER_DIR
     const configuredArtifactRuntimeDirectory = process.env.MYCOPILOT_ARTIFACT_RUNTIME_DIR
     const environment = { ...process.env }
 
@@ -278,6 +279,15 @@ export class CoreJsonRpcClient {
         'components',
         'office-renderer'
       )
+      if (process.platform === 'darwin') {
+        environment.MYCOPILOT_WORD_PDF_RENDERER_DIR = join(
+          process.resourcesPath,
+          'components',
+          'word-pdf-renderer'
+        )
+      } else {
+        deleteEnvironmentVariableCaseInsensitively(environment, 'MYCOPILOT_WORD_PDF_RENDERER_DIR')
+      }
       // Production never accepts an inherited configured-component override.
       // The Rust layer treats this application resource root as a packaged,
       // code-signed trust boundary and appends `artifact-runtime` itself.
@@ -304,6 +314,15 @@ export class CoreJsonRpcClient {
           '../..',
           '.cache',
           'office-renderer',
+          'current'
+        )
+      }
+      if (configuredWordPdfRendererDirectory === undefined && process.platform === 'darwin') {
+        environment.MYCOPILOT_WORD_PDF_RENDERER_DIR = join(
+          __dirname,
+          '../..',
+          '.cache',
+          'word-pdf-renderer',
           'current'
         )
       }
