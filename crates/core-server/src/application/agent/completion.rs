@@ -101,6 +101,39 @@ pub(super) fn terminal_done_event(output: &AgentChatOutput) -> AgentEvent {
     }
 }
 
+pub(super) fn model_request_interruption_public_message(
+    reason: AgentModelRequestInterruptionReason,
+) -> &'static str {
+    match reason {
+        AgentModelRequestInterruptionReason::ServiceConnectionFailed => "模型服务连接失败",
+        AgentModelRequestInterruptionReason::ServiceUnavailable => "模型服务暂时不可用",
+        AgentModelRequestInterruptionReason::AuthenticationFailed => "模型服务鉴权失败",
+        AgentModelRequestInterruptionReason::QuotaExhausted => "模型服务额度不足",
+        AgentModelRequestInterruptionReason::ContextLimitExceeded => "上下文超过模型限制",
+        AgentModelRequestInterruptionReason::RequestRejected => "模型请求被拒绝",
+        AgentModelRequestInterruptionReason::ResponseInvalid => "模型响应无效",
+        AgentModelRequestInterruptionReason::RequestFailed => "模型请求失败",
+    }
+}
+
+pub(super) fn model_request_interruption_event(
+    run_id: &str,
+    reason: AgentModelRequestInterruptionReason,
+) -> AgentEvent {
+    AgentEvent::Error {
+        run_id: Some(run_id.to_string()),
+        trace_sequence: None,
+        message: model_request_interruption_public_message(reason).to_string(),
+        recoverable: false,
+        code: Some("agent.model_request_interrupted".to_string()),
+        details: Some(serde_json::json!({
+            "type": "safe_model_request_interruption",
+            "reason": reason.as_str(),
+            "safeToContinue": true,
+        })),
+    }
+}
+
 pub(super) fn emit_terminal_events_after_persistence_for_turn(
     notifications: &CoreServerNotificationSender,
     gate: &AgentTerminalEventGate,

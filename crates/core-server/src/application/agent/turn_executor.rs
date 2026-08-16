@@ -708,6 +708,7 @@ impl AgentService {
                     (durable_terminal, persistence_committed)
                 }
                 Err(error) => {
+                    let model_request_interruption = error.model_request_interruption();
                     let usage = error.usage().cloned();
                     let code = error.code().map(ToString::to_string);
                     let details = error.details().cloned();
@@ -738,13 +739,23 @@ impl AgentService {
                                     "项目或会话正在移除，无法持久化 agent 失败终态。".to_string()
                                 );
                             }
-                            service.persist_assistant_error(
-                                &worker_conversation_id,
-                                &worker_assistant_message_id,
-                                &message,
-                                usage.clone(),
-                                &conversation_turn_trace,
-                            )
+                            if model_request_interruption.is_some() {
+                                service.persist_assistant_model_request_interruption(
+                                    &worker_conversation_id,
+                                    &worker_assistant_message_id,
+                                    &message,
+                                    usage.clone(),
+                                    &conversation_turn_trace,
+                                )
+                            } else {
+                                service.persist_assistant_error(
+                                    &worker_conversation_id,
+                                    &worker_assistant_message_id,
+                                    &message,
+                                    usage.clone(),
+                                    &conversation_turn_trace,
+                                )
+                            }
                         },
                         || restore_run_usage_state(&service, &worker_run_id, &previous_usage_state),
                     )
@@ -771,7 +782,11 @@ impl AgentService {
                                 &worker_run_id,
                                 &worker_conversation_id,
                                 &worker_assistant_message_id,
-                                &message,
+                                if model_request_interruption.is_some() {
+                                    ""
+                                } else {
+                                    &message
+                                },
                             );
                         } else if let Err(error) = &persisted {
                             terminal_event_gate.discard();
@@ -792,16 +807,22 @@ impl AgentService {
                                 .context
                                 .as_ref()
                                 .and_then(|context| context.collaboration_identity.as_ref());
-                            let terminal_error_event = terminal_event_gate
-                                .take_error_after_persistence()
-                                .unwrap_or_else(|| AgentEvent::Error {
-                                    run_id: Some(worker_run_id.clone()),
-                                    trace_sequence: None,
-                                    message: message.clone(),
-                                    recoverable: false,
-                                    code,
-                                    details,
-                                });
+                            let terminal_error_event =
+                                if let Some(reason) = model_request_interruption {
+                                    terminal_event_gate.discard();
+                                    model_request_interruption_event(&worker_run_id, reason)
+                                } else {
+                                    terminal_event_gate
+                                        .take_error_after_persistence()
+                                        .unwrap_or_else(|| AgentEvent::Error {
+                                            run_id: Some(worker_run_id.clone()),
+                                            trace_sequence: None,
+                                            message: message.clone(),
+                                            recoverable: false,
+                                            code,
+                                            details,
+                                        })
+                                };
                             emit_agent_event_notifications(
                                 &notifications,
                                 collaboration_identity,
@@ -818,7 +839,9 @@ impl AgentService {
                                     run_id: worker_run_id.clone(),
                                     success: false,
                                     status: Some(AgentRunStatus::Failed),
-                                    content: Some(message),
+                                    content: model_request_interruption
+                                        .is_none()
+                                        .then_some(message),
                                     usage: cumulative_usage,
                                     finish_reason: None,
                                     proposed_actions: Vec::new(),

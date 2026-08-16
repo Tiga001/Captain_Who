@@ -1,3 +1,4 @@
+import { AGENT_COMMAND_SESSION_SCHEMA_VERSION } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const rpcRequest = vi.hoisted(() => vi.fn())
@@ -12,7 +13,7 @@ import { CoreServer } from './coreServer'
 
 const sessionId = 'cmd_1234567890abcdef1234567890abcdef'
 const session = {
-  schemaVersion: 1,
+  schemaVersion: AGENT_COMMAND_SESSION_SCHEMA_VERSION,
   sessionId,
   conversationId: 'conversation-1',
   assistantMessageId: 'assistant-1',

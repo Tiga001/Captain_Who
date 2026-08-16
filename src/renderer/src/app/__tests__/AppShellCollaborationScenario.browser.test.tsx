@@ -518,8 +518,8 @@ describe('AppShell deterministic collaboration scenario', () => {
         rejectionScreen.container.querySelector('.agent-center__row[data-agent-id="agent-review"]')
       )
       .not.toBeNull()
-    expect(rejectionScreen.container.textContent).toContain('model-1')
-    expect(rejectionScreen.container.textContent).toContain('model-2')
+    expect(rejectionScreen.container.textContent).toContain('Model One')
+    expect(rejectionScreen.container.textContent).toContain('Model Two')
     await expect
       .poll(() => rejectionScreen.container.querySelector('.agent-center__observer'))
       .toBeNull()

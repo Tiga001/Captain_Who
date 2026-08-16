@@ -615,6 +615,53 @@ function currentStoredRun(overrides: Record<string, unknown> = {}) {
   }
 }
 
+it('persists and restores a safe model request interruption without provider diagnostics', async () => {
+  const message: ChatMessage = {
+    id: 'assistant-safe-interruption',
+    role: 'assistant',
+    content: '',
+    createdAt: 1,
+    status: 'sent',
+    agentRun: {
+      runId: 'run-safe-interruption',
+      status: 'failed',
+      startedAt: 1,
+      completedAt: 2,
+      toolDefinitions: [],
+      toolCalls: [],
+      toolResults: [],
+      approvals: [],
+      diffs: [],
+      timeline: [],
+      interruption: { reason: 'service_connection_failed' }
+    }
+  }
+
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+  await saveChatMessageState('conversation-safe-interruption', message)
+
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+  const persisted = JSON.parse(storedMessage.agentRunJson)
+  expect(persisted.interruption).toEqual({ reason: 'service_connection_failed' })
+  expect(JSON.stringify(persisted)).not.toContain('provider')
+
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(persisted, 'conversation-safe-interruption')
+  )
+  const restored = await loadConversation('conversation-safe-interruption')
+  expect(restored?.messages[0].agentRun?.interruption).toEqual({
+    reason: 'service_connection_failed'
+  })
+})
+
+it('rejects unknown persisted model request interruption reasons', () => {
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({ interruption: { reason: 'raw_provider_internal_failure' } })
+    )
+  ).toBeUndefined()
+})
+
 function storedConversation(agentRun: Record<string, unknown>, id = 'conversation-current') {
   return {
     id,

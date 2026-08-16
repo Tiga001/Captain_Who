@@ -907,6 +907,14 @@ export const zhCNTranslations = {
   'chat.usageCacheCreationInputTokens': '缓存写入',
 
   'agent.thinking': '正在思考',
+  'agent.interruption.serviceConnectionFailed': '模型服务连接失败',
+  'agent.interruption.serviceUnavailable': '模型服务暂时不可用',
+  'agent.interruption.authenticationFailed': '模型服务鉴权失败',
+  'agent.interruption.quotaExhausted': '模型服务额度不足',
+  'agent.interruption.contextLimitExceeded': '上下文超过模型限制',
+  'agent.interruption.requestRejected': '模型请求被拒绝',
+  'agent.interruption.responseInvalid': '模型响应无效',
+  'agent.interruption.requestFailed': '模型请求失败',
   'agent.llmRetry.rateLimited': '服务限流，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',
   'agent.llmRetry.temporarilyUnavailable':
     '模型服务暂时不可用，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',

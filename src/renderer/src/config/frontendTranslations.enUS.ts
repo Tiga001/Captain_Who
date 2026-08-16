@@ -953,6 +953,14 @@ export const enUSTranslations = {
   'chat.usageCacheCreationInputTokens': 'Cache write',
 
   'agent.thinking': 'Thinking',
+  'agent.interruption.serviceConnectionFailed': 'Model service connection failed',
+  'agent.interruption.serviceUnavailable': 'Model service is temporarily unavailable',
+  'agent.interruption.authenticationFailed': 'Model service authentication failed',
+  'agent.interruption.quotaExhausted': 'Model service quota exhausted',
+  'agent.interruption.contextLimitExceeded': 'Context exceeds the model limit',
+  'agent.interruption.requestRejected': 'Model request rejected',
+  'agent.interruption.responseInvalid': 'Invalid model response',
+  'agent.interruption.requestFailed': 'Model request failed',
   'agent.llmRetry.rateLimited':
     'Service rate limited; retrying automatically in {seconds}s ({attempt}/{maxAttempts})',
   'agent.llmRetry.temporarilyUnavailable':

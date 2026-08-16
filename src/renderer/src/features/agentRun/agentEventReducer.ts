@@ -13,6 +13,7 @@ import type {
 } from '@mycopilot/protocol'
 import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from '@mycopilot/protocol'
 import type {
+  ChatAgentInterruptionView,
   ChatAgentRunView,
   ChatAgentTimelineItem,
   ChatCommandOutputChunk,
@@ -67,6 +68,63 @@ import {
 
 const MAX_LIVE_COMMAND_OUTPUT_CHARS = 256 * 1024
 const MAX_MCP_REJECTION_REASON_CODE_POINTS = 512
+const SAFE_MODEL_REQUEST_INTERRUPTION_REASONS = new Set<ChatAgentInterruptionView['reason']>([
+  'service_connection_failed',
+  'service_unavailable',
+  'authentication_failed',
+  'quota_exhausted',
+  'context_limit_exceeded',
+  'request_rejected',
+  'response_invalid',
+  'request_failed'
+])
+
+function parseSafeModelRequestInterruption(details: unknown): ChatAgentInterruptionView | null {
+  if (typeof details !== 'object' || details === null || Array.isArray(details)) return null
+  const record = details as Record<string, unknown>
+  if (
+    record.type !== 'safe_model_request_interruption' ||
+    record.safeToContinue !== true ||
+    typeof record.reason !== 'string' ||
+    !SAFE_MODEL_REQUEST_INTERRUPTION_REASONS.has(
+      record.reason as ChatAgentInterruptionView['reason']
+    )
+  ) {
+    return null
+  }
+  return { reason: record.reason as ChatAgentInterruptionView['reason'] }
+}
+
+function committedAssistantContent(content: string): string {
+  return content === THINKING_PLACEHOLDER ? '' : content
+}
+
+function rollbackUncommittedModelStreams(message: ChatMessage): ChatMessage {
+  const run = message.agentRun
+  const checkpoints = Object.entries(run?.messageStreamCheckpoints ?? {})
+  if (!run || checkpoints.length === 0) {
+    return { ...message, content: committedAssistantContent(message.content) }
+  }
+
+  const earliestCheckpoint = checkpoints.reduce((earliest, current) =>
+    current[1].baseContentLength < earliest[1].baseContentLength ? current : earliest
+  )
+  const activeStreamIds = new Set(checkpoints.map(([streamId]) => streamId))
+  const currentContent = committedAssistantContent(message.content)
+  const restoredContent = currentContent.slice(0, earliestCheckpoint[1].baseContentLength)
+
+  return {
+    ...message,
+    content: earliestCheckpoint[1].baseWasThinking && !restoredContent ? '' : restoredContent,
+    agentRun: {
+      ...run,
+      messageStreamCheckpoints: {},
+      timeline: run.timeline.filter(
+        (item) => item.type !== 'message' || !item.streamId || !activeStreamIds.has(item.streamId)
+      )
+    }
+  }
+}
 
 function projectMcpRejectionReason(message: string | undefined): string | undefined {
   if (!message) return undefined
@@ -1723,6 +1781,30 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'error') {
+    const interruption = parseSafeModelRequestInterruption(agentEvent.details)
+    if (!agentEvent.recoverable && interruption) {
+      const rolledBackMessage = rollbackUncommittedModelStreams(message)
+      const rolledBackRun = rolledBackMessage.agentRun ?? currentRun
+      const nextRun = settleAgentRunToolActivities(
+        {
+          ...rolledBackRun,
+          status: 'failed',
+          completedAt: rolledBackRun.completedAt ?? Date.now(),
+          interruption,
+          error: undefined,
+          llmRetry: undefined
+        },
+        'failed'
+      )
+
+      return {
+        ...rolledBackMessage,
+        content: committedAssistantContent(rolledBackMessage.content),
+        status: 'sent',
+        agentRun: nextRun
+      }
+    }
+
     const nextStatus = agentEvent.recoverable ? currentRun.status : 'failed'
     const nextRun = settleAgentRunToolActivities(
       {
@@ -1761,9 +1843,15 @@ export function applyAgentEventToChatMessage(
     : currentRun.completedAt
   // A cancelled turn has no canonical final answer. All text emitted before cancellation remains
   // available in the timeline, but must not leak back out as an assistant answer when collapsed.
-  const terminalEventContent = nextStatus === 'cancelled' ? undefined : agentEvent.content
+  const safelyInterrupted = nextStatus === 'failed' && currentRun.interruption !== undefined
+  const terminalEventContent =
+    nextStatus === 'cancelled' || safelyInterrupted ? undefined : agentEvent.content
   const finalContent =
-    nextStatus === 'cancelled' ? '' : getFinalMessageContent(message.content, terminalEventContent)
+    nextStatus === 'cancelled'
+      ? ''
+      : safelyInterrupted
+        ? committedAssistantContent(message.content)
+        : getFinalMessageContent(message.content, terminalEventContent)
   const finalResponseAt =
     finalContent && !currentRun.firstResponseAt
       ? (completedAt ?? Date.now())
@@ -1808,7 +1896,7 @@ export function applyAgentEventToChatMessage(
     status:
       nextStatus === 'waiting_for_approval'
         ? 'pending'
-        : nextStatus === 'cancelled' || agentEvent.success
+        : nextStatus === 'cancelled' || agentEvent.success || safelyInterrupted
           ? 'sent'
           : 'error',
     agentRun: nextRun
@@ -1818,8 +1906,9 @@ export function applyAgentEventToChatMessage(
 function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOutput): ChatMessage {
   const messageWithEvents = output.events.reduce(applyAgentEventToChatMessage, message)
   const currentRun = ensureAgentRun(messageWithEvents.agentRun, output.runId, output.status)
+  const safelyInterrupted = output.status === 'failed' && currentRun.interruption !== undefined
   const outputFinalContent =
-    output.status === 'cancelled'
+    output.status === 'cancelled' || safelyInterrupted
       ? undefined
       : output.status === 'completed' || output.content
         ? output.content
@@ -1827,7 +1916,9 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
   const nextContent =
     output.status === 'cancelled'
       ? ''
-      : getFinalMessageContent(messageWithEvents.content, outputFinalContent)
+      : safelyInterrupted
+        ? committedAssistantContent(messageWithEvents.content)
+        : getFinalMessageContent(messageWithEvents.content, outputFinalContent)
   const outputCompletedAt = isFinishedAgentOutputStatus(output.status)
     ? (currentRun.completedAt ?? Date.now())
     : currentRun.completedAt
@@ -1870,7 +1961,7 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
   return {
     ...messageWithEvents,
     content: nextContent,
-    status: getChatMessageStatusFromAgentStatus(output.status),
+    status: safelyInterrupted ? 'sent' : getChatMessageStatusFromAgentStatus(output.status),
     agentRun: nextRun
   }
 }

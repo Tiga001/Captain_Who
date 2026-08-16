@@ -3218,6 +3218,7 @@ impl AgentService {
             }
             Err(error) => {
                 terminal_event_gate.discard();
+                let model_request_interruption = error.model_request_interruption();
                 let usage = error.usage().cloned();
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
@@ -3302,14 +3303,25 @@ impl AgentService {
                             };
                             terminal_projection.and_then(
                                 |(conversation_turn_trace, model_context_items)| {
-                                    self.persist_assistant_error_with_model_context(
-                                        conversation_id,
-                                        assistant_message_id,
-                                        &message,
-                                        usage.clone(),
-                                        &conversation_turn_trace,
-                                        model_context_items.as_deref(),
-                                    )
+                                    if model_request_interruption.is_some() {
+                                        self.persist_assistant_model_request_interruption_with_model_context(
+                                            conversation_id,
+                                            assistant_message_id,
+                                            &message,
+                                            usage.clone(),
+                                            &conversation_turn_trace,
+                                            model_context_items.as_deref(),
+                                        )
+                                    } else {
+                                        self.persist_assistant_error_with_model_context(
+                                            conversation_id,
+                                            assistant_message_id,
+                                            &message,
+                                            usage.clone(),
+                                            &conversation_turn_trace,
+                                            model_context_items.as_deref(),
+                                        )
+                                    }
                                 },
                             )
                         } else {
@@ -3385,22 +3397,31 @@ impl AgentService {
                             &run_id,
                             conversation_id,
                             assistant_message_id,
-                            &message,
+                            if model_request_interruption.is_some() {
+                                ""
+                            } else {
+                                &message
+                            },
                         );
                     }
-                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                        run_id: Some(run_id.clone()),
-                        trace_sequence: None,
-                        message: message.clone(),
-                        recoverable: false,
-                        code,
-                        details,
-                    }));
+                    let terminal_error_event = if let Some(reason) = model_request_interruption {
+                        model_request_interruption_event(&run_id, reason)
+                    } else {
+                        AgentEvent::Error {
+                            run_id: Some(run_id.clone()),
+                            trace_sequence: None,
+                            message: message.clone(),
+                            recoverable: false,
+                            code,
+                            details,
+                        }
+                    };
+                    let _ = notifications.send(agent_event_notification(terminal_error_event));
                     let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                         run_id: run_id.clone(),
                         success: false,
                         status: Some(AgentRunStatus::Failed),
-                        content: Some(message),
+                        content: model_request_interruption.is_none().then_some(message),
                         usage: cumulative_usage,
                         finish_reason: None,
                         proposed_actions: Vec::new(),

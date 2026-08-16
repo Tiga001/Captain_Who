@@ -1121,6 +1121,71 @@ impl AgentService {
         conversation_turn_trace: &ConversationTurnTrace,
         model_context_items: Option<&[ConversationModelContextItem]>,
     ) -> Result<Option<AgentUsage>, String> {
+        self.persist_assistant_failure_projection(
+            conversation_id,
+            assistant_message_id,
+            message,
+            Some("error"),
+            message,
+            usage,
+            conversation_turn_trace,
+            model_context_items,
+        )
+    }
+
+    pub(super) fn persist_assistant_model_request_interruption(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        diagnostic_message: &str,
+        usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
+    ) -> Result<Option<AgentUsage>, String> {
+        self.persist_assistant_model_request_interruption_with_model_context(
+            conversation_id,
+            assistant_message_id,
+            diagnostic_message,
+            usage,
+            conversation_turn_trace,
+            None,
+        )
+    }
+
+    pub(super) fn persist_assistant_model_request_interruption_with_model_context(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        diagnostic_message: &str,
+        usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+    ) -> Result<Option<AgentUsage>, String> {
+        // The failed sampling attempt never committed a model turn. Keep its diagnostic in usage
+        // and trace audit data, while settling the visible assistant message as an empty prefix.
+        self.persist_assistant_failure_projection(
+            conversation_id,
+            assistant_message_id,
+            "",
+            Some("sent"),
+            diagnostic_message,
+            usage,
+            conversation_turn_trace,
+            model_context_items,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_assistant_failure_projection(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        persisted_content: &str,
+        message_status: Option<&str>,
+        diagnostic_message: &str,
+        usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+    ) -> Result<Option<AgentUsage>, String> {
         let run_id = self.find_usage_run_id(conversation_id, assistant_message_id);
         let fallback_usage = usage.clone();
         let completed_at = now_ms();
@@ -1129,15 +1194,15 @@ impl AgentService {
                 run_id,
                 AgentRunStatus::Failed,
                 usage,
-                Some(message.to_string()),
+                Some(diagnostic_message.to_string()),
             )
         });
         self.storage
             .finalize_chat_message_with_conversation_trace_model_context_and_usage(
                 conversation_id,
                 assistant_message_id,
-                message,
-                Some("error"),
+                persisted_content,
+                message_status,
                 run_status_label(AgentRunStatus::Failed),
                 conversation_turn_trace,
                 model_context_items,

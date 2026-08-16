@@ -103,6 +103,116 @@ fn persists_usage_for_failed_runs() {
     assert_eq!(summary.total_tokens, Some(28));
 }
 
+#[test]
+fn model_request_interruption_settles_visible_message_without_losing_failed_audit() {
+    const CONVERSATION_ID: &str = "conversation-model-interruption";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-model-interruption";
+    const RUN_ID: &str = "run-model-interruption";
+    const DIAGNOSTIC: &str = "provider transport diagnostic";
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Model interruption".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: "provisional failed sampling".to_string(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .append_in_progress_conversation_turn_trace(
+            &mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+                RUN_ID,
+                CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+            ),
+            1,
+            1,
+        )
+        .unwrap();
+
+    let service = AgentService::new(Arc::clone(&storage));
+    service.register_usage_context(
+        RUN_ID,
+        AgentRunUsageContext {
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+            run_id: RUN_ID.to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    let usage = AgentUsage {
+        input_tokens: Some(11),
+        output_tokens: Some(2),
+        output_thinking_tokens: None,
+        total_tokens: Some(13),
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: Some(1),
+    };
+    let trace = failed_conversation_trace_without_items(
+        RUN_ID,
+        CONVERSATION_ID,
+        ASSISTANT_MESSAGE_ID,
+        DIAGNOSTIC,
+    );
+
+    service
+        .persist_assistant_model_request_interruption(
+            CONVERSATION_ID,
+            ASSISTANT_MESSAGE_ID,
+            DIAGNOSTIC,
+            Some(usage),
+            &trace,
+        )
+        .unwrap();
+
+    let conversation = storage.load_conversation(CONVERSATION_ID).unwrap().unwrap();
+    let message = &conversation.messages[0];
+    assert_eq!(message.content, "");
+    assert_eq!(message.status.as_deref(), Some("sent"));
+
+    let persisted_trace = storage
+        .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert_eq!(persisted_trace.terminal_error.as_deref(), Some(DIAGNOSTIC));
+
+    let persisted_usage = storage
+        .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted_usage.status.as_deref(), Some("failed"));
+    assert_eq!(persisted_usage.error.as_deref(), Some(DIAGNOSTIC));
+}
+
 #[tokio::test]
 async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
     const CONVERSATION_ID: &str = "conversation-terminal-retry";

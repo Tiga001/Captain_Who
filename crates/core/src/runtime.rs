@@ -1332,7 +1332,9 @@ impl AgentRuntime {
                                 empty_model_action_repair_pending = true;
                                 continue 'agent_loop;
                             }
-                            return Err(error.with_usage(usage));
+                            return Err(error
+                                .with_usage(usage)
+                                .with_model_request_interruption());
                         }
                     };
                     empty_model_action_repair_pending = false;

@@ -63,6 +63,24 @@
   font-weight: var(--mc-font-weight-strong);
 }
 
+.agent-run__interruption {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  gap: 7px;
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-chat-activity-detail);
+  line-height: var(--mc-line-height-normal);
+}
+
+.agent-run__interruption svg {
+  flex: 0 0 auto;
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
 .agent-run__notice {
   display: inline-flex;
   align-items: flex-start;

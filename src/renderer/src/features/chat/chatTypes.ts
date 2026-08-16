@@ -187,6 +187,20 @@ export type ChatAgentTimelineItem = (
   traceSequence?: number
 }
 
+export type ChatAgentInterruptionReason =
+  | 'service_connection_failed'
+  | 'service_unavailable'
+  | 'authentication_failed'
+  | 'quota_exhausted'
+  | 'context_limit_exceeded'
+  | 'request_rejected'
+  | 'response_invalid'
+  | 'request_failed'
+
+export interface ChatAgentInterruptionView {
+  reason: ChatAgentInterruptionReason
+}
+
 export interface ChatAgentRunView {
   runId: string | null
   status: AgentRunStatus | 'starting'
@@ -233,6 +247,8 @@ export interface ChatAgentRunView {
   }
   timeline: ChatAgentTimelineItem[]
   state?: AgentStateSnapshot
+  /** Safe terminal reason for a failed provisional model request; excludes diagnostics. */
+  interruption?: ChatAgentInterruptionView
   error?: string
   usage?: AgentUsage
   finishReason?: string

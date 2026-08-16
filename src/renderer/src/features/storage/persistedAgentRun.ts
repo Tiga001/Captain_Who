@@ -77,6 +77,18 @@ const TERMINAL_COMMAND_STATUSES = new Set<ChatCommandSessionView['status']>([
   'failed',
   'outcome_unknown'
 ])
+const AGENT_INTERRUPTION_REASONS = new Set<NonNullable<ChatAgentRunView['interruption']>['reason']>(
+  [
+    'service_connection_failed',
+    'service_unavailable',
+    'authentication_failed',
+    'quota_exhausted',
+    'context_limit_exceeded',
+    'request_rejected',
+    'response_invalid',
+    'request_failed'
+  ]
+)
 
 const STORED_RUN_KEYS = [
   'runId',
@@ -101,6 +113,7 @@ const STORED_RUN_KEYS = [
   'messageStreamCheckpoints',
   'timeline',
   'state',
+  'interruption',
   'error',
   'usage',
   'finishReason',
@@ -131,6 +144,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function isAgentInterruption(
+  value: unknown
+): value is NonNullable<ChatAgentRunView['interruption']> {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ['reason']) &&
+    typeof value.reason === 'string' &&
+    AGENT_INTERRUPTION_REASONS.has(
+      value.reason as NonNullable<ChatAgentRunView['interruption']>['reason']
+    )
+  )
 }
 
 function hasExactKeys(
@@ -1672,6 +1698,7 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     return undefined
   }
   if (hasOwn(value, 'state') && !isState(value.state)) return undefined
+  if (hasOwn(value, 'interruption') && !isAgentInterruption(value.interruption)) return undefined
   if (hasOwn(value, 'usage') && !isUsage(value.usage)) return undefined
   if (!isOptionalBoundedString(value, 'error', 128 * 1024, true)) return undefined
   if (!isOptionalBoundedString(value, 'finishReason', 1024, true)) return undefined

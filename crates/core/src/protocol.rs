@@ -2966,6 +2966,36 @@ pub struct AgentError {
     details: Option<Box<Value>>,
     conversation_turn_trace: Option<Box<ConversationTurnTrace>>,
     model_request_observation: Option<Box<crate::ModelRequestObservation>>,
+    // Set only at the runtime's final model-request boundary. This proves the failed work was
+    // provisional model sampling, so the Host may safely keep the committed trace prefix.
+    model_request_interruption: Option<AgentModelRequestInterruptionReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentModelRequestInterruptionReason {
+    ServiceConnectionFailed,
+    ServiceUnavailable,
+    AuthenticationFailed,
+    QuotaExhausted,
+    ContextLimitExceeded,
+    RequestRejected,
+    ResponseInvalid,
+    RequestFailed,
+}
+
+impl AgentModelRequestInterruptionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ServiceConnectionFailed => "service_connection_failed",
+            Self::ServiceUnavailable => "service_unavailable",
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::QuotaExhausted => "quota_exhausted",
+            Self::ContextLimitExceeded => "context_limit_exceeded",
+            Self::RequestRejected => "request_rejected",
+            Self::ResponseInvalid => "response_invalid",
+            Self::RequestFailed => "request_failed",
+        }
+    }
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -2980,6 +3010,7 @@ impl AgentError {
             details: None,
             conversation_turn_trace: None,
             model_request_observation: None,
+            model_request_interruption: None,
         }
     }
 
@@ -2992,6 +3023,7 @@ impl AgentError {
             details: Some(Box::new(details)),
             conversation_turn_trace: None,
             model_request_observation: None,
+            model_request_interruption: None,
         }
     }
 
@@ -3004,6 +3036,7 @@ impl AgentError {
             details: None,
             conversation_turn_trace: None,
             model_request_observation: None,
+            model_request_interruption: None,
         }
     }
 
@@ -3031,6 +3064,10 @@ impl AgentError {
         self.model_request_observation.as_deref()
     }
 
+    pub fn model_request_interruption(&self) -> Option<AgentModelRequestInterruptionReason> {
+        self.model_request_interruption
+    }
+
     pub fn with_usage(mut self, usage: Option<AgentUsage>) -> Self {
         self.usage = usage.map(Box::new);
         self
@@ -3047,6 +3084,39 @@ impl AgentError {
     ) -> Self {
         self.model_request_observation = Some(Box::new(observation));
         self
+    }
+
+    pub fn with_model_request_interruption(mut self) -> Self {
+        self.model_request_interruption = Some(classify_model_request_interruption(&self));
+        self
+    }
+}
+
+fn classify_model_request_interruption(error: &AgentError) -> AgentModelRequestInterruptionReason {
+    if error.code() == Some("agent.llm_provider_failure") {
+        return match error
+            .details()
+            .and_then(|details| details.get("category"))
+            .and_then(Value::as_str)
+        {
+            Some("network") => AgentModelRequestInterruptionReason::ServiceConnectionFailed,
+            Some("rate_limited" | "overloaded") => {
+                AgentModelRequestInterruptionReason::ServiceUnavailable
+            }
+            Some("authentication") => AgentModelRequestInterruptionReason::AuthenticationFailed,
+            Some("quota_exhausted") => AgentModelRequestInterruptionReason::QuotaExhausted,
+            Some("context_too_large") => AgentModelRequestInterruptionReason::ContextLimitExceeded,
+            Some("invalid_request") => AgentModelRequestInterruptionReason::RequestRejected,
+            _ => AgentModelRequestInterruptionReason::RequestFailed,
+        };
+    }
+
+    if error.code().is_some_and(|code| {
+        code.contains("response") || code.contains("stream") || code.contains("decode")
+    }) {
+        AgentModelRequestInterruptionReason::ResponseInvalid
+    } else {
+        AgentModelRequestInterruptionReason::RequestFailed
     }
 }
 
@@ -3078,6 +3148,40 @@ mod tests {
         ImageArtifactFormat, ImageGenerationExecutionFailureCode, ImageGenerationExecutionPhase,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn model_request_interruption_marker_survives_error_enrichment() {
+        let error = AgentError::structured(
+            "agent.llm_provider_failure",
+            "模型服务网络请求失败。",
+            json!({
+                "type": "llm_provider_failure",
+                "category": "network",
+            }),
+        )
+        .with_model_request_interruption()
+        .with_usage(Some(AgentUsage {
+            input_tokens: Some(7),
+            output_tokens: None,
+            output_thinking_tokens: None,
+            total_tokens: Some(7),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: Some(1),
+        }))
+        .with_conversation_turn_trace(completed_conversation_trace_without_items(
+            "run-1",
+            "conversation-1",
+            "assistant-1",
+        ));
+
+        assert_eq!(
+            error.model_request_interruption(),
+            Some(AgentModelRequestInterruptionReason::ServiceConnectionFailed)
+        );
+        assert_eq!(error.usage().and_then(|usage| usage.total_tokens), Some(7));
+        assert!(error.conversation_turn_trace().is_some());
+    }
 
     #[test]
     fn provider_continuation_ref_is_versioned_canonical_and_debug_redacted() {

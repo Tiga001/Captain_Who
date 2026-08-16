@@ -8,7 +8,8 @@ import {
   LoaderCircle,
   Pencil,
   Split,
-  Star
+  Star,
+  WifiOff
 } from 'lucide-react'
 import type { AgentProposedAction, AgentUsage, GitTurnDiffSummary } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -84,6 +85,29 @@ import {
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
+
+function interruptionTranslationKey(
+  reason: NonNullable<ChatAgentRunView['interruption']>['reason']
+) {
+  switch (reason) {
+    case 'service_connection_failed':
+      return 'agent.interruption.serviceConnectionFailed' as const
+    case 'service_unavailable':
+      return 'agent.interruption.serviceUnavailable' as const
+    case 'authentication_failed':
+      return 'agent.interruption.authenticationFailed' as const
+    case 'quota_exhausted':
+      return 'agent.interruption.quotaExhausted' as const
+    case 'context_limit_exceeded':
+      return 'agent.interruption.contextLimitExceeded' as const
+    case 'request_rejected':
+      return 'agent.interruption.requestRejected' as const
+    case 'response_invalid':
+      return 'agent.interruption.responseInvalid' as const
+    case 'request_failed':
+      return 'agent.interruption.requestFailed' as const
+  }
+}
 
 interface ChatMessageItemProps {
   agentLabelsById?: Readonly<Record<string, string>>
@@ -915,6 +939,12 @@ function AgentRunView({
       )}
       {isRunSettled(run) && (
         <AssistantSources key={`assistant-sources:${run.runId}`} sources={webSearchSources} />
+      )}
+      {run.interruption && (
+        <div className="agent-run__interruption" role="status">
+          <WifiOff aria-hidden="true" />
+          <span>{t(interruptionTranslationKey(run.interruption.reason))}</span>
+        </div>
       )}
       {showTokenLimitNotice && (
         <div className="agent-run__notice" role="status">
