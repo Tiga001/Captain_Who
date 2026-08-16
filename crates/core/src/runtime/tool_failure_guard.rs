@@ -65,6 +65,9 @@ impl ToolFailureGuard {
                     if pending_id != call_id || pending_tool != tool {
                         continue;
                     }
+                    if bypass_cross_response_failure_guard(tool) {
+                        continue;
+                    }
                     let fingerprint = semantic_tool_call_fingerprint(tool, operation);
                     let error_code = observation_error_code(observation);
                     if *success || matches!(status, ConversationTraceToolResultStatus::Succeeded) {
@@ -97,6 +100,9 @@ impl ToolFailureGuard {
     /// A block is counted before returning. The second local block asks the runtime to terminate
     /// after the synthetic ToolResult has paired the model's ToolCall in context and audit.
     pub(super) fn before_call(&mut self, call: &AgentToolCall) -> Option<ToolFailureGuardBlock> {
+        if bypass_cross_response_failure_guard(&call.tool) {
+            return None;
+        }
         let fingerprint = semantic_tool_call_fingerprint(&call.tool, &call.args);
         let record = self.failures.get_mut(&fingerprint)?;
         if record.executed_failures < MAX_EXECUTED_FAILURES {
@@ -141,6 +147,9 @@ impl ToolFailureGuard {
     }
 
     pub(super) fn observe(&mut self, call: &AgentToolCall, result: &AgentToolResult) {
+        if bypass_cross_response_failure_guard(&call.tool) {
+            return;
+        }
         let fingerprint = semantic_tool_call_fingerprint(&call.tool, &call.args);
         if result.ok {
             self.failures.remove(&fingerprint);
@@ -173,6 +182,10 @@ impl ToolFailureGuard {
             }),
         )
     }
+}
+
+fn bypass_cross_response_failure_guard(tool: &str) -> bool {
+    tool == "run_command"
 }
 
 fn observation_error_code(observation: &Value) -> Option<&str> {
@@ -298,9 +311,13 @@ mod tests {
     use crate::protocol::AgentApprovalStatus;
 
     fn call(id: &str, args: Value) -> AgentToolCall {
+        call_for_tool(id, "office_document", args)
+    }
+
+    fn call_for_tool(id: &str, tool: &str, args: Value) -> AgentToolCall {
         AgentToolCall {
             id: id.to_string(),
-            tool: "office_document".to_string(),
+            tool: tool.to_string(),
             args,
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
@@ -428,6 +445,23 @@ mod tests {
     }
 
     #[test]
+    fn run_command_failures_are_not_recorded_or_blocked() {
+        let mut guard = ToolFailureGuard::default();
+        let command = call_for_tool(
+            "call-1",
+            "run_command",
+            json!({"command": "python build.py --output report.docx"}),
+        );
+
+        for _ in 0..4 {
+            assert!(guard.before_call(&command).is_none());
+            guard.observe(&command, &failure(&command, "office.nonzero_exit"));
+        }
+
+        assert!(guard.failures.is_empty());
+    }
+
+    #[test]
     fn a_success_resets_the_failure_budget() {
         let mut guard = ToolFailureGuard::default();
         let operation = call("call-1", json!({"operation": "validate"}));
@@ -502,6 +536,68 @@ mod tests {
                 local_blocks: 0,
             })
         );
+    }
+
+    #[test]
+    fn durable_trace_ignores_run_command_failures() {
+        let args = json!({"command": "python build.py --output report.docx"});
+        let snapshot = ConversationTraceSnapshot {
+            items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "call-1".to_string(),
+                    tool: "run_command".to_string(),
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "run_command".to_string(),
+                    },
+                    operation: args.clone(),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 1,
+                    call_id: "call-1".to_string(),
+                    tool: "run_command".to_string(),
+                    status: ConversationTraceToolResultStatus::Failed,
+                    success: false,
+                    observation: json!({"errorCode": "office.nonzero_exit"}),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: Some("failed".to_string()),
+                    truncated: false,
+                    archive: Default::default(),
+                },
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 2,
+                    call_id: "call-2".to_string(),
+                    tool: "run_command".to_string(),
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "run_command".to_string(),
+                    },
+                    operation: args,
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 3,
+                    call_id: "call-2".to_string(),
+                    tool: "run_command".to_string(),
+                    status: ConversationTraceToolResultStatus::Failed,
+                    success: false,
+                    observation: json!({"errorCode": "office.nonzero_exit"}),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: Some("failed".to_string()),
+                    truncated: false,
+                    archive: Default::default(),
+                },
+            ],
+            model_context_items: Vec::new(),
+            next_sequence: 4,
+            truncated: false,
+        };
+
+        let guard = ToolFailureGuard::from_trace(&snapshot);
+
+        assert!(guard.failures.is_empty());
     }
 
     #[test]

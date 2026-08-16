@@ -556,6 +556,9 @@ Dispatcher、RPC 或 UI。只有 Host 注入可信 `AgentCollaborationCaller` �
   `agent_type` 是 machine key，`model` 是 `model_config_id`，两者都是精确匹配。
 - `send_message(target, message)` 只持久入队；`followup_task(target, message)` 额外保证最终执行机会，
   但永不给正在运行的目标开第二个 Turn。
+- 模型侧职责比底层同树消息授权更窄：父/祖先向后代指派、继续、修改或要求返工必须使用
+  `followup_task`；`send_message` 用于 child 向 parent 汇报进度、求助或补充信息。普通 message
+  在存储层仍可按同树权限定向，但 `message queued` 只证明邮箱入队，不证明目标已启动或正在执行。
 - `wait_agent(targets, timeout_ms?)` 是 first-ready，0 表示立即快照，默认 30 s，最长 300 s，最多
   32 个目标；它复用第 3 轮 durable receipt，不重读目标 inbox。
 - `list_agents()` 只返回授权树的简洁投影；`interrupt_agent(target)` 只中断当前 Turn，不删节点、

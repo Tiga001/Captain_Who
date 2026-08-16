@@ -144,12 +144,12 @@ impl AgentTool for AgentCollaborationTool {
             ),
             AgentCollaborationToolKind::SendMessage => (
                 "send_message",
-                "Reliably enqueue a message to an Agent in this tree. This never starts a Turn and never waits for a reply.",
+                "Use this mailbox-only tool for a child Agent to report progress, request help, or send supplemental information to its parent. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working; parent-to-descendant work must use followup_task.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::FollowupTask => (
                 "followup_task",
-                "Reliably enqueue follow-up work for a descendant and guarantee a future execution opportunity without starting a concurrent Turn.",
+                "Parent/ancestor-to-descendant task assignment. Use this to start, continue, revise, or repeat work on an existing descendant, including one whose latest task is completed, failed, interrupted, or idle. It reliably enqueues the follow-up and guarantees a future execution opportunity without starting a concurrent Turn. Use send_message only for child-to-parent mailbox reports, not task assignment.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::Wait => (
@@ -528,6 +528,32 @@ mod tests {
         assert!(wait
             .action(json!({"targets":["agent-a"],"timeout_ms":300001}))
             .is_err());
+    }
+
+    #[test]
+    fn message_and_followup_descriptions_separate_reporting_from_task_assignment() {
+        let send =
+            AgentCollaborationTool::new(AgentCollaborationToolKind::SendMessage).definition();
+        assert!(send
+            .description
+            .contains("for a child Agent to report progress"));
+        assert!(send.description.contains("never creates a Wake or Turn"));
+        assert!(send
+            .description
+            .contains("queued message is not evidence that the target is working"));
+        assert!(send.description.contains("must use followup_task"));
+
+        let followup =
+            AgentCollaborationTool::new(AgentCollaborationToolKind::FollowupTask).definition();
+        assert!(followup
+            .description
+            .contains("Parent/ancestor-to-descendant task assignment"));
+        assert!(followup
+            .description
+            .contains("guarantees a future execution opportunity"));
+        assert!(followup
+            .description
+            .contains("Use send_message only for child-to-parent mailbox reports"));
     }
 
     #[test]
