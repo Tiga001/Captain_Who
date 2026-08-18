@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "lockfile": {
     "path": "pnpm-lock.yaml",
-    "sha256": "c3cf4c30787cdd9db274e415334dc6b97a90bbf6d46483d6ee2028967744afe3"
+    "sha256": "8e91bda1f357b4bdffe8f90b8146264223435383183f08f66da4e9a1f3da3038"
   },
   "importer": {
     "path": "packages/artifact-runtime-node/package.json",
@@ -13651,7 +13651,7 @@
       "name": "pptxgenjs",
       "version": "4.0.1",
       "integrity": "sha512-TeJISr8wouAuXw4C1F/mC33xbZs/FuEG6nH9FG1Zj+nuPcGMP5YRHl6X+j3HSUnS1f3at6k75ZZXPMZlA5Lj9A==",
-      "contentRevision": "sha256:fc253267845abd4f6788fcc3238ecf4195ee1735565baea35f637cf9470bdca7",
+      "contentRevision": "sha256:3a61d1221adc701beaded5ae99a8c97ee9677c57884aeb38819bb6f1de5388c0",
       "dependencies": [
         {
           "name": "@types/node",
@@ -13698,14 +13698,14 @@
         },
         {
           "path": "dist/pptxgen.cjs.js",
-          "size": 516944,
-          "sha256": "873d182a8e2e1c0b5e522ef146117936b96b9b2024667bd4c1de59e2b031d27a",
+          "size": 516762,
+          "sha256": "35c0b7b95c292ae1f77eaca8dbbc9565537f91353699dc3fc1db0f7c80ce4501",
           "executable": false
         },
         {
           "path": "dist/pptxgen.es.js",
-          "size": 516931,
-          "sha256": "05844c5625e2cda3b449eb967c2246dd57ca57341886a7c28eeebca263b29bd4",
+          "size": 516749,
+          "sha256": "52581bde74fd8d11924329e4d11af818a6bfe2461dd9fb2330e8e7c536c51450",
           "executable": false
         },
         {
@@ -16318,5 +16318,5 @@
       ]
     }
   ],
-  "graphRevision": "sha256:89e7f4883a07db70a543af5ef806f97a95db8b74361887f1d9a29a814ae0fdae"
+  "graphRevision": "sha256:7bfe394d3d2eb5d6fe7f18a6794ce949d70d20990db66cecfe78907c17e6c16d"
 }

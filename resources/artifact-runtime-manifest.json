@@ -1,11 +1,11 @@
 {
   "schemaVersion": 4,
   "providerId": "mycopilot.artifact-runtime",
-  "bundleVersion": "2026.08.3",
+  "bundleVersion": "2026.08.4",
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "2f8bcf9573cd5dc48d6eef313b33bfe64da959c5c086ddb8ad6ca37fa0fc0740"
+      "sha256": "40333b4efa183c703b2c5c99e00f421c5e119a1c25e70239885c5e0269fbdd62"
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",
@@ -25,11 +25,15 @@
     },
     "nodePackageEvidence": {
       "path": "resources/artifact-runtime-node-package-evidence.json",
-      "sha256": "a4430b859f35187b5df59fc210996177b48f60a63905a14240f7cc0956232820"
+      "sha256": "073818fc425866f5a564b9faa0503ae1dda90e98d534eed06ffc72ab751428e0"
+    },
+    "pptxgenjsPatch": {
+      "path": "patches/pptxgenjs@4.0.1.patch",
+      "sha256": "5644896b52c473c32dbb79f1c940a7481878ef78a16fdba5c3c37b2a6f9fe9b6"
     },
     "pnpmLockfile": {
       "path": "pnpm-lock.yaml",
-      "sha256": "c3cf4c30787cdd9db274e415334dc6b97a90bbf6d46483d6ee2028967744afe3"
+      "sha256": "8e91bda1f357b4bdffe8f90b8146264223435383183f08f66da4e9a1f3da3038"
     },
     "pythonRequirements": {
       "path": "resources/artifact-runtime-python-requirements.txt",

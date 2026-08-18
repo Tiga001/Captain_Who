@@ -149,7 +149,7 @@ test('pinned ripgrep ZIP extraction reads only exact bounded members and rejects
 test('manifest pins runtime assets, PDF tools, and dependency versions for every desktop target', async () => {
   const manifest = await loadArtifactRuntimeManifest(manifestPath)
   assert.equal(manifest.schemaVersion, 4)
-  assert.equal(manifest.bundleVersion, '2026.08.3')
+  assert.equal(manifest.bundleVersion, '2026.08.4')
   assert.equal(manifest.node.version, '22.23.1')
   assert.equal(manifest.python.version, '3.12.13')
   assert.deepEqual(
@@ -183,6 +183,8 @@ test('manifest pins runtime assets, PDF tools, and dependency versions for every
     'resources/artifact-runtime/presentation-sdk.mjs'
   )
   assert.match(manifest.buildInputs.presentationSdk.sha256, /^(?!0{64}$)[a-f0-9]{64}$/)
+  assert.equal(manifest.buildInputs.pptxgenjsPatch.path, 'patches/pptxgenjs@4.0.1.patch')
+  assert.match(manifest.buildInputs.pptxgenjsPatch.sha256, /^(?!0{64}$)[a-f0-9]{64}$/)
   for (const platform of ['darwin', 'linux', 'win32']) {
     for (const arch of ['arm64', 'x64']) {
       const selected = selectArtifactRuntimeAssets(manifest, platform, arch)
@@ -264,6 +266,15 @@ test('manifest and download policy fail closed on mutable or foreign supply-chai
   await assert.rejects(
     () => loadArtifactRuntimeManifest(staleManifestPath),
     /build input nodeBootstrap SHA-256 does not match/
+  )
+
+  const stalePptxGenPatch = await rawManifest()
+  stalePptxGenPatch.buildInputs.pptxgenjsPatch.sha256 = '0'.repeat(64)
+  const stalePptxGenPatchManifestPath = join(directory, 'stale-pptxgenjs-patch-manifest.json')
+  await writeFile(stalePptxGenPatchManifestPath, `${JSON.stringify(stalePptxGenPatch)}\n`)
+  await assert.rejects(
+    () => loadArtifactRuntimeManifest(stalePptxGenPatchManifestPath),
+    /build input pptxgenjsPatch SHA-256 does not match/
   )
 })
 

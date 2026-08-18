@@ -6,3 +6,6 @@ allowBuilds:
   electron-winstaller: true
   esbuild: true
   node-pty: true
+
+patchedDependencies:
+  pptxgenjs@4.0.1: patches/pptxgenjs@4.0.1.patch

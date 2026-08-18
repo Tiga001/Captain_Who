@@ -84,6 +84,7 @@ const BUILD_INPUT_RELATIVE_PATHS = Object.freeze({
   presentationSdk: 'resources/artifact-runtime/presentation-sdk.mjs',
   nodePackageManifest: 'packages/artifact-runtime-node/package.json',
   nodePackageEvidence: 'resources/artifact-runtime-node-package-evidence.json',
+  pptxgenjsPatch: 'patches/pptxgenjs@4.0.1.patch',
   pnpmLockfile: 'pnpm-lock.yaml',
   pythonRequirements: 'resources/artifact-runtime-python-requirements.txt',
   pdfRuntimeCli: 'crates/core/src/command/pdf_runtime_cli.py'
@@ -390,8 +391,8 @@ export function validateArtifactRuntimeManifest(value) {
   if (manifest.providerId !== 'mycopilot.artifact-runtime') {
     throw new Error('manifest.providerId must be mycopilot.artifact-runtime')
   }
-  if (manifest.bundleVersion !== '2026.08.3') {
-    throw new Error('artifact runtime bundle must remain pinned to 2026.08.3')
+  if (manifest.bundleVersion !== '2026.08.4') {
+    throw new Error('artifact runtime bundle must remain pinned to 2026.08.4')
   }
   const buildInputs = validateBuildInputs(manifest.buildInputs)
 
@@ -480,10 +481,7 @@ export function validateArtifactRuntimeManifest(value) {
       packageRoot: canonicalRelativePath(node.packageRoot, 'manifest.node.packageRoot'),
       bootstrap: canonicalRelativePath(node.bootstrap, 'manifest.node.bootstrap'),
       loader: canonicalRelativePath(node.loader, 'manifest.node.loader'),
-      presentationSdk: canonicalRelativePath(
-        node.presentationSdk,
-        'manifest.node.presentationSdk'
-      ),
+      presentationSdk: canonicalRelativePath(node.presentationSdk, 'manifest.node.presentationSdk'),
       assets: validateTargetAssets(node.assets, 'manifest.node.assets', { node: true }),
       dependencies: validateDependencies(
         node.dependencies,
