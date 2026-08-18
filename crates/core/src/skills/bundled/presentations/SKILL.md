@@ -24,14 +24,17 @@ The Builder and Editor are different fixed entry points:
 
 Never use the Builder to imitate an edit, and never turn the Editor into a general-purpose Node.js program.
 
-Before materializing either script, choose one dedicated workspace-relative script directory for
-this run. Reuse an existing plain directory when appropriate; otherwise create it first with a
-separate idempotent `mkdir -p <script-directory>` `run_command`. The directory name is not fixed,
-but use the same path for materialization, patching, syntax checks, and execution. Before the final
+Before materializing a script or calling anything that writes a file, choose the task-owned script
+directory and every nested parent directory that the Builder, Editor, or renderer will use. Create
+all missing parents first with one separate idempotent `mkdir -p <parents...>` `run_command`. This
+includes the materialization destination's parent, the parent of a nested `--output`, and every
+render `outputPath` parent. The Host checks these parents before the script or renderer runs, so a
+`mkdir` inside Builder code is too late. A workspace-root output needs no directory setup. The
+directory names are not fixed, but use the same chosen paths throughout the run. Before the final
 response, delete the exact Builder or Editor and any task-created temporary files. If this task
-created the directory and it is then empty, remove it with `rmdir`; preserve pre-existing
-directories and unrelated files, and never use recursive deletion for this cleanup. Keep a script
-only when the user explicitly asks for it.
+created a directory and it is then empty, remove it with `rmdir`; preserve pre-existing directories
+and unrelated files, and never use recursive deletion for this cleanup. Keep a script only when
+the user explicitly asks for it.
 
 ### Managed Builder
 
@@ -71,6 +74,16 @@ edit in a run. Keep using that same Editor file for corrections.
 Immediately after materializing or modifying the `.mjs` Editor, run `node --check <editor>.mjs` as a separate `run_command` call. Never combine the check and edit run with `&&`, `|`, or `;`. A non-zero check forbids execution, and any later edit invalidates the successful check.
 
 Run the checked Editor with one direct logical command containing exactly one static `--source` and one static `--output`, for example `node scripts/edit_deck.mjs --source source.pptx --output source-edited.pptx`. Bind the source deck and every replacement asset through `run_command.inputs`; the `--source` value is its logical `mountPath`, not a workspace, attachment, Artifact, or private storage path. Editor v1 supports save-as only, so `--output` must be a distinct workspace-relative `.pptx` destination; absolute paths and parent traversal are invalid. Use a workspace-root filename unless the destination directory already exists. If the user requested in-place editing, preserve the original, produce a distinct validated output, and disclose that final replacement was not performed.
+
+Editor v1 has exactly one external-image route: replace an existing inspected picture with
+`deck.replaceImage({ target: '/slide[N]/picture[@id=ID]', source: input('<mountPath>') })`, where
+the `input()` value exactly equals one declared `run_command.inputs[].mountPath`. Use it only when
+the user's intent is to replace that exact inspected picture; never repurpose an unrelated picture
+as a placeholder. Adding a new external image and setting a slide image background are always
+unsupported. If the request needs either operation or inspect returns no matching picture, stop
+and report the limitation. Outside this exact `replaceImage` call, do not pass an input handle or
+guessed `source`, `path`, `src`, `resourcePath`, absolute path, or private placeholder to
+`deck.add`, and do not copy Builder image syntax into the Editor.
 
 The Editor may import only `editPresentation`, `input`, and `output` from the fixed `@mycopilot/presentation-sdk` facade. It must not import `pptxgenjs`, filesystem, archive, XML, process-launch, or network modules; invoke OfficeCLI; expose provider arguments; or modify anything outside the edit region. Copy only Host-returned stable targets and use only the documented facade operations. Element targets, `copyFrom`, and position references require inspected identities. Whole-slide structure changes use the Editor's bounded slide operation, at most once and last in the transaction; re-inspect before any following edit transaction. The SDK writes a Host-only typed plan; it never edits the package itself. The Host freezes the source, inputs, script, runtime identity, and destination; validates every target and operation; applies the plan to a private candidate; validates it; and publishes atomically. Model code never receives a real mount, staging, OfficeCLI, or executable path.
 

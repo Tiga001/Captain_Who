@@ -39,6 +39,8 @@ await editPresentation({
     //   replace: 'Updated title'
     // })
     //
+    // Replace only the exact inspected picture intended by the user; never repurpose another.
+    // Adding external images/backgrounds is unsupported; do not guess file properties for deck.add.
     // deck.replaceImage({
     //   target: '/slide[2]/picture[@id=17]',
     //   source: input('media/hero.png')

@@ -53,19 +53,21 @@ narrative, and visual direction before creating slides.
 
 The bundled `templates/builder.mjs` is a compact `pptxgenjs` starting point with a wide layout,
 theme, reusable footer, and optional mounted image. Locate its exact revision-bound URI with
-`skills_list_resources`. Choose one dedicated workspace-relative script directory for this run.
-If the directory is absent, create it before materialization with a separate idempotent command;
-if it already exists as a plain directory, reuse it:
+`skills_list_resources`. Choose one dedicated workspace-relative script directory and the exact
+parent directories for every nested deck and render output. Create all missing parents before the
+first materialization or write; reuse any that already exist as plain directories:
 
 ```json
 {
-  "command": "mkdir -p scripts",
+  "command": "mkdir -p scripts outputs",
   "cwd": ".",
-  "reason": "Prepare a workspace directory for the presentation Builder"
+  "reason": "Prepare the presentation script and output directories"
 }
 ```
 
-The name `scripts` is only an example; keep the chosen directory consistent throughout the run.
+The names `scripts` and `outputs` are only examples; keep the chosen paths consistent throughout
+the run. The Host checks a destination parent before starting the Builder or renderer, so a
+`mkdir` inside Builder code is too late. A workspace-root output needs no directory setup.
 Then copy the Builder once into that directory:
 
 ```json
@@ -96,12 +98,13 @@ redirection.
 ## Edit an existing deck with one Editor
 
 Read [editing-existing.md](editing-existing.md) before the first existing-deck edit in a run. The
-fixed sequence is inspect and copy stable targets, render a visual baseline, materialize one
-`editor.mjs`, patch only its bounded edit region, syntax-check, execute one transaction, then
-inspect, validate, and render/read every final slide.
+fixed sequence is inspect and copy stable targets, create every missing script/output/render
+parent, render a visual baseline, materialize one `editor.mjs`, patch only its bounded edit region,
+syntax-check, execute one transaction, then inspect, validate, and render/read every final slide.
 
-Create or reuse the dedicated script directory before materializing the Editor, exactly as in the
-Builder workflow. Do not wait for `skills_materialize_resource` to fail before creating a missing
+Create or reuse the dedicated script directory and every nested output parent before the baseline
+render or Editor materialization, exactly as in the Builder workflow. Do not wait for
+`skills_materialize_resource`, the Editor, or a render call to fail before creating a missing
 parent directory.
 
 The Editor command has exactly one static `--source` and one static `--output`. Bind the source and
@@ -116,11 +119,31 @@ and `input(...)`. Prefer a distinct output:
     {
       "mountPath": "source.pptx",
       "path": "<exact source path or readPath>"
+    },
+    {
+      "mountPath": "media/replacement.png",
+      "path": "<exact replacement image path, readPath, or artifact URI>"
     }
   ],
   "reason": "Apply the reviewed changes to a private copy of the existing presentation"
 }
 ```
+
+For an external image, Editor v1 supports only replacement of an existing inspected picture:
+
+```js
+deck.replaceImage({
+  target: '/slide[2]/picture[@id=17]',
+  source: input('media/replacement.png')
+})
+```
+
+The `input()` string must exactly match a declared `inputs[].mountPath`, and the operation may only
+replace the exact inspected picture intended by the user. Never repurpose an unrelated picture as
+a placeholder. Adding a new external image and setting a slide image background are always
+unsupported; if either is required or no matching picture target exists, stop and report it. Do
+not pass an input handle or guessed `source`, `path`, `src`, `resourcePath`, absolute path, or
+private placeholder to generic `deck.add` properties, and do not use Builder image syntax here.
 
 ## Clean up managed scripts
 
@@ -268,6 +291,9 @@ overview only. It cannot prove that every slide is present, fully visible, or re
 
 For final visual verification, render each slide independently. Use one call per slide, set
 `pageOrSlide` to that one-based slide number, and give every call a unique `outputPath`:
+
+Create the chosen `outputPath` parent once at task start. Do not wait for a render call to fail and
+do not rely on the renderer to create it.
 
 ```json
 {

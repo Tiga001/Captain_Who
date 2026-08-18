@@ -857,7 +857,7 @@ mod tests {
                 "node",
                 "pptxgenjs",
                 "4.0.1",
-                10,
+                11,
             ),
             (
                 SPREADSHEETS_LOCAL_ID,
@@ -1934,7 +1934,9 @@ mod tests {
 
         for required in [
             "Immediately after materializing or modifying any `.mjs` Builder",
-            "mkdir -p <script-directory>",
+            "mkdir -p <parents...>",
+            "the parent of a nested `--output`, and every\nrender `outputPath` parent",
+            "`mkdir` inside Builder code is too late",
             "delete the exact Builder or Editor and any task-created temporary files",
             "never use recursive deletion for this cleanup",
             "`node --check <builder>.mjs` as a separate `run_command` call",
@@ -1952,8 +1954,9 @@ mod tests {
         }
 
         for required in [
-            "\"command\": \"mkdir -p scripts\"",
-            "If the directory is absent, create it before materialization",
+            "\"command\": \"mkdir -p scripts outputs\"",
+            "Create all missing parents before the\nfirst materialization or write",
+            "`mkdir` inside Builder code is too late",
             "## Clean up managed scripts",
             "Never use `rm -rf` for this cleanup",
             "\"command\": \"node --check scripts/build_deck.mjs\"",
@@ -1976,7 +1979,9 @@ mod tests {
         let check = workflows
             .find("\"command\": \"node --check scripts/build_deck.mjs\"")
             .unwrap();
-        let prepare = workflows.find("\"command\": \"mkdir -p scripts\"").unwrap();
+        let prepare = workflows
+            .find("\"command\": \"mkdir -p scripts outputs\"")
+            .unwrap();
         let materialize = workflows
             .find("\"destination\": \"scripts/build_deck.mjs\"")
             .unwrap();
@@ -2013,6 +2018,11 @@ mod tests {
             "The SDK writes a Host-only typed plan",
             "Whole-slide structure changes use the Editor's bounded slide operation",
             "at most once and last in the transaction",
+            "Editor v1 has exactly one external-image route",
+            "never repurpose an unrelated picture\nas a placeholder",
+            "Adding a new external image and setting a slide image background are always\nunsupported",
+            "Outside this exact `replaceImage` call",
+            "do not copy Builder image syntax into the Editor",
             "Do not unzip or rewrite OOXML",
         ] {
             assert!(
@@ -2023,7 +2033,8 @@ mod tests {
 
         for required in [
             "For every edit to an existing `.pptx`",
-            "Create or reuse the dedicated script directory before materializing the Editor",
+            "Create or reuse the dedicated script directory and every nested output parent",
+            "before the baseline\nrender or Editor materialization",
             "## Clean up managed scripts",
             "node scripts/edit_deck.mjs --source source.pptx --output source-edited.pptx",
             "copy stable targets",
@@ -2031,6 +2042,11 @@ mod tests {
             "must import only",
             "`editPresentation`, `input`, and `output` from `@mycopilot/presentation-sdk`",
             "`node --check scripts/edit_deck.mjs` in its own call",
+            "Editor v1 supports only replacement of an existing inspected picture",
+            "The `input()` string must exactly match a declared `inputs[].mountPath`",
+            "Never repurpose an unrelated picture as\na placeholder",
+            "Adding a new external image and setting a slide image background are always\nunsupported",
+            "private placeholder to generic `deck.add` properties",
             "pre-publication\nfailure must leave the source and destination unchanged",
         ] {
             assert!(
@@ -2040,7 +2056,7 @@ mod tests {
         }
 
         for required in [
-            "mkdir -p <script-directory>",
+            "mkdir -p <parents...>",
             "Do not wait for `skills_materialize_resource` to fail",
             "delete the exact Editor and task-created\n   temporary files",
             "Never use recursive deletion",
@@ -2053,6 +2069,11 @@ mod tests {
             "deck.move({ target, newParent?, position?, properties? })",
             "deck.swap({ firstTarget, secondTarget })",
             "deck.replaceImage({ target, source: input(...) })",
+            "The only supported external-image call in Editor v1",
+            "This call cannot\ncreate a picture",
+            "never\nrepurpose an unrelated picture as a placeholder",
+            "always rejects adding an external image\nor setting a slide image background",
+            "never copy\nBuilder image syntax into the Editor",
             "deck.updateTableCell({ target, text })",
             "deck.updateChart({ target, properties: { categories, series } })",
             "deck.addSlide({ layout?, title?, body?, backgroundColor? })",
@@ -2069,6 +2090,17 @@ mod tests {
             );
         }
 
+        let prepare_parents = editing
+            .find("2. Choose one dedicated workspace-relative script directory")
+            .unwrap();
+        let render_baseline = editing
+            .find("3. Render and read every slide whose layout or appearance may change")
+            .unwrap();
+        assert!(
+            prepare_parents < render_baseline,
+            "output parents must be prepared before the visual baseline render"
+        );
+
         assert_eq!(editor.matches("// BEGIN EDIT REGION").count(), 1);
         assert_eq!(editor.matches("// END EDIT REGION").count(), 1);
         let begin = editor.find("// BEGIN EDIT REGION").unwrap();
@@ -2084,6 +2116,8 @@ mod tests {
             "deck.moveSlide({",
             "deck.replaceText({",
             "deck.replaceImage({",
+            "Replace only the exact inspected picture intended by the user; never repurpose another",
+            "Adding external images/backgrounds is unsupported; do not guess file properties for deck.add",
             "deck.updateTableCell({",
             "deck.updateChart({",
             "deck.set({",
@@ -2110,13 +2144,30 @@ mod tests {
             );
         }
 
-        assert_eq!(capability["contractVersion"], 10);
+        assert_eq!(capability["contractVersion"], 11);
         let script = &capability["modes"]["script"];
         assert_eq!(script["builderTemplate"], "templates/builder.mjs");
         assert_eq!(script["editorTemplate"], "templates/editor.mjs");
         assert_eq!(script["editingReference"], "references/editing-existing.md");
         assert_eq!(script["routes"]["create"], "builder");
         assert_eq!(script["routes"]["editExisting"], "editor");
+        assert_eq!(script["workspaceParents"]["mustExistBeforeUse"], true);
+        assert_eq!(
+            script["workspaceParents"]["appliesTo"],
+            serde_json::json!([
+                "materializationDestination",
+                "managedOutput",
+                "renderOutput"
+            ])
+        );
+        assert_eq!(
+            script["workspaceParents"]["hostPreflightBeforeScript"],
+            true
+        );
+        assert_eq!(
+            script["workspaceParents"]["hostPreflightBeforeRenderer"],
+            true
+        );
         let editor_contract = &script["editor"];
         assert_eq!(editor_contract["sourceArgument"], "--source");
         assert_eq!(editor_contract["outputArgument"], "--output");
@@ -2142,6 +2193,30 @@ mod tests {
         assert_eq!(
             editor_contract["targetRules"]["parent"],
             "slideContainerAllowed"
+        );
+        assert_eq!(
+            editor_contract["externalImage"]["supportedOperation"],
+            "replaceImage"
+        );
+        assert_eq!(
+            editor_contract["externalImage"]["target"],
+            "existingInspectedPictureRequired"
+        );
+        assert_eq!(
+            editor_contract["externalImage"]["source"],
+            "inputMatchingDeclaredMountPath"
+        );
+        assert_eq!(
+            editor_contract["externalImage"]["genericAddFileInput"],
+            false
+        );
+        assert_eq!(
+            editor_contract["externalImage"]["addNewImage"],
+            "unsupported"
+        );
+        assert_eq!(
+            editor_contract["externalImage"]["setImageBackground"],
+            "unsupported"
         );
         assert_eq!(editor_contract["facade"]["apiVersion"], 1);
         assert_eq!(
@@ -2261,7 +2336,7 @@ mod tests {
         let capability: Value =
             serde_json::from_str(include_str!("bundled/presentations/office-capability.json"))
                 .unwrap();
-        assert_eq!(capability["contractVersion"], 10);
+        assert_eq!(capability["contractVersion"], 11);
         let render_output = &capability["modes"]["native"]["renderOutput"];
         assert_eq!(
             render_output["contactSheetSemantics"],

@@ -13,7 +13,7 @@ import { CoreServer } from './core/coreServer'
 import { openExternalUrl, registerHostIpc } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
-import { shouldHideMainWindowOnClose, showExistingMainWindow } from './mainWindowLifecycle'
+import { MainWindowLifecycleController } from './mainWindowLifecycle'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -31,6 +31,7 @@ let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: (() => void) | null = null
 let mainWindow: BrowserWindow | null = null
+const mainWindowLifecycle = new MainWindowLifecycleController(process.platform)
 const trustedRendererEntries = new Map<number, string>()
 
 const macWindowChromeOptions =
@@ -144,10 +145,9 @@ function createWindow(): void {
     trustedRendererEntries.delete(rendererWebContentsId)
   })
   window.on('close', (event) => {
-    if (!shouldHideMainWindowOnClose(process.platform, isQuittingAfterServiceShutdown)) return
-
-    event.preventDefault()
-    window.hide()
+    if (mainWindowLifecycle.requestClose(window, isQuittingAfterServiceShutdown)) {
+      event.preventDefault()
+    }
   })
   window.once('closed', () => {
     trustedRendererEntries.delete(rendererWebContentsId)
@@ -163,7 +163,10 @@ function createWindow(): void {
   window.on('maximize', handleWindowStateChange)
   window.on('unmaximize', handleWindowStateChange)
   window.on('enter-full-screen', handleWindowStateChange)
-  window.on('leave-full-screen', handleWindowStateChange)
+  window.on('leave-full-screen', () => {
+    handleWindowStateChange()
+    mainWindowLifecycle.handleLeaveFullScreen(window, isQuittingAfterServiceShutdown)
+  })
   window.on('restore', handleWindowStateChange)
 
   rendererWebContents.setWindowOpenHandler((details) => {
@@ -190,7 +193,7 @@ function createWindow(): void {
 }
 
 function activateMainWindow(): void {
-  const window = showExistingMainWindow(mainWindow)
+  const window = mainWindowLifecycle.showExisting(mainWindow)
   if (!window) {
     createWindow()
     return
@@ -238,6 +241,7 @@ app.on('before-quit', (event) => {
 
   event.preventDefault()
   isQuittingAfterServiceShutdown = true
+  mainWindowLifecycle.prepareForQuit()
   void Promise.allSettled([terminalBridge.stop(), coreServer.shutdown()]).finally(() => app.quit())
 })
 

@@ -1,5 +1,5 @@
 {
-  "contractVersion": 10,
+  "contractVersion": 11,
   "engine": "officecli",
   "tool": "office_presentation",
   "extensions": [".pptx"],
@@ -64,6 +64,13 @@
       "runtimeProfile": "presentations",
       "runtimeProfileBinding": "host_from_materialized_script_receipt",
       "outputArgument": "--output",
+      "workspaceParents": {
+        "mustExistBeforeUse": true,
+        "appliesTo": ["materializationDestination", "managedOutput", "renderOutput"],
+        "preparation": "createExactTaskOwnedParentsFirst",
+        "hostPreflightBeforeScript": true,
+        "hostPreflightBeforeRenderer": true
+      },
       "editor": {
         "sourceArgument": "--source",
         "sourceArgumentCardinality": 1,
@@ -86,6 +93,15 @@
           "wholeSlideTarget": "inspectedOneBasedSlideNumber",
           "parent": "slideContainerAllowed",
           "newParent": "slideContainerAllowed"
+        },
+        "externalImage": {
+          "supportedOperation": "replaceImage",
+          "target": "existingInspectedPictureRequired",
+          "source": "inputMatchingDeclaredMountPath",
+          "genericAddFileInput": false,
+          "addNewImage": "unsupported",
+          "setImageBackground": "unsupported",
+          "unsupportedRecovery": "stopAndReport"
         },
         "boundedEditRegion": {
           "begin": "// BEGIN EDIT REGION",

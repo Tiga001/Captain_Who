@@ -19,11 +19,11 @@ private copy. It is not a second deck-generation workflow.
 1. Call `office_presentation` with `operation: "inspect"` before writing. Record the authoritative
    slide count and order, then copy the exact stable target string returned for every intended
    element, such as `/slide[3]/shape[@id=42]`.
-2. Render and read every slide whose layout or appearance may change. These images are the visual
+2. Choose one dedicated workspace-relative script directory and every nested parent directory for
+   the edited deck and render outputs. Reuse existing plain directories; otherwise create all
+   missing parents first with one separate idempotent `mkdir -p <parents...>` `run_command`.
+3. Render and read every slide whose layout or appearance may change. These images are the visual
    baseline; a contact sheet may help with overview but is not per-slide evidence.
-3. Choose one dedicated workspace-relative script directory. Reuse it if it already exists as a
-   plain directory; otherwise create it first with a separate idempotent
-   `mkdir -p <script-directory>` `run_command`.
 4. Locate the exact revision-bound `templates/editor.mjs` URI with `skills_list_resources` and
    materialize it once to a new path such as `scripts/edit_deck.mjs` inside that existing directory.
 5. Patch only the template's `BEGIN EDIT REGION` / `END EDIT REGION`. Keep the fixed import,
@@ -112,6 +112,24 @@ value comes from the single static `--output`; it is a logical destination contr
 Host. Do not read `MYCOPILOT_INPUT_ROOT`, construct a real path, or discover a private directory in
 the Editor.
 
+The only supported external-image call in Editor v1 is replacement of a picture returned by the
+latest inspect result:
+
+```js
+deck.replaceImage({
+  target: '/slide[2]/picture[@id=17]',
+  source: input('media/replacement.png')
+})
+```
+
+Here `media/replacement.png` must exactly match one declared `inputs[].mountPath`. This call cannot
+create a picture and may only replace the exact inspected picture intended by the user; never
+repurpose an unrelated picture as a placeholder. Editor v1 always rejects adding an external image
+or setting a slide image background. If the request needs either operation or no matching picture
+target exists, stop and report the unsupported edit. Never try an input handle or guessed `source`,
+`path`, `src`, `resourcePath`, absolute path, or private placeholder in `deck.add`, and never copy
+Builder image syntax into the Editor.
+
 Editor v1 supports only `mode: 'saveAs'` to a distinct workspace-relative `.pptx`; absolute paths
 and parent traversal are invalid. If the user requests in-place replacement, preserve the
 original, create and verify a distinct output, and disclose that final replacement was not
@@ -184,7 +202,8 @@ await editPresentation({
 - `deck.set({ target, properties })` updates Host-validated properties on one exact target.
 - `deck.replaceText({ target, find, replace })` replaces expected text inside one exact target.
 - `deck.add({ parent, elementType, copyFrom?, position?, properties? })` adds one typed element;
-  `parent` may be `/slide[N]`, while `copyFrom` and position references require inspected ids.
+  `parent` may be `/slide[N]`, while `copyFrom` and position references require inspected ids. It
+  cannot consume an external image input in Editor v1.
 - `deck.remove({ target, properties? })` removes one exact element target, never a whole slide.
 - `deck.move({ target, newParent?, position?, properties? })` moves one exact element target;
   `newParent` may be `/slide[N]`. `position`
@@ -194,8 +213,9 @@ await editPresentation({
   inspected id. Do not pass a bare number.
 - `deck.swap({ firstTarget, secondTarget })` swaps two exact element targets with inspected ids,
   never two whole slides.
-- `deck.replaceImage({ target, source: input(...) })` replaces picture content with one declared
-  mounted input while preserving the existing element unless explicit properties say otherwise.
+- `deck.replaceImage({ target, source: input(...) })` is the only external-image operation. It
+  replaces an inspected picture with one declared mounted input while preserving the existing
+  element unless explicit properties say otherwise.
 - `deck.updateTableCell({ target, text })` updates one Host-returned table-cell target.
 - `deck.updateChart({ target, properties: { categories, series } })` updates a chart through the
   Host's typed validator; `categories` and `series` must both be arrays.
