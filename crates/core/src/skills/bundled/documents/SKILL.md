@@ -24,6 +24,9 @@ required non-empty user-facing `reason` of at most 240 characters; never wrap th
 Choose one dedicated workspace-relative script directory for the task. Reuse it when it already
 exists as a plain directory; otherwise create it first with one separate idempotent
 `mkdir -p <script-directory>` `run_command`. The directory name is not fixed.
+Reuse this directory for the temporary visual-QA PDF; never place that PDF in the workspace's
+top-level `outputs/` directory. Its `office_document.render` `outputPath` must be
+workspace-relative; never pass an absolute path.
 
 Locate the exact revision-bound template URI with `skills_list_resources`, then materialize the
 selected Builder or Editor once into a new path. Patch and rerun that same file after corrections;
@@ -38,6 +41,10 @@ Run the materialized file with a direct logical command:
 
 - Builder: `python <builder>.py --output <new.docx>`
 - Editor: `python <editor>.py --source <mounted-source.docx> --output <edited.docx>`
+
+Prefer a workspace-root final output such as `report.docx`. If the output is nested, its parent
+directory must already exist before `run_command`; the Host checks it before the script starts, so
+the script cannot create it in time.
 
 Every run declares exactly one static `--output`. An Editor also declares exactly one static
 `--source`, equal to one `run_command.inputs[].mountPath`, and a distinct `.docx` output. Omit
@@ -97,9 +104,12 @@ present it as a delivery card unless the user explicitly requested a PDF.
    For comments, tracked changes, fields, content controls, or other fidelity-sensitive parts, run
    an explicit structural check; rendering is not structural evidence.
 4. Convert the final `.docx` once to a task-temporary PDF with `office_document.render`, supplying
-   `outputFormat: "pdf"` and a `.pdf` `outputPath`. Require one returned PDF output containing
-   `outputs[].readPath`, `outputs[].pageCount`, `outputs[].sourceSha256`, and
-   `outputs[].rendererRevision`; use only that exact `readPath`, then activate and follow the PDF Skill.
+   `outputFormat: "pdf"` and a `.pdf` `outputPath` inside the existing task script directory, never
+   top-level `outputs/`. Require one returned PDF output containing `outputs[].readPath`,
+   `outputs[].pageCount`, `outputs[].sourceSha256`, and `outputs[].rendererRevision`; use only that
+   exact `readPath`, then activate and follow the PDF Skill. Pass the returned `readPath` unchanged
+   as the PDF source for `pdfinfo` and `pdftoppm`; do not add `run_command.inputs` or rewrite it
+   beneath `MYCOPILOT_INPUT_ROOT`.
    Bind the evidence ledger to `sourceSha256` and invalidate it after any DOCX change. Treat
    `pdfinfo` as the authoritative page count `N`, require it to agree with the returned PDF output's
    `pageCount`, render pages `1..N` with `pdftoppm` in contiguous batches of at most 32 pages,

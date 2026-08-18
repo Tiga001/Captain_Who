@@ -943,9 +943,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 3"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 3"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -992,9 +992,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 4"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 4"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1034,9 +1034,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 5"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 5"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 5);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1085,9 +1085,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 6"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 6"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 6);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1136,9 +1136,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 7"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 7"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 7);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1179,9 +1179,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 8"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 8"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 8);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1224,9 +1224,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 9"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 9"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 9);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1267,9 +1267,9 @@ mod tests {
 
         let error = run_migrations(&connection).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 10"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 10"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 10);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1321,9 +1321,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 11"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 11"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 11);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1376,9 +1376,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 12"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 12"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 12);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1424,9 +1424,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
-        assert!(error
-            .to_string()
-            .contains("expected schema version 14, found 13"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 13"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 13);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);

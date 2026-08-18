@@ -703,6 +703,11 @@ mod tests {
             "`run_command`",
             "`read_image`",
             "`MYCOPILOT_INPUT_ROOT`",
+            "`office_document.render`",
+            "workspace-relative PDF `readPath`",
+            "without `run_command.inputs`",
+            "external file, generated Artifact",
+            "top-level `outputs/` directory for files that command creates",
             "complete executable set is exactly",
             "`pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, and `rg`",
             "`head`, `tail`, `grep`, `sed`, and `awk` are unavailable",
@@ -759,6 +764,10 @@ mod tests {
         assert!(reading.contains("`head`, `tail`, and byte-offset slicing are not recovery paths"));
         assert!(reading.contains("reports extracted-text line numbers, not PDF page numbers"));
         assert!(reading.contains("python - \"$MYCOPILOT_INPUT_ROOT/manual.pdf\" <<'PY'"));
+        assert!(reading.contains("pdfinfo \"<exact outputs[].readPath>\""));
+        assert!(reading
+            .contains("pdftoppm -f 1 -l 12 -png \"<exact outputs[].readPath>\" outputs/qa-page"));
+        assert!(reading.contains("Top-level `outputs/` is only the managed command's output"));
         assert!(reading.contains("Do not dump the full text"));
         assert!(!reading.contains("Do not use `grep` or `rg`"));
         assert!(!reading.contains("python -c"));
@@ -846,7 +855,7 @@ mod tests {
                 "python",
                 "python-docx",
                 "1.2.0",
-                13,
+                14,
             ),
             (
                 PRESENTATIONS_LOCAL_ID,
@@ -1168,7 +1177,7 @@ mod tests {
             assert_eq!(
                 capability["contractVersion"],
                 if local_id == DOCUMENTS_LOCAL_ID {
-                    13
+                    14
                 } else {
                     11
                 }
@@ -1185,8 +1194,17 @@ mod tests {
                 capability["modes"]["native"]["writeOperationsModelVisible"],
                 false
             );
-            assert_eq!(
-                script["lifecycle"],
+            let expected_lifecycle = if local_id == DOCUMENTS_LOCAL_ID {
+                serde_json::json!({
+                    "prepareDirectoryBeforeMaterialize": true,
+                    "defaultOutputScope": "workspaceRoot",
+                    "nestedOutputParentMustExistBeforeRun": true,
+                    "reuseSingleScript": true,
+                    "cleanupTaskOwnedFiles": true,
+                    "removeDirectoryOnlyIfTaskCreatedAndEmpty": true,
+                    "recursiveDelete": "forbidden"
+                })
+            } else {
                 serde_json::json!({
                     "prepareDirectoryBeforeMaterialize": true,
                     "reuseSingleScript": true,
@@ -1194,7 +1212,8 @@ mod tests {
                     "removeDirectoryOnlyIfTaskCreatedAndEmpty": true,
                     "recursiveDelete": "forbidden"
                 })
-            );
+            };
+            assert_eq!(script["lifecycle"], expected_lifecycle);
             assert_eq!(
                 script["syntaxPreflight"],
                 serde_json::json!({
@@ -1336,8 +1355,40 @@ mod tests {
             "outputs[].rendererRevision"
         );
         assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["outputPathScope"],
+            "existingTaskScriptOrTemporaryDirectory"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["outputPathKind"],
+            "workspaceRelative"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["topLevelOutputsDirectory"],
+            "forbidden"
+        );
+        assert_eq!(
             documents["modes"]["native"]["pdfQaOutput"]["handoff"]["runtimeEnforced"],
             false
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["handoff"]["sourcePathMode"],
+            "exactDirect"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["handoff"]["sourcePathKind"],
+            "workspaceRelative"
+        );
+        assert_eq!(
+            documents["modes"]["native"]["pdfQaOutput"]["handoff"]["runCommandInputsRequired"],
+            false
+        );
+        assert_eq!(
+            documents["modes"]["script"]["lifecycle"]["defaultOutputScope"],
+            "workspaceRoot"
+        );
+        assert_eq!(
+            documents["modes"]["script"]["lifecycle"]["nestedOutputParentMustExistBeforeRun"],
+            true
         );
         assert_eq!(
             documents["modes"]["script"]["exceptionalFallback"]["scope"],
@@ -1446,9 +1497,14 @@ mod tests {
             "model-authored DOCX-to-PDF converters are",
             "`outputs[].sourceSha256`",
             "`outputs[].rendererRevision`",
-            "contiguous batches of at most 32 pages",
+            "batches of at most 32 pages",
             "verdict per page",
             "The QA PDF is temporary evidence, not a final artifact",
+            "never place that PDF in the workspace's\ntop-level `outputs/` directory",
+            "`outputPath` must be\nworkspace-relative",
+            "never pass an absolute path",
+            "do not add `run_command.inputs` or rewrite it",
+            "Prefer a workspace-root final output",
             "`PAGE` or `NUMPAGES`",
         ] {
             assert!(
@@ -1456,6 +1512,9 @@ mod tests {
                 "document instructions are missing `{required}`"
             );
         }
+        assert!(!DOCUMENTS_SOURCE.contains("--output outputs/"));
+        assert!(!workflows.contains("--output outputs/"));
+        assert!(!workflows.contains("\"outputPath\": \"outputs/"));
 
         for required in [
             "Create every new document with the Managed\nBuilder",
@@ -1467,13 +1526,19 @@ mod tests {
             "`description`, `path`, `part`, `code`, `error`, and `message` fields",
             "## Use exceptional Python fallback",
             "## Convert once and follow the PDF Skill",
-            "use `pdfinfo` to obtain authoritative page count",
-            "Render all\npages `1..N` with `pdftoppm`",
+            "`outputPath` must be workspace-relative; an absolute path is invalid",
+            "Use `pdfinfo` to obtain authoritative page count",
+            "python scripts/build_report.py --output report.docx",
+            "must already exist before `run_command`",
+            "do not add\n`run_command.inputs`",
+            "pdfinfo \"<exact outputs[].readPath>\"",
+            "outputs/report-page",
+            "Render all pages `1..N` in contiguous",
             "outputs[].sourceSha256",
             "outputs[].rendererRevision",
             "Bind the visual evidence ledger to `sourceSha256`",
-            "contiguous batches of at most 32 pages",
-            "consume\nevery exact returned page-image path with `read_image.path`",
+            "batches of at most 32 pages",
+            "consume every exact returned page-image path with\n`read_image.path`",
             "Do not use ReportLab, image stitching, or a self-authored converter",
             "Do not present the QA PDF as a\nfinal artifact",
             "## Clean up exact task artifacts",
@@ -1538,7 +1603,7 @@ mod tests {
         assert!(!editor.contains("tempfile"));
         assert!(!editor.contains("os.replace"));
 
-        assert_eq!(capability["contractVersion"], 13);
+        assert_eq!(capability["contractVersion"], 14);
         let native = &capability["modes"]["native"];
         assert_eq!(
             native["operations"],

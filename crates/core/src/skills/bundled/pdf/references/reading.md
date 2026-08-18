@@ -8,7 +8,16 @@ Inspect an existing workspace PDF by its exact relative path:
 pdfinfo "manuals/manual.pdf"
 ```
 
-For a declared input, use its mount below the input root:
+For a QA PDF produced by `office_document.render` outside top-level `outputs/`, pass the exact
+returned workspace-relative `readPath` unchanged:
+
+```sh
+pdfinfo "<exact outputs[].readPath>"
+```
+
+Do not add `run_command.inputs`, rewrite that path below `MYCOPILOT_INPUT_ROOT`, or reconstruct it
+from an earlier requested output path. Attachments, external files, generated Artifacts, and other
+declared inputs still use their mount below the input root:
 
 ```sh
 pdfinfo "$MYCOPILOT_INPUT_ROOT/manual.pdf"
@@ -78,6 +87,15 @@ Text matches are not visual evidence. Render a bounded page range into publishab
 ```sh
 pdftoppm -f 42 -l 46 -png "$MYCOPILOT_INPUT_ROOT/manual.pdf" outputs/manual-page
 ```
+
+For that `office_document.render` QA PDF, use the same exact workspace-relative `readPath` directly:
+
+```sh
+pdftoppm -f 1 -l 12 -png "<exact outputs[].readPath>" outputs/qa-page
+```
+
+Top-level `outputs/` is only the managed command's output destination. Never use it as a PDF input
+alias or infer a source path there.
 
 Pass every returned image `readPath` unchanged to `read_image`. Inspect headings, column order, tables, diagrams, captions, footnotes, handwriting, stamps, clipping, and unreadable glyphs. For scanned PDFs or pages with unusable extraction, use this visual path immediately.
 

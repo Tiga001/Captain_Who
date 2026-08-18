@@ -1722,19 +1722,26 @@ fn document_kind_for_tool_name(tool_name: &str) -> AgentResult<OfficeDocumentKin
 }
 
 fn map_semantic_error(error: OfficeSemanticError) -> AgentError {
-    let recovery = error
-        .recommended_route()
-        .map_or("changeRequest", |_| "useManagedScript");
+    let (code, recovery) = match error.code() {
+        crate::office::OfficeSemanticErrorCode::InvalidRequest => {
+            ("semanticInvalidRequest", "changeRequest")
+        }
+        crate::office::OfficeSemanticErrorCode::KindMismatch => {
+            ("semanticKindMismatch", "changeRequest")
+        }
+        crate::office::OfficeSemanticErrorCode::CapabilityNotSupported => {
+            ("capabilityNotSupported", "useManagedScript")
+        }
+        crate::office::OfficeSemanticErrorCode::OutputPathReserved => {
+            ("outputPathReserved", "useTaskTempPath")
+        }
+    };
     AgentError::structured(
         error.code().stable_name(),
         error.message(),
         json!({
             "type": "office_semantic_request",
-            "code": match error.code() {
-                crate::office::OfficeSemanticErrorCode::InvalidRequest => "semanticInvalidRequest",
-                crate::office::OfficeSemanticErrorCode::KindMismatch => "semanticKindMismatch",
-                crate::office::OfficeSemanticErrorCode::CapabilityNotSupported => "capabilityNotSupported",
-            },
+            "code": code,
             "recovery": recovery,
             "recommendedRoute": error.recommended_route(),
             "capability": error.capability(),
@@ -1858,7 +1865,7 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
             json!({
                 "type": "string",
                 "minLength": 1,
-                "description": "Required only for render. The Host owns the render flag, stages and atomically publishes the output, then returns its authoritative model-readable path in outputs[].readPath.",
+                "description": "Required only for render. The Host owns the render flag, stages and atomically publishes the output, then returns its authoritative model-readable path in outputs[].readPath. For Word PDF visual QA, use a workspace-relative path in a task-scoped temporary directory; absolute paths and the top-level outputs/ directory are rejected.",
             }),
         ),
         (
@@ -2387,6 +2394,36 @@ mod tests {
             Some(crate::office::OfficeViewMode::Pdf)
         );
         assert_eq!(request.output_path.as_deref(), Some("qa/report.pdf"));
+    }
+
+    #[test]
+    fn model_word_pdf_render_rejects_reserved_outputs_with_task_temp_recovery() {
+        for output_path in [
+            "outputs/静夜思-visual-qa.pdf",
+            ".//outputs/静夜思-visual-qa.pdf",
+            ".\\/outputs/静夜思-visual-qa.pdf",
+            "/Users/测试/工作区/outputs/静夜思-visual-qa.pdf",
+        ] {
+            let error = parse_args(
+                json!({
+                    "operation": "render",
+                    "filePath": "静夜思.docx",
+                    "outputFormat": "pdf",
+                    "outputPath": output_path,
+                    "reason": "Convert the final Word revision for exhaustive visual QA"
+                }),
+                "office_document",
+            )
+            .unwrap()
+            .into_request()
+            .expect_err("Word PDF output must use a workspace-relative task directory");
+
+            assert_eq!(error.code(), Some("office.output_path_reserved"));
+            let details = error.details().expect("structured output path diagnostics");
+            assert_eq!(details["type"], "office_semantic_request");
+            assert_eq!(details["code"], "outputPathReserved");
+            assert_eq!(details["recovery"], "useTaskTempPath");
+        }
     }
 
     #[test]

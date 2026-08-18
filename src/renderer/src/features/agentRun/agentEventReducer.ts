@@ -2,32 +2,16 @@ import type {
   AgentActionExecutionOutput,
   AgentApprovalStatus,
   AgentChatOutput,
-  AgentCommandSessionSnapshot,
-  AgentCommandSessionTranscript,
   AgentEvent,
-  AgentFileWritePreview,
-  AgentMcpToolApproval,
-  AgentMcpToolInvocationEvent,
-  AgentProposedAction,
-  AgentToolResult
+  AgentProposedAction
 } from '@mycopilot/protocol'
-import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from '@mycopilot/protocol'
 import type {
   ChatAgentInterruptionView,
   ChatAgentRunView,
-  ChatAgentTimelineItem,
-  ChatCommandOutputChunk,
-  ChatCommandOutputPreview,
-  ChatCommandSessionView,
-  ChatFileWritePreview,
   ChatGuidanceTimelineItem,
-  ChatMcpToolInvocationView,
-  ChatMessage,
-  ChatQueuedMessage,
-  ChatSkillInstallationView
+  ChatMessage
 } from '../chat/chatTypes'
 import { THINKING_PLACEHOLDER } from './constants'
-import { getAgentActionId } from './agentActionUtils'
 import {
   normalizeReadActivities,
   settlePendingReadActivities,
@@ -41,12 +25,9 @@ import {
   upsertWebSearchActivityFromResult
 } from '../chat/agentWebSearch'
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
-import { toSafeMcpDisplayText } from '../mcp/mcpSafeDisplay'
-import {
-  managedCommandOutputsEqual,
-  parseManagedCommandOutputs
-} from '../chat/managedCommandOutputs'
-import { getActionToolCall, withActionApprovalStatus } from './actionProjection'
+import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
+import { getAgentActionId } from './agentActionUtils'
+import { getActionToolCall } from './actionProjection'
 import {
   createRejectedToolResult,
   getApprovalsForStatus,
@@ -65,9 +46,61 @@ import {
   removeTransientToolTimelineItems,
   upsertMcpInvocationTimelineItem
 } from './messageTimeline'
+import {
+  appendCommandOutputChunk,
+  hasRunCommandCall,
+  isTerminalCommandSessionStatus,
+  runningCommandReceipt,
+  settleCommandApproval,
+  terminalCommandStatusFromToolResult,
+  withCommandSession
+} from './agentEventReducerCommand'
+import {
+  appendToolCallToTimeline,
+  finishContextCompaction,
+  settlePendingContextCompactions,
+  startContextCompaction
+} from './agentEventReducerCompaction'
+import {
+  applySkillInstallationDecision,
+  applySkillInstallationExecution,
+  mergeSkillInstallationApprovals,
+  removeAgentAction,
+  upsertAgentAction,
+  upsertFileWritePreview
+} from './agentEventReducerFileSkill'
+import {
+  guidanceAttachments,
+  guidanceTimelineId,
+  removeGuidanceFromChatMessage,
+  upsertGuidanceTimelineItem
+} from './agentEventReducerGuidance'
+import {
+  addMcpApprovalViews,
+  projectMcpInvocationEvent,
+  projectMcpRejectionReason,
+  settlePendingMcpInvocations,
+  upsertMcpInvocationView
+} from './agentEventReducerMcp'
+import {
+  appendTimelineItem,
+  ensureAgentRun,
+  getSettledActivityStatus,
+  isCompletedAgentRunStatus,
+  isFinishedAgentOutputStatus,
+  upsertById
+} from './agentEventReducerShared'
 
-const MAX_LIVE_COMMAND_OUTPUT_CHARS = 256 * 1024
-const MAX_MCP_REJECTION_REASON_CODE_POINTS = 512
+export { ensureAgentRun } from './agentEventReducerShared'
+export {
+  applyAgentCommandSessionSnapshotToChatMessage,
+  markMissingAgentCommandSessionOutcomeUnknown
+} from './agentEventReducerCommand'
+export {
+  applyOptimisticGuidanceToChatMessage,
+  removeGuidanceFromChatMessage
+} from './agentEventReducerGuidance'
+
 const SAFE_MODEL_REQUEST_INTERRUPTION_REASONS = new Set<ChatAgentInterruptionView['reason']>([
   'service_connection_failed',
   'service_unavailable',
@@ -126,134 +159,12 @@ function rollbackUncommittedModelStreams(message: ChatMessage): ChatMessage {
   }
 }
 
-function projectMcpRejectionReason(message: string | undefined): string | undefined {
-  if (!message) return undefined
-  const projected = toSafeMcpDisplayText(message, MAX_MCP_REJECTION_REASON_CODE_POINTS).trim()
-  return projected || undefined
-}
-
-function createAgentRun(
-  runId: string | null,
-  status: ChatAgentRunView['status'] = 'starting'
-): ChatAgentRunView {
-  const now = Date.now()
-
-  return {
-    runId,
-    status,
-    startedAt: now,
-    completedAt: isCompletedAgentRunStatus(status) ? now : undefined,
-    toolDefinitions: [],
-    toolCalls: [],
-    toolResults: [],
-    approvals: [],
-    diffs: [],
-    fileDrafts: [],
-    fileWritePreviews: [],
-    messageStreamCheckpoints: {},
-    webSearchActivities: [],
-    readActivities: [],
-    mcpInvocations: [],
-    timeline: []
-  }
-}
-
-export function ensureAgentRun(
-  currentRun: ChatAgentRunView | undefined,
-  runId: string | null | undefined,
-  status?: ChatAgentRunView['status']
-): ChatAgentRunView {
-  if (!currentRun) {
-    return createAgentRun(runId ?? null, status)
-  }
-
-  return {
-    ...currentRun,
-    runId: currentRun.runId ?? runId ?? null,
-    status: status ?? currentRun.status,
-    startedAt: currentRun.startedAt ?? Date.now(),
-    completedAt: isCompletedAgentRunStatus(status)
-      ? (currentRun.completedAt ?? Date.now())
-      : currentRun.completedAt,
-    toolDefinitions: Array.isArray(currentRun.toolDefinitions) ? currentRun.toolDefinitions : [],
-    toolCalls: Array.isArray(currentRun.toolCalls) ? currentRun.toolCalls : [],
-    toolResults: Array.isArray(currentRun.toolResults) ? currentRun.toolResults : [],
-    approvals: Array.isArray(currentRun.approvals) ? currentRun.approvals : [],
-    ...(Array.isArray(currentRun.skillInstallations)
-      ? { skillInstallations: currentRun.skillInstallations }
-      : {}),
-    diffs: Array.isArray(currentRun.diffs) ? currentRun.diffs : [],
-    timeline: Array.isArray(currentRun.timeline) ? currentRun.timeline : [],
-    readActivities: Array.isArray(currentRun.readActivities) ? currentRun.readActivities : [],
-    fileDrafts: Array.isArray(currentRun.fileDrafts) ? currentRun.fileDrafts : [],
-    fileWritePreviews: Array.isArray(currentRun.fileWritePreviews)
-      ? currentRun.fileWritePreviews
-      : [],
-    messageStreamCheckpoints:
-      currentRun.messageStreamCheckpoints &&
-      typeof currentRun.messageStreamCheckpoints === 'object' &&
-      !Array.isArray(currentRun.messageStreamCheckpoints)
-        ? currentRun.messageStreamCheckpoints
-        : {}
-  }
-}
-
-function isCompletedAgentRunStatus(status: ChatAgentRunView['status'] | undefined) {
-  return status === 'completed' || status === 'failed' || status === 'cancelled'
-}
-
-function isFinishedAgentOutputStatus(status: ChatAgentRunView['status'] | undefined) {
-  return status !== 'starting' && status !== 'running' && status !== 'waiting_for_approval'
-}
-
-function getSettledActivityStatus(
-  status: ChatAgentRunView['status'] | undefined
-): 'completed' | 'failed' | 'cancelled' | null {
-  if (status === 'completed') return 'completed'
-  if (status === 'failed') return 'failed'
-  if (status === 'cancelled') return 'cancelled'
-  return null
-}
-
 function normalizeAgentRunToolActivities(run: ChatAgentRunView): ChatAgentRunView {
   return {
     ...run,
     webSearchActivities: normalizeWebSearchActivities(run),
     readActivities: normalizeReadActivities(run)
   }
-}
-
-function settlePendingMcpInvocations(run: ChatAgentRunView): ChatMcpToolInvocationView[] {
-  const invocations = run.mcpInvocations ?? []
-  let changed = false
-  const settled = invocations.map((invocation): ChatMcpToolInvocationView => {
-    if (MCP_TERMINAL_STATES.has(invocation.state)) return invocation
-
-    changed = true
-    // A terminal parent Run plus a non-terminal child is an inconsistent projection. Renderer
-    // state may be behind the Host's dispatch boundary, so even `pending_approval` cannot prove
-    // that the external operation was never sent. Only an exact backend terminal projection may
-    // claim `definitely_not_dispatched`.
-    return {
-      actionId: invocation.actionId,
-      invocationId: invocation.invocationId,
-      callId: invocation.callId,
-      serverId: invocation.serverId,
-      serverDisplayName: invocation.serverDisplayName,
-      scope: invocation.scope,
-      rawToolName: invocation.rawToolName,
-      modelToolName: invocation.modelToolName,
-      displayReason: invocation.displayReason,
-      external: true as const,
-      state: 'outcome_unknown',
-      dispatchCertainty: 'possibly_dispatched',
-      outcome: 'outcome_unknown',
-      errorCode: 'mcp.tool_outcome_unknown',
-      outputTruncated: invocation.outputTruncated
-    }
-  })
-
-  return changed ? settled : invocations
 }
 
 export function settleAgentRunToolActivities(
@@ -281,827 +192,6 @@ export function settleAgentRunToolActivities(
     readActivities: settlePendingReadActivities(runWithStatus, settledActivityStatus, settledAt),
     mcpInvocations: settlePendingMcpInvocations(runWithStatus)
   }
-}
-
-function upsertById<T>(items: T[], nextItem: T, getId: (item: T) => string) {
-  const nextId = getId(nextItem)
-  const itemIndex = items.findIndex((item) => getId(item) === nextId)
-
-  if (itemIndex === -1) {
-    return [...items, nextItem]
-  }
-
-  return items.map((item, index) => (index === itemIndex ? nextItem : item))
-}
-
-const MCP_TERMINAL_STATES = new Set<ChatMcpToolInvocationView['state']>([
-  'completed',
-  'failed',
-  'cancelled',
-  'rejected',
-  'expired',
-  'payload_unavailable',
-  'policy_denied',
-  'outcome_unknown'
-])
-
-const MCP_STATE_RANK: Record<ChatMcpToolInvocationView['state'], number> = {
-  pending_approval: 0,
-  approved: 1,
-  dispatching: 2,
-  running: 3,
-  completed: 4,
-  failed: 4,
-  cancelled: 4,
-  rejected: 4,
-  expired: 4,
-  payload_unavailable: 4,
-  policy_denied: 4,
-  outcome_unknown: 4
-}
-
-/**
- * Project the wire event field-by-field. Do not spread the event into Renderer state: future
- * protocol fields must remain absent until this allowlist is deliberately reviewed.
- */
-function projectMcpInvocationEvent(event: AgentMcpToolInvocationEvent): ChatMcpToolInvocationView {
-  return {
-    actionId: event.actionId,
-    invocationId: event.invocationId,
-    callId: event.callId,
-    serverId: event.serverId,
-    serverDisplayName: event.serverDisplayName,
-    rawToolName: event.rawToolName,
-    modelToolName: event.modelToolName,
-    displayReason: event.displayReason ?? undefined,
-    external: true,
-    state: event.state,
-    dispatchCertainty: event.dispatchCertainty,
-    outcome: event.outcome ?? undefined,
-    isError: event.isError ?? undefined,
-    errorCode: event.errorCode ?? undefined,
-    durationMs: event.durationMs ?? undefined,
-    outputTruncated: event.outputTruncated
-  }
-}
-
-function projectMcpScope(scope: AgentMcpToolApproval['identity']['provenance']['scope']) {
-  switch (scope.type) {
-    case 'project':
-      return { type: 'project' as const, projectId: scope.projectId }
-    case 'plugin':
-      return { type: 'plugin' as const, pluginId: scope.pluginId }
-    case 'builtin':
-      return { type: 'builtin' as const }
-    case 'managed':
-      return { type: 'managed' as const }
-    case 'user':
-      return { type: 'user' as const }
-  }
-}
-
-/**
- * The typed MCP approval is the earliest authoritative callId-to-invocation association. Its
- * model-facing call uses a redacted argument projection, which is intentionally not retained.
- */
-function projectMcpApproval(approval: AgentMcpToolApproval): ChatMcpToolInvocationView {
-  return {
-    actionId: approval.identity.actionId,
-    invocationId: approval.identity.invocationId,
-    callId: approval.identity.callId,
-    serverId: approval.summary.serverId,
-    serverDisplayName: approval.summary.serverDisplayName,
-    scope: projectMcpScope(approval.identity.provenance.scope),
-    rawToolName: approval.summary.rawToolName,
-    modelToolName: approval.summary.modelToolName,
-    displayReason: approval.summary.displayReason ?? undefined,
-    external: true,
-    state: 'pending_approval',
-    dispatchCertainty: 'definitely_not_dispatched',
-    outputTruncated: false
-  }
-}
-
-function isSameMcpInvocationIdentity(
-  current: ChatMcpToolInvocationView,
-  next: ChatMcpToolInvocationView
-) {
-  return (
-    current.invocationId === next.invocationId &&
-    current.actionId === next.actionId &&
-    current.callId === next.callId &&
-    current.serverId === next.serverId &&
-    current.rawToolName === next.rawToolName &&
-    current.modelToolName === next.modelToolName &&
-    current.external === next.external
-  )
-}
-
-function chooseMcpInvocationUpdate(
-  current: ChatMcpToolInvocationView,
-  next: ChatMcpToolInvocationView
-): ChatMcpToolInvocationView {
-  if (!isSameMcpInvocationIdentity(current, next)) return current
-  const currentWithSafeMetadata =
-    (current.scope || !next.scope) && (current.displayReason || !next.displayReason)
-      ? current
-      : {
-          actionId: current.actionId,
-          invocationId: current.invocationId,
-          callId: current.callId,
-          serverId: current.serverId,
-          serverDisplayName: current.serverDisplayName,
-          scope: current.scope ?? (next.scope ? projectMcpScope(next.scope) : undefined),
-          rawToolName: current.rawToolName,
-          modelToolName: current.modelToolName,
-          displayReason: current.displayReason ?? next.displayReason,
-          external: true as const,
-          state: current.state,
-          dispatchCertainty: current.dispatchCertainty,
-          outcome: current.outcome,
-          isError: current.isError,
-          errorCode: current.errorCode,
-          rejectionReason: current.rejectionReason,
-          durationMs: current.durationMs,
-          outputTruncated: current.outputTruncated
-        }
-  if (MCP_TERMINAL_STATES.has(current.state)) return currentWithSafeMetadata
-  if (MCP_STATE_RANK[next.state] <= MCP_STATE_RANK[current.state]) {
-    return currentWithSafeMetadata
-  }
-
-  return {
-    actionId: next.actionId,
-    invocationId: next.invocationId,
-    callId: next.callId,
-    serverId: next.serverId,
-    serverDisplayName: currentWithSafeMetadata.serverDisplayName,
-    scope: currentWithSafeMetadata.scope,
-    rawToolName: next.rawToolName,
-    modelToolName: next.modelToolName,
-    displayReason: currentWithSafeMetadata.displayReason ?? next.displayReason,
-    external: true,
-    state: next.state,
-    dispatchCertainty: next.dispatchCertainty,
-    outcome: next.outcome,
-    isError: next.isError,
-    errorCode: next.errorCode,
-    rejectionReason: currentWithSafeMetadata.rejectionReason ?? next.rejectionReason,
-    durationMs: next.durationMs,
-    outputTruncated: next.outputTruncated
-  }
-}
-
-function upsertMcpInvocationView(
-  current: ChatMcpToolInvocationView[],
-  next: ChatMcpToolInvocationView
-) {
-  const existingIndex = current.findIndex(
-    (candidate) => candidate.invocationId === next.invocationId
-  )
-  if (existingIndex < 0) return [...current, next]
-
-  const selected = chooseMcpInvocationUpdate(current[existingIndex], next)
-  if (selected === current[existingIndex]) return current
-  return current.map((candidate, index) => (index === existingIndex ? selected : candidate))
-}
-
-function addMcpApprovalViews(
-  run: ChatAgentRunView,
-  actions: AgentProposedAction[]
-): Pick<ChatAgentRunView, 'mcpInvocations' | 'timeline' | 'toolCalls' | 'toolResults'> {
-  const approvals = actions.filter(
-    (action): action is Extract<AgentProposedAction, { type: 'mcp_tool_call' }> =>
-      action.type === 'mcp_tool_call'
-  )
-  let mcpInvocations = run.mcpInvocations ?? []
-  let timeline = run.timeline
-  const mcpCallIds = new Set<string>()
-
-  approvals.forEach((action) => {
-    const next = projectMcpApproval(action.approval)
-    mcpInvocations = upsertMcpInvocationView(mcpInvocations, next)
-    timeline = upsertMcpInvocationTimelineItem(timeline, next.invocationId, next.callId)
-    mcpCallIds.add(next.callId)
-  })
-
-  return {
-    mcpInvocations,
-    timeline,
-    toolCalls: run.toolCalls.filter((call) => !mcpCallIds.has(call.id)),
-    toolResults: run.toolResults.filter((result) => !mcpCallIds.has(result.callId))
-  }
-}
-
-function appendCommandOutputChunk(
-  callId: string,
-  existing: ChatCommandOutputPreview | undefined,
-  chunk: ChatCommandOutputChunk
-): { preview: ChatCommandOutputPreview; truncated: boolean } {
-  if (
-    !chunk.output ||
-    existing?.chunks.some((candidate) => candidate.sequence === chunk.sequence)
-  ) {
-    return { preview: existing ?? { callId, chunks: [] }, truncated: false }
-  }
-
-  let chunks = [...(existing?.chunks ?? []), chunk].sort(
-    (left, right) => left.sequence - right.sequence
-  )
-  let truncated = false
-  if (chunks.length > AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS) {
-    chunks = chunks.slice(chunks.length - AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS)
-    truncated = true
-  }
-  let excess = chunks.reduce((total, candidate) => total + candidate.output.length, 0)
-  excess = Math.max(0, excess - MAX_LIVE_COMMAND_OUTPUT_CHARS)
-
-  if (excess > 0) {
-    truncated = true
-    chunks = chunks.flatMap((candidate) => {
-      if (excess <= 0) return [candidate]
-      if (candidate.output.length <= excess) {
-        excess -= candidate.output.length
-        return []
-      }
-      const output = candidate.output.slice(excess)
-      excess = 0
-      return [{ ...candidate, output }]
-    })
-  }
-
-  return { preview: { callId, chunks }, truncated }
-}
-
-const TERMINAL_COMMAND_SESSION_STATUSES = new Set<ChatCommandSessionView['status']>([
-  'exited',
-  'interrupted',
-  'timed_out',
-  'failed',
-  'outcome_unknown'
-])
-
-function isTerminalCommandSessionStatus(status: ChatCommandSessionView['status']) {
-  return TERMINAL_COMMAND_SESSION_STATUSES.has(status)
-}
-
-function hasRunCommandCall(run: ChatAgentRunView, callId: string) {
-  return run.toolCalls.some((call) => call.id === callId && call.tool === 'run_command')
-}
-
-function settleCommandApproval(
-  run: ChatAgentRunView,
-  callId: string,
-  resumedStatus: 'starting' | 'running' = 'running'
-): ChatAgentRunView {
-  const hasRequiredCall = run.toolCalls.some(
-    (call) =>
-      call.id === callId && call.tool === 'run_command' && call.approvalStatus === 'required'
-  )
-  const hasApproval = run.approvals.some(
-    (action) => action.type === 'command' && action.command.id === callId
-  )
-  const approvals = run.approvals.filter(
-    (action) => !(action.type === 'command' && action.command.id === callId)
-  )
-  const shouldResumeRun = run.status === 'waiting_for_approval' && approvals.length === 0
-  if (!hasRequiredCall && !hasApproval && !shouldResumeRun) return run
-  return {
-    ...run,
-    status: shouldResumeRun ? resumedStatus : run.status,
-    toolCalls: run.toolCalls.map((call) =>
-      call.id === callId && call.tool === 'run_command' && call.approvalStatus === 'required'
-        ? { ...call, approvalStatus: 'approved' }
-        : call
-    ),
-    approvals
-  }
-}
-
-function mergeCommandSessionView(
-  existing: ChatCommandSessionView | undefined,
-  incoming: ChatCommandSessionView
-): ChatCommandSessionView {
-  if (existing?.sessionId && incoming.sessionId && existing.sessionId !== incoming.sessionId) {
-    return existing
-  }
-
-  const existingTerminal = existing ? isTerminalCommandSessionStatus(existing.status) : false
-  const incomingTerminal = isTerminalCommandSessionStatus(incoming.status)
-  if (existing && existingTerminal && !incomingTerminal) return existing
-
-  const status =
-    existingTerminal || incomingTerminal
-      ? existingTerminal
-        ? existing!.status
-        : incoming.status
-      : existing?.status === 'running' || incoming.status === 'running'
-        ? 'running'
-        : 'starting'
-  const outputs =
-    incoming.outputs && incoming.outputs.length > 0
-      ? incoming.outputs
-      : (existing?.outputs ?? incoming.outputs)
-  const artifactObservation = existing?.artifactObservation ?? incoming.artifactObservation
-
-  const merged: ChatCommandSessionView = {
-    callId: incoming.callId,
-    sessionId: existing?.sessionId ?? incoming.sessionId,
-    status,
-    startedAt: existing?.startedAt ?? incoming.startedAt,
-    endedAt: existing?.endedAt ?? incoming.endedAt,
-    exitCode: existing?.exitCode ?? incoming.exitCode,
-    latestSequence: Math.max(existing?.latestSequence ?? 0, incoming.latestSequence),
-    outputTruncated: Boolean(existing?.outputTruncated || incoming.outputTruncated),
-    ...(outputs === undefined ? {} : { outputs }),
-    ...(artifactObservation === undefined ? {} : { artifactObservation })
-  }
-  if (
-    existing &&
-    existing.callId === merged.callId &&
-    existing.sessionId === merged.sessionId &&
-    existing.status === merged.status &&
-    existing.startedAt === merged.startedAt &&
-    existing.endedAt === merged.endedAt &&
-    existing.exitCode === merged.exitCode &&
-    existing.latestSequence === merged.latestSequence &&
-    existing.outputTruncated === merged.outputTruncated &&
-    managedCommandOutputsEqual(existing.outputs, merged.outputs) &&
-    artifactObservationsEqual(existing.artifactObservation, merged.artifactObservation)
-  ) {
-    return existing
-  }
-  return merged
-}
-
-function artifactObservationsEqual(
-  left: ChatCommandSessionView['artifactObservation'],
-  right: ChatCommandSessionView['artifactObservation']
-): boolean {
-  if (left === right) return true
-  if (left === undefined || right === undefined) return false
-  return JSON.stringify(left) === JSON.stringify(right)
-}
-
-function withCommandSession(
-  run: ChatAgentRunView,
-  incoming: ChatCommandSessionView
-): ChatAgentRunView {
-  if (!hasRunCommandCall(run, incoming.callId)) return run
-  const existing = run.commandSessions?.[incoming.callId]
-  const merged = mergeCommandSessionView(existing, incoming)
-  if (merged === existing) return run
-  return {
-    ...run,
-    commandSessions: {
-      ...(run.commandSessions ?? {}),
-      [incoming.callId]: merged
-    }
-  }
-}
-
-function runningCommandReceipt(result: AgentToolResult | undefined) {
-  if (result?.tool !== 'run_command' || result.ok !== true) return null
-  const value = result.result
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  if (
-    record.status !== 'running' ||
-    typeof record.sessionId !== 'string' ||
-    record.sessionId.length === 0
-  ) {
-    return null
-  }
-  return {
-    sessionId: record.sessionId,
-    startedAt:
-      typeof record.startedAt === 'number' && Number.isSafeInteger(record.startedAt)
-        ? record.startedAt
-        : undefined,
-    latestSequence:
-      typeof record.latestSequence === 'number' && Number.isSafeInteger(record.latestSequence)
-        ? Math.max(0, record.latestSequence)
-        : 0,
-    outputTruncated: record.outputTruncated === true
-  }
-}
-
-function terminalCommandStatusFromToolResult(
-  result: AgentToolResult
-): Pick<ChatCommandSessionView, 'status' | 'exitCode'> | null {
-  if (result.tool !== 'run_command') return null
-  const value = result.result
-  const record =
-    value && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null
-  if (record?.status === 'running' || record?.status === 'rejected') return null
-  if (record?.timedOut === true) return { status: 'timed_out' }
-  if (record?.cancelled === true) return { status: 'interrupted' }
-  if (result.ok === false) return { status: 'failed' }
-  if (typeof record?.exitCode === 'number') {
-    return { status: 'exited', exitCode: record.exitCode }
-  }
-  return null
-}
-
-/**
- * Merges a Host-owned Session snapshot into an existing run_command Timeline item. This helper is
- * deliberately message/run neutral: restoring an independently running process must never reopen
- * a completed assistant response.
- */
-export function applyAgentCommandSessionSnapshotToChatMessage(
-  message: ChatMessage,
-  snapshot: AgentCommandSessionSnapshot,
-  transcript?: AgentCommandSessionTranscript
-): ChatMessage {
-  const currentRun = message.agentRun
-  if (
-    !currentRun ||
-    snapshot.assistantMessageId !== message.id ||
-    (currentRun.runId !== null && currentRun.runId !== snapshot.originRunId) ||
-    !hasRunCommandCall(currentRun, snapshot.callId)
-  ) {
-    return message
-  }
-
-  const existing = currentRun.commandSessions?.[snapshot.callId]
-  if (existing?.sessionId && existing.sessionId !== snapshot.sessionId) return message
-
-  const runWithSettledApproval = settleCommandApproval(
-    currentRun,
-    snapshot.callId,
-    snapshot.status === 'starting' ? 'starting' : 'running'
-  )
-
-  let nextPreview = runWithSettledApproval.commandOutputPreviews?.[snapshot.callId]
-  let previewTruncated = false
-  for (const chunk of transcript?.chunks ?? []) {
-    const appended = appendCommandOutputChunk(snapshot.callId, nextPreview, chunk)
-    nextPreview = appended.preview
-    previewTruncated ||= appended.truncated
-  }
-
-  const nextRun = withCommandSession(runWithSettledApproval, {
-    callId: snapshot.callId,
-    sessionId: snapshot.sessionId,
-    status: snapshot.status,
-    startedAt: snapshot.startedAt,
-    endedAt: snapshot.endedAt,
-    exitCode: snapshot.exitCode,
-    latestSequence: snapshot.latestSequence,
-    outputs: parseManagedCommandOutputs(snapshot.outputs),
-    artifactObservation: snapshot.artifactObservation,
-    outputTruncated: Boolean(
-      snapshot.outputTruncated ||
-      transcript?.outputCaptureTruncated ||
-      transcript?.truncatedBefore ||
-      previewTruncated
-    )
-  })
-  const previewChanged = nextPreview !== currentRun.commandOutputPreviews?.[snapshot.callId]
-
-  return {
-    ...message,
-    agentRun: {
-      ...nextRun,
-      ...(previewChanged && nextPreview
-        ? {
-            commandOutputPreviews: {
-              ...(nextRun.commandOutputPreviews ?? {}),
-              [snapshot.callId]: nextPreview
-            }
-          }
-        : {})
-    }
-  }
-}
-
-/**
- * Settles one pre-refresh active identity which was absent from a successful authoritative Host
- * list. The expected Session id is captured before the request and checked again here, so a newly
- * started process that appeared while the request was in flight cannot be terminalized by the old
- * response.
- */
-export function markMissingAgentCommandSessionOutcomeUnknown(
-  message: ChatMessage,
-  callId: string,
-  expectedSessionId: string,
-  observedAt: number
-): ChatMessage {
-  const currentRun = message.agentRun
-  if (!currentRun || !hasRunCommandCall(currentRun, callId)) return message
-  const existing = currentRun.commandSessions?.[callId]
-  if (existing && isTerminalCommandSessionStatus(existing.status)) return message
-  if (existing?.sessionId && existing.sessionId !== expectedSessionId) return message
-
-  const receipt = runningCommandReceipt(
-    currentRun.toolResults.find((result) => result.callId === callId)
-  )
-  if (!existing && receipt?.sessionId !== expectedSessionId) return message
-  if (existing && !existing.sessionId && receipt?.sessionId !== expectedSessionId) return message
-
-  const runWithSettledApproval = settleCommandApproval(currentRun, callId)
-  const nextRun = withCommandSession(runWithSettledApproval, {
-    callId,
-    sessionId: expectedSessionId,
-    status: 'outcome_unknown',
-    startedAt: existing?.startedAt ?? receipt?.startedAt,
-    endedAt: observedAt,
-    latestSequence: Math.max(existing?.latestSequence ?? 0, receipt?.latestSequence ?? 0),
-    outputTruncated: Boolean(existing?.outputTruncated || receipt?.outputTruncated)
-  })
-  return nextRun === currentRun ? message : { ...message, agentRun: nextRun }
-}
-
-function upsertFileWritePreview(
-  previews: ChatFileWritePreview[],
-  incoming: AgentFileWritePreview,
-  receivedAt: number
-): ChatFileWritePreview[] {
-  const existing = previews.find((preview) => preview.previewId === incoming.previewId)
-  const { contentDelta, contentOffsetBytes, ...snapshot } = incoming
-  let content = existing?.content ?? ''
-
-  if (!existing || contentOffsetBytes === 0) {
-    content = contentDelta
-  } else if (contentOffsetBytes === existing.generatedBytes) {
-    content += contentDelta
-  } else if (incoming.generatedBytes <= existing.generatedBytes) {
-    return previews
-  }
-
-  return upsertById(
-    previews,
-    {
-      ...snapshot,
-      content,
-      receivedAt
-    },
-    (preview) => preview.previewId
-  )
-}
-
-function upsertAgentAction(actions: AgentProposedAction[], nextAction: AgentProposedAction) {
-  return upsertById(actions, nextAction, getAgentActionId)
-}
-
-function removeAgentAction(actions: AgentProposedAction[], actionId: string) {
-  return actions.filter((action) => getAgentActionId(action) !== actionId)
-}
-
-function upsertSkillInstallation(
-  installations: ChatSkillInstallationView[],
-  next: ChatSkillInstallationView
-) {
-  return upsertById(installations, next, (installation) => installation.action.id)
-}
-
-function mergeSkillInstallationApprovals(
-  installations: ChatSkillInstallationView[] | undefined,
-  actions: AgentProposedAction[]
-) {
-  return actions.reduce((current, action) => {
-    if (action.type !== 'skill_installation') return current
-    const existing = current.find(
-      (installation) => installation.action.id === action.installation.id
-    )
-    return upsertSkillInstallation(current, {
-      action: action.installation,
-      status: existing?.status ?? 'waiting_for_approval'
-    })
-  }, installations ?? [])
-}
-
-function applySkillInstallationDecision(
-  installations: ChatSkillInstallationView[] | undefined,
-  action: AgentProposedAction,
-  decision: 'approved' | 'rejected'
-) {
-  if (action.type !== 'skill_installation') return installations ?? []
-  const approvalStatus: AgentApprovalStatus = decision === 'approved' ? 'approved' : 'rejected'
-  const approvedAction = withActionApprovalStatus(action, approvalStatus)
-  if (approvedAction.type !== 'skill_installation') return installations ?? []
-  return upsertSkillInstallation(installations ?? [], {
-    action: approvedAction.installation,
-    status: decision === 'approved' ? 'installing' : 'rejected'
-  })
-}
-
-function applySkillInstallationExecution(
-  installations: ChatSkillInstallationView[] | undefined,
-  execution: AgentActionExecutionOutput
-) {
-  const current = installations ?? []
-  const existing = current.find((installation) => installation.action.id === execution.actionId)
-  if (!existing) return current
-  if (execution.status === 'rejected') {
-    return upsertSkillInstallation(current, { ...existing, status: 'rejected' })
-  }
-  if (!execution.toolResult) {
-    const status = execution.status === 'approved' ? 'installing' : 'failed'
-    return upsertSkillInstallation(current, { ...existing, status })
-  }
-  if (!execution.toolResult.ok) {
-    const details = execution.toolResult.result
-    const uncertain =
-      details &&
-      typeof details === 'object' &&
-      !Array.isArray(details) &&
-      ((details as Record<string, unknown>).commitMayHaveSucceeded === true ||
-        String((details as Record<string, unknown>).code ?? '')
-          .toLowerCase()
-          .includes('uncertain'))
-    return upsertSkillInstallation(current, {
-      ...existing,
-      status: uncertain ? 'uncertain' : 'failed'
-    })
-  }
-  const result = execution.toolResult.result
-  const resultStatus =
-    result && typeof result === 'object' && !Array.isArray(result)
-      ? (result as Record<string, unknown>).status
-      : undefined
-  return upsertSkillInstallation(current, {
-    ...existing,
-    status: resultStatus === 'alreadyInstalled' ? 'already_installed' : 'installed'
-  })
-}
-
-function appendTimelineItem(
-  run: ChatAgentRunView,
-  item: ChatAgentTimelineItem
-): ChatAgentTimelineItem[] {
-  if (run.timeline.some((timelineItem) => timelineItem.id === item.id)) {
-    return run.timeline.map((timelineItem) => (timelineItem.id === item.id ? item : timelineItem))
-  }
-
-  return [...run.timeline, item]
-}
-
-function guidanceTimelineId(clientMessageId: string) {
-  return `user-guidance-${clientMessageId}`
-}
-
-function guidanceAttachments(
-  attachments: Array<{
-    id: string
-    kind: 'file' | 'image'
-    name: string
-    mimeType?: string
-    sizeBytes: number
-  }>
-): ChatGuidanceTimelineItem['attachments'] {
-  return attachments.map((attachment) => ({
-    id: attachment.id,
-    kind: attachment.kind,
-    name: attachment.name,
-    mimeType: attachment.mimeType,
-    sizeBytes: attachment.sizeBytes
-  }))
-}
-
-function upsertGuidanceTimelineItem(
-  run: ChatAgentRunView,
-  item: ChatGuidanceTimelineItem
-): ChatAgentTimelineItem[] {
-  const existing = run.timeline.find(
-    (candidate) =>
-      candidate.type === 'user_guidance' &&
-      (candidate.clientMessageId === item.clientMessageId ||
-        (item.guidanceId && candidate.guidanceId === item.guidanceId))
-  )
-  if (!existing || existing.type !== 'user_guidance') {
-    return appendTimelineItem(run, item)
-  }
-
-  const statusRank = { submitting: 0, queued: 1, applied: 2, rejected: 3 } as const
-  const nextItem =
-    statusRank[existing.status] > statusRank[item.status]
-      ? {
-          ...item,
-          ...existing,
-          guidanceId: existing.guidanceId ?? item.guidanceId
-        }
-      : {
-          ...existing,
-          ...item,
-          guidanceId: item.guidanceId ?? existing.guidanceId
-        }
-  return run.timeline.map((candidate) => (candidate.id === existing.id ? nextItem : candidate))
-}
-
-export function applyOptimisticGuidanceToChatMessage(
-  message: ChatMessage,
-  queuedMessage: ChatQueuedMessage,
-  runId: string
-): ChatMessage {
-  const run = ensureAgentRun(message.agentRun, runId, 'running')
-  return {
-    ...message,
-    status: 'pending',
-    agentRun: {
-      ...run,
-      timeline: upsertGuidanceTimelineItem(run, {
-        id: guidanceTimelineId(queuedMessage.clientMessageId),
-        type: 'user_guidance',
-        clientMessageId: queuedMessage.clientMessageId,
-        content: queuedMessage.content,
-        attachments: guidanceAttachments(queuedMessage.attachments),
-        status: 'submitting',
-        createdAt: queuedMessage.createdAt
-      })
-    }
-  }
-}
-
-export function removeGuidanceFromChatMessage(
-  message: ChatMessage,
-  clientMessageId: string
-): ChatMessage {
-  if (!message.agentRun) return message
-  return {
-    ...message,
-    agentRun: {
-      ...message.agentRun,
-      timeline: message.agentRun.timeline.filter(
-        (item) => item.type !== 'user_guidance' || item.clientMessageId !== clientMessageId
-      )
-    }
-  }
-}
-
-function appendToolCallToTimeline(
-  run: ChatAgentRunView,
-  callId: string,
-  traceSequence?: number
-): ChatAgentTimelineItem[] {
-  const existingTraceSequence = run.timeline.find(
-    (item) => item.type === 'tool_call' && item.callId === callId
-  )?.traceSequence
-  const stableTraceSequence = traceSequence ?? existingTraceSequence
-  return appendTimelineItem(
-    {
-      ...run,
-      timeline: removeTransientToolTimelineItems(run.timeline)
-    },
-    {
-      id: `tool-call-${callId}`,
-      type: 'tool_call',
-      callId,
-      ...(stableTraceSequence === undefined ? {} : { traceSequence: stableTraceSequence })
-    }
-  )
-}
-
-function contextCompactionTimelineId(operationId: string) {
-  return `context-compaction-${operationId}`
-}
-
-function startContextCompaction(
-  run: ChatAgentRunView,
-  operationId: string,
-  traceSequence: number
-): ChatAgentTimelineItem[] {
-  const id = contextCompactionTimelineId(operationId)
-  if (run.timeline.some((item) => item.id === id)) return run.timeline
-
-  return appendTimelineItem(run, {
-    id,
-    type: 'context_compaction',
-    operationId,
-    status: 'running',
-    traceSequence
-  })
-}
-
-function finishContextCompaction(
-  run: ChatAgentRunView,
-  operationId: string,
-  status: Extract<ChatAgentTimelineItem, { type: 'context_compaction' }>['status'],
-  traceSequence: number
-): ChatAgentTimelineItem[] {
-  return appendTimelineItem(run, {
-    id: contextCompactionTimelineId(operationId),
-    type: 'context_compaction',
-    operationId,
-    status,
-    traceSequence
-  })
-}
-
-function settlePendingContextCompactions(
-  timeline: ChatAgentTimelineItem[],
-  status: 'completed' | 'failed' | 'cancelled'
-): ChatAgentTimelineItem[] {
-  const compactionStatus =
-    status === 'completed' ? 'applied' : status === 'cancelled' ? 'cancelled' : 'failed'
-
-  return timeline.map((item) =>
-    item.type === 'context_compaction' && item.status === 'running'
-      ? { ...item, status: compactionStatus }
-      : item
-  )
 }
 
 export function shouldTouchConversationForAgentEvent(agentEvent: AgentEvent) {

@@ -1248,6 +1248,18 @@ mod tests {
     }
 
     #[test]
+    fn word_qa_read_path_is_one_direct_input_for_info_and_page_render() {
+        let input = "word-work/静夜思-visual-qa.pdf";
+        for command in [
+            format!("pdfinfo '{input}'"),
+            format!("pdftoppm -f 1 -l 1 -png '{input}' outputs/page"),
+        ] {
+            let plan = parse_managed_pdf_shell(&command).unwrap().unwrap();
+            assert_eq!(plan.implicit_workspace_inputs(), vec![input.to_string()]);
+        }
+    }
+
+    #[test]
     fn rg_regex_roles_do_not_misclassify_patterns_as_paths() {
         for command in [
             r#"pdftotext -layout "$MYCOPILOT_INPUT_ROOT/AspenPolymer-Unit Operations and Reaction Models.pdf" - | rg -n -i -C 4 --max-count 30 "defining polymer|polymer component|define.*polymer""#,

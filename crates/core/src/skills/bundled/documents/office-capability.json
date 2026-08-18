@@ -1,5 +1,5 @@
 {
-  "contractVersion": 13,
+  "contractVersion": 14,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
@@ -39,7 +39,9 @@
         ],
         "outputFormat": "pdf",
         "outputPathExtension": ".pdf",
-        "outputPathScope": "taskOwnedTemporaryDirectory",
+        "outputPathKind": "workspaceRelative",
+        "outputPathScope": "existingTaskScriptOrTemporaryDirectory",
+        "topLevelOutputsDirectory": "forbidden",
         "oneCallPerFinalDocumentRevision": true,
         "resultField": "outputs",
         "pathField": "readPath",
@@ -57,7 +59,12 @@
         "handoff": {
           "skill": "pdf",
           "instructionOnly": true,
-          "runtimeEnforced": false
+          "runtimeEnforced": false,
+          "source": "outputs[].readPath",
+          "sourcePathKind": "workspaceRelative",
+          "sourcePathMode": "exactDirect",
+          "runCommandInputsRequired": false,
+          "myCopilotInputRootRewrite": "forbidden"
         }
       }
     },
@@ -77,6 +84,8 @@
       "outputArgument": "--output",
       "lifecycle": {
         "prepareDirectoryBeforeMaterialize": true,
+        "defaultOutputScope": "workspaceRoot",
+        "nestedOutputParentMustExistBeforeRun": true,
         "reuseSingleScript": true,
         "cleanupTaskOwnedFiles": true,
         "removeDirectoryOnlyIfTaskCreatedAndEmpty": true,

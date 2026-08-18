@@ -7,7 +7,17 @@ description: Read, search, inspect, create, edit, render, and verify PDF files, 
 
 Use only `run_command` for PDF processing; use `read_image` for visual inspection. The complete executable set is exactly `pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, and `rg`. Commands such as `head`, `tail`, `grep`, `sed`, and `awk` are unavailable; never install replacements or fall back to system tools.
 
-For a PDF already in the selected workspace, use its exact safe workspace-relative path. For an attachment, external file, generated Artifact, Skill resource, script, image, font, or other source, bind the returned path through `run_command.inputs`, then use its mounted path below `MYCOPILOT_INPUT_ROOT`. Never guess a physical attachment, Artifact, runtime, or private working-directory path. Copy output `readPath` values exactly as returned.
+For a PDF already in the selected workspace, use its exact safe workspace-relative path. This
+includes the exact workspace-relative PDF `readPath` returned by `office_document.render` for a QA
+PDF outside top-level `outputs/`: pass it unchanged, without `run_command.inputs` or a
+`MYCOPILOT_INPUT_ROOT` rewrite. For an attachment, external file, generated Artifact, Skill
+resource, script, image, font, or other source, keep using `run_command.inputs`, then use its mounted
+path below `MYCOPILOT_INPUT_ROOT`. Never guess a physical attachment, Artifact, runtime, or private
+working-directory path.
+
+Reserve the managed PDF command's top-level `outputs/` directory for files that command creates,
+such as page images. Never use `outputs/` as an input alias or reconstruct an input path there; use
+the exact source path instead.
 
 ## Core workflow
 

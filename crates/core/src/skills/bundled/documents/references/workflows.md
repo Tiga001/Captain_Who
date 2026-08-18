@@ -27,7 +27,7 @@ Call `office_document` with a flat semantic object:
 ```json
 {
   "operation": "inspect",
-  "filePath": "outputs/report.docx",
+  "filePath": "report.docx",
   "reason": "Inspect the Word report structure before verification"
 }
 ```
@@ -70,11 +70,13 @@ previous check. When preflight fails, patch the same Builder and submit the norm
 again. Do not run a model-authored syntax check, system Python, `python -m`, `python -c`, inline
 code, heredocs, or a compound shell command.
 
-Run the materialized template with a direct
-`python scripts/build_report.py --output outputs/report.docx` command. Omit `runtimeProfile` and
-`observe`: the Host verifies the materialization receipt, binds the pinned `documents` runtime,
-freezes the run, directs output through a private candidate, and observes the declared destination.
-Every Builder build command must declare exactly one static `--output` ending in `.docx`.
+Run the materialized template with a direct `python scripts/build_report.py --output report.docx`
+command. Prefer this workspace-root destination. If the requested destination is nested, its parent
+must already exist before `run_command`; the Host checks it before the script starts, so a Builder
+`mkdir` is too late. Omit `runtimeProfile` and `observe`: the Host verifies the materialization
+receipt, binds the pinned `documents` runtime, freezes the run, directs output through a private
+candidate, and observes the declared destination. Every Builder build command must declare exactly
+one static `--output` ending in `.docx`.
 
 After final verification, delete the exact Builder and task-created temporary files. If this task
 created the script directory and it is empty, remove it with `rmdir`. Preserve pre-existing
@@ -100,7 +102,7 @@ model-authored DOCX-to-PDF script as evidence of the Word layout.
 
 ```json
 {
-  "command": "python word-work/custom_edit.py --source source.docx --output outputs/report-edited.docx",
+  "command": "python word-work/custom_edit.py --source source.docx --output report-edited.docx",
   "cwd": ".",
   "runtimeProfile": "documents",
   "inputs": [
@@ -119,7 +121,7 @@ Every non-workspace input used by a Builder or Editor must appear in `run_comman
 
 ```json
 {
-  "command": "python scripts/build_report.py --output outputs/report.docx --image images/campus.jpg",
+  "command": "python scripts/build_report.py --output report.docx --image images/campus.jpg",
   "cwd": ".",
   "inputs": [
     {
@@ -159,32 +161,47 @@ running result is not terminal publication evidence.
 ## Convert once and follow the PDF Skill
 
 After the final `.docx` passes publication and structural inspection, create a `.pdf` destination
-inside the task-owned temporary directory and call `office_document.render` exactly once:
+inside the existing task script directory and call `office_document.render` exactly once. Its
+`outputPath` must be workspace-relative; an absolute path is invalid. Reuse the directory created
+for the Builder or Editor; do not create another directory and do not use the workspace's top-level
+`outputs/` directory for this temporary PDF:
 
 ```json
 {
   "operation": "render",
-  "filePath": "outputs/report.docx",
-  "outputPath": "word-work/report-visual-qa.pdf",
+  "filePath": "report.docx",
+  "outputPath": "scripts/report-visual-qa.pdf",
   "outputFormat": "pdf",
   "reason": "Convert the final Word report to PDF for complete visual review"
 }
 ```
 
-The request must contain all five fields shown above; `outputPath` must end in `.pdf`. Accept only a
-successful result containing a PDF output with an exact readable `outputs[].readPath`, its nested
-`outputs[].pageCount`, the frozen DOCX identity `outputs[].sourceSha256`, and the managed runtime
-identity `outputs[].rendererRevision`. Bind the visual evidence ledger to `sourceSha256`; a changed
-DOCX can never reuse an older PDF or ledger. Do not reconstruct the PDF path from `outputPath`,
-stdout, a filename, or a directory scan.
+Replace `scripts` with the task's actual script directory.
+
+The request must contain all five fields shown above; `outputPath` must be workspace-relative and
+end in `.pdf`. Accept only a successful result containing a PDF output with an exact readable
+`outputs[].readPath`, its nested `outputs[].pageCount`, the frozen DOCX identity
+`outputs[].sourceSha256`, and the managed runtime identity `outputs[].rendererRevision`.
+Bind the visual evidence ledger to `sourceSha256`; a changed DOCX can never reuse an older PDF or
+ledger. Do not reconstruct the PDF path from `outputPath`, stdout, a filename, or a directory scan.
 
 Then activate and follow the PDF Skill. This handoff is an instruction, not a runtime-enforced
-state transition. Bind the exact PDF `readPath`, use `pdfinfo` to obtain authoritative page count
-`N`, and fail verification if it disagrees with that PDF output's nested `pageCount`. Render all
-pages `1..N` with `pdftoppm` in contiguous batches of at most 32 pages. For each batch, consume
-every exact returned page-image path with `read_image.path` before cleanup, then record one visual
-verdict for every page in the document-wide ledger. A contact sheet, guessed range, file size, or
-partial sample never proves complete coverage.
+state transition. Copy the exact PDF `outputs[].readPath` unchanged into both commands; do not add
+`run_command.inputs`, rewrite the path below `MYCOPILOT_INPUT_ROOT`, reconstruct it from
+`outputPath`, or scan for the file:
+
+```sh
+pdfinfo "<exact outputs[].readPath>"
+pdftoppm -f 1 -l N -png "<exact outputs[].readPath>" outputs/report-page
+```
+
+Use `pdfinfo` to obtain authoritative page count `N`, and fail verification if it disagrees with
+that PDF output's nested `pageCount`. Here top-level `outputs/` is only the managed PDF command's
+output destination for page images, never the QA PDF input. Render all pages `1..N` in contiguous
+batches of at most 32 pages. For each batch, consume every exact returned page-image path with
+`read_image.path` before cleanup, then record one visual verdict for every page in the
+document-wide ledger. A contact sheet, guessed range, file size, or partial sample never proves
+complete coverage.
 
 Check clipping, overflow, empty pages, tables across page boundaries, image placement, font
 substitution, headers, and footers. If `PAGE` or `NUMPAGES` fields exist, confirm that they render

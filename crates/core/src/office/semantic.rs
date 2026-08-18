@@ -602,6 +602,7 @@ pub enum OfficeSemanticErrorCode {
     InvalidRequest,
     KindMismatch,
     CapabilityNotSupported,
+    OutputPathReserved,
 }
 
 impl OfficeSemanticErrorCode {
@@ -610,6 +611,7 @@ impl OfficeSemanticErrorCode {
             Self::InvalidRequest => "office.semantic_invalid_request",
             Self::KindMismatch => "office.semantic_kind_mismatch",
             Self::CapabilityNotSupported => "office.capability_not_supported",
+            Self::OutputPathReserved => "office.output_path_reserved",
         }
     }
 }
@@ -645,6 +647,14 @@ impl OfficeSemanticError {
             code: OfficeSemanticErrorCode::CapabilityNotSupported,
             message: detail.into(),
             capability: Some(capability.into()),
+        }
+    }
+
+    fn output_path_reserved(message: impl Into<String>) -> Self {
+        Self {
+            code: OfficeSemanticErrorCode::OutputPathReserved,
+            message: message.into(),
+            capability: None,
         }
     }
 
@@ -737,6 +747,12 @@ pub fn compile_office_semantic_request(
                     OfficeDocumentKind::Document,
                     semantic.operation_name(),
                 )?;
+                if !is_workspace_relative_output_path(&output) || is_top_level_outputs_path(&output)
+                {
+                    return Err(OfficeSemanticError::output_path_reserved(
+                        "Word PDF render outputPath must be workspace-relative and use a task-scoped temporary directory such as `word-work/visual-qa.pdf`; create its parent directory first. Absolute paths are not accepted, and the top-level `outputs/` directory is reserved for managed PDF runtime publications.",
+                    ));
+                }
                 if !output.ends_with(".pdf") {
                     return Err(OfficeSemanticError::invalid(
                         "Word PDF render outputPath must end with the lowercase .pdf extension.",
@@ -1945,6 +1961,29 @@ fn clean_optional(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn is_top_level_outputs_path(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    normalized
+        .split('/')
+        .find(|component| !component.is_empty() && *component != ".")
+        == Some("outputs")
+}
+
+fn is_workspace_relative_output_path(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized
+            .as_bytes()
+            .get(1)
+            .is_some_and(|separator| *separator == b':')
+    {
+        return false;
+    }
+    !["~", "@home", "@desktop", "@documents", "@downloads"]
+        .into_iter()
+        .any(|alias| normalized == alias || normalized.starts_with(&format!("{alias}/")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2036,6 +2075,74 @@ mod tests {
         assert!(pages.is_empty());
         assert_eq!(*grid, None);
         assert_eq!(*render_mode, None);
+    }
+
+    #[test]
+    fn word_pdf_render_reserves_top_level_outputs_but_accepts_task_scoped_unicode_paths() {
+        for output_path in [
+            "outputs/静夜思-visual-qa.pdf",
+            "./outputs/静夜思-visual-qa.pdf",
+            "outputs\\静夜思-visual-qa.pdf",
+            ".//outputs/静夜思-visual-qa.pdf",
+            ".\\/outputs/静夜思-visual-qa.pdf",
+            "/Users/测试/工作区/outputs/静夜思-visual-qa.pdf",
+            "C:\\测试\\工作区\\静夜思-visual-qa.pdf",
+        ] {
+            let semantic = request(
+                OfficeDocumentKind::Document,
+                OfficeSemanticIntent::Render(OfficeRenderIntent {
+                    output_path: output_path.to_string(),
+                    output_format: Some(OfficeRenderOutputFormat::Pdf),
+                    page_or_slide: None,
+                    sheet_name: None,
+                    range: None,
+                    viewport: None,
+                }),
+            );
+            let error = compile_office_semantic_request(&semantic).unwrap_err();
+            assert_eq!(error.code(), OfficeSemanticErrorCode::OutputPathReserved);
+            assert!(error.message().contains("workspace-relative"));
+        }
+
+        let task_scoped = request(
+            OfficeDocumentKind::Document,
+            OfficeSemanticIntent::Render(OfficeRenderIntent {
+                output_path: "word-work/静夜思-visual-qa.pdf".to_string(),
+                output_format: Some(OfficeRenderOutputFormat::Pdf),
+                page_or_slide: None,
+                sheet_name: None,
+                range: None,
+                viewport: None,
+            }),
+        );
+        let compiled = compile_office_semantic_request(&task_scoped).unwrap();
+        assert_eq!(
+            compiled.output_path.as_deref(),
+            Some("word-work/静夜思-visual-qa.pdf")
+        );
+    }
+
+    #[test]
+    fn top_level_outputs_remains_available_to_legacy_png_renders() {
+        for kind in [
+            OfficeDocumentKind::Document,
+            OfficeDocumentKind::Spreadsheet,
+            OfficeDocumentKind::Presentation,
+        ] {
+            let semantic = request(
+                kind,
+                OfficeSemanticIntent::Render(OfficeRenderIntent {
+                    output_path: "outputs/预览.png".to_string(),
+                    output_format: None,
+                    page_or_slide: None,
+                    sheet_name: None,
+                    range: None,
+                    viewport: None,
+                }),
+            );
+            let compiled = compile_office_semantic_request(&semantic).unwrap();
+            assert_eq!(compiled.output_path.as_deref(), Some("outputs/预览.png"));
+        }
     }
 
     #[test]

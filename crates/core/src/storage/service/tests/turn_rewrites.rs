@@ -774,7 +774,7 @@ fn rewrite_rejects_an_active_command_session_without_hiding_the_source() {
                  output_capture_truncated, archive_ref, terminal_reason,
                  created_at, updated_at, settled_at
              ) VALUES (
-                 ?1, 1, ?2, 'source-assistant', 'source-run', 'command-call', 'project-1',
+                 ?1, ?4, ?2, 'source-assistant', 'source-run', 'command-call', 'project-1',
                  'printf test', '.', ?3, 'explicit_user', '{}', '{}', 'running',
                  4, NULL, NULL, 0, 0, 0, 0, NULL, NULL, 4, 4, NULL
              )",
@@ -782,6 +782,9 @@ fn rewrite_rejects_an_active_command_session_without_hiding_the_source() {
                 "cmd_0123456789abcdef0123456789abcdef",
                 conversation_id,
                 format!("sha256:{}", "c".repeat(64)),
+                i64::from(
+                    crate::storage::agent_command_session_repository::AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+                ),
             ],
         )
         .unwrap();
