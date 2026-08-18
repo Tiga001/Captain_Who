@@ -1,4 +1,5 @@
 import type { ActivatedSkillSummary, SkillSelection } from './skills'
+import type { McpBuiltinCapabilityId } from './mcp/contracts'
 
 /**
  * Agent JSON-RPC names are transport contract, not host implementation details.
@@ -305,6 +306,14 @@ export interface AgentMcpToolInvocationEvent {
 export type AgentToolIdentity =
   | { type: 'builtin'; toolName: string }
   | { type: 'runtime_extension'; extensionId: string; toolName: string }
+  | {
+      type: 'builtin_capability'
+      capabilityId: McpBuiltinCapabilityId
+      managedMcpId: string
+      manifestDigest: string
+      toolId: string
+      modelName: string
+    }
   | { type: 'mcp'; provenance: AgentMcpToolProvenance }
   | { type: 'unregistered'; toolName: string }
 
@@ -1778,9 +1787,36 @@ export interface AgentSkillInstallationRequest {
   expiresAt: number
 }
 
+/**
+ * Renderer-safe projection of one exact request to activate a Host-owned capability.
+ *
+ * The Host deliberately excludes managed Server, transport, executable, credential, manifest
+ * contents and reviewed Tool lists. Renderer must treat every string as untrusted plain text.
+ */
+export interface AgentBuiltinCapabilityActivationApproval {
+  actionId: string
+  activationId: string
+  runId: string
+  callId: string
+  capabilityId: McpBuiltinCapabilityId
+  displayName: string
+  reason: string
+  manifestDigest: string
+  policyRevision: number
+  /** Unix timestamp in seconds. */
+  createdAt: number
+  /** Unix timestamp in seconds. */
+  expiresAt: number
+  approvalStatus: AgentApprovalStatus
+}
+
 export type AgentProposedAction =
   | { type: 'tool_call'; call: AgentToolCall }
   | { type: 'mcp_tool_call'; approval: AgentMcpToolApproval }
+  | {
+      type: 'builtin_capability_activation'
+      approval: AgentBuiltinCapabilityActivationApproval
+    }
   | { type: 'diff'; diff: AgentDiffProposal }
   | { type: 'file_write'; fileWrite: AgentFileWriteProposal }
   | { type: 'command'; command: AgentCommandActionProjection }

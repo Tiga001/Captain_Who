@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  MCP_BUILTIN_CAPABILITY_LIST_METHOD,
+  MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD,
   MCP_CATALOG_REFRESH_METHOD,
   MCP_CATALOG_TOOLS_METHOD,
   MCP_CHANGED_NOTIFICATION_METHOD,
@@ -20,6 +22,10 @@ import {
   MCP_SERVER_STATUS_METHOD,
   MCP_SERVER_STOP_METHOD,
   MCP_SERVER_UPDATE_METHOD,
+  parseMcpBuiltinCapabilityListInput,
+  parseMcpBuiltinCapabilityListOutput,
+  parseMcpBuiltinCapabilityMutationOutput,
+  parseMcpBuiltinCapabilitySetAllowedInput,
   parseMcpCatalogToolsPageInput,
   parseMcpCatalogToolsPageOutput,
   parseMcpChangedNotification,
@@ -39,6 +45,12 @@ import {
 const golden = JSON.parse(
   readFileSync(
     resolve(process.cwd(), 'packages/protocol/fixtures/mcp-management-contract-v1.json'),
+    'utf8'
+  )
+)
+const builtinGolden = JSON.parse(
+  readFileSync(
+    resolve(process.cwd(), 'packages/protocol/fixtures/mcp-builtin-capability-contract-v1.json'),
     'utf8'
   )
 )
@@ -87,6 +99,48 @@ const details = {
 } as const
 
 describe('MCP management cross-language contract', () => {
+  it('keeps built-in capability policy separate from external Server lifecycle', () => {
+    expect(builtinGolden.methods).toEqual({
+      list: MCP_BUILTIN_CAPABILITY_LIST_METHOD,
+      setAllowed: MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD
+    })
+    expect(parseMcpBuiltinCapabilityListInput(builtinGolden.listInput)).toEqual(
+      builtinGolden.listInput
+    )
+    expect(parseMcpBuiltinCapabilitySetAllowedInput(builtinGolden.setAllowedInput)).toEqual(
+      builtinGolden.setAllowedInput
+    )
+    expect(parseMcpBuiltinCapabilityListOutput(builtinGolden.listOutput)).toEqual(
+      builtinGolden.listOutput
+    )
+    expect(parseMcpBuiltinCapabilityMutationOutput(builtinGolden.mutationOutput)).toEqual(
+      builtinGolden.mutationOutput
+    )
+
+    expect(() =>
+      parseMcpBuiltinCapabilitySetAllowedInput({
+        ...builtinGolden.setAllowedInput,
+        enabled: true
+      })
+    ).toThrow(/unexpected field/)
+    expect(() =>
+      parseMcpBuiltinCapabilitySetAllowedInput({
+        ...builtinGolden.setAllowedInput,
+        capabilityId: 'external_server'
+      })
+    ).toThrow(/unexpected value/)
+    for (const forbidden of ['state', 'serverId', 'manifest', 'tools', 'executable']) {
+      expect(() =>
+        parseMcpBuiltinCapabilityListOutput({
+          ...builtinGolden.listOutput,
+          capabilities: [
+            { ...builtinGolden.listOutput.capabilities[0], [forbidden]: 'must-not-cross' }
+          ]
+        })
+      ).toThrow(/unexpected field/)
+    }
+  })
+
   it('keeps stable methods, schema and error namespace aligned with Rust', () => {
     expect(MCP_MANAGEMENT_SCHEMA_VERSION).toBe(golden.schemaVersion)
     expect(MCP_MANAGEMENT_ERROR_CODE).toBe(golden.errorCode)

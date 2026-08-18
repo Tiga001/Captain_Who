@@ -279,6 +279,9 @@ impl AgentService {
     pub(super) fn context_window_provider_host_services(&self) -> AgentRuntimeHostServices {
         let mut host_services =
             AgentRuntimeHostServices::new().with_storage(Arc::clone(&self.storage));
+        if let Some(builtin_capabilities) = self.builtin_capabilities.clone() {
+            host_services = host_services.with_builtin_capabilities(builtin_capabilities);
+        }
         if let Some(provider_continuation_vault) = self.provider_continuation_vault.as_ref() {
             host_services = host_services
                 .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));

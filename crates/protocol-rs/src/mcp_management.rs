@@ -37,6 +37,19 @@ pub enum McpApprovalModeDto {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum McpBuiltinCapabilityIdDto {
+    #[serde(rename = "browser_automation")]
+    BrowserAutomation,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum McpManagementEntryKindDto {
+    BuiltinCapability,
+    ExternalServer,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum McpLaunchAuthorizationStateDto {
     Required,
@@ -78,6 +91,21 @@ pub struct McpServerMutationPrecondition {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpServerListInput {
     pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpBuiltinCapabilityListInput {
+    pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpBuiltinCapabilitySetAllowedInput {
+    pub schema_version: u32,
+    pub capability_id: McpBuiltinCapabilityIdDto,
+    pub allowed: bool,
+    pub expected_policy_revision: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -204,6 +232,35 @@ pub struct McpServerListOutput {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpBuiltinCapabilityListItem {
+    pub schema_version: u32,
+    pub kind: McpManagementEntryKindDto,
+    pub capability_id: McpBuiltinCapabilityIdDto,
+    pub display_name: String,
+    pub description: String,
+    pub user_allowed: bool,
+    pub policy_version: u32,
+    pub policy_revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpBuiltinCapabilityListOutput {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub capabilities: Vec<McpBuiltinCapabilityListItem>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpBuiltinCapabilityMutationOutput {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub capability: McpBuiltinCapabilityListItem,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpServerDetailsOutput {
     pub schema_version: u32,
     pub registry_revision: u64,
@@ -294,6 +351,8 @@ pub struct McpCatalogToolsPageOutput {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum McpManagementOperationDto {
+    ListBuiltinCapabilities,
+    SetBuiltinCapabilityAllowed,
     List,
     Get,
     Add,

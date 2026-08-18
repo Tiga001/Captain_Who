@@ -7,6 +7,9 @@ type McpIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 /** Transport-only MCP bridge. It exposes no generic RPC and no direct Tool invocation. */
 export function createMcpIpcBridge(ipcRenderer: McpIpcRenderer): McpHostApi {
   return {
+    listBuiltinCapabilities: () => ipcRenderer.invoke(HOST_CHANNELS.mcp.listBuiltinCapabilities),
+    setBuiltinCapabilityAllowed: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.mcp.setBuiltinCapabilityAllowed, input),
     listServers: () => ipcRenderer.invoke(HOST_CHANNELS.mcp.listServers),
     getServer: (input) => ipcRenderer.invoke(HOST_CHANNELS.mcp.getServer, input),
     addServer: (input) => ipcRenderer.invoke(HOST_CHANNELS.mcp.addServer, input),

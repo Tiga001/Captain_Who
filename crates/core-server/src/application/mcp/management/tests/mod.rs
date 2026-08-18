@@ -30,8 +30,10 @@ impl McpConnector for RejectingConnector {
 
 struct TestHarness {
     _database_directory: TempDir,
+    _storage: mycopilot_core::storage::service::StorageService,
     registry: Arc<SqliteMcpRegistry>,
     manager: Arc<McpConnectionManager>,
+    builtin_capability_runtime: BuiltinCapabilityRuntime,
     service: Arc<McpManagementService>,
 }
 
@@ -42,10 +44,20 @@ impl TestHarness {
 
     fn with_connector(connector: Arc<dyn McpConnector>) -> Self {
         let database_directory = tempfile::tempdir().expect("temporary database directory");
-        let registry = Arc::new(
-            SqliteMcpRegistry::open(database_directory.path().join("mcp-registry.sqlite3"))
-                .expect("open test MCP Registry"),
+        let database_path = database_directory.path().join("mcp-registry.sqlite3");
+        let storage = mycopilot_core::storage::service::StorageService::open(&database_path)
+            .expect("create canonical test storage");
+        let registry =
+            Arc::new(SqliteMcpRegistry::open(&database_path).expect("open test MCP Registry"));
+        let builtin_capability_policies = Arc::new(
+            SqliteBuiltinCapabilityPolicyStore::open(&database_path)
+                .expect("open test built-in MCP policy store"),
         );
+        let builtin_capability_runtime =
+            crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider::runtime(
+                Arc::clone(&builtin_capability_policies),
+            )
+            .expect("construct test built-in capability runtime");
         let registry_for_manager: Arc<dyn McpRegistry> = registry.clone();
         let manager = Arc::new(
             McpConnectionManager::new(
@@ -56,11 +68,18 @@ impl TestHarness {
             )
             .expect("construct test MCP connection manager"),
         );
-        let service = Arc::new(McpManagementService::new(registry.clone(), manager.clone()));
+        let service = Arc::new(McpManagementService::new(
+            registry.clone(),
+            manager.clone(),
+            builtin_capability_policies,
+            builtin_capability_runtime.clone(),
+        ));
         Self {
             _database_directory: database_directory,
+            _storage: storage,
             registry,
             manager,
+            builtin_capability_runtime,
             service,
         }
     }
@@ -85,6 +104,67 @@ fn create_input(display_name: &str) -> McpServerCreateInput {
         cwd: "/tmp".to_string(),
         approval_mode: McpApprovalModeDto::Prompt,
     }
+}
+
+#[tokio::test]
+async fn disabling_builtin_capability_revokes_the_live_task_grant() {
+    let harness = TestHarness::new();
+    let enabled = harness
+        .service
+        .set_builtin_capability_allowed(McpBuiltinCapabilitySetAllowedInput {
+            schema_version: MCP_MANAGEMENT_SCHEMA_VERSION,
+            capability_id: McpBuiltinCapabilityIdDto::BrowserAutomation,
+            allowed: true,
+            expected_policy_revision: 0,
+        })
+        .unwrap();
+    assert!(enabled.capability.user_allowed);
+
+    let manifest = harness.builtin_capability_runtime.manifests()[0].clone();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let approval = mycopilot_core::AgentBuiltinCapabilityActivationApproval {
+        action_id: Uuid::new_v4().to_string(),
+        activation_id: Uuid::new_v4().to_string(),
+        run_id: "management-revoke-run".to_string(),
+        call_id: "management-revoke-call".to_string(),
+        capability_id: manifest.descriptor.id.as_str().to_string(),
+        display_name: manifest.descriptor.display_name,
+        reason: "Exercise the exact policy revocation path".to_string(),
+        manifest_digest: manifest.manifest_digest,
+        policy_revision: enabled.capability.policy_revision,
+        created_at: now,
+        expires_at: now + mycopilot_core::BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
+        approval_status: mycopilot_core::AgentApprovalStatus::Approved,
+    };
+    let grant = harness
+        .builtin_capability_runtime
+        .approve_activation(&approval)
+        .unwrap();
+    assert!(harness
+        .builtin_capability_runtime
+        .live_grant(&approval.run_id, &grant.capability_id)
+        .unwrap()
+        .is_some());
+
+    let disabled = harness
+        .service
+        .set_builtin_capability_allowed(McpBuiltinCapabilitySetAllowedInput {
+            schema_version: MCP_MANAGEMENT_SCHEMA_VERSION,
+            capability_id: McpBuiltinCapabilityIdDto::BrowserAutomation,
+            allowed: false,
+            expected_policy_revision: enabled.capability.policy_revision,
+        })
+        .unwrap();
+    assert!(!disabled.capability.user_allowed);
+    assert!(harness
+        .builtin_capability_runtime
+        .live_grant(&approval.run_id, &grant.capability_id)
+        .unwrap()
+        .is_none());
+    harness.shutdown().await;
 }
 
 fn mutation_input(server: &McpServerDetailsView) -> McpServerMutationInput {

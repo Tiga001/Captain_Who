@@ -19,6 +19,8 @@ export const MCP_SERVER_STATUS_METHOD = 'mcp.server.status' as const
 export const MCP_CATALOG_TOOLS_METHOD = 'mcp.catalog.tools' as const
 export const MCP_CATALOG_REFRESH_METHOD = 'mcp.catalog.refresh' as const
 export const MCP_CHANGED_NOTIFICATION_METHOD = 'mcp.changed' as const
+export const MCP_BUILTIN_CAPABILITY_LIST_METHOD = 'mcp.builtinCapability.list' as const
+export const MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD = 'mcp.builtinCapability.setAllowed' as const
 
 /** Public limits used for early UX validation. The trusted Host enforces the same or stricter. */
 export const MCP_MANAGEMENT_LIMITS = {
@@ -40,6 +42,8 @@ export type McpServerScopeView = 'user'
 export type McpServerSourceView = 'userManual'
 export type McpTrustView = 'untrusted' | 'userApproved'
 export type McpApprovalModeView = 'prompt' | 'auto' | 'deny'
+export type McpBuiltinCapabilityId = 'browser_automation'
+export type McpManagementEntryKind = 'builtinCapability' | 'externalServer'
 export type McpLaunchAuthorizationState = 'required' | 'authorized' | 'stale'
 export type McpServerStateView =
   'disabled' | 'starting' | 'discovering' | 'ready' | 'stopping' | 'error' | 'backoff' | 'degraded'
@@ -112,6 +116,40 @@ export interface McpServerListOutput {
   schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION
   registryRevision: number
   servers: McpServerListItem[]
+}
+
+export interface McpBuiltinCapabilityListInput {
+  schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION
+}
+
+export interface McpBuiltinCapabilitySetAllowedInput {
+  schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION
+  capabilityId: McpBuiltinCapabilityId
+  allowed: boolean
+  expectedPolicyRevision: number
+}
+
+export interface McpBuiltinCapabilityListItem {
+  schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION
+  kind: Extract<McpManagementEntryKind, 'builtinCapability'>
+  capabilityId: McpBuiltinCapabilityId
+  displayName: string
+  description: string
+  userAllowed: boolean
+  policyVersion: number
+  policyRevision: number
+}
+
+export interface McpBuiltinCapabilityListOutput {
+  schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION
+  revision: number
+  capabilities: McpBuiltinCapabilityListItem[]
+}
+
+export interface McpBuiltinCapabilityMutationOutput {
+  schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION
+  revision: number
+  capability: McpBuiltinCapabilityListItem
 }
 
 export interface McpServerIdInput {
@@ -220,6 +258,8 @@ export interface McpCatalogToolsPageOutput {
 }
 
 export type McpManagementOperation =
+  | 'listBuiltinCapabilities'
+  | 'setBuiltinCapabilityAllowed'
   | 'list'
   | 'get'
   | 'add'

@@ -3,6 +3,7 @@ mod agent_collaboration_harness;
 mod agent_delivery;
 mod agent_graph;
 pub mod artifact_runtime;
+pub mod builtin_capabilities;
 mod cancellation;
 pub mod command;
 mod context;
@@ -56,6 +57,16 @@ pub use agent_graph::{
     TrustedAgentWakeTurnAdmission, UpdateAgentTemplateInput, AGENT_GRAPH_SCHEMA_VERSION,
     AGENT_RESULT_ENVELOPE_SCHEMA_VERSION, AGENT_RESULT_SUMMARY_MAX_BYTES,
     AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
+};
+pub use builtin_capabilities::{
+    builtin_capability_activation_rejected_result, builtin_capability_activation_result,
+    validate_frozen_builtin_capability_activation_args, BuiltinCapabilityDescriptor,
+    BuiltinCapabilityFuture, BuiltinCapabilityId, BuiltinCapabilityInvocation,
+    BuiltinCapabilityManifest, BuiltinCapabilityPolicy, BuiltinCapabilityPolicyStore,
+    BuiltinCapabilityProvider, BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor,
+    CapabilityActivationId, CapabilityActivationState, CapabilityGrant,
+    BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS, BUILTIN_CAPABILITY_GRANT_TTL_SECONDS,
+    BUILTIN_CAPABILITY_MANIFEST_SCHEMA_VERSION,
 };
 pub use cancellation::AgentCancellationToken;
 pub use context::{
@@ -198,9 +209,10 @@ pub fn validate_frozen_agent_command_args(
 pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAssistantTurnCheckpointIdentity,
-    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentChatMessage,
-    AgentChatOutput, AgentCommandArtifactChange, AgentCommandArtifactChangeKind,
-    AgentCommandArtifactKind, AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
+    AgentAttachmentLibraryContext, AgentAttachmentReference,
+    AgentBuiltinCapabilityActivationApproval, AgentChatInput, AgentChatMessage, AgentChatOutput,
+    AgentCommandArtifactChange, AgentCommandArtifactChangeKind, AgentCommandArtifactKind,
+    AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
     AgentCommandArtifactObservationCoverage, AgentCommandArtifactObservationKind,
     AgentCommandArtifactObservationPhase, AgentCommandArtifactObservationRequest,
     AgentCommandArtifactObservationStatus, AgentCommandArtifactObservationWarning,

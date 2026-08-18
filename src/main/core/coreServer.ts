@@ -83,6 +83,9 @@ import type {
   ImageGenerationStatus,
   ImageGenerationUpdateConfigurationInput,
   ImageGenerationUpdateConfigurationOutput,
+  McpBuiltinCapabilityListOutput,
+  McpBuiltinCapabilityMutationOutput,
+  McpBuiltinCapabilitySetAllowedInput,
   McpCatalogToolsPageInput,
   McpCatalogToolsPageOutput,
   McpChangedNotification,
@@ -193,6 +196,8 @@ import {
   IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
   MCP_CATALOG_REFRESH_METHOD,
   MCP_CATALOG_TOOLS_METHOD,
+  MCP_BUILTIN_CAPABILITY_LIST_METHOD,
+  MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD,
   MCP_CHANGED_NOTIFICATION_METHOD,
   MCP_MANAGEMENT_ERROR_CODE,
   MCP_MANAGEMENT_SCHEMA_VERSION,
@@ -211,6 +216,9 @@ import {
   MCP_SERVER_UPDATE_METHOD,
   parseMcpCatalogToolsPageInput,
   parseMcpCatalogToolsPageOutput,
+  parseMcpBuiltinCapabilityListOutput,
+  parseMcpBuiltinCapabilityMutationOutput,
+  parseMcpBuiltinCapabilitySetAllowedInput,
   parseMcpChangedNotification,
   parseMcpLaunchAuthorizationCommitInput,
   parseMcpLaunchAuthorizationPreview,
@@ -620,6 +628,29 @@ export class CoreServer {
         { schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION }
       )
       .then(parseMcpServerListOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  listMcpBuiltinCapabilities(): Promise<McpBuiltinCapabilityListOutput> {
+    return this.rpc
+      .request<unknown, { schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION }>(
+        MCP_BUILTIN_CAPABILITY_LIST_METHOD,
+        { schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION }
+      )
+      .then(parseMcpBuiltinCapabilityListOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  setMcpBuiltinCapabilityAllowed(
+    input: McpBuiltinCapabilitySetAllowedInput
+  ): Promise<McpBuiltinCapabilityMutationOutput> {
+    const request = parseMcpBuiltinCapabilitySetAllowedInput(input)
+    return this.rpc
+      .request<unknown, McpBuiltinCapabilitySetAllowedInput>(
+        MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD,
+        request
+      )
+      .then(parseMcpBuiltinCapabilityMutationOutput)
       .catch(rethrowValidatedMcpManagementError)
   }
 

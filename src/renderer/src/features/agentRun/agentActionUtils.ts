@@ -1,4 +1,18 @@
-import type { AgentProposedAction } from '@mycopilot/protocol'
+import type { AgentProposedAction, PendingAgentActionSnapshot } from '@mycopilot/protocol'
+
+/** Defense in depth for Renderer hydration if a future Host bridge bypasses strict wire parsing. */
+export function shouldHydratePendingAgentAction(snapshot: PendingAgentActionSnapshot): boolean {
+  if (snapshot.action.type !== 'builtin_capability_activation') return true
+  const approval = snapshot.action.approval
+  return (
+    snapshot.status === 'pending' &&
+    approval.approvalStatus === 'required' &&
+    snapshot.actionId === approval.actionId &&
+    snapshot.runId === approval.runId &&
+    snapshot.toolName === 'activate_capability' &&
+    snapshot.toolCallId === approval.callId
+  )
+}
 
 export function getAgentActionApprovalStatus(action: AgentProposedAction) {
   if (action.type === 'diff') return action.diff.approvalStatus
@@ -9,6 +23,7 @@ export function getAgentActionApprovalStatus(action: AgentProposedAction) {
   if (action.type === 'office_operation') return action.officeOperation.approvalStatus
   if (action.type === 'skill_installation') return action.installation.approvalStatus
   if (action.type === 'mcp_tool_call') return action.approval.call.approvalStatus
+  if (action.type === 'builtin_capability_activation') return action.approval.approvalStatus
   return action.call.approvalStatus
 }
 
@@ -21,5 +36,6 @@ export function getAgentActionId(action: AgentProposedAction) {
   if (action.type === 'office_operation') return action.officeOperation.id
   if (action.type === 'skill_installation') return action.installation.id
   if (action.type === 'mcp_tool_call') return action.approval.identity.actionId
+  if (action.type === 'builtin_capability_activation') return action.approval.actionId
   return action.call.id
 }

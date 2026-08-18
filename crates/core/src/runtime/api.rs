@@ -395,6 +395,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) skill_installation_commit:
         Option<Arc<dyn crate::tools::AgentSkillInstallationCommitPreparer>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
+    pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     pub(super) command_session_executor: Option<Arc<dyn AgentCommandSessionExecutor>>,
@@ -473,6 +474,12 @@ impl AgentRuntimeHostServices {
     /// provider-neutral descriptors and an invocation capability.
     pub fn with_mcp_tools(mut self, mcp_tools: crate::tools::McpToolRuntime) -> Self {
         self.mcp_tools = Some(mcp_tools);
+        self
+    }
+
+    /// Supplies Host-owned manifests, policy and process-memory grants for built-in capabilities.
+    pub fn with_builtin_capabilities(mut self, runtime: crate::BuiltinCapabilityRuntime) -> Self {
+        self.builtin_capabilities = Some(runtime);
         self
     }
 
@@ -752,6 +759,7 @@ pub fn prepare_context_window_tool_projection(
             skill_activation_resolver: host_services.skill_activation_resolver.clone(),
             skill_resources: host_services.skill_resources.clone(),
             mcp_tools: host_services.mcp_tools.clone(),
+            builtin_capabilities: host_services.builtin_capabilities.clone(),
             agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
         },
     )?;

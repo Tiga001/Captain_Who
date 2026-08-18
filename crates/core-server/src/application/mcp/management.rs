@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use mycopilot_core::{BuiltinCapabilityId as CoreBuiltinCapabilityId, BuiltinCapabilityRuntime};
 use mycopilot_mcp_client::{
     McpApprovalMode, McpCatalogCompleteness, McpCatalogDiagnosticKind, McpCatalogSnapshot,
     McpConfigDigest, McpConfigEpoch, McpConnectionManager, McpError, McpErrorKind, McpEvent,
@@ -18,20 +19,27 @@ use mycopilot_mcp_client::{
     McpTransportConfig, McpTrustLevel,
 };
 use mycopilot_protocol_rs::{
-    McpApprovalModeDto, McpCapabilityView, McpCatalogCompletenessDto, McpCatalogToolsPageInput,
-    McpCatalogToolsPageOutput, McpChangedKindDto, McpChangedNotification, McpConnectionStateDto,
+    McpApprovalModeDto, McpBuiltinCapabilityIdDto, McpBuiltinCapabilityListInput,
+    McpBuiltinCapabilityListItem, McpBuiltinCapabilityListOutput,
+    McpBuiltinCapabilityMutationOutput, McpBuiltinCapabilitySetAllowedInput, McpCapabilityView,
+    McpCatalogCompletenessDto, McpCatalogToolsPageInput, McpCatalogToolsPageOutput,
+    McpChangedKindDto, McpChangedNotification, McpConnectionStateDto,
     McpLaunchAuthorizationCommitInput, McpLaunchAuthorizationPreview, McpLaunchAuthorizationResult,
-    McpLaunchAuthorizationStateDto, McpManagementErrorCodeDto, McpManagementErrorData,
-    McpManagementErrorTypeDto, McpManagementOperationDto, McpManagementRecoveryDto,
-    McpProtocolLifecycleDto, McpProtocolView, McpSafeErrorView, McpServerCreateInput,
-    McpServerDetailsOutput, McpServerDetailsView, McpServerIdInput, McpServerListInput,
-    McpServerListItem, McpServerListOutput, McpServerMutationInput, McpServerMutationPrecondition,
-    McpServerScopeDto, McpServerSourceDto, McpServerUpdateInput, McpToolSummaryView,
-    McpTransportKindDto, McpTrustLevelDto, MCP_MANAGEMENT_SCHEMA_VERSION,
+    McpLaunchAuthorizationStateDto, McpManagementEntryKindDto, McpManagementErrorCodeDto,
+    McpManagementErrorData, McpManagementErrorTypeDto, McpManagementOperationDto,
+    McpManagementRecoveryDto, McpProtocolLifecycleDto, McpProtocolView, McpSafeErrorView,
+    McpServerCreateInput, McpServerDetailsOutput, McpServerDetailsView, McpServerIdInput,
+    McpServerListInput, McpServerListItem, McpServerListOutput, McpServerMutationInput,
+    McpServerMutationPrecondition, McpServerScopeDto, McpServerSourceDto, McpServerUpdateInput,
+    McpToolSummaryView, McpTransportKindDto, McpTrustLevelDto, MCP_MANAGEMENT_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::builtin_capability_policy::{
+    BuiltinCapabilityId, BuiltinCapabilityPolicyError, BuiltinCapabilityPolicyRecord,
+    SqliteBuiltinCapabilityPolicyStore,
+};
 use super::sqlite_registry::{
     compute_launch_spec_digest, launch_authorization_identity_is_valid,
     launch_authorization_is_valid, prepare_launch_file_identity, McpLaunchSpecDigest,
@@ -40,6 +48,7 @@ use super::sqlite_registry::{
 };
 
 mod authorization;
+mod builtin_capabilities;
 mod catalog;
 mod errors;
 mod events;
@@ -96,6 +105,8 @@ impl Drop for ActiveServerMutation<'_> {
 pub(crate) struct McpManagementService {
     registry: Arc<SqliteMcpRegistry>,
     manager: Arc<McpConnectionManager>,
+    builtin_capability_policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
+    builtin_capability_runtime: BuiltinCapabilityRuntime,
     source_epoch: String,
     authorization_previews: Mutex<BTreeMap<Uuid, FrozenLaunchAuthorization>>,
     active_server_mutations: Mutex<BTreeSet<McpServerId>>,
@@ -118,10 +129,14 @@ impl McpManagementService {
     pub(crate) fn new(
         registry: Arc<SqliteMcpRegistry>,
         manager: Arc<McpConnectionManager>,
+        builtin_capability_policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
+        builtin_capability_runtime: BuiltinCapabilityRuntime,
     ) -> Self {
         Self {
             registry,
             manager,
+            builtin_capability_policies,
+            builtin_capability_runtime,
             source_epoch: Uuid::new_v4().to_string(),
             authorization_previews: Mutex::new(BTreeMap::new()),
             active_server_mutations: Mutex::new(BTreeSet::new()),

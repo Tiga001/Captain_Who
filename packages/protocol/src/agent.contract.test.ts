@@ -133,6 +133,14 @@ const toolIdentities = [
     toolName: 'office_document'
   },
   {
+    type: 'builtin_capability',
+    capabilityId: 'browser_automation',
+    managedMcpId: 'builtin.browser_automation.mcp',
+    manifestDigest: `sha256:${'e'.repeat(64)}`,
+    toolId: 'browser.navigate',
+    modelName: 'browser_navigate'
+  },
+  {
     type: 'mcp',
     provenance: {
       serverId: '7f4a2d91-24ab-4d24-9eed-63daf26a6c15',
@@ -160,7 +168,7 @@ const mcpTraceToolCall = {
   operation: { left: 2, right: 3 },
   approvalStatus: 'not_required',
   truncated: false,
-  provenance: toolIdentities[2]
+  provenance: toolIdentities[3]
 } satisfies ConversationTurnTraceItem
 
 describe('Agent cross-language golden contract', () => {
@@ -204,6 +212,14 @@ describe('Agent tool identity contract', () => {
         toolName: 'office_document'
       },
       {
+        type: 'builtin_capability',
+        capabilityId: 'browser_automation',
+        managedMcpId: 'builtin.browser_automation.mcp',
+        manifestDigest: `sha256:${'e'.repeat(64)}`,
+        toolId: 'browser.navigate',
+        modelName: 'browser_navigate'
+      },
+      {
         type: 'mcp',
         provenance: {
           serverId: '7f4a2d91-24ab-4d24-9eed-63daf26a6c15',
@@ -225,6 +241,6 @@ describe('Agent tool identity contract', () => {
   })
 
   it('requires typed provenance on a tool-call trace item', () => {
-    expect(mcpTraceToolCall.provenance).toEqual(toolIdentities[2])
+    expect(mcpTraceToolCall.provenance).toEqual(toolIdentities[3])
   })
 })

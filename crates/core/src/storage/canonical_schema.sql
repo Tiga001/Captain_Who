@@ -72,6 +72,20 @@ CREATE TABLE mcp_registry_model_namespaces (
             model_namespace TEXT NOT NULL UNIQUE,
             created_at INTEGER NOT NULL CHECK (created_at >= 0)
         );
+CREATE TABLE mcp_builtin_capability_metadata (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            revision_watermark INTEGER NOT NULL CHECK (revision_watermark >= 0)
+        );
+CREATE TABLE mcp_builtin_capability_policies (
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            capability_id TEXT PRIMARY KEY CHECK (
+                capability_id = 'browser_automation'
+            ),
+            user_allowed INTEGER NOT NULL CHECK (user_allowed IN (0, 1)),
+            policy_version INTEGER NOT NULL CHECK (policy_version > 0),
+            policy_revision INTEGER NOT NULL CHECK (policy_revision > 0)
+        );
 CREATE TABLE model_provider_settings (
             id TEXT PRIMARY KEY CHECK (id = 'default'),
             api_url TEXT NOT NULL,

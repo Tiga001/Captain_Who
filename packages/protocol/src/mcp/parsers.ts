@@ -2,6 +2,12 @@ import {
   MCP_MANAGEMENT_LIMITS,
   MCP_MANAGEMENT_SCHEMA_VERSION,
   type McpApprovalModeView,
+  type McpBuiltinCapabilityId,
+  type McpBuiltinCapabilityListInput,
+  type McpBuiltinCapabilityListItem,
+  type McpBuiltinCapabilityListOutput,
+  type McpBuiltinCapabilityMutationOutput,
+  type McpBuiltinCapabilitySetAllowedInput,
   type McpCapabilitySnapshotView,
   type McpCatalogCompletenessView,
   type McpCatalogToolsPageInput,
@@ -49,6 +55,8 @@ const SERVER_STATES = [
 ] as const
 const CATALOG_COMPLETENESS = ['complete', 'partial', 'stale', 'failed'] as const
 const MANAGEMENT_OPERATIONS = [
+  'listBuiltinCapabilities',
+  'setBuiltinCapabilityAllowed',
   'list',
   'get',
   'add',
@@ -109,6 +117,45 @@ export function parseMcpServerListInput(value: unknown): McpServerListInput {
   expectOnlyKeys(record, ['schemaVersion'] as const, context)
   expectSchemaVersion(record, MCP_MANAGEMENT_SCHEMA_VERSION, context)
   return { schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION }
+}
+
+export function parseMcpBuiltinCapabilityListInput(value: unknown): McpBuiltinCapabilityListInput {
+  const context = 'built-in MCP capability list request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion'] as const, context)
+  expectSchemaVersion(record, MCP_MANAGEMENT_SCHEMA_VERSION, context)
+  return { schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION }
+}
+
+/** Canonical Host-owned capability identity shared by management and Agent contracts. */
+export function parseMcpBuiltinCapabilityId(
+  value: unknown,
+  context = 'built-in MCP capability id'
+): McpBuiltinCapabilityId {
+  return expectEnum(value, ['browser_automation'] as const, context)
+}
+
+export function parseMcpBuiltinCapabilitySetAllowedInput(
+  value: unknown
+): McpBuiltinCapabilitySetAllowedInput {
+  const context = 'built-in MCP capability policy request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['schemaVersion', 'capabilityId', 'allowed', 'expectedPolicyRevision'] as const,
+    context
+  )
+  expectSchemaVersion(record, MCP_MANAGEMENT_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
+    capabilityId: parseMcpBuiltinCapabilityId(record.capabilityId, `${context}.capabilityId`),
+    allowed: expectBoolean(record.allowed, `${context}.allowed`),
+    expectedPolicyRevision: expectSafeInteger(
+      record.expectedPolicyRevision,
+      `${context}.expectedPolicyRevision`,
+      0
+    )
+  }
 }
 
 export function parseMcpServerIdInput(value: unknown): McpServerIdInput {
@@ -257,6 +304,53 @@ export function parseMcpServerListOutput(value: unknown): McpServerListOutput {
     schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
     registryRevision,
     servers: parsed
+  }
+}
+
+export function parseMcpBuiltinCapabilityListOutput(
+  value: unknown
+): McpBuiltinCapabilityListOutput {
+  const context = 'built-in MCP capability list response'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'revision', 'capabilities'] as const, context)
+  expectSchemaVersion(record, MCP_MANAGEMENT_SCHEMA_VERSION, context)
+  const revision = expectSafeInteger(record.revision, `${context}.revision`, 0)
+  const capabilities = expectArray(record.capabilities, `${context}.capabilities`)
+  if (capabilities.length > 64) {
+    throw invalidProtocolValue(context, 'capability count exceeded 64')
+  }
+  const parsed = capabilities.map((capability, index) =>
+    parseMcpBuiltinCapabilityListItem(capability, `${context}.capabilities[${index}]`)
+  )
+  if (new Set(parsed.map((capability) => capability.capabilityId)).size !== parsed.length) {
+    throw invalidProtocolValue(context, 'capabilityId values must be unique')
+  }
+  if (parsed.some((capability) => capability.policyRevision > revision)) {
+    throw invalidProtocolValue(context, 'policyRevision must not exceed response revision')
+  }
+  return {
+    schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
+    revision,
+    capabilities: parsed
+  }
+}
+
+export function parseMcpBuiltinCapabilityMutationOutput(
+  value: unknown
+): McpBuiltinCapabilityMutationOutput {
+  const context = 'built-in MCP capability mutation response'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'revision', 'capability'] as const, context)
+  expectSchemaVersion(record, MCP_MANAGEMENT_SCHEMA_VERSION, context)
+  const revision = expectSafeInteger(record.revision, `${context}.revision`, 0)
+  const capability = parseMcpBuiltinCapabilityListItem(record.capability, `${context}.capability`)
+  if (capability.policyRevision > revision) {
+    throw invalidProtocolValue(context, 'policyRevision must not exceed response revision')
+  }
+  return {
+    schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
+    revision,
+    capability
   }
 }
 
@@ -518,6 +612,48 @@ function parseMcpServerMutationPrecondition(value: unknown): McpServerMutationPr
       record.expectedConfigDigest,
       `${context}.expectedConfigDigest`
     )
+  }
+}
+
+function parseMcpBuiltinCapabilityListItem(
+  value: unknown,
+  context: string
+): McpBuiltinCapabilityListItem {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'kind',
+      'capabilityId',
+      'displayName',
+      'description',
+      'userAllowed',
+      'policyVersion',
+      'policyRevision'
+    ] as const,
+    context
+  )
+  expectSchemaVersion(record, MCP_MANAGEMENT_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
+    kind: expectEnum(record.kind, ['builtinCapability'] as const, `${context}.kind`),
+    capabilityId: parseMcpBuiltinCapabilityId(record.capabilityId, `${context}.capabilityId`),
+    displayName: expectDisplayText(
+      record.displayName,
+      `${context}.displayName`,
+      MCP_MANAGEMENT_LIMITS.displayNameBytes,
+      false
+    ),
+    description: expectDisplayText(
+      record.description,
+      `${context}.description`,
+      MCP_MANAGEMENT_LIMITS.safeTextBytes,
+      false
+    ),
+    userAllowed: expectBoolean(record.userAllowed, `${context}.userAllowed`),
+    policyVersion: expectSafeInteger(record.policyVersion, `${context}.policyVersion`, 1),
+    policyRevision: expectSafeInteger(record.policyRevision, `${context}.policyRevision`, 0)
   }
 }
 

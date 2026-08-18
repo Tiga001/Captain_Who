@@ -1251,6 +1251,10 @@ export const enUSTranslations = {
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': 'No',
   'agent.approval.dialog.rejectPlaceholder': 'No, tell me how to adjust',
+  'agent.builtinCapability.approval.title': 'Allow me to activate “{capability}”?',
+  'agent.builtinCapability.approval.taskGrantHint':
+    'After approval, reviewed tools for this capability may run automatically for this task.',
+  'agent.builtinCapability.approval.expired': 'This capability activation request has expired.',
   'agent.skillInstallation.title': 'Install “{name}”?',
   'agent.skillInstallation.approve': 'Approve installation',
   'agent.skillInstallation.reject': 'Reject',

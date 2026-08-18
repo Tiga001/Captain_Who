@@ -3,13 +3,14 @@ import type { AgentMcpToolInvocationState, AgentProposedAction } from '@mycopilo
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
+import { BuiltinCapabilityActivationApprovalCard } from './BuiltinCapabilityActivationApprovalCard'
 import { McpToolApprovalCard } from './McpToolApprovalCard'
 import { SkillInstallationApprovalCard } from './SkillInstallationApprovalCard'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
 
 type StandardAgentProposedAction = Exclude<
   AgentProposedAction,
-  { type: 'mcp_tool_call' | 'skill_installation' }
+  { type: 'mcp_tool_call' | 'builtin_capability_activation' | 'skill_installation' }
 >
 
 interface AgentApprovalDialogTarget {
@@ -224,6 +225,18 @@ export function AgentApprovalDialog({
       <McpToolApprovalCard
         action={target.action}
         invocationState={mcpInvocationState}
+        messageId={target.messageId}
+        onApprove={onApprove}
+        onCancel={onCancel}
+        onReject={onReject}
+      />
+    )
+  }
+
+  if (target.action.type === 'builtin_capability_activation') {
+    return (
+      <BuiltinCapabilityActivationApprovalCard
+        action={target.action}
         messageId={target.messageId}
         onApprove={onApprove}
         onCancel={onCancel}

@@ -13,6 +13,7 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
+    pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) agent_collaboration_enabled: bool,
 }
 
@@ -42,6 +43,7 @@ pub(super) fn prepare_runtime_capabilities(
             skill_activation_resolver: None,
             skill_resources: None,
             mcp_tools: None,
+            builtin_capabilities: None,
             agent_collaboration_enabled: false,
         },
     )
@@ -62,14 +64,16 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_activation_resolver,
         skill_resources,
         mcp_tools,
+        builtin_capabilities,
         agent_collaboration_enabled,
     } = services;
-    let runtime_extensions = RuntimeExtensions::for_run_with_skills(
+    let runtime_extensions = RuntimeExtensions::for_run_with_capabilities(
         run_id,
         input.skill_discovery.clone(),
         input.skill_activation.as_ref(),
         skill_activation_resolver,
         skill_resources,
+        builtin_capabilities,
         extension_snapshots,
     )?;
     let mut tool_registry = ToolRegistry::defaults_with_search_office_and_image(
@@ -630,6 +634,7 @@ mod approval_identity_tests {
             skill_activation_resolver: None,
             skill_resources: None,
             mcp_tools: None,
+            builtin_capabilities: None,
             agent_collaboration_enabled,
         }
     }

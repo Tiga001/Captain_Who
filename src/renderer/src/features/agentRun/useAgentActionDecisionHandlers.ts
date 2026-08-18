@@ -53,7 +53,8 @@ export function useAgentActionDecisionHandlers({
           updateAssistantMessage(
             conversationId,
             messageId,
-            (message) => applyAgentActionExecutionToChatMessage(message, execution),
+            (message) =>
+              applyAgentActionExecutionToChatMessage(message, execution, undefined, action),
             { touchConversation: true }
           )
         },
@@ -83,7 +84,7 @@ export function useAgentActionDecisionHandlers({
             conversationId,
             messageId,
             (currentMessage) =>
-              applyAgentActionExecutionToChatMessage(currentMessage, execution, message),
+              applyAgentActionExecutionToChatMessage(currentMessage, execution, message, action),
             { touchConversation: true }
           )
         },
@@ -143,10 +144,10 @@ function logAgentActionDecisionError(
   action: AgentProposedAction,
   error: unknown
 ): void {
-  if (action.type === 'mcp_tool_call') {
-    // MCP failures may carry Host error details. Keep the entire Error/cause/stack out of
-    // Renderer logs; the dedicated approval UI receives only the protocol's safe lifecycle view.
-    console.error(`Failed to ${operation} external MCP action`)
+  if (action.type === 'mcp_tool_call' || action.type === 'builtin_capability_activation') {
+    // Protected Host actions may carry internal error details. Keep the entire
+    // Error/cause/stack out of Renderer logs; dedicated approval UIs receive only safe views.
+    console.error(`Failed to ${operation} protected Agent action`)
     return
   }
   console.error(`Failed to ${operation} agent action`, error)

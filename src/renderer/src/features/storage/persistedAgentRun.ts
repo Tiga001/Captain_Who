@@ -459,18 +459,35 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
   const runCommandCallIds = new Set(
     run.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
   )
+  // Built-in capability activation approvals are Host-owned, just like MCP approvals. Their
+  // synthetic Tool calls exist only to anchor the live approval UI and must not survive a
+  // Renderer reload independently of the authoritative pending-action store.
+  const builtinCapabilityCallIds = new Set(
+    run.approvals.flatMap((action) =>
+      action.type === 'builtin_capability_activation' ? [action.approval.callId] : []
+    )
+  )
   const commandSessions = projectDurableCommandSessions(run.commandSessions, runCommandCallIds)
   const persistedRun: Record<string, unknown> = {
     ...run,
+    toolCalls: run.toolCalls.filter((call) => !builtinCapabilityCallIds.has(call.id)),
+    toolResults: run.toolResults.filter((result) => !builtinCapabilityCallIds.has(result.callId)),
     webSearchActivities: run.webSearchActivities ?? [],
     readActivities: run.readActivities ?? [],
     approvals: run.approvals.filter(
-      (action): action is Exclude<AgentProposedAction, { type: 'mcp_tool_call' }> =>
-        action.type !== 'mcp_tool_call'
+      (
+        action
+      ): action is Exclude<
+        AgentProposedAction,
+        { type: 'mcp_tool_call' | 'builtin_capability_activation' }
+      > => action.type !== 'mcp_tool_call' && action.type !== 'builtin_capability_activation'
     ),
     fileDrafts: run.fileDrafts ?? [],
     mcpInvocations: run.mcpInvocations ?? [],
     messageStreamCheckpoints: run.messageStreamCheckpoints ?? {},
+    timeline: run.timeline.filter(
+      (item) => item.type !== 'tool_call' || !builtinCapabilityCallIds.has(item.callId)
+    ),
     ...(commandSessions ? { commandSessions } : {})
   }
   delete persistedRun.fileWritePreviews

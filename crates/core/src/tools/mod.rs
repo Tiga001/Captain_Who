@@ -3,6 +3,7 @@ mod apply_patch;
 mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
 mod attachments;
+mod builtin_capability;
 mod command_session;
 mod context;
 mod conversation_history;
@@ -46,6 +47,10 @@ use crate::protocol::{
 use agent_collaboration::{AgentCollaborationTool, AgentCollaborationToolKind};
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
+pub(crate) use builtin_capability::{
+    tool_capability_id as builtin_tool_capability_id, ActivateCapabilityTool,
+    BuiltinCapabilityAgentTool,
+};
 use command_session::CommandSessionTool;
 use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
@@ -741,6 +746,7 @@ impl ToolRegistry {
                 approval.identity.provenance.model_tool_name.as_str()
             }
             AgentProposedAction::ToolCall { call } => call.tool.as_str(),
+            AgentProposedAction::BuiltinCapabilityActivation { .. } => "activate_capability",
             AgentProposedAction::Diff { .. } => "apply_patch",
             AgentProposedAction::FileWrite { .. } => "write_file",
             AgentProposedAction::Command { .. } => "run_command",
@@ -968,6 +974,28 @@ impl ToolRegistry {
                 tool_name,
             },
             AgentToolHandler::Blocking(tool),
+        )
+    }
+
+    pub(crate) fn register_builtin_capability_tool(
+        &mut self,
+        tool: BuiltinCapabilityAgentTool,
+    ) -> AgentResult<()> {
+        let capability_id = tool.capability_id().as_str().to_string();
+        let managed_mcp_id = tool.managed_mcp_id().to_string();
+        let manifest_digest = tool.manifest_digest().to_string();
+        let tool_id = tool.tool_id().to_string();
+        let model_name = tool.model_name().to_string();
+        self.register_handler(
+            format!("builtin-capability:{capability_id}"),
+            AgentToolIdentity::BuiltinCapability {
+                capability_id,
+                managed_mcp_id,
+                manifest_digest,
+                tool_id,
+                model_name,
+            },
+            AgentToolHandler::Async(Box::new(tool)),
         )
     }
 

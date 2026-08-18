@@ -3,9 +3,12 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   parseAgentActionExecutionOutputForHost,
+  parseAgentBuiltinCapabilityActivationApproval,
+  parseAgentBuiltinCapabilityActivationProposedAction,
   parseAgentEventForHost,
   parseAgentMcpToolApproval,
   parseAgentMcpToolInvocationEvent,
+  parseAgentToolIdentityForHost,
   parsePendingAgentActionSnapshotsForHost
 } from './agentMcpParsers'
 
@@ -13,6 +16,7 @@ const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
 const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
 const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
 const callId = `tc1_${'a'.repeat(43)}`
+const capabilityActivationId = '67b4ea45-d0e2-42d0-aee4-6da42d5e45a7'
 const rendererGolden = JSON.parse(
   readFileSync(
     resolve(process.cwd(), 'packages/protocol/fixtures/agent-mcp-renderer-contract-v1.json'),
@@ -75,6 +79,21 @@ const approval = {
   expiresAt: 1_753_844_100_000
 } as const
 
+const builtinCapabilityApproval = {
+  actionId,
+  activationId: capabilityActivationId,
+  runId: 'run-owned',
+  callId,
+  capabilityId: 'browser_automation',
+  displayName: 'Browser automation',
+  reason: 'Open the requested page in the in-app browser.',
+  manifestDigest: `sha256:${'e'.repeat(64)}`,
+  policyRevision: 7,
+  createdAt: 1_753_843_200,
+  expiresAt: 1_753_844_100,
+  approvalStatus: 'required'
+} as const
+
 const invocation = {
   actionId,
   invocationId,
@@ -109,6 +128,202 @@ const resultSizeSummary = {
   omittedBlockCount: 1,
   omittedEncodedBytes: 128
 } as const
+
+describe('built-in capability Host-boundary contract', () => {
+  it('strictly parses the frozen activation approval and approval event', () => {
+    expect(parseAgentBuiltinCapabilityActivationApproval(builtinCapabilityApproval)).toEqual(
+      builtinCapabilityApproval
+    )
+    expect(
+      parseAgentBuiltinCapabilityActivationProposedAction({
+        type: 'builtin_capability_activation',
+        approval: builtinCapabilityApproval
+      })
+    ).toEqual({
+      type: 'builtin_capability_activation',
+      approval: builtinCapabilityApproval
+    })
+    expect(
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-owned',
+        action: {
+          type: 'builtin_capability_activation',
+          approval: builtinCapabilityApproval
+        }
+      })
+    ).toMatchObject({
+      type: 'approval_required',
+      action: { type: 'builtin_capability_activation' }
+    })
+  })
+
+  it('rejects extra authority fields, invalid identities, cross-run events and invalid expiry', () => {
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        executable: '/tmp/managed-browser-server'
+      })
+    ).toThrow(/unexpected field/)
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        capabilityId: 'browser.automation'
+      })
+    ).toThrow(/unexpected value browser\.automation/)
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        capabilityId: 'Browser Automation'
+      })
+    ).toThrow(/unexpected value Browser Automation/)
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        displayName: '   '
+      })
+    ).toThrow(/displayName must not be blank/)
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        manifestDigest: 'e'.repeat(64)
+      })
+    ).toThrow(/sha256:-prefixed/)
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        expiresAt: builtinCapabilityApproval.createdAt + 899
+      })
+    ).toThrow(/15 minute/)
+    expect(() =>
+      parseAgentBuiltinCapabilityActivationApproval({
+        ...builtinCapabilityApproval,
+        expiresAt: builtinCapabilityApproval.createdAt + 901
+      })
+    ).toThrow(/15 minute/)
+    expect(() =>
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-other',
+        action: {
+          type: 'builtin_capability_activation',
+          approval: builtinCapabilityApproval
+        }
+      })
+    ).toThrow(/runId must match/)
+    expect(() =>
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-owned',
+        action: {
+          type: 'builtin_capability_activation',
+          approval: { ...builtinCapabilityApproval, approvalStatus: 'approved' }
+        }
+      })
+    ).toThrow(/must remain required/)
+  })
+
+  it('strictly parses built-in capability Tool identity without Server configuration', () => {
+    const identity = {
+      type: 'builtin_capability',
+      capabilityId: 'browser_automation',
+      managedMcpId: 'builtin.browser_automation.mcp',
+      manifestDigest: `sha256:${'f'.repeat(64)}`,
+      toolId: 'browser.navigate',
+      modelName: 'browser_navigate'
+    }
+    expect(parseAgentToolIdentityForHost(identity)).toEqual(identity)
+    expect(() =>
+      parseAgentToolIdentityForHost({ ...identity, capabilityId: 'browser.automation' })
+    ).toThrow(/unexpected value browser\.automation/)
+    expect(() => parseAgentToolIdentityForHost({ ...identity, serverId })).toThrow(
+      /unexpected field/
+    )
+    expect(() =>
+      parseAgentToolIdentityForHost({
+        type: identity.type,
+        capabilityId: identity.capabilityId,
+        managedMcpId: identity.managedMcpId,
+        manifestDigest: identity.manifestDigest,
+        toolId: identity.toolId
+      })
+    ).toThrow(/modelName/)
+    expect(() =>
+      parseAgentToolIdentityForHost({ ...identity, modelName: 'browser.navigate' })
+    ).toThrow(/Provider-visible Tool name/)
+    expect(() => parseAgentToolIdentityForHost({ ...identity, type: 'future_identity' })).toThrow(
+      /supported Tool identity/
+    )
+  })
+
+  it('strictly parses pending and execution projections for capability activation', () => {
+    const action = {
+      type: 'builtin_capability_activation',
+      approval: builtinCapabilityApproval
+    }
+    const pending = {
+      actionId,
+      actionType: 'builtin_capability_activation',
+      toolName: 'activate_capability',
+      toolCallId: callId,
+      runId: 'run-owned',
+      conversationId: 'conversation-owned',
+      assistantMessageId: 'assistant-owned',
+      action,
+      createdAt: 1_753_843_200_000,
+      status: 'pending'
+    }
+    expect(parsePendingAgentActionSnapshotsForHost([pending])).toEqual([pending])
+    for (const status of [
+      'approved',
+      'executing',
+      'rejected',
+      'cancelled',
+      'completed',
+      'failed'
+    ]) {
+      expect(() => parsePendingAgentActionSnapshotsForHost([{ ...pending, status }])).toThrow(
+        /expected pending/
+      )
+    }
+    expect(() =>
+      parsePendingAgentActionSnapshotsForHost([
+        {
+          ...pending,
+          action: {
+            ...action,
+            approval: { ...builtinCapabilityApproval, approvalStatus: 'approved' }
+          }
+        }
+      ])
+    ).toThrow(/must remain required/)
+    expect(() =>
+      parsePendingAgentActionSnapshotsForHost([{ ...pending, toolCallId: null }])
+    ).toThrow(/expected a string/)
+    expect(() =>
+      parsePendingAgentActionSnapshotsForHost([{ ...pending, manifest: { tools: [] } }])
+    ).toThrow(/unexpected field/)
+
+    const output = parseAgentActionExecutionOutputForHost({
+      actionId,
+      actionType: 'builtin_capability_activation',
+      toolName: 'activate_capability',
+      status: 'approved',
+      toolResult: { managedServerConfig: 'must-not-reach-renderer' },
+      agentOutput: {
+        content: 'Capability activated.',
+        status: 'completed',
+        runId: 'run-owned',
+        events: [],
+        toolDefinitions: [{ description: 'must-not-reach-renderer' }],
+        proposedActions: []
+      }
+    })
+    expect(output.toolResult).toBeUndefined()
+    expect(output.agentOutput.toolDefinitions).toEqual([])
+    expect(JSON.stringify(output)).not.toContain('managedServerConfig')
+  })
+})
 
 describe('durable presentation trace ordering contract', () => {
   it('strictly parses required Tool, narration, compaction, and Runtime error sequence fields', () => {

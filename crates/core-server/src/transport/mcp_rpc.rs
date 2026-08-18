@@ -4,16 +4,19 @@ use std::time::Duration;
 
 use mycopilot_mcp_client::McpEvent;
 use mycopilot_protocol_rs::{
-    error_with_data, JsonRpcId, JsonRpcRequest, McpCatalogToolsPageInput,
+    error_with_data, JsonRpcId, JsonRpcRequest, McpBuiltinCapabilityListInput,
+    McpBuiltinCapabilitySetAllowedInput, McpCatalogToolsPageInput,
     McpLaunchAuthorizationCommitInput, McpManagementErrorCodeDto, McpManagementErrorData,
     McpManagementErrorTypeDto, McpManagementOperationDto, McpManagementRecoveryDto,
     McpServerCreateInput, McpServerIdInput, McpServerListInput, McpServerMutationInput,
-    McpServerUpdateInput, MCP_CATALOG_REFRESH_METHOD, MCP_CATALOG_TOOLS_METHOD,
-    MCP_MANAGEMENT_ERROR_CODE, MCP_SERVER_ADD_METHOD, MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD,
-    MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD, MCP_SERVER_DELETE_METHOD,
-    MCP_SERVER_DISABLE_METHOD, MCP_SERVER_ENABLE_METHOD, MCP_SERVER_GET_METHOD,
-    MCP_SERVER_LIST_METHOD, MCP_SERVER_RESTART_METHOD, MCP_SERVER_START_METHOD,
-    MCP_SERVER_STATUS_METHOD, MCP_SERVER_STOP_METHOD, MCP_SERVER_UPDATE_METHOD,
+    McpServerUpdateInput, MCP_BUILTIN_CAPABILITY_LIST_METHOD,
+    MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD, MCP_CATALOG_REFRESH_METHOD,
+    MCP_CATALOG_TOOLS_METHOD, MCP_MANAGEMENT_ERROR_CODE, MCP_SERVER_ADD_METHOD,
+    MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD, MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD,
+    MCP_SERVER_DELETE_METHOD, MCP_SERVER_DISABLE_METHOD, MCP_SERVER_ENABLE_METHOD,
+    MCP_SERVER_GET_METHOD, MCP_SERVER_LIST_METHOD, MCP_SERVER_RESTART_METHOD,
+    MCP_SERVER_START_METHOD, MCP_SERVER_STATUS_METHOD, MCP_SERVER_STOP_METHOD,
+    MCP_SERVER_UPDATE_METHOD,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -26,7 +29,9 @@ use super::{parse_params, response_error, response_success};
 pub(crate) fn is_mcp_management_method(method: &str) -> bool {
     matches!(
         method,
-        MCP_SERVER_LIST_METHOD
+        MCP_BUILTIN_CAPABILITY_LIST_METHOD
+            | MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD
+            | MCP_SERVER_LIST_METHOD
             | MCP_SERVER_GET_METHOD
             | MCP_SERVER_ADD_METHOD
             | MCP_SERVER_UPDATE_METHOD
@@ -66,6 +71,14 @@ pub(crate) async fn handle_mcp_management_request(
     }
 
     match request.method.as_str() {
+        MCP_BUILTIN_CAPABILITY_LIST_METHOD => {
+            let input = input!(McpBuiltinCapabilityListInput);
+            finish(id, service.list_builtin_capabilities(input))
+        }
+        MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD => {
+            let input = input!(McpBuiltinCapabilitySetAllowedInput);
+            finish(id, service.set_builtin_capability_allowed(input))
+        }
         MCP_SERVER_LIST_METHOD => {
             let input = input!(McpServerListInput);
             finish(id, service.list_servers(input))
@@ -291,6 +304,12 @@ fn mcp_error_data_response(id: JsonRpcId, data: McpManagementErrorData) -> Value
 
 fn operation_for_method(method: &str) -> Option<McpManagementOperationDto> {
     match method {
+        MCP_BUILTIN_CAPABILITY_LIST_METHOD => {
+            Some(McpManagementOperationDto::ListBuiltinCapabilities)
+        }
+        MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD => {
+            Some(McpManagementOperationDto::SetBuiltinCapabilityAllowed)
+        }
         MCP_SERVER_LIST_METHOD => Some(McpManagementOperationDto::List),
         MCP_SERVER_GET_METHOD => Some(McpManagementOperationDto::Get),
         MCP_SERVER_ADD_METHOD => Some(McpManagementOperationDto::Add),
@@ -348,6 +367,7 @@ mod tests {
 
     struct RpcHarness {
         _database_directory: tempfile::TempDir,
+        _storage: mycopilot_core::storage::service::StorageService,
         manager: Arc<McpConnectionManager>,
         service: Arc<McpManagementService>,
         connector_attempts: Arc<AtomicUsize>,
@@ -356,10 +376,23 @@ mod tests {
     impl RpcHarness {
         fn new() -> Self {
             let database_directory = tempfile::tempdir().expect("temporary database directory");
+            let database_path = database_directory.path().join("mcp-rpc.sqlite3");
+            let storage = mycopilot_core::storage::service::StorageService::open(&database_path)
+                .expect("create canonical temporary storage");
             let registry = Arc::new(
-                SqliteMcpRegistry::open(database_directory.path().join("mcp-rpc.sqlite3"))
-                    .expect("open temporary MCP Registry"),
+                SqliteMcpRegistry::open(&database_path).expect("open temporary MCP Registry"),
             );
+            let builtin_capability_policies = Arc::new(
+                crate::application::mcp::builtin_capability_policy::SqliteBuiltinCapabilityPolicyStore::open(
+                    &database_path,
+                )
+                .expect("open temporary built-in MCP policy store"),
+            );
+            let builtin_capability_runtime =
+                crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider::runtime(
+                    Arc::clone(&builtin_capability_policies),
+                )
+                .expect("construct test built-in capability runtime");
             let connector_attempts = Arc::new(AtomicUsize::new(0));
             let connector = Arc::new(RejectingConnector {
                 attempts: Arc::clone(&connector_attempts),
@@ -374,9 +407,15 @@ mod tests {
                 )
                 .expect("construct test MCP Manager"),
             );
-            let service = Arc::new(McpManagementService::new(registry, Arc::clone(&manager)));
+            let service = Arc::new(McpManagementService::new(
+                registry,
+                Arc::clone(&manager),
+                builtin_capability_policies,
+                builtin_capability_runtime,
+            ));
             Self {
                 _database_directory: database_directory,
+                _storage: storage,
                 manager,
                 service,
                 connector_attempts,
@@ -486,6 +525,81 @@ mod tests {
             .await;
         assert_eq!(fetched["result"]["server"]["serverId"], server["serverId"]);
         assert_eq!(fetched["result"]["server"]["arguments"][1], "");
+        assert_eq!(harness.connector_attempts.load(Ordering::Relaxed), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rpc_builtin_capability_policy_is_default_off_cas_guarded_and_never_starts_a_server() {
+        let harness = RpcHarness::new();
+        let listed = harness
+            .request(
+                1,
+                MCP_BUILTIN_CAPABILITY_LIST_METHOD,
+                json!({ "schemaVersion": MCP_MANAGEMENT_SCHEMA_VERSION }),
+            )
+            .await;
+        assert_eq!(listed["result"]["revision"], 0);
+        assert_eq!(
+            listed["result"]["capabilities"][0]["kind"],
+            "builtinCapability"
+        );
+        assert_eq!(
+            listed["result"]["capabilities"][0]["capabilityId"],
+            "browser_automation"
+        );
+        assert_eq!(listed["result"]["capabilities"][0]["userAllowed"], false);
+        assert!(listed["result"]["capabilities"][0].get("state").is_none());
+
+        let enabled = harness
+            .request(
+                2,
+                MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD,
+                json!({
+                    "schemaVersion": MCP_MANAGEMENT_SCHEMA_VERSION,
+                    "capabilityId": "browser_automation",
+                    "allowed": true,
+                    "expectedPolicyRevision": 0,
+                }),
+            )
+            .await;
+        assert_eq!(enabled["result"]["revision"], 1);
+        assert_eq!(enabled["result"]["capability"]["userAllowed"], true);
+        assert_eq!(enabled["result"]["capability"]["policyRevision"], 1);
+
+        let stale = harness
+            .request(
+                3,
+                MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD,
+                json!({
+                    "schemaVersion": MCP_MANAGEMENT_SCHEMA_VERSION,
+                    "capabilityId": "browser_automation",
+                    "allowed": false,
+                    "expectedPolicyRevision": 0,
+                }),
+            )
+            .await;
+        assert_management_error(&stale, "setBuiltinCapabilityAllowed", "conflict");
+        assert!(stale["error"]["data"]
+            .get("currentRegistryRevision")
+            .is_none());
+
+        let disabled = harness
+            .request(
+                4,
+                MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD,
+                json!({
+                    "schemaVersion": MCP_MANAGEMENT_SCHEMA_VERSION,
+                    "capabilityId": "browser_automation",
+                    "allowed": false,
+                    "expectedPolicyRevision": 1,
+                }),
+            )
+            .await;
+        assert_eq!(disabled["result"]["revision"], 2);
+        assert_eq!(disabled["result"]["capability"]["userAllowed"], false);
+        assert_eq!(disabled["result"]["capability"]["policyRevision"], 2);
         assert_eq!(harness.connector_attempts.load(Ordering::Relaxed), 0);
 
         harness.shutdown().await;

@@ -1328,6 +1328,9 @@ impl AgentService {
             .with_trace_observer(trace_observer)
             .with_model_request_observer(model_request_observer)
             .with_context_compaction(context_compaction_services);
+        if let Some(builtin_capabilities) = self.builtin_capabilities.clone() {
+            host_services = host_services.with_builtin_capabilities(builtin_capabilities);
+        }
         if let Some(provider_continuation_vault) = self.provider_continuation_vault.as_ref() {
             host_services = host_services
                 .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));

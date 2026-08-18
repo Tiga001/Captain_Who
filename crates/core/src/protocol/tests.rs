@@ -6,6 +6,33 @@ use crate::image_generation::{
 use serde_json::{json, Value};
 
 #[test]
+fn builtin_capability_tool_identity_serializes_all_typed_routing_fields() {
+    let identity = AgentToolIdentity::BuiltinCapability {
+        capability_id: "browser_automation".to_string(),
+        managed_mcp_id: "builtin.browser_automation.mcp".to_string(),
+        manifest_digest: format!("sha256:{}", "a".repeat(64)),
+        tool_id: "browser.snapshot".to_string(),
+        model_name: "browser_snapshot".to_string(),
+    };
+    let encoded = serde_json::to_value(&identity).unwrap();
+    assert_eq!(
+        encoded,
+        json!({
+            "type": "builtin_capability",
+            "capabilityId": "browser_automation",
+            "managedMcpId": "builtin.browser_automation.mcp",
+            "manifestDigest": format!("sha256:{}", "a".repeat(64)),
+            "toolId": "browser.snapshot",
+            "modelName": "browser_snapshot"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentToolIdentity>(encoded).unwrap(),
+        identity
+    );
+}
+
+#[test]
 fn model_request_interruption_marker_survives_error_enrichment() {
     let error = AgentError::structured(
         "agent.llm_provider_failure",

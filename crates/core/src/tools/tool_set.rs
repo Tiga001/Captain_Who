@@ -91,6 +91,9 @@ pub(crate) enum ToolUnavailability {
     RequiresSkillActivation {
         required_capability: ToolCapabilityId,
     },
+    RequiresBuiltinCapabilityActivation {
+        required_capability: ToolCapabilityId,
+    },
     BlockedByPermissions,
     RuntimeCapabilityUnavailable {
         required_capability: ToolCapabilityId,
@@ -275,6 +278,14 @@ impl EffectiveToolSet {
 
         if let Some(required_capability) = expected_capability {
             if !self.active_capabilities.contains(&required_capability) {
+                if matches!(
+                    self.registered_identities.get(tool_name),
+                    Some(AgentToolIdentity::BuiltinCapability { .. })
+                ) {
+                    return Some(ToolUnavailability::RequiresBuiltinCapabilityActivation {
+                        required_capability,
+                    });
+                }
                 return Some(ToolUnavailability::RequiresSkillActivation {
                     required_capability,
                 });

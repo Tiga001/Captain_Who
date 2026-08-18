@@ -1128,6 +1128,47 @@ fn mcp_management_contract_is_strict_and_separates_launch_arguments() {
 }
 
 #[test]
+fn mcp_builtin_capability_contract_is_strict_and_independent_from_external_servers() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/mcp-builtin-capability-contract-v1.json"
+    ))
+    .expect("shared built-in MCP capability contract fixture");
+
+    assert_eq!(fixture["schemaVersion"], MCP_MANAGEMENT_SCHEMA_VERSION);
+    assert_eq!(
+        fixture["methods"]["list"],
+        MCP_BUILTIN_CAPABILITY_LIST_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["setAllowed"],
+        MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD
+    );
+    assert_wire_round_trip::<McpBuiltinCapabilityListInput>(&fixture["listInput"]);
+    assert_wire_round_trip::<McpBuiltinCapabilitySetAllowedInput>(&fixture["setAllowedInput"]);
+    assert_wire_round_trip::<McpBuiltinCapabilityListOutput>(&fixture["listOutput"]);
+    assert_wire_round_trip::<McpBuiltinCapabilityMutationOutput>(&fixture["mutationOutput"]);
+
+    let mut unknown_capability = fixture["setAllowedInput"].clone();
+    unknown_capability["capabilityId"] = serde_json::json!("external_server");
+    assert!(
+        serde_json::from_value::<McpBuiltinCapabilitySetAllowedInput>(unknown_capability).is_err()
+    );
+
+    let mut leaked_runtime_state = fixture["listOutput"].clone();
+    leaked_runtime_state["capabilities"][0]["state"] = serde_json::json!("ready");
+    assert!(
+        serde_json::from_value::<McpBuiltinCapabilityListOutput>(leaked_runtime_state).is_err()
+    );
+
+    let mut client_controlled_manifest = fixture["setAllowedInput"].clone();
+    client_controlled_manifest["manifest"] = serde_json::json!({"tools": ["unsafe"]});
+    assert!(
+        serde_json::from_value::<McpBuiltinCapabilitySetAllowedInput>(client_controlled_manifest)
+            .is_err()
+    );
+}
+
+#[test]
 fn mcp_management_matches_the_shared_rust_typescript_golden_contract() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/mcp-management-contract-v1.json"

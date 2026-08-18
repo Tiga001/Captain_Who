@@ -124,6 +124,7 @@ pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
     match action {
         AgentProposedAction::ToolCall { call } => call.id.clone(),
         AgentProposedAction::McpToolCall { approval } => approval.identity.action_id.clone(),
+        AgentProposedAction::BuiltinCapabilityActivation { approval } => approval.action_id.clone(),
         AgentProposedAction::Diff { diff } => diff.id.clone(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.clone(),
         AgentProposedAction::Command { command } => command.id.clone(),
@@ -140,6 +141,7 @@ pub(crate) fn action_type_for_action(action: &AgentProposedAction) -> &'static s
     match action {
         AgentProposedAction::ToolCall { .. } => "tool_call",
         AgentProposedAction::McpToolCall { .. } => "mcp_tool_call",
+        AgentProposedAction::BuiltinCapabilityActivation { .. } => "builtin_capability_activation",
         AgentProposedAction::Diff { .. } => "diff",
         AgentProposedAction::FileWrite { .. } => "file_write",
         AgentProposedAction::Command { .. } => "command",
@@ -155,6 +157,9 @@ pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::ToolCall { call } => call.tool.clone(),
         AgentProposedAction::McpToolCall { approval } => {
             approval.identity.provenance.model_tool_name.clone()
+        }
+        AgentProposedAction::BuiltinCapabilityActivation { .. } => {
+            "activate_capability".to_string()
         }
         AgentProposedAction::Diff { .. } => "apply_patch".to_string(),
         AgentProposedAction::FileWrite { .. } => "write_file".to_string(),
@@ -190,6 +195,12 @@ fn frozen_action_call_metadata(
             approval.call.tool.clone(),
             approval.call.approval_status,
             approval.call.reason.clone(),
+        ),
+        AgentProposedAction::BuiltinCapabilityActivation { approval } => (
+            approval.call_id.clone(),
+            "activate_capability".to_string(),
+            approval.approval_status,
+            Some(approval.reason.clone()),
         ),
         AgentProposedAction::Diff { diff } => (
             diff.id.clone(),
@@ -287,6 +298,12 @@ pub(crate) fn tool_call_for_pending_record(
                 format!("待审批运行检查点中的原始 run_command 参数与冻结 action 不一致：{error}")
             },
         )?;
+    }
+    if let AgentProposedAction::BuiltinCapabilityActivation { approval } = &record.snapshot.action {
+        mycopilot_core::validate_frozen_builtin_capability_activation_args(approval, &call.args)
+            .map_err(|_| {
+                "待审批运行检查点中的内置能力激活参数与冻结 action 不一致。".to_string()
+            })?;
     }
     Ok(AgentToolCall {
         id: call.id.clone(),

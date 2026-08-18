@@ -357,6 +357,7 @@ fn full_conversation_context_snapshot(
 }
 
 mod approval_resume;
+mod builtin_capability;
 mod capabilities;
 mod command_and_attachments;
 mod compaction_and_tool_flow;

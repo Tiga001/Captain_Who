@@ -8,6 +8,14 @@ interface ManagedWebviewPolicy {
   partition: string
 }
 
+export interface ManagedWebviewTargetRegistry {
+  registerManagedGuest(input: { guest: WebContents; host: WebContents; partition: string }): void
+}
+
+export interface ManagedWebviewHostOptions {
+  targetRegistry?: ManagedWebviewTargetRegistry
+}
+
 const SAFE_INITIAL_URL = 'about:blank'
 const MANAGED_WEBVIEW_POLICIES: ManagedWebviewPolicy[] = [
   {
@@ -43,7 +51,10 @@ export async function clearManagedWebviewData(partition: string): Promise<void> 
   await Promise.all([managedSession.clearCache(), managedSession.clearStorageData()])
 }
 
-export function configureManagedWebviewHost(host: WebContents): void {
+export function configureManagedWebviewHost(
+  host: WebContents,
+  options: ManagedWebviewHostOptions = {}
+): void {
   host.on('will-attach-webview', (event, webPreferences, params) => {
     const policy = getManagedWebviewPolicy(params.partition)
     const sourceUrl = params.src || SAFE_INITIAL_URL
@@ -74,6 +85,12 @@ export function configureManagedWebviewHost(host: WebContents): void {
     }
 
     configureManagedGuest(guest, policy)
+    try {
+      options.targetRegistry?.registerManagedGuest({ guest, host, partition: policy.partition })
+    } catch {
+      // Registration is part of the security boundary. A guest that cannot be tracked must not run.
+      guest.close()
+    }
   })
 }
 

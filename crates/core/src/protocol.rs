@@ -1196,6 +1196,14 @@ pub enum AgentToolIdentity {
         extension_id: String,
         tool_name: String,
     },
+    /// Tool reviewed and packaged as part of one Host-owned built-in capability manifest.
+    BuiltinCapability {
+        capability_id: String,
+        managed_mcp_id: String,
+        manifest_digest: String,
+        tool_id: String,
+        model_name: String,
+    },
     Mcp {
         provenance: AgentMcpToolProvenance,
     },
@@ -2647,6 +2655,27 @@ pub struct AgentSkillInstallationRequest {
     pub expires_at: u64,
 }
 
+/// One exact task-scoped request to activate a Host-owned built-in capability.
+///
+/// This projection contains no executable, transport, credential or managed-server details. The
+/// Host must compare every frozen identity field before creating its process-memory grant.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentBuiltinCapabilityActivationApproval {
+    pub action_id: String,
+    pub activation_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub capability_id: String,
+    pub display_name: String,
+    pub reason: String,
+    pub manifest_digest: String,
+    pub policy_revision: u64,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub approval_status: AgentApprovalStatus,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(
     tag = "type",
@@ -2660,6 +2689,9 @@ pub enum AgentProposedAction {
     },
     McpToolCall {
         approval: Box<AgentMcpToolApproval>,
+    },
+    BuiltinCapabilityActivation {
+        approval: Box<AgentBuiltinCapabilityActivationApproval>,
     },
     Diff {
         diff: AgentDiffProposal,

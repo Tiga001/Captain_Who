@@ -1064,6 +1064,28 @@ fn validate_tool_identity(trace_tool: &str, identity: &AgentToolIdentity) -> Res
                 );
             }
         }
+        AgentToolIdentity::BuiltinCapability {
+            capability_id,
+            managed_mcp_id,
+            manifest_digest,
+            tool_id,
+            model_name,
+        } => {
+            if crate::BuiltinCapabilityId::parse(capability_id.clone()).is_err()
+                || crate::BuiltinCapabilityId::parse(managed_mcp_id.clone()).is_err()
+                || crate::BuiltinCapabilityId::parse(tool_id.clone()).is_err()
+                || manifest_digest.len() != "sha256:".len() + 64
+                || !manifest_digest.starts_with("sha256:")
+                || !manifest_digest["sha256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || model_name != trace_tool
+            {
+                return Err(
+                    "conversation trace built-in capability provenance is invalid".to_string(),
+                );
+            }
+        }
         AgentToolIdentity::Mcp { provenance } => {
             let config_epoch_is_valid =
                 uuid::Uuid::parse_str(&provenance.config_epoch).is_ok_and(|epoch| {
@@ -2333,6 +2355,9 @@ impl ConversationTraceRecorder {
             AgentProposedAction::ToolCall { call } => (&call.id, call.approval_status),
             AgentProposedAction::McpToolCall { approval } => {
                 (&approval.identity.call_id, approval.call.approval_status)
+            }
+            AgentProposedAction::BuiltinCapabilityActivation { approval } => {
+                (&approval.call_id, approval.approval_status)
             }
         };
         if let Some(ConversationTurnTraceItem::ToolCall {

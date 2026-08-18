@@ -62,6 +62,15 @@ describe('MCP IPC bridge', () => {
     ipc.invoke.mockResolvedValue(response)
     const bridge = createMcpIpcBridge(ipc.renderer)
 
+    await expect(bridge.listBuiltinCapabilities()).resolves.toBe(response)
+    await expect(
+      bridge.setBuiltinCapabilityAllowed({
+        schemaVersion: 1,
+        capabilityId: 'browser_automation',
+        allowed: true,
+        expectedPolicyRevision: 0
+      })
+    ).resolves.toBe(response)
     await expect(bridge.listServers()).resolves.toBe(response)
     await expect(bridge.getServer({ schemaVersion: 1, serverId })).resolves.toBe(response)
     await expect(bridge.deleteServer(mutation)).resolves.toBe(response)
@@ -80,6 +89,8 @@ describe('MCP IPC bridge', () => {
     await expect(bridge.selectWorkingDirectory()).resolves.toBe(response)
 
     expect(ipc.invoke.mock.calls.map(([channel]) => channel)).toEqual([
+      'host:mcp.listBuiltinCapabilities',
+      'host:mcp.setBuiltinCapabilityAllowed',
       'host:mcp.listServers',
       'host:mcp.getServer',
       'host:mcp.deleteServer',

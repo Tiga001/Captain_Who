@@ -94,7 +94,8 @@ use mycopilot_core::{
     AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
     AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolCall,
     AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    BuiltinCapabilityRuntime, CapabilityActivationId, ContextJournalCursor,
     ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
     ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, McpApprovedToolInvocation,
     McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker, McpToolRuntime,
@@ -529,6 +530,7 @@ pub struct AgentService {
     skill_installation_service: Option<Arc<SkillInstallationService>>,
     skill_installation_workflow: Option<Arc<SkillInstallationWorkflow>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
+    builtin_capabilities: Option<BuiltinCapabilityRuntime>,
     mcp_tool_invoker: Option<Arc<dyn McpToolInvoker>>,
     mcp_startup_inspector: Option<Arc<dyn McpApprovalStartupInspector>>,
     mcp_approval_clock: McpApprovalClock,
@@ -711,6 +713,7 @@ impl AgentService {
             skill_installation_service: None,
             skill_installation_workflow: None,
             artifact_runtime,
+            builtin_capabilities: None,
             mcp_tool_invoker: None,
             mcp_startup_inspector: None,
             mcp_approval_clock: Arc::new(now_ms),
@@ -796,6 +799,15 @@ impl AgentService {
     /// run freezes only a bounded, protocol-neutral Tool catalog snapshot.
     pub(crate) fn with_mcp_tool_invoker(mut self, invoker: Arc<dyn McpToolInvoker>) -> Self {
         self.mcp_tool_invoker = Some(invoker);
+        self
+    }
+
+    /// Installs Host-owned built-in capability manifests, policy, and process-memory grants.
+    ///
+    /// The runtime is cloned into each turn/context preview, while authority remains in the
+    /// process-owned provider. No task grant is serialized into checkpoints or application state.
+    pub(crate) fn with_builtin_capabilities(mut self, runtime: BuiltinCapabilityRuntime) -> Self {
+        self.builtin_capabilities = Some(runtime);
         self
     }
 
@@ -1013,6 +1025,55 @@ impl AgentService {
             return Err(error);
         }
         Ok(summary)
+    }
+
+    /// Expires task-scoped built-in capability approvals without creating a runtime grant.
+    ///
+    /// The same injected wall clock used by MCP approval reconciliation is converted to seconds,
+    /// matching the public capability contract. SQLite owns the terminal CAS and complete trace
+    /// settlement; the process map is updated only after that transaction commits.
+    pub(crate) fn reconcile_expired_builtin_capability_approvals(&self) -> Result<usize, String> {
+        let now_ms = self.mcp_approval_now_ms();
+        let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let candidates = pending_actions
+            .iter()
+            .filter_map(|(storage_id, record)| {
+                if !matches!(
+                    record.snapshot.status,
+                    PendingActionStatus::Pending | PendingActionStatus::Approved
+                ) {
+                    return None;
+                }
+                let AgentProposedAction::BuiltinCapabilityActivation { approval } =
+                    &record.snapshot.action
+                else {
+                    return None;
+                };
+                (approval.expires_at <= now_seconds).then(|| storage_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut terminalized = 0_usize;
+        for storage_id in candidates {
+            let Some(record) = pending_actions.get(&storage_id) else {
+                continue;
+            };
+            let expected_status = pending_status_label(record.snapshot.status);
+            let changed = self
+                .storage
+                .expire_builtin_capability_agent_action(&storage_id, expected_status, now_ms)
+                .map_err(|_| {
+                    "failed to expire a built-in capability activation safely".to_string()
+                })?;
+            if changed {
+                pending_actions.remove(&storage_id);
+                terminalized = terminalized.saturating_add(1);
+            }
+        }
+        Ok(terminalized)
     }
 
     /// Invalidates every active approval bound to one typed MCP Server/source selector.

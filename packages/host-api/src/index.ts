@@ -81,6 +81,9 @@ import type {
   ImageGenerationStatus,
   ImageGenerationUpdateConfigurationInput,
   ImageGenerationUpdateConfigurationOutput,
+  McpBuiltinCapabilityListOutput,
+  McpBuiltinCapabilityMutationOutput,
+  McpBuiltinCapabilitySetAllowedInput,
   McpCatalogToolsPageInput,
   McpCatalogToolsPageOutput,
   McpChangedNotification,
@@ -267,6 +270,10 @@ export interface SkillsHostApi {
 
 /** Explicit, context-isolated MCP management surface. It intentionally has no direct callTool. */
 export interface McpHostApi {
+  listBuiltinCapabilities(): Promise<HostInvocationResult<McpBuiltinCapabilityListOutput>>
+  setBuiltinCapabilityAllowed(
+    input: McpBuiltinCapabilitySetAllowedInput
+  ): Promise<HostInvocationResult<McpBuiltinCapabilityMutationOutput>>
   listServers(): Promise<HostInvocationResult<McpServerListOutput>>
   getServer(input: McpServerIdInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
   addServer(input: McpServerCreateInput): Promise<HostInvocationResult<McpServerDetailsOutput>>

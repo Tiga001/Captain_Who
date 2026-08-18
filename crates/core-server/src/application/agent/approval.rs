@@ -5,6 +5,45 @@ const PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE: &str = "Approval is unavailable.";
 const UNSETTLED_APPROVAL_PREDECESSOR_MESSAGE: &str =
     "前置工具结果尚未完成持久化结算；已拒绝继续该审批，请等待恢复后重试。";
 
+struct BuiltinActivationSettlementGuard {
+    runtime: BuiltinCapabilityRuntime,
+    activation_id: CapabilityActivationId,
+    action_id: String,
+    committed: bool,
+}
+
+impl BuiltinActivationSettlementGuard {
+    fn new(
+        runtime: BuiltinCapabilityRuntime,
+        activation_id: CapabilityActivationId,
+        action_id: String,
+    ) -> Self {
+        Self {
+            runtime,
+            activation_id,
+            action_id,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for BuiltinActivationSettlementGuard {
+    fn drop(&mut self) {
+        if !self.committed
+            && self
+                .runtime
+                .revoke_activation(&self.activation_id, &self.action_id)
+                .is_err()
+        {
+            eprintln!("built-in capability activation rollback failed safely");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectedAgentApproval {
@@ -1063,6 +1102,35 @@ impl AgentService {
                         );
                     }
                 }
+                if let AgentProposedAction::BuiltinCapabilityActivation { approval } =
+                    &record.snapshot.action
+                {
+                    let now_ms = self.mcp_approval_now_ms();
+                    let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
+                    if approval.expires_at <= now_seconds {
+                        let retired = self
+                            .storage
+                            .expire_builtin_capability_agent_action(
+                                &record.storage_id,
+                                pending_status_label(record.snapshot.status),
+                                now_ms,
+                            )
+                            .map_err(|_| {
+                                "Built-in capability approval expiry could not be persisted safely."
+                                    .to_string()
+                            })?;
+                        if !retired {
+                            return Err(
+                                "Built-in capability approval changed while its expiry was being settled."
+                                    .to_string(),
+                            );
+                        }
+                        record.snapshot.status = PendingActionStatus::Failed;
+                        return Err(
+                            "Built-in capability approval expired before activation.".to_string()
+                        );
+                    }
+                }
                 if let Err(error) = self.validate_provider_continuations_before_dispatch(record) {
                     // Publish the durable terminal intent before replacing the resume payload.
                     // A crash between these writes leaves a non-dispatchable pending row that
@@ -1313,6 +1381,7 @@ impl AgentService {
                     .map_err(|error| error.to_string())?;
             }
         }
+        let mut builtin_activation_settlement = None;
         let execution = if decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action
         {
             let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
@@ -1329,6 +1398,85 @@ impl AgentService {
             ActionExecutionDecision {
                 status: "rejected".to_string(),
                 final_pending_status: PendingActionStatus::Rejected,
+                patch_result: None,
+                file_write_result: None,
+                file_change: None,
+                tool_result,
+            }
+        } else if let AgentProposedAction::BuiltinCapabilityActivation { approval } =
+            &record.snapshot.action
+        {
+            let tool_result = if decision_status == AgentApprovalDecisionStatus::Rejected {
+                mycopilot_core::builtin_capability_activation_rejected_result(
+                    approval,
+                    message.as_deref(),
+                )
+            } else {
+                let mut approved = (**approval).clone();
+                approved.approval_status = AgentApprovalStatus::Approved;
+                match self.builtin_capabilities.as_ref() {
+                    Some(runtime) => match runtime.approve_activation(&approved) {
+                        Ok(grant) => {
+                            builtin_activation_settlement =
+                                Some(BuiltinActivationSettlementGuard::new(
+                                    runtime.clone(),
+                                    grant.activation_id,
+                                    approved.action_id.clone(),
+                                ));
+                            mycopilot_core::builtin_capability_activation_result(
+                                &approved,
+                                mycopilot_core::CapabilityActivationState::Active,
+                                None,
+                            )
+                        }
+                        Err(error) => AgentToolResult {
+                            exact_archive_file: None,
+                            call_id: approved.call_id.clone(),
+                            tool: "activate_capability".to_string(),
+                            ok: false,
+                            result: Some(serde_json::json!({
+                                "status": "revoked",
+                                "capability": approved.capability_id,
+                            })),
+                            error: Some(error.to_string()),
+                        },
+                    },
+                    None => AgentToolResult {
+                        exact_archive_file: None,
+                        call_id: approved.call_id.clone(),
+                        tool: "activate_capability".to_string(),
+                        ok: false,
+                        result: Some(serde_json::json!({
+                            "status": "revoked",
+                            "capability": approved.capability_id,
+                        })),
+                        error: Some("Builtin capability Host is unavailable.".to_string()),
+                    },
+                }
+            };
+            continuation_message = if decision_status == AgentApprovalDecisionStatus::Rejected {
+                message.clone()
+            } else {
+                None
+            };
+            ActionExecutionDecision {
+                status: if decision_status == AgentApprovalDecisionStatus::Rejected {
+                    "rejected".to_string()
+                } else if tool_result.ok {
+                    // Keep the transport-level action status within the established approval
+                    // vocabulary. The capability-specific ToolResult carries `status=active`;
+                    // adding another wire enum here would create a second source of truth.
+                    "approved".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                final_pending_status: if decision_status == AgentApprovalDecisionStatus::Rejected {
+                    PendingActionStatus::Rejected
+                } else if tool_result.ok {
+                    PendingActionStatus::Completed
+                } else {
+                    PendingActionStatus::Failed
+                },
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
@@ -1603,6 +1751,11 @@ impl AgentService {
             self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)?;
             agent_input
         };
+        if let Some(settlement) = builtin_activation_settlement.take() {
+            // From this point the pending target and paired continuation are durably committed.
+            // Before this boundary the guard removes the process-memory grant on every error path.
+            settlement.commit();
+        }
         let run_id = record.snapshot.run_id.clone();
         let inline_continuation_guard = inline_continuation_guard
             .expect("every synchronous approval decision owns a pre-spawn continuation lease");

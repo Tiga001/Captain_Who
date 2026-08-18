@@ -78,6 +78,36 @@ function createTrustedIpc(): {
 function createCore(overrides: Record<string, unknown> = {}) {
   return {
     onMcpChanged: vi.fn(() => vi.fn()),
+    listMcpBuiltinCapabilities: vi.fn().mockResolvedValue({
+      schemaVersion: 1,
+      revision: 0,
+      capabilities: [
+        {
+          schemaVersion: 1,
+          kind: 'builtinCapability',
+          capabilityId: 'browser_automation',
+          displayName: 'Browser automation',
+          description: 'Allow the Agent to request task-scoped browser automation access.',
+          userAllowed: false,
+          policyVersion: 1,
+          policyRevision: 0
+        }
+      ]
+    }),
+    setMcpBuiltinCapabilityAllowed: vi.fn().mockResolvedValue({
+      schemaVersion: 1,
+      revision: 1,
+      capability: {
+        schemaVersion: 1,
+        kind: 'builtinCapability',
+        capabilityId: 'browser_automation',
+        displayName: 'Browser automation',
+        description: 'Allow the Agent to request task-scoped browser automation access.',
+        userAllowed: true,
+        policyVersion: 1,
+        policyRevision: 1
+      }
+    }),
     listMcpServers: vi.fn().mockResolvedValue({
       schemaVersion: 1,
       registryRevision: 7,
@@ -160,6 +190,8 @@ describe('MCP trusted IPC', () => {
 
     expect([...trusted.handlers.keys()]).toEqual(
       expect.arrayContaining([
+        'host:mcp.listBuiltinCapabilities',
+        'host:mcp.setBuiltinCapabilityAllowed',
         'host:mcp.listServers',
         'host:mcp.getServer',
         'host:mcp.addServer',
@@ -210,6 +242,60 @@ describe('MCP trusted IPC', () => {
     })
     expect(core.addMcpServer).not.toHaveBeenCalled()
     cleanup()
+  })
+
+  it('keeps built-in capability policy separate from external enable and runtime state', async () => {
+    const trusted = createTrustedIpc()
+    const core = createCore()
+    registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
+
+    await expect(
+      trusted.handlers.get('host:mcp.listBuiltinCapabilities')?.(event)
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        revision: 0,
+        capabilities: [
+          {
+            kind: 'builtinCapability',
+            capabilityId: 'browser_automation',
+            userAllowed: false
+          }
+        ]
+      }
+    })
+    await expect(
+      trusted.handlers.get('host:mcp.setBuiltinCapabilityAllowed')?.(event, {
+        schemaVersion: 1,
+        capabilityId: 'browser_automation',
+        allowed: true,
+        expectedPolicyRevision: 0
+      })
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { capability: { userAllowed: true, policyRevision: 1 } }
+    })
+    expect(core.setMcpBuiltinCapabilityAllowed).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      capabilityId: 'browser_automation',
+      allowed: true,
+      expectedPolicyRevision: 0
+    })
+    expect(core.enableMcpServer).not.toHaveBeenCalled()
+    expect(core.startMcpServer).not.toHaveBeenCalled()
+
+    const invalid = await trusted.handlers.get('host:mcp.setBuiltinCapabilityAllowed')?.(event, {
+      schemaVersion: 1,
+      capabilityId: 'browser_automation',
+      allowed: true,
+      expectedPolicyRevision: 0,
+      state: 'ready'
+    })
+    expect(invalid).toMatchObject({
+      ok: false,
+      error: { data: { operation: 'setBuiltinCapabilityAllowed', code: 'invalidInput' } }
+    })
+    expect(core.setMcpBuiltinCapabilityAllowed).toHaveBeenCalledTimes(1)
   })
 
   it('commits only the authorization id and frozen precondition after the trusted request', async () => {

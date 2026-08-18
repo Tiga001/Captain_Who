@@ -27,7 +27,7 @@ import {
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
 import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
 import { getAgentActionId } from './agentActionUtils'
-import { getActionToolCall } from './actionProjection'
+import { getActionToolCall, getActionToolCallId } from './actionProjection'
 import {
   createRejectedToolResult,
   getApprovalsForStatus,
@@ -1076,6 +1076,8 @@ export function applyAgentActionDecisionToChatMessage(
 ): ChatMessage {
   const currentRun = ensureAgentRun(message.agentRun, null)
   const actionId = getAgentActionId(action)
+  const builtinCapabilityCallId =
+    action.type === 'builtin_capability_activation' ? getActionToolCallId(action) : null
   const approvalStatus: AgentApprovalStatus = decision === 'approved' ? 'approved' : 'rejected'
   const rejectedToolResult =
     decision === 'rejected' ? createRejectedToolResult(action, rejectionMessage) : null
@@ -1118,6 +1120,25 @@ export function applyAgentActionDecisionToChatMessage(
     )
   })
 
+  if (builtinCapabilityCallId) {
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...runWithDecision,
+        // This call is a live approval anchor, not durable activity. The Host returns the
+        // activation decision to the model through its own continuation path.
+        toolCalls: runWithDecision.toolCalls.filter((call) => call.id !== builtinCapabilityCallId),
+        toolResults: runWithDecision.toolResults.filter(
+          (result) => result.callId !== builtinCapabilityCallId
+        ),
+        timeline: runWithDecision.timeline.filter(
+          (item) => item.type !== 'tool_call' || item.callId !== builtinCapabilityCallId
+        )
+      }
+    }
+  }
+
   return {
     ...message,
     status: 'pending',
@@ -1128,7 +1149,8 @@ export function applyAgentActionDecisionToChatMessage(
 export function applyAgentActionExecutionToChatMessage(
   message: ChatMessage,
   execution: AgentActionExecutionOutput,
-  mcpRejectionMessage?: string
+  mcpRejectionMessage?: string,
+  decidedAction?: AgentProposedAction
 ): ChatMessage {
   // Action-decision RPCs and Agent notifications travel on independent channels. In particular,
   // an approved command is dispatched on a background worker before the approval RPC response is
@@ -1150,6 +1172,15 @@ export function applyAgentActionExecutionToChatMessage(
     (action) =>
       action.type === 'mcp_tool_call' && action.approval.identity.actionId === execution.actionId
   )
+  const originalBuiltinCapabilityApproval =
+    decidedAction?.type === 'builtin_capability_activation' &&
+    decidedAction.approval.actionId === execution.actionId
+      ? decidedAction
+      : message.agentRun?.approvals.find(
+          (action) =>
+            action.type === 'builtin_capability_activation' &&
+            action.approval.actionId === execution.actionId
+        )
   const mcpInvocation = currentRun.mcpInvocations?.find(
     (candidate) => candidate.actionId === execution.actionId
   )
@@ -1158,6 +1189,9 @@ export function applyAgentActionExecutionToChatMessage(
     (originalMcpApproval?.type === 'mcp_tool_call'
       ? originalMcpApproval.approval.identity.callId
       : undefined)
+  const builtinCapabilityCallId = originalBuiltinCapabilityApproval
+    ? getActionToolCallId(originalBuiltinCapabilityApproval)
+    : null
 
   if (execution.actionType === 'mcp_tool_call' || mcpCallId) {
     const rejectionReason =
@@ -1179,6 +1213,28 @@ export function applyAgentActionExecutionToChatMessage(
       ),
       timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
         (item) => item.type !== 'tool_call' || item.callId !== mcpCallId
+      )
+    })
+
+    return {
+      ...messageWithAgentOutput,
+      agentRun: nextRun
+    }
+  }
+
+  if (execution.actionType === 'builtin_capability_activation') {
+    const nextRun = normalizeAgentRunToolActivities({
+      ...currentRun,
+      approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
+      toolCalls: builtinCapabilityCallId
+        ? currentRun.toolCalls.filter((call) => call.id !== builtinCapabilityCallId)
+        : currentRun.toolCalls,
+      toolResults: builtinCapabilityCallId
+        ? currentRun.toolResults.filter((result) => result.callId !== builtinCapabilityCallId)
+        : currentRun.toolResults,
+      timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
+        (item) => item.type !== 'tool_call' || item.callId !== builtinCapabilityCallId
       )
     })
 

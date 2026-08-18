@@ -1284,6 +1284,9 @@ impl AgentService {
                 })?;
                 Ok(service.commit_approved(&installation, conversation_id, &run_id))
             }
+            AgentProposedAction::BuiltinCapabilityActivation { .. } => {
+                Err(AgentError::new("内置能力激活必须经过任务级用户审批。"))
+            }
         }
     }
 }

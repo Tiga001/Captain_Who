@@ -12,6 +12,7 @@
 //! the rebuilt agent-work request. Extensions may later contribute purpose-specific context to a
 //! compaction-generation request, but they never control that restart.
 
+mod builtin_capability;
 mod skills;
 mod todo;
 
@@ -24,6 +25,7 @@ use crate::runtime::AgentSkillActivationResolver;
 use crate::skills::{AgentSkillDiscoverySnapshot, SkillResourceSession};
 use crate::tools::{AgentTool, EffectiveToolSet, ToolCapabilityId, ToolRegistry};
 use crate::world_state::WorldStateSectionEnvelope;
+use builtin_capability::BuiltinCapabilityExtension;
 use serde_json::Value;
 pub(in crate::runtime) use skills::checkpoint_authority_from_snapshots;
 pub(in crate::runtime) use skills::redact_discovery_from_snapshots;
@@ -137,6 +139,10 @@ trait RuntimeExtension: Send {
         Vec::new()
     }
 
+    fn register_additional_tools(&self, _registry: &mut ToolRegistry) -> AgentResult<()> {
+        Ok(())
+    }
+
     fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
         Ok(BTreeSet::new())
     }
@@ -177,12 +183,33 @@ impl RuntimeExtensions {
         Self::for_run_with_skills(run_id, None, None, None, None, snapshots)
     }
 
+    #[cfg(test)]
     pub(super) fn for_run_with_skills(
         run_id: &str,
         discovery: Option<AgentSkillDiscoverySnapshot>,
         initial_activation: Option<&AgentSkillActivation>,
         activation_resolver: Option<AgentSkillActivationResolver>,
         skill_resources: Option<Arc<SkillResourceSession>>,
+        snapshots: &[AgentExtensionSnapshot],
+    ) -> AgentResult<Self> {
+        Self::for_run_with_capabilities(
+            run_id,
+            discovery,
+            initial_activation,
+            activation_resolver,
+            skill_resources,
+            None,
+            snapshots,
+        )
+    }
+
+    pub(super) fn for_run_with_capabilities(
+        run_id: &str,
+        discovery: Option<AgentSkillDiscoverySnapshot>,
+        initial_activation: Option<&AgentSkillActivation>,
+        activation_resolver: Option<AgentSkillActivationResolver>,
+        skill_resources: Option<Arc<SkillResourceSession>>,
+        builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
         snapshots: &[AgentExtensionSnapshot],
     ) -> AgentResult<Self> {
         // A checkpoint is the authority for the logical run. Resume payloads may be rebuilt from
@@ -210,11 +237,15 @@ impl RuntimeExtensions {
             )?
         };
         let (todo, todo_handle) = TodoExtension::new(run_id.to_string());
-        Self::from_extensions(
-            vec![Box::new(skills), Box::new(todo)],
-            Some(todo_handle),
-            snapshots,
-        )
+        let mut extensions: Vec<Box<dyn RuntimeExtension>> = vec![Box::new(skills)];
+        if let Some(runtime) = builtin_capabilities {
+            extensions.push(Box::new(BuiltinCapabilityExtension::new(
+                run_id.to_string(),
+                runtime,
+            )));
+        }
+        extensions.push(Box::new(todo));
+        Self::from_extensions(extensions, Some(todo_handle), snapshots)
     }
 
     fn from_extensions(
@@ -259,6 +290,7 @@ impl RuntimeExtensions {
     pub(super) fn register_tools(&self, registry: &mut ToolRegistry) -> AgentResult<()> {
         for extension in &self.extensions {
             let descriptor = extension.descriptor();
+            extension.register_additional_tools(registry)?;
             for tool in extension.tools() {
                 registry.register_extension_tool(descriptor.id, tool)?;
             }

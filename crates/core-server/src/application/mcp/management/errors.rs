@@ -22,6 +22,37 @@ impl std::fmt::Display for McpManagementFailure {
 impl std::error::Error for McpManagementFailure {}
 
 impl McpManagementService {
+    pub(super) fn builtin_policy_failure(
+        &self,
+        operation: McpManagementOperationDto,
+        error: BuiltinCapabilityPolicyError,
+    ) -> McpManagementFailure {
+        let (code, recovery, message) = match error {
+            BuiltinCapabilityPolicyError::Conflict => (
+                McpManagementErrorCodeDto::Conflict,
+                McpManagementRecoveryDto::Refresh,
+                "The built-in MCP capability policy changed. Refresh before retrying.",
+            ),
+            BuiltinCapabilityPolicyError::InvalidInput => (
+                McpManagementErrorCodeDto::InvalidInput,
+                McpManagementRecoveryDto::FixInput,
+                "The built-in MCP capability policy request is invalid.",
+            ),
+            BuiltinCapabilityPolicyError::CorruptRecord => (
+                McpManagementErrorCodeDto::InvalidState,
+                McpManagementRecoveryDto::DoNotRetry,
+                "The persisted built-in MCP capability policy is invalid.",
+            ),
+            BuiltinCapabilityPolicyError::StorageUnavailable
+            | BuiltinCapabilityPolicyError::RevisionExhausted => (
+                McpManagementErrorCodeDto::InternalSafeError,
+                McpManagementRecoveryDto::Retry,
+                "Built-in MCP capability policy storage is unavailable.",
+            ),
+        };
+        self.failure(operation, code, recovery, message, None)
+    }
+
     pub(super) fn persisted(
         &self,
         server_id: McpServerId,
@@ -164,7 +195,15 @@ impl McpManagementService {
                 recovery,
                 message: bounded_text(message, MAX_SAFE_ERROR_BYTES),
                 server_id: server_id.map(|id| id.to_string()),
-                current_registry_revision: self.registry.current_revision().ok(),
+                current_registry_revision: if matches!(
+                    operation,
+                    McpManagementOperationDto::ListBuiltinCapabilities
+                        | McpManagementOperationDto::SetBuiltinCapabilityAllowed
+                ) {
+                    None
+                } else {
+                    self.registry.current_revision().ok()
+                },
             },
         }
     }

@@ -9,6 +9,9 @@ import {
 import {
   MCP_MANAGEMENT_ERROR_CODE,
   MCP_MANAGEMENT_SCHEMA_VERSION,
+  parseMcpBuiltinCapabilityListOutput,
+  parseMcpBuiltinCapabilityMutationOutput,
+  parseMcpBuiltinCapabilitySetAllowedInput,
   parseMcpCatalogToolsPageInput,
   parseMcpCatalogToolsPageOutput,
   parseMcpChangedNotification,
@@ -49,6 +52,21 @@ export function registerMcpIpc(
   const broadcaster = new McpChangedBroadcaster()
   const unsubscribe = coreServer.onMcpChanged((event) => broadcaster.enqueue(event))
 
+  ipcMain.handle(HOST_CHANNELS.mcp.listBuiltinCapabilities, () =>
+    captureMcpInvocation(
+      'listBuiltinCapabilities',
+      () => coreServer.listMcpBuiltinCapabilities(),
+      parseMcpBuiltinCapabilityListOutput
+    )
+  )
+  ipcMain.handle(HOST_CHANNELS.mcp.setBuiltinCapabilityAllowed, (_event, input) =>
+    captureMcpInputInvocation(
+      'setBuiltinCapabilityAllowed',
+      () => parseMcpBuiltinCapabilitySetAllowedInput(input),
+      (request) => coreServer.setMcpBuiltinCapabilityAllowed(request),
+      parseMcpBuiltinCapabilityMutationOutput
+    )
+  )
   ipcMain.handle(HOST_CHANNELS.mcp.listServers, () =>
     captureMcpInvocation('list', () => coreServer.listMcpServers(), parseMcpServerListOutput)
   )

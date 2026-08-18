@@ -378,6 +378,9 @@ impl AgentService {
         let action_id = action_id_for_action(&action);
         let tool_call_id = match &action {
             AgentProposedAction::McpToolCall { approval } => approval.identity.call_id.clone(),
+            AgentProposedAction::BuiltinCapabilityActivation { approval } => {
+                approval.call_id.clone()
+            }
             _ => action_id.clone(),
         };
         let storage_id = pending_action_storage_id(run_id, &action_id);
@@ -428,16 +431,46 @@ impl AgentService {
                 terminal_status,
             )?;
             let successor_storage_record = pending_storage_record(&pending_record, now_ms())?;
-            let storage_outcome = match self
-                .storage
-                .store_pending_agent_action_with_predecessor_settlement(
-                    successor_storage_record,
-                    &predecessor.storage_id,
-                    pending_status_label(predecessor_expected_status),
-                    pending_status_label(terminal_status),
-                    &predecessor_terminal_agent_input_json,
-                    now_ms(),
-                ) {
+            let builtin_initial_audit = matches!(
+                &pending_record.snapshot.action,
+                AgentProposedAction::BuiltinCapabilityActivation { .. }
+            )
+            .then(|| {
+                action_audit_record(
+                    &pending_record,
+                    None,
+                    "pending",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            });
+            let storage_result = if let Some(audit) = builtin_initial_audit {
+                self.storage
+                    .store_builtin_capability_pending_action_with_predecessor_settlement_and_audit(
+                        successor_storage_record,
+                        audit,
+                        &predecessor.storage_id,
+                        pending_status_label(predecessor_expected_status),
+                        pending_status_label(terminal_status),
+                        &predecessor_terminal_agent_input_json,
+                        now_ms(),
+                    )
+            } else {
+                self.storage
+                    .store_pending_agent_action_with_predecessor_settlement(
+                        successor_storage_record,
+                        &predecessor.storage_id,
+                        pending_status_label(predecessor_expected_status),
+                        pending_status_label(terminal_status),
+                        &predecessor_terminal_agent_input_json,
+                        now_ms(),
+                    )
+            };
+            let storage_outcome = match storage_result {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
@@ -465,7 +498,12 @@ impl AgentService {
                 .snapshot
                 .status = terminal_status;
             drop(pending_actions);
-            if matches!(storage_outcome, PendingActionStoreOutcome::Inserted) {
+            if matches!(storage_outcome, PendingActionStoreOutcome::Inserted)
+                && !matches!(
+                    &pending_record.snapshot.action,
+                    AgentProposedAction::BuiltinCapabilityActivation { .. }
+                )
+            {
                 self.record_action_audit(
                     &pending_record,
                     None,
@@ -496,7 +534,28 @@ impl AgentService {
                 }
             }
         }
-        let storage_outcome = match self.persist_pending_action(&pending_record) {
+        let storage_result = if matches!(
+            &pending_record.snapshot.action,
+            AgentProposedAction::BuiltinCapabilityActivation { .. }
+        ) {
+            let pending = pending_storage_record(&pending_record, now_ms())?;
+            let audit = action_audit_record(
+                &pending_record,
+                None,
+                "pending",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            self.storage
+                .store_builtin_capability_pending_action_with_audit(pending, audit)
+        } else {
+            self.persist_pending_action(&pending_record)
+        };
+        let storage_outcome = match storage_result {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
@@ -523,7 +582,12 @@ impl AgentService {
                 }
             }
         };
-        if matches!(storage_outcome, PendingActionStoreOutcome::Inserted) {
+        if matches!(storage_outcome, PendingActionStoreOutcome::Inserted)
+            && !matches!(
+                &pending_record.snapshot.action,
+                AgentProposedAction::BuiltinCapabilityActivation { .. }
+            )
+        {
             self.record_action_audit(
                 &pending_record,
                 None,
@@ -1213,6 +1277,13 @@ pub(super) fn pending_action_binding_matches(
     action: &AgentProposedAction,
     agent_input: &AgentChatInput,
 ) -> bool {
+    if matches!(
+        action,
+        AgentProposedAction::BuiltinCapabilityActivation { approval }
+            if approval.run_id != run_id
+    ) {
+        return false;
+    }
     let action_id = action_id_for_action(action);
     let tool_name = tool_name_for_action(action);
     let (tool_call_id, pending_action_id) = match action {
@@ -1220,6 +1291,9 @@ pub(super) fn pending_action_binding_matches(
             approval.identity.call_id.as_str(),
             Some(approval.identity.action_id.as_str()),
         ),
+        AgentProposedAction::BuiltinCapabilityActivation { approval } => {
+            (approval.call_id.as_str(), Some(approval.action_id.as_str()))
+        }
         _ => (action_id.as_str(), None),
     };
     let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
@@ -1253,6 +1327,14 @@ pub(super) fn pending_action_binding_matches(
             && record.tool_name == tool_name
     }) {
         return false;
+    }
+
+    if let AgentProposedAction::BuiltinCapabilityActivation { approval } = action {
+        return mycopilot_core::validate_frozen_builtin_capability_activation_args(
+            approval,
+            &checkpoint_call.args,
+        )
+        .is_ok();
     }
 
     let AgentProposedAction::McpToolCall { approval } = action else {

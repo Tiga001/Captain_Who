@@ -88,6 +88,7 @@ pub fn file_write_action_approval_status(
         AgentProposedAction::Command { .. }
         | AgentProposedAction::ToolCall { .. }
         | AgentProposedAction::McpToolCall { .. }
+        | AgentProposedAction::BuiltinCapabilityActivation { .. }
         | AgentProposedAction::SkillScript { .. }
         | AgentProposedAction::SkillInstallation { .. } => None,
     }

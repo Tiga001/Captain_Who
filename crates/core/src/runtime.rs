@@ -397,6 +397,7 @@ impl AgentRuntime {
             skill_installation_prepare,
             skill_installation_commit,
             mcp_tools,
+            builtin_capabilities,
             command_runtime_profile_resolver,
             command_session_executor,
             steer_input,
@@ -526,6 +527,7 @@ impl AgentRuntime {
                 skill_activation_resolver,
                 skill_resources: skill_resources.clone(),
                 mcp_tools,
+                builtin_capabilities,
                 agent_collaboration_enabled: agent_collaboration.is_some(),
             },
         )
@@ -2489,6 +2491,11 @@ impl AgentRuntime {
                                 run_id: run_id.clone(),
                                 invocation,
                             });
+                        } else if let AgentProposedAction::BuiltinCapabilityActivation {
+                            approval,
+                        } = &action
+                        {
+                            checkpoint.pending_action_id = Some(approval.action_id.clone());
                         }
                         event_stream.emit(AgentEvent::ApprovalRequired {
                             run_id: run_id.clone(),
@@ -3718,6 +3725,21 @@ fn unavailable_tool_error(tool_set: &EffectiveToolSet, tool_name: &str) -> Agent
                 "code": "toolRequiresSkillActivation",
                 "recovery": "activateSkill",
                 "requiredCapability": required_capability.as_str(),
+            }),
+        ),
+        ToolUnavailability::RequiresBuiltinCapabilityActivation {
+            required_capability,
+        } => AgentError::structured(
+            "agent.tool_requires_builtin_capability_activation",
+            format!(
+                "Tool `{tool_name}` is unavailable until its built-in capability is activated for this task."
+            ),
+            json!({
+                "type": "tool_policy",
+                "code": "toolRequiresBuiltinCapabilityActivation",
+                "recovery": "activateCapability",
+                "requiredCapability": required_capability.as_str(),
+                "retryable": false,
             }),
         ),
         ToolUnavailability::BlockedByPermissions => AgentError::structured(

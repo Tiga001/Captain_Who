@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "methods": {
+    "list": "mcp.builtinCapability.list",
+    "setAllowed": "mcp.builtinCapability.setAllowed"
+  },
+  "listInput": {
+    "schemaVersion": 1
+  },
+  "setAllowedInput": {
+    "schemaVersion": 1,
+    "capabilityId": "browser_automation",
+    "allowed": true,
+    "expectedPolicyRevision": 0
+  },
+  "listOutput": {
+    "schemaVersion": 1,
+    "revision": 0,
+    "capabilities": [
+      {
+        "schemaVersion": 1,
+        "kind": "builtinCapability",
+        "capabilityId": "browser_automation",
+        "displayName": "Browser automation",
+        "description": "Allow the Agent to request task-scoped browser automation access.",
+        "userAllowed": false,
+        "policyVersion": 1,
+        "policyRevision": 0
+      }
+    ]
+  },
+  "mutationOutput": {
+    "schemaVersion": 1,
+    "revision": 1,
+    "capability": {
+      "schemaVersion": 1,
+      "kind": "builtinCapability",
+      "capabilityId": "browser_automation",
+      "displayName": "Browser automation",
+      "description": "Allow the Agent to request task-scoped browser automation access.",
+      "userAllowed": true,
+      "policyVersion": 1,
+      "policyRevision": 1
+    }
+  }
+}

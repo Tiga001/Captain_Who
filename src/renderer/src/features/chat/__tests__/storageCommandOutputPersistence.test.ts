@@ -132,6 +132,29 @@ function storedMcpApprovalAction(
   }
 }
 
+function storedBuiltinCapabilityApprovalAction(): Extract<
+  AgentProposedAction,
+  { type: 'builtin_capability_activation' }
+> {
+  return {
+    type: 'builtin_capability_activation',
+    approval: {
+      actionId: '11111111-1111-4111-8111-111111111111',
+      activationId: '22222222-2222-4222-8222-222222222222',
+      runId: 'run-builtin-capability-pending',
+      callId,
+      capabilityId: 'browser_automation',
+      displayName: 'Browser automation',
+      reason: 'Open the in-app browser for this task.',
+      manifestDigest: `sha256:${'e'.repeat(64)}`,
+      policyRevision: 7,
+      createdAt: 1_753_843_200,
+      expiresAt: 1_753_844_100,
+      approvalStatus: 'required'
+    }
+  }
+}
+
 it('keeps live command output transient while persisting the final tool result', async () => {
   const message: ChatMessage = {
     id: 'assistant-command',
@@ -1106,6 +1129,54 @@ it('persists the current safe MCP projection and excludes its approval payload',
   )
   const restored = await loadConversation('conversation-mcp-current')
   expect(restored?.messages[0].agentRun?.mcpInvocations).toEqual(message.agentRun?.mcpInvocations)
+})
+
+it('excludes Host-owned built-in activation approval anchors and recovers them only from Host pending actions', async () => {
+  const action = storedBuiltinCapabilityApprovalAction()
+  const message: ChatMessage = {
+    id: 'assistant-builtin-capability-pending',
+    role: 'assistant',
+    content: '',
+    createdAt: 1,
+    status: 'pending',
+    agentRun: {
+      runId: action.approval.runId,
+      status: 'waiting_for_approval',
+      startedAt: 1,
+      toolDefinitions: [],
+      toolCalls: [
+        {
+          id: action.approval.callId,
+          tool: 'activate_capability',
+          args: {},
+          approvalStatus: 'required',
+          reason: action.approval.reason
+        }
+      ],
+      toolResults: [],
+      approvals: [action],
+      diffs: [],
+      timeline: [
+        {
+          id: `tool-call-${action.approval.callId}`,
+          type: 'tool_call',
+          callId: action.approval.callId
+        }
+      ]
+    }
+  }
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+
+  await saveChatMessageState('conversation-builtin-capability-pending', message)
+
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+  const persisted = JSON.parse(storedMessage.agentRunJson)
+  expect(persisted.approvals).toEqual([])
+  expect(persisted.toolCalls).toEqual([])
+  expect(persisted.toolResults).toEqual([])
+  expect(persisted.timeline).toEqual([])
+  expect(JSON.stringify(persisted)).not.toContain(action.approval.activationId)
+  expect(parsePersistedAgentRun(persisted)).toBeDefined()
 })
 
 it('rejects a nonempty persisted run with missing current fields', async () => {

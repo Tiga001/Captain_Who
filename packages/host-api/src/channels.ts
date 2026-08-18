@@ -72,6 +72,7 @@ export const HOST_CHANNELS = {
   },
   mcp: {
     addServer: 'host:mcp.addServer',
+    listBuiltinCapabilities: 'host:mcp.listBuiltinCapabilities',
     changed: 'host:mcp.changed',
     deleteServer: 'host:mcp.deleteServer',
     disableServer: 'host:mcp.disableServer',
@@ -86,6 +87,7 @@ export const HOST_CHANNELS = {
     selectExecutable: 'host:mcp.selectExecutable',
     selectWorkingDirectory: 'host:mcp.selectWorkingDirectory',
     startServer: 'host:mcp.startServer',
+    setBuiltinCapabilityAllowed: 'host:mcp.setBuiltinCapabilityAllowed',
     stopServer: 'host:mcp.stopServer',
     updateServer: 'host:mcp.updateServer'
   },

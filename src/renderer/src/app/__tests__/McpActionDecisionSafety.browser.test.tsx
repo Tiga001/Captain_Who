@@ -146,7 +146,7 @@ describe('MCP pending-action logging safety', () => {
     await expect.poll(() => service.approve.mock.calls.length).toBe(1)
     await expect.poll(() => consoleError.mock.calls.length).toBe(1)
 
-    expect(consoleError).toHaveBeenCalledWith('Failed to approve external MCP action')
+    expect(consoleError).toHaveBeenCalledWith('Failed to approve protected Agent action')
     const logged = consoleError.mock.calls
       .flat()
       .map((value) => (value instanceof Error ? `${value.message}\n${value.stack}` : String(value)))

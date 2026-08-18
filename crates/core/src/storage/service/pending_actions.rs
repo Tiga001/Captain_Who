@@ -359,6 +359,7 @@ fn durable_trace_proves_action_precedes(
     let action_id = match &action {
         AgentProposedAction::ToolCall { call } => call.id.as_str(),
         AgentProposedAction::McpToolCall { approval } => approval.identity.call_id.as_str(),
+        AgentProposedAction::BuiltinCapabilityActivation { approval } => approval.call_id.as_str(),
         AgentProposedAction::Diff { diff } => diff.id.as_str(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
         AgentProposedAction::Command { command } => command.id.as_str(),
@@ -980,6 +981,118 @@ fn terminalize_mcp_action_in_transaction(
     Ok(Some(record))
 }
 
+fn validate_builtin_capability_initial_audit(
+    pending: &AgentPendingActionRecord,
+    audit: &AgentActionAuditRecord,
+) -> Result<(), String> {
+    let action = serde_json::from_str::<AgentProposedAction>(&pending.action_json)
+        .map_err(|_| "built-in capability pending action is invalid".to_string())?;
+    let AgentProposedAction::BuiltinCapabilityActivation { approval } = action else {
+        return Err("atomic built-in capability publication requires a typed activation".into());
+    };
+    let frozen_identity_matches = pending.action_id == audit.action_id
+        && pending.run_id == audit.run_id
+        && pending.conversation_id == audit.conversation_id
+        && pending.assistant_message_id == audit.assistant_message_id
+        && pending.action_type == "builtin_capability_activation"
+        && audit.action_type == pending.action_type
+        && pending.tool_name == "activate_capability"
+        && audit.tool_name == pending.tool_name
+        && pending.tool_call_id.as_deref() == Some(approval.call_id.as_str())
+        && pending.run_id == approval.run_id
+        && pending.action_json == audit.action_json
+        && pending.created_at == audit.created_at;
+    let initial_lifecycle_matches = pending.status == "pending"
+        && pending.target_status.is_none()
+        && audit.decision.is_none()
+        && audit.status == "pending"
+        && audit.patch_result_json.is_none()
+        && audit.command_result_json.is_none()
+        && audit.tool_result_json.is_none()
+        && audit.error.is_none()
+        && audit.decided_at.is_none()
+        && audit.completed_at.is_none()
+        && audit.blocked_reason.is_none()
+        && audit.decision_source.as_deref() == Some("manual_pending");
+    if !frozen_identity_matches || !initial_lifecycle_matches {
+        return Err(
+            "built-in capability pending action and initial audit do not share one frozen identity"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn same_builtin_capability_initial_audit(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    existing.action_id == candidate.action_id
+        && existing.run_id == candidate.run_id
+        && existing.conversation_id == candidate.conversation_id
+        && existing.assistant_message_id == candidate.assistant_message_id
+        && existing.action_type == candidate.action_type
+        && existing.tool_name == candidate.tool_name
+        && existing.decision == candidate.decision
+        && existing.status == candidate.status
+        && existing.action_json == candidate.action_json
+        && existing.patch_result_json == candidate.patch_result_json
+        && existing.command_result_json == candidate.command_result_json
+        && existing.tool_result_json == candidate.tool_result_json
+        && existing.error == candidate.error
+        && existing.created_at == candidate.created_at
+        && existing.decided_at == candidate.decided_at
+        && existing.completed_at == candidate.completed_at
+        && existing.effective_permissions_json == candidate.effective_permissions_json
+        && existing.path_scope == candidate.path_scope
+        && existing.command_cwd_scope == candidate.command_cwd_scope
+        && existing.blocked_reason == candidate.blocked_reason
+        && existing.decision_source == candidate.decision_source
+}
+
+fn store_pending_action_or_conflict(
+    connection: &rusqlite::Connection,
+    record: &AgentPendingActionRecord,
+) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+    let outcome = pending_action_repository::store_pending_action(connection, record)
+        .map_err(storage_error)?;
+    if let pending_action_repository::PendingActionStoreOutcome::Conflict {
+        existing_run_id,
+        existing_status,
+    } = &outcome
+    {
+        return Err(format!(
+            "待审批操作 actionId={} 已属于 runId={}（status={}）；拒绝覆盖冻结快照。",
+            record.action_id, existing_run_id, existing_status
+        ));
+    }
+    Ok(outcome)
+}
+
+fn ensure_exact_builtin_capability_initial_audit(
+    connection: &rusqlite::Connection,
+    audit: &AgentActionAuditRecord,
+) -> Result<(), String> {
+    if agent_action_audit_repository::insert_action_audit_record_if_absent(connection, audit)
+        .map_err(storage_error)?
+    {
+        return Ok(());
+    }
+    let existing =
+        agent_action_audit_repository::load_action_audit_record(connection, &audit.action_id)
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                "built-in capability initial audit disappeared during publication".to_string()
+            })?;
+    if !same_builtin_capability_initial_audit(&existing, audit) {
+        return Err(
+            "built-in capability action id is already owned by a different audit identity"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl StorageService {
     /// Settles the hidden dispatch journal for one automatically authorized MCP invocation.
     ///
@@ -1239,6 +1352,53 @@ impl StorageService {
             ),
             _ => return Err("invalid malformed pending-action retirement status".to_string()),
         };
+        self.terminalize_generic_pending_action_as_failed(
+            action_id,
+            expected_status,
+            updated_at,
+            error_code,
+            reason,
+            None,
+            false,
+        )
+    }
+
+    /// Atomically expires one task-scoped built-in capability approval before activation.
+    ///
+    /// This path accepts only the typed activation action and its durable built-in Tool identity.
+    /// It clears the public/private pending projections and terminates the owning run without ever
+    /// creating a process-memory grant.
+    pub fn expire_builtin_capability_agent_action(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        if !matches!(expected_status, "pending" | "approved") {
+            return Err("invalid built-in capability expiry status".to_string());
+        }
+        self.terminalize_generic_pending_action_as_failed(
+            action_id,
+            expected_status,
+            updated_at,
+            "builtin_capability.activation_expired",
+            "The built-in capability activation approval expired before activation.",
+            Some("builtin_capability_activation"),
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn terminalize_generic_pending_action_as_failed(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        updated_at: i64,
+        error_code: &str,
+        reason: &str,
+        expected_action_type: Option<&str>,
+        require_builtin_identity: bool,
+    ) -> Result<bool, String> {
         let mut connection = self.state.connection()?;
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1251,11 +1411,27 @@ impl StorageService {
         if record.status != expected_status || record.target_status.is_some() {
             return Ok(false);
         }
+        if expected_action_type.is_some_and(|expected| record.action_type != expected) {
+            return Err(
+                "pending action terminalization rejected an unexpected action type".to_string(),
+            );
+        }
         let durable = load_durable_pending_trace_snapshot(
             &transaction,
             &record,
             expected_status != "executing",
         )?;
+        if require_builtin_identity
+            && !matches!(
+                &durable.provenance,
+                crate::AgentToolIdentity::Builtin { tool_name }
+                    if tool_name == "activate_capability"
+            )
+        {
+            return Err(
+                "built-in capability expiry requires durable built-in Tool provenance".to_string(),
+            );
+        }
         let conversation_id = record
             .conversation_id
             .as_deref()
@@ -1453,6 +1629,29 @@ impl StorageService {
         }
     }
 
+    /// Atomically publishes one built-in capability approval and its initial manual audit.
+    ///
+    /// A recoverable approval without its audit row is an externally observable split-brain:
+    /// the approval UI can survive restart while the durable action journal omits the proposal.
+    /// Keeping both inserts in one immediate transaction also makes an exact replay idempotent and
+    /// rejects an action id already owned by a different audit identity without leaving an orphan
+    /// pending row.
+    pub fn store_builtin_capability_pending_action_with_audit(
+        &self,
+        pending: AgentPendingActionRecord,
+        audit: AgentActionAuditRecord,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        validate_builtin_capability_initial_audit(&pending, &audit)?;
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
+        ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
+    }
+
     /// Publishes a successor approval and terminalizes its predecessor as one durable fact.
     ///
     /// The predecessor's paired ToolResult and `target_status` were committed before model
@@ -1469,6 +1668,53 @@ impl StorageService {
         predecessor_terminal_status: &str,
         predecessor_terminal_agent_input_json: &str,
         updated_at: i64,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        self.store_pending_agent_action_with_predecessor_settlement_internal(
+            successor,
+            predecessor_action_id,
+            predecessor_expected_status,
+            predecessor_terminal_status,
+            predecessor_terminal_agent_input_json,
+            updated_at,
+            None,
+        )
+    }
+
+    /// Built-in capability variant of predecessor settlement. The successor pending row and its
+    /// initial audit share the same transaction as the predecessor terminal CAS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_builtin_capability_pending_action_with_predecessor_settlement_and_audit(
+        &self,
+        successor: AgentPendingActionRecord,
+        successor_audit: AgentActionAuditRecord,
+        predecessor_action_id: &str,
+        predecessor_expected_status: &str,
+        predecessor_terminal_status: &str,
+        predecessor_terminal_agent_input_json: &str,
+        updated_at: i64,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        validate_builtin_capability_initial_audit(&successor, &successor_audit)?;
+        self.store_pending_agent_action_with_predecessor_settlement_internal(
+            successor,
+            predecessor_action_id,
+            predecessor_expected_status,
+            predecessor_terminal_status,
+            predecessor_terminal_agent_input_json,
+            updated_at,
+            Some(successor_audit),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn store_pending_agent_action_with_predecessor_settlement_internal(
+        &self,
+        successor: AgentPendingActionRecord,
+        predecessor_action_id: &str,
+        predecessor_expected_status: &str,
+        predecessor_terminal_status: &str,
+        predecessor_terminal_agent_input_json: &str,
+        updated_at: i64,
+        successor_audit: Option<AgentActionAuditRecord>,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
         if successor.action_id == predecessor_action_id {
             return Err("successor approval must not replace its predecessor".to_string());
@@ -1511,17 +1757,10 @@ impl StorageService {
             ));
         }
 
-        let outcome = pending_action_repository::store_pending_action(&transaction, &successor)
-            .map_err(storage_error)?;
-        if let pending_action_repository::PendingActionStoreOutcome::Conflict {
-            existing_run_id,
-            existing_status,
-        } = &outcome
-        {
-            return Err(format!(
-                "待审批操作 actionId={} 已属于 runId={}（status={}）；拒绝覆盖冻结快照。",
-                successor.action_id, existing_run_id, existing_status
-            ));
+        let outcome = store_pending_action_or_conflict(&transaction, &successor)?;
+
+        if let Some(audit) = successor_audit.as_ref() {
+            ensure_exact_builtin_capability_initial_audit(&transaction, audit)?;
         }
 
         if !predecessor_already_terminal {

@@ -42,6 +42,7 @@ import {
   settleAgentRunToolActivities,
   shouldTouchConversationForAgentEvent
 } from '../features/agentRun/agentEventReducer'
+import { shouldHydratePendingAgentAction } from '../features/agentRun/agentActionUtils'
 import {
   planSkillActivationRecovery,
   type SkillActivationRecoveryPlan
@@ -640,6 +641,7 @@ export function useAgentRunLifecycle({
     void listPendingAgentActions()
       .then((pendingActions) => {
         for (const pendingAction of pendingActions) {
+          if (!shouldHydratePendingAgentAction(pendingAction)) continue
           if (!pendingAction.conversationId || !pendingAction.assistantMessageId) continue
           const conversation = conversationsRef.current.find(
             (candidate) => candidate.id === pendingAction.conversationId

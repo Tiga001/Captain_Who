@@ -8,10 +8,13 @@ use crate::application::mcp::approval_payload_store::{
     durable_mcp_payload_store_or_process_only, McpApprovalPayloadStore,
 };
 use crate::application::mcp::authorized_stdio_connector::AuthorizedMcpStdioConnector;
+use crate::application::mcp::builtin_capability_policy::SqliteBuiltinCapabilityPolicyStore;
+use crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider;
 use crate::application::mcp::management::McpManagementService;
 use crate::application::mcp::registry_event_sink::McpAgentRegistryEventSink;
 use crate::application::mcp::sqlite_envelope_repository::SqliteMcpApprovalEnvelopeRepository;
 use crate::application::mcp::sqlite_registry::SqliteMcpRegistry;
+use mycopilot_core::BuiltinCapabilityRuntime;
 
 const MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60);
 const AGENT_COLLABORATION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -78,6 +81,7 @@ fn reconcile_expired_mcp_approvals_tick(
     payload_store: &dyn McpApprovalPayloadStore,
 ) -> Result<crate::application::agent::McpApprovalExpiryReconciliation, String> {
     let summary = agent_service.reconcile_expired_mcp_approvals()?;
+    agent_service.reconcile_expired_builtin_capability_approvals()?;
     payload_store
         .reconcile_expired(summary.cutoff_ms)
         .map_err(|_| "failed to reconcile expired MCP approval payloads".to_string())?;
@@ -93,6 +97,8 @@ pub(crate) struct CoreServerBootstrap {
     pub(crate) skill_services: SkillServices,
     pub(crate) git_review_service: Arc<GitReviewService>,
     pub(crate) mcp_registry: Arc<SqliteMcpRegistry>,
+    pub(crate) mcp_builtin_capability_policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
+    pub(crate) builtin_capability_runtime: BuiltinCapabilityRuntime,
     // Fields drop in declaration order. Keep this owner last so the database lock outlives every
     // service and SQLite connection above it. File-effect deletion barriers are process-local;
     // this OS lock makes one core-server the authoritative lifecycle owner for the exact DB.
@@ -113,6 +119,18 @@ impl CoreServerBootstrap {
             Arc::new(SqliteMcpRegistry::open(&database_path).map_err(|_| {
                 io::Error::other("failed to initialize the persistent MCP Registry")
             })?);
+        let mcp_builtin_capability_policies = Arc::new(
+            SqliteBuiltinCapabilityPolicyStore::open(&database_path).map_err(|_| {
+                io::Error::other("failed to initialize built-in MCP capability policy storage")
+            })?,
+        );
+        let builtin_capability_runtime =
+            HostBuiltinCapabilityProvider::runtime(Arc::clone(&mcp_builtin_capability_policies))
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to initialize built-in MCP capability runtime: {error}"
+                    ))
+                })?;
         let image_generation_configuration = Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
             image_generation_credential_store(&database_path, uses_development_credentials)?,
@@ -262,7 +280,8 @@ impl CoreServerBootstrap {
                 agent_skill_installation_prepare,
                 Arc::clone(&skill_installation_service),
                 Arc::clone(&skill_installation_workflow),
-            );
+            )
+            .with_builtin_capabilities(builtin_capability_runtime.clone());
         let skill_services = SkillServices {
             catalog: skills_service,
             installations: skill_installation_service,
@@ -278,6 +297,8 @@ impl CoreServerBootstrap {
             skill_services,
             git_review_service,
             mcp_registry,
+            mcp_builtin_capability_policies,
+            builtin_capability_runtime,
             _database_instance_lock: database_instance_lock,
         })
     }
@@ -321,6 +342,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let mcp_management = Arc::new(McpManagementService::new(
         Arc::clone(&mcp_registry),
         Arc::clone(&mcp_manager),
+        Arc::clone(&bootstrap.mcp_builtin_capability_policies),
+        bootstrap.builtin_capability_runtime.clone(),
     ));
     let mcp_payload_store = mcp_approval_payload_store(Arc::clone(&bootstrap.storage));
     let _ = mcp_payload_store.reconcile_expired(mycopilot_core::storage::now_ms());
@@ -355,6 +378,9 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     });
     agent_service
         .reconcile_startup_mcp_actions()
+        .map_err(io::Error::other)?;
+    agent_service
+        .reconcile_expired_builtin_capability_approvals()
         .map_err(io::Error::other)?;
     agent_service
         .reconcile_startup_orphaned_conversation_traces()

@@ -3,6 +3,16 @@ import type { AgentApprovalStatus, AgentProposedAction, AgentToolCall } from '@m
 export function getActionToolCall(action: AgentProposedAction): AgentToolCall | null {
   if (action.type === 'tool_call') return action.call
 
+  if (action.type === 'builtin_capability_activation') {
+    return {
+      id: action.approval.callId,
+      tool: 'activate_capability',
+      args: {},
+      approvalStatus: action.approval.approvalStatus,
+      reason: action.approval.reason
+    }
+  }
+
   if (action.type === 'diff') {
     return {
       id: action.diff.id,
@@ -110,6 +120,16 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
   }
 }
 
+/**
+ * Maps Host action identity to the model Tool-call identity used by the Renderer projection.
+ * Most approvals use the same value for both identities. Built-in capability activation keeps
+ * them deliberately distinct, so reducers must never compare its actionId directly to Tool-call
+ * IDs.
+ */
+export function getActionToolCallId(action: AgentProposedAction): string | null {
+  return getActionToolCall(action)?.id ?? null
+}
+
 function copyIfDefined(target: Record<string, unknown>, name: string, value: unknown) {
   if (value !== undefined && value !== null) target[name] = value
 }
@@ -134,6 +154,12 @@ export function withActionApprovalStatus(
         ...action.approval,
         call: { ...action.approval.call, approvalStatus }
       }
+    }
+  }
+  if (action.type === 'builtin_capability_activation') {
+    return {
+      ...action,
+      approval: { ...action.approval, approvalStatus }
     }
   }
   if (action.type === 'file_write') {

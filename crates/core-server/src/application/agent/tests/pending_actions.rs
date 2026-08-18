@@ -3699,6 +3699,377 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
 }
 
 #[test]
+fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(
+        StorageService::open(&fixture.path().join("builtin-capability-binding.sqlite")).unwrap(),
+    );
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let run_id = "builtin-capability-binding-run";
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let activation_id = uuid::Uuid::new_v4().to_string();
+    let call = AgentToolCall {
+        id: "builtin-capability-call".to_string(),
+        tool: "activate_capability".to_string(),
+        args: json!({
+            "capability": "browser_automation",
+            "reason": "Inspect the task page"
+        }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let action = AgentProposedAction::BuiltinCapabilityActivation {
+        approval: Box::new(mycopilot_core::AgentBuiltinCapabilityActivationApproval {
+            action_id: action_id.clone(),
+            activation_id,
+            run_id: run_id.to_string(),
+            call_id: call.id.clone(),
+            capability_id: "browser_automation".to_string(),
+            display_name: "Browser automation".to_string(),
+            reason: "Inspect the task page".to_string(),
+            manifest_digest: format!("sha256:{}", "1".repeat(64)),
+            policy_revision: 1,
+            created_at: 1,
+            expires_at: 901,
+            approval_status: AgentApprovalStatus::Required,
+        }),
+    };
+    let mut input: AgentChatInput = serde_json::from_value(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut input);
+    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&action_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "activate_capability".to_string(),
+        },
+    ));
+
+    assert!(pending_action_binding_matches(
+        run_id, None, &action, &input
+    ));
+
+    {
+        let checkpoint_call = input
+            .resume_checkpoint
+            .as_mut()
+            .unwrap()
+            .context_items
+            .iter_mut()
+            .flat_map(|item| item.tool_calls.iter_mut())
+            .find(|candidate| candidate.id == call.id)
+            .unwrap();
+        checkpoint_call.args["reason"] = json!("A different model-authored reason");
+    }
+    assert!(!pending_action_binding_matches(
+        run_id, None, &action, &input
+    ));
+    {
+        let checkpoint_call = input
+            .resume_checkpoint
+            .as_mut()
+            .unwrap()
+            .context_items
+            .iter_mut()
+            .flat_map(|item| item.tool_calls.iter_mut())
+            .find(|candidate| candidate.id == call.id)
+            .unwrap();
+        checkpoint_call.args = call.args.clone();
+        checkpoint_call.args["capability"] = json!("another_capability");
+    }
+    assert!(!pending_action_binding_matches(
+        run_id, None, &action, &input
+    ));
+    {
+        let checkpoint_call = input
+            .resume_checkpoint
+            .as_mut()
+            .unwrap()
+            .context_items
+            .iter_mut()
+            .flat_map(|item| item.tool_calls.iter_mut())
+            .find(|candidate| candidate.id == call.id)
+            .unwrap();
+        checkpoint_call.args = call.args.clone();
+        checkpoint_call.args["unexpected"] = json!(true);
+    }
+    assert!(!pending_action_binding_matches(
+        run_id, None, &action, &input
+    ));
+    input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .context_items
+        .iter_mut()
+        .flat_map(|item| item.tool_calls.iter_mut())
+        .find(|candidate| candidate.id == call.id)
+        .unwrap()
+        .args = call.args.clone();
+    assert!(pending_action_binding_matches(
+        run_id, None, &action, &input
+    ));
+
+    input.resume_checkpoint.as_mut().unwrap().pending_action_id =
+        Some(uuid::Uuid::new_v4().to_string());
+    assert!(!pending_action_binding_matches(
+        run_id, None, &action, &input
+    ));
+
+    input.resume_checkpoint.as_mut().unwrap().pending_action_id = Some(action_id.clone());
+    let mut drifted_action = action.clone();
+    let AgentProposedAction::BuiltinCapabilityActivation { approval } = &mut drifted_action else {
+        unreachable!();
+    };
+    approval.run_id = "different-run".to_string();
+    assert!(!pending_action_binding_matches(
+        run_id,
+        None,
+        &drifted_action,
+        &input
+    ));
+
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    storage
+        .upsert_agent_action_audit(AgentActionAuditRecord {
+            action_id: storage_id.clone(),
+            run_id: "conflicting-audit-owner".to_string(),
+            conversation_id: None,
+            assistant_message_id: None,
+            action_type: "builtin_capability_activation".to_string(),
+            tool_name: "activate_capability".to_string(),
+            decision: None,
+            status: "pending".to_string(),
+            action_json: "{}".to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: None,
+            error: None,
+            created_at: 1,
+            decided_at: None,
+            completed_at: None,
+            effective_permissions_json: None,
+            path_scope: None,
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("manual_pending".to_string()),
+        })
+        .unwrap();
+    let service = AgentService::new(Arc::clone(&storage));
+    let failed = service.store_pending_action(
+        run_id,
+        "builtin-capability-binding-conversation",
+        "builtin-capability-binding-assistant",
+        action.clone(),
+        input.clone(),
+    );
+    assert!(
+        failed.is_err(),
+        "a conflicting second write must abort publication"
+    );
+    assert!(
+        storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .is_none(),
+        "the pending insert must roll back with the conflicting audit"
+    );
+    rusqlite::Connection::open(fixture.path().join("builtin-capability-binding.sqlite"))
+        .unwrap()
+        .execute(
+            "DELETE FROM agent_action_audit WHERE action_id = ?1",
+            [&storage_id],
+        )
+        .unwrap();
+
+    assert!(service
+        .store_pending_action(
+            run_id,
+            "builtin-capability-binding-conversation",
+            "builtin-capability-binding-assistant",
+            action,
+            input,
+        )
+        .unwrap());
+    drop(service);
+
+    let restarted = AgentService::new(Arc::clone(&storage));
+    let pending = restarted.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].action_id, action_id);
+    assert_eq!(pending[0].tool_call_id.as_deref(), Some(call.id.as_str()));
+    assert_eq!(pending[0].action_type, "builtin_capability_activation");
+    let persisted_pair: (i64, i64) =
+        rusqlite::Connection::open(fixture.path().join("builtin-capability-binding.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT
+             (SELECT COUNT(*) FROM agent_pending_actions WHERE action_id = ?1),
+             (SELECT COUNT(*) FROM agent_action_audit WHERE action_id = ?1 AND status = 'pending')",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(persisted_pair, (1, 1));
+}
+
+#[test]
+fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("builtin-capability-expiry.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let run_id = "builtin-capability-expiry-run";
+    let conversation_id = "builtin-capability-expiry-conversation";
+    let assistant_message_id = "builtin-capability-expiry-assistant";
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let expiry_now_ms = mycopilot_core::storage::now_ms().saturating_add(1_000);
+    let expiry_now_seconds = u64::try_from(expiry_now_ms).unwrap() / 1_000;
+    let call = AgentToolCall {
+        id: "builtin-capability-expiry-call".to_string(),
+        tool: "activate_capability".to_string(),
+        args: json!({
+            "capability": "browser_automation",
+            "reason": "Inspect the task page"
+        }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let action = AgentProposedAction::BuiltinCapabilityActivation {
+        approval: Box::new(mycopilot_core::AgentBuiltinCapabilityActivationApproval {
+            action_id: action_id.clone(),
+            activation_id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            call_id: call.id.clone(),
+            capability_id: "browser_automation".to_string(),
+            display_name: "Browser automation".to_string(),
+            reason: "Inspect the task page".to_string(),
+            manifest_digest: format!("sha256:{}", "1".repeat(64)),
+            policy_revision: 1,
+            created_at: expiry_now_seconds.saturating_sub(901),
+            expires_at: expiry_now_seconds.saturating_sub(1),
+            approval_status: AgentApprovalStatus::Required,
+        }),
+    };
+    let mut input: AgentChatInput = serde_json::from_value(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut input);
+    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&action_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "activate_capability".to_string(),
+        },
+    ));
+    let service =
+        AgentService::new(Arc::clone(&storage)).with_mcp_approval_clock(move || expiry_now_ms);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "activate_capability".to_string(),
+        },
+        expiry_now_ms.saturating_sub(1_000),
+    );
+
+    assert!(service
+        .store_pending_action(run_id, conversation_id, assistant_message_id, action, input,)
+        .unwrap());
+    assert_eq!(service.list_pending_actions().len(), 1);
+    let pre_expiry_trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pre_expiry_trace.run_id, run_id);
+    assert_eq!(pre_expiry_trace.conversation_id, conversation_id);
+    assert_eq!(pre_expiry_trace.assistant_message_id, assistant_message_id);
+    assert_eq!(
+        pre_expiry_trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::InProgress
+    );
+    assert_eq!(
+        service
+            .reconcile_expired_builtin_capability_approvals()
+            .unwrap(),
+        1
+    );
+    assert!(service.list_pending_actions().is_empty());
+    assert_eq!(
+        service
+            .reconcile_expired_builtin_capability_approvals()
+            .unwrap(),
+        0,
+        "terminal expiry must be idempotent"
+    );
+
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let retired: (String, String, String) = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status, action_json, agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        retired,
+        ("failed".to_string(), "{}".to_string(), "{}".to_string())
+    );
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert!(trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+    )));
+    let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == assistant_message_id)
+        .unwrap();
+    assert_eq!(assistant.status.as_deref(), Some("error"));
+}
+
+#[test]
 fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     const API_TOKEN_CANARY: &str = "SQLITE_PENDING_API_TOKEN_CANARY_DO_NOT_PERSIST";
     const URL_CANARY: &str = "SQLITE_PENDING_URL_CANARY_DO_NOT_PERSIST";
