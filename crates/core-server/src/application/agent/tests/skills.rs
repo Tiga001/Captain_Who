@@ -56,7 +56,7 @@ fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
 
 #[test]
 fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction_leakage() {
-    const BUNDLED_INSTRUCTION_MARKER: &str = "Never expose OfficeCLI arguments";
+    const BUNDLED_INSTRUCTION_MARKER: &str = "Do not expose OfficeCLI arguments";
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();

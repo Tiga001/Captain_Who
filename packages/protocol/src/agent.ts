@@ -1810,6 +1810,81 @@ export interface AgentBuiltinCapabilityActivationApproval {
   approvalStatus: AgentApprovalStatus
 }
 
+/** Host-classified address class for one frozen browser destination. */
+export type AgentBrowserAddressClass =
+  'public' | 'loopback' | 'private' | 'link_local' | 'cloud_metadata' | 'unresolved'
+
+/** Risks that can require a task-scoped decision without weakening the Host boundary. */
+export type AgentBrowserRiskKind =
+  | 'insecure_http'
+  | 'localhost'
+  | 'loopback'
+  | 'private_network'
+  | 'link_local'
+  | 'cloud_metadata'
+  | 'non_standard_port'
+  | 'url_userinfo'
+  | 'dns_private_resolution'
+  | 'risk_escalation'
+  | 'new_window'
+  | 'file_upload'
+  | 'file_download'
+  | 'local_service_request'
+
+export type AgentBrowserRiskTrigger =
+  'tool_argument' | 'main_frame' | 'redirect' | 'new_window' | 'subresource' | 'upload' | 'download'
+
+export type AgentBrowserReviewedToolName =
+  | 'browser_navigate'
+  | 'browser_snapshot'
+  | 'browser_find'
+  | 'browser_click'
+  | 'browser_type'
+  | 'browser_fill_form'
+  | 'browser_press_key'
+  | 'browser_tabs'
+  | 'browser_wait_for'
+  | 'browser_close'
+
+/** Renderer-safe identity for the exact destination frozen by the Host. */
+export interface AgentBrowserDestinationIdentity {
+  normalizedUrl: string
+  origin: string
+  scheme: 'http' | 'https'
+  asciiHost: string
+  effectivePort: number
+  addressClass: AgentBrowserAddressClass
+}
+
+/**
+ * Renderer-safe projection of one exact browser boundary decision.
+ *
+ * Capability grants, request headers, credentials, cookies, target/debugger identifiers and raw
+ * network data are deliberately absent. Every string remains untrusted plain text.
+ */
+export interface AgentBrowserRiskApproval {
+  schemaVersion: 1
+  actionId: string
+  riskApprovalId: string
+  runId: string
+  callId: string
+  capabilityId: McpBuiltinCapabilityId
+  capabilityActivationId: string
+  displayName: string
+  reason: string
+  destination: AgentBrowserDestinationIdentity
+  trigger: AgentBrowserRiskTrigger
+  triggerToolName: AgentBrowserReviewedToolName
+  riskKinds: AgentBrowserRiskKind[]
+  manifestDigest: string
+  policyRevision: number
+  /** Unix timestamp in seconds. */
+  createdAt: number
+  /** Unix timestamp in seconds. */
+  expiresAt: number
+  approvalStatus: AgentApprovalStatus
+}
+
 export type AgentProposedAction =
   | { type: 'tool_call'; call: AgentToolCall }
   | { type: 'mcp_tool_call'; approval: AgentMcpToolApproval }
@@ -1817,6 +1892,7 @@ export type AgentProposedAction =
       type: 'builtin_capability_activation'
       approval: AgentBuiltinCapabilityActivationApproval
     }
+  | { type: 'browser_risk_approval'; approval: AgentBrowserRiskApproval }
   | { type: 'diff'; diff: AgentDiffProposal }
   | { type: 'file_write'; fileWrite: AgentFileWriteProposal }
   | { type: 'command'; command: AgentCommandActionProjection }
@@ -1907,7 +1983,14 @@ export type AgentEvent =
       message: string
       createdAt: number
     }
-  | { type: 'tool_call'; runId: string; traceSequence: number; call: AgentToolCall }
+  | {
+      type: 'tool_call'
+      runId: string
+      traceSequence: number
+      call: AgentToolCall
+      /** Host-authoritative Tool identity; never infer provenance from `call.tool`. */
+      identity: AgentToolIdentity
+    }
   | { type: 'tool_result'; runId: string; result: AgentToolResult }
   | {
       type: 'mcp_tool_invocation_state_changed'

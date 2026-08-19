@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, nativeTheme, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, session, type IpcMainInvokeEvent } from 'electron'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'url'
@@ -14,6 +14,17 @@ import { openExternalUrl, registerHostIpc } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { MainWindowLifecycleController } from './mainWindowLifecycle'
+import { BrowserTargetBroker } from './browser/BrowserTargetBroker'
+import { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
+import { BrowserNetworkPolicy, ElectronSessionDnsResolver } from './browser/BrowserNetworkPolicy'
+import { BrowserRiskCoordinator } from './browser/BrowserRiskCoordinator'
+import { BrowserNetworkGuard } from './browser/BrowserNetworkGuard'
+import { CoreBrowserRiskAuthorizer } from './browser/CoreBrowserRiskAuthorizer'
+import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
+import {
+  createManagedPlaywrightHostFactory,
+  ManagedPlaywrightBridgeHost
+} from './mcp/ManagedPlaywrightBridgeHost'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -31,6 +42,9 @@ let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: (() => void) | null = null
 let mainWindow: BrowserWindow | null = null
+let browserSurfaceManager: BrowserSurfaceManager | null = null
+let browserNetworkGuard: BrowserNetworkGuard | null = null
+let managedPlaywrightBridgeHost: ManagedPlaywrightBridgeHost | null = null
 const mainWindowLifecycle = new MainWindowLifecycleController(process.platform)
 const trustedRendererEntries = new Map<number, string>()
 
@@ -106,10 +120,8 @@ function isTrustedRendererEvent(event: IpcMainInvokeEvent): boolean {
 }
 
 function createWindow(): void {
-  const rendererEntryUrl =
-    is.dev && process.env['ELECTRON_RENDERER_URL']
-      ? new URL(process.env['ELECTRON_RENDERER_URL']).toString()
-      : pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+  if (!browserSurfaceManager) throw new Error('Browser surface manager is not initialized')
+  const rendererEntryUrl = getRendererEntryUrl()
   const window = new BrowserWindow({
     title: 'MyCopilot',
     width: 1120,
@@ -137,7 +149,10 @@ function createWindow(): void {
   const rendererWebContents = window.webContents
   const rendererWebContentsId = rendererWebContents.id
   trustedRendererEntries.set(rendererWebContentsId, rendererEntryUrl)
-  configureManagedWebviewHost(rendererWebContents)
+  configureManagedWebviewHost(rendererWebContents, {
+    targetRegistry: browserSurfaceManager,
+    ...(browserNetworkGuard ? { networkGuard: browserNetworkGuard } : {})
+  })
   installNativeImageContextMenu(window)
   const handleWindowStateChange = (): void => sendAppWindowState(window)
 
@@ -185,9 +200,9 @@ function createWindow(): void {
     })
   })
 
-  void window.loadURL(rendererEntryUrl).catch((error: unknown) => {
+  void window.loadURL(rendererEntryUrl).catch(() => {
     if (!window.isDestroyed()) {
-      console.error('Failed to load renderer entry', error)
+      console.error('Failed to load Renderer entry (safe error)')
     }
   })
 }
@@ -208,7 +223,37 @@ app.whenReady().then(() => {
   disposeAdaptiveAppIcon = installAdaptiveAppIcon()
   coreServer.start()
   faviconResourceCache.registerProtocol()
-  initializeManagedWebviewSessions()
+  const managedBrowserSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
+  const browserNetworkPolicy = new BrowserNetworkPolicy({
+    blockedOrigins: [getRendererEntryUrl()],
+    dnsResolver: new ElectronSessionDnsResolver(managedBrowserSession)
+  })
+  browserNetworkGuard = new BrowserNetworkGuard({
+    coordinator: new BrowserRiskCoordinator({
+      authorizer: new CoreBrowserRiskAuthorizer(coreServer),
+      policy: browserNetworkPolicy
+    }),
+    expectedSession: managedBrowserSession,
+    policy: browserNetworkPolicy
+  })
+  initializeManagedWebviewSessions({ networkGuard: browserNetworkGuard })
+  browserSurfaceManager = new BrowserSurfaceManager({
+    broker: new BrowserTargetBroker(BROWSER_WEBVIEW_PARTITION, managedBrowserSession),
+    resolveHost: () => mainWindow?.webContents ?? null,
+    sendCommand: (host, command) => {
+      if (!host.isDestroyed()) host.send(HOST_CHANNELS.browser.surfaceCommand, command)
+    },
+    networkGuard: browserNetworkGuard
+  })
+  managedPlaywrightBridgeHost = new ManagedPlaywrightBridgeHost({
+    core: coreServer,
+    createHost: createManagedPlaywrightHostFactory({
+      getBrowserContext: () => getBrowserSurfaceManager().getBrowserContext(),
+      closeSurface: () => getBrowserSurfaceManager().closeSurface(),
+      detachAutomation: () => getBrowserSurfaceManager().detachAutomation(),
+      beginNetworkOperation: (input) => getBrowserSurfaceManager().beginNetworkOperation(input)
+    })
+  })
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -218,7 +263,8 @@ app.whenReady().then(() => {
     coreServer,
     terminalBridge,
     faviconResourceCache,
-    isTrustedRendererEvent
+    isTrustedRendererEvent,
+    browserSurfaceManager
   )
 
   createWindow()
@@ -242,7 +288,16 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   isQuittingAfterServiceShutdown = true
   mainWindowLifecycle.prepareForQuit()
-  void Promise.allSettled([terminalBridge.stop(), coreServer.shutdown()]).finally(() => app.quit())
+  void (async () => {
+    // Keep the exact Main reverse bridge and BrowserSurface alive until Core has stopped the
+    // managed MCP Manager. Core shutdown sends a reviewed close command and awaits its bounded
+    // completion; tearing down Main in parallel would turn a graceful close into an unknown
+    // outcome and could strand an attachment.
+    await Promise.allSettled([terminalBridge.stop(), coreServer.shutdown()])
+    await managedPlaywrightBridgeHost?.close()
+    managedPlaywrightBridgeHost = null
+    await browserSurfaceManager?.shutdown()
+  })().finally(() => app.quit())
 })
 
 app.on('will-quit', () => {
@@ -251,5 +306,18 @@ app.on('will-quit', () => {
   disposeAdaptiveAppIcon?.()
   disposeAdaptiveAppIcon = null
   terminalBridge.killNow()
+  managedPlaywrightBridgeHost = null
   coreServer.stop()
 })
+
+/** Main-only composition hook for the managed Playwright MCP host. */
+export function getBrowserSurfaceManager(): BrowserSurfaceManager {
+  if (!browserSurfaceManager) throw new Error('Browser surface manager is not initialized')
+  return browserSurfaceManager
+}
+
+function getRendererEntryUrl(): string {
+  return is.dev && process.env['ELECTRON_RENDERER_URL']
+    ? new URL(process.env['ELECTRON_RENDERER_URL']).toString()
+    : pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+}

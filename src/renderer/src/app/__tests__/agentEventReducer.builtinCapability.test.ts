@@ -137,6 +137,34 @@ describe('built-in capability activation reducer identity', () => {
     ])
   })
 
+  it('keeps the Host-authored built-in Tool identity on the timeline item', () => {
+    const identity = {
+      type: 'builtin_capability' as const,
+      capabilityId: 'browser_automation' as const,
+      managedMcpId: 'builtin.browser_automation.mcp',
+      manifestDigest: `sha256:${'c'.repeat(64)}`,
+      toolId: 'browser.navigate',
+      modelName: 'browser_navigate'
+    }
+    const next = applyAgentEventToChatMessage(baseMessage(), {
+      type: 'tool_call',
+      runId: RUN_ID,
+      traceSequence: 4,
+      identity,
+      call: {
+        id: `tc1_${'d'.repeat(43)}`,
+        tool: 'browser_navigate',
+        args: {},
+        approvalStatus: 'approved',
+        reason: null
+      }
+    })
+
+    expect(next.agentRun?.timeline).toEqual([
+      expect.objectContaining({ type: 'tool_call', identity })
+    ])
+  })
+
   it.each(['approved', 'rejected', 'failed'] as const)(
     'removes the synthetic activation projection after a %s terminal action response',
     (status) => {

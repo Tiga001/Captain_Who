@@ -1852,6 +1852,7 @@ describe('managed command Session lifecycle routing', () => {
       type: 'tool_call',
       runId: 'run-1',
       traceSequence: 0,
+      identity: { type: 'builtin', toolName: 'run_command' },
       call: {
         id: 'command-call',
         tool: 'run_command',
@@ -3131,6 +3132,7 @@ describe('authoritative run cancellation and conversation forking', () => {
       type: 'tool_call',
       runId: 'run-1',
       traceSequence: 0,
+      identity: { type: 'builtin', toolName: 'run_command' },
       call: {
         id: 'command-call',
         tool: 'run_command',

@@ -244,6 +244,7 @@ impl McpConnectionManager {
                 name: request.tool_id.raw_name.clone(),
                 arguments: request.arguments,
                 timeout_ms: Some(timeout_ms),
+                invocation_id: Some(id.invocation_id),
             };
             if state.active_calls.contains_key(&id) {
                 return Err(McpError::config(

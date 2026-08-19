@@ -13,6 +13,10 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
     }
   }
 
+  if (action.type === 'browser_risk_approval') {
+    return null
+  }
+
   if (action.type === 'diff') {
     return {
       id: action.diff.id,
@@ -157,6 +161,12 @@ export function withActionApprovalStatus(
     }
   }
   if (action.type === 'builtin_capability_activation') {
+    return {
+      ...action,
+      approval: { ...action.approval, approvalStatus }
+    }
+  }
+  if (action.type === 'browser_risk_approval') {
     return {
       ...action,
       approval: { ...action.approval, approvalStatus }

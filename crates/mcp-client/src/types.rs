@@ -327,6 +327,10 @@ pub struct McpToolCall {
     #[serde(default)]
     pub arguments: Value,
     pub timeout_ms: Option<u64>,
+    /// Host-owned active-call identity used by transport adapters for process-local correlation.
+    /// It is never serialized onto the MCP wire.
+    #[serde(skip)]
+    pub invocation_id: Option<crate::invocation::McpInvocationId>,
 }
 
 impl fmt::Debug for McpToolCall {
@@ -336,6 +340,7 @@ impl fmt::Debug for McpToolCall {
             .field("name", &self.name)
             .field("arguments", &"<redacted>")
             .field("timeout_ms", &self.timeout_ms)
+            .field("invocation_id", &self.invocation_id)
             .finish()
     }
 }
@@ -346,6 +351,7 @@ impl McpToolCall {
             name: name.into(),
             arguments,
             timeout_ms: None,
+            invocation_id: None,
         }
     }
 }

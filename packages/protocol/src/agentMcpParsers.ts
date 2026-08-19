@@ -1,5 +1,10 @@
 import type {
   AgentActionExecutionOutput,
+  AgentBrowserAddressClass,
+  AgentBrowserRiskApproval,
+  AgentBrowserRiskKind,
+  AgentBrowserReviewedToolName,
+  AgentBrowserRiskTrigger,
   AgentBuiltinCapabilityActivationApproval,
   AgentChatOutput,
   AgentEvent,
@@ -39,6 +44,8 @@ const CANONICAL_PROVIDER_CODE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,127}$/
 const MODEL_TOOL_CALL_ID_PATTERN = /^tc1_[a-zA-Z0-9_-]{43}$/
 const MCP_APPROVAL_TTL_MS = 15 * 60 * 1000
 const BUILTIN_CAPABILITY_APPROVAL_TTL_SECONDS = 15 * 60
+const BROWSER_RISK_APPROVAL_TTL_SECONDS = 15 * 60
+const MAX_RENDERER_DATE_UNIX_SECONDS = 253_402_300_799
 const MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES = 1024 * 1024
 const MAX_RENDERER_SAFE_PROPOSED_ACTIONS = 1024
 const MAX_MCP_DIAGNOSTIC_ARGUMENT_BYTES = 64 * 1024
@@ -58,6 +65,51 @@ const LLM_RETRY_CATEGORIES = [
   'network',
   'unknown'
 ] as const satisfies readonly AgentLlmRetryCategory[]
+const BROWSER_ADDRESS_CLASSES = [
+  'public',
+  'loopback',
+  'private',
+  'link_local',
+  'cloud_metadata',
+  'unresolved'
+] as const satisfies readonly AgentBrowserAddressClass[]
+const BROWSER_RISK_KINDS = [
+  'insecure_http',
+  'localhost',
+  'loopback',
+  'private_network',
+  'link_local',
+  'cloud_metadata',
+  'non_standard_port',
+  'url_userinfo',
+  'dns_private_resolution',
+  'risk_escalation',
+  'new_window',
+  'file_upload',
+  'file_download',
+  'local_service_request'
+] as const satisfies readonly AgentBrowserRiskKind[]
+const BROWSER_RISK_TRIGGERS = [
+  'tool_argument',
+  'main_frame',
+  'redirect',
+  'new_window',
+  'subresource',
+  'upload',
+  'download'
+] as const satisfies readonly AgentBrowserRiskTrigger[]
+const BROWSER_REVIEWED_TOOL_NAMES = [
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_find',
+  'browser_click',
+  'browser_type',
+  'browser_fill_form',
+  'browser_press_key',
+  'browser_tabs',
+  'browser_wait_for',
+  'browser_close'
+] as const satisfies readonly AgentBrowserReviewedToolName[]
 
 /**
  * Parses Agent event families that have dedicated strict Host-boundary contracts. Other current
@@ -67,7 +119,7 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
   const record = expectRecord(value, 'Agent event')
   if (record.type === 'tool_call') {
     const context = 'Agent ToolCall event'
-    expectOnlyKeys(record, ['type', 'runId', 'traceSequence', 'call'] as const, context)
+    expectOnlyKeys(record, ['type', 'runId', 'traceSequence', 'call', 'identity'] as const, context)
     const call = expectRecord(record.call, `${context}.call`)
     expectOnlyKeys(
       call,
@@ -77,24 +129,39 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
     if (!Object.hasOwn(call, 'reason')) {
       throw invalidProtocolValue(`${context}.call`, 'reason is required')
     }
+    const parsedCall: AgentToolCall = {
+      id: expectModelToolCallId(call.id, `${context}.call.id`),
+      tool: expectBoundedNonEmptyString(call.tool, `${context}.call.tool`, 256),
+      args: call.args,
+      approvalStatus: expectEnum(
+        call.approvalStatus,
+        ['not_required', 'required', 'approved', 'rejected'] as const,
+        `${context}.call.approvalStatus`
+      ),
+      reason:
+        call.reason === null ? null : expectDisplayText(call.reason, `${context}.call.reason`, 4096)
+    }
+    const identity = parseAgentToolIdentityForHost(record.identity)
+    const identityToolName =
+      identity.type === 'mcp'
+        ? identity.provenance.modelToolName
+        : identity.type === 'builtin_capability'
+          ? identity.modelName
+          : identity.toolName
+    if (identityToolName !== parsedCall.tool) {
+      throw invalidProtocolValue(context, 'identity must match call.tool')
+    }
+    if (identity.type === 'builtin_capability') {
+      // Managed browser arguments can contain URLs, typed form values, or passwords. The model
+      // already has its own Tool call history; Renderer needs only a stable activity anchor.
+      parsedCall.args = {}
+    }
     return {
       type: 'tool_call',
       runId: expectOpaqueRunId(record.runId, `${context}.runId`),
       traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
-      call: {
-        id: expectModelToolCallId(call.id, `${context}.call.id`),
-        tool: expectBoundedNonEmptyString(call.tool, `${context}.call.tool`, 256),
-        args: call.args,
-        approvalStatus: expectEnum(
-          call.approvalStatus,
-          ['not_required', 'required', 'approved', 'rejected'] as const,
-          `${context}.call.approvalStatus`
-        ),
-        reason:
-          call.reason === null
-            ? null
-            : expectDisplayText(call.reason, `${context}.call.reason`, 4096)
-      }
+      identity,
+      call: parsedCall
     }
   }
   if (record.type === 'message_stream_committed') {
@@ -227,6 +294,19 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
       }
       return { type: 'approval_required', runId, action: parsedAction }
     }
+    if (action.type === 'browser_risk_approval') {
+      const context = 'browser risk approval event'
+      expectOnlyKeys(record, ['type', 'runId', 'action'] as const, context)
+      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
+      const parsedAction = parseAgentBrowserRiskProposedAction(action)
+      if (parsedAction.approval.runId !== runId) {
+        throw invalidProtocolValue(context, 'action runId must match event runId')
+      }
+      if (parsedAction.approval.approvalStatus !== 'required') {
+        throw invalidProtocolValue(context, 'approval_required action must remain required')
+      }
+      return { type: 'approval_required', runId, action: parsedAction }
+    }
   }
 
   if (record.type === 'done' && Array.isArray(record.proposedActions)) {
@@ -236,7 +316,9 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
         action !== null &&
         !Array.isArray(action) &&
         'type' in action &&
-        (action.type === 'mcp_tool_call' || action.type === 'builtin_capability_activation')
+        (action.type === 'mcp_tool_call' ||
+          action.type === 'builtin_capability_activation' ||
+          action.type === 'browser_risk_approval')
     )
     if (hasStrictAction) {
       expectOnlyKeys(
@@ -444,6 +526,9 @@ export function parseAgentBuiltinCapabilityActivationApproval(
   }
   const createdAt = expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
   const expiresAt = expectSafeInteger(record.expiresAt, `${context}.expiresAt`, 0)
+  if (createdAt > MAX_RENDERER_DATE_UNIX_SECONDS || expiresAt > MAX_RENDERER_DATE_UNIX_SECONDS) {
+    throw invalidProtocolValue(context, 'timestamps exceed the Renderer-safe date range')
+  }
   if (expiresAt - createdAt !== BUILTIN_CAPABILITY_APPROVAL_TTL_SECONDS) {
     throw invalidProtocolValue(context, 'expiry must equal the fixed 15 minute approval TTL')
   }
@@ -471,6 +556,183 @@ export function parseAgentBuiltinCapabilityActivationApproval(
       record.approvalStatus,
       ['not_required', 'required', 'approved', 'rejected'] as const,
       `${context}.approvalStatus`
+    )
+  }
+}
+
+export function parseAgentBrowserRiskProposedAction(
+  value: unknown
+): Extract<AgentProposedAction, { type: 'browser_risk_approval' }> {
+  const context = 'browser risk proposed action'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['type', 'approval'] as const, context)
+  if (record.type !== 'browser_risk_approval') {
+    throw invalidProtocolValue(context, 'type must be browser_risk_approval')
+  }
+  return {
+    type: 'browser_risk_approval',
+    approval: parseAgentBrowserRiskApproval(record.approval)
+  }
+}
+
+export function parseAgentBrowserRiskApproval(value: unknown): AgentBrowserRiskApproval {
+  const context = 'browser risk approval'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'actionId',
+      'riskApprovalId',
+      'runId',
+      'callId',
+      'capabilityId',
+      'capabilityActivationId',
+      'displayName',
+      'reason',
+      'destination',
+      'trigger',
+      'triggerToolName',
+      'riskKinds',
+      'manifestDigest',
+      'policyRevision',
+      'createdAt',
+      'expiresAt',
+      'approvalStatus'
+    ] as const,
+    context
+  )
+  if (record.schemaVersion !== 1) {
+    throw invalidProtocolValue(`${context}.schemaVersion`, 'expected 1')
+  }
+
+  const actionId = expectUuidV4(record.actionId, `${context}.actionId`)
+  const riskApprovalId = expectUuidV4(record.riskApprovalId, `${context}.riskApprovalId`)
+  const capabilityActivationId = expectUuidV4(
+    record.capabilityActivationId,
+    `${context}.capabilityActivationId`
+  )
+  if (
+    actionId === riskApprovalId ||
+    actionId === capabilityActivationId ||
+    riskApprovalId === capabilityActivationId
+  ) {
+    throw invalidProtocolValue(
+      context,
+      'action, risk approval, and activation identities must differ'
+    )
+  }
+
+  const createdAt = expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
+  const expiresAt = expectSafeInteger(record.expiresAt, `${context}.expiresAt`, 0)
+  if (createdAt > MAX_RENDERER_DATE_UNIX_SECONDS || expiresAt > MAX_RENDERER_DATE_UNIX_SECONDS) {
+    throw invalidProtocolValue(context, 'timestamps exceed the Renderer-safe date range')
+  }
+  if (expiresAt - createdAt !== BROWSER_RISK_APPROVAL_TTL_SECONDS) {
+    throw invalidProtocolValue(context, 'expiry must equal the fixed 15 minute approval TTL')
+  }
+
+  const reason = expectDisplayText(record.reason, `${context}.reason`, 4096)
+  const displayName = expectDisplayText(record.displayName, `${context}.displayName`, 256)
+  if (!reason.trim()) throw invalidProtocolValue(context, 'reason must not be blank')
+  if (!displayName.trim()) throw invalidProtocolValue(context, 'displayName must not be blank')
+
+  if (!Array.isArray(record.riskKinds) || record.riskKinds.length === 0) {
+    throw invalidProtocolValue(`${context}.riskKinds`, 'must be a non-empty array')
+  }
+  if (record.riskKinds.length > BROWSER_RISK_KINDS.length) {
+    throw invalidProtocolValue(`${context}.riskKinds`, 'exceeded the supported risk count')
+  }
+  const riskKinds = record.riskKinds.map((risk, index) =>
+    expectEnum(risk, BROWSER_RISK_KINDS, `${context}.riskKinds[${index}]`)
+  )
+  if (new Set(riskKinds).size !== riskKinds.length) {
+    throw invalidProtocolValue(`${context}.riskKinds`, 'must not contain duplicates')
+  }
+
+  return {
+    schemaVersion: 1,
+    actionId,
+    riskApprovalId,
+    runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+    callId: expectModelToolCallId(record.callId, `${context}.callId`),
+    capabilityId: parseMcpBuiltinCapabilityId(record.capabilityId, `${context}.capabilityId`),
+    capabilityActivationId,
+    displayName,
+    reason,
+    destination: parseAgentBrowserDestinationIdentity(record.destination, `${context}.destination`),
+    trigger: expectEnum(record.trigger, BROWSER_RISK_TRIGGERS, `${context}.trigger`),
+    triggerToolName: expectEnum(
+      record.triggerToolName,
+      BROWSER_REVIEWED_TOOL_NAMES,
+      `${context}.triggerToolName`
+    ),
+    riskKinds,
+    manifestDigest: expectVersionedSha256Digest(record.manifestDigest, `${context}.manifestDigest`),
+    policyRevision: expectSafeInteger(record.policyRevision, `${context}.policyRevision`, 0),
+    createdAt,
+    expiresAt,
+    approvalStatus: expectEnum(
+      record.approvalStatus,
+      ['not_required', 'required', 'approved', 'rejected'] as const,
+      `${context}.approvalStatus`
+    )
+  }
+}
+
+function parseAgentBrowserDestinationIdentity(
+  value: unknown,
+  context: string
+): AgentBrowserRiskApproval['destination'] {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['normalizedUrl', 'origin', 'scheme', 'asciiHost', 'effectivePort', 'addressClass'] as const,
+    context
+  )
+  const normalizedUrl = expectDisplayText(record.normalizedUrl, `${context}.normalizedUrl`, 2048)
+  const origin = expectDisplayText(record.origin, `${context}.origin`, 512)
+  const scheme = expectEnum(record.scheme, ['http', 'https'] as const, `${context}.scheme`)
+  const asciiHost = expectBoundedNonEmptyString(record.asciiHost, `${context}.asciiHost`, 253)
+  if (asciiHost !== asciiHost.toLowerCase() || hasAnyControl(asciiHost)) {
+    throw invalidProtocolValue(`${context}.asciiHost`, 'must be canonical lower-case ASCII')
+  }
+  const effectivePort = expectSafeInteger(record.effectivePort, `${context}.effectivePort`, 1)
+  if (effectivePort > 65_535) {
+    throw invalidProtocolValue(`${context}.effectivePort`, 'must be a valid TCP port')
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(normalizedUrl)
+  } catch {
+    throw invalidProtocolValue(`${context}.normalizedUrl`, 'must be an absolute URL')
+  }
+  const parsedHost = parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase()
+  const parsedPort = parsed.port ? Number(parsed.port) : scheme === 'https' ? 443 : 80
+  if (
+    parsed.protocol !== `${scheme}:` ||
+    parsedHost !== asciiHost ||
+    parsedPort !== effectivePort ||
+    parsed.origin !== origin ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw invalidProtocolValue(context, 'normalized URL fields are inconsistent')
+  }
+
+  return {
+    normalizedUrl,
+    origin,
+    scheme,
+    asciiHost,
+    effectivePort,
+    addressClass: expectEnum(
+      record.addressClass,
+      BROWSER_ADDRESS_CLASSES,
+      `${context}.addressClass`
     )
   }
 }
@@ -1020,7 +1282,11 @@ export function parsePendingAgentActionSnapshotsForHost(
   return value.map((entry, index) => {
     const record = expectRecord(entry, `pending Agent actions[${index}]`)
     const action = expectRecord(record.action, `pending Agent actions[${index}].action`)
-    if (action.type !== 'mcp_tool_call' && action.type !== 'builtin_capability_activation') {
+    if (
+      action.type !== 'mcp_tool_call' &&
+      action.type !== 'builtin_capability_activation' &&
+      action.type !== 'browser_risk_approval'
+    ) {
       return entry as PendingAgentActionSnapshot
     }
     if (action.type === 'builtin_capability_activation') {
@@ -1063,6 +1329,65 @@ export function parsePendingAgentActionSnapshotsForHost(
           `${context}.actionType`
         ),
         toolName: expectExactString(record.toolName, 'activate_capability', `${context}.toolName`),
+        toolCallId,
+        runId,
+        conversationId: parseOptionalNullableString(
+          record.conversationId,
+          `${context}.conversationId`
+        ),
+        assistantMessageId: parseOptionalNullableString(
+          record.assistantMessageId,
+          `${context}.assistantMessageId`
+        ),
+        action: parsedAction,
+        createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0),
+        status: 'pending'
+      }
+    }
+    if (action.type === 'browser_risk_approval') {
+      const context = `pending browser risk Agent action[${index}]`
+      expectOnlyKeys(
+        record,
+        [
+          'actionId',
+          'actionType',
+          'toolName',
+          'toolCallId',
+          'runId',
+          'conversationId',
+          'assistantMessageId',
+          'action',
+          'createdAt',
+          'status'
+        ] as const,
+        context
+      )
+      const parsedAction = parseAgentBrowserRiskProposedAction(action)
+      const actionId = expectUuidV4(record.actionId, `${context}.actionId`)
+      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
+      if (parsedAction.approval.actionId !== actionId || parsedAction.approval.runId !== runId) {
+        throw invalidProtocolValue(context, 'pending identity must match browser risk approval')
+      }
+      if (parsedAction.approval.approvalStatus !== 'required') {
+        throw invalidProtocolValue(context, 'pending browser risk approval must remain required')
+      }
+      const toolCallId = expectModelToolCallId(record.toolCallId, `${context}.toolCallId`)
+      if (toolCallId !== parsedAction.approval.callId) {
+        throw invalidProtocolValue(context, 'toolCallId must match browser risk approval')
+      }
+      expectExactString(record.status, 'pending', `${context}.status`)
+      return {
+        actionId,
+        actionType: expectExactString(
+          record.actionType,
+          'browser_risk_approval',
+          `${context}.actionType`
+        ),
+        toolName: expectExactString(
+          record.toolName,
+          parsedAction.approval.triggerToolName,
+          `${context}.toolName`
+        ),
         toolCallId,
         runId,
         conversationId: parseOptionalNullableString(
@@ -1149,14 +1474,18 @@ export function parseAgentActionExecutionOutputForHost(value: unknown): AgentAct
   const record = expectRecord(value, 'Agent action execution output')
   if (
     record.actionType !== 'mcp_tool_call' &&
-    record.actionType !== 'builtin_capability_activation'
+    record.actionType !== 'builtin_capability_activation' &&
+    record.actionType !== 'browser_risk_approval'
   ) {
     return value as AgentActionExecutionOutput
   }
   const builtinActivation = record.actionType === 'builtin_capability_activation'
+  const browserRisk = record.actionType === 'browser_risk_approval'
   const context = builtinActivation
     ? 'built-in capability Agent action execution output'
-    : 'MCP Agent action execution output'
+    : browserRisk
+      ? 'browser risk Agent action execution output'
+      : 'MCP Agent action execution output'
   expectOnlyKeys(
     record,
     [
@@ -1176,12 +1505,18 @@ export function parseAgentActionExecutionOutputForHost(value: unknown): AgentAct
     actionId: expectUuidV4(record.actionId, `${context}.actionId`),
     actionType: expectExactString(
       record.actionType,
-      builtinActivation ? 'builtin_capability_activation' : 'mcp_tool_call',
+      builtinActivation
+        ? 'builtin_capability_activation'
+        : browserRisk
+          ? 'browser_risk_approval'
+          : 'mcp_tool_call',
       `${context}.actionType`
     ),
     toolName: builtinActivation
       ? expectExactString(record.toolName, 'activate_capability', `${context}.toolName`)
-      : expectBoundedNonEmptyString(record.toolName, `${context}.toolName`, 64),
+      : browserRisk
+        ? expectEnum(record.toolName, BROWSER_REVIEWED_TOOL_NAMES, `${context}.toolName`)
+        : expectBoundedNonEmptyString(record.toolName, `${context}.toolName`, 64),
     status: expectEnum(
       record.status,
       ['applied', 'approved', 'failed', 'conflict', 'rejected'] as const,
@@ -1403,7 +1738,8 @@ function parseMcpAgentChatOutput(value: unknown, context: string): AgentChatOutp
       !Array.isArray(eventRecord.action) &&
       'type' in eventRecord.action &&
       (eventRecord.action.type === 'mcp_tool_call' ||
-        eventRecord.action.type === 'builtin_capability_activation')
+        eventRecord.action.type === 'builtin_capability_activation' ||
+        eventRecord.action.type === 'browser_risk_approval')
     const isProtectedDone =
       eventRecord.type === 'done' &&
       Array.isArray(eventRecord.proposedActions) &&
@@ -1413,7 +1749,9 @@ function parseMcpAgentChatOutput(value: unknown, context: string): AgentChatOutp
           action !== null &&
           !Array.isArray(action) &&
           'type' in action &&
-          (action.type === 'mcp_tool_call' || action.type === 'builtin_capability_activation')
+          (action.type === 'mcp_tool_call' ||
+            action.type === 'builtin_capability_activation' ||
+            action.type === 'browser_risk_approval')
       )
     if (
       eventRecord.type !== 'mcp_tool_invocation_state_changed' &&
@@ -1465,7 +1803,10 @@ function parseStrictProposedActions(
   value: unknown,
   context: string,
   enclosingRunId: string
-): Extract<AgentProposedAction, { type: 'mcp_tool_call' | 'builtin_capability_activation' }>[] {
+): Extract<
+  AgentProposedAction,
+  { type: 'mcp_tool_call' | 'builtin_capability_activation' | 'browser_risk_approval' }
+>[] {
   if (!Array.isArray(value) || value.length > MAX_RENDERER_SAFE_PROPOSED_ACTIONS) {
     throw invalidProtocolValue(
       context,
@@ -1476,7 +1817,8 @@ function parseStrictProposedActions(
     const actionRecord = expectRecord(action, `${context}[${index}]`)
     if (
       actionRecord.type !== 'mcp_tool_call' &&
-      actionRecord.type !== 'builtin_capability_activation'
+      actionRecord.type !== 'builtin_capability_activation' &&
+      actionRecord.type !== 'browser_risk_approval'
     ) {
       throw invalidProtocolValue(
         context,
@@ -1486,12 +1828,15 @@ function parseStrictProposedActions(
     const parsed =
       actionRecord.type === 'mcp_tool_call'
         ? parseAgentMcpProposedAction(actionRecord)
-        : parseAgentBuiltinCapabilityActivationProposedAction(actionRecord)
+        : actionRecord.type === 'builtin_capability_activation'
+          ? parseAgentBuiltinCapabilityActivationProposedAction(actionRecord)
+          : parseAgentBrowserRiskProposedAction(actionRecord)
     if (
-      parsed.type === 'builtin_capability_activation' &&
+      (parsed.type === 'builtin_capability_activation' ||
+        parsed.type === 'browser_risk_approval') &&
       parsed.approval.approvalStatus !== 'required'
     ) {
-      throw invalidProtocolValue(context, 'proposed capability activation must remain required')
+      throw invalidProtocolValue(context, 'proposed protected approval must remain required')
     }
     const approvalRunId =
       parsed.type === 'mcp_tool_call' ? parsed.approval.identity.runId : parsed.approval.runId

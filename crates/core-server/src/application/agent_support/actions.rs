@@ -125,6 +125,7 @@ pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::ToolCall { call } => call.id.clone(),
         AgentProposedAction::McpToolCall { approval } => approval.identity.action_id.clone(),
         AgentProposedAction::BuiltinCapabilityActivation { approval } => approval.action_id.clone(),
+        AgentProposedAction::BrowserRiskApproval { approval } => approval.action_id.clone(),
         AgentProposedAction::Diff { diff } => diff.id.clone(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.clone(),
         AgentProposedAction::Command { command } => command.id.clone(),
@@ -142,6 +143,7 @@ pub(crate) fn action_type_for_action(action: &AgentProposedAction) -> &'static s
         AgentProposedAction::ToolCall { .. } => "tool_call",
         AgentProposedAction::McpToolCall { .. } => "mcp_tool_call",
         AgentProposedAction::BuiltinCapabilityActivation { .. } => "builtin_capability_activation",
+        AgentProposedAction::BrowserRiskApproval { .. } => "browser_risk_approval",
         AgentProposedAction::Diff { .. } => "diff",
         AgentProposedAction::FileWrite { .. } => "file_write",
         AgentProposedAction::Command { .. } => "command",
@@ -161,6 +163,7 @@ pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::BuiltinCapabilityActivation { .. } => {
             "activate_capability".to_string()
         }
+        AgentProposedAction::BrowserRiskApproval { approval } => approval.trigger_tool_name.clone(),
         AgentProposedAction::Diff { .. } => "apply_patch".to_string(),
         AgentProposedAction::FileWrite { .. } => "write_file".to_string(),
         AgentProposedAction::Command { .. } => "run_command".to_string(),
@@ -199,6 +202,12 @@ fn frozen_action_call_metadata(
         AgentProposedAction::BuiltinCapabilityActivation { approval } => (
             approval.call_id.clone(),
             "activate_capability".to_string(),
+            approval.approval_status,
+            Some(approval.reason.clone()),
+        ),
+        AgentProposedAction::BrowserRiskApproval { approval } => (
+            approval.call_id.clone(),
+            approval.trigger_tool_name.clone(),
             approval.approval_status,
             Some(approval.reason.clone()),
         ),

@@ -6,6 +6,7 @@ use tokio::task::JoinSet;
 
 pub(crate) const DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS: usize = 2;
 pub(crate) const DEFAULT_MAX_CONCURRENT_MCP_MANAGEMENT_REQUESTS: usize = 16;
+pub(crate) const DEFAULT_MAX_CONCURRENT_BROWSER_RISK_REQUESTS: usize = 32;
 
 /// Owns every asynchronous MCP management request accepted by the stdio request loop.
 ///
@@ -112,6 +113,16 @@ pub(crate) struct CoreRequestServices {
     pub(crate) image_generation_artifact_read_admission: Arc<Semaphore>,
     pub(crate) mcp_management:
         Option<Arc<crate::application::mcp::management::McpManagementService>>,
+    pub(crate) managed_playwright_bridge: Option<
+        Arc<crate::application::mcp::managed_playwright_bridge::ManagedPlaywrightHostBridge>,
+    >,
+    pub(crate) managed_playwright_runtime: Option<
+        Arc<crate::application::mcp::managed_playwright_bridge::ManagedPlaywrightMcpRuntime>,
+    >,
+    pub(crate) browser_risk_coordinator:
+        Option<Arc<crate::application::mcp::browser_risk::BrowserRiskCoordinator>>,
+    pub(crate) browser_risk_admission: Arc<Semaphore>,
+    pub(crate) browser_risk_tasks: Arc<McpManagementRequestTracker>,
     pub(crate) mcp_management_admission: Arc<Semaphore>,
     pub(crate) mcp_management_tasks: Arc<McpManagementRequestTracker>,
 }
@@ -166,6 +177,11 @@ where
     let image_generation_artifact_read_admission =
         services.image_generation_artifact_read_admission;
     let mcp_management = services.mcp_management;
+    let managed_playwright_bridge = services.managed_playwright_bridge;
+    let managed_playwright_runtime = services.managed_playwright_runtime;
+    let browser_risk_coordinator = services.browser_risk_coordinator;
+    let browser_risk_admission = services.browser_risk_admission;
+    let browser_risk_tasks = services.browser_risk_tasks;
     let mcp_management_admission = services.mcp_management_admission;
     let mcp_management_tasks = services.mcp_management_tasks;
     let outbound = outbounds.normal;
@@ -193,10 +209,180 @@ where
         };
 
         if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
-            return Ok(Some(request.id));
+            let shutdown_id = request.id;
+            if let Some(coordinator) = browser_risk_coordinator.as_ref() {
+                coordinator.cancel_all();
+            }
+            let _ = browser_risk_tasks.shutdown(Duration::from_secs(1)).await;
+            if let Some(runtime) = managed_playwright_runtime.as_ref() {
+                let shutdown = runtime.shutdown();
+                tokio::pin!(shutdown);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut shutdown => break,
+                        next = lines.next_line() => {
+                            let Some(line) = next? else {
+                                // Main has gone away, so no reverse-bridge completion can arrive.
+                                // Closing the exact bridge settles the pending managed peer and lets
+                                // shutdown finish instead of repeatedly polling EOF in a busy loop.
+                                if let Some(bridge) = managed_playwright_bridge.as_ref() {
+                                    bridge.close_now();
+                                }
+                                shutdown.as_mut().await;
+                                break;
+                            };
+                            let Ok(completion_request) = serde_json::from_str::<JsonRpcRequest>(&line) else {
+                                continue;
+                            };
+                            if completion_request.jsonrpc == "2.0"
+                                && completion_request.method
+                                    == mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_COMPLETE_METHOD
+                            {
+                                enqueue_outbound(
+                                    outbound,
+                                    managed_playwright_completion_response(
+                                        managed_playwright_bridge.as_ref(),
+                                        completion_request,
+                                    ),
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(Some(shutdown_id));
         }
 
         if request.jsonrpc == "2.0" {
+            if request.method == mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_COMPLETE_METHOD {
+                let response = managed_playwright_completion_response(
+                    managed_playwright_bridge.as_ref(),
+                    request,
+                );
+                enqueue_outbound(outbound, response)?;
+                continue;
+            }
+            if request.method == mycopilot_protocol_rs::BROWSER_RISK_CANCEL_METHOD {
+                let request_id = request.id.clone();
+                let Some(coordinator) = browser_risk_coordinator.as_ref() else {
+                    enqueue_outbound(
+                        outbound,
+                        response_error(
+                            Some(request_id),
+                            -32000,
+                            "Browser risk authorization is unavailable",
+                        ),
+                    )?;
+                    continue;
+                };
+                let input = match request.params.and_then(|params| {
+                    serde_json::from_value::<mycopilot_protocol_rs::BrowserRiskCancelInput>(params)
+                        .ok()
+                }) {
+                    Some(input) => input,
+                    None => {
+                        enqueue_outbound(
+                            outbound,
+                            response_error(
+                                Some(request_id),
+                                -32602,
+                                "Invalid browser risk cancellation request",
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+                enqueue_outbound(
+                    outbound,
+                    response_success(request_id, coordinator.cancel_request(input)),
+                )?;
+                continue;
+            }
+            if request.method == mycopilot_protocol_rs::BROWSER_RISK_AUTHORIZE_METHOD {
+                let request_id = request.id.clone();
+                let Some(coordinator) = browser_risk_coordinator.as_ref().cloned() else {
+                    enqueue_outbound(
+                        outbound,
+                        response_error(
+                            Some(request_id),
+                            -32000,
+                            "Browser risk authorization is unavailable",
+                        ),
+                    )?;
+                    continue;
+                };
+                let input = match request.params.and_then(|params| {
+                    serde_json::from_value::<mycopilot_protocol_rs::BrowserRiskAuthorizeInput>(
+                        params,
+                    )
+                    .ok()
+                }) {
+                    Some(input) => input,
+                    None => {
+                        enqueue_outbound(
+                            outbound,
+                            response_error(
+                                Some(request_id),
+                                -32602,
+                                "Invalid browser risk authorization request",
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+                let (conversation_id, assistant_message_id) = match agent_service
+                    .authorize_browser_risk_request(&input.authorization_context.run_id)
+                {
+                    Ok(conversation_id) => conversation_id,
+                    Err(_) => {
+                        enqueue_outbound(
+                            outbound,
+                            response_error(
+                                Some(request_id),
+                                -32000,
+                                "Browser risk request is not bound to an authorized active run",
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+                let permit = match Arc::clone(&browser_risk_admission).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        enqueue_outbound(
+                            outbound,
+                            response_error(
+                                Some(request_id),
+                                -32000,
+                                "Browser risk authorization is busy",
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+                let request_outbound = outbound.clone();
+                let notifications = outbound.clone();
+                let task = async move {
+                    let _permit = permit;
+                    let output = coordinator
+                        .authorize(input, conversation_id, assistant_message_id, notifications)
+                        .await;
+                    let _ =
+                        enqueue_outbound(&request_outbound, response_success(request_id, output));
+                };
+                if browser_risk_tasks.try_spawn(task).is_err() {
+                    enqueue_outbound(
+                        outbound,
+                        response_error(
+                            Some(request.id),
+                            -32000,
+                            "Browser risk authorization is shutting down",
+                        ),
+                    )?;
+                }
+                continue;
+            }
             if is_mcp_management_method(&request.method) {
                 let request_id = request.id.clone();
                 let request_method = request.method.clone();
@@ -471,6 +657,32 @@ where
         enqueue_outbound(outbound, response)?;
     }
     Ok(None)
+}
+
+fn managed_playwright_completion_response(
+    bridge: Option<
+        &Arc<crate::application::mcp::managed_playwright_bridge::ManagedPlaywrightHostBridge>,
+    >,
+    request: JsonRpcRequest,
+) -> Value {
+    let id = request.id;
+    let input = request.params.and_then(|params| {
+        serde_json::from_value::<mycopilot_protocol_rs::ManagedPlaywrightCompletionInput>(params)
+            .ok()
+    });
+    match (bridge, input) {
+        (Some(bridge), Some(input)) => match bridge.complete(input) {
+            Ok(accepted) => response_success(
+                id,
+                mycopilot_protocol_rs::ManagedPlaywrightCompletionOutput {
+                    schema_version: mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                    accepted,
+                },
+            ),
+            Err(_) => response_error(Some(id), -32602, "Invalid managed Playwright completion"),
+        },
+        _ => response_error(Some(id), -32602, "Invalid managed Playwright completion"),
+    }
 }
 
 #[cfg(test)]

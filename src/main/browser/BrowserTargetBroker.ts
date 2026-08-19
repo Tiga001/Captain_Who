@@ -4,6 +4,7 @@ import { ElectronGuestCdpTransport } from './ElectronGuestCdpTransport'
 const MAX_SURFACE_ID_LENGTH = 256
 
 export type BrowserTargetBrokerErrorCode =
+  | 'capacity_exceeded'
   | 'duplicate_guest'
   | 'guest_not_found'
   | 'invalid_guest'
@@ -45,6 +46,7 @@ interface RegisteredGuest {
 }
 
 export class BrowserTargetBroker {
+  private static readonly MAX_REGISTERED_GUESTS = 32
   private readonly guests = new Map<number, RegisteredGuest>()
   private readonly surfaces = new Map<string, number>()
   private disposed = false
@@ -62,6 +64,9 @@ export class BrowserTargetBroker {
     if (existing) {
       if (existing.guest === input.guest && existing.host === input.host) return
       throw new BrowserTargetBrokerError('duplicate_guest')
+    }
+    if (this.guests.size >= BrowserTargetBroker.MAX_REGISTERED_GUESTS) {
+      throw new BrowserTargetBrokerError('capacity_exceeded')
     }
 
     const handleGuestDestroyed = (): void =>

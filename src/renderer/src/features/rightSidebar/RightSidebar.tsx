@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize, Plus, X } from 'lucide-react'
+import type { BrowserSurfaceCommand, BrowserSurfaceReadyInput } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { WorkspaceFileTreeSessionsProvider } from '../files/WorkspaceFileTreeSessions'
 import { RightSidebarHome } from './RightSidebarHome'
@@ -20,11 +21,13 @@ import type {
   RightSidebarReviewNavigationRequest
 } from './rightSidebarTypes'
 import { useRightSidebarPlatform } from './useRightSidebarPlatform'
+import { browserSurfaceIdForPage } from '../browser/browserSurface'
 import './RightSidebar.css'
 
 interface RightSidebarProps {
   activeConversationId?: string | null
   agentNavigationRequest?: RightSidebarAgentNavigationRequest | null
+  browserSurfaceCommand?: BrowserSurfaceCommand | null
   capabilities?: RightSidebarCapabilities
   collaborationSnapshot?: CollaborationStoreSnapshot | null
   isMaximized: boolean
@@ -32,6 +35,7 @@ interface RightSidebarProps {
   isWorkspaceVisible?: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
+  onBrowserSurfaceReady?: (input: BrowserSurfaceReadyInput) => Promise<void>
   onOpenAgentTemplates?: () => void
   onToggleMaximized: () => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
@@ -63,6 +67,7 @@ function RestoreFromMaximizedIcon(): ReactNode {
 export const RightSidebar = memo(function RightSidebar({
   activeConversationId,
   agentNavigationRequest,
+  browserSurfaceCommand,
   capabilities,
   collaborationSnapshot = null,
   isMaximized,
@@ -70,6 +75,7 @@ export const RightSidebar = memo(function RightSidebar({
   isWorkspaceVisible = true,
   maximizedToolbarControls,
   modules: configuredModules = RIGHT_SIDEBAR_MODULES,
+  onBrowserSurfaceReady,
   onOpenAgentTemplates,
   onToggleMaximized,
   reviewNavigationRequest,
@@ -83,9 +89,15 @@ export const RightSidebar = memo(function RightSidebar({
   const documentVisible = useRightSidebarDocumentVisibility()
   const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
   const handledAgentNavigationRequestIdRef = useRef<number | null>(null)
+  const handledBrowserSurfaceRequestIdRef = useRef<string | null>(null)
+  const submittedBrowserSurfaceRequestIdRef = useRef<string | null>(null)
   const moduleMenuRef = useRef<HTMLDivElement>(null)
   const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [isModuleMenuOpen, setIsModuleMenuOpen] = useState(false)
+  const [browserSurfaceRequest, setBrowserSurfaceRequest] = useState<{
+    pageId: string
+    requestId: string
+  } | null>(null)
   const [moduleMenuPosition, setModuleMenuPosition] = useState({ top: 0, left: 0 })
   const childAgents = useMemo(() => {
     const tree = collaborationSnapshot?.tree
@@ -109,6 +121,7 @@ export const RightSidebar = memo(function RightSidebar({
     activePageId,
     availableModules,
     closePage,
+    ensureModulePage,
     moduleAvailability,
     openModule: openPlatformModule,
     openRelatedPage,
@@ -123,6 +136,51 @@ export const RightSidebar = memo(function RightSidebar({
     workspaceName,
     workspacePath
   })
+
+  useEffect(() => {
+    if (
+      !browserSurfaceCommand ||
+      handledBrowserSurfaceRequestIdRef.current === browserSurfaceCommand.requestId
+    ) {
+      return
+    }
+    handledBrowserSurfaceRequestIdRef.current = browserSurfaceCommand.requestId
+
+    if (browserSurfaceCommand.kind === 'closeSurface') {
+      const page = pages.find(
+        (candidate) =>
+          candidate.moduleId === 'browser' &&
+          browserSurfaceIdForPage(candidate.id) === browserSurfaceCommand.surfaceId
+      )
+      if (page) closePage(page.id)
+      setBrowserSurfaceRequest((current) => (current?.pageId === page?.id ? null : current))
+      return
+    }
+
+    const pageId = ensureModulePage('browser')
+    if (!pageId) return
+    submittedBrowserSurfaceRequestIdRef.current = null
+    setBrowserSurfaceRequest({ pageId, requestId: browserSurfaceCommand.requestId })
+  }, [browserSurfaceCommand, closePage, ensureModulePage, pages])
+
+  const handleBrowserSurfaceReady = useCallback(
+    (pageId: string, surfaceId: string, requestId: string): void => {
+      if (
+        browserSurfaceRequest?.pageId !== pageId ||
+        browserSurfaceRequest.requestId !== requestId ||
+        browserSurfaceIdForPage(pageId) !== surfaceId ||
+        submittedBrowserSurfaceRequestIdRef.current === requestId
+      ) {
+        return
+      }
+      submittedBrowserSurfaceRequestIdRef.current = requestId
+      if (!onBrowserSurfaceReady) return
+      void onBrowserSurfaceReady({ schemaVersion: 1, requestId, surfaceId }).finally(() => {
+        setBrowserSurfaceRequest((current) => (current?.requestId === requestId ? null : current))
+      })
+    },
+    [browserSurfaceRequest, onBrowserSurfaceReady]
+  )
   const hasOpenPages = pages.length > 0
   const fileTreeProjectIds = useMemo(
     () => [
@@ -143,12 +201,16 @@ export const RightSidebar = memo(function RightSidebar({
       activeConversationId: activeConversationId ?? null,
       activeWorkspaceKey: workspaceKey ?? null,
       collaborationSnapshot,
+      browserSurfaceRequest: browserSurfaceRequest ?? undefined,
+      onBrowserSurfaceReady: handleBrowserSurfaceReady,
       onOpenAgentTemplates,
       renderAgentObserver
     }),
     [
       activeConversationId,
+      browserSurfaceRequest,
       collaborationSnapshot,
+      handleBrowserSurfaceReady,
       onOpenAgentTemplates,
       renderAgentObserver,
       workspaceKey

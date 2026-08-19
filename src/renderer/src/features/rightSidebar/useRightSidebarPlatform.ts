@@ -81,6 +81,32 @@ export function useRightSidebarPlatform({
     [moduleAvailability, modules, t, workspace]
   )
 
+  const ensureModulePage = useCallback(
+    (moduleId: RightSidebarModuleId): string | null => {
+      const module = modules.find((candidate) => candidate.id === moduleId)
+      if (
+        !module ||
+        getRightSidebarModuleAvailability(moduleAvailability, moduleId) !== 'available'
+      ) {
+        return null
+      }
+
+      const selected = state.pages.find(
+        (page) => page.id === state.activePageId && page.moduleId === moduleId
+      )
+      const existing = selected ?? state.pages.find((page) => page.moduleId === moduleId)
+      if (existing) {
+        dispatch({ pageId: existing.id, type: 'activate' })
+        return existing.id
+      }
+
+      const pageId = createPageId(moduleId)
+      dispatch({ module, pageId, t, type: 'open', workspace })
+      return pageId
+    },
+    [moduleAvailability, modules, state.activePageId, state.pages, t, workspace]
+  )
+
   useLayoutEffect(() => {
     dispatch({
       availability: moduleAvailability,
@@ -131,6 +157,7 @@ export function useRightSidebarPlatform({
     activePageId: state.activePageId,
     availableModules,
     closePage,
+    ensureModulePage,
     moduleAvailability,
     openModule,
     openRelatedPage,

@@ -163,6 +163,7 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   pageId,
   t
 }: BrowserModuleSurfaceProps) {
+  const { browserSurfaceRequest, onBrowserSurfaceReady } = useRightSidebarRuntimeContext()
   const handlePageMetadataChange = useCallback(
     (metadata: BrowserPageMetadata) => {
       const title = metadata.title?.trim()
@@ -177,7 +178,13 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   return (
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('browser.title')}</div>}>
       <BrowserPanel
+        automationRequestId={
+          browserSurfaceRequest?.pageId === pageId ? browserSurfaceRequest.requestId : undefined
+        }
         isActive={activity === 'foreground'}
+        onAutomationSurfaceReady={(surfaceId, requestId) =>
+          onBrowserSurfaceReady?.(pageId, surfaceId, requestId)
+        }
         onPageMetadataChange={handlePageMetadataChange}
         onSurfaceFocus={onSurfaceFocus}
         pageId={pageId}

@@ -306,7 +306,9 @@ async function syncTree(root) {
 }
 
 function readPlaywrightPin() {
-  const packageJsonPath = localRequire.resolve('playwright/package.json')
+  // Office rendering remains pinned to its independently reviewed browser runtime. The
+  // application-level `playwright` dependency follows the managed Playwright MCP version.
+  const packageJsonPath = localRequire.resolve('@mycopilot/office-playwright-runtime/package.json')
   const playwrightRoot = dirname(packageJsonPath)
   const playwrightCoreRoot = resolve(playwrightRoot, '..', 'playwright-core')
   return Promise.all([

@@ -38,7 +38,7 @@ impl McpManagementService {
         })
     }
 
-    pub(crate) fn set_builtin_capability_allowed(
+    pub(crate) async fn set_builtin_capability_allowed(
         &self,
         input: McpBuiltinCapabilitySetAllowedInput,
     ) -> Result<McpBuiltinCapabilityMutationOutput, McpManagementFailure> {
@@ -53,6 +53,9 @@ impl McpManagementService {
             .set_allowed(capability_id, input.expected_policy_revision, input.allowed)
             .map_err(|error| self.builtin_policy_failure(operation, error))?;
         if !record.user_allowed {
+            if let Some(coordinator) = &self.browser_risk_coordinator {
+                coordinator.cancel_all();
+            }
             let runtime_id = CoreBuiltinCapabilityId::parse(record.capability_id.as_str())
                 .map_err(|_| {
                     self.failure(
@@ -74,6 +77,17 @@ impl McpManagementService {
                         None,
                     )
                 })?;
+            if let Some(runtime) = &self.managed_playwright_runtime {
+                runtime.stop().await.map_err(|_| {
+                    self.failure(
+                        operation,
+                        McpManagementErrorCodeDto::InternalSafeError,
+                        McpManagementRecoveryDto::Retry,
+                        "The managed browser automation could not be stopped safely.",
+                        None,
+                    )
+                })?;
+            }
         }
         Ok(McpBuiltinCapabilityMutationOutput {
             schema_version: MCP_MANAGEMENT_SCHEMA_VERSION,

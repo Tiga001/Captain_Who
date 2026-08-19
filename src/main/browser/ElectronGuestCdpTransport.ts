@@ -24,6 +24,16 @@ interface CdpTargetInfo {
 const MAX_METHOD_LENGTH = 256
 const MAX_SESSION_ID_LENGTH = 512
 const MAX_CDP_STRING_LENGTH = 4_096
+const MAX_INSERT_TEXT_BYTES = 64 * 1_024
+const MAX_CDP_PAYLOAD_BYTES = 4 * 1_024 * 1_024
+const MAX_CDP_PAYLOAD_DEPTH = 32
+const MAX_CDP_PAYLOAD_NODES = 4_096
+const MAX_CDP_CONTAINER_ITEMS = 4_096
+const MAX_CDP_OBJECT_PROPERTIES = 512
+const MAX_CDP_PROPERTY_NAME_BYTES = 256
+const MAX_CDP_VALUE_STRING_BYTES = 1 * 1_024 * 1_024
+const MAX_CDP_EVENT_QUEUE = 1_024
+const MAX_CDP_EVENTS_PER_SECOND = 4_096
 
 export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private readonly childSessionIds = new Set<string>()
@@ -41,6 +51,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private closeNotificationDelivered = false
   private closeReason?: string
   private closed = false
+  private eventCount = 0
+  private eventQueue: object[] = []
+  private eventWindowStartedAt = Date.now()
+  private flushScheduled = false
   private emittedAttached = false
   private messageHandler?: (message: object) => void
   private ownsDebugger = false
@@ -131,7 +145,13 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   ): void => {
     if (this.closed || typeof method !== 'string' || method.length > MAX_METHOD_LENGTH) return
 
-    const safeParams = isRecord(params) ? params : {}
+    let safeParams: CdpParams
+    try {
+      safeParams = isRecord(params) ? cloneBoundedCdpRecord(params) : {}
+    } catch {
+      this.terminate('cdp_event_budget_exceeded')
+      return
+    }
     if (method === 'Target.attachedToTarget') {
       const childSessionId = safeParams.sessionId
       if (
@@ -149,7 +169,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       return
     }
 
-    this.emit({ method, params: safeParams, sessionId: mappedSessionId })
+    this.enqueueEvent({ method, params: safeParams, sessionId: mappedSessionId })
 
     if (method === 'Target.detachedFromTarget') {
       const childSessionId = safeParams.sessionId
@@ -169,7 +189,8 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
 
   private async dispatch(request: CdpRequest): Promise<void> {
     try {
-      const result = await this.dispatchCommand(request)
+      const rawResult = await this.dispatchCommand(request)
+      const result = cloneBoundedCdpPayload(rawResult === undefined ? {} : rawResult)
       this.respond(request, { result })
     } catch (error) {
       this.respond(request, {
@@ -212,7 +233,76 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
 
     const childSessionId =
       request.sessionId === this.syntheticSessionId ? undefined : request.sessionId
+    if (request.method === 'Input.insertText') {
+      return await this.insertText(request.params, childSessionId)
+    }
+    if (
+      request.method === 'Input.dispatchKeyEvent' &&
+      (request.params?.type === 'char' || request.params?.type === 'keyDown') &&
+      typeof request.params.text === 'string'
+    ) {
+      // Electron currently drops text-bearing key dispatch for a guest webview even though
+      // non-text keydown/up events are delivered. Route only a non-empty bounded text payload
+      // through the same narrow insertion shim; navigation keys and shortcuts still use native
+      // Input.dispatchKeyEvent.
+      if (request.params.text.length === 0) {
+        return await this.debuggerClient.sendCommand(request.method, request.params, childSessionId)
+      }
+      return await this.insertText({ text: request.params.text }, childSessionId)
+    }
     return await this.debuggerClient.sendCommand(request.method, request.params, childSessionId)
+  }
+
+  /**
+   * Electron's debugger currently acknowledges `Input.insertText` for a webview guest but drops
+   * the text, even when Playwright has focused the exact input. Keep this compatibility shim
+   * narrow: the fixed expression only applies a bounded string to the current guest selection.
+   * Remove it once Electron's guest debugger reliably implements `Input.insertText`.
+   */
+  private async insertText(
+    params: CdpParams | undefined,
+    sessionId: string | undefined
+  ): Promise<unknown> {
+    if (
+      !params ||
+      Object.keys(params).length !== 1 ||
+      typeof params.text !== 'string' ||
+      Buffer.byteLength(params.text, 'utf8') > MAX_INSERT_TEXT_BYTES
+    ) {
+      throw new CdpPolicyError('Invalid text insertion request')
+    }
+    if (params.text.length === 0) return {}
+
+    const serializedText = JSON.stringify(params.text)
+      .replaceAll('\u2028', '\\u2028')
+      .replaceAll('\u2029', '\\u2029')
+    let evaluated: unknown
+    try {
+      evaluated = await this.debuggerClient.sendCommand(
+        'Runtime.evaluate',
+        {
+          expression: `(() => {
+            const execCommand = Object.getPrototypeOf(document)?.execCommand;
+            if (typeof execCommand !== 'function' || !document.activeElement) return false;
+            return execCommand.call(document, 'insertText', false, ${serializedText}) === true;
+          })()`,
+          returnByValue: true
+        },
+        sessionId
+      )
+    } catch {
+      throw new CdpPolicyError('Unable to insert text into managed target')
+    }
+
+    if (
+      !isRecord(evaluated) ||
+      !isRecord(evaluated.result) ||
+      evaluated.result.value !== true ||
+      isRecord(evaluated.exceptionDetails)
+    ) {
+      throw new CdpPolicyError('Unable to insert text into managed target')
+    }
+    return {}
   }
 
   private async dispatchBrowserCommand(method: string, params?: CdpParams): Promise<unknown> {
@@ -281,6 +371,47 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     if (!this.closed) this.messageHandler?.(message)
   }
 
+  private enqueueEvent(message: object): void {
+    if (this.closed || !this.messageHandler) return
+    const now = Date.now()
+    if (now - this.eventWindowStartedAt >= 1_000) {
+      this.eventWindowStartedAt = now
+      this.eventCount = 0
+    }
+    this.eventCount += 1
+    if (this.eventCount > MAX_CDP_EVENTS_PER_SECOND) {
+      this.terminate('cdp_event_rate_exceeded')
+      return
+    }
+    if (this.eventQueue.length >= MAX_CDP_EVENT_QUEUE) {
+      this.terminate('cdp_event_queue_exceeded')
+      return
+    }
+    this.eventQueue.push(message)
+    if (this.flushScheduled) return
+    this.flushScheduled = true
+    // Playwright's CDP transport contract observes debugger notifications synchronously relative
+    // to command responses. Preserve that ordering; the queue only absorbs bounded re-entrant
+    // delivery caused by a handler, while the rate gate bounds ordinary sequential storms.
+    this.flushEventQueue()
+  }
+
+  private flushEventQueue(): void {
+    try {
+      while (!this.closed && this.eventQueue.length > 0) {
+        const queued = this.eventQueue
+        this.eventQueue = []
+        for (const message of queued) {
+          if (this.closed) return
+          this.messageHandler?.(message)
+        }
+      }
+    } finally {
+      this.flushScheduled = false
+      if (this.closed) this.eventQueue = []
+    }
+  }
+
   private terminate(reason: string): void {
     if (this.closed) return
     this.closed = true
@@ -304,6 +435,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     }
     this.ownsDebugger = false
     this.childSessionIds.clear()
+    this.eventQueue = []
     this.handleClosed(this)
     this.closeReason = reason
     this.deliverCloseNotification()
@@ -357,9 +489,151 @@ function parseRequest(value: object): CdpRequest | null {
   }
 
   const request: CdpRequest = { id: value.id as number, method: value.method }
-  if (isRecord(params)) request.params = params
+  if (isRecord(params)) {
+    try {
+      request.params = cloneBoundedCdpRecord(params)
+    } catch {
+      return null
+    }
+  }
   if (typeof sessionId === 'string') request.sessionId = sessionId
   return request
+}
+
+function cloneBoundedCdpRecord(value: Record<string, unknown>): CdpParams {
+  const cloned = cloneBoundedCdpPayload(value)
+  if (!isRecord(cloned)) throw new CdpPolicyError('Invalid CDP payload')
+  return cloned
+}
+
+function cloneBoundedCdpPayload(value: unknown): unknown {
+  let nodes = 0
+  let encodedBytes = 0
+  const ancestors = new WeakSet<object>()
+  const addBytes = (amount: number): void => {
+    encodedBytes += amount
+    if (encodedBytes > MAX_CDP_PAYLOAD_BYTES) {
+      throw new CdpPolicyError('CDP payload exceeds managed limits')
+    }
+  }
+  const addString = (current: string, fieldLimit = MAX_CDP_VALUE_STRING_BYTES): void => {
+    if (Buffer.byteLength(current, 'utf8') > fieldLimit) {
+      throw new CdpPolicyError('CDP payload exceeds managed limits')
+    }
+    addBytes(jsonEncodedStringBytes(current))
+  }
+  const clone = (current: unknown, depth: number): unknown => {
+    nodes += 1
+    if (depth > MAX_CDP_PAYLOAD_DEPTH || nodes > MAX_CDP_PAYLOAD_NODES) {
+      throw new CdpPolicyError('CDP payload exceeds managed limits')
+    }
+    if (current === null) {
+      addBytes(4)
+      return null
+    }
+    if (typeof current === 'string') {
+      addString(current)
+      return current
+    }
+    if (typeof current === 'boolean') {
+      addBytes(current ? 4 : 5)
+      return current
+    }
+    if (typeof current === 'number') {
+      if (!Number.isFinite(current)) throw new CdpPolicyError('Invalid CDP payload')
+      addBytes(String(current).length)
+      return current
+    }
+    if (typeof current !== 'object') throw new CdpPolicyError('Invalid CDP payload')
+    if (ancestors.has(current)) throw new CdpPolicyError('Invalid CDP payload')
+    ancestors.add(current)
+    try {
+      if (Array.isArray(current)) {
+        if (current.length > MAX_CDP_CONTAINER_ITEMS) {
+          throw new CdpPolicyError('CDP payload exceeds managed limits')
+        }
+        addBytes(2 + Math.max(0, current.length - 1))
+        const copy: unknown[] = []
+        for (const child of current) {
+          if (child === undefined) {
+            nodes += 1
+            if (nodes > MAX_CDP_PAYLOAD_NODES) {
+              throw new CdpPolicyError('CDP payload exceeds managed limits')
+            }
+            addBytes(4)
+            copy.push(null)
+          } else {
+            copy.push(clone(child, depth + 1))
+          }
+        }
+        return copy
+      }
+      const prototype = Object.getPrototypeOf(current)
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new CdpPolicyError('Invalid CDP payload')
+      }
+      const copy: Record<string, unknown> = {}
+      let properties = 0
+      let includedProperties = 0
+      addBytes(2)
+      for (const key in current) {
+        if (!Object.hasOwn(current, key)) continue
+        properties += 1
+        if (properties > MAX_CDP_OBJECT_PROPERTIES) {
+          throw new CdpPolicyError('CDP payload exceeds managed limits')
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(current, key)
+        if (!descriptor || descriptor.get || descriptor.set) {
+          throw new CdpPolicyError('Invalid CDP payload')
+        }
+        // ConnectOverCDP normally crosses a JSON wire. Preserve JSON's treatment of optional
+        // object properties so Playwright may pass `{ optional: undefined }` without widening the
+        // accepted value domain sent to Electron.
+        if (descriptor.value === undefined) continue
+        includedProperties += 1
+        addString(key, MAX_CDP_PROPERTY_NAME_BYTES)
+        addBytes(includedProperties === 1 ? 1 : 2)
+        copy[key] = clone(descriptor.value, depth + 1)
+      }
+      return copy
+    } finally {
+      ancestors.delete(current)
+    }
+  }
+  return clone(value, 0)
+}
+
+function jsonEncodedStringBytes(value: string): number {
+  let bytes = 2
+  for (let index = 0; index < value.length;) {
+    const codePoint = value.codePointAt(index)
+    if (codePoint === undefined) break
+    const width = codePoint > 0xffff ? 2 : 1
+    const loneSurrogate = width === 1 && codePoint >= 0xd800 && codePoint <= 0xdfff
+    if (
+      codePoint === 0x22 ||
+      codePoint === 0x5c ||
+      codePoint === 0x08 ||
+      codePoint === 0x09 ||
+      codePoint === 0x0a ||
+      codePoint === 0x0c ||
+      codePoint === 0x0d
+    ) {
+      bytes += 2
+    } else if (codePoint < 0x20 || loneSurrogate) {
+      bytes += 6
+    } else if (codePoint <= 0x7f) {
+      bytes += 1
+    } else if (codePoint <= 0x7ff) {
+      bytes += 2
+    } else if (codePoint <= 0xffff) {
+      bytes += 3
+    } else {
+      bytes += 4
+    }
+    index += width
+  }
+  return bytes
 }
 
 function normalizeBrowserVersion(value: unknown): CdpParams {

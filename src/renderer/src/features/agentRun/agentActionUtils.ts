@@ -2,16 +2,29 @@ import type { AgentProposedAction, PendingAgentActionSnapshot } from '@mycopilot
 
 /** Defense in depth for Renderer hydration if a future Host bridge bypasses strict wire parsing. */
 export function shouldHydratePendingAgentAction(snapshot: PendingAgentActionSnapshot): boolean {
-  if (snapshot.action.type !== 'builtin_capability_activation') return true
-  const approval = snapshot.action.approval
-  return (
-    snapshot.status === 'pending' &&
-    approval.approvalStatus === 'required' &&
-    snapshot.actionId === approval.actionId &&
-    snapshot.runId === approval.runId &&
-    snapshot.toolName === 'activate_capability' &&
-    snapshot.toolCallId === approval.callId
-  )
+  if (snapshot.action.type === 'builtin_capability_activation') {
+    const approval = snapshot.action.approval
+    return (
+      snapshot.status === 'pending' &&
+      approval.approvalStatus === 'required' &&
+      snapshot.actionId === approval.actionId &&
+      snapshot.runId === approval.runId &&
+      snapshot.toolName === 'activate_capability' &&
+      snapshot.toolCallId === approval.callId
+    )
+  }
+  if (snapshot.action.type === 'browser_risk_approval') {
+    const approval = snapshot.action.approval
+    return (
+      snapshot.status === 'pending' &&
+      approval.approvalStatus === 'required' &&
+      snapshot.actionId === approval.actionId &&
+      snapshot.runId === approval.runId &&
+      snapshot.toolName === approval.triggerToolName &&
+      snapshot.toolCallId === approval.callId
+    )
+  }
+  return true
 }
 
 export function getAgentActionApprovalStatus(action: AgentProposedAction) {
@@ -24,6 +37,7 @@ export function getAgentActionApprovalStatus(action: AgentProposedAction) {
   if (action.type === 'skill_installation') return action.installation.approvalStatus
   if (action.type === 'mcp_tool_call') return action.approval.call.approvalStatus
   if (action.type === 'builtin_capability_activation') return action.approval.approvalStatus
+  if (action.type === 'browser_risk_approval') return action.approval.approvalStatus
   return action.call.approvalStatus
 }
 
@@ -37,5 +51,6 @@ export function getAgentActionId(action: AgentProposedAction) {
   if (action.type === 'skill_installation') return action.installation.id
   if (action.type === 'mcp_tool_call') return action.approval.identity.actionId
   if (action.type === 'builtin_capability_activation') return action.approval.actionId
+  if (action.type === 'browser_risk_approval') return action.approval.actionId
   return action.call.id
 }

@@ -50,6 +50,7 @@ const events: Record<string, AgentEvent> = {
     type: 'tool_call',
     runId: 'run-contract-v1',
     traceSequence: 4,
+    identity: { type: 'builtin', toolName: 'read_file' },
     call: {
       id: 'call-contract-v1',
       tool: 'read_file',

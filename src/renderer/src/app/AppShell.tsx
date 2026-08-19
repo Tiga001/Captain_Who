@@ -103,6 +103,7 @@ import { useOptionalCollaborationStore } from '../features/agentCollaboration/us
 import { CollaborationApprovalPanel } from '../features/agentCollaboration/CollaborationApprovalPanel'
 import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
+import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
 
 interface EditRewriteAttempt {
   assistantMessage: ChatMessage
@@ -154,6 +155,7 @@ export function AppShell() {
     toggleRightSidebar,
     toggleRightSidebarMaximized
   } = useShellLayout()
+  const browserSurfaceBridge = useBrowserSurfaceCommand(openRightSidebar)
   const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
     useState<RightSidebarReviewNavigationRequest | null>(null)
   const rightSidebarReviewNavigationRequestIdRef = useRef(0)
@@ -1822,6 +1824,7 @@ export function AppShell() {
           activeConversationId={activeConversation?.id}
           agentNavigationRequest={rightSidebarAgentNavigationRequest}
           capabilities={rightSidebarCapabilities}
+          browserSurfaceCommand={browserSurfaceBridge.command}
           collaborationSnapshot={collaborationSnapshot}
           isMaximized={rightMaximized}
           isOpen={rightOpen}
@@ -1831,6 +1834,7 @@ export function AppShell() {
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}
+          onBrowserSurfaceReady={browserSurfaceBridge.surfaceReady}
           onOpenAgentTemplates={() => openSettings('agentTemplates')}
           reviewNavigationRequest={rightSidebarReviewNavigationRequest}
           renderAgentObserver={renderAgentObserver}

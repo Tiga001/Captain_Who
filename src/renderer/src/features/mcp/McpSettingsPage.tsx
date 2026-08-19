@@ -4,6 +4,7 @@ import type { McpServerDetailsView, McpServerListItem } from '@mycopilot/protoco
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { useToast } from '../../components/toast/ToastContext'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { McpBuiltinCapabilityList } from './McpBuiltinCapabilityList'
 import { McpServerEditor } from './McpServerEditor'
 import { McpServerList, McpServerListRefreshButton } from './McpServerList'
 import {
@@ -13,6 +14,7 @@ import {
 } from './mcpManagementErrors'
 import type { McpServerDraft } from './mcpManagementInputs'
 import { toSafeMcpDisplayText } from './mcpSafeDisplay'
+import { useBuiltinMcpCapabilities } from './useBuiltinMcpCapabilities'
 import { useMcpManagement } from './useMcpManagement'
 import './McpSettingsPage.css'
 
@@ -25,6 +27,12 @@ export interface McpSettingsPageProps {
 export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
+  const {
+    pendingCapabilities: pendingBuiltinCapabilities,
+    refresh: refreshBuiltinCapabilities,
+    setAllowed: setBuiltinAllowed,
+    state: builtinState
+  } = useBuiltinMcpCapabilities()
   const management = useMcpManagement()
   const [view, setView] = useState<McpSettingsView>('list')
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
@@ -123,6 +131,17 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
       }
     },
     [showToast, t]
+  )
+
+  const setBuiltinCapabilityAllowed = useCallback(
+    async (capability: Parameters<typeof setBuiltinAllowed>[0], allowed: boolean) => {
+      try {
+        await setBuiltinAllowed(capability, allowed)
+      } catch (error) {
+        showSafeError(error, showToast, t)
+      }
+    },
+    [setBuiltinAllowed, showToast, t]
   )
 
   const requestServerEnabledChange = async (server: McpServerListItem, enabled: boolean) => {
@@ -272,8 +291,10 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
         {view === 'list' && (
           <div className="mcp-settings-header__actions">
             <McpServerListRefreshButton
-              disabled={management.state.isRefreshing}
-              onRefresh={() => void management.refresh()}
+              disabled={management.state.isRefreshing || builtinState.isRefreshing}
+              onRefresh={() => {
+                void Promise.all([management.refresh(), refreshBuiltinCapabilities(true)])
+              }}
             />
             <button
               className="mcp-secondary-button"
@@ -292,61 +313,115 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
 
       {view === 'list' && (
         <>
-          {management.state.status === 'loading' && (
-            <div className="mcp-page-state" role="status">
-              <LoaderCircle aria-hidden="true" className="mcp-spinner" />
-              <span>{t('mcp.loading')}</span>
-            </div>
-          )}
+          <section aria-labelledby="mcp-builtin-heading" className="mcp-settings-section">
+            <h2 id="mcp-builtin-heading">{t('mcp.section.builtin')}</h2>
+            {builtinState.status === 'loading' && (
+              <div className="mcp-section-state" role="status">
+                <LoaderCircle aria-hidden="true" className="mcp-spinner" />
+                <span>{t('mcp.builtin.loading')}</span>
+              </div>
+            )}
+            {builtinState.status === 'error' && (
+              <div className="mcp-section-state mcp-section-state--error" role="alert">
+                <AlertTriangle aria-hidden="true" />
+                <span>
+                  {builtinState.errorMessage
+                    ? toSafeMcpDisplayText(builtinState.errorMessage)
+                    : t('mcp.builtin.loadFailed')}
+                </span>
+                <button
+                  className="mcp-secondary-button"
+                  onClick={() => void refreshBuiltinCapabilities(true)}
+                  type="button"
+                >
+                  {t('mcp.actions.retry')}
+                </button>
+              </div>
+            )}
+            {builtinState.output && (
+              <>
+                {builtinState.errorMessage !== null && (
+                  <div className="mcp-safe-error mcp-section-safe-error" role="status">
+                    <AlertTriangle aria-hidden="true" />
+                    <p>
+                      {builtinState.errorMessage
+                        ? toSafeMcpDisplayText(builtinState.errorMessage)
+                        : t('mcp.error.unknown')}
+                    </p>
+                  </div>
+                )}
+                <McpBuiltinCapabilityList
+                  capabilities={builtinState.output.capabilities}
+                  onSetAllowed={(capability, allowed) =>
+                    void setBuiltinCapabilityAllowed(capability, allowed)
+                  }
+                  pendingCapabilities={pendingBuiltinCapabilities}
+                />
+              </>
+            )}
+          </section>
 
-          {management.state.status === 'error' && (
-            <div className="mcp-page-state mcp-page-state--error" role="alert">
-              <AlertTriangle aria-hidden="true" />
-              <div>
-                <strong>{t('mcp.loadFailed')}</strong>
+          <section
+            aria-labelledby="mcp-external-heading"
+            className="mcp-settings-section mcp-settings-section--external"
+          >
+            <h2 id="mcp-external-heading">{t('mcp.section.external')}</h2>
+            {management.state.status === 'loading' && (
+              <div className="mcp-page-state" role="status">
+                <LoaderCircle aria-hidden="true" className="mcp-spinner" />
+                <span>{t('mcp.loading')}</span>
+              </div>
+            )}
+
+            {management.state.status === 'error' && (
+              <div className="mcp-page-state mcp-page-state--error" role="alert">
+                <AlertTriangle aria-hidden="true" />
+                <div>
+                  <strong>{t('mcp.loadFailed')}</strong>
+                  <p>
+                    {management.state.errorMessage
+                      ? toSafeMcpDisplayText(management.state.errorMessage)
+                      : t('mcp.error.unknown')}
+                  </p>
+                </div>
+                <button
+                  className="mcp-secondary-button"
+                  onClick={() => void management.refresh()}
+                  type="button"
+                >
+                  <RefreshCw aria-hidden="true" />
+                  {t('mcp.actions.retry')}
+                </button>
+              </div>
+            )}
+
+            {output && management.state.errorMessage !== null && (
+              <div className="mcp-safe-error" role="status">
+                <AlertTriangle aria-hidden="true" />
                 <p>
                   {management.state.errorMessage
                     ? toSafeMcpDisplayText(management.state.errorMessage)
                     : t('mcp.error.unknown')}
                 </p>
               </div>
-              <button
-                className="mcp-secondary-button"
-                onClick={() => void management.refresh()}
-                type="button"
-              >
-                <RefreshCw aria-hidden="true" />
-                {t('mcp.actions.retry')}
-              </button>
-            </div>
-          )}
+            )}
 
-          {output && management.state.errorMessage !== null && (
-            <div className="mcp-safe-error" role="status">
-              <AlertTriangle aria-hidden="true" />
-              <p>
-                {management.state.errorMessage
-                  ? toSafeMcpDisplayText(management.state.errorMessage)
-                  : t('mcp.error.unknown')}
-              </p>
-            </div>
-          )}
-
-          {output &&
-            (output.servers.length === 0 ? (
-              <div className="mcp-empty-state">
-                <Server aria-hidden="true" />
-                <strong>{t('mcp.empty.title')}</strong>
-                <p>{t('mcp.empty.description')}</p>
-              </div>
-            ) : (
-              <McpServerList
-                onEdit={editServer}
-                onSetEnabled={requestServerEnabledChange}
-                pendingOperations={management.pendingOperations}
-                servers={output.servers}
-              />
-            ))}
+            {output &&
+              (output.servers.length === 0 ? (
+                <div className="mcp-empty-state">
+                  <Server aria-hidden="true" />
+                  <strong>{t('mcp.empty.title')}</strong>
+                  <p>{t('mcp.empty.description')}</p>
+                </div>
+              ) : (
+                <McpServerList
+                  onEdit={editServer}
+                  onSetEnabled={requestServerEnabledChange}
+                  pendingOperations={management.pendingOperations}
+                  servers={output.servers}
+                />
+              ))}
+          </section>
         </>
       )}
 

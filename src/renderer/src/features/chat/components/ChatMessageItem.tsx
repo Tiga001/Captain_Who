@@ -501,6 +501,7 @@ function AgentTimelineItemView({
         run={run}
         settledStatus={settledStatus}
         showImageGenerationPreview={!isRunSettled(run)}
+        toolIdentity={item.identity}
         webActivity={webActivity}
       />
     )

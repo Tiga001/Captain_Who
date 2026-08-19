@@ -1,3 +1,5 @@
+import { parseAgentToolIdentityForHost } from '@mycopilot/protocol'
+import type { AgentToolIdentity } from '@mycopilot/protocol'
 import type { ChatAgentTimelineItem } from '../chat/chatTypes'
 import {
   hasExactKeys,
@@ -51,11 +53,22 @@ export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undef
   }
   if (
     value.type === 'tool_call' &&
-    hasExactKeys(value, ['id', 'type', 'callId'], ['traceSequence']) &&
+    hasExactKeys(value, ['id', 'type', 'callId'], ['identity', 'traceSequence']) &&
     isBoundedString(value.callId, 1024) &&
     isOptionalSafeInteger(value, 'traceSequence')
   ) {
-    return value as unknown as ChatAgentTimelineItem
+    let identity: AgentToolIdentity | undefined
+    if (hasOwn(value, 'identity')) {
+      try {
+        identity = parseAgentToolIdentityForHost(value.identity)
+      } catch {
+        return undefined
+      }
+    }
+    return {
+      ...(value as unknown as Extract<ChatAgentTimelineItem, { type: 'tool_call' }>),
+      ...(identity === undefined ? {} : { identity })
+    }
   }
   if (
     value.type === 'mcp_tool_call' &&

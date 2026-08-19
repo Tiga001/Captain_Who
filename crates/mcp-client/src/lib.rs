@@ -33,12 +33,14 @@ pub use catalog::{
     McpCatalogToolCallIdentity, McpToolId,
 };
 pub use config::{
-    McpApprovalMode, McpEnvBinding, McpServerConfig, McpServerScope, McpStdioConfig,
-    McpTransportConfig, McpTrustLevel,
+    McpApprovalMode, McpEnvBinding, McpHostBridgeConfig, McpServerConfig, McpServerScope,
+    McpStdioConfig, McpTransportConfig, McpTrustLevel,
 };
 pub use connection::{McpClientHandle, McpPeer};
 pub use connector::{BoxMcpFuture, McpConnector};
-pub use digest::{config_digest, McpCatalogDigest, McpConfigDigest, McpSchemaDigest};
+pub use digest::{
+    config_digest, mcp_schema_digest, McpCatalogDigest, McpConfigDigest, McpSchemaDigest,
+};
 pub use error::{McpError, McpErrorKind};
 pub(crate) use event::McpPeerSignalPublisher;
 pub use event::{

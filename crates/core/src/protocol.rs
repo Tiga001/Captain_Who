@@ -2676,6 +2676,93 @@ pub struct AgentBuiltinCapabilityActivationApproval {
     pub approval_status: AgentApprovalStatus,
 }
 
+pub const BROWSER_RISK_APPROVAL_SCHEMA_VERSION: u32 = 1;
+pub const BROWSER_RISK_APPROVAL_TTL_SECONDS: u64 = 15 * 60;
+
+/// Host-classified browser risks. These values are display hints and frozen grant identity;
+/// Renderer text and a Server/page claim never decide whether a destination is safe.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRiskKind {
+    InsecureHttp,
+    Localhost,
+    Loopback,
+    PrivateNetwork,
+    LinkLocal,
+    CloudMetadata,
+    NonStandardPort,
+    UrlUserinfo,
+    DnsPrivateResolution,
+    RiskEscalation,
+    NewWindow,
+    FileUpload,
+    FileDownload,
+    LocalServiceRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserResolvedAddressClass {
+    Public,
+    Loopback,
+    Private,
+    LinkLocal,
+    CloudMetadata,
+    Unresolved,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRiskTrigger {
+    ToolArgument,
+    MainFrame,
+    Redirect,
+    NewWindow,
+    Subresource,
+    Upload,
+    Download,
+}
+
+/// Credential-free, normalized identity frozen before a risky browser boundary is crossed.
+///
+/// `normalized_url` never contains URL userinfo, query, or fragment. Resolver identity is kept
+/// behind the Host boundary and is never serialized into this Renderer-facing projection.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDestinationIdentity {
+    pub normalized_url: String,
+    pub origin: String,
+    pub scheme: String,
+    pub ascii_host: String,
+    pub effective_port: u16,
+    pub address_class: BrowserResolvedAddressClass,
+}
+
+/// One exact, task-scoped browser risk decision. No header, Cookie, request body, upload path,
+/// CDP endpoint, webContents identity, or resolved address is part of this public projection.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentBrowserRiskApproval {
+    pub schema_version: u32,
+    pub action_id: String,
+    pub risk_approval_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub trigger_tool_name: String,
+    pub capability_id: String,
+    pub capability_activation_id: String,
+    pub display_name: String,
+    pub reason: String,
+    pub destination: BrowserDestinationIdentity,
+    pub trigger: BrowserRiskTrigger,
+    pub risk_kinds: Vec<BrowserRiskKind>,
+    pub manifest_digest: String,
+    pub policy_revision: u64,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub approval_status: AgentApprovalStatus,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(
     tag = "type",
@@ -2692,6 +2779,9 @@ pub enum AgentProposedAction {
     },
     BuiltinCapabilityActivation {
         approval: Box<AgentBuiltinCapabilityActivationApproval>,
+    },
+    BrowserRiskApproval {
+        approval: Box<AgentBrowserRiskApproval>,
     },
     Diff {
         diff: AgentDiffProposal,
@@ -2842,6 +2932,11 @@ pub enum AgentEvent {
         run_id: String,
         trace_sequence: u64,
         call: AgentToolCall,
+        /// Backend-authoritative identity of the exact Tool contract used for this call.
+        ///
+        /// Renderer must route specialized activity from this typed value and must never infer
+        /// provenance from a model-visible Tool name.
+        identity: AgentToolIdentity,
     },
     /// Generic built-in or Runtime Extension Tool result.
     ///

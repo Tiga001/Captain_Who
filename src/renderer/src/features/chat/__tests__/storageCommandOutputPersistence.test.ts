@@ -155,6 +155,42 @@ function storedBuiltinCapabilityApprovalAction(): Extract<
   }
 }
 
+function storedBrowserRiskApprovalAction(): Extract<
+  AgentProposedAction,
+  { type: 'browser_risk_approval' }
+> {
+  return {
+    type: 'browser_risk_approval',
+    approval: {
+      schemaVersion: 1,
+      actionId: '33333333-3333-4333-8333-333333333333',
+      riskApprovalId: '44444444-4444-4444-8444-444444444444',
+      runId: 'run-browser-risk-pending',
+      callId,
+      capabilityId: 'browser_automation',
+      capabilityActivationId: '55555555-5555-4555-8555-555555555555',
+      displayName: 'Browser automation',
+      reason: 'Open the local fixture.',
+      destination: {
+        normalizedUrl: 'http://127.0.0.1:3000/fixture',
+        origin: 'http://127.0.0.1:3000',
+        scheme: 'http',
+        asciiHost: '127.0.0.1',
+        effectivePort: 3000,
+        addressClass: 'loopback'
+      },
+      trigger: 'tool_argument',
+      triggerToolName: 'browser_navigate',
+      riskKinds: ['insecure_http', 'loopback', 'non_standard_port'],
+      manifestDigest: `sha256:${'f'.repeat(64)}`,
+      policyRevision: 7,
+      createdAt: 1_753_843_200,
+      expiresAt: 1_753_844_100,
+      approvalStatus: 'required'
+    }
+  }
+}
+
 it('keeps live command output transient while persisting the final tool result', async () => {
   const message: ChatMessage = {
     id: 'assistant-command',
@@ -1176,6 +1212,54 @@ it('excludes Host-owned built-in activation approval anchors and recovers them o
   expect(persisted.toolResults).toEqual([])
   expect(persisted.timeline).toEqual([])
   expect(JSON.stringify(persisted)).not.toContain(action.approval.activationId)
+  expect(parsePersistedAgentRun(persisted)).toBeDefined()
+})
+
+it('excludes process-owned browser risk approvals without deleting the original browser activity', async () => {
+  const action = storedBrowserRiskApprovalAction()
+  const message: ChatMessage = {
+    id: 'assistant-browser-risk-pending',
+    role: 'assistant',
+    content: '',
+    createdAt: 1,
+    status: 'pending',
+    agentRun: {
+      runId: action.approval.runId,
+      status: 'waiting_for_approval',
+      startedAt: 1,
+      toolDefinitions: [],
+      toolCalls: [
+        {
+          id: action.approval.callId,
+          tool: action.approval.triggerToolName,
+          args: {},
+          approvalStatus: 'not_required',
+          reason: action.approval.reason
+        }
+      ],
+      toolResults: [],
+      approvals: [action],
+      diffs: [],
+      timeline: [
+        {
+          id: `tool-call-${action.approval.callId}`,
+          type: 'tool_call',
+          callId: action.approval.callId
+        }
+      ]
+    }
+  }
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+
+  await saveChatMessageState('conversation-browser-risk-pending', message)
+
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+  const persisted = JSON.parse(storedMessage.agentRunJson)
+  expect(persisted.approvals).toEqual([])
+  expect(persisted.toolCalls).toHaveLength(1)
+  expect(persisted.timeline).toHaveLength(1)
+  expect(JSON.stringify(persisted)).not.toContain(action.approval.destination.normalizedUrl)
+  expect(JSON.stringify(persisted)).not.toContain(action.approval.riskApprovalId)
   expect(parsePersistedAgentRun(persisted)).toBeDefined()
 })
 

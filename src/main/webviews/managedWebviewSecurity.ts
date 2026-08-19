@@ -1,6 +1,12 @@
 import { session } from 'electron'
-import type { WebContents, WebPreferences } from 'electron'
-import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
+import type {
+  Event,
+  WebContents,
+  WebContentsDidStartNavigationEventParams,
+  WebPreferences
+} from 'electron'
+import { BROWSER_WEBVIEW_PARTITION, parseBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
+import type { BrowserNetworkGuard } from '../browser/BrowserNetworkGuard'
 
 interface ManagedWebviewPolicy {
   allowedProtocols: ReadonlySet<string>
@@ -9,11 +15,21 @@ interface ManagedWebviewPolicy {
 }
 
 export interface ManagedWebviewTargetRegistry {
-  registerManagedGuest(input: { guest: WebContents; host: WebContents; partition: string }): void
+  registerManagedGuest(input: {
+    guest: WebContents
+    host: WebContents
+    partition: string
+    surfaceId?: string
+  }): void
 }
 
 export interface ManagedWebviewHostOptions {
+  networkGuard?: BrowserNetworkGuard
   targetRegistry?: ManagedWebviewTargetRegistry
+}
+
+export interface ManagedWebviewSessionOptions {
+  networkGuard?: BrowserNetworkGuard
 }
 
 const SAFE_INITIAL_URL = 'about:blank'
@@ -25,21 +41,25 @@ const MANAGED_WEBVIEW_POLICIES: ManagedWebviewPolicy[] = [
   }
 ]
 
-export function initializeManagedWebviewSessions(): void {
+export function initializeManagedWebviewSessions(options: ManagedWebviewSessionOptions = {}): void {
   for (const policy of MANAGED_WEBVIEW_POLICIES) {
     const managedSession = session.fromPartition(policy.partition)
     managedSession.setPermissionCheckHandler(() => false)
     managedSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
       callback(false)
     })
-    managedSession.webRequest.onBeforeRequest((details, callback) => {
-      if (details.resourceType === 'mainFrame' && !isAllowedWebviewUrl(details.url, policy)) {
-        callback({ cancel: true })
-        return
-      }
+    if (options.networkGuard && policy.partition === BROWSER_WEBVIEW_PARTITION) {
+      options.networkGuard.install()
+    } else {
+      managedSession.webRequest.onBeforeRequest((details, callback) => {
+        if (details.resourceType === 'mainFrame' && !isAllowedWebviewUrl(details.url, policy)) {
+          callback({ cancel: true })
+          return
+        }
 
-      callback({})
-    })
+        callback({})
+      })
+    }
   }
 }
 
@@ -58,7 +78,7 @@ export function configureManagedWebviewHost(
   host.on('will-attach-webview', (event, webPreferences, params) => {
     const policy = getManagedWebviewPolicy(params.partition)
     const sourceUrl = params.src || SAFE_INITIAL_URL
-    if (!policy || !isAllowedWebviewUrl(sourceUrl, policy)) {
+    if (!policy || !isAllowedInitialWebviewUrl(sourceUrl, policy)) {
       event.preventDefault()
       console.warn('Blocked untrusted managed webview attachment')
       return
@@ -84,14 +104,66 @@ export function configureManagedWebviewHost(
       return
     }
 
-    configureManagedGuest(guest, policy)
-    try {
-      options.targetRegistry?.registerManagedGuest({ guest, host, partition: policy.partition })
-    } catch {
-      // Registration is part of the security boundary. A guest that cannot be tracked must not run.
-      guest.close()
+    configureManagedGuest(guest, policy, options.networkGuard)
+    if (options.targetRegistry) {
+      registerManagedGuestWhenIdentified(options.targetRegistry, {
+        guest,
+        host,
+        partition: policy.partition
+      })
     }
   })
+}
+
+function registerManagedGuestWhenIdentified(
+  registry: ManagedWebviewTargetRegistry,
+  input: { guest: WebContents; host: WebContents; partition: string }
+): void {
+  let settled = false
+  let identifiedSurfaceId: string | null = null
+  const timeout = setTimeout(() => failClosed(), 2_000)
+  const cleanup = (): void => {
+    clearTimeout(timeout)
+    input.guest.removeListener('did-start-navigation', handleStartNavigation)
+    input.guest.removeListener('dom-ready', handleReady)
+    input.guest.removeListener('did-finish-load', handleReady)
+    input.guest.removeListener('destroyed', cleanup)
+  }
+  const failClosed = (): void => {
+    if (settled) return
+    settled = true
+    cleanup()
+    if (!input.guest.isDestroyed()) input.guest.close()
+  }
+  const rememberIdentity = (candidateUrl: string): void => {
+    if (settled || input.guest.isDestroyed()) return
+    const surfaceId = parseBrowserSurfaceBootstrapUrl(candidateUrl)
+    if (surfaceId) identifiedSurfaceId = surfaceId
+  }
+  const attemptReadyRegistration = (): void => {
+    if (settled || input.guest.isDestroyed()) return
+    const surfaceId = parseBrowserSurfaceBootstrapUrl(input.guest.getURL()) ?? identifiedSurfaceId
+    if (!surfaceId) return
+    settled = true
+    cleanup()
+    try {
+      registry.registerManagedGuest({ ...input, surfaceId })
+    } catch {
+      if (!input.guest.isDestroyed()) input.guest.close()
+    }
+  }
+  const handleStartNavigation = (
+    details: Event<WebContentsDidStartNavigationEventParams>
+  ): void => {
+    if (details.isMainFrame) rememberIdentity(details.url)
+  }
+  const handleReady = (): void => attemptReadyRegistration()
+
+  input.guest.on('did-start-navigation', handleStartNavigation)
+  input.guest.on('dom-ready', handleReady)
+  input.guest.on('did-finish-load', handleReady)
+  input.guest.once('destroyed', cleanup)
+  rememberIdentity(input.guest.getURL())
 }
 
 function enforceManagedWebPreferences(
@@ -114,25 +186,41 @@ function enforceManagedWebPreferences(
   webPreferences.webviewTag = false
 }
 
-function configureManagedGuest(guest: WebContents, policy: ManagedWebviewPolicy): void {
+function configureManagedGuest(
+  guest: WebContents,
+  policy: ManagedWebviewPolicy,
+  networkGuard?: BrowserNetworkGuard
+): void {
   guest.setWindowOpenHandler(({ url }) => {
     if (
       policy.newWindowBehavior === 'navigate-current' &&
       isAllowedWebviewUrl(url, policy) &&
       url !== SAFE_INITIAL_URL
     ) {
-      setImmediate(() => navigateManagedGuest(guest, url))
+      if (networkGuard) {
+        networkGuard.handleWindowOpen(guest, url)
+      } else {
+        setImmediate(() => navigateManagedGuest(guest, url))
+      }
+    } else if (networkGuard && !isAllowedWebviewUrl(url, policy)) {
+      networkGuard.recordBlockedNavigation(guest)
     }
 
     return { action: 'deny' }
   })
 
   guest.on('will-navigate', (event, url) => {
-    if (!isAllowedWebviewUrl(url, policy)) event.preventDefault()
+    if (!isAllowedWebviewUrl(url, policy)) {
+      event.preventDefault()
+      networkGuard?.recordBlockedNavigation(guest)
+    }
   })
 
   guest.on('will-redirect', (event, url) => {
-    if (!isAllowedWebviewUrl(url, policy)) event.preventDefault()
+    if (!isAllowedWebviewUrl(url, policy)) {
+      event.preventDefault()
+      networkGuard?.recordBlockedNavigation(guest)
+    }
   })
 }
 
@@ -141,7 +229,8 @@ function navigateManagedGuest(guest: WebContents, url: string): void {
 
   void guest.loadURL(url).catch((error: unknown) => {
     if (!guest.isDestroyed() && !isAbortedNavigationError(error)) {
-      console.error('Failed to navigate managed webview link', error)
+      // Electron errors can embed the full target URL, including sensitive query values.
+      console.error('Managed webview navigation failed (safe error)')
     }
   })
 }
@@ -156,10 +245,24 @@ function getManagedWebviewPolicy(partition: string | undefined): ManagedWebviewP
 
 function isAllowedWebviewUrl(value: string, policy: ManagedWebviewPolicy): boolean {
   if (value === SAFE_INITIAL_URL) return true
+  if (
+    policy.partition === BROWSER_WEBVIEW_PARTITION &&
+    parseBrowserSurfaceBootstrapUrl(value) !== null
+  ) {
+    return true
+  }
 
   try {
     return policy.allowedProtocols.has(new URL(value).protocol)
   } catch {
     return false
   }
+}
+
+function isAllowedInitialWebviewUrl(value: string, policy: ManagedWebviewPolicy): boolean {
+  return (
+    isAllowedWebviewUrl(value, policy) ||
+    (policy.partition === BROWSER_WEBVIEW_PARTITION &&
+      parseBrowserSurfaceBootstrapUrl(value) !== null)
+  )
 }

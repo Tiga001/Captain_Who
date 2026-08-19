@@ -21,6 +21,7 @@ import type {
   AgentTodoState,
   AgentToolCall,
   AgentToolDefinition,
+  AgentToolIdentity,
   AgentToolResult,
   AgentUsage,
   ActivatedSkillSummary,
@@ -173,7 +174,7 @@ export interface ChatMcpToolInvocationView {
 export type ChatAgentTimelineItem = (
   | { id: string; type: 'message'; content: string; streamId?: string }
   | ChatGuidanceTimelineItem
-  | { id: string; type: 'tool_call'; callId: string }
+  | { id: string; type: 'tool_call'; callId: string; identity?: AgentToolIdentity }
   | { id: string; type: 'mcp_tool_call'; invocationId: string }
   | {
       id: string

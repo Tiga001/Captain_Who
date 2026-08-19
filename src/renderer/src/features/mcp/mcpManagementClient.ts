@@ -1,5 +1,8 @@
 import { HostInvocationError } from '@mycopilot/host-api'
 import type {
+  McpBuiltinCapabilityListOutput,
+  McpBuiltinCapabilityMutationOutput,
+  McpBuiltinCapabilitySetAllowedInput,
   McpCatalogToolsPageInput,
   McpCatalogToolsPageOutput,
   McpChangedNotification,
@@ -12,6 +15,20 @@ import type {
   McpServerUpdateInput
 } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
+
+export async function listMcpBuiltinCapabilities(): Promise<McpBuiltinCapabilityListOutput> {
+  const result = await hostClient.mcp.listBuiltinCapabilities()
+  if (!result.ok) throw new HostInvocationError(result.error)
+  return result.value
+}
+
+export async function setMcpBuiltinCapabilityAllowed(
+  input: McpBuiltinCapabilitySetAllowedInput
+): Promise<McpBuiltinCapabilityMutationOutput> {
+  const result = await hostClient.mcp.setBuiltinCapabilityAllowed(input)
+  if (!result.ok) throw new HostInvocationError(result.error)
+  return result.value
+}
 
 export async function listMcpServers(): Promise<McpServerListOutput> {
   const result = await hostClient.mcp.listServers()

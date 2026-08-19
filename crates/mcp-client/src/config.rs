@@ -101,6 +101,52 @@ pub struct McpStdioConfig {
     pub environment: Vec<McpEnvBinding>,
 }
 
+/// Host-owned in-process bridge identity for a managed MCP implementation.
+///
+/// This transport carries no executable, endpoint, credential, or user-editable parameter. Hosts
+/// must construct it from a compiled allowlist; persistent external Registry adapters are expected
+/// to reject it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpHostBridgeConfig {
+    pub channel: String,
+}
+
+impl McpHostBridgeConfig {
+    pub fn new(channel: impl Into<String>) -> Result<Self, McpError> {
+        let config = Self {
+            channel: channel.into(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), McpError> {
+        if self.channel.is_empty()
+            || self.channel.len() > 128
+            || !self.channel.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+        {
+            return Err(McpError::config(
+                "MCP Host bridge channel is not a canonical Host-owned identity",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for McpHostBridgeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpHostBridgeConfig")
+            .field("channel", &self.channel)
+            .finish()
+    }
+}
+
 impl fmt::Debug for McpStdioConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -125,6 +171,7 @@ impl fmt::Debug for McpStdioConfig {
 #[non_exhaustive]
 pub enum McpTransportConfig {
     Stdio(McpStdioConfig),
+    HostBridge(McpHostBridgeConfig),
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +232,9 @@ impl McpServerConfig {
             return Err(McpError::config(
                 "MCP shutdown timeout must be between 1 ms and 2 seconds",
             ));
+        }
+        if let McpTransportConfig::HostBridge(bridge) = &self.transport {
+            bridge.validate()?;
         }
         Ok(())
     }
@@ -269,5 +319,18 @@ mod tests {
             .unwrap()
             .insert("legacyApproval".to_string(), serde_json::json!("prompt"));
         assert!(serde_json::from_value::<McpServerConfig>(extra_field).is_err());
+    }
+
+    #[test]
+    fn host_bridge_is_explicit_and_contains_no_launch_or_secret_fields() {
+        let transport = McpTransportConfig::HostBridge(
+            McpHostBridgeConfig::new("builtin.playwright.v1").unwrap(),
+        );
+        let value = serde_json::to_value(&transport).unwrap();
+        assert_eq!(value["transport"], "host_bridge");
+        assert_eq!(value["config"]["channel"], "builtin.playwright.v1");
+        assert!(value.get("program").is_none());
+        assert!(value.get("environment").is_none());
+        assert!(McpHostBridgeConfig::new("INVALID CHANNEL").is_err());
     }
 }

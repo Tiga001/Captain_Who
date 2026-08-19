@@ -3,6 +3,8 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   parseAgentActionExecutionOutputForHost,
+  parseAgentBrowserRiskApproval,
+  parseAgentBrowserRiskProposedAction,
   parseAgentBuiltinCapabilityActivationApproval,
   parseAgentBuiltinCapabilityActivationProposedAction,
   parseAgentEventForHost,
@@ -17,6 +19,7 @@ const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
 const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
 const callId = `tc1_${'a'.repeat(43)}`
 const capabilityActivationId = '67b4ea45-d0e2-42d0-aee4-6da42d5e45a7'
+const browserRiskApprovalId = '2e976cb0-0b1e-40ab-8aa8-84ff41103d2f'
 const rendererGolden = JSON.parse(
   readFileSync(
     resolve(process.cwd(), 'packages/protocol/fixtures/agent-mcp-renderer-contract-v1.json'),
@@ -87,6 +90,34 @@ const builtinCapabilityApproval = {
   capabilityId: 'browser_automation',
   displayName: 'Browser automation',
   reason: 'Open the requested page in the in-app browser.',
+  manifestDigest: `sha256:${'e'.repeat(64)}`,
+  policyRevision: 7,
+  createdAt: 1_753_843_200,
+  expiresAt: 1_753_844_100,
+  approvalStatus: 'required'
+} as const
+
+const browserRiskApproval = {
+  schemaVersion: 1,
+  actionId,
+  riskApprovalId: browserRiskApprovalId,
+  runId: 'run-owned',
+  callId,
+  capabilityId: 'browser_automation',
+  capabilityActivationId,
+  displayName: 'Browser automation',
+  reason: 'Open the local test dashboard.',
+  destination: {
+    normalizedUrl: 'http://127.0.0.1:3000/dashboard',
+    origin: 'http://127.0.0.1:3000',
+    scheme: 'http',
+    asciiHost: '127.0.0.1',
+    effectivePort: 3000,
+    addressClass: 'loopback'
+  },
+  trigger: 'tool_argument',
+  triggerToolName: 'browser_navigate',
+  riskKinds: ['insecure_http', 'loopback', 'non_standard_port'],
   manifestDigest: `sha256:${'e'.repeat(64)}`,
   policyRevision: 7,
   createdAt: 1_753_843_200,
@@ -325,12 +356,192 @@ describe('built-in capability Host-boundary contract', () => {
   })
 })
 
+describe('browser risk Host-boundary contract', () => {
+  it('strictly parses the exact approval, event, pending snapshot and execution projection', () => {
+    expect(parseAgentBrowserRiskApproval(browserRiskApproval)).toEqual(browserRiskApproval)
+    const action = {
+      type: 'browser_risk_approval',
+      approval: browserRiskApproval
+    } as const
+    expect(parseAgentBrowserRiskProposedAction(action)).toEqual(action)
+    expect(
+      parseAgentEventForHost({ type: 'approval_required', runId: 'run-owned', action })
+    ).toEqual({ type: 'approval_required', runId: 'run-owned', action })
+
+    const pending = {
+      actionId,
+      actionType: 'browser_risk_approval',
+      toolName: 'browser_navigate',
+      toolCallId: callId,
+      runId: 'run-owned',
+      conversationId: 'conversation-owned',
+      assistantMessageId: 'assistant-owned',
+      action,
+      createdAt: 1_753_843_200_000,
+      status: 'pending'
+    }
+    expect(parsePendingAgentActionSnapshotsForHost([pending])).toEqual([pending])
+
+    const output = parseAgentActionExecutionOutputForHost({
+      actionId,
+      actionType: 'browser_risk_approval',
+      toolName: 'browser_navigate',
+      status: 'rejected',
+      toolResult: { cookie: 'PRIVATE_COOKIE_CANARY' },
+      agentOutput: {
+        content: 'The user declined this browser destination.',
+        status: 'completed',
+        runId: 'run-owned',
+        events: [],
+        toolDefinitions: [{ description: 'must-not-reach-renderer' }],
+        proposedActions: []
+      }
+    })
+    expect(output.toolResult).toBeUndefined()
+    expect(output.agentOutput.toolDefinitions).toEqual([])
+    expect(JSON.stringify(output)).not.toContain('PRIVATE_COOKIE_CANARY')
+    expect(() =>
+      parseAgentActionExecutionOutputForHost({
+        actionId,
+        actionType: 'browser_risk_approval',
+        toolName: 'browser_run_code_unsafe',
+        status: 'rejected',
+        agentOutput: {
+          content: '',
+          status: 'completed',
+          runId: 'run-owned',
+          events: [],
+          toolDefinitions: [],
+          proposedActions: []
+        }
+      })
+    ).toThrow()
+  })
+
+  it('rejects hidden authority, inconsistent destinations and malformed frozen identity', () => {
+    expect(() =>
+      parseAgentBrowserRiskApproval({ ...browserRiskApproval, headers: { authorization: 'x' } })
+    ).toThrow(/unexpected field/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        destination: {
+          ...browserRiskApproval.destination,
+          resolutionFingerprint: `sha256:${'f'.repeat(64)}`
+        }
+      })
+    ).toThrow(/unexpected field/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        destination: {
+          ...browserRiskApproval.destination,
+          normalizedUrl: 'http://user:secret@127.0.0.1:3000/dashboard'
+        }
+      })
+    ).toThrow(/inconsistent/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        destination: {
+          ...browserRiskApproval.destination,
+          normalizedUrl: 'http://127.0.0.1:3000/dashboard?token=secret'
+        }
+      })
+    ).toThrow(/inconsistent/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        destination: { ...browserRiskApproval.destination, effectivePort: 3001 }
+      })
+    ).toThrow(/inconsistent/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        riskKinds: ['loopback', 'loopback']
+      })
+    ).toThrow(/duplicates/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        expiresAt: browserRiskApproval.createdAt + 899
+      })
+    ).toThrow(/15 minute/)
+    expect(() =>
+      parseAgentBrowserRiskApproval({
+        ...browserRiskApproval,
+        createdAt: 253_402_300_800,
+        expiresAt: 253_402_301_700
+      })
+    ).toThrow(/date range/)
+    expect(() =>
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-other',
+        action: { type: 'browser_risk_approval', approval: browserRiskApproval }
+      })
+    ).toThrow(/runId must match/)
+    expect(() =>
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-owned',
+        action: {
+          type: 'browser_risk_approval',
+          approval: { ...browserRiskApproval, approvalStatus: 'approved' }
+        }
+      })
+    ).toThrow(/must remain required/)
+  })
+})
+
 describe('durable presentation trace ordering contract', () => {
+  it('accepts only the exact built-in capability Tool identity projection', () => {
+    const event = {
+      type: 'tool_call',
+      runId: 'run-browser-capability',
+      traceSequence: 7,
+      identity: {
+        type: 'builtin_capability',
+        capabilityId: 'browser_automation',
+        managedMcpId: 'builtin.browser_automation.mcp',
+        manifestDigest: `sha256:${'e'.repeat(64)}`,
+        toolId: 'browser.navigate',
+        modelName: 'browser_navigate'
+      },
+      call: {
+        id: callId,
+        tool: 'browser_navigate',
+        args: { url: 'https://user:PRIVATE_PASSWORD@example.com/' },
+        approvalStatus: 'not_required',
+        reason: null
+      }
+    }
+
+    expect(parseAgentEventForHost(event)).toEqual({
+      ...event,
+      call: { ...event.call, args: {} }
+    })
+    expect(JSON.stringify(parseAgentEventForHost(event))).not.toContain('PRIVATE_PASSWORD')
+    expect(() =>
+      parseAgentEventForHost({
+        ...event,
+        identity: { ...event.identity, cdpEndpoint: 'PRIVATE_CDP_CANARY' }
+      })
+    ).toThrow(/unexpected field/)
+    expect(() =>
+      parseAgentEventForHost({
+        ...event,
+        call: { ...event.call, tool: 'browser_snapshot' }
+      })
+    ).toThrow(/identity must match call\.tool/)
+  })
+
   it('strictly parses required Tool, narration, compaction, and Runtime error sequence fields', () => {
     const toolCall = {
       type: 'tool_call',
       runId: 'run-trace',
       traceSequence: 4,
+      identity: { type: 'builtin', toolName: 'read_file' },
       call: {
         id: callId,
         tool: 'read_file',
@@ -340,6 +551,15 @@ describe('durable presentation trace ordering contract', () => {
       }
     }
     expect(parseAgentEventForHost(toolCall)).toEqual(toolCall)
+    const missingIdentity = { ...toolCall } as Record<string, unknown>
+    delete missingIdentity.identity
+    expect(() => parseAgentEventForHost(missingIdentity)).toThrow(/identity/)
+    expect(() =>
+      parseAgentEventForHost({
+        ...toolCall,
+        identity: { type: 'builtin', toolName: 'different_tool' }
+      })
+    ).toThrow(/identity must match call\.tool/)
     expect(
       parseAgentEventForHost({
         type: 'message_stream_committed',

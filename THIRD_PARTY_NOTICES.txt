@@ -474,6 +474,21 @@ stated below, except where another license is expressly identified:
     Source: https://github.com/xtermjs/xterm.js
     Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 
+  @playwright/mcp (0.0.79)
+    Source: https://github.com/microsoft/playwright-mcp
+    License: Apache-2.0 (license text reproduced earlier in this file)
+    Copyright (c) Microsoft Corporation
+
+  playwright and playwright-core (1.63.0-alpha-2026-08-05)
+    Source: https://github.com/microsoft/playwright
+    License: Apache-2.0 (license text reproduced earlier in this file)
+    Copyright (c) Microsoft Corporation
+    Includes code derived from Puppeteer, also available under Apache-2.0.
+
+  @modelcontextprotocol/sdk (1.29.0)
+    Source: https://github.com/modelcontextprotocol/typescript-sdk
+    Copyright (c) 2024 Anthropic, PBC
+
   React and React DOM (19.2.7)
     Source: https://github.com/facebook/react
     Copyright (c) Meta Platforms, Inc. and affiliates.

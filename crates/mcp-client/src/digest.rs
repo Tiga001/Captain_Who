@@ -101,6 +101,7 @@ pub fn config_digest(config: &McpServerConfig) -> Result<McpConfigDigest, McpErr
                     .then_with(|| binding_rank(left).cmp(&binding_rank(right)))
             });
         }
+        McpTransportConfig::HostBridge(bridge) => bridge.validate()?,
     }
     let value = serde_json::to_value(normalized)
         .map_err(|_| McpError::config("MCP configuration could not be normalized"))?;
@@ -122,6 +123,17 @@ pub(crate) fn schema_digest(
         SCHEMA_DIGEST_DOMAIN,
         &value,
     )?))
+}
+
+/// Computes the stable MCP Catalog schema identity used for typed invocation revalidation.
+///
+/// Hosts with a reviewed manifest can use this without reproducing the Catalog's domain separator
+/// or canonical-JSON rules. The returned digest is an identity only; no schema content is logged.
+pub fn mcp_schema_digest(
+    input_schema: &Value,
+    output_schema: Option<&Value>,
+) -> Result<McpSchemaDigest, McpError> {
+    schema_digest(input_schema, output_schema)
 }
 
 pub(crate) fn catalog_digest(value: &Value) -> Result<McpCatalogDigest, McpError> {

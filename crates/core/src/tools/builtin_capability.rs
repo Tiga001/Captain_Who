@@ -434,17 +434,38 @@ fn builtin_capability_private_call_projection(call: &AgentToolCall) -> AgentTool
 }
 
 fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentToolResult {
+    let outcome_unknown = result
+        .result
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|details| {
+            details.get("errorCode").and_then(Value::as_str) == Some("mcp.tool_outcome_unknown")
+                || details.get("outcome").and_then(Value::as_str) == Some("outcome_unknown")
+                || details.get("code").and_then(Value::as_str) == Some("outcomeUnknown")
+        });
+    let status = if outcome_unknown {
+        "outcome_unknown"
+    } else if result.ok {
+        "completed"
+    } else {
+        "failed"
+    };
+    let mut safe_result = json!({
+        "schemaVersion": 1,
+        "type": "builtin_capability_tool",
+        "status": status,
+        "contentOmitted": true,
+    });
+    if outcome_unknown {
+        safe_result["errorCode"] = json!("mcp.tool_outcome_unknown");
+        safe_result["retryable"] = json!(false);
+    }
     AgentToolResult {
         exact_archive_file: None,
         call_id: result.call_id.clone(),
         tool: result.tool.clone(),
         ok: result.ok,
-        result: Some(json!({
-            "schemaVersion": 1,
-            "type": "builtin_capability_tool",
-            "status": if result.ok { "completed" } else { "failed" },
-            "contentOmitted": true,
-        })),
+        result: Some(safe_result),
         error: result.error.as_ref().map(|_| {
             "The built-in capability tool failed; private diagnostics were omitted.".to_string()
         }),
@@ -827,6 +848,27 @@ mod tests {
             assert!(!serialized.contains(secret));
             assert_eq!(projected.result.unwrap()["contentOmitted"], true);
         }
+
+        let outcome_unknown = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: false,
+            result: Some(json!({
+                "type": "mcp_tool",
+                "code": "outcomeUnknown",
+                "errorCode": "mcp.tool_outcome_unknown",
+                "dispatchCertainty": "possibly_dispatched",
+                "privateDiagnostic": secret,
+            })),
+            error: Some(secret.to_string()),
+        };
+        let projected = tool.event_projection(&outcome_unknown);
+        let safe = projected.result.unwrap();
+        assert_eq!(safe["status"], "outcome_unknown");
+        assert_eq!(safe["errorCode"], "mcp.tool_outcome_unknown");
+        assert_eq!(safe["retryable"], false);
+        assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
 
         let oversized_arguments = json!({"payload": "x".repeat(BUILTIN_TOOL_ARGUMENT_MAX_BYTES)});
         let oversized_error = match tool.execute_async(&context(), oversized_arguments).await {

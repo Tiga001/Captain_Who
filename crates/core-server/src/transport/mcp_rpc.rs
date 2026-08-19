@@ -77,7 +77,7 @@ pub(crate) async fn handle_mcp_management_request(
         }
         MCP_BUILTIN_CAPABILITY_SET_ALLOWED_METHOD => {
             let input = input!(McpBuiltinCapabilitySetAllowedInput);
-            finish(id, service.set_builtin_capability_allowed(input))
+            finish(id, service.set_builtin_capability_allowed(input).await)
         }
         MCP_SERVER_LIST_METHOD => {
             let input = input!(McpServerListInput);

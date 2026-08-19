@@ -475,7 +475,12 @@ impl AgentService {
     /// Legacy renderer approval list. Child approvals are intentionally absent: they are exposed
     /// only through `list_root_projected_approvals`, which carries authenticated source identity.
     pub fn list_user_pending_actions(&self) -> Vec<PendingAgentActionSnapshot> {
-        self.list_pending_actions()
+        let mut snapshots = self.list_pending_actions();
+        if let Some(coordinator) = self.browser_risk_coordinator.as_ref() {
+            snapshots.extend(coordinator.list_pending());
+            snapshots.sort_by_key(|snapshot| snapshot.created_at);
+        }
+        snapshots
             .into_iter()
             .filter(|snapshot| {
                 let Some(conversation_id) = snapshot.conversation_id.as_deref() else {
@@ -557,6 +562,17 @@ impl AgentService {
         action_id: &str,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        if let Some(coordinator) = self.browser_risk_coordinator.as_ref() {
+            if let Some(conversation_id) = coordinator.pending_conversation_id(run_id, action_id) {
+                self.collaboration_authorizer
+                    .authorize_user_conversation_write(&conversation_id)
+                    .map_err(|error| error.to_string())?;
+                return coordinator.approve(run_id, action_id)?.ok_or_else(|| {
+                    "Browser risk approval changed while the decision was being committed."
+                        .to_string()
+                });
+            }
+        }
         self.authorize_user_pending_action(run_id, action_id)?;
         self.queue_action_continuation(
             run_id,
@@ -574,6 +590,19 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        if let Some(coordinator) = self.browser_risk_coordinator.as_ref() {
+            if let Some(conversation_id) = coordinator.pending_conversation_id(run_id, action_id) {
+                self.collaboration_authorizer
+                    .authorize_user_conversation_write(&conversation_id)
+                    .map_err(|error| error.to_string())?;
+                return coordinator
+                    .reject(run_id, action_id, message)?
+                    .ok_or_else(|| {
+                        "Browser risk approval changed while rejection was being committed."
+                            .to_string()
+                    });
+            }
+        }
         self.authorize_user_pending_action(run_id, action_id)?;
         self.queue_action_continuation(
             run_id,
@@ -585,6 +614,17 @@ impl AgentService {
     }
 
     pub fn cancel_action(&self, run_id: &str, action_id: &str) -> Result<bool, String> {
+        if let Some(coordinator) = self.browser_risk_coordinator.as_ref() {
+            if let Some(conversation_id) = coordinator.pending_conversation_id(run_id, action_id) {
+                self.collaboration_authorizer
+                    .authorize_user_conversation_write(&conversation_id)
+                    .map_err(|error| error.to_string())?;
+                return coordinator.cancel(run_id, action_id)?.ok_or_else(|| {
+                    "Browser risk approval changed while cancellation was being committed."
+                        .to_string()
+                });
+            }
+        }
         self.authorize_user_pending_action(run_id, action_id)?;
         self.cancel_action_internal(run_id, action_id)
     }

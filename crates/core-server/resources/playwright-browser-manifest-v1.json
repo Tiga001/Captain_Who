@@ -1,0 +1,342 @@
+{
+  "schemaVersion": 1,
+  "packageName": "@playwright/mcp",
+  "packageVersion": "0.0.79",
+  "managedMcpId": "builtin.browser_automation.mcp",
+  "capabilityId": "browser_automation",
+  "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v1",
+  "tools": [
+    {
+      "rawName": "browser_navigate",
+      "modelName": "browser_navigate",
+      "description": "Navigate the managed browser to a URL.",
+      "safety": "destructive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The URL to navigate to"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["url", "call_reason"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false
+      },
+      "schemaDigest": "sha256:f0fbe991a36f3f17be52863a9d4b139389bc57303d6f32daec71964707ffb0ef"
+    },
+    {
+      "rawName": "browser_snapshot",
+      "modelName": "browser_snapshot",
+      "description": "Read an accessibility snapshot of the current page.",
+      "safety": "read_only",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "description": "Exact target element reference from the page snapshot, or a unique element selector",
+            "type": "string"
+          },
+          "depth": {
+            "description": "Limit the depth of the snapshot tree",
+            "type": "number"
+          },
+          "boxes": {
+            "description": "Include each element's bounding box as [box=x,y,width,height] in the snapshot. Coordinates are viewport-relative, in CSS pixels (Element.getBoundingClientRect)",
+            "type": "boolean"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "required": ["call_reason"]
+      },
+      "schemaDigest": "sha256:f198ed3151866d8fb169e5f36cb2ba05993e008370102525121642b3fcf036ae"
+    },
+    {
+      "rawName": "browser_find",
+      "modelName": "browser_find",
+      "description": "Find text or a regular expression in the current page snapshot.",
+      "safety": "read_only",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "description": "Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.",
+            "type": "string"
+          },
+          "regex": {
+            "description": "Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. \"/error/i\" for case-insensitive. Provide either text or regex, not both.",
+            "type": "string"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "required": ["call_reason"]
+      },
+      "schemaDigest": "sha256:290fd62a5c045fc3964e8cecb940194387e59423e62893beb74c4447c216f048"
+    },
+    {
+      "rawName": "browser_click",
+      "modelName": "browser_click",
+      "description": "Click an element in the managed browser.",
+      "safety": "destructive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "element": {
+            "description": "Human-readable element description used to obtain permission to interact with the element",
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "description": "Exact target element reference from the page snapshot, or a unique element selector"
+          },
+          "doubleClick": {
+            "description": "Whether to perform a double click instead of a single click",
+            "type": "boolean"
+          },
+          "button": {
+            "description": "Button to click, defaults to left",
+            "type": "string",
+            "enum": ["left", "right", "middle"]
+          },
+          "modifiers": {
+            "description": "Modifier keys to press",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["Alt", "Control", "ControlOrMeta", "Meta", "Shift"]
+            }
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["target", "call_reason"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false
+      },
+      "schemaDigest": "sha256:70609aaa1839b9cc8736e707745331bfd51189691f7fbd0b20f9484a6c8045b7"
+    },
+    {
+      "rawName": "browser_type",
+      "modelName": "browser_type",
+      "description": "Type text into an editable element.",
+      "safety": "destructive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "element": {
+            "description": "Human-readable element description used to obtain permission to interact with the element",
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "description": "Exact target element reference from the page snapshot, or a unique element selector"
+          },
+          "text": {
+            "type": "string",
+            "description": "Text to type into the element"
+          },
+          "submit": {
+            "description": "Whether to submit entered text (press Enter after)",
+            "type": "boolean"
+          },
+          "slowly": {
+            "description": "Whether to type one character at a time. Useful for triggering key handlers in the page. By default entire text is filled in at once.",
+            "type": "boolean"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["target", "text", "call_reason"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false
+      },
+      "schemaDigest": "sha256:fd79cfacb8610fc7736e58aeb2fab7de0b234953904f128e05ccda1e9b74dee3"
+    },
+    {
+      "rawName": "browser_fill_form",
+      "modelName": "browser_fill_form",
+      "description": "Fill multiple form fields in the managed browser.",
+      "safety": "destructive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "element": {
+                  "description": "Human-readable element description used to obtain permission to interact with the element",
+                  "type": "string"
+                },
+                "target": {
+                  "type": "string",
+                  "description": "Exact target element reference from the page snapshot, or a unique element selector"
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Human-readable field name"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": ["textbox", "checkbox", "radio", "combobox", "slider"],
+                  "description": "Type of the field"
+                },
+                "value": {
+                  "type": "string",
+                  "description": "Value to fill in the field. If the field is a checkbox, the value should be `true` or `false`. If the field is a combobox, the value should be the text of the option."
+                }
+              },
+              "required": ["target", "name", "type", "value"],
+              "additionalProperties": false
+            },
+            "description": "Fields to fill in"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["fields", "call_reason"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false
+      },
+      "schemaDigest": "sha256:75c3957abff1eea6440b13868039e15fef0973a62e0a8be66c531c78eb79cd1e"
+    },
+    {
+      "rawName": "browser_press_key",
+      "modelName": "browser_press_key",
+      "description": "Press a keyboard key in the managed browser.",
+      "safety": "destructive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Name of the key to press or a character to generate, such as `ArrowLeft` or `a`"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["key", "call_reason"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false
+      },
+      "schemaDigest": "sha256:234319d1c84ba10abb5850f87fc6bbfcf62f300db84190dfe3ad237d41a43426"
+    },
+    {
+      "rawName": "browser_tabs",
+      "modelName": "browser_tabs",
+      "description": "List pages in the managed browser surface.",
+      "safety": "read_only",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["list"],
+            "description": "Only the reviewed list operation is supported"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": ["action", "call_reason"],
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false
+      },
+      "schemaDigest": "sha256:51c65e88eee32351e63647c85f0041a7631e3ea5b47ee8f1f1b5ad54ed33538e"
+    },
+    {
+      "rawName": "browser_wait_for",
+      "modelName": "browser_wait_for",
+      "description": "Wait for text, disappearance, or a bounded duration.",
+      "safety": "read_only",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "description": "The time to wait in seconds",
+            "type": "number"
+          },
+          "text": {
+            "description": "The text to wait for",
+            "type": "string"
+          },
+          "textGone": {
+            "description": "The text to wait for to disappear",
+            "type": "string"
+          },
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "required": ["call_reason"]
+      },
+      "schemaDigest": "sha256:78beb4ea46ecd064ad1aecc0078dea0fa469e3e8a6715992c45e3700d1b22345"
+    },
+    {
+      "rawName": "browser_close",
+      "modelName": "browser_close",
+      "description": "Close the managed browser page.",
+      "safety": "destructive",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "call_reason": {
+            "type": "string",
+            "description": "Brief reason for using this browser tool.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "required": ["call_reason"]
+      },
+      "schemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e"
+    }
+  ]
+}

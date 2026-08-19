@@ -117,6 +117,7 @@ async fn disabling_builtin_capability_revokes_the_live_task_grant() {
             allowed: true,
             expected_policy_revision: 0,
         })
+        .await
         .unwrap();
     assert!(enabled.capability.user_allowed);
 
@@ -157,6 +158,7 @@ async fn disabling_builtin_capability_revokes_the_live_task_grant() {
             allowed: false,
             expected_policy_revision: enabled.capability.policy_revision,
         })
+        .await
         .unwrap();
     assert!(!disabled.capability.user_allowed);
     assert!(harness

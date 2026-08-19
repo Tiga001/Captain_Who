@@ -459,9 +459,10 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
   const runCommandCallIds = new Set(
     run.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
   )
-  // Built-in capability activation approvals are Host-owned, just like MCP approvals. Their
-  // synthetic Tool calls exist only to anchor the live approval UI and must not survive a
-  // Renderer reload independently of the authoritative pending-action store.
+  // Protected capability/risk approvals are Host-owned, just like MCP approvals. Synthetic
+  // activation calls exist only to anchor the live approval UI and must not survive a Renderer
+  // reload independently of the authoritative pending-action store. Browser-risk approvals never
+  // own a second Tool call; the original browser call remains the durable activity anchor.
   const builtinCapabilityCallIds = new Set(
     run.approvals.flatMap((action) =>
       action.type === 'builtin_capability_activation' ? [action.approval.callId] : []
@@ -479,8 +480,11 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
         action
       ): action is Exclude<
         AgentProposedAction,
-        { type: 'mcp_tool_call' | 'builtin_capability_activation' }
-      > => action.type !== 'mcp_tool_call' && action.type !== 'builtin_capability_activation'
+        { type: 'mcp_tool_call' | 'builtin_capability_activation' | 'browser_risk_approval' }
+      > =>
+        action.type !== 'mcp_tool_call' &&
+        action.type !== 'builtin_capability_activation' &&
+        action.type !== 'browser_risk_approval'
     ),
     fileDrafts: run.fileDrafts ?? [],
     mcpInvocations: run.mcpInvocations ?? [],

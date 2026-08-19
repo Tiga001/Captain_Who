@@ -33,6 +33,7 @@ function reduceReadImageResult(result: AgentToolResult) {
     type: 'tool_call',
     runId: 'run-1',
     traceSequence: 0,
+    identity: { type: 'builtin', toolName: 'read_image' },
     call
   })
   return applyAgentEventToChatMessage(called, {

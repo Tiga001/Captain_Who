@@ -139,6 +139,9 @@ fn agent_events_match_the_cross_language_golden_contract() {
     let tool_call = AgentEvent::ToolCall {
         run_id: "run-contract-v1".to_string(),
         trace_sequence: 4,
+        identity: AgentToolIdentity::Builtin {
+            tool_name: "read_file".to_string(),
+        },
         call: AgentToolCall {
             id: "call-contract-v1".to_string(),
             tool: "read_file".to_string(),

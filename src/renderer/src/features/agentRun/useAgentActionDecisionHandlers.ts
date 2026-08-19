@@ -144,7 +144,11 @@ function logAgentActionDecisionError(
   action: AgentProposedAction,
   error: unknown
 ): void {
-  if (action.type === 'mcp_tool_call' || action.type === 'builtin_capability_activation') {
+  if (
+    action.type === 'mcp_tool_call' ||
+    action.type === 'builtin_capability_activation' ||
+    action.type === 'browser_risk_approval'
+  ) {
     // Protected Host actions may carry internal error details. Keep the entire
     // Error/cause/stack out of Renderer logs; dedicated approval UIs receive only safe views.
     console.error(`Failed to ${operation} protected Agent action`)

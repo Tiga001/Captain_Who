@@ -1,6 +1,7 @@
 mod agent_collaboration;
 mod git;
 mod image_generation;
+mod managed_playwright_bridge;
 mod mcp_management;
 mod methods;
 mod office;
@@ -14,6 +15,7 @@ mod storage;
 pub use agent_collaboration::*;
 pub use git::*;
 pub use image_generation::*;
+pub use managed_playwright_bridge::*;
 pub use mcp_management::*;
 pub use methods::*;
 pub use office::*;

@@ -74,6 +74,69 @@ const round5Scenario = JSON.parse(
 }
 
 describe('agent collaboration protocol', () => {
+  it('preserves the exact browser Tool call identity for projected risk approvals', () => {
+    const callId = `tc1_${'a'.repeat(43)}`
+    const actionId = '11111111-1111-4111-8111-111111111111'
+    const action = {
+      type: 'browser_risk_approval',
+      approval: {
+        schemaVersion: 1,
+        actionId,
+        riskApprovalId: '22222222-2222-4222-8222-222222222222',
+        runId: 'run-browser-risk',
+        callId,
+        triggerToolName: 'browser_navigate',
+        capabilityId: 'browser_automation',
+        capabilityActivationId: '33333333-3333-4333-8333-333333333333',
+        displayName: 'Browser automation',
+        reason: 'Open the local fixture',
+        destination: {
+          normalizedUrl: 'http://127.0.0.1:3000/fixture',
+          origin: 'http://127.0.0.1:3000',
+          scheme: 'http',
+          asciiHost: '127.0.0.1',
+          effectivePort: 3000,
+          addressClass: 'loopback'
+        },
+        trigger: 'tool_argument',
+        riskKinds: ['insecure_http', 'loopback', 'non_standard_port'],
+        manifestDigest: `sha256:${'b'.repeat(64)}`,
+        policyRevision: 1,
+        createdAt: 1_753_843_200,
+        expiresAt: 1_753_844_100,
+        approvalStatus: 'required'
+      }
+    }
+    const projection = {
+      schemaVersion: 1,
+      approvalId: 'approval-browser-risk',
+      rootAgentId: 'agent-root',
+      rootConversationId: 'conversation-root',
+      sourceAgentId: 'agent-child',
+      sourceTaskPath: '/root/browser',
+      sourceConversationId: 'conversation-child',
+      runId: 'run-browser-risk',
+      actionId,
+      actionType: 'browser_risk_approval',
+      toolName: 'browser_navigate',
+      action,
+      status: 'pending',
+      createdAt: 1_753_843_200_000,
+      updatedAt: 1_753_843_200_000
+    }
+
+    expect(
+      parseCollaborationApprovalList({ schemaVersion: 1, approvals: [projection] }).approvals[0]
+        ?.action
+    ).toEqual(action)
+    expect(() =>
+      parseCollaborationApprovalList({
+        schemaVersion: 1,
+        approvals: [{ ...projection, toolName: 'browser_click' }]
+      })
+    ).toThrow()
+  })
+
   it('strictly parses the shared Round 5 Runtime-to-AppShell scenario', () => {
     const running = parseAgentTreeSnapshot(round5Scenario.runningTree)
     const settled = parseAgentTreeSnapshot(round5Scenario.settledTree)
@@ -364,6 +427,7 @@ describe('agent collaboration protocol', () => {
           type: 'tool_call',
           runId: 'run-child',
           traceSequence: 4,
+          identity: { type: 'builtin', toolName: 'read_file' },
           call: {
             id: 'call-1',
             tool: 'read_file',
@@ -374,6 +438,24 @@ describe('agent collaboration protocol', () => {
         }
       }).event
     ).toMatchObject({ type: 'tool_call', traceSequence: 4 })
+    expect(() =>
+      parseAgentObserverEventEnvelope({
+        ...envelope,
+        event: {
+          type: 'tool_call',
+          runId: 'run-child',
+          traceSequence: 4,
+          identity: { type: 'builtin', toolName: 'different_tool' },
+          call: {
+            id: 'call-1',
+            tool: 'read_file',
+            args: {},
+            approvalStatus: 'approved',
+            reason: null
+          }
+        }
+      })
+    ).toThrow(/identity/)
     expect(
       parseAgentObserverEventEnvelope({
         ...envelope,

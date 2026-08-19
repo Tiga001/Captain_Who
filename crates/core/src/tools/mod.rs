@@ -747,6 +747,9 @@ impl ToolRegistry {
             }
             AgentProposedAction::ToolCall { call } => call.tool.as_str(),
             AgentProposedAction::BuiltinCapabilityActivation { .. } => "activate_capability",
+            AgentProposedAction::BrowserRiskApproval { approval } => {
+                approval.trigger_tool_name.as_str()
+            }
             AgentProposedAction::Diff { .. } => "apply_patch",
             AgentProposedAction::FileWrite { .. } => "write_file",
             AgentProposedAction::Command { .. } => "run_command",

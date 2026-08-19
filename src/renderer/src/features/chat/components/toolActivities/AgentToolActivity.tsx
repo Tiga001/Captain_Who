@@ -1,4 +1,9 @@
-import type { AgentDiffProposal, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import type {
+  AgentDiffProposal,
+  AgentToolCall,
+  AgentToolIdentity,
+  AgentToolResult
+} from '@mycopilot/protocol'
 import type { ReactElement } from 'react'
 import type {
   ChatMcpToolInvocationView,
@@ -23,6 +28,7 @@ import { ImageGenerationToolActivity } from './ImageGenerationToolActivity'
 import { SkillScriptToolActivity } from './SkillToolActivity'
 import { SkillInstallationToolActivity } from './SkillInstallationToolActivity'
 import { McpToolActivity } from './McpToolActivity'
+import { BuiltinCapabilityToolActivity } from './BuiltinCapabilityToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
@@ -40,6 +46,7 @@ interface AgentToolActivityProps {
   run: ChatAgentRunView
   settledStatus?: SettledToolStatus
   showImageGenerationPreview: boolean
+  toolIdentity?: AgentToolIdentity
 }
 
 export function AgentToolActivity({
@@ -56,8 +63,20 @@ export function AgentToolActivity({
   result,
   run,
   settledStatus,
-  showImageGenerationPreview
+  showImageGenerationPreview,
+  toolIdentity
 }: AgentToolActivityProps): ReactElement {
+  if (toolIdentity?.type === 'builtin_capability') {
+    return (
+      <BuiltinCapabilityToolActivity
+        cancelled={cancelled && !result}
+        identity={toolIdentity}
+        result={result}
+        settledStatus={settledStatus}
+      />
+    )
+  }
+
   if (mcpInvocation) {
     return <McpToolActivity invocation={mcpInvocation} />
   }

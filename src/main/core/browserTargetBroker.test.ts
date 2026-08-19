@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { runInNewContext } from 'node:vm'
 import type { Debugger, Session, WebContents } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
 import { BrowserTargetBroker, BrowserTargetBrokerError } from '../browser/BrowserTargetBroker'
@@ -11,6 +12,8 @@ const OTHER_SESSION = {} as Session
 class FakeDebugger extends EventEmitter {
   readonly commands: Array<{ method: string; params?: unknown; sessionId?: string }> = []
   private attached = false
+  private runtimeEvaluateGate?: Promise<void>
+  private runtimeEvaluateValue = true
   private targetInfoGate?: Promise<void>
 
   attach = vi.fn(() => {
@@ -24,20 +27,26 @@ class FakeDebugger extends EventEmitter {
 
   isAttached = vi.fn(() => this.attached)
 
-  sendCommand = vi.fn(async (method: string, params?: unknown, sessionId?: string) => {
-    this.commands.push({ method, params, sessionId })
-    if (method === 'Target.getTargetInfo') await this.targetInfoGate
-    if (method === 'Browser.getVersion') {
-      return {
-        jsVersion: '1',
-        product: 'Chrome/142.0.0.0',
-        protocolVersion: '1.3',
-        revision: 'fixture',
-        userAgent: 'fixture'
+  sendCommand = vi.fn(
+    async (method: string, params?: unknown, sessionId?: string): Promise<unknown> => {
+      this.commands.push({ method, params, sessionId })
+      if (method === 'Target.getTargetInfo') await this.targetInfoGate
+      if (method === 'Browser.getVersion') {
+        return {
+          jsVersion: '1',
+          product: 'Chrome/142.0.0.0',
+          protocolVersion: '1.3',
+          revision: 'fixture',
+          userAgent: 'fixture'
+        }
       }
+      if (method === 'Runtime.evaluate') {
+        await this.runtimeEvaluateGate
+        return { result: { type: 'boolean', value: this.runtimeEvaluateValue } }
+      }
+      return {}
     }
-    return {}
-  })
+  )
 
   holdTargetInfo(): () => void {
     let resume!: () => void
@@ -45,6 +54,18 @@ class FakeDebugger extends EventEmitter {
       resume = resolve
     })
     return resume
+  }
+
+  holdRuntimeEvaluate(): () => void {
+    let resume!: () => void
+    this.runtimeEvaluateGate = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    return resume
+  }
+
+  setRuntimeEvaluateValue(value: boolean): void {
+    this.runtimeEvaluateValue = value
   }
 }
 
@@ -131,6 +152,20 @@ function createRegisteredGuest(broker: BrowserTargetBroker, id = 2, surfaceId = 
 
 function createBroker(): BrowserTargetBroker {
   return new BrowserTargetBroker(PARTITION, EXPECTED_SESSION)
+}
+
+async function createConnectedTransportHarness() {
+  const broker = createBroker()
+  const registered = createRegisteredGuest(broker)
+  const transport = await broker.connect(registered.surfaceId)
+  const harness = new TransportHarness(transport)
+  await harness.send('Target.setAutoAttach', {
+    params: { autoAttach: true, flatten: true, waitForDebuggerOnStart: true }
+  })
+  const attached = harness.events.find((event) => event.method === 'Target.attachedToTarget')
+  const params = attached?.params as Record<string, unknown> | undefined
+  if (typeof params?.sessionId !== 'string') throw new Error('synthetic session missing')
+  return { broker, harness, sessionId: params.sessionId, transport, ...registered }
 }
 
 describe('BrowserTargetBroker', () => {
@@ -256,6 +291,193 @@ describe('BrowserTargetBroker', () => {
       sessionId: undefined
     })
     expect((second.guest.debugger as unknown as FakeDebugger).commands).toEqual([])
+  })
+
+  it('safely adapts bounded Input.insertText for the exact guest selection', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const text = `safe'); globalThis.__mcp_injected = true; //\u2028next`
+    const response = await harness.send('Input.insertText', {
+      params: { text },
+      sessionId
+    })
+
+    expect(response.result).toEqual({})
+    const evaluate = (guest.debugger as unknown as FakeDebugger).commands.find(
+      (command) => command.method === 'Runtime.evaluate'
+    )
+    const expression = (evaluate?.params as { expression?: unknown } | undefined)?.expression
+    expect(typeof expression).toBe('string')
+    expect(evaluate?.sessionId).toBeUndefined()
+
+    const calls: unknown[][] = []
+    const fakeDocument = Object.assign(
+      Object.create({
+        execCommand(...arguments_: unknown[]) {
+          calls.push(arguments_)
+          return true
+        }
+      }),
+      { activeElement: {} }
+    )
+    const isolatedContext = { document: fakeDocument }
+    expect(runInNewContext(String(expression), isolatedContext)).toBe(true)
+    expect(calls).toEqual([['insertText', false, text]])
+    expect((isolatedContext as { __mcp_injected?: boolean }).__mcp_injected).toBeUndefined()
+    transport.close()
+  })
+
+  it('adapts only character dispatch for guest keyboard typing', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+
+    const response = await harness.send('Input.dispatchKeyEvent', {
+      params: { type: 'keyDown', key: 'h', text: 'h', unmodifiedText: 'h' },
+      sessionId
+    })
+
+    expect(response.result).toEqual({})
+    const commands = (guest.debugger as unknown as FakeDebugger).commands
+    expect(commands.filter((command) => command.method === 'Runtime.evaluate')).toHaveLength(1)
+    expect(commands.filter((command) => command.method === 'Input.dispatchKeyEvent')).toHaveLength(
+      0
+    )
+    transport.close()
+  })
+
+  it('rejects malformed, oversized, or unfocused Input.insertText without forwarding it', async () => {
+    const first = await createConnectedTransportHarness()
+    const malformed = await first.harness.send('Input.insertText', {
+      params: { text: 'hello', unexpected: true },
+      sessionId: first.sessionId
+    })
+    expect(malformed.error).toEqual(
+      expect.objectContaining({ message: 'Invalid text insertion request' })
+    )
+
+    const oversized = await first.harness.send('Input.insertText', {
+      params: { text: 'x'.repeat(64 * 1_024 + 1) },
+      sessionId: first.sessionId
+    })
+    expect(oversized.error).toEqual(
+      expect.objectContaining({ message: 'Invalid text insertion request' })
+    )
+    expect(
+      (first.guest.debugger as unknown as FakeDebugger).commands.filter(
+        (command) => command.method === 'Runtime.evaluate'
+      )
+    ).toHaveLength(0)
+    first.transport.close()
+
+    const second = await createConnectedTransportHarness()
+    const secondDebugger = second.guest.debugger as unknown as FakeDebugger
+    secondDebugger.setRuntimeEvaluateValue(false)
+    const noFocus = await second.harness.send('Input.insertText', {
+      params: { text: 'hello' },
+      sessionId: second.sessionId
+    })
+    expect(noFocus.error).toEqual(
+      expect.objectContaining({ message: 'Unable to insert text into managed target' })
+    )
+    second.transport.close()
+
+    const third = await createConnectedTransportHarness()
+    const thirdDebugger = third.guest.debugger as unknown as FakeDebugger
+    thirdDebugger.sendCommand.mockRejectedValueOnce(new Error('fixture evaluate failure'))
+    const exception = await third.harness.send('Input.insertText', {
+      params: { text: 'hello' },
+      sessionId: third.sessionId
+    })
+    expect(exception.error).toEqual(
+      expect.objectContaining({ message: 'Unable to insert text into managed target' })
+    )
+    third.transport.close()
+  })
+
+  it('closes an in-flight Input.insertText when the exact guest target disappears', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    const releaseEvaluate = fakeDebugger.holdRuntimeEvaluate()
+    const onclose = vi.fn()
+    transport.onclose = onclose
+
+    transport.send({ id: 99, method: 'Input.insertText', params: { text: 'hello' }, sessionId })
+    await vi.waitFor(() =>
+      expect(fakeDebugger.commands.some((command) => command.method === 'Runtime.evaluate')).toBe(
+        true
+      )
+    )
+    guest.destroy()
+    releaseEvaluate()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(onclose).toHaveBeenCalledWith('target_closed')
+    expect(harness.events.some((event) => event.id === 99)).toBe(false)
+  })
+
+  it('rejects oversized CDP command results before they enter Playwright', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    fakeDebugger.sendCommand.mockResolvedValueOnce({
+      nodes: Array.from({ length: 4_097 }, (_, index) => ({ nodeId: index }))
+    })
+
+    const response = await harness.send('Accessibility.getFullAXTree', { sessionId })
+
+    expect(response.error).toEqual(
+      expect.objectContaining({ message: 'CDP payload exceeds managed limits' })
+    )
+    expect(harness.events.some((event) => JSON.stringify(event).includes('nodeId'))).toBe(false)
+    transport.close()
+  })
+
+  it('closes the transport before forwarding oversized debugger event params', async () => {
+    const { guest, harness, transport } = await createConnectedTransportHarness()
+    const onclose = vi.fn()
+    transport.onclose = onclose
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+
+    fakeDebugger.emit(
+      'message',
+      {},
+      'Accessibility.nodesUpdated',
+      { nodes: Array.from({ length: 4_097 }, (_, index) => ({ nodeId: index })) },
+      ''
+    )
+
+    expect(onclose).toHaveBeenCalledWith('cdp_event_budget_exceeded')
+    expect(harness.events.some((event) => event.method === 'Accessibility.nodesUpdated')).toBe(
+      false
+    )
+  })
+
+  it('bounds the debugger notification queue and sustained event rate', async () => {
+    const queueHarness = await createConnectedTransportHarness()
+    const queueClose = vi.fn()
+    queueHarness.transport.onclose = queueClose
+    const queueDebugger = queueHarness.guest.debugger as unknown as FakeDebugger
+    let injectedReentrantStorm = false
+    queueHarness.transport.onmessage = (message) => {
+      const event = message as Record<string, unknown>
+      if (event.method !== 'Network.dataReceived' || injectedReentrantStorm) return
+      injectedReentrantStorm = true
+      for (let index = 0; index < 1_025; index += 1) {
+        queueDebugger.emit('message', {}, 'Network.dataReceived', { index }, '')
+      }
+    }
+    queueDebugger.emit('message', {}, 'Network.dataReceived', { index: -1 }, '')
+    expect(queueClose).toHaveBeenCalledWith('cdp_event_queue_exceeded')
+
+    const rateHarness = await createConnectedTransportHarness()
+    const rateClose = vi.fn()
+    rateHarness.transport.onclose = rateClose
+    const rateDebugger = rateHarness.guest.debugger as unknown as FakeDebugger
+    for (let batch = 0; batch < 5; batch += 1) {
+      for (let index = 0; index < 900; index += 1) {
+        rateDebugger.emit('message', {}, 'Network.dataReceived', { index }, '')
+      }
+      await new Promise((resolve) => setImmediate(resolve))
+      if (rateClose.mock.calls.length > 0) break
+    }
+    expect(rateClose).toHaveBeenCalledWith('cdp_event_rate_exceeded')
   })
 
   it('cancels an in-flight attachment when its surface is released', async () => {

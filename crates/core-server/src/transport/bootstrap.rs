@@ -8,8 +8,10 @@ use crate::application::mcp::approval_payload_store::{
     durable_mcp_payload_store_or_process_only, McpApprovalPayloadStore,
 };
 use crate::application::mcp::authorized_stdio_connector::AuthorizedMcpStdioConnector;
+use crate::application::mcp::browser_risk::BrowserRiskCoordinator;
 use crate::application::mcp::builtin_capability_policy::SqliteBuiltinCapabilityPolicyStore;
 use crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider;
+use crate::application::mcp::managed_playwright_bridge::ManagedPlaywrightMcpRuntime;
 use crate::application::mcp::management::McpManagementService;
 use crate::application::mcp::registry_event_sink::McpAgentRegistryEventSink;
 use crate::application::mcp::sqlite_envelope_repository::SqliteMcpApprovalEnvelopeRepository;
@@ -99,6 +101,8 @@ pub(crate) struct CoreServerBootstrap {
     pub(crate) mcp_registry: Arc<SqliteMcpRegistry>,
     pub(crate) mcp_builtin_capability_policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
     pub(crate) builtin_capability_runtime: BuiltinCapabilityRuntime,
+    pub(crate) builtin_capability_provider: Arc<HostBuiltinCapabilityProvider>,
+    pub(crate) browser_risk_coordinator: Arc<BrowserRiskCoordinator>,
     // Fields drop in declaration order. Keep this owner last so the database lock outlives every
     // service and SQLite connection above it. File-effect deletion barriers are process-local;
     // this OS lock makes one core-server the authoritative lifecycle owner for the exact DB.
@@ -124,13 +128,17 @@ impl CoreServerBootstrap {
                 io::Error::other("failed to initialize built-in MCP capability policy storage")
             })?,
         );
-        let builtin_capability_runtime =
-            HostBuiltinCapabilityProvider::runtime(Arc::clone(&mcp_builtin_capability_policies))
-                .map_err(|error| {
-                    io::Error::other(format!(
-                        "failed to initialize built-in MCP capability runtime: {error}"
-                    ))
-                })?;
+        let (builtin_capability_runtime, builtin_capability_provider) =
+            HostBuiltinCapabilityProvider::runtime_and_provider(Arc::clone(
+                &mcp_builtin_capability_policies,
+            ))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize built-in MCP capability runtime: {error}"
+                ))
+            })?;
+        let browser_risk_coordinator =
+            BrowserRiskCoordinator::new(builtin_capability_runtime.clone());
         let image_generation_configuration = Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
             image_generation_credential_store(&database_path, uses_development_credentials)?,
@@ -281,7 +289,8 @@ impl CoreServerBootstrap {
                 Arc::clone(&skill_installation_service),
                 Arc::clone(&skill_installation_workflow),
             )
-            .with_builtin_capabilities(builtin_capability_runtime.clone());
+            .with_builtin_capabilities(builtin_capability_runtime.clone())
+            .with_browser_risk_coordinator(Arc::clone(&browser_risk_coordinator));
         let skill_services = SkillServices {
             catalog: skills_service,
             installations: skill_installation_service,
@@ -299,6 +308,8 @@ impl CoreServerBootstrap {
             mcp_registry,
             mcp_builtin_capability_policies,
             builtin_capability_runtime,
+            builtin_capability_provider,
+            browser_risk_coordinator,
             _database_instance_lock: database_instance_lock,
         })
     }
@@ -339,12 +350,23 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         )
         .map_err(|_| io::Error::other("failed to initialize the MCP connection manager"))?,
     );
-    let mcp_management = Arc::new(McpManagementService::new(
-        Arc::clone(&mcp_registry),
-        Arc::clone(&mcp_manager),
-        Arc::clone(&bootstrap.mcp_builtin_capability_policies),
-        bootstrap.builtin_capability_runtime.clone(),
-    ));
+    let managed_playwright_runtime = ManagedPlaywrightMcpRuntime::new()
+        .map_err(|_| io::Error::other("failed to initialize managed Playwright MCP runtime"))?;
+    bootstrap
+        .builtin_capability_provider
+        .attach_managed_runtime(Arc::clone(&managed_playwright_runtime))
+        .map_err(|_| io::Error::other("failed to attach managed Playwright MCP runtime"))?;
+    let managed_playwright_bridge = managed_playwright_runtime.bridge();
+    let mcp_management = Arc::new(
+        McpManagementService::new(
+            Arc::clone(&mcp_registry),
+            Arc::clone(&mcp_manager),
+            Arc::clone(&bootstrap.mcp_builtin_capability_policies),
+            bootstrap.builtin_capability_runtime.clone(),
+        )
+        .with_managed_playwright_runtime(Arc::clone(&managed_playwright_runtime))
+        .with_browser_risk_coordinator(Arc::clone(&bootstrap.browser_risk_coordinator)),
+    );
     let mcp_payload_store = mcp_approval_payload_store(Arc::clone(&bootstrap.storage));
     let _ = mcp_payload_store.reconcile_expired(mycopilot_core::storage::now_ms());
     let mcp_bridge = Arc::new(
@@ -396,6 +418,9 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .latest_global_agent_collaboration_event_sequence()
         .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
+    managed_playwright_bridge
+        .attach_outbound(outbound_tx.clone())
+        .map_err(|_| io::Error::other("failed to attach managed Playwright Host bridge"))?;
     outbound_tx
         .send(collaboration_resync_notification())
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
@@ -433,6 +458,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         image_generation_configuration: &image_generation_configuration_dispatcher,
     };
     let mcp_management_tasks = Arc::new(McpManagementRequestTracker::new());
+    let browser_risk_tasks = Arc::new(McpManagementRequestTracker::new());
 
     let input_result = run_request_loop(
         BufReader::new(io::stdin()),
@@ -444,6 +470,13 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
                 DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
             )),
             mcp_management: Some(Arc::clone(&mcp_management)),
+            managed_playwright_bridge: Some(Arc::clone(&managed_playwright_bridge)),
+            managed_playwright_runtime: Some(Arc::clone(&managed_playwright_runtime)),
+            browser_risk_coordinator: Some(Arc::clone(&bootstrap.browser_risk_coordinator)),
+            browser_risk_admission: Arc::new(Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_BROWSER_RISK_REQUESTS,
+            )),
+            browser_risk_tasks: Arc::clone(&browser_risk_tasks),
             mcp_management_admission: Arc::new(Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_MCP_MANAGEMENT_REQUESTS,
             )),
@@ -459,6 +492,17 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         },
     )
     .await;
+
+    // `core.shutdown` settles the managed runtime inside the request loop while reverse bridge
+    // completions can still arrive from Main. EOF or a request-loop failure means that responder
+    // is no longer available, so close the bridge first and then perform the same idempotent,
+    // bounded runtime cleanup. In every exit path this happens before the outbound writer closes.
+    if !matches!(input_result.as_ref(), Ok(Some(_))) {
+        managed_playwright_bridge.close_now();
+    }
+    bootstrap.browser_risk_coordinator.cancel_all();
+    let browser_risk_requests_shutdown = browser_risk_tasks.shutdown(Duration::from_secs(1)).await;
+    managed_playwright_runtime.shutdown().await;
 
     mcp_management.begin_shutdown();
     mcp_changed_notifier.abort();
@@ -568,6 +612,17 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         eprintln!(
             "{} MCP management request task(s) did not join cleanly",
             mcp_management_requests_shutdown.task_failures
+        );
+    }
+    if browser_risk_requests_shutdown.forced {
+        eprintln!(
+            "browser risk authorization shutdown reached its deadline; remaining requests were aborted"
+        );
+    }
+    if browser_risk_requests_shutdown.task_failures > 0 {
+        eprintln!(
+            "{} browser risk authorization task(s) did not join cleanly",
+            browser_risk_requests_shutdown.task_failures
         );
     }
     match &mcp_action_invalidation {

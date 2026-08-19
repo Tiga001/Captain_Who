@@ -5,8 +5,10 @@
 //! invocations. No executable, transport, credential or raw MCP type crosses this boundary.
 
 use crate::protocol::{
-    AgentApprovalStatus, AgentBuiltinCapabilityActivationApproval, AgentError, AgentResult,
-    AgentToolDefinition, AgentToolResult,
+    AgentApprovalStatus, AgentBrowserRiskApproval, AgentBuiltinCapabilityActivationApproval,
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, BrowserDestinationIdentity,
+    BrowserRiskKind, BrowserRiskTrigger, BROWSER_RISK_APPROVAL_SCHEMA_VERSION,
+    BROWSER_RISK_APPROVAL_TTL_SECONDS,
 };
 use crate::AgentCancellationToken;
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,8 @@ const MANIFEST_VERSION_MAX_BYTES: usize = 128;
 const MANIFEST_TOOL_MAX_COUNT: usize = 256;
 const TOOL_SCHEMA_MAX_BYTES: usize = 256 * 1024;
 const MANIFEST_SCHEMA_TOTAL_MAX_BYTES: usize = 4 * 1024 * 1024;
+const BROWSER_DESTINATION_MAX_BYTES: usize = 8 * 1024;
+const BROWSER_RISK_MAX_COUNT: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -344,6 +348,145 @@ impl CapabilityGrant {
     }
 }
 
+/// Process-only task authorization for one exact normalized browser origin and risk identity.
+/// This grant is intentionally not serializable and must never enter a checkpoint or Renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRiskGrant {
+    pub grant_id: String,
+    pub run_id: String,
+    pub capability_id: BuiltinCapabilityId,
+    pub capability_activation_id: CapabilityActivationId,
+    pub manifest_digest: String,
+    pub policy_revision: u64,
+    pub destination: BrowserDestinationIdentity,
+    pub resolution_fingerprint: String,
+    pub target_fingerprint: String,
+    pub trigger: BrowserRiskTrigger,
+    pub trigger_tool_name: String,
+    pub risk_kinds: Vec<BrowserRiskKind>,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+impl BrowserRiskGrant {
+    pub fn is_live_for_request(
+        &self,
+        capability_grant: &CapabilityGrant,
+        request: &BrowserRiskAuthorizationRequest,
+        now: u64,
+    ) -> bool {
+        self.is_live_for_candidate(
+            capability_grant,
+            BrowserRiskGrantCandidate {
+                run_id: &request.run_id,
+                destination: &request.destination,
+                resolution_fingerprint: &request.resolution_fingerprint,
+                target_fingerprint: &request.target_fingerprint,
+                trigger: request.trigger,
+                trigger_tool_name: &request.trigger_tool_name,
+                risk_kinds: &request.risk_kinds,
+            },
+            now,
+        )
+    }
+
+    pub fn is_live_for_approval(
+        &self,
+        capability_grant: &CapabilityGrant,
+        approval: &AgentBrowserRiskApproval,
+        now: u64,
+    ) -> bool {
+        self.is_live_for_candidate(
+            capability_grant,
+            BrowserRiskGrantCandidate {
+                run_id: &approval.run_id,
+                destination: &approval.destination,
+                resolution_fingerprint: &self.resolution_fingerprint,
+                target_fingerprint: &self.target_fingerprint,
+                trigger: approval.trigger,
+                trigger_tool_name: &approval.trigger_tool_name,
+                risk_kinds: &approval.risk_kinds,
+            },
+            now,
+        )
+    }
+
+    fn is_live_for_candidate(
+        &self,
+        capability_grant: &CapabilityGrant,
+        candidate: BrowserRiskGrantCandidate<'_>,
+        now: u64,
+    ) -> bool {
+        self.run_id == candidate.run_id
+            && self.capability_id == capability_grant.capability_id
+            && self.capability_activation_id == capability_grant.activation_id
+            && self.manifest_digest == capability_grant.manifest_digest
+            && self.policy_revision == capability_grant.policy_revision
+            && self.destination.origin == candidate.destination.origin
+            && self.destination.scheme == candidate.destination.scheme
+            && self.destination.ascii_host == candidate.destination.ascii_host
+            && self.destination.effective_port == candidate.destination.effective_port
+            && self.destination.address_class == candidate.destination.address_class
+            && self.resolution_fingerprint == candidate.resolution_fingerprint
+            && (!requires_exact_browser_risk_scope(candidate.risk_kinds)
+                || (self.target_fingerprint == candidate.target_fingerprint
+                    && self.trigger == candidate.trigger
+                    && self.trigger_tool_name == candidate.trigger_tool_name))
+            && self.risk_kinds == candidate.risk_kinds
+            && self.expires_at > now
+    }
+}
+
+struct BrowserRiskGrantCandidate<'a> {
+    run_id: &'a str,
+    destination: &'a BrowserDestinationIdentity,
+    resolution_fingerprint: &'a str,
+    target_fingerprint: &'a str,
+    trigger: BrowserRiskTrigger,
+    trigger_tool_name: &'a str,
+    risk_kinds: &'a [BrowserRiskKind],
+}
+
+/// Credential-free, Host-classified request at a browser network boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRiskAuthorizationRequest {
+    pub run_id: String,
+    pub call_id: String,
+    pub trigger_tool_name: String,
+    pub capability_id: BuiltinCapabilityId,
+    pub capability_activation_id: CapabilityActivationId,
+    pub manifest_digest: String,
+    pub policy_revision: u64,
+    pub display_name: String,
+    pub reason: String,
+    pub destination: BrowserDestinationIdentity,
+    /// Host-only HMAC/digest of the resolver answer set; never serialized to Agent/Renderer.
+    pub resolution_fingerprint: String,
+    /// Host-only HMAC of the exact destination/action identity. Never serialized to Agent/UI.
+    pub target_fingerprint: String,
+    pub trigger: BrowserRiskTrigger,
+    pub risk_kinds: Vec<BrowserRiskKind>,
+}
+
+impl BrowserRiskAuthorizationRequest {
+    pub fn validate(&self) -> AgentResult<()> {
+        if self.run_id.trim().is_empty()
+            || self.call_id.trim().is_empty()
+            || !valid_browser_tool_name(&self.trigger_tool_name)
+            || self.display_name.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || self.reason.len() > REASON_MAX_BYTES
+            || !valid_sha256_digest(&self.manifest_digest)
+            || !valid_resolution_fingerprint(&self.resolution_fingerprint)
+            || !valid_resolution_fingerprint(&self.target_fingerprint)
+        {
+            return Err(AgentError::new("浏览器风险请求 identity 无效。"));
+        }
+        validate_browser_destination(&self.destination)?;
+        validate_browser_risk_kinds(&self.risk_kinds)
+    }
+}
+
 pub type BuiltinCapabilityFuture<'a, T> = Pin<Box<dyn Future<Output = AgentResult<T>> + Send + 'a>>;
 
 #[derive(Debug, Clone)]
@@ -400,6 +543,47 @@ pub trait BuiltinCapabilityProvider: Send + Sync {
     /// Dispatch must still revalidate live policy; this hook is defense-in-depth cleanup and
     /// prevents revoked task authority from occupying process memory until natural expiry.
     fn revoke_grants(&self, capability_id: &BuiltinCapabilityId) -> AgentResult<()>;
+    /// Retires every process-only authority owned by one terminal Agent run.
+    ///
+    /// Grants are deliberately not durable, and terminal run cleanup must not wait for their TTL.
+    /// The default keeps test/alternate Providers source-compatible while the Host implementation
+    /// performs authoritative cleanup.
+    fn revoke_run_grants(&self, _run_id: &str) -> AgentResult<()> {
+        Ok(())
+    }
+    fn browser_risk_grant(
+        &self,
+        _request: &BrowserRiskAuthorizationRequest,
+    ) -> AgentResult<Option<BrowserRiskGrant>> {
+        Ok(None)
+    }
+    fn prepare_browser_risk_approval(
+        &self,
+        request: &BrowserRiskAuthorizationRequest,
+    ) -> AgentResult<AgentBrowserRiskApproval> {
+        build_browser_risk_approval(request, unix_timestamp())
+    }
+    fn approve_browser_risk(
+        &self,
+        _approval: &AgentBrowserRiskApproval,
+    ) -> AgentResult<BrowserRiskGrant> {
+        Err(AgentError::new("当前 Host 未提供浏览器风险批准能力。"))
+    }
+    fn dismiss_browser_risk_approval(
+        &self,
+        _approval: &AgentBrowserRiskApproval,
+    ) -> AgentResult<()> {
+        Err(AgentError::new(
+            "当前 Host 未提供浏览器风险批准终态清理能力。",
+        ))
+    }
+    fn revoke_browser_risk_grants(
+        &self,
+        _run_id: Option<&str>,
+        _capability_id: &BuiltinCapabilityId,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
     fn invoke_authorized<'a>(
         &'a self,
         invocation: BuiltinCapabilityInvocation,
@@ -559,6 +743,135 @@ impl BuiltinCapabilityRuntime {
         self.provider.revoke_grants(capability_id)
     }
 
+    pub fn revoke_run_grants(&self, run_id: &str) -> AgentResult<()> {
+        if run_id.trim().is_empty() {
+            return Err(AgentError::new("撤销的内置能力 run identity 无效。"));
+        }
+        self.provider.revoke_run_grants(run_id)
+    }
+
+    pub fn live_browser_risk_grant(
+        &self,
+        request: &BrowserRiskAuthorizationRequest,
+    ) -> AgentResult<Option<BrowserRiskGrant>> {
+        request.validate()?;
+        let manifest = self
+            .manifest(&request.capability_id)
+            .ok_or_else(|| AgentError::new("浏览器风险请求的内置能力已不存在。"))?;
+        let policy = self.policy(&request.capability_id)?;
+        let capability_grant = self
+            .live_grant(&request.run_id, &request.capability_id)?
+            .ok_or_else(|| AgentError::new("当前任务没有有效的浏览器能力授权。"))?;
+        if request.capability_activation_id != capability_grant.activation_id
+            || request.manifest_digest != manifest.manifest_digest
+            || request.policy_revision != policy.revision
+            || request.display_name != manifest.descriptor.display_name
+            || !manifest
+                .tools
+                .iter()
+                .any(|tool| tool.tool_id == request.trigger_tool_name)
+        {
+            return Err(AgentError::new(
+                "浏览器风险请求与当前 capability grant 不一致。",
+            ));
+        }
+        let grant = self.provider.browser_risk_grant(request)?;
+        Ok(grant.filter(|grant| {
+            grant.is_live_for_request(&capability_grant, request, unix_timestamp())
+        }))
+    }
+
+    pub fn prepare_browser_risk_approval(
+        &self,
+        request: &BrowserRiskAuthorizationRequest,
+    ) -> AgentResult<AgentBrowserRiskApproval> {
+        // Run the same final live capability checks used by grant lookup before publishing an
+        // approval. The Provider stores any Host-only resolver binding process-locally.
+        if self.live_browser_risk_grant(request)?.is_some() {
+            return Err(AgentError::new(
+                "浏览器目标已由当前任务的精确 risk grant 授权。",
+            ));
+        }
+        let approval = self.provider.prepare_browser_risk_approval(request)?;
+        validate_browser_risk_approval_shape(&approval)?;
+        if approval.run_id != request.run_id
+            || approval.call_id != request.call_id
+            || approval.trigger_tool_name != request.trigger_tool_name
+            || approval.capability_id != request.capability_id.as_str()
+            || approval.capability_activation_id != request.capability_activation_id.as_str()
+            || approval.manifest_digest != request.manifest_digest
+            || approval.policy_revision != request.policy_revision
+            || approval.destination != request.destination
+            || approval.trigger != request.trigger
+            || approval.risk_kinds != request.risk_kinds
+        {
+            return Err(AgentError::new(
+                "Host 生成的浏览器风险批准与冻结请求不一致。",
+            ));
+        }
+        Ok(approval)
+    }
+
+    pub fn approve_browser_risk(
+        &self,
+        approval: &AgentBrowserRiskApproval,
+    ) -> AgentResult<BrowserRiskGrant> {
+        validate_browser_risk_approval_shape(approval)?;
+        let capability_id = BuiltinCapabilityId::parse(approval.capability_id.clone())?;
+        let activation_id =
+            CapabilityActivationId::parse(approval.capability_activation_id.clone())?;
+        let manifest = self
+            .manifest(&capability_id)
+            .ok_or_else(|| AgentError::new("批准的浏览器能力已不存在。"))?;
+        let policy = self.policy(&capability_id)?;
+        let capability_grant = self
+            .live_grant(&approval.run_id, &capability_id)?
+            .ok_or_else(|| AgentError::new("浏览器能力 grant 已失效。"))?;
+        let now = unix_timestamp();
+        if approval.approval_status != AgentApprovalStatus::Approved
+            || activation_id != capability_grant.activation_id
+            || approval.manifest_digest != manifest.manifest_digest
+            || approval.policy_revision != policy.revision
+            || approval.display_name != manifest.descriptor.display_name
+            || !manifest
+                .tools
+                .iter()
+                .any(|tool| tool.tool_id == approval.trigger_tool_name)
+            || approval.created_at > now
+            || approval.expires_at <= now
+        {
+            return Err(AgentError::new(
+                "浏览器风险批准在等待期间发生漂移；已安全失效。",
+            ));
+        }
+        let grant = self.provider.approve_browser_risk(approval)?;
+        if !grant.is_live_for_approval(&capability_grant, approval, now) {
+            return Err(AgentError::new("Host 返回了无效的浏览器风险 grant。"));
+        }
+        Ok(grant)
+    }
+
+    /// Atomically consumes a process-only risk approval without creating a grant.
+    pub fn dismiss_browser_risk_approval(
+        &self,
+        approval: &AgentBrowserRiskApproval,
+    ) -> AgentResult<()> {
+        validate_browser_risk_approval_shape(approval)?;
+        self.provider.dismiss_browser_risk_approval(approval)
+    }
+
+    pub fn revoke_browser_risk_grants(
+        &self,
+        run_id: Option<&str>,
+        capability_id: &BuiltinCapabilityId,
+    ) -> AgentResult<()> {
+        if self.manifest(capability_id).is_none() {
+            return Err(AgentError::new("撤销的内置能力未注册。"));
+        }
+        self.provider
+            .revoke_browser_risk_grants(run_id, capability_id)
+    }
+
     pub(crate) async fn invoke(
         &self,
         request: BuiltinCapabilityDispatchRequest,
@@ -596,6 +909,216 @@ impl BuiltinCapabilityRuntime {
             .invoke_authorized(invocation, grant, request.cancellation)
             .await
     }
+}
+
+pub fn build_browser_risk_approval(
+    request: &BrowserRiskAuthorizationRequest,
+    now: u64,
+) -> AgentResult<AgentBrowserRiskApproval> {
+    request.validate()?;
+    let expires_at = now
+        .checked_add(BROWSER_RISK_APPROVAL_TTL_SECONDS)
+        .ok_or_else(|| AgentError::new("浏览器风险批准时间溢出。"))?;
+    Ok(AgentBrowserRiskApproval {
+        schema_version: BROWSER_RISK_APPROVAL_SCHEMA_VERSION,
+        action_id: Uuid::new_v4().to_string(),
+        risk_approval_id: Uuid::new_v4().to_string(),
+        run_id: request.run_id.clone(),
+        call_id: request.call_id.clone(),
+        trigger_tool_name: request.trigger_tool_name.clone(),
+        capability_id: request.capability_id.as_str().to_string(),
+        capability_activation_id: request.capability_activation_id.as_str().to_string(),
+        display_name: request.display_name.clone(),
+        reason: request.reason.clone(),
+        destination: request.destination.clone(),
+        trigger: request.trigger,
+        risk_kinds: request.risk_kinds.clone(),
+        manifest_digest: request.manifest_digest.clone(),
+        policy_revision: request.policy_revision,
+        created_at: now,
+        expires_at,
+        approval_status: AgentApprovalStatus::Required,
+    })
+}
+
+pub fn browser_risk_rejected_result(
+    approval: &AgentBrowserRiskApproval,
+    user_feedback: Option<&str>,
+) -> AgentToolResult {
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: approval.call_id.clone(),
+        tool: "browser_risk_authorization".to_string(),
+        ok: true,
+        result: Some(json!({
+            "status": "rejected",
+            "destinationOrigin": approval.destination.origin,
+            "riskKinds": approval.risk_kinds,
+            "userFeedback": user_feedback,
+            "recovery": "userRefusedDoNotRetry",
+            "message": "The user rejected this browser destination. Do not repeat the same request unless the user changes direction."
+        })),
+        error: None,
+    }
+}
+
+pub fn validate_browser_risk_approval_shape(
+    approval: &AgentBrowserRiskApproval,
+) -> AgentResult<()> {
+    parse_v4_uuid(&approval.action_id, "浏览器风险 action")?;
+    parse_v4_uuid(&approval.risk_approval_id, "浏览器风险 approval")?;
+    if approval.schema_version != BROWSER_RISK_APPROVAL_SCHEMA_VERSION
+        || approval.run_id.trim().is_empty()
+        || approval.call_id.trim().is_empty()
+        || !valid_browser_tool_name(&approval.trigger_tool_name)
+        || approval.display_name.trim().is_empty()
+        || approval.reason.trim().is_empty()
+        || approval.reason.len() > REASON_MAX_BYTES
+        || approval.expires_at.checked_sub(approval.created_at)
+            != Some(BROWSER_RISK_APPROVAL_TTL_SECONDS)
+        || !valid_sha256_digest(&approval.manifest_digest)
+    {
+        return Err(AgentError::new("浏览器风险批准字段无效。"));
+    }
+    BuiltinCapabilityId::parse(approval.capability_id.clone())?;
+    CapabilityActivationId::parse(approval.capability_activation_id.clone())?;
+    validate_browser_destination(&approval.destination)?;
+    validate_browser_risk_kinds(&approval.risk_kinds)
+}
+
+fn validate_browser_destination(destination: &BrowserDestinationIdentity) -> AgentResult<()> {
+    let value_size = destination
+        .normalized_url
+        .len()
+        .saturating_add(destination.origin.len())
+        .saturating_add(destination.scheme.len())
+        .saturating_add(destination.ascii_host.len());
+    if value_size > BROWSER_DESTINATION_MAX_BYTES
+        || destination.normalized_url.len() > 2_048
+        || destination.origin.len() > 512
+        || !matches!(destination.scheme.as_str(), "http" | "https")
+        || !valid_ascii_url_host(&destination.ascii_host)
+        || destination.effective_port == 0
+        || destination.normalized_url.contains(['?', '#'])
+        || [
+            destination.normalized_url.as_str(),
+            destination.origin.as_str(),
+            destination.scheme.as_str(),
+            destination.ascii_host.as_str(),
+        ]
+        .iter()
+        .any(|value| value.is_empty() || value.contains('\0'))
+    {
+        return Err(AgentError::new("浏览器目标安全 identity 无效。"));
+    }
+
+    // Parse and reconstruct instead of trusting several correlated wire fields independently.
+    // An exact canonical comparison rejects URL parser normalization tricks, credentials hidden
+    // in authority, default-port aliases, and mismatched origin/host identities.
+    let parsed = reqwest::Url::parse(&destination.normalized_url)
+        .map_err(|_| AgentError::new("浏览器目标 URL 无法规范解析。"))?;
+    let parsed_host = parsed
+        .host_str()
+        .ok_or_else(|| AgentError::new("浏览器目标 URL 缺少 Host。"))?;
+    let parsed_port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AgentError::new("浏览器目标 URL 缺少有效端口。"))?;
+    let canonical_url = parsed.to_string();
+    let canonical_origin = parsed.origin().ascii_serialization();
+    if parsed.scheme() != destination.scheme
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed_host != destination.ascii_host
+        || parsed_port != destination.effective_port
+        || canonical_origin != destination.origin
+        || canonical_url != destination.normalized_url
+    {
+        return Err(AgentError::new(
+            "浏览器目标 URL、origin、Host 或端口不一致。",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_ascii_url_host(host: &str) -> bool {
+    if host.is_empty()
+        || host.trim() != host
+        || host.starts_with('[')
+        || host.ends_with(']')
+        || !host.is_ascii()
+        || host.bytes().any(|byte| {
+            byte.is_ascii_uppercase()
+                || byte.is_ascii_control()
+                || byte.is_ascii_whitespace()
+                || matches!(byte, b'/' | b'\\' | b'@' | b'?' | b'#')
+        })
+    {
+        return false;
+    }
+    // URL host serialization is either an IPv6 literal (without brackets here), an IPv4
+    // literal, or an IDNA ASCII domain. Its remaining punctuation is deliberately tiny.
+    host.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'_'))
+}
+
+fn validate_browser_risk_kinds(risk_kinds: &[BrowserRiskKind]) -> AgentResult<()> {
+    if risk_kinds.is_empty() || risk_kinds.len() > BROWSER_RISK_MAX_COUNT {
+        return Err(AgentError::new("浏览器风险分类数量无效。"));
+    }
+    if risk_kinds.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(AgentError::new("浏览器风险分类必须去重并按稳定顺序排列。"));
+    }
+    Ok(())
+}
+
+fn requires_exact_browser_risk_scope(risk_kinds: &[BrowserRiskKind]) -> bool {
+    risk_kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            BrowserRiskKind::UrlUserinfo
+                | BrowserRiskKind::RiskEscalation
+                | BrowserRiskKind::NewWindow
+                | BrowserRiskKind::FileUpload
+                | BrowserRiskKind::FileDownload
+        )
+    })
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_resolution_fingerprint(value: &str) -> bool {
+    value.len() == 76
+        && value.starts_with("hmac-sha256:")
+        && value[12..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_browser_tool_name(value: &str) -> bool {
+    value.starts_with("browser_")
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn parse_v4_uuid(value: &str, label: &str) -> AgentResult<Uuid> {
+    let uuid = Uuid::parse_str(value).map_err(|_| AgentError::new(format!("{label} id 无效。")))?;
+    if uuid.is_nil()
+        || uuid.get_version() != Some(uuid::Version::Random)
+        || uuid.to_string() != value
+    {
+        return Err(AgentError::new(format!("{label} id 必须是规范 UUID v4。")));
+    }
+    Ok(uuid)
 }
 
 pub fn builtin_capability_activation_result(

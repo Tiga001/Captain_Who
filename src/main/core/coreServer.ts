@@ -93,6 +93,12 @@ import type {
   McpLaunchAuthorizationPreview,
   McpLaunchAuthorizationResult,
   McpManagementErrorData,
+  ManagedPlaywrightCancelNotification,
+  ManagedPlaywrightCommandNotification,
+  ManagedPlaywrightCompletionInput,
+  BrowserRiskAuthorizeInput,
+  BrowserRiskAuthorizeOutput,
+  BrowserRiskCancelInput,
   McpServerCreateInput,
   McpServerDetailsOutput,
   McpServerIdInput,
@@ -201,6 +207,11 @@ import {
   MCP_CHANGED_NOTIFICATION_METHOD,
   MCP_MANAGEMENT_ERROR_CODE,
   MCP_MANAGEMENT_SCHEMA_VERSION,
+  MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD,
+  MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
+  MANAGED_PLAYWRIGHT_COMPLETE_METHOD,
+  BROWSER_RISK_AUTHORIZE_METHOD,
+  BROWSER_RISK_CANCEL_METHOD,
   MCP_SERVER_ADD_METHOD,
   MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD,
   MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD,
@@ -230,6 +241,14 @@ import {
   parseMcpServerListOutput,
   parseMcpServerMutationInput,
   parseMcpServerUpdateInput,
+  parseManagedPlaywrightCancelNotification,
+  parseManagedPlaywrightCommandNotification,
+  parseManagedPlaywrightCompletionInput,
+  parseManagedPlaywrightCompletionOutput,
+  parseBrowserRiskAuthorizeInput,
+  parseBrowserRiskAuthorizeOutput,
+  parseBrowserRiskCancelInput,
+  parseBrowserRiskCancelOutput,
   parseImageGenerationConfigurationErrorData,
   IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
   IMAGE_GENERATION_READ_ARTIFACT_METHOD,
@@ -538,9 +557,14 @@ export class CoreServer {
   async shutdown(): Promise<void> {
     if (!this.rpc.isRunning()) return
 
+    // Core first gives the managed Playwright bridge up to two seconds to settle, then shuts down
+    // the remaining Agent/MCP services in parallel under their own two-second bounds. Keep the
+    // Host watchdog larger than that composed budget so it does not kill Core in the middle of
+    // external MCP or Agent cleanup. This remains a hard upper bound for application exit.
+    const hostShutdownTimeoutMs = 6_000
     let timeoutId: ReturnType<typeof setTimeout> | null = null
     const timeout = new Promise<void>((resolve) => {
-      timeoutId = setTimeout(resolve, 2500)
+      timeoutId = setTimeout(resolve, hostShutdownTimeoutMs)
       timeoutId.unref()
     })
     const shutdown = this.rpc
@@ -762,6 +786,58 @@ export class CoreServer {
         console.warn('Ignored invalid mcp.changed notification')
       }
     })
+  }
+
+  onManagedPlaywrightCommand(
+    handler: (event: ManagedPlaywrightCommandNotification) => void
+  ): () => void {
+    return this.rpc.onNotification(MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseManagedPlaywrightCommandNotification(params))
+      } catch {
+        console.warn('Ignored invalid managed Playwright command notification')
+      }
+    })
+  }
+
+  onManagedPlaywrightCancel(
+    handler: (event: ManagedPlaywrightCancelNotification) => void
+  ): () => void {
+    return this.rpc.onNotification(MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseManagedPlaywrightCancelNotification(params))
+      } catch {
+        console.warn('Ignored invalid managed Playwright cancel notification')
+      }
+    })
+  }
+
+  completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<void> {
+    const request = parseManagedPlaywrightCompletionInput(input)
+    return this.rpc
+      .request<unknown, ManagedPlaywrightCompletionInput>(
+        MANAGED_PLAYWRIGHT_COMPLETE_METHOD,
+        request
+      )
+      .then(parseManagedPlaywrightCompletionOutput)
+      .then((output) => {
+        if (!output.accepted) throw new Error('Managed Playwright completion was not accepted')
+      })
+  }
+
+  authorizeBrowserRisk(input: BrowserRiskAuthorizeInput): Promise<BrowserRiskAuthorizeOutput> {
+    const request = parseBrowserRiskAuthorizeInput(input)
+    return this.rpc
+      .request<unknown, BrowserRiskAuthorizeInput>(BROWSER_RISK_AUTHORIZE_METHOD, request)
+      .then(parseBrowserRiskAuthorizeOutput)
+  }
+
+  cancelBrowserRisk(input: BrowserRiskCancelInput): Promise<boolean> {
+    const request = parseBrowserRiskCancelInput(input)
+    return this.rpc
+      .request<unknown, BrowserRiskCancelInput>(BROWSER_RISK_CANCEL_METHOD, request)
+      .then(parseBrowserRiskCancelOutput)
+      .then((output) => output.accepted)
   }
 
   private mutateMcpServer(

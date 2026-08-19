@@ -36,10 +36,12 @@ use mycopilot_protocol_rs::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::browser_risk::BrowserRiskCoordinator;
 use super::builtin_capability_policy::{
     BuiltinCapabilityId, BuiltinCapabilityPolicyError, BuiltinCapabilityPolicyRecord,
     SqliteBuiltinCapabilityPolicyStore,
 };
+use super::managed_playwright_bridge::ManagedPlaywrightMcpRuntime;
 use super::sqlite_registry::{
     compute_launch_spec_digest, launch_authorization_identity_is_valid,
     launch_authorization_is_valid, prepare_launch_file_identity, McpLaunchSpecDigest,
@@ -107,6 +109,8 @@ pub(crate) struct McpManagementService {
     manager: Arc<McpConnectionManager>,
     builtin_capability_policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
     builtin_capability_runtime: BuiltinCapabilityRuntime,
+    managed_playwright_runtime: Option<Arc<ManagedPlaywrightMcpRuntime>>,
+    browser_risk_coordinator: Option<Arc<BrowserRiskCoordinator>>,
     source_epoch: String,
     authorization_previews: Mutex<BTreeMap<Uuid, FrozenLaunchAuthorization>>,
     active_server_mutations: Mutex<BTreeSet<McpServerId>>,
@@ -137,11 +141,29 @@ impl McpManagementService {
             manager,
             builtin_capability_policies,
             builtin_capability_runtime,
+            managed_playwright_runtime: None,
+            browser_risk_coordinator: None,
             source_epoch: Uuid::new_v4().to_string(),
             authorization_previews: Mutex::new(BTreeMap::new()),
             active_server_mutations: Mutex::new(BTreeSet::new()),
             shutdown_started: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn with_managed_playwright_runtime(
+        mut self,
+        runtime: Arc<ManagedPlaywrightMcpRuntime>,
+    ) -> Self {
+        self.managed_playwright_runtime = Some(runtime);
+        self
+    }
+
+    pub(crate) fn with_browser_risk_coordinator(
+        mut self,
+        coordinator: Arc<BrowserRiskCoordinator>,
+    ) -> Self {
+        self.browser_risk_coordinator = Some(coordinator);
+        self
     }
 
     pub(crate) fn begin_shutdown(&self) {

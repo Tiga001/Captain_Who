@@ -3,7 +3,8 @@ import type {
   AgentApprovalStatus,
   AgentChatOutput,
   AgentEvent,
-  AgentProposedAction
+  AgentProposedAction,
+  AgentToolResult
 } from '@mycopilot/protocol'
 import type {
   ChatAgentInterruptionView,
@@ -111,6 +112,45 @@ const SAFE_MODEL_REQUEST_INTERRUPTION_REASONS = new Set<ChatAgentInterruptionVie
   'response_invalid',
   'request_failed'
 ])
+
+const SAFE_BUILTIN_CAPABILITY_RESULT_STATUSES = new Set([
+  'completed',
+  'failed',
+  'outcome_unknown'
+] as const)
+
+function projectBuiltinCapabilityToolResult(result: AgentToolResult): AgentToolResult {
+  const value = result.result
+  const record =
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null
+  const status = record?.status
+  const hasSafeProjection =
+    record?.schemaVersion === 1 &&
+    record.type === 'builtin_capability_tool' &&
+    record.contentOmitted === true &&
+    typeof status === 'string' &&
+    SAFE_BUILTIN_CAPABILITY_RESULT_STATUSES.has(
+      status as 'completed' | 'failed' | 'outcome_unknown'
+    )
+
+  return {
+    callId: result.callId,
+    tool: result.tool,
+    ok: result.ok,
+    ...(hasSafeProjection
+      ? {
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status,
+            contentOmitted: true
+          }
+        }
+      : {})
+  }
+}
 
 function parseSafeModelRequestInterruption(details: unknown): ChatAgentInterruptionView | null {
   if (typeof details !== 'object' || details === null || Array.isArray(details)) return null
@@ -539,7 +579,8 @@ export function applyAgentEventToChatMessage(
         timeline: appendToolCallToTimeline(
           runWithCleanTimeline,
           agentEvent.call.id,
-          agentEvent.traceSequence
+          agentEvent.traceSequence,
+          agentEvent.identity
         )
       }
     }
@@ -554,10 +595,20 @@ export function applyAgentEventToChatMessage(
       return message
     }
 
+    const builtinCapabilityResult = currentRun.timeline.some(
+      (item) =>
+        item.type === 'tool_call' &&
+        item.callId === agentEvent.result.callId &&
+        item.identity?.type === 'builtin_capability'
+    )
+    const safeResult = builtinCapabilityResult
+      ? projectBuiltinCapabilityToolResult(agentEvent.result)
+      : agentEvent.result
+
     let nextRun: ChatAgentRunView = {
       ...currentRun,
       status: 'running',
-      toolResults: upsertById(currentRun.toolResults, agentEvent.result, (result) => result.callId),
+      toolResults: upsertById(currentRun.toolResults, safeResult, (result) => result.callId),
       webSearchActivities: upsertWebSearchActivityFromResult(currentRun, agentEvent.result),
       readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
       fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),

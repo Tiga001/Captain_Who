@@ -247,6 +247,13 @@ fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServic
             DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
         )),
         mcp_management: None,
+        managed_playwright_bridge: None,
+        managed_playwright_runtime: None,
+        browser_risk_coordinator: None,
+        browser_risk_admission: Arc::new(Semaphore::new(
+            DEFAULT_MAX_CONCURRENT_BROWSER_RISK_REQUESTS,
+        )),
+        browser_risk_tasks: Arc::new(McpManagementRequestTracker::new()),
         mcp_management_admission: Arc::new(Semaphore::new(
             DEFAULT_MAX_CONCURRENT_MCP_MANAGEMENT_REQUESTS,
         )),

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { playwright } from '@vitest/browser-playwright'
@@ -9,6 +10,7 @@ const filesTests = 'src/renderer/src/features/files/__tests__'
 const mainWindowLifecycleTest = 'src/main/mainWindowLifecycle.test.ts'
 const workspaceFilesTests = 'src/main/workspaceFiles'
 const coreMainTests = 'src/main/core'
+const mcpMainTests = 'src/main/mcp'
 const terminalMainTests = 'src/main/terminal'
 const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
@@ -18,6 +20,19 @@ const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
 const agentCollaborationTests = 'src/renderer/src/features/agentCollaboration'
 const protocolTests = 'packages/protocol/src'
+const officeRendererManifest = JSON.parse(
+  readFileSync(resolve('resources/office-renderer-manifest.json'), 'utf8')
+) as { targets: Record<string, { executable: string }> }
+const officeRendererTarget = officeRendererManifest.targets[`${process.platform}-${process.arch}`]
+
+if (!officeRendererTarget) {
+  throw new Error(`Office renderer is unavailable for ${process.platform}-${process.arch}`)
+}
+
+const browserTestExecutable = resolve(
+  '.cache/office-renderer/current',
+  officeRendererTarget.executable
+)
 
 export default defineConfig({
   optimizeDeps: {
@@ -55,6 +70,7 @@ export default defineConfig({
             `${rightSidebarTests}/**/*.test.ts`,
             mainWindowLifecycleTest,
             `${coreMainTests}/**/*.test.ts`,
+            `${mcpMainTests}/**/*.test.ts`,
             `${workspaceFilesTests}/**/*.test.ts`,
             `${terminalMainTests}/**/*.test.ts`,
             `${terminalPreloadTests}/**/*.test.ts`,
@@ -75,7 +91,7 @@ export default defineConfig({
             enabled: true,
             headless: true,
             instances: [{ browser: 'chromium' }],
-            provider: playwright()
+            provider: playwright({ launchOptions: { executablePath: browserTestExecutable } })
           },
           include: [
             `${appTests}/**/*.browser.test.tsx`,

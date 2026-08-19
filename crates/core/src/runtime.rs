@@ -1927,8 +1927,8 @@ impl AgentRuntime {
                         let mut recorder = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
-                        let sequence =
-                            recorder.record_tool_call_with_identity(&trace_call, tool_identity);
+                        let sequence = recorder
+                            .record_tool_call_with_identity(&trace_call, tool_identity.clone());
                         if let Some(sequence) = sequence {
                             recorder
                                 .record_model_tool_call_message(
@@ -2029,6 +2029,7 @@ impl AgentRuntime {
                             trace_sequence: call_sequence
                                 .expect("a ToolCall always has a durable trace sequence"),
                             call: event_call,
+                            identity: tool_identity.clone(),
                         });
                     }
                     if cancellation_token.is_cancelled() {
@@ -3544,7 +3545,8 @@ fn settle_terminal_grouped_tool_batch(
             queued.assistant_content.clone(),
             vec![queued.checkpoint_call.clone()],
         );
-        let call_sequence = staged_trace.record_tool_call_with_identity(&trace_call, tool_identity);
+        let call_sequence =
+            staged_trace.record_tool_call_with_identity(&trace_call, tool_identity.clone());
         if let Some(sequence) = call_sequence {
             staged_trace
                 .record_model_tool_call_message(
@@ -3592,6 +3594,7 @@ fn settle_terminal_grouped_tool_batch(
                 trace_sequence: call_sequence
                     .expect("a settled ToolCall always has a durable trace sequence"),
                 call: tool_registry.event_call_projection(&call),
+                identity: tool_identity,
             });
         }
 

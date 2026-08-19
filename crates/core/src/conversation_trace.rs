@@ -2359,6 +2359,9 @@ impl ConversationTraceRecorder {
             AgentProposedAction::BuiltinCapabilityActivation { approval } => {
                 (&approval.call_id, approval.approval_status)
             }
+            AgentProposedAction::BrowserRiskApproval { approval } => {
+                (&approval.call_id, approval.approval_status)
+            }
         };
         if let Some(ConversationTurnTraceItem::ToolCall {
             approval_status: current,

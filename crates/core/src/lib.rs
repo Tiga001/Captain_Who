@@ -59,8 +59,10 @@ pub use agent_graph::{
     AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
 };
 pub use builtin_capabilities::{
+    browser_risk_rejected_result, build_browser_risk_approval,
     builtin_capability_activation_rejected_result, builtin_capability_activation_result,
-    validate_frozen_builtin_capability_activation_args, BuiltinCapabilityDescriptor,
+    validate_browser_risk_approval_shape, validate_frozen_builtin_capability_activation_args,
+    BrowserRiskAuthorizationRequest, BrowserRiskGrant, BuiltinCapabilityDescriptor,
     BuiltinCapabilityFuture, BuiltinCapabilityId, BuiltinCapabilityInvocation,
     BuiltinCapabilityManifest, BuiltinCapabilityPolicy, BuiltinCapabilityPolicyStore,
     BuiltinCapabilityProvider, BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor,
@@ -209,7 +211,7 @@ pub fn validate_frozen_agent_command_args(
 pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAssistantTurnCheckpointIdentity,
-    AgentAttachmentLibraryContext, AgentAttachmentReference,
+    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentBrowserRiskApproval,
     AgentBuiltinCapabilityActivationApproval, AgentChatInput, AgentChatMessage, AgentChatOutput,
     AgentCommandArtifactChange, AgentCommandArtifactChangeKind, AgentCommandArtifactKind,
     AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
@@ -256,13 +258,15 @@ pub use protocol::{
     AgentToolApprovalMode, AgentToolCall, AgentToolContinuation, AgentToolDefinition,
     AgentToolIdentity, AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
-    AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission, ModelCapabilities,
-    ProviderContinuationRef, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission,
+    BrowserDestinationIdentity, BrowserResolvedAddressClass, BrowserRiskKind, BrowserRiskTrigger,
+    ModelCapabilities, ProviderContinuationRef, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
     AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
     AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
     AGENT_OFFICE_REASON_MAX_CHARS, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-    AGENT_SKILL_INSTALLATION_SCHEMA_VERSION, PROVIDER_CONTINUATION_REF_VERSION,
+    AGENT_SKILL_INSTALLATION_SCHEMA_VERSION, BROWSER_RISK_APPROVAL_SCHEMA_VERSION,
+    BROWSER_RISK_APPROVAL_TTL_SECONDS, PROVIDER_CONTINUATION_REF_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{

@@ -1287,6 +1287,9 @@ impl AgentService {
             AgentProposedAction::BuiltinCapabilityActivation { .. } => {
                 Err(AgentError::new("内置能力激活必须经过任务级用户审批。"))
             }
+            AgentProposedAction::BrowserRiskApproval { .. } => Err(AgentError::new(
+                "浏览器风险批准必须由进程内 authorization coordinator 结算。",
+            )),
         }
     }
 }

@@ -9,7 +9,10 @@ import type {
 } from './agent'
 import type { ActivatedSkillSummary } from './skills'
 import {
+  parseAgentBrowserRiskProposedAction,
+  parseAgentBuiltinCapabilityActivationProposedAction,
   parseAgentEventForHost,
+  parseAgentToolIdentityForHost,
   parseAgentMcpToolInvocationEvent,
   parsePendingAgentActionSnapshotsForHost
 } from './agentMcpParsers'
@@ -1153,13 +1156,27 @@ function parseObserverAgentEvent(value: unknown): AgentEvent {
         content: boundedObserverText(item.content, `${type}.content`, OBSERVER_EVENT_MAX_TEXT_BYTES)
       }
     case 'tool_call':
-      exactObserverEvent(item, ['type', 'runId', 'traceSequence', 'call'], type)
+      exactObserverEvent(item, ['type', 'runId', 'traceSequence', 'call', 'identity'], type)
       if (!Object.hasOwn(item, 'call')) throw new Error(`Missing ${type}.call`)
-      return {
-        type,
-        runId,
-        traceSequence: integer(item.traceSequence, `${type}.traceSequence`, 0),
-        call: parseObserverToolCall(item.call)
+      {
+        const call = parseObserverToolCall(item.call)
+        const identity = parseAgentToolIdentityForHost(item.identity)
+        const identityToolName =
+          identity.type === 'mcp'
+            ? identity.provenance.modelToolName
+            : identity.type === 'builtin_capability'
+              ? identity.modelName
+              : identity.toolName
+        if (identityToolName !== call.tool) {
+          throw new Error(`Invalid ${type}.identity`)
+        }
+        return {
+          type,
+          runId,
+          traceSequence: integer(item.traceSequence, `${type}.traceSequence`, 0),
+          call,
+          identity
+        }
       }
     case 'tool_result':
       exactObserverEvent(item, ['type', 'runId', 'result'], type)
@@ -1774,6 +1791,13 @@ export function parseCollaborationApprovalProjection(
   const runId = text(item.runId, 'runId', 2_048)
   const sourceConversationId = text(item.sourceConversationId, 'sourceConversationId')
   const createdAt = integer(item.createdAt, 'createdAt')
+  const actionRecord = record(item.action, 'CollaborationApprovalProjection.action')
+  const protectedToolCallId =
+    actionRecord.type === 'builtin_capability_activation'
+      ? parseAgentBuiltinCapabilityActivationProposedAction(actionRecord).approval.callId
+      : actionRecord.type === 'browser_risk_approval'
+        ? parseAgentBrowserRiskProposedAction(actionRecord).approval.callId
+        : null
   const status = oneOf(
     item.status,
     [
@@ -1794,7 +1818,10 @@ export function parseCollaborationApprovalProjection(
       actionId,
       actionType,
       toolName,
-      toolCallId: null,
+      // Host-owned capability approvals are bound to the exact model Tool call. Passing null here
+      // would make a collaboration projection weaker than the authoritative pending snapshot and
+      // would also prevent the strict pending-action parser from hydrating it.
+      toolCallId: protectedToolCallId,
       runId,
       conversationId: sourceConversationId,
       assistantMessageId: null,

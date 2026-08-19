@@ -338,6 +338,7 @@ impl AgentService {
     }
 
     pub(super) fn cancel_run_internal(&self, run_id: &str) -> bool {
+        self.retire_builtin_capability_run(run_id);
         let cancelled_run = {
             let cancellations = self
                 .cancellations
@@ -357,6 +358,16 @@ impl AgentService {
         let cancelled_sessions = self.command_sessions.cancel_pre_handoff_for_run(run_id);
         let cancelled_processes = self.process_runs.cancel_run(run_id);
         cancelled_run || cancelled_sessions > 0 || cancelled_processes > 0
+    }
+
+    fn retire_builtin_capability_run(&self, run_id: &str) {
+        if let Some(coordinator) = self.browser_risk_coordinator.as_ref() {
+            // The coordinator atomically settles process-only risk waiters/tombstones and then
+            // delegates all task-grant retirement to the shared runtime authority.
+            coordinator.cancel_run(run_id);
+        } else if let Some(runtime) = self.builtin_capabilities.as_ref() {
+            let _ = runtime.revoke_run_grants(run_id);
+        }
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
@@ -907,6 +918,7 @@ impl AgentService {
                 );
             if persisted.is_ok() {
                 self.finish_persisted_run_usage(&context.run_id, AgentRunStatus::Cancelled);
+                self.retire_builtin_capability_run(&context.run_id);
                 self.invalidate_conversation_context_state(&context.conversation_id);
             } else if let Err(error) = persisted {
                 // The transaction is all-or-nothing. A later startup retires the unchanged
@@ -1075,6 +1087,7 @@ impl AgentService {
                 )?;
             replace_output_usage(output, cumulative_usage);
             self.finish_persisted_run_usage(&output.run_id, output.status);
+            self.retire_builtin_capability_run(&output.run_id);
             return Ok(());
         }
         self.persist_run_usage(
@@ -1216,6 +1229,7 @@ impl AgentService {
             .or(fallback_usage);
         if let Some(run_id) = run_id {
             self.finish_persisted_run_usage(&run_id, AgentRunStatus::Failed);
+            self.retire_builtin_capability_run(&run_id);
         }
         Ok(cumulative_usage)
     }

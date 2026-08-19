@@ -196,6 +196,7 @@ describe('MCP lifecycle Renderer projection', () => {
       type: 'tool_call',
       runId: RUN_ID,
       traceSequence: 1,
+      identity: { type: 'mcp', provenance: approval().identity.provenance },
       call: {
         id: CALL_ID,
         tool: 'model-visible-name-without-an-mcp-prefix',
@@ -333,6 +334,7 @@ describe('MCP lifecycle Renderer projection', () => {
       type: 'tool_call',
       runId: RUN_ID,
       traceSequence: 2,
+      identity: { type: 'mcp', provenance: approval().identity.provenance },
       call: {
         id: CALL_ID,
         tool: 'model-visible-name-without-an-mcp-prefix',
@@ -495,6 +497,7 @@ describe('MCP lifecycle Renderer projection', () => {
       type: 'tool_call',
       runId: RUN_ID,
       traceSequence: 0,
+      identity: { type: 'unregistered', toolName: 'mcp__spoofed__name' },
       call: {
         id: 'ordinary-tool-call',
         tool: 'mcp__spoofed__name',
@@ -509,6 +512,7 @@ describe('MCP lifecycle Renderer projection', () => {
       id: 'tool-call-ordinary-tool-call',
       type: 'tool_call',
       callId: 'ordinary-tool-call',
+      identity: { type: 'unregistered', toolName: 'mcp__spoofed__name' },
       traceSequence: 0
     })
     expect(generic.agentRun?.mcpInvocations).toEqual([])
@@ -519,6 +523,7 @@ describe('MCP lifecycle Renderer projection', () => {
       type: 'tool_call',
       runId: RUN_ID,
       traceSequence: 9,
+      identity: { type: 'builtin', toolName: 'write_file' },
       call: {
         id: 'write-call',
         tool: 'write_file',
@@ -552,6 +557,7 @@ describe('MCP lifecycle Renderer projection', () => {
       id: 'tool-call-write-call',
       type: 'tool_call',
       callId: 'write-call',
+      identity: { type: 'builtin', toolName: 'write_file' },
       traceSequence: 9
     })
   })

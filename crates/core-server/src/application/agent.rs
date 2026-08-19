@@ -18,6 +18,7 @@ pub use crate::application::agent_support::{
 use crate::application::mcp::approval_payload_store::{
     McpApprovalStartupInspector, McpApprovalStartupPayloadState,
 };
+use crate::application::mcp::browser_risk::BrowserRiskCoordinator;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
@@ -531,6 +532,7 @@ pub struct AgentService {
     skill_installation_workflow: Option<Arc<SkillInstallationWorkflow>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
     builtin_capabilities: Option<BuiltinCapabilityRuntime>,
+    browser_risk_coordinator: Option<Arc<BrowserRiskCoordinator>>,
     mcp_tool_invoker: Option<Arc<dyn McpToolInvoker>>,
     mcp_startup_inspector: Option<Arc<dyn McpApprovalStartupInspector>>,
     mcp_approval_clock: McpApprovalClock,
@@ -714,6 +716,7 @@ impl AgentService {
             skill_installation_workflow: None,
             artifact_runtime,
             builtin_capabilities: None,
+            browser_risk_coordinator: None,
             mcp_tool_invoker: None,
             mcp_startup_inspector: None,
             mcp_approval_clock: Arc::new(now_ms),
@@ -767,6 +770,38 @@ impl AgentService {
     pub fn with_skills_service(mut self, skills: Arc<SkillsService>) -> Self {
         self.skills = skills;
         self
+    }
+
+    pub(crate) fn with_browser_risk_coordinator(
+        mut self,
+        coordinator: Arc<BrowserRiskCoordinator>,
+    ) -> Self {
+        self.browser_risk_coordinator = Some(coordinator);
+        self
+    }
+
+    pub(crate) fn authorize_browser_risk_request(
+        &self,
+        run_id: &str,
+    ) -> Result<(String, String), String> {
+        let binding = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .map(|run| {
+                (
+                    run.conversation_id.clone(),
+                    run.assistant_message_id.clone(),
+                )
+            })
+            .ok_or_else(|| {
+                "Browser risk request is not bound to an active Agent run.".to_string()
+            })?;
+        self.collaboration_authorizer
+            .authorize_user_conversation_write(&binding.0)
+            .map_err(|error| error.to_string())?;
+        Ok(binding)
     }
 
     /// Installs the process-owned image-generation executor into future Agent runs. The service

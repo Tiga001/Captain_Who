@@ -336,7 +336,11 @@ impl McpStdioConnector {
                 "untrusted MCP server is not authorized for process launch",
             ));
         }
-        let McpTransportConfig::Stdio(stdio) = &config.transport;
+        let McpTransportConfig::Stdio(stdio) = &config.transport else {
+            return Err(McpError::config(
+                "stdio connector cannot start a non-stdio MCP transport",
+            ));
+        };
         let mut command = build_command(stdio, &self.policy)?;
         let mut spawned = command
             .spawn()

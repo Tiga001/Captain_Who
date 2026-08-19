@@ -320,6 +320,9 @@ pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentP
         AgentProposedAction::BuiltinCapabilityActivation { approval } => {
             approval.approval_status = AgentApprovalStatus::Approved;
         }
+        AgentProposedAction::BrowserRiskApproval { approval } => {
+            approval.approval_status = AgentApprovalStatus::Approved;
+        }
         AgentProposedAction::SkillMaterialization { materialization } => {
             materialization.approval_status = AgentApprovalStatus::Approved;
         }

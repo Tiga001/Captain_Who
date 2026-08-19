@@ -10,16 +10,21 @@ import {
   RefreshCw
 } from 'lucide-react'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
+import { createBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
+import type { WebviewTag } from 'electron'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
 import { WebviewSurface } from '../rightSidebar/surfaces/WebviewSurface'
 import type { BrowserPageMetadata } from './browserTypes'
 import { getFallbackPageTitle, normalizeBrowserUrl } from './browserUrl'
 import { useBrowserWebview } from './useBrowserWebview'
+import { browserSurfaceIdForPage } from './browserSurface'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
+  automationRequestId?: string
   isActive: boolean
+  onAutomationSurfaceReady?: (surfaceId: string, requestId: string) => void
   onPageMetadataChange?: (metadata: BrowserPageMetadata) => void
   onSurfaceFocus?: () => void
   pageId: string
@@ -32,18 +37,22 @@ function clampZoom(value: number) {
 }
 
 export function BrowserPanel({
+  automationRequestId,
   isActive,
+  onAutomationSurfaceReady,
   onPageMetadataChange,
   onSurfaceFocus,
   pageId
 }: BrowserPanelProps) {
   const { t } = useFrontendConfig()
   const menuAnchorRef = useRef<HTMLDivElement>(null)
+  const webviewRef = useRef<WebviewTag | null>(null)
+  const submittedAutomationRequestRef = useRef<string | null>(null)
   const [addressValue, setAddressValue] = useState('')
   const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [zoom, setZoomState] = useState(1)
-  const viewId = `right-sidebar-browser-${pageId}`
+  const viewId = browserSurfaceIdForPage(pageId)
   const {
     clearBrowsingData,
     currentUrl,
@@ -64,6 +73,38 @@ export function BrowserPanel({
     onSurfaceFocus?.()
   }, [closeMenu, onSurfaceFocus])
   useDismissOnOutsidePointer(menuAnchorRef, isMenuOpen, closeMenu)
+
+  const reportAutomationSurfaceReady = useCallback(
+    (webview: WebviewTag | null): void => {
+      if (
+        !webview ||
+        !automationRequestId ||
+        submittedAutomationRequestRef.current === automationRequestId
+      ) {
+        return
+      }
+      submittedAutomationRequestRef.current = automationRequestId
+      onAutomationSurfaceReady?.(viewId, automationRequestId)
+    },
+    [automationRequestId, onAutomationSurfaceReady, viewId]
+  )
+
+  const handleWebviewReady = useCallback(
+    (webview: WebviewTag | null): void => {
+      webviewRef.current = webview
+      setWebview(webview)
+      reportAutomationSurfaceReady(webview)
+    },
+    [reportAutomationSurfaceReady, setWebview]
+  )
+
+  useEffect(() => {
+    if (!automationRequestId) {
+      submittedAutomationRequestRef.current = null
+      return
+    }
+    reportAutomationSurfaceReady(webviewRef.current)
+  }, [automationRequestId, reportAutomationSurfaceReady])
 
   useEffect(() => {
     if (!isActive) {
@@ -248,11 +289,12 @@ export function BrowserPanel({
       <div className="browser-panel__content">
         <WebviewSurface
           accessibleTitle={t('browser.title')}
+          initialUrl={createBrowserSurfaceBootstrapUrl(viewId)}
           isActive={isActive}
           isVisible={Boolean(currentUrl)}
           openLinksInSameSurface
           onFocus={handleSurfaceFocus}
-          onReady={setWebview}
+          onReady={handleWebviewReady}
           partition={BROWSER_WEBVIEW_PARTITION}
           surfaceId={viewId}
         />

@@ -3,8 +3,7 @@ import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } fro
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
-import type { StorageImageFileRecord } from '@mycopilot/protocol'
-import type { StorageProjectRecord } from '@mycopilot/protocol'
+import type { StorageImageFileRecord, StorageProjectRecord } from '@mycopilot/protocol'
 import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 
@@ -23,6 +22,8 @@ import { registerStorageIpc } from './ipc/storageIpc'
 import { registerTerminalIpc } from './ipc/terminalIpc'
 import { createTrustedIpcMain } from './ipc/trustedIpc'
 import { registerWorkspaceFilesIpc } from './ipc/workspaceFilesIpc'
+import type { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
+import { registerBrowserSurfaceIpc } from './ipc/browserSurfaceIpc'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -273,7 +274,8 @@ export function registerHostIpc(
   coreServer: CoreServer,
   terminalBridge: TerminalBridge,
   faviconResourceCache: FaviconResourceCache,
-  isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean
+  isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean,
+  browserSurfaceManager?: BrowserSurfaceManager
 ): () => void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
@@ -315,6 +317,9 @@ export function registerHostIpc(
       faviconResourceCache.clear()
     ])
   })
+  if (browserSurfaceManager) {
+    registerBrowserSurfaceIpc(ipcMain, browserSurfaceManager)
+  }
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )

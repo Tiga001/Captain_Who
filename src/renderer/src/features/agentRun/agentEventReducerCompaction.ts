@@ -1,3 +1,4 @@
+import type { AgentToolIdentity } from '@mycopilot/protocol'
 import type { ChatAgentRunView, ChatAgentTimelineItem } from '../chat/chatTypes'
 import { removeTransientToolTimelineItems } from './messageTimeline'
 import { appendTimelineItem } from './agentEventReducerShared'
@@ -5,12 +6,13 @@ import { appendTimelineItem } from './agentEventReducerShared'
 export function appendToolCallToTimeline(
   run: ChatAgentRunView,
   callId: string,
-  traceSequence?: number
+  traceSequence?: number,
+  identity?: AgentToolIdentity
 ): ChatAgentTimelineItem[] {
-  const existingTraceSequence = run.timeline.find(
-    (item) => item.type === 'tool_call' && item.callId === callId
-  )?.traceSequence
-  const stableTraceSequence = traceSequence ?? existingTraceSequence
+  const existing = run.timeline.find((item) => item.type === 'tool_call' && item.callId === callId)
+  const stableTraceSequence = traceSequence ?? existing?.traceSequence
+  const stableIdentity =
+    identity ?? (existing?.type === 'tool_call' ? existing.identity : undefined)
   return appendTimelineItem(
     {
       ...run,
@@ -20,6 +22,7 @@ export function appendToolCallToTimeline(
       id: `tool-call-${callId}`,
       type: 'tool_call',
       callId,
+      ...(stableIdentity === undefined ? {} : { identity: stableIdentity }),
       ...(stableTraceSequence === undefined ? {} : { traceSequence: stableTraceSequence })
     }
   )

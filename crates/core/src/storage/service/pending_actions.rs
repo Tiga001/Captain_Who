@@ -360,6 +360,7 @@ fn durable_trace_proves_action_precedes(
         AgentProposedAction::ToolCall { call } => call.id.as_str(),
         AgentProposedAction::McpToolCall { approval } => approval.identity.call_id.as_str(),
         AgentProposedAction::BuiltinCapabilityActivation { approval } => approval.call_id.as_str(),
+        AgentProposedAction::BrowserRiskApproval { approval } => approval.call_id.as_str(),
         AgentProposedAction::Diff { diff } => diff.id.as_str(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
         AgentProposedAction::Command { command } => command.id.as_str(),

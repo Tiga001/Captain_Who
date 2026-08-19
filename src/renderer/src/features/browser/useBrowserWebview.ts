@@ -8,6 +8,7 @@ import type {
   RenderProcessGoneEvent,
   WebviewTag
 } from 'electron'
+import { parseBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 import type { BrowserNavigationState } from './browserTypes'
 import { getFallbackPageTitle } from './browserUrl'
@@ -301,7 +302,11 @@ function createEmptyNavigationState(): BrowserNavigationState {
 
 function normalizeWebviewUrl(url: string | null | undefined): string | null {
   const normalized = url?.trim()
-  return normalized && normalized !== 'about:blank' ? normalized : null
+  return normalized &&
+    normalized !== 'about:blank' &&
+    parseBrowserSurfaceBootstrapUrl(normalized) === null
+    ? normalized
+    : null
 }
 
 function haveSameHttpOrigin(

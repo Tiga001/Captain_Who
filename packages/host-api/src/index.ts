@@ -59,6 +59,9 @@ import type {
   AgentUsageSummaryOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
+  BrowserSurfaceCommand,
+  BrowserSurfaceReadyInput,
+  BrowserSurfaceReadyOutput,
   CorePingRequest,
   CorePingResponse,
   GitRepositoryInspectInput,
@@ -153,6 +156,10 @@ export interface AttachmentsHostApi {
 
 export interface BrowserHostApi {
   clearBrowsingData(): Promise<void>
+  /** Acknowledges an exact, already attached right-sidebar browser surface. */
+  surfaceReady(input: BrowserSurfaceReadyInput): Promise<BrowserSurfaceReadyOutput>
+  /** Receives Host-owned reveal/create/close requests without exposing guest or CDP identity. */
+  onSurfaceCommand(handler: (command: BrowserSurfaceCommand) => void): () => void
 }
 
 export interface OfficeHostApi {

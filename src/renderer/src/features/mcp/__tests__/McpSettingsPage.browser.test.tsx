@@ -1,4 +1,6 @@
 import type {
+  McpBuiltinCapabilityListItem,
+  McpBuiltinCapabilityListOutput,
   McpServerDetailsView,
   McpServerListItem,
   McpServerListOutput
@@ -14,6 +16,9 @@ const service = vi.hoisted(() => ({
   disableServer: vi.fn(),
   enableServer: vi.fn(),
   hook: vi.fn(),
+  builtinHook: vi.fn(),
+  builtinRefresh: vi.fn(),
+  builtinSetAllowed: vi.fn(),
   loadDetails: vi.fn(),
   loadTools: vi.fn(),
   refresh: vi.fn(),
@@ -32,6 +37,10 @@ vi.mock('../useMcpManagement', () => ({
   useMcpManagement: service.hook
 }))
 
+vi.mock('../useBuiltinMcpCapabilities', () => ({
+  useBuiltinMcpCapabilities: service.builtinHook
+}))
+
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'en-US', t: (key: string) => key })
 }))
@@ -43,6 +52,49 @@ vi.mock('../../../components/toast/ToastContext', () => ({
 const { McpSettingsPage } = await import('../McpSettingsPage')
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111'
+
+function builtinCapability(
+  overrides: Partial<McpBuiltinCapabilityListItem> = {}
+): McpBuiltinCapabilityListItem {
+  return {
+    schemaVersion: 1,
+    kind: 'builtinCapability',
+    capabilityId: 'browser_automation',
+    displayName: 'Host Browser automation',
+    description: 'Host description',
+    userAllowed: false,
+    policyVersion: 1,
+    policyRevision: 0,
+    ...overrides
+  }
+}
+
+function builtinOutput(
+  capabilities: McpBuiltinCapabilityListItem[] = [builtinCapability()]
+): McpBuiltinCapabilityListOutput {
+  return { schemaVersion: 1, revision: 0, capabilities }
+}
+
+function builtinManagement(
+  state: {
+    status: 'loading' | 'ready' | 'error'
+    output: McpBuiltinCapabilityListOutput | null
+    errorMessage: string | null
+    isRefreshing: boolean
+  } = {
+    status: 'ready',
+    output: builtinOutput(),
+    errorMessage: null,
+    isRefreshing: false
+  }
+) {
+  return {
+    pendingCapabilities: new Set(),
+    refresh: service.builtinRefresh,
+    setAllowed: service.builtinSetAllowed,
+    state
+  }
+}
 
 function details(overrides: Partial<McpServerDetailsView> = {}): McpServerDetailsView {
   return {
@@ -144,6 +196,9 @@ function management(
 
 beforeEach(() => {
   for (const mock of Object.values(service)) mock.mockReset()
+  service.builtinHook.mockReturnValue(builtinManagement())
+  service.builtinRefresh.mockResolvedValue(builtinOutput())
+  service.builtinSetAllowed.mockResolvedValue(null)
   service.loadTools.mockResolvedValue(null)
   service.loadDetails.mockResolvedValue(null)
   service.refresh.mockResolvedValue(null)
@@ -152,6 +207,104 @@ beforeEach(() => {
 })
 
 describe('MCP Settings page', () => {
+  it('separates the built-in capability from the unchanged external Server area', async () => {
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await expect.element(screen.getByRole('heading', { name: 'mcp.section.builtin' })).toBeVisible()
+    await expect
+      .element(screen.getByRole('heading', { name: 'mcp.section.external' }))
+      .toBeVisible()
+    await expect.element(screen.getByText('mcp.builtin.browserAutomation.name')).toBeVisible()
+    await expect
+      .element(screen.getByText('mcp.builtin.browserAutomation.description'))
+      .toBeVisible()
+    expect(screen.getByRole('switch').elements()).toHaveLength(1)
+    expect(screen.getByText('Host Browser automation').query()).toBeNull()
+    expect(screen.getByText('Host description').query()).toBeNull()
+    await expect.element(screen.getByText('mcp.empty.title')).toBeVisible()
+  })
+
+  it('changes only user_allowed when the built-in capability switch is used', async () => {
+    const capability = builtinCapability()
+    service.builtinHook.mockReturnValue(
+      builtinManagement({
+        status: 'ready',
+        output: builtinOutput([capability]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    const toggle = screen.getByRole('switch', { name: 'mcp.builtin.toggleNamed' })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await toggle.click()
+
+    await expect.poll(() => service.builtinSetAllowed.mock.calls.length).toBe(1)
+    expect(service.builtinSetAllowed).toHaveBeenCalledWith(capability, true)
+    expect(service.setServerEnabled).not.toHaveBeenCalled()
+    expect(service.startServer).not.toHaveBeenCalled()
+    expect(service.authorizeLaunch).not.toHaveBeenCalled()
+  })
+
+  it('shows built-in loading and safe retry independently from external Servers', async () => {
+    service.builtinHook.mockReturnValue(
+      builtinManagement({
+        status: 'error',
+        output: null,
+        errorMessage: 'safe built-in failure',
+        isRefreshing: false
+      })
+    )
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([details()]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await expect.element(screen.getByText('safe built-in failure')).toBeVisible()
+    await expect.element(screen.getByText('fixture')).toBeVisible()
+    await screen.getByRole('button', { name: 'mcp.actions.retry' }).click()
+    expect(service.builtinRefresh).toHaveBeenCalledWith(true)
+    expect(service.refresh).not.toHaveBeenCalled()
+  })
+
+  it('refreshes built-in and external MCP from the shared refresh action', async () => {
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await screen.getByRole('button', { name: 'mcp.actions.refresh' }).click()
+    expect(service.refresh).toHaveBeenCalledTimes(1)
+    expect(service.builtinRefresh).toHaveBeenCalledWith(true)
+  })
+
   it('renders the initial loading state', async () => {
     service.hook.mockReturnValue(
       management({ status: 'loading', output: null, errorMessage: null, isRefreshing: false })

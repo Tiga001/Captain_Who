@@ -676,7 +676,7 @@ fn map_annotations(annotations: Option<McpToolAnnotations>) -> McpAgentToolAnnot
     })
 }
 
-fn map_tool_result(
+pub(crate) fn map_tool_result(
     result: McpToolResult,
     limits: &McpRuntimeProjectionLimits,
 ) -> AgentResult<McpToolInvocationResult> {
@@ -965,7 +965,7 @@ fn map_catalog_error(_error: McpError) -> AgentError {
     )
 }
 
-fn map_invocation_error(error: McpError) -> AgentError {
+pub(crate) fn map_invocation_error(error: McpError) -> AgentError {
     let dispatch_certainty = error
         .dispatch_certainty
         .unwrap_or(McpDispatchCertainty::DefinitelyNotDispatched);

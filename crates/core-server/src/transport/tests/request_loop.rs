@@ -748,3 +748,188 @@ async fn artifact_read_admission_is_bounded_and_does_not_block_core_requests() {
     skills_dispatcher.shutdown().await.unwrap();
     image_generation_dispatcher.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_shutdown_settles_the_managed_playwright_runtime_before_outbound_closes() {
+    use crate::application::mcp::managed_playwright_bridge::ManagedPlaywrightMcpRuntime;
+    use mycopilot_protocol_rs::{
+        ManagedPlaywrightCommand, ManagedPlaywrightCommandNotification,
+        ManagedPlaywrightCompletionInput, ManagedPlaywrightCompletionOutcome,
+        MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION, MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
+        MANAGED_PLAYWRIGHT_COMPLETE_METHOD,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let installations =
+        Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
+    let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+    let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git_dispatcher,
+        skills: &skills_dispatcher,
+        skill_acquisition: &skills_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
+    };
+    let runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
+    let bridge = runtime.bridge();
+    bridge.attach_outbound(outbound_tx.clone()).unwrap();
+    let mut services = test_core_request_services(Arc::clone(&storage));
+    services.managed_playwright_bridge = Some(Arc::clone(&bridge));
+    services.managed_playwright_runtime = Some(Arc::clone(&runtime));
+    runtime.request_start().unwrap();
+
+    let (server_input, mut main_input) = tokio::io::duplex(256 * 1024);
+    let driver_runtime = Arc::clone(&runtime);
+    let driver = async move {
+        let mut request_id = 100_u64;
+        loop {
+            let outbound = tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+                .await
+                .expect("managed Playwright shutdown notification timeout")
+                .expect("managed Playwright outbound closed before shutdown");
+            if outbound["method"] != MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD {
+                continue;
+            }
+            let notification: ManagedPlaywrightCommandNotification =
+                serde_json::from_value(outbound["params"].clone()).unwrap();
+            let (outcome, should_request_shutdown, is_close) = match notification.command {
+                ManagedPlaywrightCommand::Connect => (
+                    ManagedPlaywrightCompletionOutcome::Connected {
+                        protocol: json!({
+                            "negotiatedVersion": "2025-11-25",
+                            "lifecycle": "initialize_fallback",
+                            "server": {"name": "@playwright/mcp", "version": "0.0.79"},
+                            "capabilities": {
+                                "tools": true,
+                                "toolsListChanged": false,
+                                "resources": false,
+                                "resourcesListChanged": false,
+                                "resourcesSubscribe": false,
+                                "prompts": false,
+                                "promptsListChanged": false,
+                                "logging": false,
+                                "completions": false,
+                                "tasks": false,
+                                "extensions": []
+                            }
+                        }),
+                    },
+                    false,
+                    false,
+                ),
+                ManagedPlaywrightCommand::ListTools { cursor: None } => {
+                    let manifest = crate::application::mcp::playwright_manifest::load_playwright_browser_manifest().unwrap();
+                    (
+                        ManagedPlaywrightCompletionOutcome::ToolsListed {
+                            page: json!({
+                                "tools": manifest.tools.into_iter().map(|tool| json!({
+                                    "name": tool.tool_id,
+                                    "title": null,
+                                    "description": tool.description,
+                                    "inputSchema": tool.input_schema,
+                                    "outputSchema": null,
+                                    "annotations": {
+                                        "readOnlyHint": false,
+                                        "destructiveHint": false,
+                                        "idempotentHint": null,
+                                        "openWorldHint": null,
+                                        "title": null
+                                    }
+                                })).collect::<Vec<_>>(),
+                                "nextCursor": null,
+                                "ttlMs": null,
+                                "cacheScope": null
+                            }),
+                        },
+                        true,
+                        false,
+                    )
+                }
+                ManagedPlaywrightCommand::Close => {
+                    (ManagedPlaywrightCompletionOutcome::Closed, false, true)
+                }
+                unexpected => panic!("unexpected managed Playwright command: {unexpected:?}"),
+            };
+            let completion = ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: notification.request_id,
+                outcome,
+            };
+            let completion_request_id = request_id;
+            let line = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": completion_request_id,
+                "method": MANAGED_PLAYWRIGHT_COMPLETE_METHOD,
+                "params": completion,
+            }))
+            .unwrap();
+            request_id += 1;
+            main_input.write_all(&line).await.unwrap();
+            main_input.write_all(b"\n").await.unwrap();
+
+            if should_request_shutdown {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                while !driver_runtime.is_ready() && tokio::time::Instant::now() < deadline {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    driver_runtime.is_ready(),
+                    "managed runtime never became Ready"
+                );
+                main_input
+                    .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"core.shutdown\"}\n")
+                    .await
+                    .unwrap();
+            }
+            if is_close {
+                loop {
+                    let response = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+                        .await
+                        .expect("managed close completion response timeout")
+                        .expect("managed outbound closed before close completion response");
+                    if response["id"] == json!(completion_request_id) {
+                        break;
+                    }
+                }
+                return true;
+            }
+        }
+    };
+
+    let request_loop = run_request_loop(
+        BufReader::new(server_input),
+        services,
+        &agent_service,
+        SkillServices {
+            catalog: Arc::new(SkillsService::new()),
+            installations,
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
+    );
+    let (shutdown_id, close_seen) = tokio::join!(request_loop, driver);
+    assert!(matches!(shutdown_id.unwrap(), Some(JsonRpcId::Number(9))));
+    assert!(close_seen);
+    assert_eq!(runtime.lifecycle_task_count(), 0);
+    assert_eq!(bridge.pending_request_count(), 0);
+    assert!(!runtime.is_ready());
+
+    git_dispatcher.shutdown().await.unwrap();
+    skills_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
+}
