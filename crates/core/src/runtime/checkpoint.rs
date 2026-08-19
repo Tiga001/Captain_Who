@@ -22,7 +22,7 @@ use crate::llm::{
     LlmRuntimeToolCallBinding, LlmToolCall,
 };
 use crate::protocol::{
-    AgentAssistantTurnCheckpointIdentity, AgentContextCheckpointItem,
+    AgentApprovalStatus, AgentAssistantTurnCheckpointIdentity, AgentContextCheckpointItem,
     AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
     AgentProviderToolCallIdentity, AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint,
     AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, AgentToolIdentity,
@@ -247,10 +247,11 @@ impl ToolCallBatch {
         self.queue.len()
     }
 
-    /// Drops queued external calls that do not yet have a one-time Host preparation.
+    /// Drops queued private calls that cannot be rehydrated without their process-only payload.
     ///
     /// Only a count survives the approval checkpoint. In particular, model-authored arguments,
-    /// Server names and Server-authored Tool names never enter this diagnostic channel.
+    /// Tool names and model-authored arguments never enter this diagnostic channel. The field
+    /// retaining the count keeps its historical name for checkpoint compatibility.
     pub(super) fn defer_external_calls(
         &mut self,
         mut is_external: impl FnMut(&QueuedToolCall) -> bool,
@@ -805,8 +806,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         ));
     }
 
-    let continuation_uses_external_mcp_projection =
-        checkpoint_continuation_uses_external_mcp_projection(&checkpoint)?;
+    let continuation_projection = checkpoint_continuation_projection(&checkpoint)?;
     let continuation_result_sequence =
         continuation_result_sequence(&checkpoint, &continuation.call.id);
     let provider_profile_config = checkpoint.provider_profile_config.clone();
@@ -868,15 +868,27 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         name: continuation.call.tool.clone(),
         args: continuation.call.args.clone(),
     };
-    let durable_result = if continuation_uses_external_mcp_projection {
-        crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
-    } else {
-        canonical_tool_result_for_context(&continuation.result)
+    let durable_result = match continuation_projection {
+        CheckpointContinuationProjection::Standard => {
+            canonical_tool_result_for_context(&continuation.result)
+        }
+        CheckpointContinuationProjection::ExternalMcp => {
+            crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
+        }
+        CheckpointContinuationProjection::BuiltinCapability => {
+            crate::tools::builtin_capability_tool_result_persistence_projection(
+                &continuation.result,
+            )
+        }
     };
-    let llm_result = if continuation_uses_external_mcp_projection {
-        crate::tools::mcp_tool_result_model_projection(&continuation.result)
-    } else {
-        crate::tools::model_projection_for_persisted_continuation(&continuation.result)
+    let llm_result = match continuation_projection {
+        CheckpointContinuationProjection::ExternalMcp => {
+            crate::tools::mcp_tool_result_model_projection(&continuation.result)
+        }
+        CheckpointContinuationProjection::Standard
+        | CheckpointContinuationProjection::BuiltinCapability => {
+            crate::tools::model_projection_for_persisted_continuation(&continuation.result)
+        }
     };
     let model_observation = super::finalize_model_tool_observation(
         model_tool_result_gate,
@@ -885,23 +897,25 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         &llm_result,
         archive_metadata,
     )?;
-    let persisted_model_observation = if continuation_uses_external_mcp_projection {
-        super::finalize_model_tool_observation(
-            model_tool_result_gate,
-            &continuation.call.id,
-            !continuation.result.ok,
-            &durable_result,
-            archive_metadata,
-        )?
-    } else {
-        model_observation.clone()
-    };
+    let persisted_model_observation =
+        if continuation_projection != CheckpointContinuationProjection::Standard {
+            super::finalize_model_tool_observation(
+                model_tool_result_gate,
+                &continuation.call.id,
+                !continuation.result.ok,
+                &durable_result,
+                archive_metadata,
+            )?
+        } else {
+            model_observation.clone()
+        };
     context.append_tool_continuation_in_batch(
         &continuation_call,
         model_observation.clone(),
-        continuation_uses_external_mcp_projection.then_some(persisted_model_observation.clone()),
+        (continuation_projection != CheckpointContinuationProjection::Standard)
+            .then_some(persisted_model_observation.clone()),
         !continuation.result.ok,
-        continuation_uses_external_mcp_projection,
+        continuation_projection == CheckpointContinuationProjection::ExternalMcp,
         assistant_message_id.map(|assistant_message_id| {
             ContextOrigin::conversation_trace_item(
                 assistant_message_id,
@@ -955,9 +969,16 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
 /// capability activation both need an action UUID distinct from the Provider Tool Call ID, so the
 /// field cannot safely double as a tool-kind flag. Re-projecting a built-in result as MCP would
 /// rewrite an already committed ToolResult and violate the append-only Trace prefix.
-pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheckpointContinuationProjection {
+    Standard,
+    ExternalMcp,
+    BuiltinCapability,
+}
+
+pub(super) fn checkpoint_continuation_projection(
     checkpoint: &AgentRunCheckpoint,
-) -> AgentResult<bool> {
+) -> AgentResult<CheckpointContinuationProjection> {
     let mut matching_provenance = checkpoint
         .conversation_trace_items
         .iter()
@@ -965,11 +986,14 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
             ConversationTurnTraceItem::ToolCall {
                 call_id,
                 provenance,
+                approval_status,
                 ..
-            } if call_id == &checkpoint.pending_tool_call_id => Some(provenance),
+            } if call_id == &checkpoint.pending_tool_call_id => {
+                Some((provenance, *approval_status))
+            }
             _ => None,
         });
-    let provenance = matching_provenance
+    let (provenance, frozen_approval_status) = matching_provenance
         .next()
         .ok_or_else(|| AgentError::new("无法恢复运行检查点：待审批调用缺少冻结的工具来源身份。"))?;
     if matching_provenance.next().is_some() {
@@ -978,7 +1002,9 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
         ));
     }
     match (provenance, checkpoint.pending_action_id.as_deref()) {
-        (AgentToolIdentity::Mcp { .. }, Some(_)) => Ok(true),
+        (AgentToolIdentity::Mcp { .. }, Some(_)) => {
+            Ok(CheckpointContinuationProjection::ExternalMcp)
+        }
         (AgentToolIdentity::Mcp { .. }, None) => Err(AgentError::new(
             "无法恢复运行检查点：外部 MCP 审批缺少冻结的动作身份。",
         )),
@@ -992,7 +1018,7 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
             == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
             && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME =>
         {
-            Ok(false)
+            Ok(CheckpointContinuationProjection::Standard)
         }
         (
             AgentToolIdentity::RuntimeExtension {
@@ -1008,6 +1034,17 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
                 "无法恢复运行检查点：内置能力激活审批缺少冻结的动作身份。",
             ))
         }
+        (AgentToolIdentity::BuiltinCapability { .. }, Some(_))
+            if frozen_approval_status == AgentApprovalStatus::Required =>
+        {
+            // Sensitive built-in MCP Tools use the same durable pending-action/checkpoint
+            // lifecycle as command and external-MCP approvals. The complete Catalog-bound
+            // BuiltinCapability provenance plus a frozen `required` call proves this is the
+            // standard built-in projection; the pending-action repository separately binds the
+            // action UUID to the exact typed BuiltinMcpToolApproval. Ordinary automatic built-in
+            // calls retain `automatic` and therefore fail closed if a bogus action id appears.
+            Ok(CheckpointContinuationProjection::BuiltinCapability)
+        }
         (
             AgentToolIdentity::Unregistered { .. }
             | AgentToolIdentity::LegacyBuiltinCapability { .. },
@@ -1020,7 +1057,7 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
             | AgentToolIdentity::RuntimeExtension { .. }
             | AgentToolIdentity::BuiltinCapability { .. },
             None,
-        ) => Ok(false),
+        ) => Ok(CheckpointContinuationProjection::Standard),
         (
             AgentToolIdentity::Builtin { .. }
             | AgentToolIdentity::RuntimeExtension { .. }
@@ -1030,6 +1067,14 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
             "无法恢复运行检查点：审批动作身份与冻结的工具来源不匹配。",
         )),
     }
+}
+
+#[cfg(test)]
+pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
+    checkpoint: &AgentRunCheckpoint,
+) -> AgentResult<bool> {
+    Ok(checkpoint_continuation_projection(checkpoint)?
+        == CheckpointContinuationProjection::ExternalMcp)
 }
 
 fn validate_checkpoint_provider_protocol_revision(

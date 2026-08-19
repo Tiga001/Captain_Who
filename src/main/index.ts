@@ -1,4 +1,13 @@
-import { app, BrowserWindow, Menu, nativeTheme, session, type IpcMainInvokeEvent } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeTheme,
+  session,
+  type IpcMainInvokeEvent,
+  type OpenDialogOptions
+} from 'electron'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'url'
@@ -21,12 +30,14 @@ import { BrowserRiskCoordinator } from './browser/BrowserRiskCoordinator'
 import { BrowserNetworkGuard } from './browser/BrowserNetworkGuard'
 import { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
 import { BrowserDownloadBroker } from './browser/BrowserDownloadBroker'
+import { BrowserFileBroker } from './browser/BrowserFileBroker'
 import { CoreBrowserRiskAuthorizer } from './browser/CoreBrowserRiskAuthorizer'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 import {
   createManagedPlaywrightHostFactory,
   ManagedPlaywrightBridgeHost
 } from './mcp/ManagedPlaywrightBridgeHost'
+import { ManagedPlaywrightSensitiveTargetBindingBroker } from './mcp/ManagedPlaywrightSensitiveTargetBindingBroker'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -48,6 +59,7 @@ let browserSurfaceManager: BrowserSurfaceManager | null = null
 let browserNetworkGuard: BrowserNetworkGuard | null = null
 let browserArtifactBroker: BrowserArtifactBroker | null = null
 let browserDownloadBroker: BrowserDownloadBroker | null = null
+let browserFileBroker: BrowserFileBroker | null = null
 let managedPlaywrightBridgeHost: ManagedPlaywrightBridgeHost | null = null
 const mainWindowLifecycle = new MainWindowLifecycleController(process.platform)
 const trustedRendererEntries = new Map<number, string>()
@@ -221,7 +233,7 @@ function activateMainWindow(): void {
   sendAppWindowState(window)
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
   disposeAdaptiveAppIcon = installAdaptiveAppIcon()
@@ -231,6 +243,24 @@ app.whenReady().then(() => {
   browserArtifactBroker = new BrowserArtifactBroker({
     rootDirectory: join(appDataRoot, 'browser-automation-artifacts')
   })
+  browserFileBroker = new BrowserFileBroker({
+    rootDirectory: join(appDataRoot, 'browser-automation-files'),
+    selectionProvider: {
+      selectFiles: async ({ multiple }) => {
+        const options: OpenDialogOptions = {
+          title: app.getLocale().toLowerCase().startsWith('zh')
+            ? '选择要交给浏览器自动化使用的文件'
+            : 'Select files for browser automation',
+          properties: multiple ? ['openFile', 'multiSelections'] : ['openFile']
+        }
+        const result = mainWindow
+          ? await dialog.showOpenDialog(mainWindow, options)
+          : await dialog.showOpenDialog(options)
+        return result.canceled ? null : result.filePaths
+      }
+    }
+  })
+  await browserFileBroker.initialize()
   browserDownloadBroker = new BrowserDownloadBroker({
     artifacts: browserArtifactBroker,
     expectedSession: managedBrowserSession
@@ -258,17 +288,39 @@ app.whenReady().then(() => {
     },
     networkGuard: browserNetworkGuard
   })
+  const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
+    beginDispatchFence: (target) => {
+      const manager = browserSurfaceManager
+      if (!manager) throw new Error('browser.surface_unavailable')
+      return manager.beginSensitiveDispatchFence(target)
+    },
+    getActiveTarget: () => browserSurfaceManager?.getSensitiveTargetIdentity() ?? null
+  })
   managedPlaywrightBridgeHost = new ManagedPlaywrightBridgeHost({
     core: coreServer,
+    sensitiveTargetBindings,
     createHost: createManagedPlaywrightHostFactory({
       getBrowserContext: () => getBrowserSurfaceManager().getBrowserContext(),
       getActiveSurfaceIdentity: () => getBrowserSurfaceManager().getActiveSurfaceIdentity(),
+      sensitiveTargetBindings,
       artifactBroker: browserArtifactBroker,
-      finalizeBrowserRun: (runId) => browserNetworkGuard?.finalizeRun(runId) ?? Promise.resolve(),
+      fileBroker: browserFileBroker,
+      finalizeBrowserRun: async (runId) => {
+        await Promise.all([
+          browserNetworkGuard?.finalizeRun(runId) ?? Promise.resolve(),
+          browserFileBroker?.releaseRun(runId) ?? Promise.resolve()
+        ])
+      },
       releaseBrowserCapability: (activationId) =>
-        browserNetworkGuard?.releaseCapability(activationId) ?? Promise.resolve(),
+        Promise.all([
+          browserNetworkGuard?.releaseCapability(activationId) ?? Promise.resolve(),
+          browserFileBroker?.releaseCapability(activationId) ?? Promise.resolve()
+        ]).then(() => undefined),
       releaseBrowserToolCall: (input) =>
-        browserNetworkGuard?.releaseToolCall(input) ?? Promise.resolve(),
+        Promise.all([
+          browserNetworkGuard?.releaseToolCall(input) ?? Promise.resolve(),
+          browserFileBroker?.releaseToolCall(input) ?? Promise.resolve()
+        ]).then(() => undefined),
       surfaceGroup: browserSurfaceManager,
       closeSurface: () => getBrowserSurfaceManager().closeSurface(),
       detachAutomation: () => getBrowserSurfaceManager().detachAutomation(),
@@ -322,6 +374,8 @@ app.on('before-quit', (event) => {
     browserSurfaceManager = null
     browserNetworkGuard = null
     browserDownloadBroker = null
+    await browserFileBroker?.shutdown().catch(() => undefined)
+    browserFileBroker = null
     await browserArtifactBroker?.shutdown().catch(() => undefined)
     browserArtifactBroker = null
   })().finally(() => app.quit())
@@ -335,6 +389,7 @@ app.on('will-quit', () => {
   terminalBridge.killNow()
   managedPlaywrightBridgeHost = null
   browserDownloadBroker = null
+  browserFileBroker = null
   browserNetworkGuard = null
   browserSurfaceManager = null
   browserArtifactBroker = null

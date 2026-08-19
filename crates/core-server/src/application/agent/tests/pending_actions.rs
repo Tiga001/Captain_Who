@@ -4080,6 +4080,902 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
     assert_eq!(assistant.status.as_deref(), Some("error"));
 }
 
+fn store_builtin_sensitive_test_pending(
+    service: &AgentService,
+    storage: &StorageService,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+) -> (String, AgentToolCall) {
+    let now_ms = mycopilot_core::storage::now_ms();
+    let now_seconds = u64::try_from(now_ms).unwrap() / 1_000;
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let call = AgentToolCall {
+        id: call_id.to_string(),
+        tool: "browser_evaluate".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: Some("Run the reviewed page script.".to_string()),
+    };
+    let approval = mycopilot_core::AgentBuiltinMcpToolApproval {
+        schema_version: mycopilot_core::BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION,
+        identity: mycopilot_core::BuiltinMcpToolApprovalIdentity {
+            action_id: action_id.clone(),
+            approval_id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            call_id: call.id.clone(),
+            capability_id: "browser_automation".to_string(),
+            capability_activation_id: uuid::Uuid::new_v4().to_string(),
+            managed_mcp_id: "builtin.browser_automation.mcp".to_string(),
+            package_name: "@playwright/mcp".to_string(),
+            package_version: "0.0.79".to_string(),
+            upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)),
+            manifest_digest: format!("sha256:{}", "2".repeat(64)),
+            policy_digest: format!("sha256:{}", "3".repeat(64)),
+            policy_revision: 1,
+            tool_id: "browser_evaluate".to_string(),
+            raw_name: "browser_evaluate".to_string(),
+            model_name: "browser_evaluate".to_string(),
+            upstream_schema_digest: format!("sha256:{}", "4".repeat(64)),
+            host_overlay_digest: format!("sha256:{}", "5".repeat(64)),
+            host_input_schema_digest: format!("sha256:{}", "6".repeat(64)),
+            arguments_digest: format!("sha256:{}", "7".repeat(64)),
+            resource_scope_digest: format!("sha256:{}", "8".repeat(64)),
+            origin: Some("https://mail.example.test".to_string()),
+        },
+        capability_display_name: "Browser automation".to_string(),
+        tool_display_name: "Evaluate page script".to_string(),
+        call_reason: "Run the reviewed page script.".to_string(),
+        operation_category: "page_script_execution".to_string(),
+        resource_summary: mycopilot_core::BuiltinMcpToolResourceSummary {
+            scope: "page_script_execution".to_string(),
+            display_name: "Current managed page".to_string(),
+            file_basenames: Vec::new(),
+            origin: Some("https://mail.example.test".to_string()),
+        },
+        risk_kinds: vec![mycopilot_core::BuiltinMcpToolRiskKind::PageScriptExecution],
+        created_at: now_seconds,
+        expires_at: now_seconds.saturating_add(900),
+        approval_status: AgentApprovalStatus::Required,
+    };
+    let action = AgentProposedAction::BuiltinMcpToolApproval {
+        approval: Box::new(approval),
+    };
+    let provenance = AgentToolIdentity::BuiltinCapability {
+        capability_id: "browser_automation".into(),
+        managed_mcp_id: "builtin.browser_automation.mcp".into(),
+        package_name: "@playwright/mcp".into(),
+        package_version: "0.0.79".into(),
+        upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)).into(),
+        policy_digest: format!("sha256:{}", "3".repeat(64)).into(),
+        manifest_digest: format!("sha256:{}", "2".repeat(64)).into(),
+        tool_id: "browser_evaluate".into(),
+        raw_name: "browser_evaluate".into(),
+        model_name: "browser_evaluate".into(),
+        upstream_schema_digest: format!("sha256:{}", "4".repeat(64)).into(),
+        host_overlay_digest: format!("sha256:{}", "5".repeat(64)).into(),
+        host_input_schema_digest: format!("sha256:{}", "6".repeat(64)).into(),
+    };
+    let mut input: AgentChatInput = serde_json::from_value(json!({
+        "apiUrl": "http://127.0.0.1:9/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(storage, &mut input);
+    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        storage,
+        run_id,
+        Some(&action_id),
+        &call,
+        provenance.clone(),
+    ));
+    seed_durable_pending_owner(
+        storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        provenance,
+        now_ms,
+    );
+    assert!(service
+        .store_pending_action(run_id, conversation_id, assistant_message_id, action, input,)
+        .unwrap());
+    (action_id, call)
+}
+
+#[test]
+fn expired_builtin_sensitive_approval_tick_settles_once_and_releases_the_turn() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("builtin-sensitive-expiry-tick.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "http://127.0.0.1:9/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let expiry_clock_ms = mycopilot_core::storage::now_ms().saturating_add(901_000);
+    let service =
+        AgentService::new(Arc::clone(&storage)).with_mcp_approval_clock(move || expiry_clock_ms);
+    let run_id = "builtin-sensitive-expiry-tick-run";
+    let conversation_id = "builtin-sensitive-expiry-tick-conversation";
+    let assistant_message_id = "builtin-sensitive-expiry-tick-assistant";
+    let (action_id, call) = store_builtin_sensitive_test_pending(
+        &service,
+        &storage,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        "builtin-sensitive-expiry-tick-call",
+    );
+
+    assert_eq!(service.list_pending_actions().len(), 1);
+    assert_eq!(
+        service
+            .reconcile_expired_builtin_mcp_tool_approvals()
+            .unwrap(),
+        1
+    );
+    assert!(service.list_pending_actions().is_empty());
+    assert_eq!(
+        service
+            .reconcile_expired_builtin_mcp_tool_approvals()
+            .unwrap(),
+        0,
+        "expiry reconciliation must be idempotent"
+    );
+    assert!(!service
+        .has_conversation_turn_occupancy(conversation_id)
+        .unwrap());
+    assert!(!service
+        .active_turn_permits
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(run_id));
+
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let retired = storage
+        .get_pending_agent_action(&storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retired.status, "failed");
+    assert_eq!(retired.action_json, "{}");
+    assert_eq!(retired.agent_input_json, "{}");
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1
+    );
+    let trace_json = serde_json::to_string(&trace).unwrap();
+    assert!(trace_json.contains("\"status\":\"expired\""));
+    assert!(trace_json.contains("\"dispatchCertainty\":\"definitely_not_dispatched\""));
+}
+
+#[test]
+fn approving_an_expired_builtin_sensitive_action_removes_the_stale_card_and_turn() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "http://127.0.0.1:9/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let expiry_clock_ms = mycopilot_core::storage::now_ms().saturating_add(901_000);
+    let service =
+        AgentService::new(Arc::clone(&storage)).with_mcp_approval_clock(move || expiry_clock_ms);
+    let run_id = "builtin-sensitive-expiry-decision-run";
+    let conversation_id = "builtin-sensitive-expiry-decision-conversation";
+    let assistant_message_id = "builtin-sensitive-expiry-decision-assistant";
+    let (action_id, call) = store_builtin_sensitive_test_pending(
+        &service,
+        &storage,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        "builtin-sensitive-expiry-decision-call",
+    );
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let error = service
+        .queue_action_continuation(
+            run_id,
+            &action_id,
+            AgentApprovalDecisionStatus::Approved,
+            None,
+            notifications,
+        )
+        .unwrap_err();
+    assert!(error.contains("expired before dispatch"));
+    assert!(service.list_pending_actions().is_empty());
+    assert!(!service
+        .has_conversation_turn_occupancy(conversation_id)
+        .unwrap());
+    assert!(!service
+        .active_turn_permits
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(run_id));
+
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1
+    );
+    assert!(service
+        .queue_action_continuation(
+            run_id,
+            &action_id,
+            AgentApprovalDecisionStatus::Approved,
+            None,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .is_err());
+}
+
+#[test]
+fn builtin_sensitive_startup_terminalization_is_typed_atomic_and_secret_free() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("builtin-sensitive-startup.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let now_ms = mycopilot_core::storage::now_ms();
+    let now_seconds = u64::try_from(now_ms).unwrap() / 1_000;
+    let secret = "BUILTIN_STARTUP_RAW_ARGS_MUST_NEVER_PERSIST";
+    let cases = [
+        (
+            "pending",
+            McpStartupActionTerminalOutcome::PayloadUnavailable,
+            "payload_unavailable",
+            "definitely_not_dispatched",
+        ),
+        (
+            "approved",
+            McpStartupActionTerminalOutcome::PayloadUnavailable,
+            "payload_unavailable",
+            "definitely_not_dispatched",
+        ),
+        (
+            "executing",
+            McpStartupActionTerminalOutcome::OutcomeUnknown,
+            "outcome_unknown",
+            "possibly_dispatched",
+        ),
+        (
+            "pending",
+            McpStartupActionTerminalOutcome::Expired,
+            "expired",
+            "definitely_not_dispatched",
+        ),
+    ];
+
+    for (index, (expected_status, outcome, result_status, certainty)) in
+        cases.into_iter().enumerate()
+    {
+        let run_id = format!("builtin-sensitive-startup-run-{index}");
+        let conversation_id = format!("builtin-sensitive-startup-conversation-{index}");
+        let assistant_message_id = format!("builtin-sensitive-startup-assistant-{index}");
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let call = AgentToolCall {
+            id: format!("builtin-sensitive-startup-call-{index}"),
+            tool: "browser_evaluate".to_string(),
+            // The raw evaluate function/password/cookie/file handle is process-sealed. The
+            // durable pending ToolCall is the exact private projection and contains no args.
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: Some("Run the reviewed page script.".to_string()),
+        };
+        let approval = mycopilot_core::AgentBuiltinMcpToolApproval {
+            schema_version: mycopilot_core::BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION,
+            identity: mycopilot_core::BuiltinMcpToolApprovalIdentity {
+                action_id: action_id.clone(),
+                approval_id: uuid::Uuid::new_v4().to_string(),
+                run_id: run_id.clone(),
+                call_id: call.id.clone(),
+                capability_id: "browser_automation".to_string(),
+                capability_activation_id: uuid::Uuid::new_v4().to_string(),
+                managed_mcp_id: "builtin.browser_automation.mcp".to_string(),
+                package_name: "@playwright/mcp".to_string(),
+                package_version: "0.0.79".to_string(),
+                upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)),
+                manifest_digest: format!("sha256:{}", "2".repeat(64)),
+                policy_digest: format!("sha256:{}", "3".repeat(64)),
+                policy_revision: 1,
+                tool_id: "browser_evaluate".to_string(),
+                raw_name: "browser_evaluate".to_string(),
+                model_name: "browser_evaluate".to_string(),
+                upstream_schema_digest: format!("sha256:{}", "4".repeat(64)),
+                host_overlay_digest: format!("sha256:{}", "5".repeat(64)),
+                host_input_schema_digest: format!("sha256:{}", "6".repeat(64)),
+                arguments_digest: format!("sha256:{}", "7".repeat(64)),
+                resource_scope_digest: format!("sha256:{}", "8".repeat(64)),
+                origin: Some("https://mail.example.test".to_string()),
+            },
+            capability_display_name: "Browser automation".to_string(),
+            tool_display_name: "Evaluate page script".to_string(),
+            call_reason: "Run the reviewed page script.".to_string(),
+            operation_category: "page_script_execution".to_string(),
+            resource_summary: mycopilot_core::BuiltinMcpToolResourceSummary {
+                scope: "page_script_execution".to_string(),
+                display_name: "Current managed page".to_string(),
+                file_basenames: Vec::new(),
+                origin: Some("https://mail.example.test".to_string()),
+            },
+            risk_kinds: vec![mycopilot_core::BuiltinMcpToolRiskKind::PageScriptExecution],
+            created_at: now_seconds,
+            expires_at: now_seconds.saturating_add(900),
+            approval_status: AgentApprovalStatus::Required,
+        };
+        let action = AgentProposedAction::BuiltinMcpToolApproval {
+            approval: Box::new(approval),
+        };
+        let provenance = AgentToolIdentity::BuiltinCapability {
+            capability_id: "browser_automation".into(),
+            managed_mcp_id: "builtin.browser_automation.mcp".into(),
+            package_name: "@playwright/mcp".into(),
+            package_version: "0.0.79".into(),
+            upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)).into(),
+            policy_digest: format!("sha256:{}", "3".repeat(64)).into(),
+            manifest_digest: format!("sha256:{}", "2".repeat(64)).into(),
+            tool_id: "browser_evaluate".into(),
+            raw_name: "browser_evaluate".into(),
+            model_name: "browser_evaluate".into(),
+            upstream_schema_digest: format!("sha256:{}", "4".repeat(64)).into(),
+            host_overlay_digest: format!("sha256:{}", "5".repeat(64)).into(),
+            host_input_schema_digest: format!("sha256:{}", "6".repeat(64)).into(),
+        };
+        let mut input: AgentChatInput = serde_json::from_value(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "test-token",
+            "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
+            "messages": []
+        }))
+        .unwrap();
+        freeze_test_pending_provider_configuration(&storage, &mut input);
+        input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+            &storage,
+            &run_id,
+            Some(&action_id),
+            &call,
+            provenance.clone(),
+        ));
+        seed_durable_pending_owner(
+            &storage,
+            &conversation_id,
+            &assistant_message_id,
+            &run_id,
+            &call,
+            provenance,
+            now_ms.saturating_add(i64::try_from(index).unwrap()),
+        );
+        assert!(service
+            .store_pending_action(
+                &run_id,
+                &conversation_id,
+                &assistant_message_id,
+                action,
+                input,
+            )
+            .unwrap());
+        let storage_id = pending_action_storage_id(&run_id, &action_id);
+        if expected_status != "pending" {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute(
+                    "UPDATE agent_pending_actions SET status = ?2 WHERE action_id = ?1",
+                    rusqlite::params![storage_id, expected_status],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE agent_action_audit SET status = ?2 WHERE action_id = ?1",
+                    rusqlite::params![storage_id, expected_status],
+                )
+                .unwrap();
+        }
+        let prefix = storage
+            .get_conversation_turn_trace(&assistant_message_id)
+            .unwrap()
+            .unwrap();
+        let durable_row = storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .unwrap();
+        let terminal_at = durable_row
+            .created_at
+            .max(durable_row.updated_at)
+            .saturating_add(1_000);
+        assert!(storage
+            .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                &storage_id,
+                expected_status,
+                outcome,
+                terminal_at,
+            )
+            .unwrap());
+        assert!(!storage
+            .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                &storage_id,
+                expected_status,
+                outcome,
+                terminal_at.saturating_add(1),
+            )
+            .unwrap());
+        let trace = storage
+            .get_conversation_turn_trace(&assistant_message_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&trace.items[..prefix.items.len()], prefix.items.as_slice());
+        assert_eq!(
+            trace
+                .items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+                ))
+                .count(),
+            1
+        );
+        let rendered = serde_json::to_string(&trace).unwrap();
+        assert!(rendered.contains(&format!("\"status\":\"{result_status}\"")));
+        assert!(rendered.contains(&format!("\"dispatchCertainty\":\"{certainty}\"")));
+        assert!(!rendered.contains(secret));
+        let retired = storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retired.status, "failed");
+        assert_eq!(retired.action_json, "{}");
+        assert_eq!(retired.agent_input_json, "{}");
+    }
+}
+
+#[test]
+fn builtin_sensitive_rejection_crash_window_recovers_the_exact_rejected_receipt() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("builtin-sensitive-reject-crash.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "http://127.0.0.1:9/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "builtin-sensitive-reject-crash-run";
+    let conversation_id = "builtin-sensitive-reject-crash-conversation";
+    let assistant_message_id = "builtin-sensitive-reject-crash-assistant";
+    let (action_id, call) = store_builtin_sensitive_test_pending(
+        &service,
+        &storage,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        "builtin-sensitive-reject-crash-call",
+    );
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let record = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&storage_id)
+        .unwrap()
+        .clone();
+    let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action else {
+        panic!("expected the typed built-in MCP approval");
+    };
+    let feedback_secret =
+        "使用密码 UNLABELLED_PASSWORD_CANARY_7Yp9；Use UNLABELLED_REJECTION_SECRET";
+    let live_result =
+        mycopilot_core::builtin_mcp_tool_rejected_result(approval, Some(feedback_secret));
+    let mut persisted_input = record.agent_input.clone();
+    persisted_input.approval_decision = Some(AgentApprovalDecision {
+        action_id: action_id.clone(),
+        status: AgentApprovalDecisionStatus::Rejected,
+        message: None,
+    });
+    persisted_input.tool_continuation = Some(AgentToolContinuation {
+        call: call.clone(),
+        result: mycopilot_core::builtin_capability_tool_result_persistence_projection(&live_result),
+    });
+    let completed_at = mycopilot_core::storage::now_ms();
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .commit_rejected_mcp_receipt(&record, &persisted_input, completed_at, &notifications)
+        .unwrap();
+
+    let crash_window = storage
+        .get_pending_agent_action(&storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(crash_window.status, "pending");
+    assert_eq!(crash_window.target_status.as_deref(), Some("rejected"));
+    let committed_prefix = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        committed_prefix
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1
+    );
+    let prefix_json = serde_json::to_string(&committed_prefix).unwrap();
+    assert!(prefix_json.contains("\"status\":\"rejected\""));
+    assert!(prefix_json.contains("\"dispatchCertainty\":\"definitely_not_dispatched\""));
+    assert!(!prefix_json.contains("payload_unavailable"));
+    assert!(!prefix_json.contains("outcome_unknown"));
+    assert!(!prefix_json.contains("UNLABELLED_PASSWORD_CANARY_7Yp9"));
+    assert!(!prefix_json.contains("UNLABELLED_REJECTION_SECRET"));
+
+    // Simulate a process crash after the atomic receipt but before the in-memory continuation
+    // claim. Startup must adopt that exact receipt, never reinterpret refusal as dispatch.
+    drop(service);
+    let restarted = AgentService::new(Arc::clone(&storage));
+    assert!(!restarted
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(&storage_id));
+    let retired = storage
+        .get_pending_agent_action(&storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retired.status, "rejected");
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &trace.items[..committed_prefix.items.len()],
+        committed_prefix.items.as_slice()
+    );
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1
+    );
+    let trace_json = serde_json::to_string(&trace).unwrap();
+    assert!(!trace_json.contains("payload_unavailable"));
+    assert!(!trace_json.contains("outcome_unknown"));
+    assert!(!trace_json.contains("UNLABELLED_PASSWORD_CANARY_7Yp9"));
+    assert!(!trace_json.contains("UNLABELLED_REJECTION_SECRET"));
+}
+
+#[test]
+fn builtin_sensitive_cancel_reaches_pre_spawn_and_dispatching_process_guards() {
+    for (index, target_status) in [
+        PendingActionStatus::Approved,
+        PendingActionStatus::Executing,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        save_test_pending_provider(
+            &storage,
+            "test-model",
+            "http://127.0.0.1:9/v1/chat/completions",
+            "test-token",
+            "disabled",
+            "",
+        );
+        let service = AgentService::new(Arc::clone(&storage));
+        let run_id = format!("builtin-sensitive-cancel-run-{index}");
+        let conversation_id = format!("builtin-sensitive-cancel-conversation-{index}");
+        let assistant_message_id = format!("builtin-sensitive-cancel-assistant-{index}");
+        let (action_id, _) = store_builtin_sensitive_test_pending(
+            &service,
+            &storage,
+            &run_id,
+            &conversation_id,
+            &assistant_message_id,
+            &format!("builtin-sensitive-cancel-call-{index}"),
+        );
+        let storage_id = pending_action_storage_id(&run_id, &action_id);
+        let record = service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&storage_id)
+            .unwrap()
+            .clone();
+        service
+            .transition_pending_status(&record, PendingActionStatus::Approved)
+            .unwrap();
+        if target_status == PendingActionStatus::Executing {
+            let approved = service
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&storage_id)
+                .unwrap()
+                .clone();
+            service
+                .transition_pending_status(&approved, PendingActionStatus::Executing)
+                .unwrap();
+        }
+        let guard = service.process_runs.register(&storage_id, &run_id);
+        assert!(service.cancel_action(&run_id, &action_id).unwrap());
+        assert!(guard
+            .cancel_flag()
+            .load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            service
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&storage_id)
+                .unwrap()
+                .snapshot
+                .status,
+            target_status
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_once() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "http://127.0.0.1:9/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "builtin-sensitive-reject-race-run";
+    let conversation_id = "builtin-sensitive-reject-race-conversation";
+    let assistant_message_id = "builtin-sensitive-reject-race-assistant";
+    let (action_id, call) = store_builtin_sensitive_test_pending(
+        &service,
+        &storage,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        "builtin-sensitive-reject-race-call",
+    );
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let approve_entered = Arc::new(std::sync::Barrier::new(2));
+    let approve_release = Arc::new(std::sync::Barrier::new(2));
+    crate::application::agent::approval::install_approval_decision_barrier_hook(
+        &action_id,
+        AgentApprovalDecisionStatus::Approved,
+        {
+            let entered = Arc::clone(&approve_entered);
+            let release = Arc::clone(&approve_release);
+            Arc::new(move || {
+                entered.wait();
+                release.wait();
+            })
+        },
+    );
+    let approve = {
+        let service = service.clone();
+        let action_id = action_id.clone();
+        let notifications = notifications.clone();
+        tokio::spawn(async move {
+            service.queue_action_continuation(
+                run_id,
+                &action_id,
+                AgentApprovalDecisionStatus::Approved,
+                None,
+                notifications,
+            )
+        })
+    };
+    approve_entered.wait();
+    let output = service
+        .queue_action_continuation(
+            run_id,
+            &action_id,
+            AgentApprovalDecisionStatus::Rejected,
+            Some("Use the public workflow instead.".to_string()),
+            notifications.clone(),
+        )
+        .unwrap();
+    assert_eq!(output.status, "rejected");
+    approve_release.wait();
+    assert!(approve.await.unwrap().is_err());
+    assert!(service
+        .queue_action_continuation(
+            run_id,
+            &action_id,
+            AgentApprovalDecisionStatus::Rejected,
+            None,
+            notifications,
+        )
+        .is_err());
+    assert!(!service.cancel_action(run_id, &action_id).unwrap());
+    let row = storage
+        .get_pending_agent_action(&storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, "rejected");
+    assert_eq!(row.target_status.as_deref(), Some("rejected"));
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn builtin_sensitive_approve_claim_blocks_late_reject_and_restart_terminalizes_once() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "http://127.0.0.1:9/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "builtin-sensitive-approve-race-run";
+    let conversation_id = "builtin-sensitive-approve-race-conversation";
+    let assistant_message_id = "builtin-sensitive-approve-race-assistant";
+    let (action_id, call) = store_builtin_sensitive_test_pending(
+        &service,
+        &storage,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        "builtin-sensitive-approve-race-call",
+    );
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let reject_entered = Arc::new(std::sync::Barrier::new(2));
+    let reject_release = Arc::new(std::sync::Barrier::new(2));
+    crate::application::agent::approval::install_approval_decision_barrier_hook(
+        &action_id,
+        AgentApprovalDecisionStatus::Rejected,
+        {
+            let entered = Arc::clone(&reject_entered);
+            let release = Arc::clone(&reject_release);
+            Arc::new(move || {
+                entered.wait();
+                release.wait();
+            })
+        },
+    );
+    let reject = {
+        let service = service.clone();
+        let action_id = action_id.clone();
+        let notifications = notifications.clone();
+        tokio::spawn(async move {
+            service.queue_action_continuation(
+                run_id,
+                &action_id,
+                AgentApprovalDecisionStatus::Rejected,
+                None,
+                notifications,
+            )
+        })
+    };
+    reject_entered.wait();
+    let approve_error = service
+        .queue_action_continuation(
+            run_id,
+            &action_id,
+            AgentApprovalDecisionStatus::Approved,
+            None,
+            notifications.clone(),
+        )
+        .unwrap_err();
+    assert!(approve_error.contains("Host is unavailable"));
+    reject_release.wait();
+    assert!(reject.await.unwrap().is_err());
+    assert_eq!(
+        storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "approved"
+    );
+
+    drop(service);
+    let restarted = AgentService::new(Arc::clone(&storage));
+    assert!(!restarted
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(&storage_id));
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1
+    );
+    let rendered = serde_json::to_string(&trace).unwrap();
+    assert!(rendered.contains("payload_unavailable"));
+    assert!(rendered.contains("definitely_not_dispatched"));
+    assert!(!rendered.contains("outcome_unknown"));
+}
+
 #[test]
 fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     const API_TOKEN_CANARY: &str = "SQLITE_PENDING_API_TOKEN_CANARY_DO_NOT_PERSIST";

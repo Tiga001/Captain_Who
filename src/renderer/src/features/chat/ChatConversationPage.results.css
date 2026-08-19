@@ -287,7 +287,13 @@
   white-space: nowrap;
 }
 
-.browser-artifact-card__summary > button {
+.browser-artifact-card__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.browser-artifact-card__actions > button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -303,7 +309,7 @@
   font-size: var(--mc-font-size-chat-activity-detail);
 }
 
-.browser-artifact-card__summary > button svg {
+.browser-artifact-card__actions > button svg {
   width: var(--mc-icon-size-sm);
   height: var(--mc-icon-size-sm);
   animation: browser-artifact-spin 0.8s linear infinite;
@@ -337,7 +343,8 @@
   word-break: break-word;
 }
 
-.browser-artifact-card__preview-failed {
+.browser-artifact-card__preview-failed,
+.browser-artifact-card__export-failed {
   display: inline-flex;
   align-items: center;
   margin: 0 12px 12px;
@@ -346,7 +353,8 @@
   font-size: var(--mc-font-size-chat-activity-detail);
 }
 
-.browser-artifact-card__preview-failed svg {
+.browser-artifact-card__preview-failed svg,
+.browser-artifact-card__export-failed svg {
   width: var(--mc-icon-size-sm);
   height: var(--mc-icon-size-sm);
 }
@@ -358,7 +366,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .browser-artifact-card__summary > button svg {
+  .browser-artifact-card__actions > button svg {
     animation: none;
   }
 }

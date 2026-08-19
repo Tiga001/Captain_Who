@@ -25,7 +25,7 @@ const AUTHORIZATION_CONTEXT = {
 describe('managed Playwright bridge wire contract', () => {
   it('accepts only the Rust call_tool camelCase field projection', () => {
     const notification = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       requestId: REQUEST_ID,
       serverId: SERVER_ID,
       deadlineMs: 2_000_000_000_000,
@@ -52,6 +52,74 @@ describe('managed Playwright bridge wire contract', () => {
           authorizationContext: {
             ...AUTHORIZATION_CONTEXT,
             manifestDigest: 'a'.repeat(64)
+          }
+        }
+      })
+    ).toThrow()
+  })
+
+  it('strictly validates the post-approval sensitive Tool grant without accepting secrets', () => {
+    const grant = {
+      grantId: 'fe9c2750-fddf-4d3e-961f-55f6c0e17395',
+      approvalId: 'ed14d2ba-9dc6-40e0-bfc7-22e71cad7fb8',
+      argumentsDigest: `sha256:${'b'.repeat(64)}`,
+      resourceScopeDigest: `sha256:${'c'.repeat(64)}`,
+      targetBindingId: '398a919a-7b03-4234-b82c-a84498cf18ac',
+      targetBindingDigest: `sha256:${'d'.repeat(64)}`,
+      origin: 'https://mail.example.test',
+      riskKinds: ['page_script_execution'],
+      expiresAtMs: 1_999_999_000_000
+    }
+    const notification = {
+      schemaVersion: 2,
+      requestId: REQUEST_ID,
+      serverId: SERVER_ID,
+      deadlineMs: 2_000_000_000_000,
+      command: {
+        type: 'call_tool',
+        name: 'browser_evaluate',
+        arguments: {
+          function: '() => document.title',
+          approval_origin: 'https://mail.example.test',
+          call_reason: 'Read the current page title.'
+        },
+        timeoutMs: 60_000,
+        authorizationContext: { ...AUTHORIZATION_CONTEXT, builtinToolGrant: grant }
+      }
+    }
+    expect(parseManagedPlaywrightCommandNotification(notification)).toEqual(notification)
+    expect(() =>
+      parseManagedPlaywrightCommandNotification({
+        ...notification,
+        command: {
+          ...notification.command,
+          authorizationContext: {
+            ...AUTHORIZATION_CONTEXT,
+            builtinToolGrant: { ...grant, cookie: 'secret-canary' }
+          }
+        }
+      })
+    ).toThrow()
+    expect(() =>
+      parseManagedPlaywrightCommandNotification({
+        ...notification,
+        command: {
+          ...notification.command,
+          authorizationContext: {
+            ...AUTHORIZATION_CONTEXT,
+            builtinToolGrant: { ...grant, origin: 'https://mail.example.test/path' }
+          }
+        }
+      })
+    ).toThrow()
+    expect(() =>
+      parseManagedPlaywrightCommandNotification({
+        ...notification,
+        command: {
+          ...notification.command,
+          authorizationContext: {
+            ...AUTHORIZATION_CONTEXT,
+            builtinToolGrant: { ...grant, riskKinds: ['page_script_execution', 'cookie_read'] }
           }
         }
       })
@@ -105,7 +173,7 @@ describe('managed Playwright bridge wire contract', () => {
 
   it('accepts only the TypeScript error completion camelCase field projection', () => {
     const completion = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       requestId: REQUEST_ID,
       outcome: {
         type: 'error',
@@ -142,6 +210,96 @@ describe('managed Playwright bridge wire contract', () => {
           code: 'outcome_unknown',
           dispatchCertainty: 'response_received'
         }
+      })
+    ).toThrow()
+  })
+
+  it('strictly validates proposal-time sensitive target prepare and release commands', () => {
+    const prepare = {
+      schemaVersion: 2,
+      requestId: REQUEST_ID,
+      serverId: SERVER_ID,
+      deadlineMs: 2_000_000_000_000,
+      command: {
+        type: 'prepare_sensitive_tool',
+        input: {
+          bindingRequestId: '7c71eead-3b07-4700-8378-c61d7ea7ac68',
+          runId: 'run-1',
+          capabilityId: 'browser_automation',
+          activationId: AUTHORIZATION_CONTEXT.activationId,
+          manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+          policyRevision: 1,
+          grantExpiresAtMs: 2_000_000_000_000,
+          callId: 'call-1',
+          toolName: 'browser_evaluate',
+          argumentsDigest: `sha256:${'b'.repeat(64)}`,
+          createdAtMs: 1_999_999_000_000,
+          expiresAtMs: 1_999_999_600_000
+        }
+      }
+    }
+    expect(parseManagedPlaywrightCommandNotification(prepare)).toEqual(prepare)
+    expect(() =>
+      parseManagedPlaywrightCommandNotification({
+        ...prepare,
+        command: {
+          ...prepare.command,
+          input: { ...prepare.command.input, surfaceId: 'must-remain-main-only' }
+        }
+      })
+    ).toThrow()
+
+    const release = {
+      ...prepare,
+      command: {
+        type: 'release_sensitive_tool_binding',
+        bindingId: '398a919a-7b03-4234-b82c-a84498cf18ac',
+        runId: 'run-1',
+        activationId: AUTHORIZATION_CONTEXT.activationId,
+        callId: 'call-1',
+        reason: 'cancelled'
+      }
+    }
+    expect(parseManagedPlaywrightCommandNotification(release)).toEqual(release)
+    expect(() =>
+      parseManagedPlaywrightCommandNotification({
+        ...release,
+        command: { ...release.command, generation: 7 }
+      })
+    ).toThrow()
+  })
+
+  it('strictly validates sensitive target completion outcomes', () => {
+    const prepared = {
+      schemaVersion: 2,
+      requestId: REQUEST_ID,
+      outcome: {
+        type: 'sensitive_tool_prepared',
+        bindingId: '398a919a-7b03-4234-b82c-a84498cf18ac',
+        targetBindingDigest: `sha256:${'d'.repeat(64)}`,
+        origin: 'https://mail.example.test',
+        createdAtMs: 1_999_999_000_000,
+        expiresAtMs: 1_999_999_600_000
+      }
+    }
+    expect(parseManagedPlaywrightCompletionInput(prepared)).toEqual(prepared)
+    expect(() =>
+      parseManagedPlaywrightCompletionInput({
+        ...prepared,
+        outcome: { ...prepared.outcome, surfaceId: 'must-remain-main-only' }
+      })
+    ).toThrow()
+
+    const released = {
+      schemaVersion: 2,
+      requestId: REQUEST_ID,
+      outcome: { type: 'sensitive_tool_binding_released', released: true }
+    }
+    expect(parseManagedPlaywrightCompletionInput(released)).toEqual(released)
+    expect(() =>
+      parseManagedPlaywrightCompletionInput({
+        ...released,
+        outcome: { ...released.outcome, reason: 'cancelled' }
       })
     ).toThrow()
   })

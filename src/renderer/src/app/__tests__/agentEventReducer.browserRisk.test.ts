@@ -199,7 +199,7 @@ describe('browser risk approval reducer identity', () => {
     expect(JSON.stringify(withResult.agentRun)).not.toContain('AUTHORIZATION_COOKIE_CANARY')
   })
 
-  it('drops the entire managed projection when any non-allowlisted field is present', () => {
+  it('drops non-allowlisted fields while retaining the rebuilt managed receipt', () => {
     const withResult = applyAgentEventToChatMessage(withBrowserCall(), {
       type: 'tool_result',
       runId: RUN_ID,
@@ -218,7 +218,17 @@ describe('browser risk approval reducer identity', () => {
       }
     })
     expect(withResult.agentRun?.toolResults).toEqual([
-      { callId: CALL_ID, tool: 'browser_navigate', ok: false }
+      {
+        callId: CALL_ID,
+        tool: 'browser_navigate',
+        ok: false,
+        result: {
+          schemaVersion: 1,
+          type: 'builtin_capability_tool',
+          status: 'outcome_unknown',
+          contentOmitted: true
+        }
+      }
     ])
     expect(JSON.stringify(withResult.agentRun)).not.toContain('PRIVATE_PAGE_TREE_CANARY')
     expect(JSON.stringify(withResult.agentRun)).not.toContain('AUTHORIZATION_COOKIE_CANARY')

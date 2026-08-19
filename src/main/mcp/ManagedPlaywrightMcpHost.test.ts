@@ -1,16 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import { access, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { BrowserContext } from 'playwright'
 import type { BrowserNetworkOperationLease } from '../browser/BrowserNetworkGuard'
 import { BrowserArtifactBroker } from '../browser/BrowserArtifactBroker'
+import { BrowserFileBroker } from '../browser/BrowserFileBroker'
 import type {
   BrowserRiskAuthorizationContext,
   BrowserRiskFailure
 } from '../browser/BrowserRiskCoordinator'
 
 import {
+  appendSafeFrameEditorCandidates,
   ManagedPlaywrightMcpHost,
   ManagedPlaywrightMcpHostError,
   type ManagedPlaywrightConnectionFactory,
@@ -26,6 +29,11 @@ import {
   MANAGED_PLAYWRIGHT_CAPABILITIES,
   MANAGED_PLAYWRIGHT_CATALOG_LOCK
 } from './managedPlaywrightCatalog'
+import { canonicalSha256, sensitivePolicyForTool } from './managedPlaywrightSensitivePolicy'
+import {
+  ManagedPlaywrightSensitiveTargetBindingError,
+  type ManagedPlaywrightSensitiveTargetBindingStore
+} from './ManagedPlaywrightSensitiveTargetBindingBroker'
 
 const trackedHosts = new Set<ManagedPlaywrightMcpHost>()
 const RISK_CONTEXT: BrowserRiskAuthorizationContext = {
@@ -67,7 +75,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(tools.map((tool) => tool.name)).toEqual(
       MANAGED_PLAYWRIGHT_MANIFEST.tools.map((tool) => tool.rawName)
     )
-    expect(tools).toHaveLength(40)
+    expect(tools).toHaveLength(61)
     expect(tools.map((tool) => tool.name)).not.toContain('browser_run_code_unsafe')
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
@@ -199,6 +207,376 @@ describe('ManagedPlaywrightMcpHost', () => {
     )
   })
 
+  it('rejects missing, expired, or origin-drifted sensitive grants before starting MCP or creating a tab', async () => {
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const surfaces = [surfaceView(0, true)]
+    const surfaceGroup = singleSurfaceGroup(surfaces)
+    const host = fakeHost({ createOfficialConnection, surfaceGroup })
+    const args = {
+      function: '() => document.title',
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Read the fixture title.'
+    }
+
+    await expect(
+      host.callTool('browser_evaluate', args, {
+        authorizationContext: { ...RISK_CONTEXT, grantExpiresAtMs: Date.now() + 120_000 }
+      })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_grant_missing',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+
+    const expired = sensitiveContext('browser_evaluate', args)
+    expired.builtinToolGrant = {
+      ...expired.builtinToolGrant!,
+      expiresAtMs: Date.now() - 1
+    }
+    await expect(
+      host.callTool('browser_evaluate', args, { authorizationContext: expired })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_grant_expired',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+
+    surfaces.splice(0)
+    await expect(
+      host.callTool('browser_evaluate', args, {
+        authorizationContext: sensitiveContext('browser_evaluate', args)
+      })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_grant_origin_drifted',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+
+    expect(createOfficialConnection).not.toHaveBeenCalled()
+    expect(surfaceGroup.ensureActiveSurface).not.toHaveBeenCalled()
+    expect(surfaceGroup.createSurface).not.toHaveBeenCalled()
+    expect(surfaces).toHaveLength(0)
+  })
+
+  it('dispatches an approved page evaluation exactly once and strips Host approval fields', async () => {
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'fixture-result' }],
+      isError: false
+    }))
+    const host = fakeHost({ callTool, surfaceGroup: singleSurfaceGroup() })
+    const args = {
+      function: '() => document.title',
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Read the fixture title.'
+    }
+    const authorizationContext = sensitiveContext('browser_evaluate', args)
+
+    await expect(
+      host.callTool('browser_evaluate', args, { authorizationContext })
+    ).resolves.toEqual({
+      content: [{ type: 'text', text: 'fixture-result' }],
+      isError: false
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(callTool).toHaveBeenCalledWith(
+      {
+        name: 'browser_evaluate',
+        arguments: { function: '() => document.title' }
+      },
+      undefined,
+      expect.objectContaining({ resetTimeoutOnProgress: false })
+    )
+    await expect(
+      host.callTool('browser_evaluate', args, { authorizationContext })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_grant_reused',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+  })
+
+  it('binds sensitive element disclosure to top-frame snapshot refs only', async () => {
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false
+    }))
+    const host = fakeHost({ callTool, surfaceGroup: singleSurfaceGroup() })
+    const topFrameArguments = {
+      function: '(element) => element.textContent',
+      element: 'Reviewed top-frame element',
+      target: 'e17',
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Read the reviewed top-frame fixture element.'
+    }
+    await expect(
+      host.callTool('browser_evaluate', topFrameArguments, {
+        authorizationContext: sensitiveContext('browser_evaluate', topFrameArguments)
+      })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledOnce()
+
+    for (const [index, target] of [
+      'f1e2',
+      'frameLocator("iframe").locator("[contenteditable]")',
+      'managed-frame-editor:00000000-0000-4000-8000-000000000000',
+      '#unknown-selector'
+    ].entries()) {
+      const argumentsValue = { ...topFrameArguments, target }
+      await expect(
+        host.callTool('browser_evaluate', argumentsValue, {
+          authorizationContext: sensitiveContext('browser_evaluate', argumentsValue, {
+            callId: `call-frame-scope-${index}`
+          })
+        })
+      ).rejects.toMatchObject({
+        code: 'mcp.builtin_playwright.sensitive_target_scope_unsupported',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+    }
+
+    const dropArguments = {
+      target: 'f2e9',
+      paths: ['browser-file:00000000-0000-4000-8000-000000000000'],
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Drop the approved fixture file.'
+    }
+    await expect(
+      host.callTool('browser_drop', dropArguments, {
+        authorizationContext: sensitiveContext('browser_drop', dropArguments)
+      })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_target_scope_unsupported',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+  })
+
+  it('refuses mutable network-ledger indices before connecting or upstream dispatch', async () => {
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'must-not-read-request' }],
+      isError: false
+    }))
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const host = fakeHost({
+      callTool,
+      createOfficialConnection,
+      surfaceGroup: singleSurfaceGroup()
+    })
+    const argumentsValue = {
+      index: 1,
+      part: 'request-headers',
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Read the reviewed fixture request headers.'
+    }
+    await expect(
+      host.callTool('browser_network_request', argumentsValue, {
+        authorizationContext: sensitiveContext('browser_network_request', argumentsValue)
+      })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_request_identity_unavailable',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(createOfficialConnection).not.toHaveBeenCalled()
+    expect(callTool).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      name: 'page origin navigation',
+      mutate: (surfaces: ReturnType<typeof surfaceView>[]) => {
+        surfaces[0].url = 'http://localhost/after-approval'
+      }
+    },
+    {
+      name: 'active tab selection',
+      mutate: (surfaces: ReturnType<typeof surfaceView>[]) => {
+        surfaces[0].isActive = false
+        surfaces.push({
+          ...surfaceView(1, true),
+          url: 'http://127.0.0.1/other-tab'
+        })
+      }
+    },
+    {
+      name: 'surface generation replacement',
+      mutate: (surfaces: ReturnType<typeof surfaceView>[]) => {
+        surfaces[0].generation += 1
+      }
+    }
+  ])(
+    'fails closed when $name races grant validation before official dispatch',
+    async ({ mutate }) => {
+      let releaseConnection!: () => void
+      let signalConnectionStarted!: () => void
+      const connectionStarted = new Promise<void>((resolve) => {
+        signalConnectionStarted = resolve
+      })
+      const connectionBarrier = new Promise<void>((resolve) => {
+        releaseConnection = resolve
+      })
+      const createOfficialConnection = vi.fn(async () => {
+        signalConnectionStarted()
+        await connectionBarrier
+        return {
+          connect: vi.fn(async () => undefined),
+          close: vi.fn(async () => undefined)
+        }
+      })
+      const callTool = vi.fn(async () => ({
+        content: [{ type: 'text', text: 'must-not-dispatch' }],
+        isError: false
+      }))
+      const surfaces = [surfaceView(0, true)]
+      const args = {
+        function: '() => document.title',
+        approval_origin: 'http://127.0.0.1',
+        call_reason: 'Read the fixture title.'
+      }
+      const host = fakeHost({
+        callTool,
+        createOfficialConnection,
+        surfaceGroup: singleSurfaceGroup(surfaces)
+      })
+
+      const pending = host.callTool('browser_evaluate', args, {
+        authorizationContext: sensitiveContext('browser_evaluate', args)
+      })
+      await connectionStarted
+      mutate(surfaces)
+      releaseConnection()
+
+      await expect(pending).rejects.toMatchObject({
+        code: 'mcp.builtin_playwright.sensitive_grant_origin_drifted',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+      expect(callTool).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps pure MIME drop automatic while refusing a sensitive grant on that path', async () => {
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text', text: 'dropped' }] }))
+    const host = fakeHost({ callTool })
+    const args = {
+      target: '#fixture-drop-zone',
+      data: { 'text/plain': 'hello' },
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Drop plain fixture text.'
+    }
+    await expect(host.callTool('browser_drop', args)).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledWith(
+      {
+        name: 'browser_drop',
+        arguments: { target: '#fixture-drop-zone', data: { 'text/plain': 'hello' } }
+      },
+      undefined,
+      expect.any(Object)
+    )
+
+    await expect(
+      host.callTool('browser_drop', args, {
+        authorizationContext: sensitiveContext('browser_drop', {
+          ...args,
+          paths: ['browser-file:00000000-0000-4000-8000-000000000000']
+        })
+      })
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.sensitive_grant_drifted',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+  })
+
+  it('uses native file selection but fails closed until the exact file-chooser frame is bound', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-file-test-'))
+    const source = join(parent, 'selected.txt')
+    await writeFile(source, 'selected-file-canary')
+    const fileBroker = new BrowserFileBroker({
+      rootDirectory: join(parent, 'browser-automation-files'),
+      selectionProvider: { selectFiles: vi.fn(async () => [source]) }
+    })
+    await fileBroker.initialize()
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'must-not-upload' }],
+      isError: false
+    }))
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const host = fakeHost({
+      callTool: callTool as ManagedMcpClient['callTool'],
+      createOfficialConnection,
+      fileBroker,
+      surfaceGroup: singleSurfaceGroup()
+    })
+    try {
+      const selectionArguments = {
+        approval_origin: 'http://127.0.0.1',
+        call_reason: 'Choose a fixture file.'
+      }
+      const selection = await host.callTool('browser_file_upload', selectionArguments, {
+        authorizationContext: { ...RISK_CONTEXT, callId: 'call-file-picker' }
+      })
+      const handle =
+        selection.content[0]?.type === 'text'
+          ? selection.content[0].text.match(/browser-file:[0-9a-f-]+/)?.[0]
+          : undefined
+      expect(handle).toMatch(/^browser-file:/)
+      expect(selection).toMatchObject({
+        structuredContent: {
+          status: 'file_selection_ready',
+          contentOmitted: true,
+          fileCount: 1
+        },
+        isError: false
+      })
+      expect(createOfficialConnection).not.toHaveBeenCalled()
+      expect(callTool).not.toHaveBeenCalled()
+      expect(fileBroker.snapshot().handles).toBe(1)
+
+      const uploadArguments = {
+        paths: [handle!],
+        approval_origin: 'http://127.0.0.1',
+        call_reason: 'Upload the selected fixture file.'
+      }
+      await expect(
+        host.callTool('browser_file_upload', uploadArguments, {
+          authorizationContext: sensitiveContext('browser_file_upload', uploadArguments, {
+            callId: 'call-file-upload'
+          })
+        })
+      ).rejects.toMatchObject({
+        code: 'mcp.builtin_playwright.sensitive_target_scope_unsupported',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+      expect(callTool).not.toHaveBeenCalled()
+      expect(fileBroker.snapshot().handles).toBe(1)
+
+      const guessedArguments = {
+        paths: [source],
+        approval_origin: 'http://127.0.0.1',
+        call_reason: 'Upload a guessed path.'
+      }
+      await expect(
+        host.callTool('browser_file_upload', guessedArguments, {
+          authorizationContext: sensitiveContext('browser_file_upload', guessedArguments, {
+            callId: 'call-guessed-upload'
+          })
+        })
+      ).rejects.toMatchObject({
+        code: 'mcp.builtin_playwright.sensitive_target_scope_unsupported',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+      expect(callTool).not.toHaveBeenCalled()
+    } finally {
+      await fileBroker.shutdown()
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
   it('enforces every exposed Host schema before any upstream dispatch', async () => {
     const callTool = vi.fn(async () => ({
       content: [{ type: 'text', text: 'unexpected dispatch' }],
@@ -229,31 +607,212 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(callTool).not.toHaveBeenCalled()
   })
 
-  it('redacts credential-bearing network-list output at the Host boundary', async () => {
+  it('projects frame failures to value-free typed results', async () => {
+    const diagnostics = [
+      [
+        'Ref f1e2 not found in the current page snapshot. Try capturing new snapshot.',
+        'stale_frame_ref'
+      ],
+      ['"frameLocator(SECRET_SELECTOR)" does not match any elements.', 'frame_not_found'],
+      ['Element is not editable', 'frame_not_editable'],
+      ['frame_input_delivery_failed', 'frame_input_delivery_failed'],
+      ['Frame was detached', 'frame_detached'],
+      ['Target page, context or browser has been closed', 'target_closed']
+    ] as const
+    const callTool = vi.fn()
+    for (const [diagnostic] of diagnostics) {
+      callTool.mockResolvedValueOnce({
+        content: [{ type: 'text', text: diagnostic }],
+        isError: true
+      })
+    }
+    const host = fakeHost({ callTool })
+
+    for (const [, errorCode] of diagnostics) {
+      const result = await host.callTool('browser_type', {
+        target: 'frameLocator("iframe").locator("[contenteditable]")',
+        text: 'fixture-value-canary',
+        call_reason: 'Exercise a local iframe failure.'
+      })
+      expect(result).toEqual({
+        content: [{ type: 'text', text: `Managed browser frame operation failed: ${errorCode}.` }],
+        structuredContent: { status: 'failed', errorCode, contentOmitted: true },
+        isError: true
+      })
+      expect(JSON.stringify(result)).not.toContain('SECRET_SELECTOR')
+      expect(JSON.stringify(result)).not.toContain('fixture-value-canary')
+    }
+  })
+
+  it('adds a value-free editor candidate when an otherwise successful snapshot is blank', async () => {
+    const candidateElement = {
+      dispose: vi.fn(async () => undefined)
+    }
+    const childFrame = {
+      childFrames: () => [],
+      frameElement: vi.fn(async () => ({
+        evaluate: vi.fn(async () => ({ index: 0, type: 'iframe' })),
+        dispose: vi.fn(async () => undefined)
+      })),
+      locator: vi.fn(() => ({
+        evaluateAll: vi.fn(async () => [{ index: 0, kind: 'contenteditable' }]),
+        nth: vi.fn(() => ({ elementHandle: vi.fn(async () => candidateElement) }))
+      }))
+    }
+    const mainFrame = { childFrames: () => [childFrame] }
+    const context = {
+      pages: () => [{ mainFrame: () => mainFrame }]
+    } as unknown as BrowserContext
+
+    const result = await appendSafeFrameEditorCandidates(
+      { content: [{ type: 'text', text: 'Page snapshot is empty.' }], isError: false },
+      context,
+      () => 'managed-frame-editor:123e4567-e89b-42d3-a456-426614174099'
+    )
+    expect(result.content).toEqual([
+      { type: 'text', text: 'Page snapshot is empty.' },
+      {
+        type: 'text',
+        text: expect.stringContaining('managed-frame-editor:123e4567-e89b-42d3-a456-426614174099')
+      }
+    ])
+    expect(JSON.stringify(result)).not.toContain('nth=')
+    expect(JSON.stringify(result)).not.toMatch(/https?:\/\/|PRIVATE_FRAME_SECRET_CANARY/)
+  })
+
+  it('binds a blank-iframe editor target to one exact element and rejects stale generations', async () => {
+    const element = {
+      click: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => undefined),
+      evaluate: vi.fn(async () => 'contenteditable'),
+      fill: vi.fn(async () => undefined),
+      press: vi.fn(async () => undefined),
+      type: vi.fn(async () => undefined)
+    }
+    const frame = {
+      childFrames: () => [],
+      frameElement: vi.fn(async () => ({
+        evaluate: vi.fn(async () => ({ index: 0, type: 'iframe' })),
+        dispose: vi.fn(async () => undefined)
+      })),
+      isDetached: () => false,
+      locator: vi.fn(() => ({
+        evaluateAll: vi.fn(async () => [{ index: 0, kind: 'contenteditable' }]),
+        nth: vi.fn(() => ({ elementHandle: vi.fn(async () => element) }))
+      }))
+    }
+    const context = {
+      ...fakeBrowserContext(),
+      pages: () => [{ mainFrame: () => ({ childFrames: () => [frame] }) }]
+    } as unknown as BrowserContext
+    const surfaces = [surfaceView(0, true)]
+    const upstream = vi.fn(async ({ name }: { name: string }) => ({
+      content: [
+        {
+          type: 'text' as const,
+          text: name === 'browser_snapshot' ? 'Page snapshot is empty.' : 'must-not-dispatch'
+        }
+      ],
+      isError: false
+    }))
     const host = fakeHost({
-      callTool: vi.fn(async () => ({
+      callTool: upstream as ManagedMcpClient['callTool'],
+      getBrowserContext: async () => context,
+      surfaceGroup: singleSurfaceGroup(surfaces)
+    })
+
+    const snapshot = await host.callTool(
+      'browser_snapshot',
+      { call_reason: 'Locate the blank fixture editor.' },
+      { authorizationContext: RISK_CONTEXT }
+    )
+    const snapshotText = snapshot.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n')
+    const opaqueTarget = snapshotText.match(/managed-frame-editor:[0-9a-f-]{36}/u)?.[0]
+    expect(opaqueTarget).toBeTruthy()
+
+    await expect(
+      host.callTool(
+        'browser_type',
+        {
+          target: opaqueTarget,
+          text: '你好',
+          call_reason: 'Fill the exact blank fixture editor.'
+        },
+        { authorizationContext: RISK_CONTEXT }
+      )
+    ).resolves.toMatchObject({ isError: false })
+    expect(element.fill).toHaveBeenCalledWith('你好')
+    expect(upstream).toHaveBeenCalledTimes(1)
+
+    const secondSnapshot = await host.callTool(
+      'browser_snapshot',
+      { call_reason: 'Refresh the blank fixture editor.' },
+      { authorizationContext: RISK_CONTEXT }
+    )
+    const secondTarget = secondSnapshot.content
+      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+      .join('\n')
+      .match(/managed-frame-editor:[0-9a-f-]{36}/u)?.[0]
+    expect(secondTarget).toBeTruthy()
+    surfaces[0].generation += 1
+
+    await expect(
+      host.callTool(
+        'browser_type',
+        {
+          target: secondTarget,
+          text: 'must-not-land',
+          call_reason: 'Exercise a stale blank editor token.'
+        },
+        { authorizationContext: RISK_CONTEXT }
+      )
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { status: 'failed', errorCode: 'stale_frame_ref' }
+    })
+    expect(element.fill).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(secondSnapshot)).not.toContain('nth=')
+  })
+
+  it('rebuilds network lists from a fixed Host grammar without page-controlled text', async () => {
+    const statusTextCanary = 'OPAQUE_STATUS_CANARY_A7fQ9vLm2KxP'
+    const failureTextCanary = 'OPAQUE_FAILURE_CANARY_B9xR4mNp7TzQ'
+    const unknownLineCanary = 'OPAQUE_UNKNOWN_CANARY_C2mK8pVn4RsW'
+    const websocketCanary = 'OPAQUE_WS_CANARY_D4qL6tYh8NxB'
+    const structuredCanary = 'OPAQUE_STRUCTURED_CANARY_E6vM3zJp9HkR'
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
         content: [
           {
             type: 'text',
             text: [
               '### Result',
-              '1. [GET] https://alice:password@example.test/api/items?token=query-canary#fragment-canary => [200] OK',
-              'Authorization: bearer-header-canary',
-              'Cookie: cookie-header-canary'
+              `1. [GET] https://alice:password@example.test/api/items?token=query-canary#fragment-canary => [200] ${statusTextCanary}`,
+              `2. [POST] http://example.test/submit => [FAILED] ${failureTextCanary}`,
+              `3. [GET] wss://socket.example.test/${websocketCanary} => [101] Switching Protocols`,
+              `4. [BREW] https://example.test/coffee => [418] ${unknownLineCanary}`,
+              unknownLineCanary,
+              '### Page',
+              `- Page URL: https://example.test/${unknownLineCanary}`
             ].join('\n')
           }
         ],
-        // Upstream diagnostics are not a reviewed DTO. Even a malformed/non-object value is
-        // discarded before the safe bounded text projection is returned.
-        structuredContent: [
-          {
-            headers: { authorization: 'structured-bearer-canary' },
-            url: 'https://example.test/?token=structured-query-canary'
-          }
-        ],
+        // Upstream diagnostics are not a reviewed DTO and are discarded before Host projection.
+        structuredContent: { value: structuredCanary },
         isError: false
-      }))
-    })
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: `### Error\n${failureTextCanary}` }],
+        isError: true
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: `upstream-format-drift ${unknownLineCanary}` }],
+        isError: false
+      })
+    const host = fakeHost({ callTool })
 
     const result = await host.callTool('browser_network_requests', {
       static: false,
@@ -265,21 +824,88 @@ describe('ManagedPlaywrightMcpHost', () => {
         {
           type: 'text',
           text: [
-            '### Result',
-            '1. [GET] https://example.test/api/items => [200] OK',
-            'Authorization: [redacted]',
-            'Cookie: [redacted]'
+            'Managed browser network summary: 2 reviewed requests.',
+            '1. [GET] https://example.test/api/items => [200]',
+            '2. [POST] http://example.test/submit => [FAILED]',
+            'Status text, failure text, query strings, fragments, credentials, and unrecognized content were omitted.'
           ].join('\n')
         }
       ],
+      structuredContent: {
+        schemaVersion: 1,
+        status: 'completed',
+        summary: {
+          count: 2,
+          requests: [
+            {
+              index: 1,
+              method: 'GET',
+              status: 200,
+              url: 'https://example.test/api/items'
+            },
+            {
+              index: 2,
+              method: 'POST',
+              status: 'failed',
+              url: 'http://example.test/submit'
+            }
+          ]
+        },
+        contentOmitted: true
+      },
       isError: false
     })
-    expect(JSON.stringify(result)).not.toMatch(
-      /alice|password|query-canary|fragment-canary|bearer-header-canary|cookie-header-canary|structured-bearer-canary|structured-query-canary/
-    )
+    expect(JSON.stringify(result)).not.toMatch(/alice|password|query-canary|fragment-canary/)
+    for (const canary of [
+      statusTextCanary,
+      failureTextCanary,
+      unknownLineCanary,
+      websocketCanary,
+      structuredCanary
+    ]) {
+      expect(JSON.stringify(result)).not.toContain(canary)
+    }
+
+    const failed = await host.callTool('browser_network_requests', {
+      static: false,
+      call_reason: 'Inspect request failures.'
+    })
+    expect(failed).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: 'Managed browser network summary failed; upstream error text was omitted.'
+        }
+      ],
+      structuredContent: {
+        schemaVersion: 1,
+        status: 'failed',
+        summary: { count: 0, requests: [] },
+        contentOmitted: true
+      },
+      isError: true
+    })
+    expect(JSON.stringify(failed)).not.toContain(failureTextCanary)
+
+    const drifted = await host.callTool('browser_network_requests', {
+      static: false,
+      call_reason: 'Inspect request failures.'
+    })
+    expect(drifted).toMatchObject({
+      structuredContent: {
+        status: 'completed',
+        summary: { count: 0, requests: [] },
+        contentOmitted: true
+      },
+      isError: false
+    })
+    expect(JSON.stringify(drifted)).not.toContain(unknownLineCanary)
   })
 
-  it('redacts page-controlled console output and rejects non-text diagnostic results', async () => {
+  it('replaces page-controlled console text with a value-free Host summary', async () => {
+    const unlabeledPasswordCanary = 'OPAQUE_CANARY_A7fQ9vLm2KxP'
+    const unlabeledLocalStorageCanary = 'OPAQUE_CANARY_B9xR4mNp7TzQ'
+    const unlabeledVerificationCodeCanary = 'OTP_CANARY_482761'
     const callTool = vi
       .fn()
       .mockResolvedValueOnce({
@@ -287,14 +913,31 @@ describe('ManagedPlaywrightMcpHost', () => {
           {
             type: 'text',
             text: [
-              'Error: fetch https://alice:password@example.test/failure?token=query-canary#fragment-canary',
-              'Set-Cookie: cookie-header-canary',
-              'token=console-token-canary',
-              'Authorization=Bearer console-bearer-canary'
+              '### Result',
+              'Total messages: 3 (Errors: 1, Warnings: 1)',
+              'Returning 1 messages for level "error"',
+              '',
+              `[error] ${unlabeledPasswordCanary} ${unlabeledLocalStorageCanary} ${unlabeledVerificationCodeCanary}`
             ].join('\n')
           }
         ],
+        structuredContent: {
+          messages: [
+            unlabeledPasswordCanary,
+            unlabeledLocalStorageCanary,
+            unlabeledVerificationCodeCanary
+          ]
+        },
         isError: false
+      })
+      .mockResolvedValueOnce({
+        content: [
+          {
+            type: 'text',
+            text: `### Error\n${unlabeledPasswordCanary} ${unlabeledLocalStorageCanary} ${unlabeledVerificationCodeCanary}`
+          }
+        ],
+        isError: true
       })
       .mockResolvedValueOnce({
         content: [{ type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' }],
@@ -310,19 +953,46 @@ describe('ManagedPlaywrightMcpHost', () => {
       content: [
         {
           type: 'text',
-          text: [
-            'Error: fetch https://example.test/failure',
-            'Set-Cookie: [redacted]',
-            'token=[redacted]',
-            'Authorization=[redacted]'
-          ].join('\n')
+          text: 'Managed browser console summary: 3 total, 1 errors, 1 warnings, 1 returned for level "error". Message text was omitted.'
         }
       ],
+      structuredContent: {
+        schemaVersion: 1,
+        status: 'completed',
+        summary: {
+          level: 'error',
+          counts: { errors: 1, returned: 1, total: 3, warnings: 1 }
+        },
+        contentOmitted: true
+      },
       isError: false
     })
-    expect(JSON.stringify(result)).not.toMatch(
-      /alice|password|query-canary|fragment-canary|cookie-header-canary|console-token-canary|console-bearer-canary/
-    )
+    expect(JSON.stringify(result)).not.toContain(unlabeledPasswordCanary)
+    expect(JSON.stringify(result)).not.toContain(unlabeledLocalStorageCanary)
+    expect(JSON.stringify(result)).not.toContain(unlabeledVerificationCodeCanary)
+
+    const failed = await host.callTool('browser_console_messages', {
+      level: 'error',
+      call_reason: 'Inspect page errors.'
+    })
+    expect(failed).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: 'Managed browser console summary failed for level "error"; message text was omitted.'
+        }
+      ],
+      structuredContent: {
+        schemaVersion: 1,
+        status: 'failed',
+        summary: { level: 'error' },
+        contentOmitted: true
+      },
+      isError: true
+    })
+    expect(JSON.stringify(failed)).not.toContain(unlabeledPasswordCanary)
+    expect(JSON.stringify(failed)).not.toContain(unlabeledLocalStorageCanary)
+    expect(JSON.stringify(failed)).not.toContain(unlabeledVerificationCodeCanary)
 
     await expect(
       host.callTool('browser_console_messages', {
@@ -348,6 +1018,7 @@ describe('ManagedPlaywrightMcpHost', () => {
   it('implements tabs and resize through the SurfaceGroup without exposing target identity', async () => {
     let surfaces = [surfaceView(0, true)]
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
       ensureActiveSurface: vi.fn(async () => surfaces[0]),
       listSurfaces: () => surfaces,
       createSurface: vi.fn(async () => {
@@ -400,7 +1071,10 @@ describe('ManagedPlaywrightMcpHost', () => {
     const route = vi.fn(async () => undefined)
     const unroute = vi.fn(async () => undefined)
     const context = fakeBrowserContext({ route, setOffline, unroute })
-    const callTool = vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false
+    }))
     const host = fakeHost({ callTool, getBrowserContext: async () => context })
     const runA = { ...RISK_CONTEXT, runId: 'run-a', callId: 'call-a' }
     const runB = { ...RISK_CONTEXT, runId: 'run-b', callId: 'call-b' }
@@ -509,6 +1183,12 @@ describe('ManagedPlaywrightMcpHost', () => {
       Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
     )
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => ({
+        surfaceId: 'surface-0',
+        generation: 1,
+        navigationEpoch: 1,
+        origin: 'http://127.0.0.1'
+      }),
       ensureActiveSurface: vi.fn(async () => surfaceView(0, true)),
       listSurfaces: () => [surfaceView(0, true)],
       createSurface: vi.fn(async () => surfaceView(0, true)),
@@ -555,11 +1235,14 @@ describe('ManagedPlaywrightMcpHost', () => {
     }
   })
 
-  it('exports console and network diagnostics only after Host redaction', async () => {
+  it('exports only Host-safe console summaries and bounded network lists', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-diagnostic-test-'))
     const broker = new BrowserArtifactBroker({
       rootDirectory: join(parent, 'browser-automation-artifacts')
     })
+    const unlabeledPasswordCanary = 'OPAQUE_CANARY_A7fQ9vLm2KxP'
+    const unlabeledLocalStorageCanary = 'OPAQUE_CANARY_B9xR4mNp7TzQ'
+    const unlabeledVerificationCodeCanary = 'OTP_CANARY_482761'
     const callTool = vi.fn(
       async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => ({
         content: [
@@ -567,11 +1250,34 @@ describe('ManagedPlaywrightMcpHost', () => {
             type: 'text',
             text:
               name === 'browser_network_requests'
-                ? 'GET https://alice:password@example.test/api?token=query-canary Authorization: bearer-canary'
-                : 'token=console-canary Set-Cookie: cookie-canary'
+                ? [
+                    '### Result',
+                    `1. [GET] https://alice:password@example.test/api?token=query-canary => [204] ${unlabeledPasswordCanary}`,
+                    `2. [POST] http://example.test/submit => [FAILED] ${unlabeledLocalStorageCanary}`,
+                    `3. [GET] ws://socket.example.test/${unlabeledVerificationCodeCanary} => [101] Switching Protocols`,
+                    `opaque ${unlabeledVerificationCodeCanary}`
+                  ].join('\n')
+                : [
+                    '### Result',
+                    'Total messages: 4 (Errors: 1, Warnings: 2)',
+                    'Returning 3 messages for level "warning"',
+                    '',
+                    `[warning] ${unlabeledPasswordCanary}`,
+                    `[warning] ${unlabeledLocalStorageCanary}`,
+                    `[error] ${unlabeledVerificationCodeCanary}`
+                  ].join('\n')
           }
         ],
-        structuredContent: [{ rawSecret: 'structured-canary' }],
+        structuredContent: [
+          {
+            rawSecret: 'structured-canary',
+            consoleValues: [
+              unlabeledPasswordCanary,
+              unlabeledLocalStorageCanary,
+              unlabeledVerificationCodeCanary
+            ]
+          }
+        ],
         isError: false,
         observedArguments: args
       })
@@ -601,6 +1307,26 @@ describe('ManagedPlaywrightMcpHost', () => {
         expect(text).not.toMatch(
           /alice|password|query-canary|bearer-canary|console-canary|cookie-canary|structured-canary/
         )
+        expect(JSON.stringify(result)).not.toContain(unlabeledPasswordCanary)
+        expect(JSON.stringify(result)).not.toContain(unlabeledLocalStorageCanary)
+        expect(JSON.stringify(result)).not.toContain(unlabeledVerificationCodeCanary)
+        expect(text).not.toContain(unlabeledPasswordCanary)
+        expect(text).not.toContain(unlabeledLocalStorageCanary)
+        expect(text).not.toContain(unlabeledVerificationCodeCanary)
+        if (name === 'browser_console_messages') {
+          expect(text).toBe(
+            'Managed browser console summary: 4 total, 1 errors, 2 warnings, 3 returned for level "warning". Message text was omitted.'
+          )
+        } else {
+          expect(text).toBe(
+            [
+              'Managed browser network summary: 2 reviewed requests.',
+              '1. [GET] https://example.test/api => [204]',
+              '2. [POST] http://example.test/submit => [FAILED]',
+              'Status text, failure text, query strings, fragments, credentials, and unrecognized content were omitted.'
+            ].join('\n')
+          )
+        }
       }
       for (const invocation of callTool.mock.calls) {
         const parameters = invocation[0] as { arguments: Record<string, unknown> }
@@ -611,6 +1337,66 @@ describe('ManagedPlaywrightMcpHost', () => {
       await host.close()
       await broker.shutdown()
       await rm(parent, { force: true, recursive: true })
+    }
+  })
+
+  it('publishes storage state as a protected metadata-only Artifact with no preview IPC', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-storage-state-test-'))
+    const broker = new BrowserArtifactBroker({
+      rootDirectory: join(parent, 'browser-automation-artifacts')
+    })
+    const callTool = vi.fn(
+      async ({ arguments: upstreamArguments }: { arguments: Record<string, unknown> }) => {
+        const meta = upstreamArguments._meta as { cwd: string }
+        await writeFile(
+          join(meta.cwd, String(upstreamArguments.filename)),
+          JSON.stringify({
+            cookies: [{ name: 'session', value: 'PRIVATE_STORAGE_COOKIE_CANARY' }],
+            origins: [
+              {
+                origin: 'http://127.0.0.1',
+                localStorage: [{ name: 'token', value: 'PRIVATE_LOCAL_STORAGE_CANARY' }]
+              }
+            ]
+          })
+        )
+        return {
+          content: [{ type: 'text', text: 'PRIVATE_STORAGE_COOKIE_CANARY' }],
+          isError: false
+        }
+      }
+    )
+    const host = fakeHost({
+      artifactBroker: broker,
+      callTool: callTool as ManagedMcpClient['callTool'],
+      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
+      getBrowserContext: async () => fakeBrowserContext(),
+      surfaceGroup: singleSurfaceGroup()
+    })
+    const args = {
+      approval_origin: 'http://127.0.0.1',
+      call_reason: 'Export the fixture storage state.'
+    }
+    try {
+      const result = await host.callTool('browser_storage_state', args, {
+        authorizationContext: sensitiveContext('browser_storage_state', args, {
+          callId: 'call-storage-export'
+        })
+      })
+      const artifact = (result.structuredContent as { artifacts: unknown[] }).artifacts[0] as {
+        preview: string
+      }
+      expect(artifact).toEqual(expect.objectContaining({ kind: 'json', preview: 'none' }))
+      expect(JSON.stringify(result)).not.toMatch(
+        /PRIVATE_STORAGE_COOKIE_CANARY|PRIVATE_LOCAL_STORAGE_CANARY/
+      )
+      await expect(broker.readPreview(artifact)).rejects.toMatchObject({
+        code: 'browser.artifact.preview_unavailable'
+      })
+    } finally {
+      await host.close()
+      await broker.shutdown()
+      await rm(parent, { recursive: true, force: true })
     }
   })
 
@@ -1108,11 +1894,78 @@ function surfaceView(index: number, isActive: boolean) {
   }
 }
 
-function fakeBrowserContext(overrides: {
-  route?: (...args: unknown[]) => Promise<void>
-  setOffline?: (offline: boolean) => Promise<void>
-  unroute?: (...args: unknown[]) => Promise<void>
-} = {}): BrowserContext {
+function singleSurfaceGroup(
+  surfaces: ReturnType<typeof surfaceView>[] = [surfaceView(0, true)]
+): ManagedPlaywrightSurfaceGroupAdapter {
+  return {
+    getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
+    ensureActiveSurface: vi.fn(async () => {
+      const active = surfaces.find((surface) => surface.isActive)
+      if (!active) throw new Error('no active surface')
+      return active
+    }),
+    listSurfaces: () => surfaces,
+    createSurface: vi.fn(async () => {
+      const created = surfaceView(surfaces.length, true)
+      for (const surface of surfaces) surface.isActive = false
+      surfaces.push(created)
+      return created
+    }),
+    selectSurface: vi.fn(async ({ index }) => {
+      for (const surface of surfaces) surface.isActive = surface.index === index
+      return surfaces[index]
+    }),
+    closeSurfaceByIndex: vi.fn(async () => undefined)
+  }
+}
+
+function sensitiveContext(
+  toolName: string,
+  modelArguments: Record<string, unknown>,
+  overrides: Partial<BrowserRiskAuthorizationContext> = {}
+): BrowserRiskAuthorizationContext {
+  const policy = sensitivePolicyForTool(toolName)
+  if (!policy) throw new Error(`Missing sensitive policy for ${toolName}`)
+  const origin = String(modelArguments.approval_origin)
+  const argumentsDigest = canonicalSha256(modelArguments)
+  const expiresAtMs = Date.now() + 60_000
+  const targetBindingId = randomUUID()
+  const targetBindingDigest = canonicalSha256({ targetBindingId })
+  return {
+    ...RISK_CONTEXT,
+    callId: `call-${toolName}`,
+    triggerToolName: toolName,
+    grantExpiresAtMs: expiresAtMs + 60_000,
+    ...overrides,
+    builtinToolGrant: {
+      grantId: randomUUID(),
+      approvalId: randomUUID(),
+      argumentsDigest,
+      targetBindingId,
+      targetBindingDigest,
+      resourceScopeDigest: canonicalSha256({
+        schemaVersion: 2,
+        toolId: toolName,
+        argumentsDigest,
+        origin,
+        riskKinds: [...policy.riskKinds],
+        scope: policy.scope,
+        targetBindingDigest
+      }),
+      origin,
+      riskKinds: [...policy.riskKinds],
+      expiresAtMs
+    }
+  }
+}
+
+function fakeBrowserContext(
+  overrides: {
+    route?: (...args: unknown[]) => Promise<void>
+    setOffline?: (offline: boolean) => Promise<void>
+    unroute?: (...args: unknown[]) => Promise<void>
+  } = {}
+): BrowserContext {
   return {
     route: overrides.route ?? vi.fn(async () => undefined),
     unroute: overrides.unroute ?? vi.fn(async () => undefined),
@@ -1128,6 +1981,7 @@ function fakeBrowserContext(overrides: {
 
 function fakeHost(overrides: {
   artifactBroker?: BrowserArtifactBroker
+  fileBroker?: BrowserFileBroker
   beginNetworkOperation?: ManagedPlaywrightMcpHostOptions['beginNetworkOperation']
   callTool?: ManagedMcpClient['callTool']
   closeSurface?: () => Promise<void>
@@ -1146,6 +2000,7 @@ function fakeHost(overrides: {
   }))
   const host = new ManagedPlaywrightMcpHost({
     artifactBroker: overrides.artifactBroker,
+    fileBroker: overrides.fileBroker,
     beginNetworkOperation: overrides.beginNetworkOperation,
     getActiveSurfaceIdentity: overrides.getActiveSurfaceIdentity,
     getBrowserContext:
@@ -1154,6 +2009,7 @@ function fakeHost(overrides: {
         throw new Error('not needed by fake MCP client')
       }),
     surfaceGroup: overrides.surfaceGroup,
+    sensitiveTargetBindings: fakeSensitiveTargetBindings(overrides.surfaceGroup),
     closeSurface: overrides.closeSurface ?? vi.fn(async () => undefined),
     detachAutomation: overrides.detachAutomation ?? vi.fn(async () => undefined),
     createOfficialConnection:
@@ -1173,6 +2029,53 @@ function fakeHost(overrides: {
   })
   trackedHosts.add(host)
   return host
+}
+
+function sensitiveTargetFromSurfaces(surfaces: ReturnType<typeof surfaceView>[]) {
+  const surface = surfaces.find((candidate) => candidate.isActive)
+  if (!surface) return null
+  try {
+    return {
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      navigationEpoch: 1,
+      origin: new URL(surface.url).origin
+    }
+  } catch {
+    return null
+  }
+}
+
+function fakeSensitiveTargetBindings(
+  surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter | undefined
+): ManagedPlaywrightSensitiveTargetBindingStore {
+  const consumed = new Set<string>()
+  return {
+    acquire: (authorization) => {
+      const grant = authorization.builtinToolGrant
+      const target = surfaceGroup?.getSensitiveTargetIdentity()
+      if (!grant || !target) {
+        throw new ManagedPlaywrightSensitiveTargetBindingError('origin_drifted')
+      }
+      if (consumed.has(grant.targetBindingId)) {
+        throw new ManagedPlaywrightSensitiveTargetBindingError('reused')
+      }
+      let dispatched = false
+      return {
+        target: Object.freeze({ ...target }),
+        markDispatched: () => {
+          if (dispatched || consumed.has(grant.targetBindingId)) {
+            throw new ManagedPlaywrightSensitiveTargetBindingError('reused')
+          }
+          dispatched = true
+          consumed.add(grant.targetBindingId)
+        },
+        finish: () => undefined
+      }
+    },
+    releaseRun: () => 0,
+    releaseToolCall: () => 0
+  }
 }
 
 function riskLease(options: {

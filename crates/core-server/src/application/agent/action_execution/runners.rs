@@ -49,6 +49,10 @@ fn persisted_mcp_tool_result(result: &AgentToolResult) -> AgentToolResult {
     mycopilot_core::mcp_tool_result_persistence_projection(result)
 }
 
+fn persisted_builtin_mcp_tool_result(result: &AgentToolResult) -> AgentToolResult {
+    mycopilot_core::builtin_capability_tool_result_persistence_projection(result)
+}
+
 fn mcp_tool_result_output_truncated(result: &AgentToolResult) -> bool {
     result
         .result
@@ -768,6 +772,190 @@ impl AgentService {
                 conversation_turn_trace: None,
             },
         })
+    }
+
+    pub(in crate::application::agent) fn queue_builtin_mcp_tool_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        grant: mycopilot_core::BuiltinMcpToolGrant,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentActionExecutionOutput, String> {
+        let run_id = record.snapshot.run_id.clone();
+        let service = self.clone();
+        let execution_record = record.clone();
+        tokio::spawn(async move {
+            service
+                .run_builtin_mcp_tool_execution(execution_record, call, grant, guard, notifications)
+                .await;
+        });
+        Ok(AgentActionExecutionOutput {
+            action_id: record.snapshot.action_id,
+            action_type: record.snapshot.action_type,
+            tool_name: record.snapshot.tool_name,
+            status: "approved".to_string(),
+            patch_result: None,
+            file_write_result: None,
+            command_result: None,
+            tool_result: None,
+            agent_output: AgentChatOutput {
+                content: String::new(),
+                status: AgentRunStatus::Running,
+                run_id,
+                events: Vec::new(),
+                tool_definitions: Vec::new(),
+                todo: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: Vec::new(),
+                conversation_turn_trace: None,
+            },
+        })
+    }
+
+    async fn run_builtin_mcp_tool_execution(
+        &self,
+        mut record: PendingActionRecord,
+        call: AgentToolCall,
+        grant: mycopilot_core::BuiltinMcpToolGrant,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        self.seed_trace_snapshot_from_checkpoint(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+        );
+        let AgentProposedAction::BuiltinMcpToolApproval { mut approval } =
+            record.snapshot.action.clone()
+        else {
+            let _ = self.persist_pending_target_status(&record, PendingActionStatus::Failed);
+            return;
+        };
+        approval.approval_status = AgentApprovalStatus::Approved;
+        let Some(runtime) = self.builtin_capabilities.clone() else {
+            let _ = self.persist_pending_target_status(&record, PendingActionStatus::Failed);
+            return;
+        };
+        let cancellation = AgentCancellationToken::new();
+        self.register_cancellation(&run_id, cancellation.clone());
+        if guard.cancel_flag().load(Ordering::SeqCst) {
+            cancellation.cancel();
+        }
+        let _guard = guard;
+        let result = if cancellation.is_cancelled() {
+            let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+            mycopilot_core::builtin_mcp_tool_cancelled_result(&approval)
+        } else {
+            if self
+                .transition_pending_status(&record, PendingActionStatus::Executing)
+                .is_err()
+            {
+                let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation);
+                return;
+            }
+            record.snapshot.status = PendingActionStatus::Executing;
+            match runtime
+                .invoke_approved_builtin_mcp_tool((*approval).clone(), grant, cancellation.clone())
+                .await
+            {
+                Ok(value) => AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: approval.identity.call_id.clone(),
+                    tool: approval.identity.model_name.clone(),
+                    ok: true,
+                    result: Some(value),
+                    error: None,
+                },
+                Err(error)
+                    if error
+                        .details()
+                        .and_then(|value| value.get("dispatchCertainty"))
+                        .and_then(Value::as_str)
+                        == Some("possibly_dispatched") =>
+                {
+                    mycopilot_core::builtin_mcp_tool_outcome_unknown_result(&approval)
+                }
+                Err(error)
+                    if error.is_cancelled()
+                        && mcp_agent_error_dispatch_certainty(&error)
+                            == AgentMcpDispatchCertainty::DefinitelyNotDispatched =>
+                {
+                    mycopilot_core::builtin_mcp_tool_cancelled_result(&approval)
+                }
+                Err(error) if error.is_cancelled() => {
+                    mycopilot_core::builtin_mcp_tool_outcome_unknown_result(&approval)
+                }
+                Err(error) => AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: approval.identity.call_id.clone(),
+                    tool: approval.identity.model_name.clone(),
+                    ok: false,
+                    result: error.details().cloned().or_else(|| {
+                        Some(serde_json::json!({
+                            "schemaVersion": 1,
+                            "type": "builtin_mcp_tool_approval",
+                            "status": "failed",
+                            "dispatchCertainty": "definitely_not_dispatched",
+                            "contentOmitted": true,
+                        }))
+                    }),
+                    error: Some(error.to_string()),
+                },
+            }
+        };
+        let final_pending_status = if result.ok {
+            PendingActionStatus::Completed
+        } else if result
+            .result
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            == Some("cancelled")
+        {
+            PendingActionStatus::Cancelled
+        } else {
+            PendingActionStatus::Failed
+        };
+        let mut agent_input = record.agent_input.clone();
+        agent_input.approval_decision = Some(AgentApprovalDecision {
+            action_id: record.snapshot.action_id.clone(),
+            status: AgentApprovalDecisionStatus::Approved,
+            message: None,
+        });
+        agent_input.tool_continuation = Some(AgentToolContinuation {
+            call: call.clone(),
+            result: result.clone(),
+        });
+        let mut persisted_agent_input = agent_input.clone();
+        if let Some(continuation) = persisted_agent_input.tool_continuation.as_mut() {
+            continuation.result = persisted_builtin_mcp_tool_result(&continuation.result);
+        }
+        if self
+            .commit_audited_result_trace_with_continuation(
+                &record,
+                &persisted_agent_input,
+                final_pending_status,
+                None,
+                now_ms(),
+                &notifications,
+            )
+            .is_err()
+        {
+            self.unregister_cancellation_if_current(&run_id, &cancellation);
+            return;
+        }
+        self.run_action_continuation(
+            record,
+            agent_input,
+            notifications,
+            final_pending_status,
+            Some(cancellation.clone()),
+        )
+        .await;
+        self.unregister_cancellation_if_current(&run_id, &cancellation);
     }
 
     pub(in crate::application::agent) fn queue_claimed_mcp_tool_execution(

@@ -7,6 +7,8 @@ import {
   parseAgentBrowserRiskProposedAction,
   parseAgentBuiltinCapabilityActivationApproval,
   parseAgentBuiltinCapabilityActivationProposedAction,
+  parseAgentBuiltinMcpToolApproval,
+  parseAgentBuiltinMcpToolApprovalProposedAction,
   parseAgentEventForHost,
   parseAgentMcpToolApproval,
   parseAgentMcpToolInvocationEvent,
@@ -20,6 +22,7 @@ const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
 const callId = `tc1_${'a'.repeat(43)}`
 const capabilityActivationId = '67b4ea45-d0e2-42d0-aee4-6da42d5e45a7'
 const browserRiskApprovalId = '2e976cb0-0b1e-40ab-8aa8-84ff41103d2f'
+const builtinMcpApprovalId = '4c6cc4a7-c8eb-4583-b7c5-dc7d2bf86293'
 const rendererGolden = JSON.parse(
   readFileSync(
     resolve(process.cwd(), 'packages/protocol/fixtures/agent-mcp-renderer-contract-v1.json'),
@@ -120,6 +123,48 @@ const browserRiskApproval = {
   riskKinds: ['insecure_http', 'loopback', 'non_standard_port'],
   manifestDigest: `sha256:${'e'.repeat(64)}`,
   policyRevision: 7,
+  createdAt: 1_753_843_200,
+  expiresAt: 1_753_844_100,
+  approvalStatus: 'required'
+} as const
+
+const builtinMcpToolApproval = {
+  schemaVersion: 1,
+  identity: {
+    actionId,
+    approvalId: builtinMcpApprovalId,
+    runId: 'run-owned',
+    callId,
+    capabilityId: 'browser_automation',
+    capabilityActivationId,
+    managedMcpId: 'builtin.browser_automation.mcp',
+    packageName: '@playwright/mcp',
+    packageVersion: '0.0.79',
+    upstreamCatalogDigest: `sha256:${'1'.repeat(64)}`,
+    manifestDigest: `sha256:${'2'.repeat(64)}`,
+    policyDigest: `sha256:${'3'.repeat(64)}`,
+    policyRevision: 8,
+    toolId: 'browser_evaluate',
+    rawName: 'browser_evaluate',
+    modelName: 'browser_evaluate',
+    upstreamSchemaDigest: `sha256:${'4'.repeat(64)}`,
+    hostOverlayDigest: `sha256:${'5'.repeat(64)}`,
+    hostInputSchemaDigest: `sha256:${'6'.repeat(64)}`,
+    argumentsDigest: `sha256:${'7'.repeat(64)}`,
+    resourceScopeDigest: `sha256:${'8'.repeat(64)}`,
+    origin: 'https://fixture.example'
+  },
+  capabilityDisplayName: 'Browser automation',
+  toolDisplayName: 'Run page script',
+  callReason: 'Set the fixture editor value.',
+  operationCategory: 'page_script_execution',
+  resourceSummary: {
+    scope: 'page_script_execution',
+    displayName: 'Current page script',
+    fileBasenames: [],
+    origin: 'https://fixture.example'
+  },
+  riskKinds: ['page_script_execution'],
   createdAt: 1_753_843_200,
   expiresAt: 1_753_844_100,
   approvalStatus: 'required'
@@ -378,6 +423,128 @@ describe('built-in capability Host-boundary contract', () => {
     expect(output.toolResult).toBeUndefined()
     expect(output.agentOutput.toolDefinitions).toEqual([])
     expect(JSON.stringify(output)).not.toContain('managedServerConfig')
+  })
+})
+
+describe('built-in MCP Tool approval Host-boundary contract', () => {
+  it('strictly parses the safe approval, event, pending snapshot and execution receipt', () => {
+    expect(parseAgentBuiltinMcpToolApproval(builtinMcpToolApproval)).toEqual(builtinMcpToolApproval)
+    const action = {
+      type: 'builtin_mcp_tool_approval',
+      approval: builtinMcpToolApproval
+    } as const
+    expect(parseAgentBuiltinMcpToolApprovalProposedAction(action)).toEqual(action)
+    expect(
+      parseAgentEventForHost({ type: 'approval_required', runId: 'run-owned', action })
+    ).toEqual({ type: 'approval_required', runId: 'run-owned', action })
+
+    const pending = {
+      actionId,
+      actionType: 'builtin_mcp_tool_approval',
+      toolName: 'browser_evaluate',
+      toolCallId: callId,
+      runId: 'run-owned',
+      conversationId: 'conversation-owned',
+      assistantMessageId: 'assistant-owned',
+      action,
+      createdAt: 1_753_843_200_000,
+      status: 'pending'
+    }
+    expect(parsePendingAgentActionSnapshotsForHost([pending])).toEqual([pending])
+
+    const output = parseAgentActionExecutionOutputForHost({
+      actionId,
+      actionType: 'builtin_mcp_tool_approval',
+      toolName: 'browser_evaluate',
+      status: 'rejected',
+      toolResult: {
+        cookie: 'PRIVATE_COOKIE_CANARY',
+        storage: 'PRIVATE_STORAGE_CANARY',
+        code: 'PRIVATE_SCRIPT_CANARY'
+      },
+      agentOutput: {
+        content: 'The user declined this sensitive browser operation.',
+        status: 'completed',
+        runId: 'run-owned',
+        events: [],
+        toolDefinitions: [{ description: 'must-not-reach-renderer' }],
+        proposedActions: []
+      }
+    })
+    expect(output.toolResult).toBeUndefined()
+    expect(output.agentOutput.toolDefinitions).toEqual([])
+    expect(JSON.stringify(output)).not.toContain('PRIVATE_')
+  })
+
+  it('rejects hidden authority, identity drift, raw paths and non-canonical risks', () => {
+    expect(() =>
+      parseAgentBuiltinMcpToolApproval({
+        ...builtinMcpToolApproval,
+        headers: { authorization: 'PRIVATE_AUTH_CANARY' }
+      })
+    ).toThrow(/unexpected field/)
+    expect(() =>
+      parseAgentBuiltinMcpToolApproval({
+        ...builtinMcpToolApproval,
+        identity: { ...builtinMcpToolApproval.identity, modelName: 'browser_click' }
+      })
+    ).toThrow(/identities must match/)
+    expect(() =>
+      parseAgentBuiltinMcpToolApproval({
+        ...builtinMcpToolApproval,
+        resourceSummary: {
+          ...builtinMcpToolApproval.resourceSummary,
+          fileBasenames: ['/Users/private/secret.txt']
+        }
+      })
+    ).toThrow(/must remain a basename/)
+    expect(() =>
+      parseAgentBuiltinMcpToolApproval({
+        ...builtinMcpToolApproval,
+        riskKinds: ['page_script_execution', 'page_script_execution']
+      })
+    ).toThrow(/unique and canonical/)
+    expect(() =>
+      parseAgentBuiltinMcpToolApproval({
+        ...builtinMcpToolApproval,
+        identity: { ...builtinMcpToolApproval.identity, origin: 'https://fixture.example/path' }
+      })
+    ).toThrow(/origin/)
+  })
+
+  it('fails closed for mismatched or non-pending hydration identities', () => {
+    const action = {
+      type: 'builtin_mcp_tool_approval',
+      approval: builtinMcpToolApproval
+    } as const
+    const pending = {
+      actionId,
+      actionType: 'builtin_mcp_tool_approval',
+      toolName: 'browser_evaluate',
+      toolCallId: callId,
+      runId: 'run-owned',
+      conversationId: null,
+      assistantMessageId: null,
+      action,
+      createdAt: 1_753_843_200_000,
+      status: 'pending'
+    }
+    expect(() =>
+      parsePendingAgentActionSnapshotsForHost([{ ...pending, status: 'approved' }])
+    ).toThrow(/expected pending/)
+    expect(() =>
+      parsePendingAgentActionSnapshotsForHost([{ ...pending, toolName: 'browser_cookie_get' }])
+    ).toThrow(/expected browser_evaluate/)
+    expect(() =>
+      parsePendingAgentActionSnapshotsForHost([{ ...pending, toolCallId: null }])
+    ).toThrow(/expected a string/)
+    expect(() =>
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-other',
+        action
+      })
+    ).toThrow(/runId must match/)
   })
 })
 

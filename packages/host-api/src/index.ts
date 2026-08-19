@@ -59,6 +59,8 @@ import type {
   AgentUsageSummaryOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
+  BrowserArtifactExportInput,
+  BrowserArtifactExportOutput,
   BrowserArtifactReadInput,
   BrowserArtifactReadOutput,
   BrowserSurfaceCommand,
@@ -160,6 +162,10 @@ export interface AttachmentsHostApi {
 
 export interface BrowserHostApi {
   clearBrowsingData(): Promise<void>
+  /** Opens a native save dialog and exports an exact Host-owned Browser Artifact reference. */
+  exportArtifact(
+    input: BrowserArtifactExportInput
+  ): Promise<HostInvocationResult<BrowserArtifactExportOutput>>
   /** Reads bounded preview bytes for an exact Host-owned Browser Artifact reference. */
   readArtifactPreview(
     input: BrowserArtifactReadInput

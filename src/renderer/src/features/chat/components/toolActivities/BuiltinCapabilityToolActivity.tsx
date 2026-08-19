@@ -382,8 +382,15 @@ function getStatus(
 ): BrowserToolStatus {
   const projectedStatus = safeProjectedStatus(result)
   if (projectedStatus === 'outcome_unknown') return 'outcomeUnknown'
-  if (projectedStatus === 'cancelled') return 'cancelled'
-  if (projectedStatus === 'failed' || result?.ok === false) return 'failed'
+  if (projectedStatus === 'cancelled' || projectedStatus === 'rejected') return 'cancelled'
+  if (
+    projectedStatus === 'failed' ||
+    projectedStatus === 'expired' ||
+    projectedStatus === 'payload_unavailable' ||
+    result?.ok === false
+  ) {
+    return 'failed'
+  }
   if (projectedStatus === 'completed' || result) return 'completed'
   return settledStatus ?? (cancelled ? 'cancelled' : 'running')
 }

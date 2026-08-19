@@ -17,11 +17,18 @@ import {
   type ManagedPlaywrightMcpHostOptions
 } from './ManagedPlaywrightMcpHost'
 import { MANAGED_PLAYWRIGHT_SERVER_ID } from './managedPlaywrightManifest'
+import { managedPlaywrightTool } from './managedPlaywrightManifest'
+import {
+  ManagedPlaywrightSensitiveTargetBindingBroker,
+  ManagedPlaywrightSensitiveTargetBindingError
+} from './ManagedPlaywrightSensitiveTargetBindingBroker'
+import { sensitivePolicyForTool } from './managedPlaywrightSensitivePolicy'
 
 const MAX_IN_FLIGHT = 8
+const CORE_COMPLETION_SETTLE_MS = 2_000
 
 export interface ManagedPlaywrightBridgeCore {
-  completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<void>
+  completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean>
   onManagedPlaywrightCancel(
     handler: (input: ManagedPlaywrightCancelNotification) => void
   ): () => void
@@ -32,8 +39,10 @@ export interface ManagedPlaywrightBridgeCore {
 }
 
 export interface ManagedPlaywrightBridgeHostOptions {
+  completionSettleMs?: number
   core: ManagedPlaywrightBridgeCore
   createHost: () => ManagedPlaywrightMcpHost
+  sensitiveTargetBindings: ManagedPlaywrightSensitiveTargetBindingBroker
   now?: () => number
 }
 
@@ -45,15 +54,18 @@ interface ActiveCommand {
 /**
  * Exact Main-side endpoint for the Core-owned managed MCP peer.
  *
- * This is deliberately not a general JSON-RPC proxy. It accepts four reviewed operations, keeps a
+ * This is deliberately not a general JSON-RPC proxy. It accepts the reviewed managed operations,
+ * keeps a
  * bounded request registry, validates every notification before use, and reports one terminal
  * completion for every admitted request. Raw browser/CDP identities never cross this boundary.
  */
 export class ManagedPlaywrightBridgeHost {
   private readonly active = new Map<string, ActiveCommand>()
   private readonly core: ManagedPlaywrightBridgeCore
+  private readonly completionSettleMs: number
   private readonly createHost: () => ManagedPlaywrightMcpHost
   private readonly now: () => number
+  private readonly sensitiveTargetBindings: ManagedPlaywrightSensitiveTargetBindingBroker
   private readonly unsubscribeCancel: () => void
   private readonly unsubscribeCommand: () => void
   private readonly unsubscribeAgentEvent: () => void
@@ -63,7 +75,9 @@ export class ManagedPlaywrightBridgeHost {
 
   constructor(options: ManagedPlaywrightBridgeHostOptions) {
     this.core = options.core
+    this.completionSettleMs = normalizeCompletionSettleMs(options.completionSettleMs)
     this.createHost = options.createHost
+    this.sensitiveTargetBindings = options.sensitiveTargetBindings
     this.now = options.now ?? Date.now
     this.unsubscribeCommand = this.core.onManagedPlaywrightCommand((input) =>
       this.acceptCommand(input)
@@ -73,7 +87,10 @@ export class ManagedPlaywrightBridgeHost {
     )
     this.unsubscribeAgentEvent =
       this.core.onAgentEvent?.((event) => {
-        if (event.type === 'done') void this.host?.releaseRun(event.runId)
+        if (event.type === 'done') {
+          this.sensitiveTargetBindings.releaseRun(event.runId)
+          void this.host?.releaseRun(event.runId)
+        }
       }) ?? (() => undefined)
   }
 
@@ -91,6 +108,7 @@ export class ManagedPlaywrightBridgeHost {
     const host = this.host
     this.host = undefined
     if (host) await host.close()
+    this.sensitiveTargetBindings.shutdown()
   }
 
   private acceptCommand(untrusted: ManagedPlaywrightCommandNotification): void {
@@ -134,6 +152,7 @@ export class ManagedPlaywrightBridgeHost {
     controller: AbortController
   ): Promise<void> {
     let outcome: ManagedPlaywrightCompletionOutcome
+    let preparedBindingRequestId: string | undefined
     try {
       const timeoutMs = Math.max(1, Math.min(300_000, input.deadlineMs - this.now()))
       switch (input.command.type) {
@@ -166,6 +185,30 @@ export class ManagedPlaywrightBridgeHost {
           }
           break
         }
+        case 'prepare_sensitive_tool': {
+          const reviewed = managedPlaywrightTool(input.command.input.toolName)
+          if (
+            !reviewed ||
+            reviewed.handlingMode !== 'approval_required' ||
+            !sensitivePolicyForTool(reviewed.rawName)
+          ) {
+            throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.tool_not_reviewed')
+          }
+          const prepared = this.sensitiveTargetBindings.prepare(input.command.input)
+          preparedBindingRequestId = input.command.input.bindingRequestId
+          outcome = { type: 'sensitive_tool_prepared', ...prepared }
+          break
+        }
+        case 'release_sensitive_tool_binding': {
+          const released = this.sensitiveTargetBindings.release({
+            bindingId: input.command.bindingId,
+            runId: input.command.runId,
+            activationId: input.command.activationId,
+            callId: input.command.callId
+          })
+          outcome = { type: 'sensitive_tool_binding_released', released }
+          break
+        }
         case 'call_tool': {
           const result = await this.currentHost().callTool(
             input.command.name,
@@ -188,6 +231,7 @@ export class ManagedPlaywrightBridgeHost {
           break
         }
       }
+      if (controller.signal.aborted) throw cancellationError(controller.signal.reason)
     } catch (error) {
       if (input.command.type === 'connect') {
         // A timed-out/cancelled connect has no peer through which Core could later send `close`.
@@ -203,7 +247,14 @@ export class ManagedPlaywrightBridgeHost {
       if (active) clearTimeout(active.timer)
       this.active.delete(input.requestId)
     }
-    await this.complete(input.requestId, outcome)
+    const accepted = await this.complete(
+      input.requestId,
+      outcome,
+      Boolean(preparedBindingRequestId)
+    )
+    if (preparedBindingRequestId && (!accepted || outcome.type !== 'sensitive_tool_prepared')) {
+      this.sensitiveTargetBindings.releaseByRequestId(preparedBindingRequestId)
+    }
   }
 
   private currentHost(): ManagedPlaywrightMcpHost {
@@ -214,16 +265,37 @@ export class ManagedPlaywrightBridgeHost {
 
   private async complete(
     requestId: string,
-    outcome: ManagedPlaywrightCompletionOutcome
-  ): Promise<void> {
-    await this.core
+    outcome: ManagedPlaywrightCompletionOutcome,
+    boundSensitiveProposal = false
+  ): Promise<boolean> {
+    const completion = this.core
       .completeManagedPlaywright({
         schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
         requestId,
         outcome
       })
-      .catch(() => undefined)
+      .catch(() => false)
+    if (!boundSensitiveProposal) return await completion
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        completion,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), this.completionSettleMs)
+          timer.unref?.()
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
+}
+
+function normalizeCompletionSettleMs(value: number | undefined): number {
+  if (value === undefined) return CORE_COMPLETION_SETTLE_MS
+  return Number.isSafeInteger(value) && value >= 10 && value <= CORE_COMPLETION_SETTLE_MS
+    ? value
+    : CORE_COMPLETION_SETTLE_MS
 }
 
 async function raceWithSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -261,6 +333,15 @@ function mapError(
   let certainty: ManagedPlaywrightDispatchCertainty =
     operation === 'call_tool' ? 'possibly_dispatched' : 'definitely_not_dispatched'
   if (!(error instanceof ManagedPlaywrightMcpHostError)) {
+    if (error instanceof ManagedPlaywrightSensitiveTargetBindingError) {
+      const code: ManagedPlaywrightBridgeErrorCode =
+        error.code === 'busy'
+          ? 'busy'
+          : error.code === 'surface_unavailable'
+            ? 'surface_unavailable'
+            : 'invalid_arguments'
+      return errorOutcome(code, 'definitely_not_dispatched')
+    }
     return errorOutcome('internal_safe_error', certainty)
   }
   const codeByHostError: Record<string, ManagedPlaywrightBridgeErrorCode> = {
@@ -270,6 +351,13 @@ function mapError(
     'mcp.builtin_playwright.timeout': 'timeout',
     'mcp.builtin_playwright.tool_not_reviewed': 'tool_not_reviewed',
     'mcp.builtin_playwright.invalid_arguments': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_grant_missing': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_grant_drifted': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_grant_expired': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_grant_origin_drifted': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_grant_reused': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_target_scope_unsupported': 'invalid_arguments',
+    'mcp.builtin_playwright.sensitive_request_identity_unavailable': 'invalid_arguments',
     'mcp.builtin_playwright.catalog_drift': 'catalog_drift',
     'mcp.builtin_playwright.output_too_large': 'output_too_large',
     'mcp.builtin_playwright.protocol_error': 'protocol_error',

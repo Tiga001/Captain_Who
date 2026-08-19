@@ -13,8 +13,34 @@ interface FixtureResult {
   closedTargetRejected: boolean
   createTargetRejected: boolean
   finalText: string
+  focusSpoofContained: boolean
+  frameParity: {
+    blankEditorText: string
+    coordinateEditorText: string
+    crossEventTypes: string
+    crossInputValue: string
+    detachedFrameRejected: boolean
+    keyEventTargets: string
+    keyEventTypes: string
+    navigatedInputValue: string
+    nestedInputValue: string
+    sameEditorText: string
+    sameEventTargets: string
+    sameEventTypes: string
+    sameInputValue: string
+    sameTextareaValue: string
+    secondInputValue: string
+    shadowEditorText: string
+  }
+  frameProbe: {
+    candidateCount: number
+    distinctFramePaths: string[]
+    safeProjection: boolean
+  }
   isolatedProfile: boolean
   noRemoteDebuggingPort: boolean
+  outOfProcessFrameAttached: boolean
+  outOfProcessFrameResumed: boolean
   onlySelectedGuest: boolean
   selectedDebuggerDetached: boolean
   snapshot: {
@@ -63,8 +89,36 @@ describe.runIf(process.platform === 'darwin')('BrowserTargetBroker Electron fixt
         closedTargetRejected: true,
         createTargetRejected: true,
         finalText: 'applied:hello',
+        focusSpoofContained: true,
+        frameParity: {
+          blankEditorText: '空白你好',
+          coordinateEditorText: '坐标你好',
+          crossEventTypes:
+            'beforeinput,input,beforeinput,input,beforeinput,input,beforeinput,input,keydown,keyup',
+          crossInputValue: '跨域你好',
+          detachedFrameRejected: true,
+          keyEventTargets:
+            'key-event-input,key-event-input,key-event-input,key-event-input,key-event-input,key-event-input,key-event-input,key-event-input',
+          keyEventTypes: 'keydown,beforeinput,input,keyup,keydown,beforeinput,input,keyup',
+          navigatedInputValue: '导航后你好',
+          nestedInputValue: '嵌套你好',
+          sameEditorText: '编辑器你好',
+          sameEventTargets: 'frame-input,frame-input,frame-input,frame-input',
+          sameEventTypes: 'beforeinput,input,beforeinput,input',
+          sameInputValue: '你好',
+          sameTextareaValue: '多行\n你好',
+          secondInputValue: '第二帧',
+          shadowEditorText: '影子你好'
+        },
+        frameProbe: {
+          candidateCount: 24,
+          distinctFramePaths: ['0', '1', '2.0', '3'],
+          safeProjection: true
+        },
         isolatedProfile: true,
         noRemoteDebuggingPort: true,
+        outOfProcessFrameAttached: true,
+        outOfProcessFrameResumed: true,
         onlySelectedGuest: true,
         selectedDebuggerDetached: true,
         snapshot: {

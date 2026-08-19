@@ -95,6 +95,7 @@ export interface ManagedPlaywrightCatalogConformanceReport {
 
 export interface ManagedPlaywrightHostOverlay {
   addCallReason: true
+  addApprovalOrigin?: true
   removeProperties?: readonly string[]
   propertyOverrides?: Readonly<Record<string, Readonly<Record<string, unknown>>>>
 }
@@ -116,6 +117,13 @@ const HOST_CALL_REASON_SCHEMA = Object.freeze({
   type: 'string',
   description: 'Brief reason for using this browser tool.',
   minLength: 1,
+  maxLength: 512
+})
+const HOST_APPROVAL_ORIGIN_SCHEMA = Object.freeze({
+  type: 'string',
+  description:
+    'Exact HTTP(S) origin of the active managed page for sensitive-tool approval. Do not include credentials, path, query, or fragment.',
+  minLength: 8,
   maxLength: 512
 })
 
@@ -219,7 +227,22 @@ export function modelSchemaForOfficialPlaywrightTool(
   }
 
   properties.call_reason = structuredClone(HOST_CALL_REASON_SCHEMA)
-  schema.required = [...new Set([...upstreamRequired, 'call_reason'])]
+  if (
+    overlay.addApprovalOrigin === true &&
+    Object.prototype.hasOwnProperty.call(properties, 'approval_origin')
+  ) {
+    throw new Error('catalog_drift')
+  }
+  if (overlay.addApprovalOrigin === true) {
+    properties.approval_origin = structuredClone(HOST_APPROVAL_ORIGIN_SCHEMA)
+  }
+  schema.required = [
+    ...new Set([
+      ...upstreamRequired,
+      'call_reason',
+      ...(overlay.addApprovalOrigin === true ? ['approval_origin'] : [])
+    ])
+  ]
   return schema
 }
 
@@ -480,6 +503,7 @@ function parsePolicyTool(value: unknown, index: number): ParsedPolicyTool {
     record.exposed &&
     record.handlingMode !== 'pass_through' &&
     record.handlingMode !== 'host_adapted' &&
+    record.handlingMode !== 'approval_required' &&
     record.handlingMode !== 'artifact_managed'
   ) {
     throw new Error(`${context} cannot expose a tool before its handling boundary exists`)
@@ -502,13 +526,17 @@ function parsePolicyTool(value: unknown, index: number): ParsedPolicyTool {
   ) {
     throw new Error(`${context} constraints are invalid`)
   }
+  const hostOverlay = parseHostOverlay(record.hostOverlay, `${context}.hostOverlay`)
+  if ((record.handlingMode === 'approval_required') !== (hostOverlay.addApprovalOrigin === true)) {
+    throw new Error(`${context} approval origin overlay is invalid`)
+  }
   return {
     rawName: record.rawName,
     modelName: record.modelName,
     handlingMode: record.handlingMode as ManagedPlaywrightHandlingMode,
     exposed: record.exposed,
     upstreamSchemaDigest: record.upstreamSchemaDigest,
-    hostOverlay: parseHostOverlay(record.hostOverlay, `${context}.hostOverlay`),
+    hostOverlay,
     hostOverlayDigest: record.hostOverlayDigest,
     hostInputSchemaDigest: record.hostInputSchemaDigest,
     reasonCode: record.reasonCode,
@@ -518,11 +546,19 @@ function parsePolicyTool(value: unknown, index: number): ParsedPolicyTool {
 
 function parseHostOverlay(value: unknown, context: string): ManagedPlaywrightHostOverlay {
   const record = expectRecord(value, context)
-  const allowedKeys = ['addCallReason', 'removeProperties', 'propertyOverrides']
+  const allowedKeys = [
+    'addCallReason',
+    'addApprovalOrigin',
+    'removeProperties',
+    'propertyOverrides'
+  ]
   if (Object.keys(record).some((key) => !allowedKeys.includes(key))) {
     throw new Error(`${context} contains unsupported fields`)
   }
   if (record.addCallReason !== true) throw new Error(`${context}.addCallReason must be true`)
+  if (record.addApprovalOrigin !== undefined && record.addApprovalOrigin !== true) {
+    throw new Error(`${context}.addApprovalOrigin must be true when present`)
+  }
   const removeProperties = record.removeProperties
   if (
     removeProperties !== undefined &&
@@ -547,6 +583,7 @@ function parseHostOverlay(value: unknown, context: string): ManagedPlaywrightHos
   }
   return deepFreeze({
     addCallReason: true,
+    ...(record.addApprovalOrigin === true ? { addApprovalOrigin: true as const } : {}),
     ...(removeProperties === undefined ? {} : { removeProperties: [...removeProperties] }),
     ...(propertyOverrides === undefined ? {} : { propertyOverrides })
   })

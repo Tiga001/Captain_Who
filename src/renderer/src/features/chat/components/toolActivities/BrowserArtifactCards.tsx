@@ -9,7 +9,7 @@ import {
   Video,
   XCircle
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { hostClient } from '../../../../host/hostClient'
@@ -20,6 +20,8 @@ type PreviewState =
   | { status: 'image'; src: string }
   | { status: 'text'; text: string; truncated: boolean }
   | { status: 'failed' }
+
+type ExportState = 'idle' | 'exporting' | 'exported' | 'failed'
 
 const MAX_RENDERED_TEXT_CHARACTERS = 4_096
 
@@ -48,6 +50,8 @@ function ArtifactIcon({ artifact }: { artifact: BrowserArtifactReference }) {
 
 function BrowserArtifactCard({ artifact }: { artifact: BrowserArtifactReference }) {
   const { t } = useFrontendConfig()
+  const exportInFlight = useRef(false)
+  const [exportState, setExportState] = useState<ExportState>('idle')
   const [preview, setPreview] = useState<PreviewState>({ status: 'idle' })
 
   useEffect(
@@ -84,6 +88,24 @@ function BrowserArtifactCard({ artifact }: { artifact: BrowserArtifactReference 
     }
   }
 
+  const exportArtifact = async (): Promise<void> => {
+    if (exportInFlight.current) return
+    exportInFlight.current = true
+    setExportState('exporting')
+    try {
+      const result = await hostClient.browser.exportArtifact({ schemaVersion: 1, artifact })
+      if (!result.ok) {
+        setExportState('failed')
+        return
+      }
+      setExportState(result.value.status === 'exported' ? 'exported' : 'idle')
+    } catch {
+      setExportState('failed')
+    } finally {
+      exportInFlight.current = false
+    }
+  }
+
   return (
     <article className="browser-artifact-card" data-kind={artifact.kind}>
       <div className="browser-artifact-card__summary">
@@ -98,19 +120,34 @@ function BrowserArtifactCard({ artifact }: { artifact: BrowserArtifactReference 
             {artifact.mimeType} · {formatBytes(artifact.sizeBytes)}
           </span>
         </span>
-        {artifact.preview !== 'none' ? (
+        <span className="browser-artifact-card__actions">
+          {artifact.preview !== 'none' ? (
+            <button
+              disabled={preview.status === 'loading'}
+              onClick={() => void loadPreview()}
+              type="button"
+            >
+              {preview.status === 'loading' ? (
+                <LoaderCircle aria-hidden="true" />
+              ) : (
+                t('agent.builtinCapability.artifact.preview')
+              )}
+            </button>
+          ) : null}
           <button
-            disabled={preview.status === 'loading'}
-            onClick={() => void loadPreview()}
+            disabled={exportState === 'exporting'}
+            onClick={() => void exportArtifact()}
             type="button"
           >
-            {preview.status === 'loading' ? (
+            {exportState === 'exporting' ? (
               <LoaderCircle aria-hidden="true" />
+            ) : exportState === 'exported' ? (
+              t('agent.builtinCapability.artifact.exported')
             ) : (
-              t('agent.builtinCapability.artifact.preview')
+              t('agent.builtinCapability.artifact.export')
             )}
           </button>
-        ) : null}
+        </span>
       </div>
       {preview.status === 'image' ? (
         <div className="browser-artifact-card__image-preview">
@@ -127,6 +164,12 @@ function BrowserArtifactCard({ artifact }: { artifact: BrowserArtifactReference 
         <span className="browser-artifact-card__preview-failed">
           <XCircle aria-hidden="true" />
           {t('agent.builtinCapability.artifact.previewUnavailable')}
+        </span>
+      ) : null}
+      {exportState === 'failed' ? (
+        <span className="browser-artifact-card__export-failed">
+          <XCircle aria-hidden="true" />
+          {t('agent.builtinCapability.artifact.exportUnavailable')}
         </span>
       ) : null}
     </article>

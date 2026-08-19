@@ -1,5 +1,11 @@
 import { BrowserWindow, dialog, nativeTheme, shell } from 'electron'
-import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
+import type {
+  IpcMainInvokeEvent,
+  OpenDialogOptions,
+  OpenDialogReturnValue,
+  SaveDialogOptions,
+  SaveDialogReturnValue
+} from 'electron'
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
@@ -74,6 +80,25 @@ function showOpenDialog(
 ): Promise<OpenDialogReturnValue> {
   const window = getInvokeWindow(event)
   return window ? dialog.showOpenDialog(window, options) : dialog.showOpenDialog(options)
+}
+
+function showSaveDialog(
+  event: IpcMainInvokeEvent,
+  options: SaveDialogOptions
+): Promise<SaveDialogReturnValue> {
+  const window = getInvokeWindow(event)
+  return window ? dialog.showSaveDialog(window, options) : dialog.showSaveDialog(options)
+}
+
+async function selectBrowserArtifactExportPath(
+  event: IpcMainInvokeEvent,
+  suggestedFileName: string
+): Promise<string | null> {
+  const result = await showSaveDialog(event, {
+    defaultPath: suggestedFileName,
+    properties: ['createDirectory', 'showOverwriteConfirmation']
+  })
+  return result.canceled || !result.filePath ? null : result.filePath
 }
 
 function createProjectRecord(directoryPath: string): StorageProjectRecord {
@@ -324,7 +349,7 @@ export function registerHostIpc(
     registerBrowserSurfaceIpc(ipcMain, browserSurfaceManager)
   }
   if (browserArtifactBroker) {
-    registerBrowserArtifactIpc(ipcMain, browserArtifactBroker)
+    registerBrowserArtifactIpc(ipcMain, browserArtifactBroker, selectBrowserArtifactExportPath)
   }
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)

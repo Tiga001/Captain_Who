@@ -1,11 +1,9 @@
 import {
-  parseBrowserArtifactToolProjection,
   type AgentActionExecutionOutput,
   type AgentApprovalStatus,
   type AgentChatOutput,
   type AgentEvent,
-  type AgentProposedAction,
-  type AgentToolResult
+  type AgentProposedAction
 } from '@mycopilot/protocol'
 import type {
   ChatAgentInterruptionView,
@@ -29,6 +27,7 @@ import {
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
 import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
 import { getAgentActionId } from './agentActionUtils'
+import { projectBuiltinCapabilityToolResult } from './builtinCapabilityResultProjection'
 import { getActionToolCall, getActionToolCallId } from './actionProjection'
 import {
   createRejectedToolResult,
@@ -113,22 +112,6 @@ const SAFE_MODEL_REQUEST_INTERRUPTION_REASONS = new Set<ChatAgentInterruptionVie
   'response_invalid',
   'request_failed'
 ])
-
-function projectBuiltinCapabilityToolResult(result: AgentToolResult): AgentToolResult {
-  let safeProjection
-  try {
-    safeProjection = parseBrowserArtifactToolProjection(result.result)
-  } catch {
-    safeProjection = undefined
-  }
-
-  return {
-    callId: result.callId,
-    tool: result.tool,
-    ok: result.ok,
-    ...(safeProjection ? { result: safeProjection } : {})
-  }
-}
 
 function parseSafeModelRequestInterruption(details: unknown): ChatAgentInterruptionView | null {
   if (typeof details !== 'object' || details === null || Array.isArray(details)) return null
@@ -1210,6 +1193,15 @@ export function applyAgentActionExecutionToChatMessage(
             action.type === 'builtin_capability_activation' &&
             action.approval.actionId === execution.actionId
         )
+  const originalBuiltinMcpApproval =
+    decidedAction?.type === 'builtin_mcp_tool_approval' &&
+    decidedAction.approval.identity.actionId === execution.actionId
+      ? decidedAction
+      : message.agentRun?.approvals.find(
+          (action) =>
+            action.type === 'builtin_mcp_tool_approval' &&
+            action.approval.identity.actionId === execution.actionId
+        )
   const mcpInvocation = currentRun.mcpInvocations?.find(
     (candidate) => candidate.actionId === execution.actionId
   )
@@ -1221,6 +1213,10 @@ export function applyAgentActionExecutionToChatMessage(
   const builtinCapabilityCallId = originalBuiltinCapabilityApproval
     ? getActionToolCallId(originalBuiltinCapabilityApproval)
     : null
+  const builtinMcpCallId =
+    originalBuiltinMcpApproval?.type === 'builtin_mcp_tool_approval'
+      ? originalBuiltinMcpApproval.approval.identity.callId
+      : null
 
   if (execution.actionType === 'mcp_tool_call' || mcpCallId) {
     const rejectionReason =
@@ -1267,6 +1263,30 @@ export function applyAgentActionExecutionToChatMessage(
       )
     })
 
+    return {
+      ...messageWithAgentOutput,
+      agentRun: nextRun
+    }
+  }
+
+  if (execution.actionType === 'builtin_mcp_tool_approval' || originalBuiltinMcpApproval) {
+    const approvalStatus: AgentApprovalStatus =
+      execution.status === 'rejected' ? 'rejected' : 'approved'
+    const safeToolResult = execution.toolResult
+      ? projectBuiltinCapabilityToolResult(execution.toolResult)
+      : undefined
+    const nextRun = normalizeAgentRunToolActivities({
+      ...currentRun,
+      approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      toolCalls: currentRun.toolCalls.map((call) =>
+        call.id === builtinMcpCallId ? { ...call, approvalStatus } : call
+      ),
+      toolResults: safeToolResult
+        ? upsertById(currentRun.toolResults, safeToolResult, (result) => result.callId)
+        : currentRun.toolResults,
+      skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
+      timeline: removeTransientToolTimelineItems(currentRun.timeline)
+    })
     return {
       ...messageWithAgentOutput,
       agentRun: nextRun

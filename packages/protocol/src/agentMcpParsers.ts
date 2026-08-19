@@ -6,6 +6,8 @@ import type {
   AgentBrowserReviewedToolName,
   AgentBrowserRiskTrigger,
   AgentBuiltinCapabilityActivationApproval,
+  AgentBuiltinMcpToolApproval,
+  AgentBuiltinMcpToolRiskKind,
   AgentChatOutput,
   AgentEvent,
   AgentLlmRetryCategory,
@@ -44,6 +46,7 @@ const CANONICAL_PROVIDER_CODE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,127}$/
 const MODEL_TOOL_CALL_ID_PATTERN = /^tc1_[a-zA-Z0-9_-]{43}$/
 const MCP_APPROVAL_TTL_MS = 15 * 60 * 1000
 const BUILTIN_CAPABILITY_APPROVAL_TTL_SECONDS = 15 * 60
+const BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS = 15 * 60
 const BROWSER_RISK_APPROVAL_TTL_SECONDS = 15 * 60
 const MAX_RENDERER_DATE_UNIX_SECONDS = 253_402_300_799
 const MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES = 1024 * 1024
@@ -110,6 +113,46 @@ const BROWSER_REVIEWED_TOOL_NAMES = [
   'browser_wait_for',
   'browser_close'
 ] as const satisfies readonly AgentBrowserReviewedToolName[]
+const BUILTIN_MCP_TOOL_RISK_KINDS = [
+  'file_read',
+  'file_write',
+  'file_upload',
+  'file_download',
+  'cookie_read',
+  'cookie_write',
+  'local_storage_read',
+  'local_storage_write',
+  'session_storage_read',
+  'session_storage_write',
+  'storage_state_import',
+  'storage_state_export',
+  'network_sensitive_read',
+  'page_script_execution',
+  'unsafe_code_execution'
+] as const satisfies readonly AgentBuiltinMcpToolRiskKind[]
+const BUILTIN_MCP_APPROVAL_TOOL_NAMES = [
+  'browser_cookie_clear',
+  'browser_cookie_delete',
+  'browser_cookie_get',
+  'browser_cookie_list',
+  'browser_cookie_set',
+  'browser_drop',
+  'browser_evaluate',
+  'browser_file_upload',
+  'browser_localstorage_clear',
+  'browser_localstorage_delete',
+  'browser_localstorage_get',
+  'browser_localstorage_list',
+  'browser_localstorage_set',
+  'browser_network_request',
+  'browser_sessionstorage_clear',
+  'browser_sessionstorage_delete',
+  'browser_sessionstorage_get',
+  'browser_sessionstorage_list',
+  'browser_sessionstorage_set',
+  'browser_set_storage_state',
+  'browser_storage_state'
+] as const
 
 /**
  * Parses Agent event families that have dedicated strict Host-boundary contracts. Other current
@@ -294,6 +337,19 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
       }
       return { type: 'approval_required', runId, action: parsedAction }
     }
+    if (action.type === 'builtin_mcp_tool_approval') {
+      const context = 'built-in MCP Tool approval event'
+      expectOnlyKeys(record, ['type', 'runId', 'action'] as const, context)
+      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
+      const parsedAction = parseAgentBuiltinMcpToolApprovalProposedAction(action)
+      if (parsedAction.approval.identity.runId !== runId) {
+        throw invalidProtocolValue(context, 'action runId must match event runId')
+      }
+      if (parsedAction.approval.approvalStatus !== 'required') {
+        throw invalidProtocolValue(context, 'approval_required action must remain required')
+      }
+      return { type: 'approval_required', runId, action: parsedAction }
+    }
     if (action.type === 'browser_risk_approval') {
       const context = 'browser risk approval event'
       expectOnlyKeys(record, ['type', 'runId', 'action'] as const, context)
@@ -318,6 +374,7 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
         'type' in action &&
         (action.type === 'mcp_tool_call' ||
           action.type === 'builtin_capability_activation' ||
+          action.type === 'builtin_mcp_tool_approval' ||
           action.type === 'browser_risk_approval')
     )
     if (hasStrictAction) {
@@ -550,6 +607,255 @@ export function parseAgentBuiltinCapabilityActivationApproval(
     reason,
     manifestDigest: expectVersionedSha256Digest(record.manifestDigest, `${context}.manifestDigest`),
     policyRevision: expectSafeInteger(record.policyRevision, `${context}.policyRevision`, 0),
+    createdAt,
+    expiresAt,
+    approvalStatus: expectEnum(
+      record.approvalStatus,
+      ['not_required', 'required', 'approved', 'rejected'] as const,
+      `${context}.approvalStatus`
+    )
+  }
+}
+
+export function parseAgentBuiltinMcpToolApprovalProposedAction(
+  value: unknown
+): Extract<AgentProposedAction, { type: 'builtin_mcp_tool_approval' }> {
+  const context = 'built-in MCP Tool approval proposed action'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['type', 'approval'] as const, context)
+  if (record.type !== 'builtin_mcp_tool_approval') {
+    throw invalidProtocolValue(context, 'type must be builtin_mcp_tool_approval')
+  }
+  return {
+    type: 'builtin_mcp_tool_approval',
+    approval: parseAgentBuiltinMcpToolApproval(record.approval)
+  }
+}
+
+export function parseAgentBuiltinMcpToolApproval(value: unknown): AgentBuiltinMcpToolApproval {
+  const context = 'built-in MCP Tool approval'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'identity',
+      'capabilityDisplayName',
+      'toolDisplayName',
+      'callReason',
+      'operationCategory',
+      'resourceSummary',
+      'riskKinds',
+      'createdAt',
+      'expiresAt',
+      'approvalStatus'
+    ] as const,
+    context
+  )
+  if (record.schemaVersion !== 1) {
+    throw invalidProtocolValue(`${context}.schemaVersion`, 'expected 1')
+  }
+  const identityRecord = expectRecord(record.identity, `${context}.identity`)
+  expectOnlyKeys(
+    identityRecord,
+    [
+      'actionId',
+      'approvalId',
+      'runId',
+      'callId',
+      'capabilityId',
+      'capabilityActivationId',
+      'managedMcpId',
+      'packageName',
+      'packageVersion',
+      'upstreamCatalogDigest',
+      'manifestDigest',
+      'policyDigest',
+      'policyRevision',
+      'toolId',
+      'rawName',
+      'modelName',
+      'upstreamSchemaDigest',
+      'hostOverlayDigest',
+      'hostInputSchemaDigest',
+      'argumentsDigest',
+      'resourceScopeDigest',
+      'origin'
+    ] as const,
+    `${context}.identity`
+  )
+  const actionId = expectUuidV4(identityRecord.actionId, `${context}.identity.actionId`)
+  const approvalId = expectUuidV4(identityRecord.approvalId, `${context}.identity.approvalId`)
+  const capabilityActivationId = expectUuidV4(
+    identityRecord.capabilityActivationId,
+    `${context}.identity.capabilityActivationId`
+  )
+  if (new Set([actionId, approvalId, capabilityActivationId]).size !== 3) {
+    throw invalidProtocolValue(context, 'approval identities must be distinct')
+  }
+  const origin = parseNullableHttpOrigin(identityRecord.origin, `${context}.identity.origin`)
+  const resourceRecord = expectRecord(record.resourceSummary, `${context}.resourceSummary`)
+  expectOnlyKeys(
+    resourceRecord,
+    ['scope', 'displayName', 'fileBasenames', 'origin'] as const,
+    `${context}.resourceSummary`
+  )
+  if (!Array.isArray(resourceRecord.fileBasenames) || resourceRecord.fileBasenames.length > 32) {
+    throw invalidProtocolValue(`${context}.resourceSummary.fileBasenames`, 'invalid file list')
+  }
+  const fileBasenames = resourceRecord.fileBasenames.map((value, index) => {
+    const basename = expectDisplayText(
+      value,
+      `${context}.resourceSummary.fileBasenames[${index}]`,
+      256
+    )
+    if (!basename.trim() || basename.includes('/') || basename.includes('\\')) {
+      throw invalidProtocolValue(
+        `${context}.resourceSummary.fileBasenames[${index}]`,
+        'must remain a basename'
+      )
+    }
+    return basename
+  })
+  const resourceOrigin = parseNullableHttpOrigin(
+    resourceRecord.origin,
+    `${context}.resourceSummary.origin`
+  )
+  if (resourceOrigin !== origin) {
+    throw invalidProtocolValue(context, 'resource and identity origins must match')
+  }
+  if (!Array.isArray(record.riskKinds) || record.riskKinds.length === 0) {
+    throw invalidProtocolValue(`${context}.riskKinds`, 'must be a non-empty array')
+  }
+  const riskKinds = record.riskKinds.map((risk, index) =>
+    expectEnum(risk, BUILTIN_MCP_TOOL_RISK_KINDS, `${context}.riskKinds[${index}]`)
+  )
+  if (
+    new Set(riskKinds).size !== riskKinds.length ||
+    riskKinds.some(
+      (risk, index) =>
+        index > 0 &&
+        BUILTIN_MCP_TOOL_RISK_KINDS.indexOf(riskKinds[index - 1]) >=
+          BUILTIN_MCP_TOOL_RISK_KINDS.indexOf(risk)
+    )
+  ) {
+    throw invalidProtocolValue(`${context}.riskKinds`, 'must be unique and canonical')
+  }
+  const createdAt = expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
+  const expiresAt = expectSafeInteger(record.expiresAt, `${context}.expiresAt`, 0)
+  if (
+    createdAt > MAX_RENDERER_DATE_UNIX_SECONDS ||
+    expiresAt > MAX_RENDERER_DATE_UNIX_SECONDS ||
+    expiresAt - createdAt !== BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS
+  ) {
+    throw invalidProtocolValue(context, 'invalid fixed approval TTL')
+  }
+  const rawName = expectBoundedNonEmptyString(
+    identityRecord.rawName,
+    `${context}.identity.rawName`,
+    64
+  )
+  const modelName = expectBoundedNonEmptyString(
+    identityRecord.modelName,
+    `${context}.identity.modelName`,
+    64
+  )
+  const toolId = expectBoundedNonEmptyString(
+    identityRecord.toolId,
+    `${context}.identity.toolId`,
+    64
+  )
+  if (rawName !== modelName || rawName !== toolId || !SAFE_CODE_PATTERN.test(rawName)) {
+    throw invalidProtocolValue(context, 'Tool identities must match the reviewed raw identity')
+  }
+  return {
+    schemaVersion: 1,
+    identity: {
+      actionId,
+      approvalId,
+      runId: expectOpaqueRunId(identityRecord.runId, `${context}.identity.runId`),
+      callId: expectModelToolCallId(identityRecord.callId, `${context}.identity.callId`),
+      capabilityId: parseMcpBuiltinCapabilityId(
+        identityRecord.capabilityId,
+        `${context}.identity.capabilityId`
+      ),
+      capabilityActivationId,
+      managedMcpId: expectBoundedNonEmptyString(
+        identityRecord.managedMcpId,
+        `${context}.identity.managedMcpId`,
+        128
+      ),
+      packageName: expectDisplayText(
+        identityRecord.packageName,
+        `${context}.identity.packageName`,
+        128
+      ),
+      packageVersion: expectDisplayText(
+        identityRecord.packageVersion,
+        `${context}.identity.packageVersion`,
+        64
+      ),
+      upstreamCatalogDigest: expectVersionedSha256Digest(
+        identityRecord.upstreamCatalogDigest,
+        `${context}.identity.upstreamCatalogDigest`
+      ),
+      manifestDigest: expectVersionedSha256Digest(
+        identityRecord.manifestDigest,
+        `${context}.identity.manifestDigest`
+      ),
+      policyDigest: expectVersionedSha256Digest(
+        identityRecord.policyDigest,
+        `${context}.identity.policyDigest`
+      ),
+      policyRevision: expectSafeInteger(
+        identityRecord.policyRevision,
+        `${context}.identity.policyRevision`,
+        1
+      ),
+      toolId,
+      rawName,
+      modelName,
+      upstreamSchemaDigest: expectVersionedSha256Digest(
+        identityRecord.upstreamSchemaDigest,
+        `${context}.identity.upstreamSchemaDigest`
+      ),
+      hostOverlayDigest: expectVersionedSha256Digest(
+        identityRecord.hostOverlayDigest,
+        `${context}.identity.hostOverlayDigest`
+      ),
+      hostInputSchemaDigest: expectVersionedSha256Digest(
+        identityRecord.hostInputSchemaDigest,
+        `${context}.identity.hostInputSchemaDigest`
+      ),
+      argumentsDigest: expectVersionedSha256Digest(
+        identityRecord.argumentsDigest,
+        `${context}.identity.argumentsDigest`
+      ),
+      resourceScopeDigest: expectVersionedSha256Digest(
+        identityRecord.resourceScopeDigest,
+        `${context}.identity.resourceScopeDigest`
+      ),
+      origin
+    },
+    capabilityDisplayName: expectDisplayText(
+      record.capabilityDisplayName,
+      `${context}.capabilityDisplayName`,
+      256
+    ),
+    toolDisplayName: expectDisplayText(record.toolDisplayName, `${context}.toolDisplayName`, 256),
+    callReason: expectDisplayText(record.callReason, `${context}.callReason`, 4096),
+    operationCategory: expectSafeCode(record.operationCategory, `${context}.operationCategory`),
+    resourceSummary: {
+      scope: expectSafeCode(resourceRecord.scope, `${context}.resourceSummary.scope`),
+      displayName: expectDisplayText(
+        resourceRecord.displayName,
+        `${context}.resourceSummary.displayName`,
+        512
+      ),
+      fileBasenames,
+      origin: resourceOrigin
+    },
+    riskKinds,
     createdAt,
     expiresAt,
     approvalStatus: expectEnum(
@@ -1328,6 +1634,7 @@ export function parsePendingAgentActionSnapshotsForHost(
     if (
       action.type !== 'mcp_tool_call' &&
       action.type !== 'builtin_capability_activation' &&
+      action.type !== 'builtin_mcp_tool_approval' &&
       action.type !== 'browser_risk_approval'
     ) {
       return entry as PendingAgentActionSnapshot
@@ -1446,6 +1753,68 @@ export function parsePendingAgentActionSnapshotsForHost(
         status: 'pending'
       }
     }
+    if (action.type === 'builtin_mcp_tool_approval') {
+      const context = `pending built-in MCP Tool Agent action[${index}]`
+      expectOnlyKeys(
+        record,
+        [
+          'actionId',
+          'actionType',
+          'toolName',
+          'toolCallId',
+          'runId',
+          'conversationId',
+          'assistantMessageId',
+          'action',
+          'createdAt',
+          'status'
+        ] as const,
+        context
+      )
+      const parsedAction = parseAgentBuiltinMcpToolApprovalProposedAction(action)
+      const actionId = expectUuidV4(record.actionId, `${context}.actionId`)
+      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
+      if (
+        parsedAction.approval.identity.actionId !== actionId ||
+        parsedAction.approval.identity.runId !== runId
+      ) {
+        throw invalidProtocolValue(context, 'pending identity must match built-in MCP approval')
+      }
+      if (parsedAction.approval.approvalStatus !== 'required') {
+        throw invalidProtocolValue(context, 'pending built-in MCP approval must remain required')
+      }
+      const toolCallId = expectModelToolCallId(record.toolCallId, `${context}.toolCallId`)
+      if (toolCallId !== parsedAction.approval.identity.callId) {
+        throw invalidProtocolValue(context, 'toolCallId must match built-in MCP approval')
+      }
+      expectExactString(record.status, 'pending', `${context}.status`)
+      return {
+        actionId,
+        actionType: expectExactString(
+          record.actionType,
+          'builtin_mcp_tool_approval',
+          `${context}.actionType`
+        ),
+        toolName: expectExactString(
+          record.toolName,
+          parsedAction.approval.identity.rawName,
+          `${context}.toolName`
+        ),
+        toolCallId,
+        runId,
+        conversationId: parseOptionalNullableString(
+          record.conversationId,
+          `${context}.conversationId`
+        ),
+        assistantMessageId: parseOptionalNullableString(
+          record.assistantMessageId,
+          `${context}.assistantMessageId`
+        ),
+        action: parsedAction,
+        createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0),
+        status: 'pending'
+      }
+    }
     const context = `pending MCP Agent action[${index}]`
     expectOnlyKeys(
       record,
@@ -1518,17 +1887,21 @@ export function parseAgentActionExecutionOutputForHost(value: unknown): AgentAct
   if (
     record.actionType !== 'mcp_tool_call' &&
     record.actionType !== 'builtin_capability_activation' &&
+    record.actionType !== 'builtin_mcp_tool_approval' &&
     record.actionType !== 'browser_risk_approval'
   ) {
     return value as AgentActionExecutionOutput
   }
   const builtinActivation = record.actionType === 'builtin_capability_activation'
+  const builtinMcpToolApproval = record.actionType === 'builtin_mcp_tool_approval'
   const browserRisk = record.actionType === 'browser_risk_approval'
   const context = builtinActivation
     ? 'built-in capability Agent action execution output'
-    : browserRisk
-      ? 'browser risk Agent action execution output'
-      : 'MCP Agent action execution output'
+    : builtinMcpToolApproval
+      ? 'built-in MCP Tool Agent action execution output'
+      : browserRisk
+        ? 'browser risk Agent action execution output'
+        : 'MCP Agent action execution output'
   expectOnlyKeys(
     record,
     [
@@ -1550,16 +1923,20 @@ export function parseAgentActionExecutionOutputForHost(value: unknown): AgentAct
       record.actionType,
       builtinActivation
         ? 'builtin_capability_activation'
-        : browserRisk
-          ? 'browser_risk_approval'
-          : 'mcp_tool_call',
+        : builtinMcpToolApproval
+          ? 'builtin_mcp_tool_approval'
+          : browserRisk
+            ? 'browser_risk_approval'
+            : 'mcp_tool_call',
       `${context}.actionType`
     ),
     toolName: builtinActivation
       ? expectExactString(record.toolName, 'activate_capability', `${context}.toolName`)
-      : browserRisk
-        ? expectEnum(record.toolName, BROWSER_REVIEWED_TOOL_NAMES, `${context}.toolName`)
-        : expectBoundedNonEmptyString(record.toolName, `${context}.toolName`, 64),
+      : builtinMcpToolApproval
+        ? expectEnum(record.toolName, BUILTIN_MCP_APPROVAL_TOOL_NAMES, `${context}.toolName`)
+        : browserRisk
+          ? expectEnum(record.toolName, BROWSER_REVIEWED_TOOL_NAMES, `${context}.toolName`)
+          : expectBoundedNonEmptyString(record.toolName, `${context}.toolName`, 64),
     status: expectEnum(
       record.status,
       ['applied', 'approved', 'failed', 'conflict', 'rejected'] as const,
@@ -1782,6 +2159,7 @@ function parseMcpAgentChatOutput(value: unknown, context: string): AgentChatOutp
       'type' in eventRecord.action &&
       (eventRecord.action.type === 'mcp_tool_call' ||
         eventRecord.action.type === 'builtin_capability_activation' ||
+        eventRecord.action.type === 'builtin_mcp_tool_approval' ||
         eventRecord.action.type === 'browser_risk_approval')
     const isProtectedDone =
       eventRecord.type === 'done' &&
@@ -1794,6 +2172,7 @@ function parseMcpAgentChatOutput(value: unknown, context: string): AgentChatOutp
           'type' in action &&
           (action.type === 'mcp_tool_call' ||
             action.type === 'builtin_capability_activation' ||
+            action.type === 'builtin_mcp_tool_approval' ||
             action.type === 'browser_risk_approval')
       )
     if (
@@ -1848,7 +2227,13 @@ function parseStrictProposedActions(
   enclosingRunId: string
 ): Extract<
   AgentProposedAction,
-  { type: 'mcp_tool_call' | 'builtin_capability_activation' | 'browser_risk_approval' }
+  {
+    type:
+      | 'mcp_tool_call'
+      | 'builtin_capability_activation'
+      | 'builtin_mcp_tool_approval'
+      | 'browser_risk_approval'
+  }
 >[] {
   if (!Array.isArray(value) || value.length > MAX_RENDERER_SAFE_PROPOSED_ACTIONS) {
     throw invalidProtocolValue(
@@ -1861,6 +2246,7 @@ function parseStrictProposedActions(
     if (
       actionRecord.type !== 'mcp_tool_call' &&
       actionRecord.type !== 'builtin_capability_activation' &&
+      actionRecord.type !== 'builtin_mcp_tool_approval' &&
       actionRecord.type !== 'browser_risk_approval'
     ) {
       throw invalidProtocolValue(
@@ -1873,16 +2259,21 @@ function parseStrictProposedActions(
         ? parseAgentMcpProposedAction(actionRecord)
         : actionRecord.type === 'builtin_capability_activation'
           ? parseAgentBuiltinCapabilityActivationProposedAction(actionRecord)
-          : parseAgentBrowserRiskProposedAction(actionRecord)
+          : actionRecord.type === 'builtin_mcp_tool_approval'
+            ? parseAgentBuiltinMcpToolApprovalProposedAction(actionRecord)
+            : parseAgentBrowserRiskProposedAction(actionRecord)
     if (
       (parsed.type === 'builtin_capability_activation' ||
+        parsed.type === 'builtin_mcp_tool_approval' ||
         parsed.type === 'browser_risk_approval') &&
       parsed.approval.approvalStatus !== 'required'
     ) {
       throw invalidProtocolValue(context, 'proposed protected approval must remain required')
     }
     const approvalRunId =
-      parsed.type === 'mcp_tool_call' ? parsed.approval.identity.runId : parsed.approval.runId
+      parsed.type === 'mcp_tool_call' || parsed.type === 'builtin_mcp_tool_approval'
+        ? parsed.approval.identity.runId
+        : parsed.approval.runId
     if (approvalRunId !== enclosingRunId) {
       throw invalidProtocolValue(context, 'approval identity runId must match enclosing runId')
     }
@@ -1988,6 +2379,29 @@ function expectSafeCode(value: unknown, context: string): string {
     throw invalidProtocolValue(context, 'expected a bounded safe code')
   }
   return result
+}
+
+function parseNullableHttpOrigin(value: unknown, context: string): string | null {
+  if (value === null) return null
+  const origin = expectDisplayText(value, context, 2048)
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    throw invalidProtocolValue(context, 'must be an HTTP(S) origin')
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.origin !== origin ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== ''
+  ) {
+    throw invalidProtocolValue(context, 'must be a canonical HTTP(S) origin')
+  }
+  return origin
 }
 
 function expectExactString(value: unknown, expected: string, context: string): string {

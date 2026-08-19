@@ -20,6 +20,7 @@ use mycopilot_protocol_rs::{
     ManagedPlaywrightCancelNotification, ManagedPlaywrightCancelReason, ManagedPlaywrightCommand,
     ManagedPlaywrightCommandNotification, ManagedPlaywrightCompletionInput,
     ManagedPlaywrightCompletionOutcome, ManagedPlaywrightDispatchCertainty,
+    ManagedPlaywrightPrepareSensitiveToolInput, ManagedPlaywrightSensitiveBindingReleaseReason,
     MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION, MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD,
     MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
 };
@@ -51,6 +52,7 @@ type ManagedPlaywrightIdleSleeper =
 enum PendingOperation {
     Connect,
     ListTools,
+    PrepareSensitiveTool,
     CallTool,
     Close,
 }
@@ -165,6 +167,71 @@ impl ManagedPlaywrightHostBridge {
         }
         if let Ok(mut contexts) = self.authorization_contexts.lock() {
             contexts.clear();
+        }
+    }
+
+    pub(crate) async fn prepare_sensitive_tool(
+        &self,
+        input: ManagedPlaywrightPrepareSensitiveToolInput,
+    ) -> Result<ManagedPlaywrightCompletionOutcome, McpError> {
+        self.request(
+            ManagedPlaywrightCommand::PrepareSensitiveTool {
+                input: Box::new(input),
+            },
+            PendingOperation::PrepareSensitiveTool,
+            Duration::from_secs(10),
+            // Proposal-time target freezing is deliberately drained to a terminal Main outcome.
+            // Cancelling this bridge request could discard a late `sensitive_tool_prepared`
+            // completion after Main created the binding, leaving that authority alive until TTL.
+            None,
+        )
+        .await
+    }
+
+    /// Best-effort process-only cleanup from synchronous reject/cancel/revoke paths. Main performs
+    /// the deletion before attempting its completion, so an untracked completion cannot restore
+    /// or retain the authority.
+    pub(crate) fn release_sensitive_tool_binding_now(
+        &self,
+        binding_id: String,
+        run_id: String,
+        activation_id: String,
+        call_id: String,
+        reason: ManagedPlaywrightSensitiveBindingReleaseReason,
+    ) -> Result<(), McpError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let request_id = Uuid::new_v4();
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
+            "params": ManagedPlaywrightCommandNotification {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: request_id.to_string(),
+                server_id: self.server_id.to_string(),
+                deadline_ms: unix_millis().saturating_add(10_000),
+                command: ManagedPlaywrightCommand::ReleaseSensitiveToolBinding {
+                    binding_id,
+                    run_id,
+                    activation_id,
+                    call_id,
+                    reason,
+                },
+            },
+        });
+        let sent = self
+            .outbound
+            .lock()
+            .map_err(|_| McpError::protocol("managed Playwright outbound lock is unavailable"))?
+            .as_ref()
+            .is_some_and(|outbound| outbound.send(notification).is_ok());
+        if sent {
+            Ok(())
+        } else {
+            Err(McpError::shutdown(
+                "managed Playwright Host bridge is unavailable",
+            ))
         }
     }
 
@@ -1054,6 +1121,10 @@ fn outcome_matches(
                 ManagedPlaywrightCompletionOutcome::ToolsListed { .. }
             )
             | (
+                PendingOperation::PrepareSensitiveTool,
+                ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared { .. }
+            )
+            | (
                 PendingOperation::CallTool,
                 ManagedPlaywrightCompletionOutcome::ToolCalled { .. }
             )
@@ -1375,6 +1446,20 @@ mod tests {
                         ManagedPlaywrightCompletionOutcome::ToolCalled {
                             result: json!({"content":[{"type":"text","text":"ok"}],
                               "structuredContent":null,"isError":false}),
+                        }
+                    }
+                    ManagedPlaywrightCommand::PrepareSensitiveTool { input } => {
+                        ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
+                            binding_id: Uuid::new_v4().to_string(),
+                            target_binding_digest: format!("sha256:{}", "7".repeat(64)),
+                            origin: "https://mail.example.test".to_string(),
+                            created_at_ms: input.created_at_ms,
+                            expires_at_ms: input.expires_at_ms,
+                        }
+                    }
+                    ManagedPlaywrightCommand::ReleaseSensitiveToolBinding { .. } => {
+                        ManagedPlaywrightCompletionOutcome::SensitiveToolBindingReleased {
+                            released: true,
                         }
                     }
                     ManagedPlaywrightCommand::Close => ManagedPlaywrightCompletionOutcome::Closed,
@@ -1863,14 +1948,8 @@ mod tests {
         ] {
             assert!(catalog_names.contains(expected), "{expected}");
         }
-        for forbidden in [
-            "browser_evaluate",
-            "browser_file_upload",
-            "browser_cookie_list",
-            "browser_run_code_unsafe",
-        ] {
-            assert!(!catalog_names.contains(forbidden), "{forbidden}");
-        }
+        let forbidden = "browser_run_code_unsafe";
+        assert!(!catalog_names.contains(forbidden), "{forbidden}");
 
         let navigate = invoke_browser_tool_with_grant(
             &runtime,
@@ -1902,6 +1981,63 @@ mod tests {
         let drop_target_ref = snapshot_ref(&snapshot_text, "Drop target");
         let list_ref = snapshot_ref(&snapshot_text, "Visible items");
         let download_ref = snapshot_ref(&snapshot_text, "Download fixture");
+        let frame_subject_ref = snapshot_ref(&snapshot_text, "Frame Subject");
+        let mail_body_target = frame_editor_target(&snapshot_text, 2);
+
+        let frame_form = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_fill_form",
+            json!({
+                "fields": [{
+                    "target": frame_subject_ref,
+                    "name": "Frame Subject",
+                    "type": "textbox",
+                    "value": "iframe-subject"
+                }],
+                "call_reason": "Fill a repository-owned iframe input."
+            }),
+        )
+        .await;
+        assert!(
+            !frame_form.is_error,
+            "managed iframe browser_fill_form failed: {}",
+            tool_result_text(&frame_form)
+        );
+        let frame_type = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_type",
+            json!({
+                "target": mail_body_target,
+                "text": "你好",
+                "call_reason": "Fill the repository-owned iframe editor in Chinese."
+            }),
+        )
+        .await;
+        assert!(
+            !frame_type.is_error,
+            "managed iframe Chinese browser_type failed: {}",
+            tool_result_text(&frame_type)
+        );
+        let frame_result_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Verify repository-owned iframe input parity."}),
+        )
+        .await;
+        let frame_result_text = tool_result_text(&frame_result_snapshot);
+        assert!(frame_result_text.contains("subject:iframe-subject"));
+        assert!(frame_result_text.contains("body:你好"));
+        assert!(
+            frame_result_text.contains("focused:mail-body"),
+            "iframe focus projection mismatch: {frame_result_text}"
+        );
+        assert!(
+            frame_result_text.contains("body-events:beforeinput,input"),
+            "iframe event projection mismatch: {frame_result_text}"
+        );
 
         for (tool, arguments) in [
             (
@@ -2375,7 +2511,10 @@ mod tests {
         )
         .await;
         assert!(!console.is_error);
-        assert!(tool_result_text(&console).contains("managed fixture warning"));
+        let console_summary = tool_result_text(&console);
+        assert!(console_summary.contains("Managed browser console summary"));
+        assert!(console_summary.contains("Message text was omitted"));
+        assert!(!console_summary.contains("managed fixture warning"));
         let requests = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
@@ -2578,6 +2717,7 @@ mod tests {
                     call_id: Uuid::new_v4().to_string(),
                     trigger_tool_name: raw_name.to_string(),
                     call_reason: "Exercise the managed browser unit fixture.".to_string(),
+                    builtin_tool_grant: None,
                 },
                 McpCancellationToken::new(),
             )
@@ -2619,6 +2759,7 @@ mod tests {
                     call_id: Uuid::new_v4().to_string(),
                     trigger_tool_name: raw_name.to_string(),
                     call_reason: "Exercise the local managed browser fixture.".to_string(),
+                    builtin_tool_grant: None,
                 },
                 McpCancellationToken::new(),
             )
@@ -2680,5 +2821,18 @@ mod tests {
         let start = line.find("[ref=").expect("snapshot ref start") + "[ref=".len();
         let end = line[start..].find(']').expect("snapshot ref end") + start;
         line[start..end].to_string()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn frame_editor_target(snapshot: &str, editor_index: usize) -> String {
+        let marker = format!("contenteditable {editor_index}: ");
+        snapshot
+            .lines()
+            .find_map(|line| line.split_once(&marker).map(|(_, target)| target.trim()))
+            .filter(|target| target.starts_with("managed-frame-editor:"))
+            .unwrap_or_else(|| {
+                panic!("snapshot omitted safe iframe editor {editor_index}: {snapshot}")
+            })
+            .to_string()
     }
 }

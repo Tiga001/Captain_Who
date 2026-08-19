@@ -169,6 +169,77 @@ afterEach(() => {
 })
 
 describe('BrowserSurfaceManager', () => {
+  it.each([
+    ['same-origin', 'https://mail.example.test/compose'],
+    ['cross-origin', 'https://other.example.test/compose']
+  ])('does not freeze a sensitive target during %s main-frame navigation', async (_name, url) => {
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = attachGuest(manager, host)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    await pending
+
+    guest.url = 'https://mail.example.test/inbox'
+    guest.emit('did-start-navigation', {}, url, false, true)
+    expect(manager.getSensitiveTargetIdentity()).toBeNull()
+    guest.url = url
+    guest.emit('did-navigate', {}, url, 200, 'OK')
+    expect(manager.getSensitiveTargetIdentity()).toEqual({
+      surfaceId: SURFACE_ID,
+      generation: 1,
+      navigationEpoch: 2,
+      origin: new URL(url).origin
+    })
+    await manager.shutdown()
+  })
+
+  it('blocks a navigation for the full sensitive dispatch fence and removes every listener', async () => {
+    const networkFinish = vi.fn()
+    const networkFence = {
+      blocked: vi.fn(() => false),
+      finish: networkFinish
+    }
+    const networkGuard = {
+      beginMainFrameNavigationFence: vi.fn(() => networkFence),
+      deactivateAutomation: vi.fn(),
+      registerGuest: vi.fn(),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserNetworkGuard
+    const { commands, host, manager } = createHarness({ networkGuard })
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = attachGuest(manager, host)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    await pending
+    guest.url = 'https://mail.example.test/inbox'
+    const identity = manager.getSensitiveTargetIdentity()
+    if (!identity) throw new Error('sensitive target missing')
+    const baselineNavigateListeners = guest.listenerCount('will-navigate')
+    const baselineRedirectListeners = guest.listenerCount('will-redirect')
+    const fence = manager.beginSensitiveDispatchFence(identity)
+    const preventDefault = vi.fn()
+    guest.emit('will-redirect', { preventDefault }, 'https://mail.example.test/other', false, true)
+    expect(preventDefault).toHaveBeenCalledOnce()
+    expect(() => fence.finish()).toThrow(
+      expect.objectContaining({ code: 'browser.surface_unavailable' })
+    )
+    expect(networkFinish).toHaveBeenCalledOnce()
+    expect(guest.listenerCount('will-navigate')).toBe(baselineNavigateListeners)
+    expect(guest.listenerCount('will-redirect')).toBe(baselineRedirectListeners)
+    await manager.shutdown()
+  })
+
   it('single-flights concurrent first use and only connects after exact Renderer readiness', async () => {
     const { browsers, commands, host, manager } = createHarness()
     const first = manager.getBrowserContext()

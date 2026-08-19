@@ -1,0 +1,1799 @@
+{
+  "schemaVersion": 1,
+  "reportKind": "managed_playwright_release_conformance",
+  "evidenceSemantics": {
+    "contract": "Enforced by deterministic source validation; this is not a runtime test result.",
+    "evidence": "A bounded automated evidence source is named; an execution is observed only when its command and result are explicitly recorded.",
+    "pending": "The stated release claim is not yet established by a complete automated gate."
+  },
+  "package": {
+    "name": "@playwright/mcp",
+    "version": "0.0.79",
+    "playwrightVersion": "1.63.0-alpha-2026-08-05"
+  },
+  "identity": {
+    "managedMcpId": "builtin.browser_automation.mcp",
+    "capabilityId": "browser_automation",
+    "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v5",
+    "upstreamCatalogDigest": "sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf",
+    "policyDigest": "sha256:522934676363be5d6c113fc373cfa1c47309da4b8a101e4619d0c815f9d80ade"
+  },
+  "classification": {
+    "status": "contract",
+    "upstreamToolCount": 69,
+    "policyToolCount": 69,
+    "exposedToolCount": 61,
+    "hiddenToolCount": 8,
+    "handlingModes": {
+      "pass_through": 25,
+      "host_adapted": 8,
+      "approval_required": 21,
+      "artifact_managed": 7,
+      "sandboxed": 1,
+      "unsupported": 7
+    }
+  },
+  "tools": [
+    {
+      "rawName": "browser_annotate",
+      "modelName": "browser_annotate",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "upstream_external_dashboard_forbidden",
+      "constraints": [
+        "requires_call_reason",
+        "not_model_visible",
+        "external_dashboard_process_forbidden"
+      ],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_click",
+      "modelName": "browser_click",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:7fed82f52ae7018670d967e4429b63501948c80de2df2e9279ce4c103694d0d3",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:70609aaa1839b9cc8736e707745331bfd51189691f7fbd0b20f9484a6c8045b7",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_close",
+      "modelName": "browser_close",
+      "capability": "core",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_console_messages",
+      "modelName": "browser_console_messages",
+      "capability": "core",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:d503685c2c343d3f67d58e4e72ecd680e5b452d1e7905f3aa40dd0f5e6093853",
+      "hostOverlayDigest": "sha256:aa92578c35a642be2f288addb3018ccfaaa716b55a134fe3cedf398de6b80a82",
+      "hostInputSchemaDigest": "sha256:aa4087122695b196536301d0c716fca23c097b85474ed07fabfef9e1f6b4015a",
+      "hostOverlay": {
+        "addCallReason": true,
+        "removeProperties": ["all"],
+        "propertyOverrides": {
+          "level": {
+            "enum": ["error", "warning"],
+            "default": "warning",
+            "description": "Return only warning or error console messages; defaults to warning."
+          },
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed console Artifact; paths are ignored."
+          }
+        }
+      },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_cookie_clear",
+      "modelName": "browser_cookie_clear",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_cookie_delete",
+      "modelName": "browser_cookie_delete",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:76dd26a4e8f1ee5d0be920c5c3364720a806bd28cdbdd0ac33ce677948850e16",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:72d5d786fe27fee3fc748c1ed6bf04d02bdc404d1baa9f7cb3c7fef3dfc466df",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_cookie_get",
+      "modelName": "browser_cookie_get",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:4a732a67e10ddccec52e7c605633dcfaef2f219315e7ebcea534fd8cd370e4dc",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:e6e1d5fa1eac6ffd8170839953adb25739c4e7c88e4bd6b3107a0abe9c6b7ab6",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_cookie_list",
+      "modelName": "browser_cookie_list",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:fc1e5fb88b5616ee72970df7bde7c108d78e3c5c18d5643526f8005c68e2dc84",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:765465b351590e2b333651458cd06ced442df5d5cc5a919f4974f2da5ca6c68c",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_cookie_set",
+      "modelName": "browser_cookie_set",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:df26a270900cdc1b989b4f444ee50f4efd9777d7b6644c7223f93f864a9950a0",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:47ae6943605d00ba534f0f2692af22d6be97e9ebfdfcb0b9dc43d593f468ba59",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_drag",
+      "modelName": "browser_drag",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:3dcca018f0b0e9341fee3c91b5420f82557a59a9d9763699e90970b2bd3ed1cb",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:56f8ad48be94d0e6d316908fe1a4749f3f658dea027552eb8adf9b5db41eb275",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_drop",
+      "modelName": "browser_drop",
+      "capability": "core",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:2f2a2c904744c935fc66547031c43b43466e86043f6c306624b536867b18d8e8",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:c1efdc47b1a2c1421a1341d6327aac7bbf1c749ce3fd3d2db88a763dc826764d",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "approval_when_paths_present",
+        "mime_data_may_use_conditional_fast_path"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_evaluate",
+      "modelName": "browser_evaluate",
+      "capability": "core",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:323e6acbb66440dd71d398d4f2acdbddc8af0714ed36da0e01eb35fede62e5eb",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:aa639ded6e7da2c86598e7eea030fcbdb1a39b71641159602c35850c6a566c82",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": ["requires_call_reason", "task_scoped_tool_approval"],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_file_upload",
+      "modelName": "browser_file_upload",
+      "capability": "core",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:c76aede191ef1e3bdd09ff177419a1e77a0e1f3f676bdd7c8053ac78e6a80086",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:f4585c795fcdca6247df64e1a1525278c1ac3126cfc0b93f1a607e613679a59b",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": ["requires_call_reason", "task_scoped_tool_approval"],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_fill_form",
+      "modelName": "browser_fill_form",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:c991223a68247bd517c0fa1b61db444178ff6ad546e7214936d29b8de4c2f2ee",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:75c3957abff1eea6440b13868039e15fef0973a62e0a8be66c531c78eb79cd1e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_find",
+      "modelName": "browser_find",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:204f595563881a96f3f3830af62668b73678fd42dd04a57100fc55a3f39c8979",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:290fd62a5c045fc3964e8cecb940194387e59423e62893beb74c4447c216f048",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_generate_locator",
+      "modelName": "browser_generate_locator",
+      "capability": "testing",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:3b0a5a3333d051dba9f6b023c341eef00f0e5264bef37bc0a11f83156937e803",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:50f51833f3710a021a806f30f29a1ee318c75fc13dc32b4b2c4c5883c010c118",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_get_config",
+      "modelName": "browser_get_config",
+      "capability": "config",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_handle_dialog",
+      "modelName": "browser_handle_dialog",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:2d4cacf71e9fd7f902bebbc84f106614b891c2654de32b71b1f0d629a10d8b5c",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:336f7408c75f0f89daa52dbc7a4525f3cca6154c0220fecf3bb9c1c66c010d32",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_hide_highlight",
+      "modelName": "browser_hide_highlight",
+      "capability": "devtools",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:4255935180b9cff438dfc46822c9959bc81f0a04c4d0a659e178147af947afad",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:e064261110ee3154b1b0e02f8c9202fe6eb78953775dd44c37ce91473d8ef588",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_highlight",
+      "modelName": "browser_highlight",
+      "capability": "devtools",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:1d51f2a909c140ba4cfd3602fab5ff66f4c5ebbe3829b93eeebdb1291bec2dd1",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:e88efb892347eadfed2e093b32127d67f6cc60e8ba24f49e5bf08d2b9e44f895",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_hover",
+      "modelName": "browser_hover",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:3b0a5a3333d051dba9f6b023c341eef00f0e5264bef37bc0a11f83156937e803",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:50f51833f3710a021a806f30f29a1ee318c75fc13dc32b4b2c4c5883c010c118",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_localstorage_clear",
+      "modelName": "browser_localstorage_clear",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_localstorage_delete",
+      "modelName": "browser_localstorage_delete",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:577641519a1b38db5cee07f45e70da5966aa108f2ded9cf59ef26af6f035e370",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:eb5281c5e52d97c8b0d90cb096822270ffcd6c19ee0a8fe76a264b881db6ea0f",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_localstorage_get",
+      "modelName": "browser_localstorage_get",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:1c2f2a11388b56205807e349d00a8c47fbfbebaeb26d71347a0f68a0adac21c0",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:232a0ad5ab7ed9d2f49a3ba7e9ab5f7436fe541f143881d2da5a409698e19cef",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_localstorage_list",
+      "modelName": "browser_localstorage_list",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_localstorage_set",
+      "modelName": "browser_localstorage_set",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:f6fd7358e05c0f02f2ec398bd727eee449bdd978255c66e7427ce3762a313b8e",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:9e62523806c094d4b3d5c2820bfee62cab96ff8ff91401ca8947400979097919",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_mouse_click_xy",
+      "modelName": "browser_mouse_click_xy",
+      "capability": "vision",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:606b45c9d0cbad2a687ac597c8f17a07af8be0dc57ddf3dbe4bfabb50f3516ff",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:b446da5015eec8e663119b586cd64f849442a4ab622231ee200015f825f102ef",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_mouse_down",
+      "modelName": "browser_mouse_down",
+      "capability": "vision",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:359f7d310c629f6ea6bbde05696c4180afb7cf9683c624b308826c24c3a0c38f",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:19a229ca428aabcce393dc7051182350bb90f63d206884c9bd546e93263b95f6",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_mouse_drag_xy",
+      "modelName": "browser_mouse_drag_xy",
+      "capability": "vision",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:084b985bb8a978c4d1c7b7b48fea3633ef539659c54c4911a4397906b764a60f",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:1702cb6a6e0eac88e31e580d19dd9ed721f5e91963b7893282d7e25d9501f5c5",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_mouse_move_xy",
+      "modelName": "browser_mouse_move_xy",
+      "capability": "vision",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:1669520ba2684a799ed71742c7a36e397ea2f83f694c40df04d1804807155a8e",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:0d5586ad5a286aef277eb6e62c5fc6138f54f08aace30b2a76951fc774967018",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_mouse_up",
+      "modelName": "browser_mouse_up",
+      "capability": "vision",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:359f7d310c629f6ea6bbde05696c4180afb7cf9683c624b308826c24c3a0c38f",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:19a229ca428aabcce393dc7051182350bb90f63d206884c9bd546e93263b95f6",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_mouse_wheel",
+      "modelName": "browser_mouse_wheel",
+      "capability": "vision",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:f0ae8a34c8450dad90cfe989d155b15c0f545c385d137e406e1d683c6c6d4574",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:28596b74cf85318606c1c8296cd8ff1b6760a7e5c9a2569b549af5813d5be460",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_navigate",
+      "modelName": "browser_navigate",
+      "capability": "core-navigation",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:2165538e098634780eec628947d795a2619b4d2e3cef0e36d3084ac46abb94f7",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:f0fbe991a36f3f17be52863a9d4b139389bc57303d6f32daec71964707ffb0ef",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_navigate_back",
+      "modelName": "browser_navigate_back",
+      "capability": "core-navigation",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_network_request",
+      "modelName": "browser_network_request",
+      "capability": "core",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:d041ab91391ddbdb960c9a5b10f741af3baabdad5137a41c5f3111cce14b2872",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:78950a21bc2325a8aafba1df59be47592b9838a80ffe7d03931e4248cb2d5719",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "redact_credentials_and_bodies"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_network_requests",
+      "modelName": "browser_network_requests",
+      "capability": "core",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:86d566ed7630b826e22f89987152935cd5963d5d31cf04e90c33f7918389646a",
+      "hostOverlayDigest": "sha256:a840f03650e687105c504a942b7bca7ac9a8b66431acb33a2799f8075e6de221",
+      "hostInputSchemaDigest": "sha256:cbf01b6eff4bf95935c77ec6143ff782c8b3134b04db8e7c0eaac6059c007364",
+      "hostOverlay": {
+        "addCallReason": true,
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed network-list Artifact; paths are ignored."
+          }
+        }
+      },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_network_state_set",
+      "modelName": "browser_network_state_set",
+      "capability": "network",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:37b3130631c34dd03a17b55931f80c8fefa3bcb73044f4af2b3a7a99f12b52b6",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:11538c9d1640a0ef7c72c15ed9b1cc631209a757f3f7647baeecbf5ad38151ab",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_pdf_save",
+      "modelName": "browser_pdf_save",
+      "capability": "pdf",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:9ef6269f3a795e2f49cc03b9478671ee10e0cc2bd3a78fb2fc3d9fa48907d6e3",
+      "hostOverlayDigest": "sha256:9143a7cc349609a500915141dc319c7d2a322d631bfaf57a4872dd0b7eca8d48",
+      "hostInputSchemaDigest": "sha256:9a10b2606be8a84e813887629e4bb7486227beec471f7122e53585f0b1d580d2",
+      "hostOverlay": {
+        "addCallReason": true,
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed PDF Artifact; paths are ignored."
+          }
+        }
+      },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_press_key",
+      "modelName": "browser_press_key",
+      "capability": "core-input",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:57a7f701ebf865e5a7a759c15e8d04bca12cb756c2e3f4ae7280070bb6e310e2",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:234319d1c84ba10abb5850f87fc6bbfcf62f300db84190dfe3ad237d41a43426",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_resize",
+      "modelName": "browser_resize",
+      "capability": "core",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:4a80d1f511092cf5e94b689f81afd36ec42b0ac74a510f7220a7c9987af00b84",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:f0bc5a5b82d3da4dd0646f4185a15ce9a243a136daa15bbb9a7cc2d07dfae3d4",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_resume",
+      "modelName": "browser_resume",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:1752e516807d7ad0aa23b0fb247a38db166dc6336915e44fe657f04871f8fc25",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:4fd944a8fe1931d5c6138eede447529877fdb57ab785c95da502d2f42357b41a",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "managed_guest_has_no_test_debugger_pause",
+      "constraints": ["requires_call_reason", "not_model_visible", "no_managed_pause_source"],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_route",
+      "modelName": "browser_route",
+      "capability": "network",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:51f39167e639a0b6b559ec6a263e3a0aa97ffe7bb9beb0c5249ef6bc2be7f3c3",
+      "hostOverlayDigest": "sha256:7c0e7c3a3f08cc771c6f2c29de82e2a11d403568ba82dce0b25cfdd3a6f4079d",
+      "hostInputSchemaDigest": "sha256:b0d6b1f163f4576e9662b0d042da00f10a1777e0f4d43b44535731c04558c675",
+      "hostOverlay": {
+        "addCallReason": true,
+        "removeProperties": ["body", "contentType", "headers", "removeHeaders"]
+      },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped",
+        "no_header_or_body_capture"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_route_list",
+      "modelName": "browser_route_list",
+      "capability": "network",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped",
+        "no_header_or_body_capture"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_run_code_unsafe",
+      "modelName": "browser_run_code_unsafe",
+      "capability": "core",
+      "handlingMode": "sandboxed",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:900ecef9fc7ac8229624f8faee37b95d5353ec2b0479edca1b92e12a816558dd",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:dc0c16aa0c9870565a0309b78f6a9295c53e838fd171f425056e90bf0531d649",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "rce_equivalent_isolation",
+      "constraints": [
+        "requires_call_reason",
+        "isolated_process_required",
+        "no_electron_main_execution"
+      ],
+      "behaviorContract": "unavailable_until_real_process_sandbox"
+    },
+    {
+      "rawName": "browser_select_option",
+      "modelName": "browser_select_option",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:03b097752bdb41817ec0a6a259062598e5c85c1a8c7106d0f2fde506321096bd",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:5c733b8671105eb31503be6ca9c7e4662683e8a083fdf5cbed5dd2724b71beea",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_sessionstorage_clear",
+      "modelName": "browser_sessionstorage_clear",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_sessionstorage_delete",
+      "modelName": "browser_sessionstorage_delete",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:577641519a1b38db5cee07f45e70da5966aa108f2ded9cf59ef26af6f035e370",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:eb5281c5e52d97c8b0d90cb096822270ffcd6c19ee0a8fe76a264b881db6ea0f",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_sessionstorage_get",
+      "modelName": "browser_sessionstorage_get",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:1c2f2a11388b56205807e349d00a8c47fbfbebaeb26d71347a0f68a0adac21c0",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:232a0ad5ab7ed9d2f49a3ba7e9ab5f7436fe541f143881d2da5a409698e19cef",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_sessionstorage_list",
+      "modelName": "browser_sessionstorage_list",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_sessionstorage_set",
+      "modelName": "browser_sessionstorage_set",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:f6fd7358e05c0f02f2ec398bd727eee449bdd978255c66e7427ce3762a313b8e",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:9e62523806c094d4b3d5c2820bfee62cab96ff8ff91401ca8947400979097919",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_set_storage_state",
+      "modelName": "browser_set_storage_state",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:ebc1ab1135769a1a5e9485d2fb781b1372fc2e1faef66645f5c98b76db508920",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:d72618aefd88263f08a608c154d4111fa7aaa15f4e20d962ca7e3458252ab259",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_snapshot",
+      "modelName": "browser_snapshot",
+      "capability": "core",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:36ee5bbb5798a52e26015635e1f6015b8f4b62f44119d53ad2516837667fcd61",
+      "hostOverlayDigest": "sha256:b88c092e3c7bd54086e6747a289d9d4ee93ffc6c2c3d930e923444ce7976535d",
+      "hostInputSchemaDigest": "sha256:1396504699b99aba27d69f1124056fdc0b1690e24405adf3dd34e4fd3ec2cd8b",
+      "hostOverlay": {
+        "addCallReason": true,
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed snapshot Artifact; paths are ignored."
+          }
+        }
+      },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_start_tracing",
+      "modelName": "browser_start_tracing",
+      "capability": "devtools",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_start_video",
+      "modelName": "browser_start_video",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:4225dd42b296a31349b8fda248a62fe2e693aa51fd6f170a79ebeb45a041034c",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:fce6cd04b6170f1ed566605cda48d3cfbb3c8f197f6d11a0c0d54b342b0fbf0b",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "production_ffmpeg_not_bundled",
+      "constraints": [
+        "requires_call_reason",
+        "not_model_visible",
+        "external_video_encoder_unavailable"
+      ],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_stop_tracing",
+      "modelName": "browser_stop_tracing",
+      "capability": "devtools",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_stop_video",
+      "modelName": "browser_stop_video",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "production_ffmpeg_not_bundled",
+      "constraints": [
+        "requires_call_reason",
+        "not_model_visible",
+        "external_video_encoder_unavailable"
+      ],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_storage_state",
+      "modelName": "browser_storage_state",
+      "capability": "storage",
+      "handlingMode": "approval_required",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:5209cc8085a45707965f4d4a7d088131941d8413e698eb59047e500cfe2e54aa",
+      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
+      "hostInputSchemaDigest": "sha256:942cdf3acf33035c25ab63b8a73ac9cc768eca653d1c4faf23f4aed0a23f6114",
+      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "reasonCode": "sensitive_data_or_file_boundary",
+      "constraints": [
+        "requires_call_reason",
+        "task_scoped_tool_approval",
+        "credential_data_boundary"
+      ],
+      "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
+    },
+    {
+      "rawName": "browser_tabs",
+      "modelName": "browser_tabs",
+      "capability": "core-tabs",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:268e0f3eca6295e0fef99d2ef85adfbd3d843c054087817fe96e02ccd8145711",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:2c2a85334e59617732c2a6dafb420af14362a8fcf6404f72906692d48170fbfd",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_take_screenshot",
+      "modelName": "browser_take_screenshot",
+      "capability": "core",
+      "handlingMode": "artifact_managed",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:8862e5da1b5030fc1a927c9ead00f2690872f24f282bc0d4cc3dbf017e041b34",
+      "hostOverlayDigest": "sha256:28f11372f85b2966b3622ddd611e905009852027231ede45f0b9ec5566ba7fdb",
+      "hostInputSchemaDigest": "sha256:b47799f66fd41613608d90592e36fb8ebb8ddf334e7a0573b6af508ec9e8cc36",
+      "hostOverlay": {
+        "addCallReason": true,
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed image Artifact; paths are ignored."
+          }
+        }
+      },
+      "reasonCode": "host_artifact_lifecycle",
+      "constraints": [
+        "requires_call_reason",
+        "artifact_handle_only",
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
+      ],
+      "behaviorContract": "host_owned_artifact_reference"
+    },
+    {
+      "rawName": "browser_type",
+      "modelName": "browser_type",
+      "capability": "core-input",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:ed892740ebc14bb2a49467c08b8bb02717d50f1f3ef8ed06d51abf5ebb3249da",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:fd79cfacb8610fc7736e58aeb2fab7de0b234953904f128e05ccda1e9b74dee3",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_unroute",
+      "modelName": "browser_unroute",
+      "capability": "network",
+      "handlingMode": "host_adapted",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:df78d9c8d3a3244dc2ecadbcfa0d18be70611b813db6392cc77f5d5cef257d22",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:a58c57d9d8047d35f8ff586dcbad185e505b29c9552a97da721df748d402f4ba",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "host_browser_surface_semantics",
+      "constraints": [
+        "requires_call_reason",
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped",
+        "no_header_or_body_capture"
+      ],
+      "behaviorContract": "typed_host_lifecycle_adapter"
+    },
+    {
+      "rawName": "browser_verify_element_visible",
+      "modelName": "browser_verify_element_visible",
+      "capability": "testing",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:229d50999ed8ea69a7fb886fa02349a37fd21111803e888117615e563ef847f6",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:287ccfe07b9bcc6d2f93beb69cf07e86e1323bbf06f1853a8cebecce17c0b37a",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_verify_list_visible",
+      "modelName": "browser_verify_list_visible",
+      "capability": "testing",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:12f54686a7c09f0e697d8ebc9ca084e2620be5f586b19b9c65986b6adf0e62f6",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:f8ff2c885cae41d48d17e20fe31354e28c310405c51d9951ec3235e4768e606b",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_verify_text_visible",
+      "modelName": "browser_verify_text_visible",
+      "capability": "testing",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:8daabb8639f55e8e8bf37364a53981a43b13ec13b6c55f667978b69e63c2ef99",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:6dc4897467a566f65c660aac37849be6b30839b5f667cacb180f7e91efa574df",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_verify_value",
+      "modelName": "browser_verify_value",
+      "capability": "testing",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:f9e80741caefcd4ed9adfbc4a83ab819124c5be9496fe5b81df7b42c1b23fbfb",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:3b581e551677ebb0cbd2994610e6fdb2e4d87d72d069740223b820d5a0a9d2ff",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    },
+    {
+      "rawName": "browser_video_chapter",
+      "modelName": "browser_video_chapter",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:d9cedd643d08f5521b7106ef63865f18863fbd033854155cf14068fd68e415a3",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:6583b23ccc61ad8b6f5c52819da97968134b62ddae3cd18f73da81d417b3e596",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "managed_video_recording_unavailable",
+      "constraints": [
+        "requires_call_reason",
+        "not_model_visible",
+        "managed_video_recording_unavailable"
+      ],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_video_hide_actions",
+      "modelName": "browser_video_hide_actions",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "managed_video_recording_unavailable",
+      "constraints": [
+        "requires_call_reason",
+        "not_model_visible",
+        "managed_video_recording_unavailable"
+      ],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_video_show_actions",
+      "modelName": "browser_video_show_actions",
+      "capability": "devtools",
+      "handlingMode": "unsupported",
+      "exposed": false,
+      "availability": "model_hidden",
+      "upstreamSchemaDigest": "sha256:a43cfdca9b032d31076ed1fa91679dbd0aefbb541864f59fd162f8fbca5dcb71",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:7596705525d22ab2ac365aa7f3339c6b9a4b22fad33134c501db012504ecf125",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "managed_video_recording_unavailable",
+      "constraints": [
+        "requires_call_reason",
+        "not_model_visible",
+        "managed_video_recording_unavailable"
+      ],
+      "behaviorContract": "typed_model_hidden_unavailable"
+    },
+    {
+      "rawName": "browser_wait_for",
+      "modelName": "browser_wait_for",
+      "capability": "core",
+      "handlingMode": "pass_through",
+      "exposed": true,
+      "availability": "model_visible",
+      "upstreamSchemaDigest": "sha256:004b7fd9ce085dd4bb13f67caa6d23a23078ef24342e31c552a377a010e36d5d",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:78beb4ea46ecd064ad1aecc0078dea0fa469e3e8a6715992c45e3700d1b22345",
+      "hostOverlay": { "addCallReason": true },
+      "reasonCode": "direct_managed_page_operation",
+      "constraints": ["requires_call_reason", "managed_page_context_only"],
+      "behaviorContract": "fixed_official_server_passthrough"
+    }
+  ],
+  "schemaParity": {
+    "status": "contract",
+    "upstreamSchemas": "digest_locked_without_mutation",
+    "hostSchemas": "upstream_schema_plus_digest_locked_host_overlay",
+    "overlayOnlyFields": ["call_reason", "approval_origin"],
+    "recursiveKeywords": [
+      "type",
+      "required",
+      "properties",
+      "items",
+      "enum",
+      "const",
+      "additionalProperties",
+      "oneOf",
+      "anyOf",
+      "allOf",
+      "prefixItems",
+      "minimum",
+      "maximum",
+      "minLength",
+      "maxLength",
+      "description"
+    ],
+    "unknownFields": "rejected_by_additionalProperties_false",
+    "providerPayloadEvidence": {
+      "status": "evidence",
+      "execution": "not_recorded_in_source_control",
+      "providers": ["openai_compatible", "anthropic_compatible"],
+      "evidence": [
+        "crates/core-server/src/application/mcp/playwright_manifest.rs",
+        "crates/core/src/tools/builtin_capability.rs"
+      ]
+    }
+  },
+  "behaviorDifferences": [
+    {
+      "handlingMode": "pass_through",
+      "toolCount": 25,
+      "contract": "fixed_official_server_passthrough",
+      "expectedDifference": "none_beyond_host_overlay_and_managed_target_binding"
+    },
+    {
+      "handlingMode": "host_adapted",
+      "toolCount": 8,
+      "contract": "typed_host_lifecycle_adapter",
+      "expectedDifference": "host_lifecycle_or_surface_boundary_is_authoritative"
+    },
+    {
+      "handlingMode": "approval_required",
+      "toolCount": 21,
+      "contract": "original_tool_internal_approval_then_fixed_official_server",
+      "expectedDifference": "approval_is_inside_the_original_tool_lifecycle"
+    },
+    {
+      "handlingMode": "artifact_managed",
+      "toolCount": 7,
+      "contract": "host_owned_artifact_reference",
+      "expectedDifference": "binary_or_file_output_is_replaced_by_a_safe_artifact_reference"
+    },
+    {
+      "handlingMode": "sandboxed",
+      "toolCount": 1,
+      "contract": "unavailable_until_real_process_sandbox",
+      "expectedDifference": "tool_is_not_model_visible"
+    },
+    {
+      "handlingMode": "unsupported",
+      "toolCount": 7,
+      "contract": "typed_model_hidden_unavailable",
+      "expectedDifference": "tool_is_not_model_visible"
+    }
+  ],
+  "sensitiveResourceScope": {
+    "status": "contract",
+    "principle": "A sensitive approval is published only when Main can freeze and later revalidate the exact managed resource identity.",
+    "tools": [
+      {
+        "tool": "browser_evaluate",
+        "available": ["top_page_without_target", "top_frame_snapshot_ref_eN"],
+        "unavailable": ["child_frame_ref", "frame_locator", "arbitrary_selector"],
+        "failureCode": "sensitive_target_scope_unsupported",
+        "reason": "The fixed server evaluates a targeted locator in its owning frame; a top-page origin alone cannot authorize a child-frame execution."
+      },
+      {
+        "tool": "browser_drop",
+        "available": ["pure_mime_data", "approved_paths_to_top_frame_snapshot_ref_eN"],
+        "unavailable": ["approved_paths_to_child_frame_or_unverifiable_target"],
+        "failureCode": "sensitive_target_scope_unsupported",
+        "reason": "Approved local files are disclosed only to a target proven to belong to the frozen top-frame document."
+      },
+      {
+        "tool": "browser_file_upload",
+        "available": [],
+        "unavailable": ["modal_file_chooser_without_immutable_owner_frame_identity"],
+        "failureCode": "sensitive_target_scope_unsupported",
+        "reason": "The fixed server modal state does not expose a proposal-time immutable FileChooser identity to the Host approval boundary."
+      },
+      {
+        "tool": "browser_network_request",
+        "available": [],
+        "unavailable": ["mutable_connection_local_request_index"],
+        "failureCode": "sensitive_request_identity_unavailable",
+        "reason": "A request index can be rebuilt or refer to a cross-origin frame request; it is not an immutable request authority."
+      }
+    ],
+    "futureClosure": "Use Host-owned FileChooser and request ledgers with opaque frame/request identities included in the approval scope digest."
+  },
+  "iframeParity": {
+    "status": "evidence",
+    "execution": "observed_on_2026-08-20",
+    "observedEvidence": {
+      "date": "2026-08-20",
+      "platform": "darwin-arm64",
+      "result": "passed",
+      "scope": "real_electron_guest_oopif_input_delivery"
+    },
+    "expectedParity": [
+      "final_dom",
+      "text_value",
+      "focused_frame",
+      "keyboard_event_order",
+      "tool_result"
+    ],
+    "browserEvaluateIsNotAcceptedAsTypeParity": true,
+    "managedGuestAdaptations": [
+      {
+        "difference": "Target.setAutoAttach.waitForDebuggerOnStart_is_forced_false",
+        "reason": "Electron otherwise exposes an empty child frame tree and deadlocks OOPIF input.",
+        "isolation": "Page.createIsolatedWorld is routed only through the exact admitted guest root session; no global CDP endpoint or unrelated Target is exposed."
+      },
+      {
+        "difference": "blank_iframe_editor_candidates_use_one_time_host_tokens",
+        "reason": "An empty accessibility subtree has no upstream aria-ref; a positional nth selector could drift to a different editor after frame reordering.",
+        "isolation": "The token retains an exact ElementHandle in Main and is bound to run, activation, surface generation, and a 60-second TTL; it is consumed once and never persisted as a CDP or DOM identity."
+      }
+    ],
+    "knownHarnessLimitations": [
+      {
+        "scope": "hidden_cargo_grandchild_fixture_only",
+        "limitation": "slowly_true_widget_event_is_not_observed",
+        "productImpact": "none_on_the_direct_visible_electron_product_parity_path"
+      }
+    ],
+    "safeErrorCodes": [
+      "frame_not_found",
+      "stale_frame_ref",
+      "frame_not_editable",
+      "frame_input_delivery_failed",
+      "frame_detached",
+      "target_closed"
+    ],
+    "evidence": [
+      "src/main/browser/fixtures/browserTargetBroker.electron.ts",
+      "src/main/core/browserTargetBroker.electron.test.ts",
+      "src/main/browser/fixtures/managedPlaywrightBridge.electron.ts"
+    ]
+  },
+  "security": {
+    "hostIsolation": {
+      "globalRemoteDebuggingPort": false,
+      "userBrowserConnection": false,
+      "unknownThirdPartyServerExecution": false,
+      "managedTargetsOnly": true
+    },
+    "browserRunCodeUnsafe": {
+      "status": "pending",
+      "modelVisible": false,
+      "conclusion": "unavailable_without_a_real_low_privilege_process_sandbox",
+      "mainProcessExecutionForbidden": true
+    },
+    "persistenceLeakBudget": {
+      "secretValues": 0,
+      "authorizationHeaders": 0,
+      "cookieValues": 0,
+      "storageValues": 0,
+      "fileContents": 0,
+      "absoluteHostPaths": 0,
+      "binaryOrBase64Payloads": 0
+    },
+    "limits": {
+      "managedMcpHost": {
+        "maxActiveCalls": 8,
+        "maxArgumentBytes": 65536,
+        "maxArgumentDepth": 32,
+        "maxArgumentNodes": 4096,
+        "maxResultBytes": 4194304,
+        "maxTextBytes": 262144,
+        "maxStructuredContentBytes": 262144
+      },
+      "cdp": {
+        "maxInsertTextBytes": 65536,
+        "maxPayloadBytes": 4194304,
+        "maxPayloadDepth": 32,
+        "maxPayloadNodes": 4096,
+        "maxEventQueue": 1024,
+        "maxEventsPerSecond": 4096,
+        "maxChildSessions": 64
+      },
+      "artifacts": {
+        "maxArtifactBytes": 67108864,
+        "maxArtifacts": 256,
+        "maxArtifactsPerRun": 64,
+        "maxRunBytes": 134217728,
+        "maxTotalBytes": 268435456,
+        "ttlMs": 1800000
+      },
+      "files": {
+        "maxFileBytes": 67108864,
+        "maxRunBytes": 134217728,
+        "maxFilesPerSelection": 16,
+        "maxHandles": 64,
+        "ttlMs": 900000
+      },
+      "targets": { "maxRegisteredGuests": 32 }
+    }
+  },
+  "stressEvidence": {
+    "status": "evidence",
+    "execution": "observed_on_2026-08-20",
+    "observedEvidence": {
+      "platform": "darwin-arm64",
+      "command": "pnpm test:playwright-round3-stress",
+      "result": "passed",
+      "tests": 5
+    },
+    "covered": [
+      {
+        "scenario": "managed_host_read_tool_dispatch",
+        "iterations": 500,
+        "executionBoundary": "fixed_catalog_plus_in_memory_official_client_fixture",
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > settles 500 continuous Host calls and fails closed at the 32-reader admission boundary"
+      },
+      {
+        "scenario": "concurrent_read_admission_attempts",
+        "iterations": 32,
+        "firstWaveAdmitted": 8,
+        "firstWaveRejectedBusy": 24,
+        "completedAfterBoundedRetry": 32,
+        "admissionWaves": 4,
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > settles 500 continuous Host calls and fails closed at the 32-reader admission boundary"
+      },
+      {
+        "scenario": "tab_create_close",
+        "iterations": 100,
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > returns tabs, routes, context listeners, and connection temp directories to baseline for 100 cycles"
+      },
+      {
+        "scenario": "route_unroute",
+        "iterations": 100,
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > returns tabs, routes, context listeners, and connection temp directories to baseline for 100 cycles"
+      },
+      {
+        "scenario": "file_selection_and_consume",
+        "iterations": 100,
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > consumes 100 local-file authorities and removes every private copy with an injected clock"
+      },
+      {
+        "scenario": "protected_storage_export_and_revoke",
+        "iterations": 100,
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > exports and revokes 100 protected storage states without retaining artifacts, sessions, timers, or secrets"
+      },
+      {
+        "scenario": "target_crash_recovery",
+        "iterations": 25,
+        "executionBoundary": "real_broker_and_transport_with_local_webcontents_fixture",
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > recovers 25 target crashes and 25 failed relay generations with all listeners and timers at baseline"
+      },
+      {
+        "scenario": "relay_generation_recovery",
+        "iterations": 25,
+        "executionBoundary": "real_bridge_with_typed_local_core_and_host_fixtures",
+        "evidence": "src/main/mcp/managedPlaywrightRound3Stress.test.ts > recovers 25 target crashes and 25 failed relay generations with all listeners and timers at baseline"
+      },
+      {
+        "scenario": "activation_idle_reactivation",
+        "iterations": 100,
+        "evidence": "crates/core-server/src/application/mcp/managed_playwright_bridge.rs > idle_policy_reuses_one_timer_and_reactivates_for_one_hundred_cycles"
+      },
+      {
+        "scenario": "approve_reject_race",
+        "iterations": 1,
+        "evidence": "crates/core-server/src/application/mcp/builtin_capability_runtime.rs > approve_reject_race_has_exactly_one_terminal_authority"
+      },
+      {
+        "scenario": "cdp_child_attachment_storm",
+        "iterations": 65,
+        "evidence": "src/main/core/browserTargetBroker.test.ts > closes on an OOPIF attachment storm before child session state can grow unbounded"
+      },
+      {
+        "scenario": "mcp_notification_queue_bound",
+        "iterations": 1025,
+        "evidence": "src/main/core/ipc.mcp.test.ts"
+      }
+    ],
+    "pending": [
+      "real_electron_browser_tool_calls_500",
+      "real_electron_tab_cycles_100",
+      "upload_download_cycles_100",
+      "real_renderer_and_server_process_crash_cycles_25_each",
+      "rss_non_linear_growth_release_gate"
+    ]
+  },
+  "packagedApplication": {
+    "status": "evidence",
+    "execution": "observed_on_2026-08-20",
+    "observedEvidence": {
+      "platform": "darwin-arm64",
+      "command": "pnpm verify:playwright-packaged-startup",
+      "result": "passed",
+      "scope": "unpacked_macos_process_startup_only",
+      "sourceFreshness": "not_established_gate_verifies_the_supplied_bundle_only",
+      "bundledCoreServerProcesses": 1,
+      "sandboxedRendererProcesses": 1,
+      "stableSamples": 3,
+      "temporaryAppData": true,
+      "proxiedOutboundAttempts": 0,
+      "localFixtureSelfCheck": "passed"
+    },
+    "isolation": {
+      "inheritedMyCopilotEnvironment": "removed",
+      "userBrowserOrProfile": false,
+      "remoteDebugging": false,
+      "unknownMcp": false
+    },
+    "offlineAssurance": "proxy_and_resolver_containment_not_a_kernel_firewall",
+    "agentMcpLocalFixtureE2e": {
+      "status": "pending",
+      "reasonCode": "no_production_external_managed_mcp_driver",
+      "localFixtureAgentMcpRequests": 0,
+      "nearestExecutableEvidence": "pnpm exec vitest run --project unit src/main/core/managedPlaywrightBridge.electron.test.ts",
+      "requiredToClose": "Use the public packaged UI with an offline provider fixture and normal approval UI; do not add a privileged test channel."
+    }
+  },
+  "platforms": [
+    {
+      "platform": "darwin",
+      "architecture": "arm64",
+      "status": "evidence",
+      "execution": "observed_on_2026-08-20",
+      "scope": ["catalog", "unit", "local_electron_fixture", "unpacked_process_startup"],
+      "observedTests": {
+        "catalogAndExternalReference": 8,
+        "directElectronOopif": 1,
+        "managedPlaywrightElectron": 1,
+        "round3DeterministicStress": 5,
+        "packagedStartupGate": 1
+      },
+      "packagedOfflineStartup": "observed_process_only",
+      "packagedOfflineE2e": "pending"
+    },
+    {
+      "platform": "windows",
+      "architecture": "unverified",
+      "status": "pending",
+      "reason": "platform_environment_unavailable"
+    },
+    {
+      "platform": "linux",
+      "architecture": "unverified",
+      "status": "pending",
+      "reason": "platform_environment_unavailable"
+    }
+  ],
+  "releaseGates": [
+    {
+      "id": "catalog_lock_and_policy_bijection",
+      "status": "contract",
+      "scope": "All fixed-package tools have exactly one reviewed policy row and matching digests.",
+      "evidence": [
+        "src/main/mcp/managedPlaywrightCatalog.test.ts > managed Playwright fixed Catalog",
+        "scripts/playwright-conformance-report.test.mjs > derives every tool row from the frozen inputs"
+      ]
+    },
+    {
+      "id": "recursive_schema_and_provider_payload_parity",
+      "status": "evidence",
+      "scope": "Upstream schema, Host overlay, Rust registry, OpenAI payload, and Anthropic payload.",
+      "execution": "not_recorded_in_source_control",
+      "evidence": [
+        "src/main/mcp/managedPlaywrightCatalog.test.ts",
+        "packages/protocol/src/mcp/managedPlaywrightBridge.test.ts",
+        "crates/core-server/src/application/mcp/playwright_manifest.rs"
+      ]
+    },
+    {
+      "id": "raw_official_and_external_reference",
+      "status": "evidence",
+      "scope": "Pinned createConnection and pinned stdio Server use the same repository-local fixture.",
+      "execution": "observed_on_2026-08-20",
+      "observedEvidence": {
+        "platform": "darwin-arm64",
+        "command": "pnpm exec vitest run --project unit src/main/mcp/managedPlaywrightCatalog.test.ts",
+        "result": "passed",
+        "tests": 8
+      },
+      "evidence": [
+        "src/main/mcp/managedPlaywrightCatalog.test.ts > matches RawOfficial and ExternalReference behavior on one isolated local workflow"
+      ]
+    },
+    {
+      "id": "builtin_managed_electron_guest",
+      "status": "evidence",
+      "scope": "Private Broker, managed guest, BrowserSurface lifecycle, and fixed MCP invocation.",
+      "execution": "observed_on_2026-08-20",
+      "observedEvidence": {
+        "platform": "darwin-arm64",
+        "command": "pnpm exec vitest run --project unit src/main/core/managedPlaywrightBridge.electron.test.ts",
+        "result": "passed",
+        "tests": 1
+      },
+      "evidence": [
+        "src/main/core/browserTargetBroker.electron.test.ts",
+        "src/main/browser/fixtures/managedPlaywrightBridge.electron.ts"
+      ]
+    },
+    {
+      "id": "iframe_input_parity",
+      "status": "evidence",
+      "scope": "Same-origin, OOPIF, sibling, nested, blank contenteditable, textarea, input, and Shadow DOM input delivery.",
+      "execution": "observed_on_2026-08-20",
+      "observedEvidence": {
+        "platform": "darwin-arm64",
+        "command": "pnpm exec vitest run --project unit src/main/core/browserTargetBroker.electron.test.ts",
+        "result": "passed",
+        "tests": 1
+      },
+      "evidence": [
+        "src/main/browser/fixtures/browserTargetBroker.electron.ts",
+        "src/main/core/browserTargetBroker.electron.test.ts",
+        "src/main/browser/fixtures/managedPlaywrightBridge.electron.ts"
+      ]
+    },
+    {
+      "id": "sensitive_tool_internal_approval",
+      "status": "evidence",
+      "scope": "Approve-success, approve-failure, reject, reject-with-reason, races, and expiry.",
+      "execution": "not_recorded_in_source_control",
+      "evidence": [
+        "crates/core-server/src/application/mcp/builtin_capability_runtime.rs",
+        "src/renderer/src/app/__tests__/BuiltinMcpToolApprovalCard.browser.test.tsx"
+      ]
+    },
+    {
+      "id": "file_artifact_and_secret_boundaries",
+      "status": "evidence",
+      "scope": "Opaque file authority, protected artifacts, bounded output, and safe durable projections.",
+      "execution": "not_recorded_in_source_control",
+      "evidence": [
+        "src/main/core/browserFileBroker.test.ts",
+        "src/main/core/browserArtifactBroker.test.ts",
+        "crates/core/src/runtime/checkpoint/tests/creation_and_mcp.rs"
+      ]
+    },
+    {
+      "id": "complete_69_tool_behavior_matrix",
+      "status": "pending",
+      "scope": "Success, invalid input, cancellation, over-limit, and target-close for every model-visible tool.",
+      "reason": "No single automated matrix currently proves all five cases for every visible tool."
+    },
+    {
+      "id": "deterministic_round_3_host_stress",
+      "status": "evidence",
+      "scope": "Managed Host dispatch, bounded concurrent admission, tab/route/file/storage cleanup, Target crash recovery, and relay generation recovery.",
+      "execution": "observed_on_2026-08-20",
+      "observedEvidence": {
+        "platform": "darwin-arm64",
+        "command": "pnpm test:playwright-round3-stress",
+        "result": "passed",
+        "tests": 5
+      },
+      "evidence": ["src/main/mcp/managedPlaywrightRound3Stress.test.ts"]
+    },
+    {
+      "id": "complete_round_3_stress_matrix",
+      "status": "pending",
+      "scope": "The deterministic Host gate plus repeated real-Electron browser work and RSS assertions.",
+      "reason": "The deterministic Host gate is observed, but 500 real guest actions, 100 real download cycles, repeated real renderer/server crashes, and an RSS-growth gate remain unproved."
+    },
+    {
+      "id": "packaged_application_offline_startup",
+      "status": "evidence",
+      "scope": "Start the real unpacked macOS bundle with temporary appData, a loopback deny proxy, and a repository-local fixture.",
+      "execution": "observed_on_2026-08-20",
+      "observedEvidence": {
+        "platform": "darwin-arm64",
+        "command": "pnpm verify:playwright-packaged-startup",
+        "result": "passed",
+        "sourceFreshness": "not_established_gate_verifies_the_supplied_bundle_only",
+        "coreServerProcesses": 1,
+        "rendererProcesses": 1,
+        "proxiedOutboundAttempts": 0,
+        "localFixtureSelfCheck": "passed",
+        "localFixtureAgentMcpRequests": 0
+      },
+      "evidence": [
+        "scripts/verify-packaged-playwright-startup.mjs",
+        "scripts/verify-packaged-playwright-startup.test.mjs"
+      ]
+    },
+    {
+      "id": "packaged_application_offline_e2e",
+      "status": "pending",
+      "scope": "Launch the unpacked production app offline and execute the local managed-browser fixture.",
+      "reasonCode": "no_production_external_managed_mcp_driver",
+      "reason": "Process startup is observed, but the production app exposes no CLI, socket, environment hook, or general MCP endpoint that can drive Agent managed Playwright. Remote debugging, unknown MCP, user-profile reuse, and a fixture-only production backdoor are forbidden."
+    }
+  ]
+}

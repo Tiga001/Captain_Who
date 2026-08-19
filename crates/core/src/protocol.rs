@@ -2699,6 +2699,96 @@ pub struct AgentBuiltinCapabilityActivationApproval {
     pub approval_status: AgentApprovalStatus,
 }
 
+pub const BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION: u32 = 1;
+pub const BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS: u64 = 15 * 60;
+
+/// Host-classified sensitive effects of a built-in MCP Tool invocation.
+///
+/// These values are frozen authorization identity and presentation hints. A model-authored name,
+/// Tool prefix, or Renderer claim never selects the policy.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinMcpToolRiskKind {
+    FileRead,
+    FileWrite,
+    FileUpload,
+    FileDownload,
+    CookieRead,
+    CookieWrite,
+    LocalStorageRead,
+    LocalStorageWrite,
+    SessionStorageRead,
+    SessionStorageWrite,
+    StorageStateImport,
+    StorageStateExport,
+    NetworkSensitiveRead,
+    PageScriptExecution,
+    UnsafeCodeExecution,
+}
+
+/// Plain-text, value-free resource projection for the native approval card.
+///
+/// Basenames are display data only. Raw paths, opaque file handles, request data, storage values,
+/// script source, and page content are deliberately absent.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinMcpToolResourceSummary {
+    pub scope: String,
+    pub display_name: String,
+    pub file_basenames: Vec<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub origin: Option<String>,
+}
+
+/// Complete non-secret identity of one exact sensitive built-in MCP Tool invocation.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinMcpToolApprovalIdentity {
+    pub action_id: String,
+    pub approval_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub capability_id: String,
+    pub capability_activation_id: String,
+    pub managed_mcp_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub upstream_catalog_digest: String,
+    pub manifest_digest: String,
+    pub policy_digest: String,
+    pub policy_revision: u64,
+    pub tool_id: String,
+    pub raw_name: String,
+    pub model_name: String,
+    pub upstream_schema_digest: String,
+    pub host_overlay_digest: String,
+    pub host_input_schema_digest: String,
+    pub arguments_digest: String,
+    pub resource_scope_digest: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub origin: Option<String>,
+}
+
+/// Persistable, secret-free proposal for a sensitive built-in MCP Tool.
+///
+/// The original Tool invocation remains in flight behind the Host dispatch barrier. This DTO is
+/// the approval projection of that same call, not a second Tool call.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentBuiltinMcpToolApproval {
+    pub schema_version: u32,
+    pub identity: BuiltinMcpToolApprovalIdentity,
+    pub capability_display_name: String,
+    pub tool_display_name: String,
+    pub call_reason: String,
+    pub operation_category: String,
+    pub resource_summary: BuiltinMcpToolResourceSummary,
+    pub risk_kinds: Vec<BuiltinMcpToolRiskKind>,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub approval_status: AgentApprovalStatus,
+}
+
 pub const BROWSER_RISK_APPROVAL_SCHEMA_VERSION: u32 = 1;
 pub const BROWSER_RISK_APPROVAL_TTL_SECONDS: u64 = 15 * 60;
 
@@ -2802,6 +2892,9 @@ pub enum AgentProposedAction {
     },
     BuiltinCapabilityActivation {
         approval: Box<AgentBuiltinCapabilityActivationApproval>,
+    },
+    BuiltinMcpToolApproval {
+        approval: Box<AgentBuiltinMcpToolApproval>,
     },
     BrowserRiskApproval {
         approval: Box<AgentBrowserRiskApproval>,
@@ -3184,6 +3277,26 @@ impl AgentError {
             usage: None,
             code: None,
             details: None,
+            conversation_turn_trace: None,
+            model_request_observation: None,
+            model_request_interruption: None,
+        }
+    }
+
+    /// A cancellation with a bounded typed receipt. This is used when the caller can prove a
+    /// dispatch boundary (for example, an approved MCP call cancelled before Host dispatch)
+    /// without degrading the normal cancellation control flow into an ordinary Tool failure.
+    pub fn cancelled_structured(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            cancelled: true,
+            usage: None,
+            code: Some(code.into()),
+            details: Some(Box::new(details)),
             conversation_turn_trace: None,
             model_request_observation: None,
             model_request_interruption: None,

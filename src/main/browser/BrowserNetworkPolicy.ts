@@ -118,7 +118,7 @@ export class BrowserNetworkPolicy {
   private readonly dnsResolver: BrowserDnsResolver
   private readonly dnsTimeoutMs: number
   private readonly mcpControlEndpoints: ReadonlySet<string>
-  private readonly protectedPorts: ReadonlySet<number>
+  private readonly protectedPortBoundaries: ReadonlyMap<number, BrowserHostBoundaryCode>
   private readonly identityKey = randomBytes(32)
   private readonly pendingResolutions = new Map<
     string,
@@ -138,11 +138,17 @@ export class BrowserNetworkPolicy {
     this.dnsResolver = options.dnsResolver ?? new NodeBrowserDnsResolver()
     this.dnsTimeoutMs = normalizeTimeout(options.dnsTimeoutMs)
     this.mcpControlEndpoints = new Set((options.mcpControlEndpoints ?? []).map(endpointKey))
-    this.protectedPorts = new Set([
-      ...blockedOrigins.map((entry) => entry.port),
-      ...(options.debugEndpoints ?? []).map((entry) => entry.port),
-      ...(options.mcpControlEndpoints ?? []).map((entry) => entry.port)
-    ])
+    const protectedPortBoundaries = new Map<number, BrowserHostBoundaryCode>()
+    for (const endpoint of options.mcpControlEndpoints ?? []) {
+      protectedPortBoundaries.set(endpoint.port, 'mcp_control')
+    }
+    for (const endpoint of options.debugEndpoints ?? []) {
+      protectedPortBoundaries.set(endpoint.port, 'internal_debug')
+    }
+    for (const endpoint of blockedOrigins) {
+      protectedPortBoundaries.set(endpoint.port, 'main_renderer')
+    }
+    this.protectedPortBoundaries = protectedPortBoundaries
   }
 
   /**
@@ -155,24 +161,21 @@ export class BrowserNetworkPolicy {
    */
   async assessStaticHostBoundary(
     untrustedUrl: string,
-    signal?: AbortSignal
+    _signal?: AbortSignal
   ): Promise<BrowserHostBoundaryCode | null> {
+    void _signal
     const literal = this.assessLiteralHostBoundary(untrustedUrl, true)
     if ('boundary' in literal) return literal.boundary
     const { url } = literal
 
-    const hostname = normalizeHostname(url.hostname)
     const port = effectivePort(url)
 
-    // DNS aliases matter only on ports that can reach a protected Host service. Resolving every
-    // manual destination would make normal browsing depend on local DNS even when Chromium is
-    // using a proxy or fake-IP network. Protected ports remain fail closed.
-    if (this.protectedPorts.has(port)) {
-      const resolved = await this.resolve(hostname, signal)
-      if (resolved.overflow) return 'resolution_overflow'
-      if (resolved.failed) return 'resolution_unavailable'
-      return this.classifyResolvedBoundary(resolved.addresses, port)
-    }
+    // A DNS preflight cannot pin Chromium's later socket resolution, so an attacker-controlled
+    // hostname could answer public during this check and loopback during the real request. Host
+    // services therefore own reserved ports inside the managed Browser partition: every hostname
+    // on such a port is rejected without DNS. Ordinary ports remain proxy/fake-IP compatible.
+    const protectedBoundary = this.protectedPortBoundaries.get(port)
+    if (protectedBoundary) return protectedBoundary
     return null
   }
 
@@ -187,6 +190,9 @@ export class BrowserNetworkPolicy {
 
     const hostname = normalizeHostname(url.hostname)
     const port = effectivePort(url)
+
+    const protectedBoundary = this.protectedPortBoundaries.get(port)
+    if (protectedBoundary) return { disposition: 'deny', code: protectedBoundary }
 
     // Active automation resolves exactly once here. Do not call the manual async boundary helper:
     // a second lookup would consume a new DNS-rebinding answer before the grant identity is built.

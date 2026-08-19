@@ -188,6 +188,17 @@ function begin(harness: ReturnType<typeof createHarness>, signal?: AbortSignal) 
 }
 
 describe('BrowserNetworkGuard', () => {
+  it('cancels exact-guest main-frame requests while a sensitive document fence is active', async () => {
+    const harness = createHarness(undefined, ['127.0.0.1'], {}, 'host_boundaries_only')
+    const fence = harness.guard.beginMainFrameNavigationFence(harness.guest, 1)
+
+    await expect(request(harness)).resolves.toEqual({ cancel: true })
+    expect(fence.blocked()).toBe(true)
+    fence.finish()
+    await expect(request(harness, { id: 2 })).resolves.toEqual({})
+    await harness.guard.shutdown()
+  })
+
   it('keeps provisional generation zero network-only until the SurfaceGroup registers authority', () => {
     const { session } = createSession()
     const policy = new BrowserNetworkPolicy({ dnsResolver: new Resolver(['93.184.216.34']) })
@@ -281,10 +292,7 @@ describe('BrowserNetworkGuard', () => {
       artifacts: vi.fn(() => []),
       finish: healthyFinish
     }
-    const beginTool = vi
-      .fn()
-      .mockReturnValueOnce(failedLease)
-      .mockReturnValueOnce(healthyLease)
+    const beginTool = vi.fn().mockReturnValueOnce(failedLease).mockReturnValueOnce(healthyLease)
     const downloadBroker = {
       install: vi.fn(),
       registerGuest: vi.fn(),

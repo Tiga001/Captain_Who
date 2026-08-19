@@ -1667,6 +1667,54 @@ pub fn terminal_conversation_trace_from_snapshot(
     )
 }
 
+/// Atomically closes the one unresolved ToolCall in a durable snapshot with an authoritative,
+/// already-sanitized terminal ToolResult. Sensitive built-in MCP startup reconciliation uses this
+/// instead of a generic runtime error so the original call_id receives exactly one typed result
+/// while preserving the committed prefix byte-for-byte.
+pub fn terminal_conversation_trace_from_snapshot_with_tool_result(
+    snapshot: ConversationTraceSnapshot,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    terminal_status: ConversationTurnTraceTerminalStatus,
+    reason: &str,
+    result: &AgentToolResult,
+) -> Result<TerminalConversationTraceProjection, String> {
+    if !terminal_status.is_terminal() {
+        return Err("terminal conversation projection requires a terminal status".to_string());
+    }
+    let mut recorder = ConversationTraceRecorder::from_durable_snapshot(snapshot);
+    let call = recorder.unresolved_tool_call().ok_or_else(|| {
+        "terminal ToolResult projection requires one unresolved ToolCall".to_string()
+    })?;
+    if result.call_id != call.id || result.tool != call.tool {
+        return Err(
+            "terminal ToolResult identity does not match the unresolved ToolCall".to_string(),
+        );
+    }
+    record_model_tool_exchange_with_projection(
+        &mut recorder,
+        &call,
+        result,
+        None,
+        None,
+        ConversationHistoryArchiveTraceMetadata::default(),
+    )?;
+    let model_context_items = recorder.snapshot().model_context_items;
+    let trace = recorder.finish(
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        terminal_status,
+        Some(reason),
+    );
+    trace.validate_complete_model_context(&model_context_items)?;
+    Ok(TerminalConversationTraceProjection {
+        trace,
+        model_context_items,
+    })
+}
+
 pub(crate) fn terminal_conversation_trace_from_snapshot_with_tool_approval(
     snapshot: ConversationTraceSnapshot,
     run_id: &str,
@@ -2407,6 +2455,9 @@ impl ConversationTraceRecorder {
             }
             AgentProposedAction::BuiltinCapabilityActivation { approval } => {
                 (&approval.call_id, approval.approval_status)
+            }
+            AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                (&approval.identity.call_id, approval.approval_status)
             }
             AgentProposedAction::BrowserRiskApproval { approval } => {
                 (&approval.call_id, approval.approval_status)

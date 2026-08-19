@@ -5,6 +5,48 @@ const PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE: &str = "Approval is unavailable.";
 const UNSETTLED_APPROVAL_PREDECESSOR_MESSAGE: &str =
     "前置工具结果尚未完成持久化结算；已拒绝继续该审批，请等待恢复后重试。";
 
+#[cfg(test)]
+type ApprovalDecisionBarrierHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static APPROVAL_DECISION_BARRIER_HOOKS: Mutex<
+    Vec<(
+        String,
+        AgentApprovalDecisionStatus,
+        ApprovalDecisionBarrierHook,
+    )>,
+> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_approval_decision_barrier_hook(
+    action_id: &str,
+    decision: AgentApprovalDecisionStatus,
+    hook: ApprovalDecisionBarrierHook,
+) {
+    APPROVAL_DECISION_BARRIER_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((action_id.to_string(), decision, hook));
+}
+
+#[cfg(test)]
+fn run_approval_decision_barrier_hook(action_id: &str, decision: AgentApprovalDecisionStatus) {
+    let hook = {
+        let mut hooks = APPROVAL_DECISION_BARRIER_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, candidate_decision, _)| {
+                candidate == action_id && *candidate_decision == decision
+            })
+            .map(|index| hooks.swap_remove(index).2)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 struct BuiltinActivationSettlementGuard {
     runtime: BuiltinCapabilityRuntime,
     activation_id: CapabilityActivationId,
@@ -661,11 +703,13 @@ impl AgentService {
                 | AgentProposedAction::SkillScript { .. }
                 | AgentProposedAction::OfficeOperation { .. }
                 | AgentProposedAction::McpToolCall { .. }
+                | AgentProposedAction::BuiltinMcpToolApproval { .. }
         );
         let is_mcp_dispatching = record.snapshot.status == PendingActionStatus::Executing
             && matches!(
                 record.snapshot.action,
                 AgentProposedAction::McpToolCall { .. }
+                    | AgentProposedAction::BuiltinMcpToolApproval { .. }
             );
         if is_cancellable_process
             && (record.snapshot.status == PendingActionStatus::Approved || is_mcp_dispatching)
@@ -890,13 +934,26 @@ impl AgentService {
     ) -> Result<(), String> {
         const REASON: &str = "Pending action was cancelled by the user.";
         call.approval_status = AgentApprovalStatus::Rejected;
-        let execution = action_execution_for_decision(
-            &self.storage,
-            record,
-            &call,
-            AgentApprovalDecisionStatus::Rejected,
-            Some(REASON),
-        );
+        let execution = if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
+            &record.snapshot.action
+        {
+            ActionExecutionDecision {
+                status: "cancelled".to_string(),
+                final_pending_status: PendingActionStatus::Cancelled,
+                patch_result: None,
+                file_write_result: None,
+                file_change: None,
+                tool_result: mycopilot_core::builtin_mcp_tool_cancelled_result(approval),
+            }
+        } else {
+            action_execution_for_decision(
+                &self.storage,
+                record,
+                &call,
+                AgentApprovalDecisionStatus::Rejected,
+                Some(REASON),
+            )
+        };
         let completed_at = now_ms();
         if let (Some(conversation_id), Some(assistant_message_id), Some(checkpoint)) = (
             record.snapshot.conversation_id.as_deref(),
@@ -960,7 +1017,7 @@ impl AgentService {
     /// Commits the exact pre-dispatch rejection receipt and resolves a commit-unknown response
     /// from durable state. Every retry and inspection uses the same timestamp so the audit and
     /// trace identity remain byte-for-byte stable.
-    fn commit_rejected_mcp_receipt(
+    pub(super) fn commit_rejected_mcp_receipt(
         &self,
         record: &PendingActionRecord,
         persisted_agent_input: &AgentChatInput,
@@ -1054,6 +1111,8 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        #[cfg(test)]
+        run_approval_decision_barrier_hook(action_id, decision_status);
         if decision_status == AgentApprovalDecisionStatus::Approved {
             if let Some(output) =
                 self.try_resume_approved_mcp_action(run_id, action_id, notifications.clone())?
@@ -1072,6 +1131,7 @@ impl AgentService {
             approved_process_guard,
             approved_materialization_guard,
             inline_continuation_guard,
+            precommitted_builtin_rejection,
         ) = {
             let mut pending_actions = self
                 .pending_actions
@@ -1091,6 +1151,7 @@ impl AgentService {
                 && matches!(
                     record.snapshot.action,
                     AgentProposedAction::McpToolCall { .. }
+                        | AgentProposedAction::BuiltinMcpToolApproval { .. }
                 );
             let is_recovered_approved_mcp_rejection = is_rejected_mcp
                 && record.snapshot.status == PendingActionStatus::Approved
@@ -1171,6 +1232,55 @@ impl AgentService {
                         );
                     }
                 }
+                if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
+                    &record.snapshot.action
+                {
+                    let now_ms = self.mcp_approval_now_ms();
+                    let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
+                    if approval.expires_at <= now_seconds {
+                        let retired = self
+                            .storage
+                            .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                                &record.storage_id,
+                                pending_status_label(record.snapshot.status),
+                                McpStartupActionTerminalOutcome::Expired,
+                                now_ms,
+                            )
+                            .map_err(|_| {
+                                "Built-in MCP Tool approval expiry could not be persisted safely."
+                                    .to_string()
+                            })?;
+                        if !retired {
+                            return Err(
+                                "Built-in MCP Tool approval changed while its expiry was being settled."
+                                    .to_string(),
+                            );
+                        }
+                        record.snapshot.status = PendingActionStatus::Failed;
+                        let expired_record = record.clone();
+                        pending_actions.remove(&storage_id);
+                        self.startup_recoverable_mcp_approvals
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .remove(&storage_id);
+                        drop(pending_actions);
+                        drop(deletion_lifecycle.take());
+                        self.invalidate_mcp_pending_payload(&expired_record.snapshot.action);
+                        if let Some(conversation_id) =
+                            expired_record.snapshot.conversation_id.as_deref()
+                        {
+                            self.release_conversation_turn_if_current(
+                                conversation_id,
+                                &expired_record.snapshot.run_id,
+                            );
+                            self.release_turn_concurrency_permit(&expired_record.snapshot.run_id);
+                        }
+                        return Err(
+                            "Built-in MCP Tool approval expired before dispatch; the Tool was not invoked."
+                                .to_string(),
+                        );
+                    }
+                }
                 if let Err(error) = self.validate_provider_continuations_before_dispatch(record) {
                     // Publish the durable terminal intent before replacing the resume payload.
                     // A crash between these writes leaves a non-dispatchable pending row that
@@ -1203,6 +1313,59 @@ impl AgentService {
                 }
             }
             let call = tool_call_for_pending_record(record)?;
+            // A sensitive built-in rejection must win the durable decision CAS before its
+            // process-only payload is mutated. Otherwise an approve thread can transition the
+            // same pending row while Host rejection removes the frozen invocation, producing a
+            // split-brain approval. Commit the value-free rejection ToolResult/trace first; the
+            // target_status=rejected receipt makes every concurrent approve transition fail.
+            let precommitted_builtin_rejection =
+                if decision_status == AgentApprovalDecisionStatus::Rejected {
+                    if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
+                        &record.snapshot.action
+                    {
+                        let tool_result = mycopilot_core::builtin_mcp_tool_rejected_result(
+                            approval,
+                            message.as_deref(),
+                        );
+                        let mut live_agent_input = record.agent_input.clone();
+                        live_agent_input.approval_decision = Some(AgentApprovalDecision {
+                            action_id: record.snapshot.action_id.clone(),
+                            status: decision_status,
+                            message: message.clone(),
+                        });
+                        live_agent_input.tool_continuation = Some(AgentToolContinuation {
+                            call: call.clone(),
+                            result: tool_result.clone(),
+                        });
+                        let mut persisted_agent_input = live_agent_input.clone();
+                        if let Some(decision) = persisted_agent_input.approval_decision.as_mut() {
+                            // User feedback is process-only model context. It can contain a
+                            // password or other unlabelled secret and is never needed to prove
+                            // the durable decision/ToolResult identity.
+                            decision.message = None;
+                        }
+                        persisted_agent_input
+                            .tool_continuation
+                            .as_mut()
+                            .expect("built-in rejection continuation was just populated")
+                            .result =
+                            mycopilot_core::builtin_capability_tool_result_persistence_projection(
+                                &tool_result,
+                            );
+                        let completed_at = now_ms();
+                        self.commit_rejected_mcp_receipt(
+                            record,
+                            &persisted_agent_input,
+                            completed_at,
+                            &notifications,
+                        )?;
+                        Some((live_agent_input, tool_result))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
             if decision_status == AgentApprovalDecisionStatus::Approved {
                 authorize_structured_file_write(
                     &record.agent_input,
@@ -1218,6 +1381,7 @@ impl AgentService {
                         | AgentProposedAction::SkillScript { .. }
                         | AgentProposedAction::OfficeOperation { .. }
                         | AgentProposedAction::McpToolCall { .. }
+                        | AgentProposedAction::BuiltinMcpToolApproval { .. }
                 );
             let is_approved_materialization = decision_status
                 == AgentApprovalDecisionStatus::Approved
@@ -1271,6 +1435,7 @@ impl AgentService {
                 approved_process_guard,
                 approved_materialization_guard,
                 inline_continuation_guard,
+                precommitted_builtin_rejection,
             )
         };
         let mut approved_materialization_guard = approved_materialization_guard;
@@ -1281,14 +1446,21 @@ impl AgentService {
             record.snapshot.action,
             AgentProposedAction::McpToolCall { .. }
         );
-        if !is_mcp_action {
+        let is_builtin_mcp_action = matches!(
+            record.snapshot.action,
+            AgentProposedAction::BuiltinMcpToolApproval { .. }
+        );
+        if !is_mcp_action && !is_builtin_mcp_action {
             call.approval_status = match decision_status {
                 AgentApprovalDecisionStatus::Approved => AgentApprovalStatus::Approved,
                 AgentApprovalDecisionStatus::Rejected => AgentApprovalStatus::Rejected,
             };
         }
         let decided_at = now_ms();
-        if decision_status == AgentApprovalDecisionStatus::Rejected && !is_mcp_action {
+        if decision_status == AgentApprovalDecisionStatus::Rejected
+            && !is_mcp_action
+            && !is_builtin_mcp_action
+        {
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
         }
         if decision_status == AgentApprovalDecisionStatus::Approved
@@ -1391,6 +1563,120 @@ impl AgentService {
                 notifications,
             );
         }
+        if decision_status == AgentApprovalDecisionStatus::Approved && is_builtin_mcp_action {
+            let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action
+            else {
+                unreachable!("typed built-in MCP action was checked above");
+            };
+            let mut approved = (**approval).clone();
+            approved.approval_status = AgentApprovalStatus::Approved;
+            let runtime = self
+                .builtin_capabilities
+                .as_ref()
+                .ok_or_else(|| "Builtin capability Host is unavailable.".to_string())?;
+            let grant = match runtime.approve_builtin_mcp_tool(&approved) {
+                Ok(grant) => grant,
+                Err(_error) => {
+                    let completed_at = now_ms();
+                    let terminalized = self
+                        .storage
+                        .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                            &record.storage_id,
+                            pending_status_label(PendingActionStatus::Approved),
+                            McpStartupActionTerminalOutcome::PayloadUnavailable,
+                            completed_at,
+                        )
+                        .map_err(|_| {
+                            "Built-in MCP Tool approval could not be terminalized safely."
+                                .to_string()
+                        })?;
+                    if !terminalized {
+                        return Err(
+                            "Built-in MCP Tool approval changed while process authority was being retired."
+                                .to_string(),
+                        );
+                    }
+                    self.invalidate_mcp_pending_payload(&record.snapshot.action);
+                    self.pending_actions
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove(&record.storage_id);
+                    if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                        self.release_conversation_turn_if_current(
+                            conversation_id,
+                            &record.snapshot.run_id,
+                        );
+                        self.release_turn_concurrency_permit(&record.snapshot.run_id);
+                    }
+                    let tool_result = AgentToolResult {
+                        exact_archive_file: None,
+                        call_id: approval.identity.call_id.clone(),
+                        tool: approval.identity.model_name.clone(),
+                        ok: false,
+                        result: Some(serde_json::json!({
+                            "schemaVersion": 1,
+                            "type": "builtin_mcp_tool_approval",
+                            "status": "failed",
+                            "errorCode": "mcp.tool_approval_payload_unavailable",
+                            "dispatchCertainty": "definitely_not_dispatched",
+                            "retryable": false,
+                            "contentOmitted": true,
+                        })),
+                        error: Some(
+                            "The sensitive built-in MCP Tool was not dispatched because its process authority was unavailable."
+                                .to_string(),
+                        ),
+                    };
+                    drop(deletion_lifecycle);
+                    return Ok(AgentActionExecutionOutput {
+                        action_id: record.snapshot.action_id,
+                        action_type: record.snapshot.action_type,
+                        tool_name: record.snapshot.tool_name,
+                        status: "failed".to_string(),
+                        patch_result: None,
+                        file_write_result: None,
+                        command_result: None,
+                        tool_result: Some(tool_result),
+                        agent_output: AgentChatOutput {
+                            content: String::new(),
+                            status: AgentRunStatus::Failed,
+                            run_id: record.snapshot.run_id,
+                            events: Vec::new(),
+                            tool_definitions: Vec::new(),
+                            todo: None,
+                            usage: None,
+                            finish_reason: None,
+                            proposed_actions: Vec::new(),
+                            conversation_turn_trace: None,
+                        },
+                    });
+                }
+            };
+            self.record_action_audit(
+                &record,
+                Some("approved"),
+                "approved",
+                None,
+                None,
+                None,
+                None,
+                Some(decided_at),
+                None,
+            );
+            drop(deletion_lifecycle);
+            let queue = self.queue_builtin_mcp_tool_execution(
+                record,
+                call,
+                grant.clone(),
+                approved_process_guard
+                    .expect("approved built-in MCP invocation registered under pending lock"),
+                notifications,
+            );
+            if queue.is_err() {
+                let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+            }
+            return queue;
+        }
 
         let is_approved_materialization = decision_status == AgentApprovalDecisionStatus::Approved
             && matches!(
@@ -1435,6 +1721,34 @@ impl AgentService {
                 .and_then(|value| value.get("userFeedback"))
                 .and_then(serde_json::Value::as_str)
                 .map(ToString::to_string);
+            ActionExecutionDecision {
+                status: "rejected".to_string(),
+                final_pending_status: PendingActionStatus::Rejected,
+                patch_result: None,
+                file_write_result: None,
+                file_change: None,
+                tool_result,
+            }
+        } else if decision_status == AgentApprovalDecisionStatus::Rejected && is_builtin_mcp_action
+        {
+            let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action
+            else {
+                unreachable!("typed built-in MCP action was checked above");
+            };
+            if let Some(runtime) = self.builtin_capabilities.as_ref() {
+                if runtime.reject_builtin_mcp_tool_approval(approval).is_err() {
+                    // Durable user rejection is already authoritative. Cleanup is idempotent and
+                    // must never turn it into a transport failure or reopen approval authority.
+                    let _ = runtime.dismiss_builtin_mcp_tool_approval(approval);
+                }
+            }
+            let tool_result = precommitted_builtin_rejection
+                .as_ref()
+                .map(|(_, result)| result.clone())
+                .unwrap_or_else(|| {
+                    mycopilot_core::builtin_mcp_tool_rejected_result(approval, message.as_deref())
+                });
+            continuation_message = message.clone();
             ActionExecutionDecision {
                 status: "rejected".to_string(),
                 final_pending_status: PendingActionStatus::Rejected,
@@ -1658,31 +1972,48 @@ impl AgentService {
                 }
             }
         }
-        let is_rejected_mcp =
-            decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action;
+        let is_rejected_mcp = decision_status == AgentApprovalDecisionStatus::Rejected
+            && (is_mcp_action || is_builtin_mcp_action);
         let agent_input = if is_rejected_mcp {
-            let mut agent_input = record.agent_input.clone();
-            agent_input.approval_decision = Some(AgentApprovalDecision {
-                action_id: record.snapshot.action_id.clone(),
-                status: decision_status,
-                message: continuation_message.clone(),
-            });
-            agent_input.tool_continuation = Some(AgentToolContinuation {
-                call: call.clone(),
-                result: tool_result.clone(),
-            });
-            let mut persisted_agent_input = agent_input.clone();
-            if let Some(continuation) = persisted_agent_input.tool_continuation.as_mut() {
-                continuation.result =
-                    mycopilot_core::mcp_tool_result_persistence_projection(&continuation.result);
+            let (agent_input, needs_commit) = match precommitted_builtin_rejection.as_ref() {
+                Some((agent_input, _)) => (agent_input.clone(), false),
+                None => {
+                    let mut agent_input = record.agent_input.clone();
+                    agent_input.approval_decision = Some(AgentApprovalDecision {
+                        action_id: record.snapshot.action_id.clone(),
+                        status: decision_status,
+                        message: continuation_message.clone(),
+                    });
+                    agent_input.tool_continuation = Some(AgentToolContinuation {
+                        call: call.clone(),
+                        result: tool_result.clone(),
+                    });
+                    (agent_input, true)
+                }
+            };
+            if needs_commit {
+                let mut persisted_agent_input = agent_input.clone();
+                if is_builtin_mcp_action {
+                    if let Some(decision) = persisted_agent_input.approval_decision.as_mut() {
+                        decision.message = None;
+                    }
+                }
+                if let Some(continuation) = persisted_agent_input.tool_continuation.as_mut() {
+                    continuation.result = if is_builtin_mcp_action {
+                        mycopilot_core::builtin_capability_tool_result_persistence_projection(
+                            &continuation.result,
+                        )
+                    } else {
+                        mycopilot_core::mcp_tool_result_persistence_projection(&continuation.result)
+                    };
+                }
+                self.commit_rejected_mcp_receipt(
+                    &record,
+                    &persisted_agent_input,
+                    now_ms(),
+                    &notifications,
+                )?;
             }
-            let completed_at = now_ms();
-            self.commit_rejected_mcp_receipt(
-                &record,
-                &persisted_agent_input,
-                completed_at,
-                &notifications,
-            )?;
             self.claim_rejected_mcp_continuation(&record)?;
             // Only the durable status-CAS winner owns the pre-spawn lease. Registering before
             // arbitration would let a duplicate reject overwrite the winner's action-keyed guard
@@ -1692,29 +2023,28 @@ impl AgentService {
                     .register(&record.storage_id, &record.snapshot.run_id),
             );
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
-            let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
-                unreachable!("typed MCP rejection was checked before settlement");
-            };
-            if let Ok(invocation) = mcp_tool_invocation_event(
-                approval,
-                McpToolInvocationEventUpdate {
-                    state: AgentMcpToolInvocationState::Rejected,
-                    dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    outcome: Some(AgentMcpToolInvocationOutcome::Rejected),
-                    is_error: None,
-                    error_code: Some("mcp.approval_rejected"),
-                    duration_ms: None,
-                    output_truncated: false,
-                    result_size: None,
-                    failure_stage: None,
-                },
-            ) {
-                let _ = notifications.send(agent_event_notification(
-                    AgentEvent::McpToolInvocationStateChanged {
-                        run_id: record.snapshot.run_id.clone(),
-                        invocation,
+            if let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action {
+                if let Ok(invocation) = mcp_tool_invocation_event(
+                    approval,
+                    McpToolInvocationEventUpdate {
+                        state: AgentMcpToolInvocationState::Rejected,
+                        dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                        outcome: Some(AgentMcpToolInvocationOutcome::Rejected),
+                        is_error: None,
+                        error_code: Some("mcp.approval_rejected"),
+                        duration_ms: None,
+                        output_truncated: false,
+                        result_size: None,
+                        failure_stage: None,
                     },
-                ));
+                ) {
+                    let _ = notifications.send(agent_event_notification(
+                        AgentEvent::McpToolInvocationStateChanged {
+                            run_id: record.snapshot.run_id.clone(),
+                            invocation,
+                        },
+                    ));
+                }
             }
             agent_input
         } else if is_approved_materialization {
@@ -1788,7 +2118,20 @@ impl AgentService {
                 call: call.clone(),
                 result: tool_result.clone(),
             });
-            self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)?;
+            let mut persisted_agent_input = agent_input.clone();
+            if is_builtin_mcp_action {
+                if let Some(continuation) = persisted_agent_input.tool_continuation.as_mut() {
+                    continuation.result =
+                        mycopilot_core::builtin_capability_tool_result_persistence_projection(
+                            &continuation.result,
+                        );
+                }
+            }
+            self.commit_trace_snapshot_with_continuation(
+                &record,
+                &persisted_agent_input,
+                &notifications,
+            )?;
             agent_input
         };
         if let Some(settlement) = builtin_activation_settlement.take() {

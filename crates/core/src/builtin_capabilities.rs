@@ -6,9 +6,11 @@
 
 use crate::protocol::{
     AgentApprovalStatus, AgentBrowserRiskApproval, AgentBuiltinCapabilityActivationApproval,
-    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, BrowserDestinationIdentity,
-    BrowserRiskKind, BrowserRiskTrigger, BROWSER_RISK_APPROVAL_SCHEMA_VERSION,
-    BROWSER_RISK_APPROVAL_TTL_SECONDS,
+    AgentBuiltinMcpToolApproval, AgentError, AgentResult, AgentToolDefinition, AgentToolResult,
+    BrowserDestinationIdentity, BrowserRiskKind, BrowserRiskTrigger,
+    BuiltinMcpToolApprovalIdentity, BuiltinMcpToolResourceSummary, BuiltinMcpToolRiskKind,
+    BROWSER_RISK_APPROVAL_SCHEMA_VERSION, BROWSER_RISK_APPROVAL_TTL_SECONDS,
+    BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION, BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS,
 };
 use crate::AgentCancellationToken;
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,18 @@ const TOOL_SCHEMA_MAX_BYTES: usize = 256 * 1024;
 const MANIFEST_SCHEMA_TOTAL_MAX_BYTES: usize = 4 * 1024 * 1024;
 const BROWSER_DESTINATION_MAX_BYTES: usize = 8 * 1024;
 const BROWSER_RISK_MAX_COUNT: usize = 32;
+const BUILTIN_MCP_RISK_MAX_COUNT: usize = 32;
+const BUILTIN_MCP_FILE_BASENAME_MAX_COUNT: usize = 32;
+const BUILTIN_MCP_SAFE_DISPLAY_MAX_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinMcpToolApprovalMode {
+    #[default]
+    Never,
+    Always,
+    Dynamic,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -125,6 +139,13 @@ pub struct BuiltinCapabilityToolDescriptor {
     pub host_overlay_digest: String,
     pub safety: crate::protocol::AgentToolSafety,
     pub requires_workspace: bool,
+    /// Internal approval policy for this exact reviewed Tool identity. `Never` keeps the ordinary
+    /// automatic built-in path; `Always`/`Dynamic` enter the same durable approval lifecycle as
+    /// run_command before any managed Host dispatch.
+    #[serde(default)]
+    pub builtin_approval_mode: BuiltinMcpToolApprovalMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_risk_kinds: Vec<BuiltinMcpToolRiskKind>,
 }
 
 impl BuiltinCapabilityToolDescriptor {
@@ -150,6 +171,8 @@ impl BuiltinCapabilityToolDescriptor {
             schema_digest: input_schema_digest,
             safety,
             requires_workspace,
+            builtin_approval_mode: BuiltinMcpToolApprovalMode::Never,
+            builtin_risk_kinds: Vec::new(),
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -164,6 +187,19 @@ impl BuiltinCapabilityToolDescriptor {
         self.raw_name = raw_name.into();
         self.upstream_schema_digest = upstream_schema_digest.into();
         self.host_overlay_digest = host_overlay_digest.into();
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_builtin_approval_policy(
+        mut self,
+        mode: BuiltinMcpToolApprovalMode,
+        mut risk_kinds: Vec<BuiltinMcpToolRiskKind>,
+    ) -> AgentResult<Self> {
+        risk_kinds.sort_unstable();
+        risk_kinds.dedup();
+        self.builtin_approval_mode = mode;
+        self.builtin_risk_kinds = risk_kinds;
         self.validate()?;
         Ok(self)
     }
@@ -183,6 +219,14 @@ impl BuiltinCapabilityToolDescriptor {
             || !valid_sha256_digest(&self.host_overlay_digest)
         {
             return Err(AgentError::new("内置能力 Tool identity/description 无效。"));
+        }
+        if self.builtin_risk_kinds.len() > BUILTIN_MCP_RISK_MAX_COUNT
+            || (self.builtin_approval_mode == BuiltinMcpToolApprovalMode::Never
+                && !self.builtin_risk_kinds.is_empty())
+            || (self.builtin_approval_mode != BuiltinMcpToolApprovalMode::Never
+                && self.builtin_risk_kinds.is_empty())
+        {
+            return Err(AgentError::new("内置能力 Tool 敏感审批策略无效。"));
         }
         if serde_json::to_vec(&self.input_schema)
             .map_err(|error| AgentError::new(format!("无法检查内置能力 Tool schema：{error}")))?
@@ -208,10 +252,88 @@ impl BuiltinCapabilityToolDescriptor {
             input_schema: self.input_schema.clone(),
             safety: self.safety,
             requires_workspace: self.requires_workspace,
-            requires_approval: false,
-            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
+            requires_approval: self.builtin_approval_mode != BuiltinMcpToolApprovalMode::Never,
+            approval_mode: match self.builtin_approval_mode {
+                BuiltinMcpToolApprovalMode::Never => crate::protocol::AgentToolApprovalMode::Never,
+                BuiltinMcpToolApprovalMode::Always => {
+                    crate::protocol::AgentToolApprovalMode::Always
+                }
+                BuiltinMcpToolApprovalMode::Dynamic => {
+                    crate::protocol::AgentToolApprovalMode::Dynamic
+                }
+            },
         }
     }
+}
+
+pub fn builtin_tool_requires_approval(
+    descriptor: &BuiltinCapabilityToolDescriptor,
+    arguments: &Value,
+) -> bool {
+    match descriptor.builtin_approval_mode {
+        BuiltinMcpToolApprovalMode::Never => false,
+        BuiltinMcpToolApprovalMode::Always => true,
+        BuiltinMcpToolApprovalMode::Dynamic => match descriptor.tool_id.as_str() {
+            "browser_drop" | "browser_file_upload" => arguments
+                .get("paths")
+                .and_then(Value::as_array)
+                .is_some_and(|paths| !paths.is_empty()),
+            // Unknown dynamic policies fail closed; exact Tool identity is intentional.
+            _ => true,
+        },
+    }
+}
+
+pub fn validate_builtin_sensitive_target_scope(
+    invocation: &BuiltinCapabilityInvocation,
+) -> AgentResult<()> {
+    let target = invocation.arguments.get("target").and_then(Value::as_str);
+    let supported = match invocation.tool_id.as_str() {
+        "browser_evaluate" => target.is_none_or(is_top_frame_snapshot_ref),
+        "browser_drop" => target.is_some_and(is_top_frame_snapshot_ref),
+        // The official upload Tool consumes an earlier modal file chooser but does not expose
+        // the chooser's owner Frame. Until Main freezes that exact Frame identity, applying a
+        // top-level origin approval to a subframe chooser would disclose files across origins.
+        "browser_file_upload" => false,
+        // The upstream index addresses a mutable, connection-local request ledger. A top-level
+        // Surface binding cannot prove which cross-frame request is being approved.
+        "browser_network_request" => false,
+        _ => true,
+    };
+    if supported {
+        return Ok(());
+    }
+    let request_identity_unavailable = invocation.tool_id == "browser_network_request";
+    Err(AgentError::structured(
+        if request_identity_unavailable {
+            "builtin_mcp_tool.sensitive_request_identity_unavailable"
+        } else {
+            "builtin_mcp_tool.sensitive_target_scope_unsupported"
+        },
+        if request_identity_unavailable {
+            "The sensitive network request cannot be bound to an exact immutable request identity; request detail access is unavailable."
+        } else {
+            "The sensitive browser request cannot be bound to the reviewed top-level document. Use a fresh top-frame snapshot reference; embedded-frame file disclosure is unavailable."
+        },
+        json!({
+            "schemaVersion": 1,
+            "type": "builtin_mcp_tool_approval",
+            "status": if request_identity_unavailable {
+                "request_identity_unavailable"
+            } else {
+                "unsupported_target_scope"
+            },
+            "retryable": false,
+            "dispatchCertainty": "definitely_not_dispatched",
+            "contentOmitted": true,
+        }),
+    ))
+}
+
+fn is_top_frame_snapshot_ref(value: &str) -> bool {
+    value.strip_prefix('e').is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +589,190 @@ impl CapabilityGrant {
             && self.policy_revision == policy.revision
             && self.expires_at > now
     }
+
+    fn is_live_for_identity(
+        &self,
+        run_id: &str,
+        capability_id: &BuiltinCapabilityId,
+        activation_id: &CapabilityActivationId,
+        manifest_digest: &str,
+        policy_digest: &str,
+        policy_revision: u64,
+    ) -> bool {
+        self.run_id == run_id
+            && &self.capability_id == capability_id
+            && &self.activation_id == activation_id
+            && self.manifest_digest == manifest_digest
+            && self.provider_policy_digest == policy_digest
+            && self.policy_revision == policy_revision
+    }
+}
+
+/// Full invocation prepared by Core before a sensitive built-in Tool enters durable approval.
+/// Raw arguments remain process-local behind the Provider; only their digest and a safe resource
+/// projection are copied into `AgentBuiltinMcpToolApproval`.
+#[derive(Debug, Clone)]
+pub struct BuiltinMcpToolApprovalRequest {
+    pub invocation: BuiltinCapabilityInvocation,
+    pub capability_grant: CapabilityGrant,
+    pub capability_display_name: String,
+    pub tool_display_name: String,
+    pub call_reason: String,
+    pub operation_category: String,
+    pub resource_summary: BuiltinMcpToolResourceSummary,
+    pub resource_scope_digest: String,
+    pub origin: Option<String>,
+    pub risk_kinds: Vec<BuiltinMcpToolRiskKind>,
+    /// Process-only Main authority. It is deliberately absent from the durable approval DTO.
+    pub target_binding: Option<PreparedBuiltinMcpToolTargetBinding>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BuiltinMcpToolTargetBindingRequest {
+    pub binding_request_id: String,
+    pub invocation: BuiltinCapabilityInvocation,
+    pub capability_grant: CapabilityGrant,
+    pub arguments_digest: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub cancellation: AgentCancellationToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedBuiltinMcpToolTargetBinding {
+    pub binding_id: String,
+    pub target_binding_digest: String,
+    pub origin: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+impl BuiltinMcpToolApprovalRequest {
+    pub fn validate(&self) -> AgentResult<()> {
+        self.invocation.validate_identity()?;
+        if !self.capability_grant.is_live_for_identity(
+            &self.invocation.run_id,
+            &self.invocation.capability_id,
+            &self.invocation.activation_id,
+            &self.invocation.manifest_digest,
+            &self.invocation.policy_digest,
+            self.invocation.policy_revision,
+        ) || self.capability_display_name.trim().is_empty()
+            || self.capability_display_name.len() > DISPLAY_NAME_MAX_BYTES
+            || self.tool_display_name.trim().is_empty()
+            || self.tool_display_name.len() > DISPLAY_NAME_MAX_BYTES
+            || self.call_reason.trim().is_empty()
+            || self.call_reason.len() > REASON_MAX_BYTES
+            || !valid_policy_token(&self.operation_category)
+            || !valid_sha256_digest(&self.resource_scope_digest)
+            || self.risk_kinds.is_empty()
+            || self.risk_kinds.len() > BUILTIN_MCP_RISK_MAX_COUNT
+        {
+            return Err(AgentError::new(
+                "内置 MCP 敏感 Tool 审批请求 identity 无效。",
+            ));
+        }
+        let mut risks = self.risk_kinds.clone();
+        risks.sort_unstable();
+        if risks.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(AgentError::new("内置 MCP 敏感 Tool 风险分类重复。"));
+        }
+        validate_builtin_resource_summary(&self.resource_summary)?;
+        validate_optional_origin(self.origin.as_deref())?;
+        if self.resource_summary.origin != self.origin {
+            return Err(AgentError::new("内置 MCP 敏感 Tool origin 投影不一致。"));
+        }
+        if let Some(binding) = &self.target_binding {
+            let binding_id = Uuid::parse_str(&binding.binding_id)
+                .map_err(|_| AgentError::new("内置 MCP 敏感 Tool 页面绑定 identity 无效。"))?;
+            if binding_id.get_version() != Some(uuid::Version::Random)
+                || !valid_sha256_digest(&binding.target_binding_digest)
+                || binding.origin != self.origin.as_deref().unwrap_or_default()
+                || binding.created_at >= binding.expires_at
+                || binding.expires_at - binding.created_at > BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS
+                || binding.expires_at > self.capability_grant.expires_at
+            {
+                return Err(AgentError::new(
+                    "内置 MCP 敏感 Tool 页面绑定 identity 无效。",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Process-only single-use authority for one exact sensitive invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinMcpToolGrant {
+    pub grant_id: String,
+    pub approval_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub capability_id: BuiltinCapabilityId,
+    pub capability_activation_id: CapabilityActivationId,
+    pub managed_mcp_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub upstream_catalog_digest: String,
+    pub manifest_digest: String,
+    pub policy_digest: String,
+    pub policy_revision: u64,
+    pub tool_id: String,
+    pub raw_name: String,
+    pub model_name: String,
+    pub upstream_schema_digest: String,
+    pub host_overlay_digest: String,
+    pub host_input_schema_digest: String,
+    pub arguments_digest: String,
+    pub resource_scope_digest: String,
+    pub target_binding_id: Option<String>,
+    pub target_binding_digest: Option<String>,
+    pub origin: Option<String>,
+    pub risk_kinds: Vec<BuiltinMcpToolRiskKind>,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+impl BuiltinMcpToolGrant {
+    pub fn is_live_for(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+        capability_grant: &CapabilityGrant,
+        now: u64,
+    ) -> bool {
+        let identity = &approval.identity;
+        self.approval_id == identity.approval_id
+            && self.run_id == identity.run_id
+            && self.call_id == identity.call_id
+            && self.capability_id.as_str() == identity.capability_id
+            && self.capability_activation_id.as_str() == identity.capability_activation_id
+            && self.managed_mcp_id == identity.managed_mcp_id
+            && self.package_name == identity.package_name
+            && self.package_version == identity.package_version
+            && self.upstream_catalog_digest == identity.upstream_catalog_digest
+            && self.manifest_digest == identity.manifest_digest
+            && self.policy_digest == identity.policy_digest
+            && self.policy_revision == identity.policy_revision
+            && self.tool_id == identity.tool_id
+            && self.raw_name == identity.raw_name
+            && self.model_name == identity.model_name
+            && self.upstream_schema_digest == identity.upstream_schema_digest
+            && self.host_overlay_digest == identity.host_overlay_digest
+            && self.host_input_schema_digest == identity.host_input_schema_digest
+            && self.arguments_digest == identity.arguments_digest
+            && self.resource_scope_digest == identity.resource_scope_digest
+            && self.origin == identity.origin
+            && self.risk_kinds == approval.risk_kinds
+            && self.expires_at > now
+            && capability_grant.run_id == self.run_id
+            && capability_grant.capability_id == self.capability_id
+            && capability_grant.activation_id == self.capability_activation_id
+            && capability_grant.manifest_digest == self.manifest_digest
+            && capability_grant.upstream_catalog_digest == self.upstream_catalog_digest
+            && capability_grant.provider_policy_digest == self.policy_digest
+            && capability_grant.policy_revision == self.policy_revision
+            && capability_grant.expires_at >= self.expires_at
+    }
 }
 
 /// Process-only task authorization for one exact normalized browser origin and risk identity.
@@ -630,6 +936,30 @@ pub struct BuiltinCapabilityInvocation {
     pub host_input_schema_digest: String,
     pub call_id: String,
     pub arguments: Value,
+    pub builtin_tool_grant: Option<BuiltinMcpToolGrant>,
+}
+
+impl BuiltinCapabilityInvocation {
+    fn validate_identity(&self) -> AgentResult<()> {
+        if self.run_id.trim().is_empty()
+            || self.call_id.trim().is_empty()
+            || BuiltinCapabilityId::parse(self.managed_mcp_id.clone()).is_err()
+            || self.package_name.trim().is_empty()
+            || self.package_version.trim().is_empty()
+            || !valid_sha256_digest(&self.upstream_catalog_digest)
+            || !valid_sha256_digest(&self.policy_digest)
+            || !valid_sha256_digest(&self.manifest_digest)
+            || BuiltinCapabilityId::parse(self.tool_id.clone()).is_err()
+            || BuiltinCapabilityId::parse(self.raw_name.clone()).is_err()
+            || self.model_name.trim().is_empty()
+            || !valid_sha256_digest(&self.upstream_schema_digest)
+            || !valid_sha256_digest(&self.host_overlay_digest)
+            || !valid_sha256_digest(&self.host_input_schema_digest)
+        {
+            return Err(AgentError::new("内置能力 Tool invocation identity 无效。"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -688,6 +1018,80 @@ pub trait BuiltinCapabilityProvider: Send + Sync {
     fn revoke_run_grants(&self, _run_id: &str) -> AgentResult<()> {
         Ok(())
     }
+    /// Freezes one exact sensitive invocation and stores its raw arguments behind a process-only
+    /// approval binding before Core publishes a durable pending action.
+    fn prepare_builtin_mcp_tool_approval(
+        &self,
+        _request: BuiltinMcpToolApprovalRequest,
+    ) -> AgentResult<AgentBuiltinMcpToolApproval> {
+        Err(AgentError::new(
+            "当前 Host 未提供内置 MCP 敏感 Tool 审批准备能力。",
+        ))
+    }
+    /// Freezes the exact Host-owned browser Surface before a sensitive approval is published.
+    fn prepare_builtin_mcp_tool_target_binding<'a>(
+        &'a self,
+        _request: BuiltinMcpToolTargetBindingRequest,
+    ) -> BuiltinCapabilityFuture<'a, PreparedBuiltinMcpToolTargetBinding> {
+        Box::pin(async {
+            Err(AgentError::new(
+                "当前 Host 未提供内置 MCP 敏感 Tool 页面绑定能力。",
+            ))
+        })
+    }
+    /// Idempotent process-only cleanup used by proposal failure/reject/cancel/revoke paths.
+    fn release_builtin_mcp_tool_target_binding(
+        &self,
+        _binding: &PreparedBuiltinMcpToolTargetBinding,
+        _run_id: &str,
+        _activation_id: &CapabilityActivationId,
+        _call_id: &str,
+        _reason: BuiltinMcpToolTargetBindingReleaseReason,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+    /// Consumes one exact pending approval and creates a process-only single-use grant.
+    fn approve_builtin_mcp_tool(
+        &self,
+        _approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<BuiltinMcpToolGrant> {
+        Err(AgentError::new(
+            "当前 Host 未提供内置 MCP 敏感 Tool 批准能力。",
+        ))
+    }
+    /// Removes a still-undispatched prepared payload after reject/cancel/expiry.
+    fn dismiss_builtin_mcp_tool_approval(
+        &self,
+        _approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+    fn reject_builtin_mcp_tool_approval(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<()> {
+        self.dismiss_builtin_mcp_tool_approval(approval)
+    }
+    fn revoke_builtin_mcp_tool_grant(
+        &self,
+        _grant_id: &str,
+        _approval_id: &str,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+    /// Dispatches the prepared invocation exactly once after durable approval settlement.
+    fn invoke_approved_builtin_mcp_tool<'a>(
+        &'a self,
+        _approval: AgentBuiltinMcpToolApproval,
+        _grant: BuiltinMcpToolGrant,
+        _cancellation: AgentCancellationToken,
+    ) -> BuiltinCapabilityFuture<'a, Value> {
+        Box::pin(async {
+            Err(AgentError::new(
+                "当前 Host 未提供内置 MCP 敏感 Tool 执行能力。",
+            ))
+        })
+    }
     fn browser_risk_grant(
         &self,
         _request: &BrowserRiskAuthorizationRequest,
@@ -727,6 +1131,18 @@ pub trait BuiltinCapabilityProvider: Send + Sync {
         expected_grant: CapabilityGrant,
         cancellation: AgentCancellationToken,
     ) -> BuiltinCapabilityFuture<'a, Value>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinMcpToolTargetBindingReleaseReason {
+    ProposalFailed,
+    Rejected,
+    Cancelled,
+    Expired,
+    RunRevoked,
+    CapabilityRevoked,
+    GrantRevoked,
+    Shutdown,
 }
 
 pub trait BuiltinCapabilityPolicyStore: Send + Sync {
@@ -887,6 +1303,311 @@ impl BuiltinCapabilityRuntime {
         self.provider.revoke_run_grants(run_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_builtin_mcp_tool_approval(
+        &self,
+        invocation: BuiltinCapabilityInvocation,
+        call_reason: String,
+        operation_category: String,
+        resource_summary: BuiltinMcpToolResourceSummary,
+        origin: Option<String>,
+        mut risk_kinds: Vec<BuiltinMcpToolRiskKind>,
+    ) -> AgentResult<AgentBuiltinMcpToolApproval> {
+        invocation.validate_identity()?;
+        if invocation.builtin_tool_grant.is_some() {
+            return Err(AgentError::new("未批准的内置 MCP Tool 请求携带了 grant。"));
+        }
+        let manifest = self
+            .manifest(&invocation.capability_id)
+            .ok_or_else(|| AgentError::new("内置 MCP Tool 所属能力已不存在。"))?;
+        let policy = self.policy(&invocation.capability_id)?;
+        let capability_grant = self
+            .live_grant(&invocation.run_id, &invocation.capability_id)?
+            .ok_or_else(|| AgentError::new("当前任务没有有效的内置能力授权。"))?;
+        let descriptor = manifest
+            .tools
+            .iter()
+            .find(|tool| exact_invocation_matches_descriptor(&invocation, manifest, tool))
+            .ok_or_else(|| AgentError::new("敏感 Tool 不在当前审核 manifest 中。"))?;
+        risk_kinds.sort_unstable();
+        risk_kinds.dedup();
+        if descriptor.builtin_approval_mode == BuiltinMcpToolApprovalMode::Never
+            || !builtin_tool_requires_approval(descriptor, &invocation.arguments)
+            || risk_kinds.is_empty()
+            || risk_kinds != descriptor.builtin_risk_kinds
+            || invocation.policy_revision != policy.revision
+            || invocation.activation_id != capability_grant.activation_id
+        {
+            return Err(AgentError::new(
+                "内置 MCP Tool 敏感审批与 reviewed policy 不一致。",
+            ));
+        }
+        validate_builtin_sensitive_target_scope(&invocation)?;
+        let arguments_digest = builtin_mcp_tool_arguments_digest(&invocation.arguments)?;
+        let resource_scope_digest = builtin_mcp_tool_resource_scope_digest(
+            &invocation.tool_id,
+            &arguments_digest,
+            origin.as_deref(),
+            &risk_kinds,
+            &resource_summary.scope,
+        )?;
+        let request = BuiltinMcpToolApprovalRequest {
+            invocation,
+            capability_grant,
+            capability_display_name: manifest.descriptor.display_name.clone(),
+            tool_display_name: descriptor.model_name.clone(),
+            call_reason,
+            operation_category,
+            resource_summary,
+            resource_scope_digest,
+            origin,
+            risk_kinds,
+            target_binding: None,
+        };
+        let approval = self.provider.prepare_builtin_mcp_tool_approval(request)?;
+        validate_builtin_mcp_tool_approval_shape(&approval)?;
+        Ok(approval)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_builtin_mcp_tool_approval_async(
+        &self,
+        invocation: BuiltinCapabilityInvocation,
+        call_reason: String,
+        operation_category: String,
+        resource_summary: BuiltinMcpToolResourceSummary,
+        claimed_origin: String,
+        mut risk_kinds: Vec<BuiltinMcpToolRiskKind>,
+        cancellation: AgentCancellationToken,
+    ) -> AgentResult<AgentBuiltinMcpToolApproval> {
+        invocation.validate_identity()?;
+        cancellation.check()?;
+        if invocation.builtin_tool_grant.is_some() {
+            return Err(AgentError::new("未批准的内置 MCP Tool 请求携带了 grant。"));
+        }
+        validate_optional_origin(Some(&claimed_origin))?;
+        let manifest = self
+            .manifest(&invocation.capability_id)
+            .ok_or_else(|| AgentError::new("内置 MCP Tool 所属能力已不存在。"))?;
+        let policy = self.policy(&invocation.capability_id)?;
+        let capability_grant = self
+            .live_grant(&invocation.run_id, &invocation.capability_id)?
+            .ok_or_else(|| AgentError::new("当前任务没有有效的内置能力授权。"))?;
+        let descriptor = manifest
+            .tools
+            .iter()
+            .find(|tool| exact_invocation_matches_descriptor(&invocation, manifest, tool))
+            .ok_or_else(|| AgentError::new("敏感 Tool 不在当前审核 manifest 中。"))?;
+        risk_kinds.sort_unstable();
+        risk_kinds.dedup();
+        if descriptor.builtin_approval_mode == BuiltinMcpToolApprovalMode::Never
+            || !builtin_tool_requires_approval(descriptor, &invocation.arguments)
+            || risk_kinds.is_empty()
+            || risk_kinds != descriptor.builtin_risk_kinds
+            || invocation.policy_revision != policy.revision
+            || invocation.activation_id != capability_grant.activation_id
+        {
+            return Err(AgentError::new(
+                "内置 MCP Tool 敏感审批与 reviewed policy 不一致。",
+            ));
+        }
+        validate_builtin_sensitive_target_scope(&invocation)?;
+        let arguments_digest = builtin_mcp_tool_arguments_digest(&invocation.arguments)?;
+        let created_at = unix_timestamp();
+        let expires_at = created_at
+            .checked_add(BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS)
+            .ok_or_else(|| AgentError::new("内置 MCP Tool 页面绑定时间溢出。"))?
+            .min(capability_grant.expires_at);
+        if expires_at <= created_at {
+            return Err(AgentError::new(
+                "内置 MCP Tool capability grant 已接近过期。",
+            ));
+        }
+        let target_binding = self
+            .provider
+            .prepare_builtin_mcp_tool_target_binding(BuiltinMcpToolTargetBindingRequest {
+                binding_request_id: Uuid::new_v4().to_string(),
+                invocation: invocation.clone(),
+                capability_grant: capability_grant.clone(),
+                arguments_digest: arguments_digest.clone(),
+                created_at,
+                expires_at,
+                cancellation: cancellation.clone(),
+            })
+            .await?;
+        let target_binding_id = Uuid::parse_str(&target_binding.binding_id);
+        if cancellation.is_cancelled() {
+            let _ = self.provider.release_builtin_mcp_tool_target_binding(
+                &target_binding,
+                &invocation.run_id,
+                &invocation.activation_id,
+                &invocation.call_id,
+                BuiltinMcpToolTargetBindingReleaseReason::Cancelled,
+            );
+            cancellation.check()?;
+            return Err(AgentError::new(
+                "内置 MCP Tool 页面绑定在审批发布前已取消。",
+            ));
+        }
+        if target_binding_id.ok().and_then(|id| id.get_version()) != Some(uuid::Version::Random)
+            || !valid_sha256_digest(&target_binding.target_binding_digest)
+            || target_binding.origin != claimed_origin
+            || target_binding.created_at != created_at
+            || target_binding.expires_at != expires_at
+        {
+            let _ = self.provider.release_builtin_mcp_tool_target_binding(
+                &target_binding,
+                &invocation.run_id,
+                &invocation.activation_id,
+                &invocation.call_id,
+                BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed,
+            );
+            return Err(AgentError::new(
+                "Main 返回的敏感 Tool 页面绑定 identity 无效或 origin 已漂移。",
+            ));
+        }
+        let resource_scope_digest = match builtin_mcp_tool_resource_scope_digest_v2(
+            &invocation.tool_id,
+            &arguments_digest,
+            Some(&target_binding.origin),
+            &risk_kinds,
+            &resource_summary.scope,
+            &target_binding.target_binding_digest,
+        ) {
+            Ok(digest) => digest,
+            Err(error) => {
+                let _ = self.provider.release_builtin_mcp_tool_target_binding(
+                    &target_binding,
+                    &invocation.run_id,
+                    &invocation.activation_id,
+                    &invocation.call_id,
+                    BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed,
+                );
+                return Err(error);
+            }
+        };
+        let cleanup_binding = target_binding.clone();
+        let cleanup_run_id = invocation.run_id.clone();
+        let cleanup_activation_id = invocation.activation_id.clone();
+        let cleanup_call_id = invocation.call_id.clone();
+        let request = BuiltinMcpToolApprovalRequest {
+            invocation,
+            capability_grant,
+            capability_display_name: manifest.descriptor.display_name.clone(),
+            tool_display_name: descriptor.model_name.clone(),
+            call_reason,
+            operation_category,
+            resource_summary,
+            resource_scope_digest,
+            origin: Some(target_binding.origin.clone()),
+            risk_kinds,
+            target_binding: Some(target_binding),
+        };
+        match self.provider.prepare_builtin_mcp_tool_approval(request) {
+            Ok(approval) => {
+                if let Err(error) = validate_builtin_mcp_tool_approval_shape(&approval) {
+                    let _ = self.provider.dismiss_builtin_mcp_tool_approval(&approval);
+                    let _ = self.provider.release_builtin_mcp_tool_target_binding(
+                        &cleanup_binding,
+                        &cleanup_run_id,
+                        &cleanup_activation_id,
+                        &cleanup_call_id,
+                        BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed,
+                    );
+                    return Err(error);
+                }
+                Ok(approval)
+            }
+            Err(error) => {
+                let _ = self.provider.release_builtin_mcp_tool_target_binding(
+                    &cleanup_binding,
+                    &cleanup_run_id,
+                    &cleanup_activation_id,
+                    &cleanup_call_id,
+                    BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed,
+                );
+                Err(error)
+            }
+        }
+    }
+
+    pub fn approve_builtin_mcp_tool(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<BuiltinMcpToolGrant> {
+        validate_builtin_mcp_tool_approval_shape(approval)?;
+        let identity = &approval.identity;
+        let capability_id = BuiltinCapabilityId::parse(identity.capability_id.clone())?;
+        let activation_id =
+            CapabilityActivationId::parse(identity.capability_activation_id.clone())?;
+        let manifest = self
+            .manifest(&capability_id)
+            .ok_or_else(|| AgentError::new("批准的内置 MCP Tool 能力已不存在。"))?;
+        let policy = self.policy(&capability_id)?;
+        let capability_grant = self
+            .live_grant(&identity.run_id, &capability_id)?
+            .ok_or_else(|| AgentError::new("内置 MCP Tool capability grant 已失效。"))?;
+        let descriptor = manifest
+            .tools
+            .iter()
+            .find(|tool| exact_approval_matches_descriptor(identity, manifest, tool))
+            .ok_or_else(|| AgentError::new("批准的内置 MCP Tool identity 已漂移。"))?;
+        let now = unix_timestamp();
+        if approval.approval_status != AgentApprovalStatus::Approved
+            || descriptor.builtin_approval_mode == BuiltinMcpToolApprovalMode::Never
+            || approval.risk_kinds != descriptor.builtin_risk_kinds
+            || capability_grant.activation_id != activation_id
+            || identity.policy_revision != policy.revision
+            || approval.created_at > now
+            || approval.expires_at <= now
+        {
+            return Err(AgentError::new(
+                "内置 MCP Tool 批准在等待期间发生漂移；已安全失效。",
+            ));
+        }
+        let grant = self.provider.approve_builtin_mcp_tool(approval)?;
+        if !grant.is_live_for(approval, &capability_grant, now) {
+            return Err(AgentError::new("Host 返回了无效的内置 MCP Tool grant。"));
+        }
+        Ok(grant)
+    }
+
+    pub fn dismiss_builtin_mcp_tool_approval(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<()> {
+        validate_builtin_mcp_tool_approval_shape(approval)?;
+        self.provider.dismiss_builtin_mcp_tool_approval(approval)
+    }
+
+    pub fn reject_builtin_mcp_tool_approval(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<()> {
+        validate_builtin_mcp_tool_approval_shape(approval)?;
+        self.provider.reject_builtin_mcp_tool_approval(approval)
+    }
+
+    pub fn revoke_builtin_mcp_tool_grant(
+        &self,
+        grant_id: &str,
+        approval_id: &str,
+    ) -> AgentResult<()> {
+        self.provider
+            .revoke_builtin_mcp_tool_grant(grant_id, approval_id)
+    }
+
+    pub async fn invoke_approved_builtin_mcp_tool(
+        &self,
+        approval: AgentBuiltinMcpToolApproval,
+        grant: BuiltinMcpToolGrant,
+        cancellation: AgentCancellationToken,
+    ) -> AgentResult<Value> {
+        self.provider
+            .invoke_approved_builtin_mcp_tool(approval, grant, cancellation)
+            .await
+    }
+
     pub fn live_browser_risk_grant(
         &self,
         request: &BrowserRiskAuthorizationRequest,
@@ -1035,6 +1756,13 @@ impl BuiltinCapabilityRuntime {
         {
             return Err(AgentError::new("内置能力工具不在已审核 manifest 中。"));
         }
+        if reviewed_tool
+            .is_some_and(|tool| builtin_tool_requires_approval(tool, &request.arguments))
+        {
+            return Err(AgentError::new(
+                "敏感内置 MCP Tool 缺少原调用生命周期批准。",
+            ));
+        }
         let policy = self.policy(&request.capability_id)?;
         let grant = self
             .live_grant(&request.run_id, &request.capability_id)?
@@ -1058,6 +1786,7 @@ impl BuiltinCapabilityRuntime {
             host_input_schema_digest: request.host_input_schema_digest,
             call_id: request.call_id,
             arguments: request.arguments,
+            builtin_tool_grant: None,
         };
         self.provider
             .invoke_authorized(invocation, grant, request.cancellation)
@@ -1093,6 +1822,457 @@ pub fn build_browser_risk_approval(
         expires_at,
         approval_status: AgentApprovalStatus::Required,
     })
+}
+
+pub fn build_builtin_mcp_tool_approval(
+    request: &BuiltinMcpToolApprovalRequest,
+    now: u64,
+) -> AgentResult<AgentBuiltinMcpToolApproval> {
+    request.validate()?;
+    let (created_at, expires_at) = if let Some(binding) = &request.target_binding {
+        (binding.created_at, binding.expires_at)
+    } else {
+        (
+            now,
+            now.checked_add(BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS)
+                .ok_or_else(|| AgentError::new("内置 MCP Tool 审批时间溢出。"))?,
+        )
+    };
+    let arguments_digest = builtin_mcp_tool_arguments_digest(&request.invocation.arguments)?;
+    let invocation = &request.invocation;
+    Ok(AgentBuiltinMcpToolApproval {
+        schema_version: BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION,
+        identity: BuiltinMcpToolApprovalIdentity {
+            action_id: Uuid::new_v4().to_string(),
+            approval_id: Uuid::new_v4().to_string(),
+            run_id: invocation.run_id.clone(),
+            call_id: invocation.call_id.clone(),
+            capability_id: invocation.capability_id.as_str().to_string(),
+            capability_activation_id: invocation.activation_id.as_str().to_string(),
+            managed_mcp_id: invocation.managed_mcp_id.clone(),
+            package_name: invocation.package_name.clone(),
+            package_version: invocation.package_version.clone(),
+            upstream_catalog_digest: invocation.upstream_catalog_digest.clone(),
+            manifest_digest: invocation.manifest_digest.clone(),
+            policy_digest: invocation.policy_digest.clone(),
+            policy_revision: invocation.policy_revision,
+            tool_id: invocation.tool_id.clone(),
+            raw_name: invocation.raw_name.clone(),
+            model_name: invocation.model_name.clone(),
+            upstream_schema_digest: invocation.upstream_schema_digest.clone(),
+            host_overlay_digest: invocation.host_overlay_digest.clone(),
+            host_input_schema_digest: invocation.host_input_schema_digest.clone(),
+            arguments_digest,
+            resource_scope_digest: request.resource_scope_digest.clone(),
+            origin: request.origin.clone(),
+        },
+        capability_display_name: request.capability_display_name.clone(),
+        tool_display_name: request.tool_display_name.clone(),
+        call_reason: request.call_reason.clone(),
+        operation_category: request.operation_category.clone(),
+        resource_summary: request.resource_summary.clone(),
+        risk_kinds: request.risk_kinds.clone(),
+        created_at,
+        expires_at,
+        approval_status: AgentApprovalStatus::Required,
+    })
+}
+
+/// Deterministic safe resource binding shared with Main.
+///
+/// `arguments_digest` is computed over the complete model/Host input object *before* stripping
+/// `call_reason` or `approval_origin`. Opaque FileBroker handles are therefore bound without
+/// revealing either a path or file content. Main recomputes this digest before applying overlays.
+pub fn builtin_mcp_tool_resource_scope_digest(
+    tool_id: &str,
+    arguments_digest: &str,
+    origin: Option<&str>,
+    risk_kinds: &[BuiltinMcpToolRiskKind],
+    scope: &str,
+) -> AgentResult<String> {
+    if BuiltinCapabilityId::parse(tool_id.to_string()).is_err()
+        || !valid_sha256_digest(arguments_digest)
+        || !valid_policy_token(scope)
+    {
+        return Err(AgentError::new(
+            "内置 MCP Tool resource scope identity 无效。",
+        ));
+    }
+    validate_optional_origin(origin)?;
+    let mut risks = risk_kinds.to_vec();
+    risks.sort_unstable();
+    if risks.is_empty()
+        || risks.len() > BUILTIN_MCP_RISK_MAX_COUNT
+        || risks.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(AgentError::new("内置 MCP Tool resource scope 风险无效。"));
+    }
+    let material = json!({
+        "schemaVersion": 1,
+        "toolId": tool_id,
+        "argumentsDigest": arguments_digest,
+        "origin": origin,
+        "riskKinds": risks,
+        "scope": scope,
+    });
+    let bytes = serde_json::to_vec(&material)
+        .map_err(|_| AgentError::new("无法计算内置 MCP Tool resource scope digest。"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+/// Version 2 additionally binds the Main-owned exact Surface generation digest. The opaque
+/// binding itself stays process-only; this digest is the only durable approval projection.
+pub fn builtin_mcp_tool_resource_scope_digest_v2(
+    tool_id: &str,
+    arguments_digest: &str,
+    origin: Option<&str>,
+    risk_kinds: &[BuiltinMcpToolRiskKind],
+    scope: &str,
+    target_binding_digest: &str,
+) -> AgentResult<String> {
+    if BuiltinCapabilityId::parse(tool_id.to_string()).is_err()
+        || !valid_sha256_digest(arguments_digest)
+        || !valid_sha256_digest(target_binding_digest)
+        || !valid_policy_token(scope)
+    {
+        return Err(AgentError::new(
+            "内置 MCP Tool resource scope identity 无效。",
+        ));
+    }
+    validate_optional_origin(origin)?;
+    let mut risks = risk_kinds.to_vec();
+    risks.sort_unstable();
+    if risks.is_empty()
+        || risks.len() > BUILTIN_MCP_RISK_MAX_COUNT
+        || risks.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(AgentError::new("内置 MCP Tool resource scope 风险无效。"));
+    }
+    let material = json!({
+        "schemaVersion": 2,
+        "toolId": tool_id,
+        "argumentsDigest": arguments_digest,
+        "origin": origin,
+        "riskKinds": risks,
+        "scope": scope,
+        "targetBindingDigest": target_binding_digest,
+    });
+    let bytes = serde_json::to_vec(&material)
+        .map_err(|_| AgentError::new("无法计算内置 MCP Tool resource scope digest。"))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+/// Canonical SHA-256 binding used only by the built-in sensitive-Tool authorization wire.
+///
+/// External MCP approval identities intentionally retain their historical bare-hex digest. The
+/// managed Playwright bridge and Main validator require an explicit algorithm prefix, so this
+/// adapter must remain separate rather than changing `mcp_tool_arguments_digest` globally.
+pub fn builtin_mcp_tool_arguments_digest(arguments: &Value) -> AgentResult<String> {
+    Ok(format!(
+        "sha256:{}",
+        crate::tools::mcp_tool_arguments_digest(arguments)?
+    ))
+}
+
+pub fn validate_builtin_mcp_tool_approval_shape(
+    approval: &AgentBuiltinMcpToolApproval,
+) -> AgentResult<()> {
+    let identity = &approval.identity;
+    parse_v4_uuid(&identity.action_id, "内置 MCP Tool action")?;
+    parse_v4_uuid(&identity.approval_id, "内置 MCP Tool approval")?;
+    BuiltinCapabilityId::parse(identity.capability_id.clone())?;
+    CapabilityActivationId::parse(identity.capability_activation_id.clone())?;
+    if approval.schema_version != BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION
+        || identity.run_id.trim().is_empty()
+        || identity.call_id.trim().is_empty()
+        || BuiltinCapabilityId::parse(identity.managed_mcp_id.clone()).is_err()
+        || identity.package_name.trim().is_empty()
+        || identity.package_version.trim().is_empty()
+        || !valid_sha256_digest(&identity.upstream_catalog_digest)
+        || !valid_sha256_digest(&identity.manifest_digest)
+        || !valid_sha256_digest(&identity.policy_digest)
+        || BuiltinCapabilityId::parse(identity.tool_id.clone()).is_err()
+        || BuiltinCapabilityId::parse(identity.raw_name.clone()).is_err()
+        || identity.model_name.trim().is_empty()
+        || !valid_sha256_digest(&identity.upstream_schema_digest)
+        || !valid_sha256_digest(&identity.host_overlay_digest)
+        || !valid_sha256_digest(&identity.host_input_schema_digest)
+        || !valid_sha256_digest(&identity.arguments_digest)
+        || !valid_sha256_digest(&identity.resource_scope_digest)
+        || approval.capability_display_name.trim().is_empty()
+        || approval.capability_display_name.len() > DISPLAY_NAME_MAX_BYTES
+        || approval.tool_display_name.trim().is_empty()
+        || approval.tool_display_name.len() > DISPLAY_NAME_MAX_BYTES
+        || approval.call_reason.trim().is_empty()
+        || approval.call_reason.len() > REASON_MAX_BYTES
+        || !valid_policy_token(&approval.operation_category)
+        || approval.risk_kinds.is_empty()
+        || approval.risk_kinds.len() > BUILTIN_MCP_RISK_MAX_COUNT
+        || approval.expires_at.checked_sub(approval.created_at)
+            != Some(BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS)
+    {
+        return Err(AgentError::new("内置 MCP Tool 审批字段无效。"));
+    }
+    let mut risks = approval.risk_kinds.clone();
+    risks.sort_unstable();
+    if risks.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(AgentError::new("内置 MCP Tool 审批风险分类重复。"));
+    }
+    validate_builtin_resource_summary(&approval.resource_summary)?;
+    validate_optional_origin(identity.origin.as_deref())?;
+    if approval.resource_summary.origin != identity.origin {
+        return Err(AgentError::new("内置 MCP Tool 审批 origin 投影不一致。"));
+    }
+    Ok(())
+}
+
+pub fn builtin_mcp_tool_rejected_result(
+    approval: &AgentBuiltinMcpToolApproval,
+    user_feedback: Option<&str>,
+) -> AgentToolResult {
+    let feedback = user_feedback.and_then(sanitize_user_feedback);
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: approval.identity.call_id.clone(),
+        tool: approval.identity.model_name.clone(),
+        ok: true,
+        result: Some(json!({
+            "schemaVersion": 1,
+            "type": "builtin_mcp_tool_approval",
+            "status": "rejected",
+            "decision": "rejected",
+            "userFeedback": feedback,
+            "retryable": false,
+            "recovery": "user_refused_do_not_retry",
+            "dispatchCertainty": "definitely_not_dispatched",
+            "contentOmitted": true,
+        })),
+        error: None,
+    }
+}
+
+pub fn builtin_mcp_tool_cancelled_result(
+    approval: &AgentBuiltinMcpToolApproval,
+) -> AgentToolResult {
+    builtin_mcp_tool_terminal_result(
+        approval,
+        "cancelled",
+        "mcp.tool_cancelled_before_dispatch",
+        "definitely_not_dispatched",
+        false,
+    )
+}
+
+pub fn builtin_mcp_tool_expired_result(approval: &AgentBuiltinMcpToolApproval) -> AgentToolResult {
+    builtin_mcp_tool_terminal_result(
+        approval,
+        "expired",
+        "mcp.tool_approval_expired",
+        "definitely_not_dispatched",
+        false,
+    )
+}
+
+pub fn builtin_mcp_tool_payload_unavailable_result(
+    approval: &AgentBuiltinMcpToolApproval,
+) -> AgentToolResult {
+    builtin_mcp_tool_terminal_result(
+        approval,
+        "payload_unavailable",
+        "mcp.approval_payload_unavailable",
+        "definitely_not_dispatched",
+        false,
+    )
+}
+
+pub fn builtin_mcp_tool_outcome_unknown_result(
+    approval: &AgentBuiltinMcpToolApproval,
+) -> AgentToolResult {
+    builtin_mcp_tool_terminal_result(
+        approval,
+        "outcome_unknown",
+        "mcp.tool_outcome_unknown",
+        "possibly_dispatched",
+        false,
+    )
+}
+
+fn builtin_mcp_tool_terminal_result(
+    approval: &AgentBuiltinMcpToolApproval,
+    status: &str,
+    error_code: &str,
+    dispatch_certainty: &str,
+    ok: bool,
+) -> AgentToolResult {
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: approval.identity.call_id.clone(),
+        tool: approval.identity.model_name.clone(),
+        ok,
+        result: Some(json!({
+            "schemaVersion": 1,
+            "type": "builtin_mcp_tool_approval",
+            "status": status,
+            "errorCode": error_code,
+            "retryable": false,
+            "dispatchCertainty": dispatch_certainty,
+            "contentOmitted": true,
+        })),
+        error: (!ok).then(|| {
+            "The sensitive built-in MCP tool did not produce an authoritative response.".to_string()
+        }),
+    }
+}
+
+fn validate_builtin_resource_summary(summary: &BuiltinMcpToolResourceSummary) -> AgentResult<()> {
+    if !valid_policy_token(&summary.scope)
+        || summary.display_name.trim().is_empty()
+        || summary.display_name.len() > BUILTIN_MCP_SAFE_DISPLAY_MAX_BYTES
+        || summary.file_basenames.len() > BUILTIN_MCP_FILE_BASENAME_MAX_COUNT
+        || summary.file_basenames.iter().any(|name| {
+            name.trim().is_empty()
+                || name.len() > 255
+                || name.contains(['/', '\\'])
+                || name.chars().any(char::is_control)
+        })
+    {
+        return Err(AgentError::new("内置 MCP Tool 资源摘要无效。"));
+    }
+    validate_optional_origin(summary.origin.as_deref())
+}
+
+fn validate_optional_origin(origin: Option<&str>) -> AgentResult<()> {
+    let Some(origin) = origin else {
+        return Ok(());
+    };
+    let lower = origin.to_ascii_lowercase();
+    let has_http_scheme = lower.starts_with("https://") || lower.starts_with("http://");
+    let authority = origin.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    if !has_http_scheme
+        || origin.len() > BROWSER_DESTINATION_MAX_BYTES
+        || authority.is_empty()
+        || authority.contains(['/', '?', '#', '@'])
+        || origin.chars().any(char::is_control)
+    {
+        return Err(AgentError::new(
+            "内置 MCP Tool approval_origin 必须是无凭据、无路径的 HTTP(S) origin。",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_policy_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn exact_invocation_matches_descriptor(
+    invocation: &BuiltinCapabilityInvocation,
+    manifest: &BuiltinCapabilityManifest,
+    descriptor: &BuiltinCapabilityToolDescriptor,
+) -> bool {
+    invocation.managed_mcp_id == manifest.managed_mcp_id
+        && invocation.package_name == manifest.provider_contract.package_name
+        && invocation.package_version == manifest.provider_contract.package_version
+        && invocation.upstream_catalog_digest == manifest.provider_contract.upstream_catalog_digest
+        && invocation.policy_digest == manifest.provider_contract.policy_digest
+        && invocation.manifest_digest == manifest.manifest_digest
+        && invocation.tool_id == descriptor.tool_id
+        && invocation.raw_name == descriptor.raw_name
+        && invocation.model_name == descriptor.model_name
+        && invocation.upstream_schema_digest == descriptor.upstream_schema_digest
+        && invocation.host_overlay_digest == descriptor.host_overlay_digest
+        && invocation.host_input_schema_digest == descriptor.schema_digest
+}
+
+fn exact_approval_matches_descriptor(
+    identity: &BuiltinMcpToolApprovalIdentity,
+    manifest: &BuiltinCapabilityManifest,
+    descriptor: &BuiltinCapabilityToolDescriptor,
+) -> bool {
+    identity.managed_mcp_id == manifest.managed_mcp_id
+        && identity.package_name == manifest.provider_contract.package_name
+        && identity.package_version == manifest.provider_contract.package_version
+        && identity.upstream_catalog_digest == manifest.provider_contract.upstream_catalog_digest
+        && identity.policy_digest == manifest.provider_contract.policy_digest
+        && identity.manifest_digest == manifest.manifest_digest
+        && identity.tool_id == descriptor.tool_id
+        && identity.raw_name == descriptor.raw_name
+        && identity.model_name == descriptor.model_name
+        && identity.upstream_schema_digest == descriptor.upstream_schema_digest
+        && identity.host_overlay_digest == descriptor.host_overlay_digest
+        && identity.host_input_schema_digest == descriptor.schema_digest
+}
+
+fn sanitize_user_feedback(value: &str) -> Option<String> {
+    sanitize_builtin_mcp_safe_text(value, 1_024)
+}
+
+pub(crate) fn sanitize_builtin_mcp_safe_text(value: &str, max_bytes: usize) -> Option<String> {
+    let value = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '\u{00ad}'
+                        | '\u{061c}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{feff}'
+                )
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    const SECRET_MARKERS: &[&str] = &[
+        "authorization:",
+        "authorization=",
+        "authorization bearer ",
+        "proxy-authorization:",
+        "cookie:",
+        "cookie=",
+        "set-cookie:",
+        "password:",
+        "password=",
+        "passwd:",
+        "passwd=",
+        "token:",
+        "token=",
+        "secret:",
+        "secret=",
+        "api_key:",
+        "api_key=",
+        "apikey:",
+        "apikey=",
+        "access_token:",
+        "access_token=",
+        "refresh_token:",
+        "refresh_token=",
+    ];
+    let contains_url_private_data = (lower.contains("http://") || lower.contains("https://"))
+        && (lower.contains('?') || lower.contains('@'));
+    if contains_url_private_data || SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return Some("[sensitive text omitted]".to_string());
+    }
+    let mut end = value.len().min(max_bytes);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (end > 0).then(|| value[..end].to_string())
 }
 
 pub fn browser_risk_rejected_result(
@@ -1390,6 +2570,77 @@ fn canonical_json(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_sensitive_argument_digest_matches_the_main_canonical_vector() {
+        let arguments = json!({
+            "function": "() => document.title",
+            "approval_origin": "https://mail.example.test",
+            "call_reason": "Read the current page title.",
+        });
+        assert_eq!(
+            builtin_mcp_tool_arguments_digest(&arguments).unwrap(),
+            "sha256:fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694"
+        );
+        assert_eq!(
+            crate::tools::mcp_tool_arguments_digest(&arguments).unwrap(),
+            "fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694",
+            "external MCP keeps its historical bare digest"
+        );
+        assert_eq!(
+            builtin_mcp_tool_resource_scope_digest(
+                "browser_evaluate",
+                "sha256:fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694",
+                Some("https://mail.example.test"),
+                &[BuiltinMcpToolRiskKind::PageScriptExecution],
+                "page_script_execution",
+            )
+            .unwrap(),
+            "sha256:c2e7c64206076f6d422b1526c49b2870c601106dc88bcea59102dc39d36556d1"
+        );
+    }
+
+    #[test]
+    fn managed_profile_scope_digest_matches_the_main_canonical_vector() {
+        let arguments = json!({
+            "approval_origin": "https://mail.example.test",
+            "call_reason": "List reviewed managed browser cookies.",
+        });
+        let arguments_digest = builtin_mcp_tool_arguments_digest(&arguments).unwrap();
+        assert_eq!(
+            arguments_digest,
+            "sha256:85a6b62bc42b5e8f095052224a1d4f40b4366029e5e212c8b07b8679c22fa281"
+        );
+        assert_eq!(
+            builtin_mcp_tool_resource_scope_digest(
+                "browser_cookie_list",
+                &arguments_digest,
+                Some("https://mail.example.test"),
+                &[BuiltinMcpToolRiskKind::CookieRead],
+                "managed_browser_profile",
+            )
+            .unwrap(),
+            "sha256:867eef1812ae00959599b4cbc376c1608b217e1072552286b9f581e48f0f7ed7"
+        );
+    }
+
+    #[test]
+    fn rejection_feedback_redacts_common_credential_assignments() {
+        for feedback in [
+            "Authorization: Bearer FEEDBACK_SECRET",
+            "Set-Cookie: session=FEEDBACK_SECRET",
+            "password=FEEDBACK_SECRET",
+            "api_key: FEEDBACK_SECRET",
+        ] {
+            let projected = sanitize_user_feedback(feedback).unwrap();
+            assert_eq!(projected, "[sensitive text omitted]");
+            assert!(!projected.contains("FEEDBACK_SECRET"));
+        }
+        assert_eq!(
+            sanitize_user_feedback("No, use the public status page instead.").as_deref(),
+            Some("No, use the public status page instead.")
+        );
+    }
 
     #[test]
     fn technical_gate_manifest_may_start_without_tools() {

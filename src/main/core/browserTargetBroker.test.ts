@@ -1,5 +1,4 @@
 import { EventEmitter } from 'node:events'
-import { runInNewContext } from 'node:vm'
 import type { Debugger, Session, WebContents } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
 import { BrowserTargetBroker, BrowserTargetBrokerError } from '../browser/BrowserTargetBroker'
@@ -11,9 +10,12 @@ const OTHER_SESSION = {} as Session
 
 class FakeDebugger extends EventEmitter {
   readonly commands: Array<{ method: string; params?: unknown; sessionId?: string }> = []
+  readonly focusedSessions = new Set<string>()
+  readonly mainWorldFocusSpoofs = new Set<string>()
+  readonly frameSessions = new Map<string, string>()
+  readonly focusContextSessions = new Map<number, string>()
   private attached = false
-  private runtimeEvaluateGate?: Promise<void>
-  private runtimeEvaluateValue = true
+  private nextFocusContextId = 7
   private targetInfoGate?: Promise<void>
 
   attach = vi.fn(() => {
@@ -40,9 +42,40 @@ class FakeDebugger extends EventEmitter {
           userAgent: 'fixture'
         }
       }
-      if (method === 'Runtime.evaluate') {
-        await this.runtimeEvaluateGate
-        return { result: { type: 'boolean', value: this.runtimeEvaluateValue } }
+      if (
+        method === 'Runtime.evaluate' &&
+        typeof sessionId === 'string' &&
+        (params as { expression?: unknown } | undefined)?.expression ===
+          'document.hasFocus() === true'
+      ) {
+        return {
+          result: {
+            value: this.focusedSessions.has(sessionId) || this.mainWorldFocusSpoofs.has(sessionId)
+          }
+        }
+      }
+      if (
+        method === 'Page.createIsolatedWorld' &&
+        typeof (params as { worldName?: unknown } | undefined)?.worldName === 'string' &&
+        String((params as { worldName: string }).worldName).startsWith('mycopilot-focus-')
+      ) {
+        const frameId = (params as { frameId?: unknown }).frameId
+        const frameSession =
+          typeof frameId === 'string' ? this.frameSessions.get(frameId) : undefined
+        if (!frameSession) return {}
+        const executionContextId = this.nextFocusContextId++
+        this.focusContextSessions.set(executionContextId, frameSession)
+        return { executionContextId }
+      }
+      if (
+        method === 'Runtime.evaluate' &&
+        (params as { expression?: unknown; contextId?: unknown } | undefined)?.expression ===
+          'Document.prototype.hasFocus.call(document) === true'
+      ) {
+        const contextId = (params as { contextId?: unknown }).contextId
+        const frameSession =
+          typeof contextId === 'number' ? this.focusContextSessions.get(contextId) : undefined
+        return { result: { value: frameSession ? this.focusedSessions.has(frameSession) : false } }
       }
       return {}
     }
@@ -55,23 +88,15 @@ class FakeDebugger extends EventEmitter {
     })
     return resume
   }
-
-  holdRuntimeEvaluate(): () => void {
-    let resume!: () => void
-    this.runtimeEvaluateGate = new Promise<void>((resolve) => {
-      resume = resolve
-    })
-    return resume
-  }
-
-  setRuntimeEvaluateValue(value: boolean): void {
-    this.runtimeEvaluateValue = value
-  }
 }
 
 class FakeWebContents extends EventEmitter {
   readonly debugger = new FakeDebugger() as unknown as Debugger
+  readonly focus = vi.fn()
+  readonly insertedTexts: string[] = []
   destroyed = false
+  private insertTextFailure = false
+  private insertTextGate?: Promise<void>
 
   constructor(
     readonly id: number,
@@ -96,6 +121,24 @@ class FakeWebContents extends EventEmitter {
 
   isDestroyed(): boolean {
     return this.destroyed
+  }
+
+  async insertText(text: string): Promise<void> {
+    this.insertedTexts.push(text)
+    await this.insertTextGate
+    if (this.insertTextFailure) throw new Error('fixture insertText failure')
+  }
+
+  holdInsertText(): () => void {
+    let resume!: () => void
+    this.insertTextGate = new Promise<void>((resolve) => {
+      resume = resolve
+    })
+    return resume
+  }
+
+  rejectInsertText(): void {
+    this.insertTextFailure = true
   }
 
   destroy(): void {
@@ -167,6 +210,66 @@ async function createConnectedTransportHarness() {
   const params = attached?.params as Record<string, unknown> | undefined
   if (typeof params?.sessionId !== 'string') throw new Error('synthetic session missing')
   return { broker, harness, sessionId: params.sessionId, transport, ...registered }
+}
+
+function syntheticTargetIdentity(harness: TransportHarness): {
+  browserContextId: string
+  targetId: string
+} {
+  const attached = harness.events.find((event) => event.method === 'Target.attachedToTarget')
+  const params = attached?.params as Record<string, unknown> | undefined
+  const targetInfo = params?.targetInfo as Record<string, unknown> | undefined
+  if (typeof targetInfo?.browserContextId !== 'string' || typeof targetInfo.targetId !== 'string') {
+    throw new Error('synthetic target identity missing')
+  }
+  return {
+    browserContextId: targetInfo.browserContextId,
+    targetId: targetInfo.targetId
+  }
+}
+
+function emitIframeAttached(
+  guest: FakeWebContents,
+  identity: { browserContextId: string; targetId: string },
+  options: {
+    childSessionId: string
+    childTargetId: string
+    parentSessionId?: string
+    parentTargetId?: string
+    waitingForDebugger?: boolean
+  }
+): void {
+  ;(guest.debugger as unknown as FakeDebugger).frameSessions.set(
+    options.childTargetId,
+    options.childSessionId
+  )
+  ;(guest.debugger as unknown as FakeDebugger).emit(
+    'message',
+    {},
+    'Target.attachedToTarget',
+    {
+      sessionId: options.childSessionId,
+      targetInfo: {
+        attached: true,
+        browserContextId: identity.browserContextId,
+        parentFrameId: options.parentTargetId ?? identity.targetId,
+        targetId: options.childTargetId,
+        type: 'iframe',
+        url: 'http://localhost/frame'
+      },
+      waitingForDebugger: options.waitingForDebugger ?? false
+    },
+    options.parentSessionId ?? ''
+  )
+  if (options.waitingForDebugger !== true) {
+    ;(guest.debugger as unknown as FakeDebugger).emit(
+      'message',
+      {},
+      'Page.frameNavigated',
+      { frame: { id: options.childTargetId } },
+      options.childSessionId
+    )
+  }
 }
 
 describe('BrowserTargetBroker', () => {
@@ -305,48 +408,203 @@ describe('BrowserTargetBroker', () => {
     })
 
     expect(response.result).toEqual({})
-    const evaluate = (guest.debugger as unknown as FakeDebugger).commands.find(
-      (command) => command.method === 'Runtime.evaluate'
-    )
-    const expression = (evaluate?.params as { expression?: unknown } | undefined)?.expression
-    expect(typeof expression).toBe('string')
-    expect(evaluate?.sessionId).toBeUndefined()
-
-    const calls: unknown[][] = []
-    const fakeDocument = Object.assign(
-      Object.create({
-        execCommand(...arguments_: unknown[]) {
-          calls.push(arguments_)
-          return true
-        }
-      }),
-      { activeElement: {} }
-    )
-    const isolatedContext = { document: fakeDocument }
-    expect(runInNewContext(String(expression), isolatedContext)).toBe(true)
-    expect(calls).toEqual([['insertText', false, text]])
-    expect((isolatedContext as { __mcp_injected?: boolean }).__mcp_injected).toBeUndefined()
+    expect(guest.insertedTexts).toEqual([text])
+    expect(
+      (guest.debugger as unknown as FakeDebugger).commands.some(
+        (command) => command.method === 'Runtime.evaluate'
+      )
+    ).toBe(false)
     transport.close()
   })
 
-  it('adapts only character dispatch for guest keyboard typing', async () => {
+  it('preserves native key events while delivering their text exactly once', async () => {
     const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
 
+    const keyParams = { type: 'keyDown', key: 'h', text: 'h', unmodifiedText: 'h' }
     const response = await harness.send('Input.dispatchKeyEvent', {
-      params: { type: 'keyDown', key: 'h', text: 'h', unmodifiedText: 'h' },
+      params: keyParams,
       sessionId
     })
 
     expect(response.result).toEqual({})
     const commands = (guest.debugger as unknown as FakeDebugger).commands
-    expect(commands.filter((command) => command.method === 'Runtime.evaluate')).toHaveLength(1)
-    expect(commands.filter((command) => command.method === 'Input.dispatchKeyEvent')).toHaveLength(
-      0
-    )
+    expect(commands.filter((command) => command.method === 'Runtime.evaluate')).toHaveLength(0)
+    expect(commands).toContainEqual({
+      method: 'Input.dispatchKeyEvent',
+      params: { type: 'keyDown', key: 'h' },
+      sessionId: undefined
+    })
+    expect(guest.insertedTexts).toEqual(['h'])
     transport.close()
   })
 
-  it('rejects malformed, oversized, or unfocused Input.insertText without forwarding it', async () => {
+  it('admits nested OOPIF sessions, disables debugger pausing, and inserts into the focused child', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    const identity = syntheticTargetIdentity(harness)
+
+    emitIframeAttached(guest, identity, {
+      childSessionId: 'child-one',
+      childTargetId: 'target-child-one'
+    })
+    emitIframeAttached(guest, identity, {
+      childSessionId: 'child-nested',
+      childTargetId: 'target-child-nested',
+      parentSessionId: 'child-one',
+      parentTargetId: 'target-child-one'
+    })
+    const attachedEvents = harness.events.filter(
+      (event) => event.method === 'Target.attachedToTarget'
+    )
+    expect(attachedEvents).toHaveLength(3)
+    expect(attachedEvents.at(-1)?.sessionId).toBe('child-one')
+
+    const autoAttach = await harness.send('Target.setAutoAttach', {
+      params: {
+        autoAttach: true,
+        flatten: true,
+        waitForDebuggerOnStart: true
+      },
+      sessionId
+    })
+    expect(autoAttach.result).toEqual({})
+    expect(fakeDebugger.commands).toContainEqual({
+      method: 'Target.setAutoAttach',
+      params: {
+        autoAttach: true,
+        flatten: true,
+        waitForDebuggerOnStart: false
+      },
+      sessionId: undefined
+    })
+
+    fakeDebugger.focusedSessions.add('child-one')
+    const inserted = await harness.send('Input.insertText', {
+      params: { text: '你好' },
+      sessionId
+    })
+    expect(inserted.result).toEqual({})
+    expect(guest.insertedTexts).toEqual([])
+    expect(fakeDebugger.commands).toContainEqual({
+      method: 'Input.insertText',
+      params: { text: '你好' },
+      sessionId: 'child-one'
+    })
+
+    const world = await harness.send('Page.createIsolatedWorld', {
+      params: { frameId: 'frame-child-one', worldName: 'fixture-world' },
+      sessionId: 'child-one'
+    })
+    expect(world.result).toEqual({})
+    expect(fakeDebugger.commands).toContainEqual({
+      method: 'Page.createIsolatedWorld',
+      params: { frameId: 'frame-child-one', worldName: 'fixture-world' },
+      sessionId: undefined
+    })
+    transport.close()
+  })
+
+  it('ignores a page-controlled document.hasFocus spoof when routing sensitive text', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    const identity = syntheticTargetIdentity(harness)
+    emitIframeAttached(guest, identity, {
+      childSessionId: 'spoofed-child',
+      childTargetId: 'spoofed-target'
+    })
+    fakeDebugger.mainWorldFocusSpoofs.add('spoofed-child')
+
+    const inserted = await harness.send('Input.insertText', {
+      params: { text: 'top-secret' },
+      sessionId
+    })
+
+    expect(inserted.result).toEqual({})
+    expect(guest.insertedTexts).toEqual(['top-secret'])
+    expect(fakeDebugger.commands).not.toContainEqual(
+      expect.objectContaining({
+        method: 'Runtime.evaluate',
+        params: expect.objectContaining({ expression: 'document.hasFocus() === true' })
+      })
+    )
+    expect(fakeDebugger.commands).toContainEqual(
+      expect.objectContaining({
+        method: 'Runtime.evaluate',
+        params: expect.objectContaining({
+          expression: 'Document.prototype.hasFocus.call(document) === true',
+          contextId: expect.any(Number)
+        }),
+        sessionId: 'spoofed-child'
+      })
+    )
+    expect(
+      fakeDebugger.commands.some(
+        (command) => command.method === 'Input.insertText' && command.sessionId === 'spoofed-child'
+      )
+    ).toBe(false)
+    transport.close()
+  })
+
+  it('releases child readiness and identities when an OOPIF detaches before it is ready', async () => {
+    const { guest, harness, transport } = await createConnectedTransportHarness()
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    const identity = syntheticTargetIdentity(harness)
+    emitIframeAttached(guest, identity, {
+      childSessionId: 'child-race',
+      childTargetId: 'target-child-race',
+      waitingForDebugger: true
+    })
+
+    const pendingWorld = harness.send('Page.createIsolatedWorld', {
+      params: { frameId: 'frame-race', worldName: 'fixture-world' },
+      sessionId: 'child-race'
+    })
+    fakeDebugger.emit(
+      'message',
+      {},
+      'Target.detachedFromTarget',
+      { sessionId: 'child-race', targetId: 'target-child-race' },
+      ''
+    )
+    await expect(pendingWorld).resolves.toEqual(
+      expect.objectContaining({ error: expect.objectContaining({ message: 'frame_detached' }) })
+    )
+
+    const beforeReattach = harness.events.filter(
+      (event) => event.method === 'Target.attachedToTarget'
+    ).length
+    emitIframeAttached(guest, identity, {
+      childSessionId: 'child-race',
+      childTargetId: 'target-child-race'
+    })
+    expect(
+      harness.events.filter((event) => event.method === 'Target.attachedToTarget')
+    ).toHaveLength(beforeReattach + 1)
+    transport.close()
+  })
+
+  it('closes on an OOPIF attachment storm before child session state can grow unbounded', async () => {
+    const { guest, harness, transport } = await createConnectedTransportHarness()
+    const identity = syntheticTargetIdentity(harness)
+    const onclose = vi.fn()
+    transport.onclose = onclose
+
+    for (let index = 0; index < 65; index += 1) {
+      emitIframeAttached(guest, identity, {
+        childSessionId: `storm-session-${index}`,
+        childTargetId: `storm-target-${index}`
+      })
+    }
+
+    expect(onclose).toHaveBeenCalledOnce()
+    expect(onclose).toHaveBeenCalledWith('cdp_child_session_limit_exceeded')
+    expect(
+      harness.events.filter((event) => event.method === 'Target.attachedToTarget')
+    ).toHaveLength(65)
+    expect((guest.debugger as unknown as FakeDebugger).detach).toHaveBeenCalledOnce()
+  })
+
+  it('rejects malformed, oversized, or failed Input.insertText without forwarding it', async () => {
     const first = await createConnectedTransportHarness()
     const malformed = await first.harness.send('Input.insertText', {
       params: { text: 'hello', unexpected: true },
@@ -368,48 +626,31 @@ describe('BrowserTargetBroker', () => {
         (command) => command.method === 'Runtime.evaluate'
       )
     ).toHaveLength(0)
+    expect(first.guest.insertedTexts).toEqual([])
     first.transport.close()
 
     const second = await createConnectedTransportHarness()
-    const secondDebugger = second.guest.debugger as unknown as FakeDebugger
-    secondDebugger.setRuntimeEvaluateValue(false)
-    const noFocus = await second.harness.send('Input.insertText', {
+    second.guest.rejectInsertText()
+    const failed = await second.harness.send('Input.insertText', {
       params: { text: 'hello' },
       sessionId: second.sessionId
     })
-    expect(noFocus.error).toEqual(
-      expect.objectContaining({ message: 'Unable to insert text into managed target' })
+    expect(failed.error).toEqual(
+      expect.objectContaining({ message: 'frame_input_delivery_failed' })
     )
     second.transport.close()
-
-    const third = await createConnectedTransportHarness()
-    const thirdDebugger = third.guest.debugger as unknown as FakeDebugger
-    thirdDebugger.sendCommand.mockRejectedValueOnce(new Error('fixture evaluate failure'))
-    const exception = await third.harness.send('Input.insertText', {
-      params: { text: 'hello' },
-      sessionId: third.sessionId
-    })
-    expect(exception.error).toEqual(
-      expect.objectContaining({ message: 'Unable to insert text into managed target' })
-    )
-    third.transport.close()
   })
 
   it('closes an in-flight Input.insertText when the exact guest target disappears', async () => {
     const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
-    const fakeDebugger = guest.debugger as unknown as FakeDebugger
-    const releaseEvaluate = fakeDebugger.holdRuntimeEvaluate()
+    const releaseInsertText = guest.holdInsertText()
     const onclose = vi.fn()
     transport.onclose = onclose
 
     transport.send({ id: 99, method: 'Input.insertText', params: { text: 'hello' }, sessionId })
-    await vi.waitFor(() =>
-      expect(fakeDebugger.commands.some((command) => command.method === 'Runtime.evaluate')).toBe(
-        true
-      )
-    )
+    await vi.waitFor(() => expect(guest.insertedTexts).toEqual(['hello']))
     guest.destroy()
-    releaseEvaluate()
+    releaseInsertText()
     await new Promise((resolve) => setImmediate(resolve))
 
     expect(onclose).toHaveBeenCalledWith('target_closed')

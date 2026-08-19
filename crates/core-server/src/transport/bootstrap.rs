@@ -84,6 +84,7 @@ fn reconcile_expired_mcp_approvals_tick(
 ) -> Result<crate::application::agent::McpApprovalExpiryReconciliation, String> {
     let summary = agent_service.reconcile_expired_mcp_approvals()?;
     agent_service.reconcile_expired_builtin_capability_approvals()?;
+    agent_service.reconcile_expired_builtin_mcp_tool_approvals()?;
     payload_store
         .reconcile_expired(summary.cutoff_ms)
         .map_err(|_| "failed to reconcile expired MCP approval payloads".to_string())?;
@@ -403,6 +404,9 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .map_err(io::Error::other)?;
     agent_service
         .reconcile_expired_builtin_capability_approvals()
+        .map_err(io::Error::other)?;
+    agent_service
+        .reconcile_expired_builtin_mcp_tool_approvals()
         .map_err(io::Error::other)?;
     agent_service
         .reconcile_startup_orphaned_conversation_traces()

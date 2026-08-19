@@ -59,7 +59,7 @@ describe('managed Playwright fixed Catalog', () => {
       browser_tabs: 'core-tabs',
       browser_type: 'core-input'
     })
-    expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS).toHaveLength(40)
+    expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS).toHaveLength(61)
     expect(
       MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter((tool) => tool.handlingMode === 'pass_through')
     ).toHaveLength(25)
@@ -69,9 +69,55 @@ describe('managed Playwright fixed Catalog', () => {
     expect(
       MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter((tool) => tool.handlingMode === 'artifact_managed')
     ).toHaveLength(7)
+    const approvalTools = MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter(
+      (tool) => tool.handlingMode === 'approval_required'
+    )
+    expect(approvalTools.map((tool) => tool.rawName).sort()).toEqual(
+      [
+        'browser_cookie_clear',
+        'browser_cookie_delete',
+        'browser_cookie_get',
+        'browser_cookie_list',
+        'browser_cookie_set',
+        'browser_drop',
+        'browser_evaluate',
+        'browser_file_upload',
+        'browser_localstorage_clear',
+        'browser_localstorage_delete',
+        'browser_localstorage_get',
+        'browser_localstorage_list',
+        'browser_localstorage_set',
+        'browser_network_request',
+        'browser_sessionstorage_clear',
+        'browser_sessionstorage_delete',
+        'browser_sessionstorage_get',
+        'browser_sessionstorage_list',
+        'browser_sessionstorage_set',
+        'browser_set_storage_state',
+        'browser_storage_state'
+      ].sort()
+    )
+    expect(approvalTools).toHaveLength(21)
+    for (const tool of approvalTools) {
+      expect(tool.inputSchema.required).toEqual(
+        expect.arrayContaining(['call_reason', 'approval_origin'])
+      )
+      expect(tool.inputSchema).toHaveProperty('properties.approval_origin', {
+        type: 'string',
+        description:
+          'Exact HTTP(S) origin of the active managed page for sensitive-tool approval. Do not include credentials, path, query, or fragment.',
+        minLength: 8,
+        maxLength: 512
+      })
+    }
     expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.map((tool) => tool.rawName)).not.toContain(
       'browser_run_code_unsafe'
     )
+    expect(
+      MANAGED_PLAYWRIGHT_POLICY_MANIFEST.tools.find(
+        (tool) => tool.rawName === 'browser_run_code_unsafe'
+      )
+    ).toMatchObject({ exposed: false, handlingMode: 'sandboxed' })
 
     const snapshot = MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.find(
       (tool) => tool.rawName === 'browser_snapshot'
@@ -146,8 +192,12 @@ describe('managed Playwright fixed Catalog', () => {
   })
 
   it('matches all upstream capability assignments from the fixed coreBundle', () => {
-    const require = createRequire(import.meta.url)
-    const coreBundle = require('playwright-core/lib/coreBundle') as {
+    const projectRequire = createRequire(import.meta.url)
+    const fixedPlaywrightRequire = createRequire(projectRequire.resolve('@playwright/mcp'))
+    expect(
+      (fixedPlaywrightRequire('playwright-core/package.json') as { version: string }).version
+    ).toBe(MANAGED_PLAYWRIGHT_CATALOG_LOCK.playwrightVersion)
+    const coreBundle = fixedPlaywrightRequire('playwright-core/lib/coreBundle') as {
       tools: {
         browserTools: Array<{
           capability: string
@@ -237,10 +287,10 @@ describe('managed Playwright fixed Catalog', () => {
       packageVersion: '0.0.79',
       status: 'exact',
       upstreamToolCount: 69,
-      exposedToolCount: 40,
+      exposedToolCount: 61,
       upstreamCatalogDigest:
         'sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf',
-      policyDigest: 'sha256:23cf8923a8d0aecceeea4fdf45113629f7cb6af186c3b704d26505239d3878a5'
+      policyDigest: 'sha256:522934676363be5d6c113fc373cfa1c47309da4b8a101e4619d0c815f9d80ade'
     })
 
     const titleDrift = structuredClone(live)
@@ -343,11 +393,58 @@ describe('managed Playwright fixed Catalog', () => {
     const fixture = createServer((request, response) => {
       requestLedger.push(request.url ?? '')
       response.setHeader('content-type', 'text/html; charset=utf-8')
+      if (request.url === '/conformance-frame') {
+        response.end(`<!doctype html><html><body>
+          <label for="frame-subject">Frame Subject</label>
+          <input id="frame-subject" />
+          <div id="frame-body" role="textbox" aria-label="Frame Body" contenteditable></div>
+          <div id="frame-chinese" role="textbox" aria-label="Frame Chinese" contenteditable></div>
+          <output id="frame-subject-value">frame-subject:</output>
+          <output id="frame-body-value">frame-body:</output>
+          <output id="frame-chinese-value">frame-chinese:</output>
+          <output id="frame-chinese-events">frame-chinese-events:</output>
+          <output id="frame-events">frame-events:</output>
+          <script>
+            const events = []
+            const body = document.querySelector('#frame-body')
+            for (const name of ['keydown', 'beforeinput', 'input', 'keyup']) {
+              body.addEventListener(name, event => {
+                events.push(event.type)
+                document.querySelector('#frame-events').textContent =
+                  'frame-events:' + events.join(',')
+              })
+            }
+            document.querySelector('#frame-subject').addEventListener('input', event => {
+              document.querySelector('#frame-subject-value').textContent =
+                'frame-subject:' + event.target.value
+            })
+            body.addEventListener('input', () => {
+              document.querySelector('#frame-body-value').textContent =
+                'frame-body:' + body.textContent
+            })
+            const chinese = document.querySelector('#frame-chinese')
+            const chineseEvents = []
+            for (const name of ['keydown', 'beforeinput', 'input', 'keyup']) {
+              chinese.addEventListener(name, event => {
+                chineseEvents.push(event.type)
+                document.querySelector('#frame-chinese-events').textContent =
+                  'frame-chinese-events:' + chineseEvents.join(',')
+              })
+            }
+            chinese.addEventListener('input', () => {
+              document.querySelector('#frame-chinese-value').textContent =
+                'frame-chinese:' + chinese.textContent
+            })
+          </script>
+        </body></html>`)
+        return
+      }
       response.end(`<!doctype html><html><body>
         <main>
           <h1>Official Conformance Fixture</h1>
           <label for="value">Value</label><input id="value" />
           <button id="apply">Apply</button><output id="result">idle</output>
+          <iframe src="/conformance-frame"></iframe>
         </main>
         <script>
           document.querySelector('#apply').addEventListener('click', () => {
@@ -415,6 +512,20 @@ describe('managed Playwright fixed Catalog', () => {
 
       expect(raw.finalSnapshot).toContain('applied:conformance')
       expect(external.finalSnapshot).toContain('applied:conformance')
+      expect(raw.finalSnapshot).toContain('frame-subject:iframe-subject')
+      expect(external.finalSnapshot).toContain('frame-subject:iframe-subject')
+      expect(raw.finalSnapshot).toContain('frame-body:ab')
+      expect(external.finalSnapshot).toContain('frame-body:ab')
+      expect(raw.finalSnapshot).toContain('frame-chinese:你好')
+      expect(external.finalSnapshot).toContain('frame-chinese:你好')
+      expect(raw.finalSnapshot).toContain('frame-chinese-events:beforeinput,input')
+      expect(external.finalSnapshot).toContain('frame-chinese-events:beforeinput,input')
+      expect(raw.finalSnapshot).toContain(
+        'frame-events:keydown,beforeinput,input,keyup,keydown,beforeinput,input,keyup'
+      )
+      expect(external.finalSnapshot).toContain(
+        'frame-events:keydown,beforeinput,input,keyup,keydown,beforeinput,input,keyup'
+      )
       expect(normalizeOfficialSnapshot(raw.finalSnapshot)).toBe(
         normalizeOfficialSnapshot(external.finalSnapshot)
       )
@@ -474,6 +585,9 @@ async function runOfficialConformanceWorkflow(
   const initial = toolText(await client.callTool({ name: 'browser_snapshot', arguments: {} }))
   const inputRef = officialSnapshotRef(initial, 'Value')
   const buttonRef = officialSnapshotRef(initial, 'Apply')
+  const frameSubjectRef = officialSnapshotRef(initial, 'Frame Subject')
+  const frameBodyRef = officialSnapshotRef(initial, 'Frame Body')
+  const frameChineseRef = officialSnapshotRef(initial, 'Frame Chinese')
   await client.callTool({
     name: 'browser_fill_form',
     arguments: {
@@ -488,6 +602,27 @@ async function runOfficialConformanceWorkflow(
     }
   })
   await client.callTool({ name: 'browser_click', arguments: { target: buttonRef } })
+  await client.callTool({
+    name: 'browser_fill_form',
+    arguments: {
+      fields: [
+        {
+          target: frameSubjectRef,
+          name: 'Frame Subject',
+          type: 'textbox',
+          value: 'iframe-subject'
+        }
+      ]
+    }
+  })
+  await client.callTool({
+    name: 'browser_type',
+    arguments: { target: frameBodyRef, text: 'ab', slowly: true }
+  })
+  await client.callTool({
+    name: 'browser_type',
+    arguments: { target: frameChineseRef, text: '你好' }
+  })
   await client.callTool({ name: 'browser_wait_for', arguments: { text: 'applied:conformance' } })
   const finalSnapshot = toolText(await client.callTool({ name: 'browser_snapshot', arguments: {} }))
   let invalidArgumentsRejected = false

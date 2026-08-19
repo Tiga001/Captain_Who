@@ -53,10 +53,11 @@ describe('BrowserNetworkPolicy', () => {
     await expect(policy.assessStaticHostBoundary('not a URL')).resolves.toBe('unsupported_scheme')
   })
 
-  it('resolves aliases only on protected Host ports and fails those ports closed', async () => {
+  it('reserves protected Host ports without trusting a DNS preflight', async () => {
+    const resolve = vi.fn(async () => ['93.184.216.34'])
     const aliasPolicy = new BrowserNetworkPolicy({
       blockedOrigins: ['http://127.0.0.1:5173/'],
-      dnsResolver: new SequenceResolver([['127.0.0.1']])
+      dnsResolver: { resolve }
     })
     const unavailablePolicy = new BrowserNetworkPolicy({
       debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
@@ -72,7 +73,8 @@ describe('BrowserNetworkPolicy', () => {
     ).resolves.toBe('main_renderer')
     await expect(
       unavailablePolicy.assessStaticHostBoundary('http://debug-alias.test:9222/json')
-    ).resolves.toBe('resolution_unavailable')
+    ).resolves.toBe('internal_debug')
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it('keeps WebSocket aliases to protected Host ports closed', async () => {
@@ -86,18 +88,18 @@ describe('BrowserNetworkPolicy', () => {
     ).resolves.toBe('main_renderer')
   })
 
-  it('uses exactly one DNS answer when active automation targets a protected port', async () => {
+  it('blocks a protected port before active automation can consume a rebinding answer', async () => {
     const resolve = vi.fn(async () => ['93.184.216.34'])
     const policy = new BrowserNetworkPolicy({
       debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
       dnsResolver: { resolve }
     })
 
-    await expect(policy.assess('https://public.test:9222/path')).resolves.toMatchObject({
-      disposition: 'approval_required',
-      riskKinds: ['non_standard_port']
+    await expect(policy.assess('https://public.test:9222/path')).resolves.toEqual({
+      disposition: 'deny',
+      code: 'internal_debug'
     })
-    expect(resolve).toHaveBeenCalledOnce()
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it('allows ordinary public HTTPS without an approval', async () => {
@@ -387,11 +389,10 @@ describe('BrowserNetworkPolicy', () => {
     const answers = Array.from({ length: 16 }, (_, index) => `8.8.8.${index + 1}`)
     answers.push('127.0.0.1')
     const policy = new BrowserNetworkPolicy({
-      debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
       dnsResolver: new SequenceResolver([answers])
     })
 
-    await expect(policy.assess('https://many-addresses.test:9222/')).resolves.toEqual({
+    await expect(policy.assess('https://many-addresses.test:9443/')).resolves.toEqual({
       disposition: 'deny',
       code: 'resolution_overflow'
     })

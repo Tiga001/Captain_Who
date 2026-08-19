@@ -1,6 +1,8 @@
 import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS, type BrowserHostApi } from '@mycopilot/host-api'
 import {
+  parseBrowserArtifactExportInput,
+  parseBrowserArtifactExportOutput,
   parseBrowserArtifactReadInput,
   parseBrowserArtifactReadOutput,
   parseBrowserSurfaceCommand,
@@ -16,6 +18,17 @@ type BrowserIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): BrowserHostApi {
   return {
     clearBrowsingData: () => ipcRenderer.invoke(HOST_CHANNELS.browser.clearBrowsingData),
+    exportArtifact: (input) =>
+      ipcRenderer
+        .invoke(HOST_CHANNELS.browser.artifactExport, parseBrowserArtifactExportInput(input))
+        .then((result: unknown) => {
+          if (!result || typeof result !== 'object' || !('ok' in result)) {
+            throw new Error('Invalid Browser Artifact Host response')
+          }
+          if ((result as { ok?: unknown }).ok !== true) return result as never
+          const envelope = result as { ok: true; value: unknown }
+          return { ok: true, value: parseBrowserArtifactExportOutput(envelope.value) }
+        }),
     readArtifactPreview: (input) =>
       ipcRenderer
         .invoke(HOST_CHANNELS.browser.artifactReadPreview, parseBrowserArtifactReadInput(input))

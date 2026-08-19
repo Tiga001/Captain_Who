@@ -131,4 +131,52 @@ describe('Browser IPC bridge', () => {
       } as never)
     ).toThrow(/managedPath/)
   })
+
+  it('exports only a complete Artifact identity and rejects path-bearing responses', async () => {
+    const artifact = {
+      schemaVersion: 1,
+      artifactId: 'browser-artifact:123e4567-e89b-42d3-a456-426614174000',
+      kind: 'pdf',
+      displayName: 'page.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 2,
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      lifecycle: 'run',
+      owner: 'browser_automation',
+      preview: 'none'
+    } as const
+    const invoke = vi.fn(async (): Promise<unknown> => ({
+      ok: true,
+      value: { schemaVersion: 1, status: 'exported', displayName: 'saved-page.pdf' }
+    }))
+    const bridge = createBrowserIpcBridge({
+      invoke,
+      on: vi.fn(),
+      removeListener: vi.fn()
+    } as unknown as BrowserIpcRenderer)
+
+    await expect(bridge.exportArtifact({ schemaVersion: 1, artifact })).resolves.toEqual({
+      ok: true,
+      value: { schemaVersion: 1, status: 'exported', displayName: 'saved-page.pdf' }
+    })
+    expect(invoke).toHaveBeenCalledWith(HOST_CHANNELS.browser.artifactExport, {
+      schemaVersion: 1,
+      artifact
+    })
+
+    invoke.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        status: 'exported',
+        displayName: 'saved-page.pdf',
+        path: '/tmp/saved-page.pdf'
+      }
+    })
+    await expect(bridge.exportArtifact({ schemaVersion: 1, artifact })).rejects.toThrow(/path/)
+    expect(() =>
+      bridge.exportArtifact({ schemaVersion: 1, artifact, path: '/tmp/page.pdf' } as never)
+    ).toThrow(/path/)
+  })
 })

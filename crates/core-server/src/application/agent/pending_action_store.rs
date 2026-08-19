@@ -381,6 +381,9 @@ impl AgentService {
             AgentProposedAction::BuiltinCapabilityActivation { approval } => {
                 approval.call_id.clone()
             }
+            AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                approval.identity.call_id.clone()
+            }
             _ => action_id.clone(),
         };
         let storage_id = pending_action_storage_id(run_id, &action_id);
@@ -605,11 +608,21 @@ impl AgentService {
     }
 
     pub(super) fn invalidate_mcp_pending_payload(&self, action: &AgentProposedAction) {
-        let AgentProposedAction::McpToolCall { approval } = action else {
-            return;
-        };
-        if let Some(invoker) = self.mcp_tool_invoker.as_ref() {
-            let _ = invoker.invalidate_prepared_approval(&approval.identity);
+        match action {
+            AgentProposedAction::McpToolCall { approval } => {
+                if let Some(invoker) = self.mcp_tool_invoker.as_ref() {
+                    let _ = invoker.invalidate_prepared_approval(&approval.identity);
+                }
+            }
+            AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                if let Some(runtime) = self.builtin_capabilities.as_ref() {
+                    // Idempotent invalidation is shared by cancellation, expiry, storage failure,
+                    // deletion and shutdown. No path may leave process-sealed arguments or a
+                    // single-use grant live after the durable pending action stops being usable.
+                    let _ = runtime.dismiss_builtin_mcp_tool_approval(approval);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1281,6 +1294,10 @@ pub(super) fn pending_action_binding_matches(
         action,
         AgentProposedAction::BuiltinCapabilityActivation { approval }
             if approval.run_id != run_id
+    ) || matches!(
+        action,
+        AgentProposedAction::BuiltinMcpToolApproval { approval }
+            if approval.identity.run_id != run_id
     ) {
         return false;
     }
@@ -1294,6 +1311,10 @@ pub(super) fn pending_action_binding_matches(
         AgentProposedAction::BuiltinCapabilityActivation { approval } => {
             (approval.call_id.as_str(), Some(approval.action_id.as_str()))
         }
+        AgentProposedAction::BuiltinMcpToolApproval { approval } => (
+            approval.identity.call_id.as_str(),
+            Some(approval.identity.action_id.as_str()),
+        ),
         _ => (action_id.as_str(), None),
     };
     let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
@@ -1335,6 +1356,15 @@ pub(super) fn pending_action_binding_matches(
             &checkpoint_call.args,
         )
         .is_ok();
+    }
+
+    if let AgentProposedAction::BuiltinMcpToolApproval { approval } = action {
+        return mycopilot_core::validate_builtin_mcp_tool_approval_shape(approval).is_ok()
+            && approval.approval_status == AgentApprovalStatus::Required
+            && approval.identity.run_id == run_id
+            && approval.identity.call_id == checkpoint_call.id
+            && approval.identity.model_name == checkpoint_call.name
+            && checkpoint_call.args == serde_json::json!({});
     }
 
     let AgentProposedAction::McpToolCall { approval } = action else {

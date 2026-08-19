@@ -25,6 +25,44 @@ fn freeze_pending_provenance(checkpoint: &mut AgentRunCheckpoint, provenance: Ag
     *frozen = provenance;
 }
 
+fn freeze_pending_approval_status(
+    checkpoint: &mut AgentRunCheckpoint,
+    approval_status: AgentApprovalStatus,
+) {
+    let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let frozen = checkpoint
+        .conversation_trace_items
+        .iter_mut()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                approval_status,
+                ..
+            } if call_id == &pending_call_id => Some(approval_status),
+            _ => None,
+        })
+        .expect("pending ToolCall has frozen approval status");
+    *frozen = approval_status;
+}
+
+fn builtin_sensitive_identity(tool_name: &str) -> AgentToolIdentity {
+    AgentToolIdentity::BuiltinCapability {
+        capability_id: "browser_automation".into(),
+        managed_mcp_id: "builtin.browser_automation.mcp".into(),
+        package_name: "@playwright/mcp".into(),
+        package_version: "0.0.79".into(),
+        upstream_catalog_digest: format!("sha256:{}", "a".repeat(64)).into(),
+        policy_digest: format!("sha256:{}", "b".repeat(64)).into(),
+        manifest_digest: format!("sha256:{}", "c".repeat(64)).into(),
+        tool_id: tool_name.to_string().into(),
+        raw_name: tool_name.to_string().into(),
+        model_name: tool_name.to_string().into(),
+        upstream_schema_digest: format!("sha256:{}", "d".repeat(64)).into(),
+        host_overlay_digest: format!("sha256:{}", "e".repeat(64)).into(),
+        host_input_schema_digest: format!("sha256:{}", "f".repeat(64)).into(),
+    }
+}
+
 fn observer_setup_trace(
     checkpoint: &AgentRunCheckpoint,
     continuation: &AgentToolContinuation,
@@ -86,6 +124,73 @@ fn builtin_activation_action_id_preserves_the_standard_tool_result_prefix() {
     assert!(rendered.contains("browser_automation"));
     assert!(!rendered.contains("\"type\":\"mcp_tool\""));
     assert!(!rendered.contains("\"external\":true"));
+}
+
+#[test]
+fn builtin_sensitive_action_id_preserves_one_standard_tool_result_prefix() {
+    let tool_name = "browser_evaluate";
+    let (mut checkpoint, mut continuation) =
+        restorable_checkpoint_fixture_for_pending_tool(tool_name);
+    checkpoint.pending_action_id = Some(uuid::Uuid::new_v4().to_string());
+    freeze_pending_provenance(&mut checkpoint, builtin_sensitive_identity(tool_name));
+    freeze_pending_approval_status(&mut checkpoint, AgentApprovalStatus::Required);
+    continuation.call.approval_status = AgentApprovalStatus::Required;
+    continuation.result.result = Some(json!({
+        "status": "completed",
+        "secret": "BUILTIN_SENSITIVE_RESULT_MUST_NOT_PERSIST",
+        "structuredContent": {
+            "artifacts": [{
+                "schemaVersion": 1,
+                "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+                "kind": "json",
+                "displayName": "storage-state.json",
+                "mimeType": "application/json",
+                "sizeBytes": 128,
+                "createdAt": 1_000,
+                "expiresAt": 2_000,
+                "lifecycle": "run",
+                "owner": "browser_automation",
+                "preview": "none"
+            }]
+        }
+    }));
+
+    assert!(!checkpoint_continuation_uses_external_mcp_projection(&checkpoint).unwrap());
+    let durable_result =
+        crate::tools::builtin_capability_tool_result_persistence_projection(&continuation.result);
+    let host_committed = crate::conversation_trace::
+        conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
+            &checkpoint,
+            &continuation.call,
+            &durable_result,
+            Some("assistant-builtin-sensitive"),
+            "The approved browser operation completed.",
+            ConversationHistoryArchiveTraceMetadata::default(),
+        )
+        .unwrap();
+    let observer_setup =
+        observer_setup_trace(&checkpoint, &continuation, "assistant-builtin-sensitive");
+    let restored =
+        restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+    let runtime_setup = restored.conversation_trace.snapshot();
+
+    assert_eq!(observer_setup.items, host_committed.items);
+    assert_eq!(runtime_setup.items, host_committed.items);
+    let rendered = serde_json::to_string(&runtime_setup.items).unwrap();
+    assert!(rendered.contains("browser-artifact:123e4567-e89b-42d3-a456-426614174000"));
+    assert!(!rendered.contains("BUILTIN_SENSITIVE_RESULT_MUST_NOT_PERSIST"));
+    assert_eq!(
+        runtime_setup
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. }
+                    if call_id == &continuation.call.id
+            ))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -327,6 +432,22 @@ fn continuation_projection_rejects_untrusted_or_mismatched_approval_identity() {
         restorable_checkpoint_fixture_for_pending_tool("mcp__fixture__read");
     mcp_without_action.pending_action_id = None;
     assert!(checkpoint_continuation_uses_external_mcp_projection(&mcp_without_action).is_err());
+
+    let (mut automatic_builtin_with_action, _) =
+        restorable_checkpoint_fixture_for_pending_tool("browser_navigate");
+    automatic_builtin_with_action.pending_action_id = Some(uuid::Uuid::new_v4().to_string());
+    freeze_pending_provenance(
+        &mut automatic_builtin_with_action,
+        builtin_sensitive_identity("browser_navigate"),
+    );
+    freeze_pending_approval_status(
+        &mut automatic_builtin_with_action,
+        AgentApprovalStatus::NotRequired,
+    );
+    assert!(
+        checkpoint_continuation_uses_external_mcp_projection(&automatic_builtin_with_action)
+            .is_err()
+    );
 }
 
 #[test]
@@ -581,6 +702,136 @@ fn mcp_approval_barrier_drops_only_external_calls_and_persists_a_safe_reprepare_
     batch.pop_front();
     assert_eq!(batch.take_deferred_external_tool_call_count(), Some(2));
     assert_eq!(batch.take_deferred_external_tool_call_count(), None);
+}
+
+#[test]
+fn builtin_sensitive_approval_defers_private_siblings_without_persisting_any_arguments() {
+    let secret = "BUILTIN_PENDING_PASSWORD_COOKIE_STORAGE_FILE_HANDLE_SECRET";
+    let pending = LlmToolCall {
+        id: canonical_test_call_id(0, "provider-builtin-sensitive-pending"),
+        name: "browser_evaluate".to_string(),
+        args: json!({
+            "function": format!("() => localStorage.getItem('{secret}')"),
+            "password": secret,
+            "cookie": secret,
+            "approval_origin": "https://mail.example.test",
+            "call_reason": "Read the reviewed page state.",
+        }),
+    };
+    let mut batch = ToolCallBatch::from_model_response(
+        "checkpoint-validation-run",
+        0,
+        String::new(),
+        vec![
+            pending.clone(),
+            LlmToolCall {
+                id: canonical_test_call_id(1, "provider-builtin-ordinary"),
+                name: "browser_click".to_string(),
+                args: json!({"ref": secret, "call_reason": "Continue the reviewed flow."}),
+            },
+            LlmToolCall {
+                id: canonical_test_call_id(2, "provider-builtin-sensitive-sibling"),
+                name: "browser_file_upload".to_string(),
+                args: json!({
+                    "paths": [format!("browser-file:{secret}")],
+                    "approval_origin": "https://mail.example.test",
+                    "call_reason": "Upload the reviewed file.",
+                }),
+            },
+            LlmToolCall {
+                id: canonical_test_call_id(3, "provider-safe-sibling"),
+                name: "read_file".to_string(),
+                args: json!({"path": "report.txt"}),
+            },
+        ],
+        false,
+        |call| {
+            let private_builtin = call.name.starts_with("browser_");
+            (
+                LlmToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    args: if private_builtin {
+                        json!({})
+                    } else {
+                        call.args.clone()
+                    },
+                },
+                AgentToolCallCheckpointPersistence::Allowed,
+            )
+        },
+    );
+    let checkpoint_message = batch.checkpoint_assistant_message().unwrap().unwrap();
+    let group = batch.context_group().unwrap();
+    let complete_turn = batch.take_assistant_turn().unwrap();
+    pop_test_call(&mut batch, &pending.id);
+    let mut context = ContextFrame::new(vec![ContextItem::new(
+        LlmMessage::from_assistant_turn(complete_turn),
+        ContextMetadata::new(
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        )
+        .with_group(group.clone()),
+    )
+    .with_checkpoint_message(checkpoint_message)]);
+
+    let deferred = batch.defer_external_calls(|queued| {
+        queued.checkpoint_persistence != AgentToolCallCheckpointPersistence::Allowed
+            || queued.checkpoint_call.args != queued.call.args
+    });
+    assert_eq!(deferred.len(), 2);
+    let deferred_ids = deferred
+        .into_iter()
+        .map(|queued| queued.call.id)
+        .collect::<BTreeSet<_>>();
+    context
+        .omit_runtime_tool_calls_from_group(&group, &deferred_ids)
+        .unwrap();
+    assert_eq!(batch.queue.len(), 1);
+    assert_eq!(batch.queue[0].call.name, "read_file");
+
+    let mut trace = ConversationTraceRecorder::default();
+    record_current_test_tool_call(
+        &mut trace,
+        &batch,
+        &AgentToolCall {
+            id: pending.id.clone(),
+            tool: pending.name.clone(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: Some("Read the reviewed page state.".to_string()),
+        },
+    );
+    let checkpoint = create_run_checkpoint(
+        "checkpoint-validation-run",
+        RunCheckpointState {
+            context: &context,
+            next_model_request_index: 1,
+            tool_batch: &batch,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: &pending.id,
+            conversation_trace: &trace,
+            tool_set: &test_tool_set(),
+            run_context: None,
+            collaboration_run_snapshot: None,
+            model_capabilities: ModelCapabilities::default(),
+            run_world_state: &test_run_world_state(),
+            provider_profile_config: &test_provider_profile(),
+            provider_protocol_key: &test_provider_key(),
+        },
+    )
+    .unwrap();
+    assert_eq!(checkpoint.queued_tool_calls.len(), 1);
+    assert_eq!(checkpoint.deferred_external_tool_call_count, 2);
+    let rendered = serde_json::to_string(&checkpoint).unwrap();
+    assert!(!rendered.contains(secret));
+    assert!(!rendered.contains("browser_click"));
+    assert!(!rendered.contains("browser_file_upload"));
+    assert!(!rendered.contains("function"));
+    assert!(!rendered.contains("password"));
+    assert!(!rendered.contains("cookie"));
+    assert!(!rendered.contains("browser-file:"));
 }
 
 #[test]

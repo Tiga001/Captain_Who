@@ -33,12 +33,25 @@ fn load_durable_pending_trace_snapshot(
     trace
         .validate()
         .map_err(|_| "pending action durable ConversationTurnTrace is invalid".to_string())?;
-    if trace.run_id != record.run_id
-        || trace.conversation_id != conversation_id
-        || trace.assistant_message_id != assistant_message_id
-        || trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress
-    {
-        return Err("pending action durable ConversationTurnTrace identity is inconsistent".into());
+    if trace.run_id != record.run_id {
+        return Err(
+            "pending action durable ConversationTurnTrace run identity is inconsistent".into(),
+        );
+    }
+    if trace.conversation_id != conversation_id {
+        return Err(
+            "pending action durable ConversationTurnTrace conversation identity is inconsistent"
+                .into(),
+        );
+    }
+    if trace.assistant_message_id != assistant_message_id {
+        return Err(
+            "pending action durable ConversationTurnTrace Assistant identity is inconsistent"
+                .into(),
+        );
+    }
+    if trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress {
+        return Err("pending action durable ConversationTurnTrace is already terminal".into());
     }
 
     let row_call_id = record
@@ -201,6 +214,12 @@ pub enum McpAutoActionJournalTerminalOutcome {
     OutcomeUnknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequiredPendingToolProvenance {
+    BuiltinCapabilityActivation,
+    BuiltinCapabilityTool,
+}
+
 impl McpAutoActionJournalTerminalOutcome {
     fn pending_status(self) -> &'static str {
         match self {
@@ -360,6 +379,9 @@ fn durable_trace_proves_action_precedes(
         AgentProposedAction::ToolCall { call } => call.id.as_str(),
         AgentProposedAction::McpToolCall { approval } => approval.identity.call_id.as_str(),
         AgentProposedAction::BuiltinCapabilityActivation { approval } => approval.call_id.as_str(),
+        AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+            approval.identity.call_id.as_str()
+        }
         AgentProposedAction::BrowserRiskApproval { approval } => approval.call_id.as_str(),
         AgentProposedAction::Diff { diff } => diff.id.as_str(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
@@ -1360,7 +1382,8 @@ impl StorageService {
             error_code,
             reason,
             None,
-            false,
+            None,
+            None,
         )
     }
 
@@ -1385,7 +1408,43 @@ impl StorageService {
             "builtin_capability.activation_expired",
             "The built-in capability activation approval expired before activation.",
             Some("builtin_capability_activation"),
-            true,
+            Some(RequiredPendingToolProvenance::BuiltinCapabilityActivation),
+            None,
+        )
+    }
+
+    /// Retires a sensitive built-in MCP Tool after process authority was lost.
+    ///
+    /// Raw arguments and the single-use grant are deliberately process-only. A restart therefore
+    /// makes `pending`/`approved` definitely not dispatched, while `executing` is conservatively
+    /// outcome-unknown. The unresolved original ToolCall receives exactly one bounded terminal
+    /// ToolResult in the same append-only trace transaction; the Tool is never replayed.
+    pub fn terminalize_builtin_mcp_tool_agent_action_on_startup(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        outcome: McpStartupActionTerminalOutcome,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        if !valid_mcp_terminal_transition(expected_status, outcome)
+            || !matches!(
+                outcome,
+                McpStartupActionTerminalOutcome::PayloadUnavailable
+                    | McpStartupActionTerminalOutcome::Expired
+                    | McpStartupActionTerminalOutcome::OutcomeUnknown
+            )
+        {
+            return Err("invalid built-in MCP Tool startup terminal transition".to_string());
+        }
+        self.terminalize_generic_pending_action_as_failed(
+            action_id,
+            expected_status,
+            updated_at,
+            outcome.error_code(),
+            outcome.safe_reason(),
+            Some("builtin_mcp_tool_approval"),
+            Some(RequiredPendingToolProvenance::BuiltinCapabilityTool),
+            Some(outcome),
         )
     }
 
@@ -1398,7 +1457,8 @@ impl StorageService {
         error_code: &str,
         reason: &str,
         expected_action_type: Option<&str>,
-        require_builtin_identity: bool,
+        required_provenance: Option<RequiredPendingToolProvenance>,
+        builtin_mcp_outcome: Option<McpStartupActionTerminalOutcome>,
     ) -> Result<bool, String> {
         let mut connection = self.state.connection()?;
         let transaction = connection
@@ -1422,8 +1482,9 @@ impl StorageService {
             &record,
             expected_status != "executing",
         )?;
-        if require_builtin_identity
-            && !matches!(
+        let provenance_matches = match required_provenance {
+            None => true,
+            Some(RequiredPendingToolProvenance::BuiltinCapabilityActivation) => matches!(
                 &durable.provenance,
                 crate::AgentToolIdentity::RuntimeExtension {
                     extension_id,
@@ -1431,10 +1492,15 @@ impl StorageService {
                 } if extension_id
                     == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
                     && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME
-            )
-        {
+            ),
+            Some(RequiredPendingToolProvenance::BuiltinCapabilityTool) => matches!(
+                &durable.provenance,
+                crate::AgentToolIdentity::BuiltinCapability { .. }
+            ),
+        };
+        if !provenance_matches {
             return Err(
-                "built-in capability expiry requires durable activation Tool provenance"
+                "pending action terminalization requires matching durable Tool provenance"
                     .to_string(),
             );
         }
@@ -1446,14 +1512,51 @@ impl StorageService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "malformed pending action requires an Assistant owner".to_string())?;
-        let terminal = crate::terminal_conversation_trace_from_snapshot(
-            durable.snapshot,
-            &record.run_id,
-            conversation_id,
-            assistant_message_id,
-            crate::ConversationTurnTraceTerminalStatus::Failed,
-            reason,
-        )?;
+        let terminal = if let Some(outcome) = builtin_mcp_outcome {
+            let action: crate::AgentProposedAction = serde_json::from_str(&record.action_json)
+                .map_err(|_| "built-in MCP Tool action could not be decoded safely".to_string())?;
+            let crate::AgentProposedAction::BuiltinMcpToolApproval { approval } = action else {
+                return Err(
+                    "built-in MCP Tool action type changed during terminalization".to_string(),
+                );
+            };
+            let result = match outcome {
+                McpStartupActionTerminalOutcome::PayloadUnavailable => {
+                    crate::builtin_mcp_tool_payload_unavailable_result(&approval)
+                }
+                McpStartupActionTerminalOutcome::Expired => {
+                    crate::builtin_mcp_tool_expired_result(&approval)
+                }
+                McpStartupActionTerminalOutcome::OutcomeUnknown => {
+                    crate::builtin_mcp_tool_outcome_unknown_result(&approval)
+                }
+                McpStartupActionTerminalOutcome::PolicyDenied
+                | McpStartupActionTerminalOutcome::Rejected
+                | McpStartupActionTerminalOutcome::Cancelled => {
+                    return Err("unsupported built-in MCP Tool terminal outcome".to_string())
+                }
+            };
+            let result =
+                crate::tools::builtin_capability_tool_result_persistence_projection(&result);
+            crate::terminal_conversation_trace_from_snapshot_with_tool_result(
+                durable.snapshot,
+                &record.run_id,
+                conversation_id,
+                assistant_message_id,
+                crate::ConversationTurnTraceTerminalStatus::Failed,
+                reason,
+                &result,
+            )?
+        } else {
+            crate::terminal_conversation_trace_from_snapshot(
+                durable.snapshot,
+                &record.run_id,
+                conversation_id,
+                assistant_message_id,
+                crate::ConversationTurnTraceTerminalStatus::Failed,
+                reason,
+            )?
+        };
 
         let affected = transaction
             .execute(
@@ -2899,6 +3002,59 @@ fn validate_durable_mcp_tool_result(
     Ok(is_rejection)
 }
 
+fn validate_durable_builtin_mcp_tool_result(
+    tool_result: &AgentToolResult,
+    target_status: &str,
+) -> Result<bool, String> {
+    let value = tool_result
+        .result
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "built-in MCP durable ToolResult must be a typed object".to_string())?;
+    const ALLOWED_FIELDS: &[&str] = &[
+        "schemaVersion",
+        "type",
+        "status",
+        "dispatchCertainty",
+        "contentOmitted",
+        "errorCode",
+        "retryable",
+        "artifacts",
+    ];
+    if value
+        .keys()
+        .any(|key| !ALLOWED_FIELDS.contains(&key.as_str()))
+        || value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64)
+            != Some(1)
+        || value.get("type").and_then(serde_json::Value::as_str) != Some("builtin_capability_tool")
+        || value
+            .get("contentOmitted")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || tool_result.exact_archive_file.is_some()
+    {
+        return Err("built-in MCP durable ToolResult is not the safe Host projection".to_string());
+    }
+    let is_rejection = target_status == "rejected";
+    if is_rejection
+        && (value.get("status").and_then(serde_json::Value::as_str) != Some("rejected")
+            || value
+                .get("dispatchCertainty")
+                .and_then(serde_json::Value::as_str)
+                != Some("definitely_not_dispatched")
+            || value.get("errorCode").and_then(serde_json::Value::as_str)
+                != Some("mcp.approval_rejected")
+            || value.get("retryable").and_then(serde_json::Value::as_bool) != Some(false)
+            || !tool_result.ok
+            || tool_result.error.is_some())
+    {
+        return Err("built-in MCP rejection ToolResult semantics are inconsistent".to_string());
+    }
+    Ok(is_rejection)
+}
+
 fn validate_manual_file_effect_settlement_request(
     audit: &AgentActionAuditRecord,
     expected_pending_status: &str,
@@ -2918,7 +3074,10 @@ fn validate_manual_file_effect_settlement_request(
     }
     let action = serde_json::from_str::<AgentProposedAction>(&audit.action_json)
         .map_err(|error| format!("frozen file-effect action is invalid: {error}"))?;
-    let is_mcp_action = matches!(action, AgentProposedAction::McpToolCall { .. });
+    let is_external_mcp_action = matches!(action, AgentProposedAction::McpToolCall { .. });
+    let is_builtin_mcp_action =
+        matches!(action, AgentProposedAction::BuiltinMcpToolApproval { .. });
+    let is_mcp_action = is_external_mcp_action || is_builtin_mcp_action;
     let is_mcp_rejection = is_mcp_action && target_status == "rejected";
     let valid_decision = if is_mcp_rejection {
         audit.decision.as_deref() == Some("rejected")
@@ -2987,7 +3146,11 @@ fn validate_manual_file_effect_settlement_request(
         validate_manual_command_handoff_projection(&tool_result)?;
     }
     if is_mcp_action {
-        let validated_rejection = validate_durable_mcp_tool_result(&tool_result, target_status)?;
+        let validated_rejection = if is_external_mcp_action {
+            validate_durable_mcp_tool_result(&tool_result, target_status)?
+        } else {
+            validate_durable_builtin_mcp_tool_result(&tool_result, target_status)?
+        };
         if validated_rejection != is_mcp_rejection {
             return Err("MCP durable ToolResult rejection state is inconsistent".to_string());
         }
@@ -3270,6 +3433,12 @@ fn manual_file_effect_identity(
         AgentProposedAction::McpToolCall { approval } => Ok((
             "mcp_tool_call",
             approval.identity.provenance.model_tool_name.clone(),
+            approval.identity.call_id.clone(),
+            false,
+        )),
+        AgentProposedAction::BuiltinMcpToolApproval { approval } => Ok((
+            "builtin_mcp_tool_approval",
+            approval.identity.model_name.clone(),
             approval.identity.call_id.clone(),
             false,
         )),

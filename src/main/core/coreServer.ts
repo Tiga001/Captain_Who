@@ -812,7 +812,7 @@ export class CoreServer {
     })
   }
 
-  completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<void> {
+  completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean> {
     const request = parseManagedPlaywrightCompletionInput(input)
     return this.rpc
       .request<unknown, ManagedPlaywrightCompletionInput>(
@@ -820,9 +820,7 @@ export class CoreServer {
         request
       )
       .then(parseManagedPlaywrightCompletionOutput)
-      .then((output) => {
-        if (!output.accepted) throw new Error('Managed Playwright completion was not accepted')
-      })
+      .then((output) => output.accepted)
   }
 
   authorizeBrowserRisk(input: BrowserRiskAuthorizeInput): Promise<BrowserRiskAuthorizeOutput> {

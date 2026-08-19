@@ -1,14 +1,15 @@
 use super::{
-    AgentTool, AgentToolExposure, AgentToolPermissionPolicy, AsyncAgentTool, BoxAgentToolFuture,
+    AgentTool, AgentToolExposure, AgentToolPermissionPolicy, AsyncAgentTool,
+    BoxAgentProposedActionFuture, BoxAgentToolFuture,
 };
 use crate::builtin_capabilities::{
-    build_activation_approval, BuiltinCapabilityDispatchRequest, BuiltinCapabilityId,
-    BuiltinCapabilityManifest, BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor,
-    CapabilityActivationState,
+    build_activation_approval, builtin_tool_requires_approval, BuiltinCapabilityDispatchRequest,
+    BuiltinCapabilityId, BuiltinCapabilityInvocation, BuiltinCapabilityManifest,
+    BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor, CapabilityActivationState,
 };
 use crate::protocol::{
     AgentError, AgentProposedAction, AgentResult, AgentToolApprovalMode, AgentToolCall,
-    AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety, BuiltinMcpToolResourceSummary,
 };
 use crate::tools::context::ToolExecutionContext;
 use crate::tools::tool_set::ToolCapabilityId;
@@ -27,7 +28,6 @@ const BUILTIN_TOOL_MODEL_MAX_DEPTH: usize = 16;
 const BUILTIN_TOOL_MODEL_MAX_OBJECT_FIELDS: usize = 64;
 const BUILTIN_TOOL_MODEL_MAX_ARRAY_ITEMS: usize = 64;
 const BUILTIN_TOOL_MODEL_MAX_STRING_CHARS: usize = 16 * 1024;
-const BUILTIN_TOOL_DISPLAY_REASON_MAX_BYTES: usize = 512;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -268,6 +268,73 @@ impl BuiltinCapabilityAgentTool {
     pub(crate) fn host_input_schema_digest(&self) -> &str {
         &self.descriptor.schema_digest
     }
+
+    fn frozen_invocation(
+        &self,
+        context: &ToolExecutionContext,
+        arguments: Value,
+    ) -> AgentResult<BuiltinCapabilityInvocation> {
+        let grant = self
+            .runtime
+            .live_grant(context.run_id()?, &self.capability_id)?
+            .ok_or_else(|| AgentError::new("当前任务没有有效的内置能力授权。"))?;
+        Ok(BuiltinCapabilityInvocation {
+            run_id: context.run_id()?.to_string(),
+            capability_id: self.capability_id.clone(),
+            managed_mcp_id: self.managed_mcp_id.clone(),
+            package_name: self.package_name.clone(),
+            package_version: self.package_version.clone(),
+            upstream_catalog_digest: self.upstream_catalog_digest.clone(),
+            policy_digest: self.policy_digest.clone(),
+            activation_id: grant.activation_id,
+            manifest_digest: self.manifest_digest.clone(),
+            policy_revision: grant.policy_revision,
+            tool_id: self.descriptor.tool_id.clone(),
+            raw_name: self.descriptor.raw_name.clone(),
+            model_name: self.descriptor.model_name.clone(),
+            upstream_schema_digest: self.descriptor.upstream_schema_digest.clone(),
+            host_overlay_digest: self.descriptor.host_overlay_digest.clone(),
+            host_input_schema_digest: self.descriptor.schema_digest.clone(),
+            call_id: context.tool_call_id()?.to_string(),
+            arguments,
+            builtin_tool_grant: None,
+        })
+    }
+
+    fn sensitive_scope(&self) -> (&'static str, &'static str) {
+        sensitive_tool_scope(&self.descriptor.tool_id)
+    }
+}
+
+fn sensitive_tool_scope(tool_id: &str) -> (&'static str, &'static str) {
+    match tool_id {
+        "browser_drop" | "browser_file_upload" => ("file_upload", "file_upload"),
+        "browser_network_request" => ("network_sensitive_read", "network_sensitive_read"),
+        // Playwright cookie APIs and storage-state operate on the managed browser context, not
+        // solely on the currently visible origin. `approval_origin` remains a TOCTOU anchor for
+        // the active Surface, while the durable resource summary truthfully names the broader
+        // profile scope.
+        "browser_cookie_get" | "browser_cookie_list" => ("cookie_read", "managed_browser_profile"),
+        "browser_cookie_clear" | "browser_cookie_delete" | "browser_cookie_set" => {
+            ("cookie_write", "managed_browser_profile")
+        }
+        "browser_localstorage_get" | "browser_localstorage_list" => {
+            ("local_storage_read", "local_storage_read")
+        }
+        "browser_localstorage_clear"
+        | "browser_localstorage_delete"
+        | "browser_localstorage_set" => ("local_storage_write", "local_storage_write"),
+        "browser_sessionstorage_get" | "browser_sessionstorage_list" => {
+            ("session_storage_read", "session_storage_read")
+        }
+        "browser_sessionstorage_clear"
+        | "browser_sessionstorage_delete"
+        | "browser_sessionstorage_set" => ("session_storage_write", "session_storage_write"),
+        "browser_set_storage_state" => ("storage_state_import", "managed_browser_profile"),
+        "browser_storage_state" => ("storage_state_export", "managed_browser_profile"),
+        "browser_evaluate" => ("page_script_execution", "page_script_execution"),
+        _ => ("sensitive_browser_operation", "sensitive_browser_operation"),
+    }
 }
 
 impl AgentTool for BuiltinCapabilityAgentTool {
@@ -298,7 +365,21 @@ impl AgentTool for BuiltinCapabilityAgentTool {
     }
 
     fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
-        builtin_capability_event_call_projection(call)
+        let mut projected = builtin_capability_private_call_projection(call);
+        projected.reason = Some(
+            if self.descriptor.builtin_approval_mode
+                != crate::builtin_capabilities::BuiltinMcpToolApprovalMode::Never
+            {
+                let (operation_category, _) = self.sensitive_scope();
+                value_free_sensitive_approval_reason(operation_category).to_string()
+            } else {
+                // Even a harmless browser Tool's model-authored reason may repeat a password or form
+                // value without a recognizable label. Typed identity already drives the localized
+                // activity text, so persist only this Host-owned value-free explanation.
+                "The model requests this reviewed managed-browser operation.".to_string()
+            },
+        );
+        projected
     }
 
     fn checkpoint_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
@@ -306,19 +387,87 @@ impl AgentTool for BuiltinCapabilityAgentTool {
     }
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        builtin_capability_persistence_projection(result)
+        builtin_capability_tool_result_persistence_projection(result)
     }
 
     fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        builtin_capability_persistence_projection(result)
+        builtin_capability_tool_result_persistence_projection(result)
     }
 
     fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        builtin_capability_persistence_projection(result)
+        builtin_capability_tool_result_persistence_projection(result)
     }
 
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        builtin_capability_persistence_projection(result)
+        builtin_capability_tool_result_persistence_projection(result)
+    }
+
+    fn proposed_action(
+        &self,
+        _context: &ToolExecutionContext,
+        _call: &AgentToolCall,
+    ) -> AgentResult<AgentProposedAction> {
+        Err(AgentError::new(
+            "敏感内置 MCP Tool 必须通过异步 Host 页面绑定路径创建审批。",
+        ))
+    }
+
+    fn proposed_action_async<'a>(
+        &'a self,
+        context: &'a ToolExecutionContext,
+        call: &'a AgentToolCall,
+    ) -> BoxAgentProposedActionFuture<'a> {
+        Box::pin(async move {
+            validate_builtin_tool_arguments(&call.args)?;
+            if !builtin_tool_requires_approval(&self.descriptor, &call.args) {
+                return Err(AgentError::new("该内置 MCP Tool 调用不需要敏感审批。"));
+            }
+            let claimed_origin = call
+                .args
+                .get("approval_origin")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .ok_or_else(|| AgentError::new("敏感内置 MCP Tool 缺少 approval_origin。"))?;
+            let (operation_category, resource_scope) = self.sensitive_scope();
+            let call_reason = value_free_sensitive_approval_reason(operation_category).to_string();
+            let resource_summary = BuiltinMcpToolResourceSummary {
+                scope: resource_scope.to_string(),
+                display_name: if resource_scope == "managed_browser_profile" {
+                    "Managed browser profile".to_string()
+                } else {
+                    operation_category.replace('_', " ")
+                },
+                file_basenames: Vec::new(),
+                origin: Some(claimed_origin.clone()),
+            };
+            let invocation = self.frozen_invocation(context, call.args.clone())?;
+            let approval = self
+                .runtime
+                .prepare_builtin_mcp_tool_approval_async(
+                    invocation,
+                    call_reason,
+                    operation_category.to_string(),
+                    resource_summary,
+                    claimed_origin,
+                    self.descriptor.builtin_risk_kinds.clone(),
+                    context.cancellation_token(),
+                )
+                .await?;
+            Ok(AgentProposedAction::BuiltinMcpToolApproval {
+                approval: Box::new(approval),
+            })
+        })
+    }
+
+    fn invalidate_proposed_action(&self, action: &AgentProposedAction) -> AgentResult<()> {
+        let AgentProposedAction::BuiltinMcpToolApproval { approval } = action else {
+            return Ok(());
+        };
+        self.runtime.dismiss_builtin_mcp_tool_approval(approval)
+    }
+
+    fn requires_approval_for_call(&self, args: &Value) -> bool {
+        builtin_tool_requires_approval(&self.descriptor, args)
     }
 }
 
@@ -482,51 +631,34 @@ fn builtin_capability_private_call_projection(call: &AgentToolCall) -> AgentTool
     projected
 }
 
-fn builtin_capability_event_call_projection(call: &AgentToolCall) -> AgentToolCall {
-    let mut projected = builtin_capability_private_call_projection(call);
-    projected.reason = call
-        .args
-        .get("call_reason")
-        .and_then(Value::as_str)
-        .and_then(sanitize_builtin_capability_display_reason);
-    projected
+fn value_free_sensitive_approval_reason(operation_category: &str) -> &'static str {
+    match operation_category {
+        "file_upload" => "The model requests use of user-selected files in the managed page.",
+        "network_sensitive_read" => {
+            "The model requests sensitive network details from the managed page."
+        }
+        "cookie_read" => "The model requests reading browser cookies for the managed page.",
+        "cookie_write" => "The model requests changing browser cookies for the managed page.",
+        "local_storage_read" => "The model requests reading local storage for the managed page.",
+        "local_storage_write" => "The model requests changing local storage for the managed page.",
+        "session_storage_read" => {
+            "The model requests reading session storage for the managed page."
+        }
+        "session_storage_write" => {
+            "The model requests changing session storage for the managed page."
+        }
+        "storage_state_import" => "The model requests importing reviewed browser storage state.",
+        "storage_state_export" => "The model requests exporting protected browser storage state.",
+        "page_script_execution" => {
+            "The model requests running a reviewed script in the managed page."
+        }
+        _ => "The model requests a reviewed sensitive managed-browser operation.",
+    }
 }
 
-fn sanitize_builtin_capability_display_reason(value: &str) -> Option<String> {
-    let sanitized = value
-        .chars()
-        .map(|character| {
-            if character.is_control()
-                || matches!(
-                    character,
-                    '\u{00ad}'
-                        | '\u{061c}'
-                        | '\u{200b}'..='\u{200f}'
-                        | '\u{2028}'..='\u{202e}'
-                        | '\u{2060}'
-                        | '\u{2066}'..='\u{2069}'
-                        | '\u{feff}'
-                )
-            {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    let sanitized = sanitized.trim();
-    if sanitized.is_empty() {
-        return None;
-    }
-
-    let mut end = sanitized.len().min(BUILTIN_TOOL_DISPLAY_REASON_MAX_BYTES);
-    while end > 0 && !sanitized.is_char_boundary(end) {
-        end -= 1;
-    }
-    (end > 0).then(|| sanitized[..end].to_string())
-}
-
-fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentToolResult {
+pub fn builtin_capability_tool_result_persistence_projection(
+    result: &AgentToolResult,
+) -> AgentToolResult {
     let details = result.result.as_ref().and_then(Value::as_object);
     let outcome_unknown = details.is_some_and(|details| {
         details.get("errorCode").and_then(Value::as_str) == Some("mcp.tool_outcome_unknown")
@@ -544,10 +676,39 @@ fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentT
             ) || details.get("outcome").and_then(Value::as_str) == Some("cancelled")
                 || details.get("status").and_then(Value::as_str) == Some("cancelled")
         });
+    let rejected = !outcome_unknown
+        && !cancelled
+        && details.is_some_and(|details| {
+            details.get("status").and_then(Value::as_str) == Some("rejected")
+                || details.get("decision").and_then(Value::as_str) == Some("rejected")
+        });
+    let expired = !outcome_unknown
+        && !cancelled
+        && !rejected
+        && details.is_some_and(|details| {
+            details.get("status").and_then(Value::as_str) == Some("expired")
+                || details.get("errorCode").and_then(Value::as_str)
+                    == Some("mcp.tool_approval_expired")
+        });
+    let payload_unavailable = !outcome_unknown
+        && !cancelled
+        && !rejected
+        && !expired
+        && details.is_some_and(|details| {
+            details.get("status").and_then(Value::as_str) == Some("payload_unavailable")
+                || details.get("errorCode").and_then(Value::as_str)
+                    == Some("mcp.approval_payload_unavailable")
+        });
     let status = if outcome_unknown {
         "outcome_unknown"
     } else if cancelled {
         "cancelled"
+    } else if rejected {
+        "rejected"
+    } else if expired {
+        "expired"
+    } else if payload_unavailable {
+        "payload_unavailable"
     } else if result.ok {
         "completed"
     } else {
@@ -559,9 +720,27 @@ fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentT
         "status": status,
         "contentOmitted": true,
     });
-    if outcome_unknown {
-        safe_result["errorCode"] = json!("mcp.tool_outcome_unknown");
+    if outcome_unknown || cancelled || expired || payload_unavailable {
+        safe_result["errorCode"] = json!(if outcome_unknown {
+            "mcp.tool_outcome_unknown"
+        } else if cancelled {
+            "mcp.tool_cancelled_before_dispatch"
+        } else if expired {
+            "mcp.tool_approval_expired"
+        } else {
+            "mcp.approval_payload_unavailable"
+        });
         safe_result["retryable"] = json!(false);
+        safe_result["dispatchCertainty"] = json!(if outcome_unknown {
+            "possibly_dispatched"
+        } else {
+            "definitely_not_dispatched"
+        });
+    }
+    if rejected {
+        safe_result["errorCode"] = json!("mcp.approval_rejected");
+        safe_result["retryable"] = json!(false);
+        safe_result["dispatchCertainty"] = json!("definitely_not_dispatched");
     }
     if let Some(artifacts) = result
         .result
@@ -588,10 +767,10 @@ mod tests {
     use super::*;
     use crate::builtin_capabilities::{
         BuiltinCapabilityDescriptor, BuiltinCapabilityFuture, BuiltinCapabilityInvocation,
-        BuiltinCapabilityPolicy, BuiltinCapabilityProvider, CapabilityActivationId,
-        CapabilityGrant,
+        BuiltinCapabilityPolicy, BuiltinCapabilityProvider, BuiltinMcpToolApprovalMode,
+        BuiltinMcpToolApprovalRequest, CapabilityActivationId, CapabilityGrant,
     };
-    use crate::protocol::{AgentApprovalStatus, AgentToolIdentity};
+    use crate::protocol::{AgentApprovalStatus, AgentToolIdentity, BuiltinMcpToolRiskKind};
     use crate::tools::ToolRegistry;
     use crate::AgentCancellationToken;
     use std::collections::BTreeSet;
@@ -641,6 +820,42 @@ mod tests {
             Ok(())
         }
 
+        fn prepare_builtin_mcp_tool_approval(
+            &self,
+            request: BuiltinMcpToolApprovalRequest,
+        ) -> AgentResult<crate::AgentBuiltinMcpToolApproval> {
+            crate::builtin_capabilities::build_builtin_mcp_tool_approval(
+                &request,
+                crate::builtin_capabilities::unix_timestamp(),
+            )
+        }
+
+        fn prepare_builtin_mcp_tool_target_binding<'a>(
+            &'a self,
+            request: crate::builtin_capabilities::BuiltinMcpToolTargetBindingRequest,
+        ) -> BuiltinCapabilityFuture<
+            'a,
+            crate::builtin_capabilities::PreparedBuiltinMcpToolTargetBinding,
+        > {
+            Box::pin(async move {
+                let origin = request
+                    .invocation
+                    .arguments
+                    .get("approval_origin")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AgentError::new("test approval origin missing"))?;
+                Ok(
+                    crate::builtin_capabilities::PreparedBuiltinMcpToolTargetBinding {
+                        binding_id: Uuid::new_v4().to_string(),
+                        target_binding_digest: format!("sha256:{}", "7".repeat(64)),
+                        origin: origin.to_string(),
+                        created_at: request.created_at,
+                        expires_at: request.expires_at,
+                    },
+                )
+            })
+        }
+
         fn invoke_authorized<'a>(
             &'a self,
             invocation: BuiltinCapabilityInvocation,
@@ -686,6 +901,71 @@ mod tests {
                 revision: 7,
             })),
             grant: Arc::new(Mutex::new(None)),
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            result: Arc::new(Mutex::new(json!({"ok": true}))),
+        };
+        (
+            BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap(),
+            provider,
+        )
+    }
+
+    fn sensitive_harness() -> (BuiltinCapabilityRuntime, TestProvider) {
+        let descriptor = BuiltinCapabilityToolDescriptor::new(
+            "browser_evaluate",
+            "browser_evaluate",
+            "Run a reviewed function in the managed page",
+            json!({
+                "type": "object",
+                "properties": {
+                    "function": {"type": "string"},
+                    "element": {"type": "string"},
+                    "target": {"type": "string"},
+                    "approval_origin": {"type": "string"},
+                    "call_reason": {"type": "string"}
+                },
+                "required": ["function", "approval_origin", "call_reason"],
+                "additionalProperties": false
+            }),
+            AgentToolSafety::RequiresApproval,
+            false,
+        )
+        .unwrap()
+        .with_builtin_approval_policy(
+            BuiltinMcpToolApprovalMode::Always,
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let manifest = BuiltinCapabilityManifest::new(
+            BuiltinCapabilityDescriptor {
+                id: BuiltinCapabilityId::parse("browser.automation").unwrap(),
+                display_name: "Browser automation".to_string(),
+                description: "Control the managed browser".to_string(),
+            },
+            "builtin.browser_automation.mcp",
+            "1",
+            vec![descriptor],
+        )
+        .unwrap();
+        let now = crate::builtin_capabilities::unix_timestamp();
+        let grant = CapabilityGrant {
+            run_id: "run-1".to_string(),
+            capability_id: manifest.descriptor.id.clone(),
+            activation_id: CapabilityActivationId::generate(),
+            manifest_digest: manifest.manifest_digest.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
+            policy_revision: 7,
+            created_at: now,
+            expires_at: now + crate::builtin_capabilities::BUILTIN_CAPABILITY_GRANT_TTL_SECONDS,
+        };
+        let provider = TestProvider {
+            manifest,
+            policy: Arc::new(Mutex::new(BuiltinCapabilityPolicy {
+                user_allowed: true,
+                revision: 7,
+            })),
+            grant: Arc::new(Mutex::new(Some(grant))),
             invocations: Arc::new(Mutex::new(Vec::new())),
             result: Arc::new(Mutex::new(json!({"ok": true}))),
         };
@@ -938,7 +1218,7 @@ mod tests {
             tool: "browser_snapshot".to_string(),
             args: json!({
                 "value": secret,
-                "call_reason": "Read\u{202e} the requested\npage",
+                "call_reason": format!("使用密码 {secret}；Use {secret}"),
             }),
             approval_status: AgentApprovalStatus::Approved,
             reason: Some(secret.to_string()),
@@ -955,15 +1235,9 @@ mod tests {
         assert_eq!(event_call.args, json!({}));
         assert_eq!(
             event_call.reason.as_deref(),
-            Some("Read  the requested page")
+            Some("The model requests this reviewed managed-browser operation.")
         );
         assert!(!serde_json::to_string(&event_call).unwrap().contains(secret));
-        assert!(
-            sanitize_builtin_capability_display_reason(&"界".repeat(512))
-                .unwrap()
-                .len()
-                <= BUILTIN_TOOL_DISPLAY_REASON_MAX_BYTES
-        );
         let raw_result = AgentToolResult {
             exact_archive_file: None,
             call_id: call.id.clone(),
@@ -1096,6 +1370,125 @@ mod tests {
         assert!(
             serde_json::to_vec(&projected.value).unwrap().len()
                 < BUILTIN_TOOL_MODEL_RESULT_MAX_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn sensitive_approval_uses_only_host_owned_value_free_reason_text() {
+        let (runtime, _) = sensitive_harness();
+        let manifest = runtime.manifests()[0].clone();
+        let tool =
+            BuiltinCapabilityAgentTool::new(&manifest, manifest.tools[0].clone(), runtime).unwrap();
+        let canaries = [
+            "UNLABELLED_PASSWORD_CANARY_7Yp9",
+            "COOKIE_VALUE_CANARY",
+            "STORAGE_VALUE_CANARY",
+            "browser-file:123e4567-e89b-42d3-a456-426614174000",
+        ];
+        let call = AgentToolCall {
+            id: "call-1".to_string(),
+            tool: "browser_evaluate".to_string(),
+            args: json!({
+                "function": "() => ({password: 'UNLABELLED_PASSWORD_CANARY_7Yp9', cookie: 'COOKIE_VALUE_CANARY', storage: 'STORAGE_VALUE_CANARY'})",
+                "approval_origin": "https://mail.example.test",
+                "call_reason": "使用密码 UNLABELLED_PASSWORD_CANARY_7Yp9 登录；Use UNLABELLED_PASSWORD_CANARY_7Yp9；读取 COOKIE_VALUE_CANARY、STORAGE_VALUE_CANARY 和 browser-file:123e4567-e89b-42d3-a456-426614174000"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let sync_error = tool.proposed_action(&context(), &call).unwrap_err();
+        assert!(sync_error.to_string().contains("异步 Host 页面绑定"));
+        let tool_context = context();
+        let action = tool
+            .proposed_action_async(&tool_context, &call)
+            .await
+            .unwrap();
+        let AgentProposedAction::BuiltinMcpToolApproval { approval } = action else {
+            panic!("expected a typed sensitive built-in MCP approval");
+        };
+        assert_eq!(
+            approval.call_reason,
+            "The model requests running a reviewed script in the managed page."
+        );
+        let serialized = serde_json::to_string(&approval).unwrap();
+        for canary in canaries {
+            assert!(!serialized.contains(canary));
+        }
+        assert!(!serialized.contains("使用密码"));
+        assert!(!serialized.contains("UNLABELLED_PASSWORD_CANARY_7Yp9"));
+        assert_eq!(
+            tool.event_call_projection(&call).reason.as_deref(),
+            Some("The model requests running a reviewed script in the managed page.")
+        );
+        // The exact raw invocation remains available only to the in-process Provider binding;
+        // persistent/event/checkpoint projections of the original ToolCall stay empty.
+        for projected in [
+            tool.trace_call_projection(&call),
+            tool.checkpoint_call_projection(&call),
+            tool.event_call_projection(&call),
+        ] {
+            let projected = serde_json::to_string(&projected).unwrap();
+            for canary in canaries {
+                assert!(!projected.contains(canary));
+            }
+        }
+
+        for (index, target) in [
+            "f1e2",
+            "frameLocator(\"iframe\").locator(\"[contenteditable]\")",
+            "managed-frame-editor:00000000-0000-4000-8000-000000000000",
+            "#unknown-selector",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let frame_call = AgentToolCall {
+                id: format!("call-frame-{index}"),
+                tool: "browser_evaluate".to_string(),
+                args: json!({
+                    "function": "(element) => element.textContent",
+                    "element": "Embedded editor",
+                    "target": target,
+                    "approval_origin": "https://mail.example.test",
+                    "call_reason": "Read the embedded editor."
+                }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let error = tool
+                .proposed_action_async(&tool_context, &frame_call)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code(),
+                Some("builtin_mcp_tool.sensitive_target_scope_unsupported")
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_and_storage_state_approvals_name_the_global_managed_profile_scope() {
+        for (tool_id, operation) in [
+            ("browser_cookie_get", "cookie_read"),
+            ("browser_cookie_list", "cookie_read"),
+            ("browser_cookie_clear", "cookie_write"),
+            ("browser_cookie_delete", "cookie_write"),
+            ("browser_cookie_set", "cookie_write"),
+            ("browser_set_storage_state", "storage_state_import"),
+            ("browser_storage_state", "storage_state_export"),
+        ] {
+            assert_eq!(
+                sensitive_tool_scope(tool_id),
+                (operation, "managed_browser_profile")
+            );
+        }
+        assert_eq!(
+            sensitive_tool_scope("browser_localstorage_get"),
+            ("local_storage_read", "local_storage_read")
+        );
+        assert_eq!(
+            sensitive_tool_scope("browser_sessionstorage_set"),
+            ("session_storage_write", "session_storage_write")
         );
     }
 }

@@ -1,4 +1,4 @@
-export const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION = 1 as const
+export const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION = 2 as const
 export const MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD =
   'mcp.builtinPlaywright.command' as const
 export const MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD = 'mcp.builtinPlaywright.cancel' as const
@@ -18,11 +18,78 @@ export interface ManagedPlaywrightAuthorizationContext {
   callId: string
   triggerToolName: string
   callReason: string
+  /** Present only after Core has approved one exact sensitive built-in Tool invocation. */
+  builtinToolGrant?: ManagedPlaywrightBuiltinToolGrantContext
 }
+
+export type BuiltinMcpToolRiskKind =
+  | 'file_read'
+  | 'file_write'
+  | 'file_upload'
+  | 'file_download'
+  | 'cookie_read'
+  | 'cookie_write'
+  | 'local_storage_read'
+  | 'local_storage_write'
+  | 'session_storage_read'
+  | 'session_storage_write'
+  | 'storage_state_import'
+  | 'storage_state_export'
+  | 'network_sensitive_read'
+  | 'page_script_execution'
+  | 'unsafe_code_execution'
+
+export interface ManagedPlaywrightBuiltinToolGrantContext {
+  grantId: string
+  approvalId: string
+  argumentsDigest: string
+  resourceScopeDigest: string
+  /** Opaque Main-owned authority. It is process-only and must never enter Renderer state. */
+  targetBindingId: string
+  /** Value-free digest of the exact Surface generation frozen before approval publication. */
+  targetBindingDigest: string
+  origin: string | null
+  riskKinds: BuiltinMcpToolRiskKind[]
+  expiresAtMs: number
+}
+
+export interface ManagedPlaywrightPrepareSensitiveToolInput {
+  bindingRequestId: string
+  runId: string
+  capabilityId: 'browser_automation'
+  activationId: string
+  manifestDigest: string
+  policyRevision: number
+  grantExpiresAtMs: number
+  callId: string
+  toolName: string
+  argumentsDigest: string
+  createdAtMs: number
+  expiresAtMs: number
+}
+
+export type ManagedPlaywrightSensitiveBindingReleaseReason =
+  | 'proposal_failed'
+  | 'rejected'
+  | 'cancelled'
+  | 'expired'
+  | 'run_revoked'
+  | 'capability_revoked'
+  | 'grant_revoked'
+  | 'shutdown'
 
 export type ManagedPlaywrightCommand =
   | { type: 'connect' }
   | { type: 'list_tools'; cursor: string | null }
+  | { type: 'prepare_sensitive_tool'; input: ManagedPlaywrightPrepareSensitiveToolInput }
+  | {
+      type: 'release_sensitive_tool_binding'
+      bindingId: string
+      runId: string
+      activationId: string
+      callId: string
+      reason: ManagedPlaywrightSensitiveBindingReleaseReason
+    }
   | {
       type: 'call_tool'
       name: string
@@ -71,6 +138,15 @@ export type ManagedPlaywrightCompletionOutcome =
   | { type: 'connected'; protocol: unknown }
   | { type: 'tools_listed'; page: unknown }
   | { type: 'tool_called'; result: unknown }
+  | {
+      type: 'sensitive_tool_prepared'
+      bindingId: string
+      targetBindingDigest: string
+      origin: string
+      createdAtMs: number
+      expiresAtMs: number
+    }
+  | { type: 'sensitive_tool_binding_released'; released: boolean }
   | { type: 'closed' }
   | {
       type: 'error'
@@ -219,6 +295,33 @@ const BROWSER_RISK_DECISIONS = [
   'unsupported_host_boundary',
   'outcome_unknown'
 ] as const satisfies readonly BrowserRiskAuthorizationDecision[]
+const BUILTIN_MCP_TOOL_RISK_KINDS = [
+  'file_read',
+  'file_write',
+  'file_upload',
+  'file_download',
+  'cookie_read',
+  'cookie_write',
+  'local_storage_read',
+  'local_storage_write',
+  'session_storage_read',
+  'session_storage_write',
+  'storage_state_import',
+  'storage_state_export',
+  'network_sensitive_read',
+  'page_script_execution',
+  'unsafe_code_execution'
+] as const satisfies readonly BuiltinMcpToolRiskKind[]
+const SENSITIVE_BINDING_RELEASE_REASONS = [
+  'proposal_failed',
+  'rejected',
+  'cancelled',
+  'expired',
+  'run_revoked',
+  'capability_revoked',
+  'grant_revoked',
+  'shutdown'
+] as const satisfies readonly ManagedPlaywrightSensitiveBindingReleaseReason[]
 
 export function parseManagedPlaywrightCommandNotification(
   value: unknown
@@ -363,7 +466,8 @@ export function parseBrowserRiskCancelOutput(value: unknown): BrowserRiskCancelO
 }
 
 function parseAuthorizationContext(value: unknown): ManagedPlaywrightAuthorizationContext {
-  const record = exactRecord(value, [
+  const record = expectRecord(value)
+  exactKeys(record, [
     'runId',
     'capabilityId',
     'activationId',
@@ -373,7 +477,8 @@ function parseAuthorizationContext(value: unknown): ManagedPlaywrightAuthorizati
     'invocationId',
     'callId',
     'triggerToolName',
-    'callReason'
+    'callReason',
+    ...(record.builtinToolGrant === undefined ? [] : ['builtinToolGrant'])
   ])
   if (record.capabilityId !== 'browser_automation') {
     throw new Error('Invalid managed Playwright capability identity')
@@ -382,6 +487,10 @@ function parseAuthorizationContext(value: unknown): ManagedPlaywrightAuthorizati
   if (grantExpiresAtMs % 1_000 !== 0) {
     throw new Error('Invalid managed Playwright grant expiry')
   }
+  const builtinToolGrant =
+    record.builtinToolGrant === undefined
+      ? undefined
+      : parseBuiltinToolGrant(record.builtinToolGrant, grantExpiresAtMs)
   return {
     runId: expectSafeString(record.runId, 1, 256),
     capabilityId: 'browser_automation',
@@ -392,8 +501,73 @@ function parseAuthorizationContext(value: unknown): ManagedPlaywrightAuthorizati
     invocationId: expectMatchingString(record.invocationId, REQUEST_ID),
     callId: expectSafeString(record.callId, 1, 256),
     triggerToolName: expectMatchingString(record.triggerToolName, BROWSER_TOOL_NAME),
-    callReason: expectSafeString(record.callReason, 1, 512)
+    callReason: expectSafeString(record.callReason, 1, 512),
+    ...(builtinToolGrant ? { builtinToolGrant } : {})
   }
+}
+
+function parseBuiltinToolGrant(
+  value: unknown,
+  capabilityGrantExpiresAtMs: number
+): ManagedPlaywrightBuiltinToolGrantContext {
+  const record = exactRecord(value, [
+    'grantId',
+    'approvalId',
+    'argumentsDigest',
+    'resourceScopeDigest',
+    'targetBindingId',
+    'targetBindingDigest',
+    'origin',
+    'riskKinds',
+    'expiresAtMs'
+  ])
+  const expiresAtMs = expectSafeInteger(record.expiresAtMs, 1, capabilityGrantExpiresAtMs)
+  const origin = record.origin === null ? null : expectHttpOrigin(record.origin)
+  const riskKinds = expectUniqueEnumArray(record.riskKinds, BUILTIN_MCP_TOOL_RISK_KINDS)
+  if (riskKinds.length === 0) throw new Error('Invalid managed Playwright sensitive grant')
+  if (
+    riskKinds.some(
+      (risk, index) =>
+        index > 0 &&
+        BUILTIN_MCP_TOOL_RISK_KINDS.indexOf(riskKinds[index - 1]) >=
+          BUILTIN_MCP_TOOL_RISK_KINDS.indexOf(risk)
+    )
+  ) {
+    throw new Error('Invalid managed Playwright sensitive grant')
+  }
+  return {
+    grantId: expectMatchingString(record.grantId, REQUEST_ID),
+    approvalId: expectMatchingString(record.approvalId, REQUEST_ID),
+    argumentsDigest: expectMatchingString(record.argumentsDigest, SHA256_DIGEST),
+    resourceScopeDigest: expectMatchingString(record.resourceScopeDigest, SHA256_DIGEST),
+    targetBindingId: expectMatchingString(record.targetBindingId, REQUEST_ID),
+    targetBindingDigest: expectMatchingString(record.targetBindingDigest, SHA256_DIGEST),
+    origin,
+    riskKinds,
+    expiresAtMs
+  }
+}
+
+function expectHttpOrigin(value: unknown): string {
+  const origin = expectSafeString(value, 1, 2_048)
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    throw new Error('Invalid managed Playwright approval origin')
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.origin !== origin ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== ''
+  ) {
+    throw new Error('Invalid managed Playwright approval origin')
+  }
+  return origin
 }
 
 function parseBrowserRiskDestination(value: unknown): BrowserRiskDestinationInput {
@@ -457,6 +631,21 @@ function parseCommand(value: unknown): ManagedPlaywrightCommand {
       }
       return { type, cursor: base.cursor }
     }
+    case 'prepare_sensitive_tool': {
+      exactKeys(base, ['type', 'input'])
+      return { type, input: parsePrepareSensitiveToolInput(base.input) }
+    }
+    case 'release_sensitive_tool_binding': {
+      exactKeys(base, ['type', 'bindingId', 'runId', 'activationId', 'callId', 'reason'])
+      return {
+        type,
+        bindingId: expectMatchingString(base.bindingId, REQUEST_ID),
+        runId: expectSafeString(base.runId, 1, 256),
+        activationId: expectMatchingString(base.activationId, REQUEST_ID),
+        callId: expectSafeString(base.callId, 1, 256),
+        reason: expectEnum(base.reason, SENSITIVE_BINDING_RELEASE_REASONS)
+      }
+    }
     case 'call_tool': {
       exactKeys(base, ['type', 'name', 'arguments', 'timeoutMs', 'authorizationContext'])
       const name = expectMatchingString(base.name, TOOL_NAME)
@@ -480,6 +669,52 @@ function parseCommand(value: unknown): ManagedPlaywrightCommand {
   }
 }
 
+function parsePrepareSensitiveToolInput(
+  value: unknown
+): ManagedPlaywrightPrepareSensitiveToolInput {
+  const record = exactRecord(value, [
+    'bindingRequestId',
+    'runId',
+    'capabilityId',
+    'activationId',
+    'manifestDigest',
+    'policyRevision',
+    'grantExpiresAtMs',
+    'callId',
+    'toolName',
+    'argumentsDigest',
+    'createdAtMs',
+    'expiresAtMs'
+  ])
+  if (record.capabilityId !== 'browser_automation') {
+    throw new Error('Invalid managed Playwright capability identity')
+  }
+  const createdAtMs = expectSafeInteger(record.createdAtMs, 1, Number.MAX_SAFE_INTEGER)
+  const grantExpiresAtMs = expectSafeInteger(
+    record.grantExpiresAtMs,
+    createdAtMs + 1,
+    Number.MAX_SAFE_INTEGER
+  )
+  const expiresAtMs = expectSafeInteger(record.expiresAtMs, createdAtMs + 1, grantExpiresAtMs)
+  if (expiresAtMs - createdAtMs > 15 * 60 * 1_000) {
+    throw new Error('Invalid managed Playwright sensitive binding expiry')
+  }
+  return {
+    bindingRequestId: expectMatchingString(record.bindingRequestId, REQUEST_ID),
+    runId: expectSafeString(record.runId, 1, 256),
+    capabilityId: 'browser_automation',
+    activationId: expectMatchingString(record.activationId, REQUEST_ID),
+    manifestDigest: expectMatchingString(record.manifestDigest, SHA256_DIGEST),
+    policyRevision: expectSafeInteger(record.policyRevision, 1, Number.MAX_SAFE_INTEGER),
+    grantExpiresAtMs,
+    callId: expectSafeString(record.callId, 1, 256),
+    toolName: expectMatchingString(record.toolName, BROWSER_TOOL_NAME),
+    argumentsDigest: expectMatchingString(record.argumentsDigest, SHA256_DIGEST),
+    createdAtMs,
+    expiresAtMs
+  }
+}
+
 function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutcome {
   const base = expectRecord(value)
   switch (base.type) {
@@ -492,6 +727,37 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
     case 'tool_called':
       exactKeys(base, ['type', 'result'])
       return { type: 'tool_called', result: base.result }
+    case 'sensitive_tool_prepared': {
+      exactKeys(base, [
+        'type',
+        'bindingId',
+        'targetBindingDigest',
+        'origin',
+        'createdAtMs',
+        'expiresAtMs'
+      ])
+      const createdAtMs = expectSafeInteger(base.createdAtMs, 1, Number.MAX_SAFE_INTEGER)
+      const expiresAtMs = expectSafeInteger(
+        base.expiresAtMs,
+        createdAtMs + 1,
+        Number.MAX_SAFE_INTEGER
+      )
+      return {
+        type: 'sensitive_tool_prepared',
+        bindingId: expectMatchingString(base.bindingId, REQUEST_ID),
+        targetBindingDigest: expectMatchingString(base.targetBindingDigest, SHA256_DIGEST),
+        origin: expectHttpOrigin(base.origin),
+        createdAtMs,
+        expiresAtMs
+      }
+    }
+    case 'sensitive_tool_binding_released': {
+      exactKeys(base, ['type', 'released'])
+      if (typeof base.released !== 'boolean') {
+        throw new Error('Invalid managed Playwright sensitive binding release')
+      }
+      return { type: 'sensitive_tool_binding_released', released: base.released }
+    }
     case 'closed':
       exactKeys(base, ['type'])
       return { type: 'closed' }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { ManagedPlaywrightBuiltinToolGrantContext } from '@mycopilot/protocol'
 
 import {
   BrowserNetworkPolicy,
@@ -29,6 +30,7 @@ export interface BrowserRiskAuthorizationContext {
   callId: string
   triggerToolName: string
   callReason: string
+  builtinToolGrant?: ManagedPlaywrightBuiltinToolGrantContext
 }
 
 export interface BrowserRiskAuthorizationRequest {

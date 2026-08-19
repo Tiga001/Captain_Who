@@ -5,6 +5,7 @@ import { formatTranslation, type Translate } from '../../../config/translationFo
 import { ApprovalDialogShell } from './ApprovalDialogShell'
 import { BrowserRiskApprovalCard } from './BrowserRiskApprovalCard'
 import { BuiltinCapabilityActivationApprovalCard } from './BuiltinCapabilityActivationApprovalCard'
+import { BuiltinMcpToolApprovalCard } from './BuiltinMcpToolApprovalCard'
 import { McpToolApprovalCard } from './McpToolApprovalCard'
 import { SkillInstallationApprovalCard } from './SkillInstallationApprovalCard'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
@@ -15,6 +16,7 @@ type StandardAgentProposedAction = Exclude<
     type:
       | 'mcp_tool_call'
       | 'builtin_capability_activation'
+      | 'builtin_mcp_tool_approval'
       | 'browser_risk_approval'
       | 'skill_installation'
   }
@@ -255,6 +257,18 @@ export function AgentApprovalDialog({
   if (target.action.type === 'browser_risk_approval') {
     return (
       <BrowserRiskApprovalCard
+        action={target.action}
+        messageId={target.messageId}
+        onApprove={onApprove}
+        onCancel={onCancel}
+        onReject={onReject}
+      />
+    )
+  }
+
+  if (target.action.type === 'builtin_mcp_tool_approval') {
+    return (
+      <BuiltinMcpToolApprovalCard
         action={target.action}
         messageId={target.messageId}
         onApprove={onApprove}

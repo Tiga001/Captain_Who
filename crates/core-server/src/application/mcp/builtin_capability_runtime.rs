@@ -9,24 +9,50 @@ use super::playwright_manifest::{
     load_playwright_browser_manifest, BROWSER_AUTOMATION_CAPABILITY_ID,
 };
 use mycopilot_core::{
-    build_browser_risk_approval, validate_browser_risk_approval_shape, AgentApprovalStatus,
-    AgentBrowserRiskApproval, AgentBuiltinCapabilityActivationApproval, AgentCancellationToken,
-    AgentError, AgentResult, BrowserRiskAuthorizationRequest, BrowserRiskGrant,
-    BuiltinCapabilityFuture, BuiltinCapabilityId, BuiltinCapabilityInvocation,
-    BuiltinCapabilityManifest, BuiltinCapabilityPolicy, BuiltinCapabilityProvider,
-    BuiltinCapabilityRuntime, CapabilityActivationId, CapabilityGrant, McpOmittedContentKind,
-    McpRuntimeProjectionLimits, McpToolContentBlock, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
+    build_browser_risk_approval, build_builtin_mcp_tool_approval,
+    validate_browser_risk_approval_shape, validate_builtin_mcp_tool_approval_shape,
+    AgentApprovalStatus, AgentBrowserRiskApproval, AgentBuiltinCapabilityActivationApproval,
+    AgentBuiltinMcpToolApproval, AgentCancellationToken, AgentError, AgentResult,
+    BrowserRiskAuthorizationRequest, BrowserRiskGrant, BuiltinCapabilityFuture,
+    BuiltinCapabilityId, BuiltinCapabilityInvocation, BuiltinCapabilityManifest,
+    BuiltinCapabilityPolicy, BuiltinCapabilityProvider, BuiltinCapabilityRuntime,
+    BuiltinMcpToolApprovalRequest, BuiltinMcpToolGrant, BuiltinMcpToolTargetBindingReleaseReason,
+    BuiltinMcpToolTargetBindingRequest, CapabilityActivationId, CapabilityGrant,
+    McpOmittedContentKind, McpRuntimeProjectionLimits, McpToolContentBlock,
+    PreparedBuiltinMcpToolTargetBinding, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
     BUILTIN_CAPABILITY_GRANT_TTL_SECONDS,
 };
 use mycopilot_mcp_client::{McpInvocationId, McpToolResult};
-use mycopilot_protocol_rs::ManagedPlaywrightAuthorizationContext;
+use mycopilot_protocol_rs::{
+    BuiltinMcpToolRiskKindDto, ManagedPlaywrightAuthorizationContext,
+    ManagedPlaywrightBuiltinToolGrantContext, ManagedPlaywrightCompletionOutcome,
+    ManagedPlaywrightPrepareSensitiveToolInput, ManagedPlaywrightSensitiveBindingReleaseReason,
+};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::{Uuid, Version};
 
 const MAX_PENDING_BROWSER_RISK_APPROVALS: usize = 64;
+const MAX_PENDING_BUILTIN_TOOL_APPROVALS: usize = 128;
+const MAX_DENIED_BUILTIN_TOOL_SCOPES: usize = 256;
+
+fn builtin_mcp_cancelled_before_dispatch_error() -> AgentError {
+    AgentError::cancelled_structured(
+        "mcp.tool_cancelled_before_dispatch",
+        "The approved built-in MCP Tool call was cancelled before Host dispatch.",
+        json!({
+            "schemaVersion": 1,
+            "type": "builtin_mcp_tool_approval",
+            "status": "cancelled",
+            "errorCode": "mcp.tool_cancelled_before_dispatch",
+            "retryable": false,
+            "dispatchCertainty": "definitely_not_dispatched",
+            "contentOmitted": true,
+        }),
+    )
+}
 
 #[derive(Default)]
 struct ProcessGrantState {
@@ -36,6 +62,11 @@ struct ProcessGrantState {
     browser_risk_grants: HashMap<String, BrowserRiskGrant>,
     pending_browser_risks: HashMap<String, PendingBrowserRiskBinding>,
     consumed_browser_risk_action_ids: HashMap<String, u64>,
+    pending_builtin_tools: HashMap<String, PendingBuiltinToolBinding>,
+    approved_builtin_tools: HashMap<String, ApprovedBuiltinToolBinding>,
+    consumed_builtin_tool_action_ids: HashMap<String, u64>,
+    denied_builtin_tool_scopes: HashSet<BuiltinToolDenialScope>,
+    deny_all_builtin_tool_runs: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -43,6 +74,51 @@ struct PendingBrowserRiskBinding {
     approval: AgentBrowserRiskApproval,
     resolution_fingerprint: String,
     target_fingerprint: String,
+}
+
+#[derive(Clone)]
+struct PendingBuiltinToolBinding {
+    approval: AgentBuiltinMcpToolApproval,
+    invocation: BuiltinCapabilityInvocation,
+    capability_grant: CapabilityGrant,
+    denial_scope: BuiltinToolDenialScope,
+    target_binding: PreparedBuiltinMcpToolTargetBinding,
+}
+
+#[derive(Clone)]
+struct ApprovedBuiltinToolBinding {
+    approval: AgentBuiltinMcpToolApproval,
+    invocation: BuiltinCapabilityInvocation,
+    capability_grant: CapabilityGrant,
+    grant: BuiltinMcpToolGrant,
+    target_binding: PreparedBuiltinMcpToolTargetBinding,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BuiltinToolDenialScope {
+    run_id: String,
+    capability_activation_id: String,
+    tool_id: String,
+    arguments_digest: String,
+    origin: Option<String>,
+    operation_category: String,
+    resource_scope: String,
+    risk_kinds: Vec<mycopilot_core::BuiltinMcpToolRiskKind>,
+}
+
+impl BuiltinToolDenialScope {
+    fn from_approval(approval: &AgentBuiltinMcpToolApproval) -> Self {
+        Self {
+            run_id: approval.identity.run_id.clone(),
+            capability_activation_id: approval.identity.capability_activation_id.clone(),
+            tool_id: approval.identity.tool_id.clone(),
+            arguments_digest: approval.identity.arguments_digest.clone(),
+            origin: approval.identity.origin.clone(),
+            operation_category: approval.operation_category.clone(),
+            resource_scope: approval.resource_summary.scope.clone(),
+            risk_kinds: approval.risk_kinds.clone(),
+        }
+    }
 }
 
 impl ProcessGrantState {
@@ -57,6 +133,12 @@ impl ProcessGrantState {
         self.pending_browser_risks
             .retain(|_, binding| binding.approval.expires_at > now);
         self.consumed_browser_risk_action_ids
+            .retain(|_, expires_at| *expires_at > now);
+        self.pending_builtin_tools
+            .retain(|_, binding| binding.approval.expires_at > now);
+        self.approved_builtin_tools
+            .retain(|_, binding| binding.grant.expires_at > now);
+        self.consumed_builtin_tool_action_ids
             .retain(|_, expires_at| *expires_at > now);
     }
 }
@@ -75,6 +157,8 @@ pub(crate) struct HostBuiltinCapabilityProvider {
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     #[cfg(test)]
     approval_before_start_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    sensitive_before_grant_consume_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for HostBuiltinCapabilityProvider {
@@ -136,6 +220,8 @@ impl HostBuiltinCapabilityProvider {
             clock,
             #[cfg(test)]
             approval_before_start_hook: Mutex::new(None),
+            #[cfg(test)]
+            sensitive_before_grant_consume_hook: Mutex::new(None),
         })
     }
 
@@ -381,6 +467,33 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
     ) -> AgentResult<()> {
         let _transition = self.lock_activation_transition()?;
         let mut state = self.lock_grants()?;
+        let released = state
+            .pending_builtin_tools
+            .values()
+            .filter(|binding| {
+                binding.approval.identity.capability_activation_id == activation_id.as_str()
+            })
+            .map(|binding| {
+                (
+                    binding.target_binding.clone(),
+                    binding.approval.identity.run_id.clone(),
+                    binding.approval.identity.call_id.clone(),
+                )
+            })
+            .chain(
+                state
+                    .approved_builtin_tools
+                    .values()
+                    .filter(|binding| binding.grant.capability_activation_id == *activation_id)
+                    .map(|binding| {
+                        (
+                            binding.target_binding.clone(),
+                            binding.grant.run_id.clone(),
+                            binding.grant.call_id.clone(),
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
         state
             .grants
             .retain(|_, grant| grant.activation_id != *activation_id);
@@ -390,10 +503,28 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         state.pending_browser_risks.retain(|_, binding| {
             binding.approval.capability_activation_id != activation_id.as_str()
         });
+        state.pending_builtin_tools.retain(|_, binding| {
+            binding.approval.identity.capability_activation_id != activation_id.as_str()
+        });
+        state
+            .approved_builtin_tools
+            .retain(|_, binding| binding.grant.capability_activation_id != *activation_id);
+        state
+            .denied_builtin_tool_scopes
+            .retain(|scope| scope.capability_activation_id != activation_id.as_str());
         state.consumed_activation_ids.remove(activation_id.as_str());
         state.consumed_action_ids.remove(action_id);
         let should_stop = state.grants.is_empty();
         drop(state);
+        for (binding, run_id, call_id) in released {
+            let _ = self.release_builtin_mcp_tool_target_binding(
+                &binding,
+                &run_id,
+                activation_id,
+                &call_id,
+                BuiltinMcpToolTargetBindingReleaseReason::CapabilityRevoked,
+            );
+        }
         if should_stop {
             self.stop_managed_runtime()?;
         }
@@ -406,6 +537,33 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         let now = (self.clock)();
         let mut state = self.lock_grants()?;
         state.prune_expired(now);
+        let released = state
+            .pending_builtin_tools
+            .values()
+            .filter(|binding| binding.approval.identity.capability_id == capability_id.as_str())
+            .map(|binding| {
+                (
+                    binding.target_binding.clone(),
+                    binding.approval.identity.run_id.clone(),
+                    binding.approval.identity.capability_activation_id.clone(),
+                    binding.approval.identity.call_id.clone(),
+                )
+            })
+            .chain(
+                state
+                    .approved_builtin_tools
+                    .values()
+                    .filter(|binding| binding.grant.capability_id == *capability_id)
+                    .map(|binding| {
+                        (
+                            binding.target_binding.clone(),
+                            binding.grant.run_id.clone(),
+                            binding.grant.capability_activation_id.as_str().to_string(),
+                            binding.grant.call_id.clone(),
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
         state
             .grants
             .retain(|(_, stored_capability_id), _| stored_capability_id != capability_id.as_str());
@@ -415,7 +573,24 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         state
             .pending_browser_risks
             .retain(|_, binding| binding.approval.capability_id != capability_id.as_str());
+        state
+            .pending_builtin_tools
+            .retain(|_, binding| binding.approval.identity.capability_id != capability_id.as_str());
+        state
+            .approved_builtin_tools
+            .retain(|_, binding| binding.grant.capability_id != *capability_id);
         drop(state);
+        for (binding, run_id, activation_id, call_id) in released {
+            if let Ok(activation_id) = CapabilityActivationId::parse(activation_id) {
+                let _ = self.release_builtin_mcp_tool_target_binding(
+                    &binding,
+                    &run_id,
+                    &activation_id,
+                    &call_id,
+                    BuiltinMcpToolTargetBindingReleaseReason::CapabilityRevoked,
+                );
+            }
+        }
         self.stop_managed_runtime()?;
         Ok(())
     }
@@ -428,6 +603,31 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         let now = (self.clock)();
         let mut state = self.lock_grants()?;
         state.prune_expired(now);
+        let released = state
+            .pending_builtin_tools
+            .values()
+            .filter(|binding| binding.approval.identity.run_id == run_id)
+            .map(|binding| {
+                (
+                    binding.target_binding.clone(),
+                    binding.approval.identity.capability_activation_id.clone(),
+                    binding.approval.identity.call_id.clone(),
+                )
+            })
+            .chain(
+                state
+                    .approved_builtin_tools
+                    .values()
+                    .filter(|binding| binding.grant.run_id == run_id)
+                    .map(|binding| {
+                        (
+                            binding.target_binding.clone(),
+                            binding.grant.capability_activation_id.as_str().to_string(),
+                            binding.grant.call_id.clone(),
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
         state
             .grants
             .retain(|(stored_run_id, _), _| stored_run_id != run_id);
@@ -437,14 +637,621 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         state
             .pending_browser_risks
             .retain(|_, binding| binding.approval.run_id != run_id);
+        state
+            .pending_builtin_tools
+            .retain(|_, binding| binding.approval.identity.run_id != run_id);
+        state
+            .approved_builtin_tools
+            .retain(|_, binding| binding.grant.run_id != run_id);
+        state
+            .denied_builtin_tool_scopes
+            .retain(|scope| scope.run_id != run_id);
+        state.deny_all_builtin_tool_runs.remove(run_id);
         let should_stop = state.grants.is_empty();
         drop(state);
+        for (binding, activation_id, call_id) in released {
+            if let Ok(activation_id) = CapabilityActivationId::parse(activation_id) {
+                let _ = self.release_builtin_mcp_tool_target_binding(
+                    &binding,
+                    run_id,
+                    &activation_id,
+                    &call_id,
+                    BuiltinMcpToolTargetBindingReleaseReason::RunRevoked,
+                );
+            }
+        }
         if should_stop {
             // This stops/detaches managed automation only. BrowserSurfaceManager deliberately
             // keeps the user's visible guest page alive for manual browsing.
             self.stop_managed_runtime()?;
         }
         Ok(())
+    }
+
+    fn prepare_builtin_mcp_tool_target_binding<'a>(
+        &'a self,
+        request: BuiltinMcpToolTargetBindingRequest,
+    ) -> BuiltinCapabilityFuture<'a, PreparedBuiltinMcpToolTargetBinding> {
+        Box::pin(async move {
+            request.cancellation.check()?;
+            mycopilot_core::validate_builtin_sensitive_target_scope(&request.invocation)?;
+            if request.invocation.builtin_tool_grant.is_some()
+                || request.arguments_digest
+                    != mycopilot_core::builtin_mcp_tool_arguments_digest(
+                        &request.invocation.arguments,
+                    )?
+                || request.created_at >= request.expires_at
+                || request.expires_at > request.capability_grant.expires_at
+            {
+                return Err(AgentError::new(
+                    "内置 MCP Tool 页面绑定请求 identity 无效。",
+                ));
+            }
+            let manifest = self.exact_manifest_for(&request.invocation.capability_id)?;
+            let live = self
+                .live_grant(
+                    &request.invocation.run_id,
+                    &request.invocation.capability_id,
+                )?
+                .ok_or_else(|| AgentError::new("内置 MCP Tool capability grant 已失效。"))?;
+            if live != request.capability_grant
+                || request.invocation.activation_id != live.activation_id
+                || request.invocation.managed_mcp_id != manifest.managed_mcp_id
+                || request.invocation.package_name != manifest.provider_contract.package_name
+                || request.invocation.package_version != manifest.provider_contract.package_version
+                || request.invocation.upstream_catalog_digest
+                    != manifest.provider_contract.upstream_catalog_digest
+                || request.invocation.policy_digest != manifest.provider_contract.policy_digest
+                || request.invocation.manifest_digest != manifest.manifest_digest
+                || !manifest.tools.iter().any(|tool| {
+                    tool.tool_id == request.invocation.tool_id
+                        && tool.raw_name == request.invocation.raw_name
+                        && mycopilot_core::builtin_tool_requires_approval(
+                            tool,
+                            &request.invocation.arguments,
+                        )
+                })
+            {
+                return Err(AgentError::new(
+                    "内置 MCP Tool 页面绑定与当前 manifest/grant 不一致。",
+                ));
+            }
+            let runtime = self
+                .managed_runtime()?
+                .ok_or_else(|| AgentError::new("内置浏览器 runtime 尚未注册。"))?;
+            let bridge = runtime.bridge();
+            let release_run_id = request.invocation.run_id.clone();
+            let release_activation_id = request.invocation.activation_id.as_str().to_string();
+            let release_call_id = request.invocation.call_id.clone();
+            let prepare =
+                bridge.prepare_sensitive_tool(ManagedPlaywrightPrepareSensitiveToolInput {
+                    binding_request_id: request.binding_request_id,
+                    run_id: request.invocation.run_id,
+                    capability_id: request.invocation.capability_id.as_str().to_string(),
+                    activation_id: request.invocation.activation_id.as_str().to_string(),
+                    manifest_digest: request.invocation.manifest_digest,
+                    policy_revision: request.invocation.policy_revision,
+                    grant_expires_at_ms: request.capability_grant.expires_at.saturating_mul(1_000),
+                    call_id: request.invocation.call_id,
+                    tool_name: request.invocation.tool_id,
+                    arguments_digest: request.arguments_digest,
+                    created_at_ms: request.created_at.saturating_mul(1_000),
+                    expires_at_ms: request.expires_at.saturating_mul(1_000),
+                });
+            tokio::pin!(prepare);
+            let outcome = tokio::select! {
+                biased;
+                _ = request.cancellation.cancelled() => {
+                    // Drain the bounded prepare request. Main may already have created and
+                    // successfully completed a binding by the time cancellation wins this select;
+                    // discarding that opaque binding id would leak proposal authority until TTL.
+                    if let Ok(ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
+                        binding_id,
+                        ..
+                    }) = prepare.await {
+                        let _ = bridge.release_sensitive_tool_binding_now(
+                            binding_id,
+                            release_run_id,
+                            release_activation_id,
+                            release_call_id,
+                            ManagedPlaywrightSensitiveBindingReleaseReason::Cancelled,
+                        );
+                    }
+                    return Err(builtin_mcp_cancelled_before_dispatch_error());
+                }
+                result = &mut prepare => result,
+            }
+            .map_err(|_| AgentError::new("Main 无法冻结敏感浏览器页面 identity。"))?;
+            let ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
+                binding_id,
+                target_binding_digest,
+                origin,
+                created_at_ms,
+                expires_at_ms,
+            } = outcome
+            else {
+                return Err(AgentError::new("Main 返回了无效的敏感页面绑定结果。"));
+            };
+            if created_at_ms != request.created_at.saturating_mul(1_000)
+                || expires_at_ms != request.expires_at.saturating_mul(1_000)
+            {
+                let _ = bridge.release_sensitive_tool_binding_now(
+                    binding_id,
+                    release_run_id,
+                    release_activation_id,
+                    release_call_id,
+                    ManagedPlaywrightSensitiveBindingReleaseReason::ProposalFailed,
+                );
+                return Err(AgentError::new("Main 返回的敏感页面绑定时间已漂移。"));
+            }
+            Ok(PreparedBuiltinMcpToolTargetBinding {
+                binding_id,
+                target_binding_digest,
+                origin,
+                created_at: request.created_at,
+                expires_at: request.expires_at,
+            })
+        })
+    }
+
+    fn release_builtin_mcp_tool_target_binding(
+        &self,
+        binding: &PreparedBuiltinMcpToolTargetBinding,
+        run_id: &str,
+        activation_id: &CapabilityActivationId,
+        call_id: &str,
+        reason: BuiltinMcpToolTargetBindingReleaseReason,
+    ) -> AgentResult<()> {
+        let Some(runtime) = self.managed_runtime()? else {
+            return Ok(());
+        };
+        runtime
+            .bridge()
+            .release_sensitive_tool_binding_now(
+                binding.binding_id.clone(),
+                run_id.to_string(),
+                activation_id.as_str().to_string(),
+                call_id.to_string(),
+                map_target_binding_release_reason(reason),
+            )
+            .map_err(|_| AgentError::new("Main 敏感页面绑定清理消息无法发送。"))
+    }
+
+    fn prepare_builtin_mcp_tool_approval(
+        &self,
+        request: BuiltinMcpToolApprovalRequest,
+    ) -> AgentResult<AgentBuiltinMcpToolApproval> {
+        let cleanup_binding = request.target_binding.clone();
+        let cleanup_run_id = request.invocation.run_id.clone();
+        let cleanup_activation_id = request.invocation.activation_id.clone();
+        let cleanup_call_id = request.invocation.call_id.clone();
+        let result = (|| {
+            request.validate()?;
+            mycopilot_core::validate_builtin_sensitive_target_scope(&request.invocation)?;
+            let target_binding = request
+                .target_binding
+                .clone()
+                .ok_or_else(|| AgentError::new("敏感内置 MCP Tool 缺少 Main 页面绑定。"))?;
+            let now = (self.clock)();
+            let manifest = self.exact_manifest_for(&request.invocation.capability_id)?;
+            let live = self
+                .live_grant(
+                    &request.invocation.run_id,
+                    &request.invocation.capability_id,
+                )?
+                .ok_or_else(|| AgentError::new("内置 MCP Tool capability grant 已失效。"))?;
+            let reviewed_tool = manifest.tools.iter().find(|tool| {
+                tool.tool_id == request.invocation.tool_id
+                    && tool.raw_name == request.invocation.raw_name
+                    && tool.model_name == request.invocation.model_name
+                    && tool.upstream_schema_digest == request.invocation.upstream_schema_digest
+                    && tool.host_overlay_digest == request.invocation.host_overlay_digest
+                    && tool.schema_digest == request.invocation.host_input_schema_digest
+            });
+            let mut requested_risks = request.risk_kinds.clone();
+            requested_risks.sort_unstable();
+            let reviewed_risk_match = reviewed_tool.is_some_and(|tool| {
+                let mut reviewed_risks = tool.builtin_risk_kinds.clone();
+                reviewed_risks.sort_unstable();
+                tool.builtin_approval_mode != mycopilot_core::BuiltinMcpToolApprovalMode::Never
+                    && mycopilot_core::builtin_tool_requires_approval(
+                        tool,
+                        &request.invocation.arguments,
+                    )
+                    && reviewed_risks == requested_risks
+            });
+            if live != request.capability_grant
+                || request.invocation.activation_id != live.activation_id
+                || request.invocation.managed_mcp_id != manifest.managed_mcp_id
+                || request.invocation.package_name != manifest.provider_contract.package_name
+                || request.invocation.package_version != manifest.provider_contract.package_version
+                || request.invocation.upstream_catalog_digest
+                    != manifest.provider_contract.upstream_catalog_digest
+                || request.invocation.policy_digest != manifest.provider_contract.policy_digest
+                || request.invocation.manifest_digest != manifest.manifest_digest
+                || !reviewed_risk_match
+            {
+                return Err(AgentError::new(
+                    "内置 MCP Tool 审批请求与当前 manifest/grant/reviewed risk policy 不一致。",
+                ));
+            }
+            let approval = build_builtin_mcp_tool_approval(&request, now)?;
+            let denial_scope = BuiltinToolDenialScope::from_approval(&approval);
+            let mut state = self.lock_grants()?;
+            state.prune_expired(now);
+            if state
+                .grants
+                .get(&(live.run_id.clone(), live.capability_id.as_str().to_string()))
+                != Some(&live)
+            {
+                return Err(AgentError::new(
+                    "内置 MCP Tool capability grant 在审批创建前已撤销。",
+                ));
+            }
+            if state
+                .deny_all_builtin_tool_runs
+                .contains(&approval.identity.run_id)
+                || state.denied_builtin_tool_scopes.contains(&denial_scope)
+            {
+                return Err(AgentError::structured(
+                    "builtin_mcp_tool.previously_rejected",
+                    "The user already rejected this exact sensitive browser request. Do not retry it unless the request changes.",
+                    json!({
+                        "type": "builtin_mcp_tool_approval",
+                        "status": "rejected",
+                        "retryable": false,
+                        "dispatchCertainty": "definitely_not_dispatched",
+                    }),
+                ));
+            }
+            if state
+                .pending_builtin_tools
+                .values()
+                .any(|binding| binding.denial_scope == denial_scope)
+            {
+                return Err(AgentError::structured(
+                    "builtin_mcp_tool.approval_already_pending",
+                    "The same sensitive built-in Tool request already has a pending approval.",
+                    json!({
+                        "type": "builtin_mcp_tool_approval",
+                        "status": "pending",
+                        "retryable": false,
+                        "dispatchCertainty": "definitely_not_dispatched",
+                    }),
+                ));
+            }
+            if state.pending_builtin_tools.len() >= MAX_PENDING_BUILTIN_TOOL_APPROVALS {
+                return Err(AgentError::structured(
+                    "builtin_mcp_tool.approval_busy",
+                    "Sensitive built-in Tool approval capacity is exhausted.",
+                    json!({"retryable": false, "dispatchCertainty": "definitely_not_dispatched"}),
+                ));
+            }
+            state.pending_builtin_tools.insert(
+                approval.identity.approval_id.clone(),
+                PendingBuiltinToolBinding {
+                    approval: approval.clone(),
+                    invocation: request.invocation,
+                    capability_grant: live,
+                    denial_scope,
+                    target_binding,
+                },
+            );
+            Ok(approval)
+        })();
+        if result.is_err() {
+            if let Some(binding) = cleanup_binding {
+                let _ = self.release_builtin_mcp_tool_target_binding(
+                    &binding,
+                    &cleanup_run_id,
+                    &cleanup_activation_id,
+                    &cleanup_call_id,
+                    BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed,
+                );
+            }
+        }
+        result
+    }
+
+    fn approve_builtin_mcp_tool(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<BuiltinMcpToolGrant> {
+        validate_builtin_mcp_tool_approval_shape(approval)?;
+        let now = (self.clock)();
+        let capability_id = BuiltinCapabilityId::parse(approval.identity.capability_id.clone())?;
+        let activation_id =
+            CapabilityActivationId::parse(approval.identity.capability_activation_id.clone())?;
+        let live = self
+            .live_grant(&approval.identity.run_id, &capability_id)?
+            .ok_or_else(|| AgentError::new("内置 MCP Tool capability grant 已失效。"))?;
+        let mut state = self.lock_grants()?;
+        state.prune_expired(now);
+        if state
+            .grants
+            .get(&(live.run_id.clone(), live.capability_id.as_str().to_string()))
+            != Some(&live)
+        {
+            return Err(AgentError::new(
+                "内置 MCP Tool capability grant 在批准前已撤销。",
+            ));
+        }
+        if state
+            .consumed_builtin_tool_action_ids
+            .contains_key(&approval.identity.action_id)
+        {
+            return Err(AgentError::new("内置 MCP Tool 审批已消费。"));
+        }
+        let binding = state
+            .pending_builtin_tools
+            .get(&approval.identity.approval_id)
+            .cloned()
+            .ok_or_else(|| AgentError::new("内置 MCP Tool 审批不存在或已失效。"))?;
+        let mut frozen = approval.clone();
+        frozen.approval_status = AgentApprovalStatus::Required;
+        if binding.approval != frozen
+            || binding.capability_grant != live
+            || approval.approval_status != AgentApprovalStatus::Approved
+            || approval.created_at > now
+            || approval.expires_at <= now
+        {
+            return Err(AgentError::new("内置 MCP Tool 审批 identity 已漂移。"));
+        }
+        state
+            .pending_builtin_tools
+            .remove(&approval.identity.approval_id);
+        let grant = BuiltinMcpToolGrant {
+            grant_id: Uuid::new_v4().to_string(),
+            approval_id: approval.identity.approval_id.clone(),
+            run_id: approval.identity.run_id.clone(),
+            call_id: approval.identity.call_id.clone(),
+            capability_id,
+            capability_activation_id: activation_id,
+            managed_mcp_id: approval.identity.managed_mcp_id.clone(),
+            package_name: approval.identity.package_name.clone(),
+            package_version: approval.identity.package_version.clone(),
+            upstream_catalog_digest: approval.identity.upstream_catalog_digest.clone(),
+            manifest_digest: approval.identity.manifest_digest.clone(),
+            policy_digest: approval.identity.policy_digest.clone(),
+            policy_revision: approval.identity.policy_revision,
+            tool_id: approval.identity.tool_id.clone(),
+            raw_name: approval.identity.raw_name.clone(),
+            model_name: approval.identity.model_name.clone(),
+            upstream_schema_digest: approval.identity.upstream_schema_digest.clone(),
+            host_overlay_digest: approval.identity.host_overlay_digest.clone(),
+            host_input_schema_digest: approval.identity.host_input_schema_digest.clone(),
+            arguments_digest: approval.identity.arguments_digest.clone(),
+            resource_scope_digest: approval.identity.resource_scope_digest.clone(),
+            target_binding_id: Some(binding.target_binding.binding_id.clone()),
+            target_binding_digest: Some(binding.target_binding.target_binding_digest.clone()),
+            origin: approval.identity.origin.clone(),
+            risk_kinds: approval.risk_kinds.clone(),
+            created_at: now,
+            expires_at: approval.expires_at.min(live.expires_at),
+        };
+        if !grant.is_live_for(approval, &live, now) {
+            return Err(AgentError::new("内置 MCP Tool grant 构造失败。"));
+        }
+        state
+            .consumed_builtin_tool_action_ids
+            .insert(approval.identity.action_id.clone(), approval.expires_at);
+        state.approved_builtin_tools.insert(
+            grant.grant_id.clone(),
+            ApprovedBuiltinToolBinding {
+                approval: frozen,
+                invocation: binding.invocation,
+                capability_grant: live,
+                grant: grant.clone(),
+                target_binding: binding.target_binding,
+            },
+        );
+        Ok(grant)
+    }
+
+    fn dismiss_builtin_mcp_tool_approval(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<()> {
+        validate_builtin_mcp_tool_approval_shape(approval)?;
+        let now = (self.clock)();
+        let mut state = self.lock_grants()?;
+        state.prune_expired(now);
+        let mut frozen = approval.clone();
+        frozen.approval_status = AgentApprovalStatus::Required;
+        let mut released = Vec::new();
+        if let Some(binding) = state
+            .pending_builtin_tools
+            .get(&approval.identity.approval_id)
+        {
+            if binding.approval != frozen {
+                return Err(AgentError::new("内置 MCP Tool 审批 identity 已漂移。"));
+            }
+            if let Some(binding) = state
+                .pending_builtin_tools
+                .remove(&approval.identity.approval_id)
+            {
+                released.push(binding.target_binding);
+            }
+        }
+        let approved_grant_ids = state
+            .approved_builtin_tools
+            .iter()
+            .filter_map(|(grant_id, binding)| {
+                (binding.approval == frozen).then_some(grant_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for grant_id in approved_grant_ids {
+            if let Some(binding) = state.approved_builtin_tools.remove(&grant_id) {
+                released.push(binding.target_binding);
+            }
+        }
+        // Cleanup is intentionally idempotent: deletion, cancellation, expiry and shutdown may
+        // converge on the same durable action. An already-settled historical action has no live
+        // authority, so a second invalidation is a successful no-op.
+        state
+            .consumed_builtin_tool_action_ids
+            .insert(approval.identity.action_id.clone(), approval.expires_at);
+        drop(state);
+        let activation_id =
+            CapabilityActivationId::parse(approval.identity.capability_activation_id.clone())?;
+        for binding in released {
+            let _ = self.release_builtin_mcp_tool_target_binding(
+                &binding,
+                &approval.identity.run_id,
+                &activation_id,
+                &approval.identity.call_id,
+                BuiltinMcpToolTargetBindingReleaseReason::Cancelled,
+            );
+        }
+        Ok(())
+    }
+
+    fn reject_builtin_mcp_tool_approval(
+        &self,
+        approval: &AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<()> {
+        validate_builtin_mcp_tool_approval_shape(approval)?;
+        let now = (self.clock)();
+        let mut state = self.lock_grants()?;
+        state.prune_expired(now);
+        let binding = state
+            .pending_builtin_tools
+            .get(&approval.identity.approval_id)
+            .cloned()
+            .ok_or_else(|| AgentError::new("内置 MCP Tool 审批不存在或已结算。"))?;
+        let mut frozen = approval.clone();
+        frozen.approval_status = AgentApprovalStatus::Required;
+        if binding.approval != frozen {
+            return Err(AgentError::new("内置 MCP Tool 审批 identity 已漂移。"));
+        }
+        state
+            .pending_builtin_tools
+            .remove(&approval.identity.approval_id);
+        if state.denied_builtin_tool_scopes.len() >= MAX_DENIED_BUILTIN_TOOL_SCOPES
+            && !state
+                .denied_builtin_tool_scopes
+                .contains(&binding.denial_scope)
+        {
+            state
+                .deny_all_builtin_tool_runs
+                .insert(approval.identity.run_id.clone());
+        } else {
+            state
+                .denied_builtin_tool_scopes
+                .insert(binding.denial_scope.clone());
+        }
+        state
+            .consumed_builtin_tool_action_ids
+            .insert(approval.identity.action_id.clone(), approval.expires_at);
+        drop(state);
+        let activation_id =
+            CapabilityActivationId::parse(approval.identity.capability_activation_id.clone())?;
+        let _ = self.release_builtin_mcp_tool_target_binding(
+            &binding.target_binding,
+            &approval.identity.run_id,
+            &activation_id,
+            &approval.identity.call_id,
+            BuiltinMcpToolTargetBindingReleaseReason::Rejected,
+        );
+        Ok(())
+    }
+
+    fn revoke_builtin_mcp_tool_grant(&self, grant_id: &str, approval_id: &str) -> AgentResult<()> {
+        let mut state = self.lock_grants()?;
+        let released = if state
+            .approved_builtin_tools
+            .get(grant_id)
+            .is_some_and(|binding| binding.grant.approval_id == approval_id)
+        {
+            state.approved_builtin_tools.remove(grant_id)
+        } else {
+            None
+        };
+        drop(state);
+        if let Some(binding) = released {
+            let _ = self.release_builtin_mcp_tool_target_binding(
+                &binding.target_binding,
+                &binding.grant.run_id,
+                &binding.grant.capability_activation_id,
+                &binding.grant.call_id,
+                BuiltinMcpToolTargetBindingReleaseReason::GrantRevoked,
+            );
+        }
+        Ok(())
+    }
+
+    fn invoke_approved_builtin_mcp_tool<'a>(
+        &'a self,
+        approval: AgentBuiltinMcpToolApproval,
+        grant: BuiltinMcpToolGrant,
+        cancellation: AgentCancellationToken,
+    ) -> BuiltinCapabilityFuture<'a, Value> {
+        Box::pin(async move {
+            validate_builtin_mcp_tool_approval_shape(&approval)?;
+            let now = (self.clock)();
+            #[cfg(test)]
+            if let Some(hook) = self
+                .sensitive_before_grant_consume_hook
+                .lock()
+                .map_err(|_| AgentError::new("内置 MCP Tool 测试状态不可用。"))?
+                .clone()
+            {
+                hook();
+            }
+            let binding = {
+                let mut state = self.lock_grants()?;
+                state.prune_expired(now);
+                let binding = state
+                    .approved_builtin_tools
+                    .get(&grant.grant_id)
+                    .cloned()
+                    .ok_or_else(|| AgentError::new("内置 MCP Tool grant 不存在或已消费。"))?;
+                let mut frozen = approval.clone();
+                frozen.approval_status = AgentApprovalStatus::Required;
+                if binding.approval != frozen
+                    || binding.grant != grant
+                    || !grant.is_live_for(&approval, &binding.capability_grant, now)
+                    || mycopilot_core::builtin_mcp_tool_arguments_digest(
+                        &binding.invocation.arguments,
+                    )? != grant.arguments_digest
+                {
+                    return Err(AgentError::new("内置 MCP Tool grant identity 已漂移。"));
+                }
+                if cancellation.is_cancelled() {
+                    state.approved_builtin_tools.remove(&grant.grant_id);
+                    drop(state);
+                    let _ = self.release_builtin_mcp_tool_target_binding(
+                        &binding.target_binding,
+                        &binding.grant.run_id,
+                        &binding.grant.capability_activation_id,
+                        &binding.grant.call_id,
+                        BuiltinMcpToolTargetBindingReleaseReason::Cancelled,
+                    );
+                    return Err(builtin_mcp_cancelled_before_dispatch_error());
+                }
+                // Validation and one-time consumption happen under one lock. A stale or forged
+                // queue attempt must not consume the valid grant that the original call owns.
+                state.approved_builtin_tools.remove(&grant.grant_id);
+                binding
+            };
+            // Consumption is the dispatch-certainty boundary owned by this Provider. A cancel
+            // observed immediately after that atomic claim still proves that Main was never
+            // called, so keep the result definite and do not hand the invocation to the Host.
+            if cancellation.is_cancelled() {
+                let _ = self.release_builtin_mcp_tool_target_binding(
+                    &binding.target_binding,
+                    &binding.grant.run_id,
+                    &binding.grant.capability_activation_id,
+                    &binding.grant.call_id,
+                    BuiltinMcpToolTargetBindingReleaseReason::Cancelled,
+                );
+                return Err(builtin_mcp_cancelled_before_dispatch_error());
+            }
+            let mut invocation = binding.invocation;
+            invocation.builtin_tool_grant = Some(grant);
+            self.invoke_authorized(invocation, binding.capability_grant, cancellation)
+                .await
+        })
     }
 
     fn browser_risk_grant(
@@ -642,11 +1449,24 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         cancellation: AgentCancellationToken,
     ) -> BuiltinCapabilityFuture<'a, Value> {
         Box::pin(async move {
-            cancellation.check()?;
+            if cancellation.is_cancelled() {
+                if invocation.builtin_tool_grant.is_some() {
+                    return Err(builtin_mcp_cancelled_before_dispatch_error());
+                }
+                cancellation.check()?;
+            }
             let manifest = self.exact_manifest_for(&invocation.capability_id)?;
             let live = self
                 .live_grant(&invocation.run_id, &invocation.capability_id)?
                 .ok_or_else(|| AgentError::new("当前任务的内置能力 grant 已失效。"))?;
+            let reviewed_tool = manifest.tools.iter().find(|tool| {
+                tool.tool_id == invocation.tool_id
+                    && tool.raw_name == invocation.raw_name
+                    && tool.model_name == invocation.model_name
+                    && tool.upstream_schema_digest == invocation.upstream_schema_digest
+                    && tool.host_overlay_digest == invocation.host_overlay_digest
+                    && tool.schema_digest == invocation.host_input_schema_digest
+            });
             if live != expected_grant
                 || invocation.activation_id != live.activation_id
                 || invocation.managed_mcp_id != manifest.managed_mcp_id
@@ -657,18 +1477,35 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 || invocation.policy_digest != manifest.provider_contract.policy_digest
                 || invocation.manifest_digest != manifest.manifest_digest
                 || invocation.policy_revision != live.policy_revision
-                || !manifest.tools.iter().any(|tool| {
-                    tool.tool_id == invocation.tool_id
-                        && tool.raw_name == invocation.raw_name
-                        && tool.model_name == invocation.model_name
-                        && tool.upstream_schema_digest == invocation.upstream_schema_digest
-                        && tool.host_overlay_digest == invocation.host_overlay_digest
-                        && tool.schema_digest == invocation.host_input_schema_digest
-                })
+                || reviewed_tool.is_none()
             {
                 return Err(AgentError::new(
                     "内置能力调用不在当前审核 manifest/grant 中。",
                 ));
+            }
+            let requires_sensitive_approval = reviewed_tool.is_some_and(|tool| {
+                mycopilot_core::builtin_tool_requires_approval(tool, &invocation.arguments)
+            });
+            if requires_sensitive_approval != invocation.builtin_tool_grant.is_some() {
+                return Err(AgentError::new(
+                    "内置 MCP Tool 的敏感 grant 与 reviewed policy 不一致。",
+                ));
+            }
+            if let Some(grant) = invocation.builtin_tool_grant.as_ref() {
+                if grant.run_id != invocation.run_id
+                    || grant.call_id != invocation.call_id
+                    || grant.capability_id != invocation.capability_id
+                    || grant.capability_activation_id != invocation.activation_id
+                    || grant.manifest_digest != invocation.manifest_digest
+                    || grant.policy_digest != invocation.policy_digest
+                    || grant.policy_revision != invocation.policy_revision
+                    || grant.tool_id != invocation.tool_id
+                    || grant.arguments_digest
+                        != mycopilot_core::builtin_mcp_tool_arguments_digest(&invocation.arguments)?
+                    || grant.expires_at <= (self.clock)()
+                {
+                    return Err(AgentError::new("内置 MCP Tool 的敏感 grant 已漂移或过期。"));
+                }
             }
             let runtime = self
                 .managed_runtime()?
@@ -681,6 +1518,32 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 .ok_or_else(|| AgentError::new("内置浏览器调用缺少有效的调用理由。"))?
                 .to_string();
             let invocation_id = McpInvocationId::new();
+            let builtin_tool_grant = invocation
+                .builtin_tool_grant
+                .as_ref()
+                .map(|grant| {
+                    Ok::<_, AgentError>(Box::new(ManagedPlaywrightBuiltinToolGrantContext {
+                        grant_id: grant.grant_id.clone(),
+                        approval_id: grant.approval_id.clone(),
+                        arguments_digest: grant.arguments_digest.clone(),
+                        resource_scope_digest: grant.resource_scope_digest.clone(),
+                        target_binding_id: grant.target_binding_id.clone().ok_or_else(|| {
+                            AgentError::new("敏感 Tool grant 缺少 Main 页面绑定 identity。")
+                        })?,
+                        target_binding_digest: grant.target_binding_digest.clone().ok_or_else(
+                            || AgentError::new("敏感 Tool grant 缺少 Main 页面绑定 digest。"),
+                        )?,
+                        origin: grant.origin.clone(),
+                        risk_kinds: grant
+                            .risk_kinds
+                            .iter()
+                            .copied()
+                            .map(map_builtin_tool_risk_kind)
+                            .collect(),
+                        expires_at_ms: grant.expires_at.saturating_mul(1_000),
+                    }))
+                })
+                .transpose()?;
             let authorization_context = ManagedPlaywrightAuthorizationContext {
                 run_id: invocation.run_id.clone(),
                 capability_id: invocation.capability_id.as_str().to_string(),
@@ -695,6 +1558,7 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 call_id: invocation.call_id.clone(),
                 trigger_tool_name: invocation.tool_id.clone(),
                 call_reason,
+                builtin_tool_grant,
             };
             let mcp_cancellation = mycopilot_mcp_client::McpCancellationToken::new();
             let invoke = runtime.invoke(
@@ -716,6 +1580,60 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
             .map_err(crate::adapters::mcp_runtime::map_invocation_error)?;
             project_managed_browser_result(result)
         })
+    }
+}
+
+fn map_builtin_tool_risk_kind(
+    risk: mycopilot_core::BuiltinMcpToolRiskKind,
+) -> BuiltinMcpToolRiskKindDto {
+    use mycopilot_core::BuiltinMcpToolRiskKind as Core;
+    match risk {
+        Core::FileRead => BuiltinMcpToolRiskKindDto::FileRead,
+        Core::FileWrite => BuiltinMcpToolRiskKindDto::FileWrite,
+        Core::FileUpload => BuiltinMcpToolRiskKindDto::FileUpload,
+        Core::FileDownload => BuiltinMcpToolRiskKindDto::FileDownload,
+        Core::CookieRead => BuiltinMcpToolRiskKindDto::CookieRead,
+        Core::CookieWrite => BuiltinMcpToolRiskKindDto::CookieWrite,
+        Core::LocalStorageRead => BuiltinMcpToolRiskKindDto::LocalStorageRead,
+        Core::LocalStorageWrite => BuiltinMcpToolRiskKindDto::LocalStorageWrite,
+        Core::SessionStorageRead => BuiltinMcpToolRiskKindDto::SessionStorageRead,
+        Core::SessionStorageWrite => BuiltinMcpToolRiskKindDto::SessionStorageWrite,
+        Core::StorageStateImport => BuiltinMcpToolRiskKindDto::StorageStateImport,
+        Core::StorageStateExport => BuiltinMcpToolRiskKindDto::StorageStateExport,
+        Core::NetworkSensitiveRead => BuiltinMcpToolRiskKindDto::NetworkSensitiveRead,
+        Core::PageScriptExecution => BuiltinMcpToolRiskKindDto::PageScriptExecution,
+        Core::UnsafeCodeExecution => BuiltinMcpToolRiskKindDto::UnsafeCodeExecution,
+    }
+}
+
+fn map_target_binding_release_reason(
+    reason: BuiltinMcpToolTargetBindingReleaseReason,
+) -> ManagedPlaywrightSensitiveBindingReleaseReason {
+    match reason {
+        BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::ProposalFailed
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::Rejected => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::Rejected
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::Cancelled => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::Cancelled
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::Expired => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::Expired
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::RunRevoked => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::RunRevoked
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::CapabilityRevoked => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::CapabilityRevoked
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::GrantRevoked => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::GrantRevoked
+        }
+        BuiltinMcpToolTargetBindingReleaseReason::Shutdown => {
+            ManagedPlaywrightSensitiveBindingReleaseReason::Shutdown
+        }
     }
 }
 
@@ -819,13 +1737,18 @@ mod tests {
     use mycopilot_core::{
         builtin_capability_activation_result, BrowserDestinationIdentity,
         BrowserResolvedAddressClass, BrowserRiskKind, BrowserRiskTrigger,
-        CapabilityActivationState,
+        BuiltinMcpToolResourceSummary, BuiltinMcpToolRiskKind, CapabilityActivationState,
     };
     use mycopilot_mcp_client::{
         McpContentBlock, McpEmbeddedResource, McpResourceLink, McpToolResult,
     };
+    use mycopilot_protocol_rs::{
+        ManagedPlaywrightCommand, ManagedPlaywrightCommandNotification,
+        ManagedPlaywrightCompletionInput, MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Barrier;
+    use std::time::Duration;
 
     struct Harness {
         _directory: tempfile::TempDir,
@@ -881,6 +1804,151 @@ mod tests {
             expires_at: now + BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
             approval_status: AgentApprovalStatus::Approved,
         }
+    }
+
+    fn activate_browser(harness: &Harness) -> CapabilityGrant {
+        harness
+            .policies
+            .set_allowed(StoredCapabilityId::BrowserAutomation, 0, true)
+            .unwrap();
+        harness
+            .runtime
+            .approve_activation(&approved(harness, Uuid::new_v4(), Uuid::new_v4()))
+            .unwrap()
+    }
+
+    fn sensitive_invocation(
+        harness: &Harness,
+        grant: &CapabilityGrant,
+        tool_id: &str,
+        call_id: &str,
+        arguments: Value,
+    ) -> BuiltinCapabilityInvocation {
+        let manifest = &harness.runtime.manifests()[0];
+        let descriptor = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.tool_id.as_str() == tool_id)
+            .unwrap();
+        BuiltinCapabilityInvocation {
+            run_id: grant.run_id.clone(),
+            capability_id: grant.capability_id.clone(),
+            managed_mcp_id: manifest.managed_mcp_id.clone(),
+            package_name: manifest.provider_contract.package_name.clone(),
+            package_version: manifest.provider_contract.package_version.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            policy_digest: manifest.provider_contract.policy_digest.clone(),
+            activation_id: grant.activation_id.clone(),
+            manifest_digest: manifest.manifest_digest.clone(),
+            policy_revision: grant.policy_revision,
+            tool_id: descriptor.tool_id.as_str().to_string(),
+            raw_name: descriptor.raw_name.as_str().to_string(),
+            model_name: descriptor.model_name.clone(),
+            upstream_schema_digest: descriptor.upstream_schema_digest.clone(),
+            host_overlay_digest: descriptor.host_overlay_digest.clone(),
+            host_input_schema_digest: descriptor.schema_digest.clone(),
+            call_id: call_id.to_string(),
+            arguments,
+            builtin_tool_grant: None,
+        }
+    }
+
+    fn prepare_sensitive(
+        harness: &Harness,
+        grant: &CapabilityGrant,
+        tool_id: &str,
+        call_id: &str,
+        risks: Vec<BuiltinMcpToolRiskKind>,
+    ) -> AgentResult<AgentBuiltinMcpToolApproval> {
+        let origin = "https://mail.example.test".to_string();
+        let invocation = sensitive_invocation(
+            harness,
+            grant,
+            tool_id,
+            call_id,
+            json!({
+                "call_reason": "Perform the exact reviewed sensitive browser operation.",
+                "approval_origin": origin,
+                "filename": "browser-file:123e4567-e89b-42d3-a456-426614174000",
+            }),
+        );
+        let resource_summary = BuiltinMcpToolResourceSummary {
+            scope: match tool_id {
+                "browser_set_storage_state" => "storage_state_import",
+                "browser_evaluate" => "page_script_execution",
+                _ => "sensitive_browser_operation",
+            }
+            .to_string(),
+            display_name: "Current managed page storage".to_string(),
+            file_basenames: vec!["storage-state.json".to_string()],
+            origin: Some(origin.clone()),
+        };
+        let request = sensitive_approval_request(
+            harness,
+            invocation,
+            origin,
+            "Perform the exact reviewed sensitive browser operation.",
+            "sensitive_browser_operation",
+            resource_summary,
+            risks,
+        )?;
+        harness.provider.prepare_builtin_mcp_tool_approval(request)
+    }
+
+    fn sensitive_approval_request(
+        harness: &Harness,
+        invocation: BuiltinCapabilityInvocation,
+        origin: String,
+        call_reason: &str,
+        operation_category: &str,
+        resource_summary: BuiltinMcpToolResourceSummary,
+        risks: Vec<BuiltinMcpToolRiskKind>,
+    ) -> AgentResult<BuiltinMcpToolApprovalRequest> {
+        let capability_grant = harness
+            .runtime
+            .live_grant(&invocation.run_id, &invocation.capability_id)?
+            .ok_or_else(|| AgentError::new("test capability grant missing"))?;
+        let manifest = &harness.runtime.manifests()[0];
+        let descriptor = manifest
+            .tools
+            .iter()
+            .find(|descriptor| descriptor.tool_id.as_str() == invocation.tool_id)
+            .ok_or_else(|| AgentError::new("test sensitive descriptor missing"))?;
+        let arguments_digest =
+            mycopilot_core::builtin_mcp_tool_arguments_digest(&invocation.arguments)?;
+        let binding_entropy = Uuid::new_v4().simple().to_string();
+        let target_binding = PreparedBuiltinMcpToolTargetBinding {
+            binding_id: Uuid::new_v4().to_string(),
+            target_binding_digest: format!("sha256:{binding_entropy}{binding_entropy}"),
+            origin: origin.clone(),
+            created_at: harness.now.load(Ordering::SeqCst),
+            expires_at: harness
+                .now
+                .load(Ordering::SeqCst)
+                .saturating_add(mycopilot_core::BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS)
+                .min(capability_grant.expires_at),
+        };
+        let resource_scope_digest = mycopilot_core::builtin_mcp_tool_resource_scope_digest_v2(
+            &invocation.tool_id,
+            &arguments_digest,
+            Some(&origin),
+            &risks,
+            &resource_summary.scope,
+            &target_binding.target_binding_digest,
+        )?;
+        Ok(BuiltinMcpToolApprovalRequest {
+            invocation,
+            capability_grant,
+            capability_display_name: manifest.descriptor.display_name.clone(),
+            tool_display_name: descriptor.model_name.clone(),
+            call_reason: call_reason.to_string(),
+            operation_category: operation_category.to_string(),
+            resource_summary,
+            resource_scope_digest,
+            origin: Some(origin),
+            risk_kinds: risks,
+            target_binding: Some(target_binding),
+        })
     }
 
     fn browser_risk_request(
@@ -962,6 +2030,611 @@ mod tests {
             None,
         );
         assert!(result.ok);
+    }
+
+    #[test]
+    fn builtin_sensitive_approval_requires_the_exact_reviewed_risk_set() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let exact = vec![
+            BuiltinMcpToolRiskKind::FileRead,
+            BuiltinMcpToolRiskKind::CookieWrite,
+            BuiltinMcpToolRiskKind::LocalStorageWrite,
+            BuiltinMcpToolRiskKind::StorageStateImport,
+        ];
+        assert!(prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_set_storage_state",
+            "call-risk-subset",
+            vec![BuiltinMcpToolRiskKind::StorageStateImport],
+        )
+        .is_err());
+        assert!(harness
+            .provider
+            .lock_grants()
+            .unwrap()
+            .pending_builtin_tools
+            .is_empty());
+
+        let approval = prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_set_storage_state",
+            "call-risk-exact",
+            exact,
+        )
+        .unwrap();
+        let mut understated = approval.clone();
+        understated.approval_status = AgentApprovalStatus::Approved;
+        understated.risk_kinds = vec![BuiltinMcpToolRiskKind::StorageStateImport];
+        assert!(harness
+            .runtime
+            .approve_builtin_mcp_tool(&understated)
+            .is_err());
+        let mut approved = approval.clone();
+        approved.approval_status = AgentApprovalStatus::Approved;
+        let grant = harness
+            .runtime
+            .approve_builtin_mcp_tool(&approved)
+            .expect("a forged subset decision must not consume the exact pending approval");
+        harness
+            .runtime
+            .revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id)
+            .unwrap();
+    }
+
+    #[test]
+    fn concurrent_exact_sensitive_prepare_creates_one_pending_authority() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let invocation = sensitive_invocation(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-concurrent-prepare",
+            json!({
+                "function": "() => document.title",
+                "approval_origin": "https://mail.example.test",
+                "call_reason": "Read the reviewed page title.",
+            }),
+        );
+        let requests = (0..2)
+            .map(|_| {
+                sensitive_approval_request(
+                    &harness,
+                    invocation.clone(),
+                    "https://mail.example.test".to_string(),
+                    "Read the reviewed page title.",
+                    "page_script_execution",
+                    BuiltinMcpToolResourceSummary {
+                        scope: "page_script_execution".to_string(),
+                        display_name: "Current managed page".to_string(),
+                        file_basenames: Vec::new(),
+                        origin: Some("https://mail.example.test".to_string()),
+                    },
+                    vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut joins = Vec::new();
+        for request in requests {
+            let provider = Arc::clone(&harness.provider);
+            let barrier = Arc::clone(&barrier);
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                provider.prepare_builtin_mcp_tool_approval(request)
+            }));
+        }
+        barrier.wait();
+        let results = joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let duplicate = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("one concurrent duplicate must fail closed");
+        assert_eq!(
+            duplicate.code(),
+            Some("builtin_mcp_tool.approval_already_pending")
+        );
+        assert_eq!(
+            harness
+                .provider
+                .lock_grants()
+                .unwrap()
+                .pending_builtin_tools
+                .len(),
+            1
+        );
+        let approval = results.into_iter().find_map(Result::ok).unwrap();
+        harness
+            .runtime
+            .dismiss_builtin_mcp_tool_approval(&approval)
+            .unwrap();
+    }
+
+    #[test]
+    fn mutable_network_request_index_is_rejected_before_pending_authority() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let error = prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_network_request",
+            "call-network-ledger-index",
+            vec![BuiltinMcpToolRiskKind::NetworkSensitiveRead],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some("builtin_mcp_tool.sensitive_request_identity_unavailable")
+        );
+        assert!(harness
+            .provider
+            .lock_grants()
+            .unwrap()
+            .pending_builtin_tools
+            .is_empty());
+    }
+
+    #[test]
+    fn approve_reject_race_has_exactly_one_terminal_authority() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let approval = prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-approve-reject-race",
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let mut approved = approval.clone();
+        approved.approval_status = AgentApprovalStatus::Approved;
+        let barrier = Arc::new(Barrier::new(3));
+        let approve = {
+            let runtime = harness.runtime.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.approve_builtin_mcp_tool(&approved)
+            })
+        };
+        let reject = {
+            let runtime = harness.runtime.clone();
+            let approval = approval.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.reject_builtin_mcp_tool_approval(&approval)
+            })
+        };
+        barrier.wait();
+        let approved_result = approve.join().unwrap();
+        let rejected_result = reject.join().unwrap();
+        assert_eq!(
+            usize::from(approved_result.is_ok()) + usize::from(rejected_result.is_ok()),
+            1
+        );
+        let state = harness.provider.lock_grants().unwrap();
+        assert!(state.pending_builtin_tools.is_empty());
+        assert_eq!(
+            state.approved_builtin_tools.len()
+                + usize::from(!state.denied_builtin_tool_scopes.is_empty()),
+            1
+        );
+    }
+
+    #[test]
+    fn revoke_run_racing_sensitive_approve_leaves_no_live_authority() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let approval = prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-revoke-approve-race",
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let mut approved = approval.clone();
+        approved.approval_status = AgentApprovalStatus::Approved;
+        let barrier = Arc::new(Barrier::new(3));
+        let approve = {
+            let runtime = harness.runtime.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.approve_builtin_mcp_tool(&approved)
+            })
+        };
+        let revoke = {
+            let runtime = harness.runtime.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                runtime.revoke_run_grants("run-1")
+            })
+        };
+        barrier.wait();
+        let _ = approve.join().unwrap();
+        revoke.join().unwrap().unwrap();
+        assert!(harness
+            .runtime
+            .live_grant("run-1", &grant.capability_id)
+            .unwrap()
+            .is_none());
+        let state = harness.provider.lock_grants().unwrap();
+        assert!(state.pending_builtin_tools.is_empty());
+        assert!(state.approved_builtin_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tampered_invoke_does_not_consume_the_valid_single_use_grant() {
+        let harness = harness();
+        let capability_grant = activate_browser(&harness);
+        let approval = prepare_sensitive(
+            &harness,
+            &capability_grant,
+            "browser_evaluate",
+            "call-tampered-invoke",
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let mut approved = approval.clone();
+        approved.approval_status = AgentApprovalStatus::Approved;
+        let grant = harness.runtime.approve_builtin_mcp_tool(&approved).unwrap();
+        let mut tampered = grant.clone();
+        tampered.arguments_digest = format!("sha256:{}", "0".repeat(64));
+        assert!(harness
+            .runtime
+            .invoke_approved_builtin_mcp_tool(
+                approved.clone(),
+                tampered,
+                AgentCancellationToken::new(),
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            harness
+                .provider
+                .lock_grants()
+                .unwrap()
+                .approved_builtin_tools
+                .len(),
+            1,
+            "a malformed queue attempt must leave the valid authority intact"
+        );
+
+        let valid_attempt = harness
+            .runtime
+            .invoke_approved_builtin_mcp_tool(
+                approved.clone(),
+                grant.clone(),
+                AgentCancellationToken::new(),
+            )
+            .await;
+        assert!(
+            valid_attempt.is_err(),
+            "the test Host has no managed runtime"
+        );
+        assert!(harness
+            .provider
+            .lock_grants()
+            .unwrap()
+            .approved_builtin_tools
+            .is_empty());
+        assert!(harness
+            .runtime
+            .invoke_approved_builtin_mcp_tool(approved, grant, AgentCancellationToken::new(),)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_sensitive_grant_consumption_is_definite_and_single_use() {
+        let harness = harness();
+        let capability_grant = activate_browser(&harness);
+        let approval = prepare_sensitive(
+            &harness,
+            &capability_grant,
+            "browser_evaluate",
+            "call-cancelled-before-consumption",
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let mut approved = approval.clone();
+        approved.approval_status = AgentApprovalStatus::Approved;
+        let grant = harness.runtime.approve_builtin_mcp_tool(&approved).unwrap();
+        let cancellation = AgentCancellationToken::new();
+        cancellation.cancel();
+
+        let error = harness
+            .runtime
+            .invoke_approved_builtin_mcp_tool(approved.clone(), grant.clone(), cancellation)
+            .await
+            .unwrap_err();
+        assert!(error.is_cancelled());
+        assert_eq!(error.code(), Some("mcp.tool_cancelled_before_dispatch"));
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("dispatchCertainty"))
+                .and_then(Value::as_str),
+            Some("definitely_not_dispatched")
+        );
+        assert!(harness
+            .provider
+            .lock_grants()
+            .unwrap()
+            .approved_builtin_tools
+            .is_empty());
+        assert!(harness
+            .runtime
+            .invoke_approved_builtin_mcp_tool(approved, grant, AgentCancellationToken::new())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_between_dispatch_cas_and_grant_consumption_stays_definite() {
+        let harness = harness();
+        let capability_grant = activate_browser(&harness);
+        let approval = prepare_sensitive(
+            &harness,
+            &capability_grant,
+            "browser_evaluate",
+            "call-cancelled-at-consumption-barrier",
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let mut approved = approval.clone();
+        approved.approval_status = AgentApprovalStatus::Approved;
+        let grant = harness.runtime.approve_builtin_mcp_tool(&approved).unwrap();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let hook = {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Arc::new(move || {
+                entered.wait();
+                release.wait();
+            }) as Arc<dyn Fn() + Send + Sync>
+        };
+        *harness
+            .provider
+            .sensitive_before_grant_consume_hook
+            .lock()
+            .unwrap() = Some(hook);
+        let cancellation = AgentCancellationToken::new();
+        let invoke_cancellation = cancellation.clone();
+        let runtime = harness.runtime.clone();
+        let invoke = tokio::spawn(async move {
+            runtime
+                .invoke_approved_builtin_mcp_tool(approved, grant, invoke_cancellation)
+                .await
+        });
+        entered.wait();
+        cancellation.cancel();
+        release.wait();
+        let error = invoke.await.unwrap().unwrap_err();
+        assert!(error.is_cancelled());
+        assert_eq!(error.code(), Some("mcp.tool_cancelled_before_dispatch"));
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("dispatchCertainty"))
+                .and_then(Value::as_str),
+            Some("definitely_not_dispatched")
+        );
+        assert!(harness
+            .provider
+            .lock_grants()
+            .unwrap()
+            .approved_builtin_tools
+            .is_empty());
+    }
+
+    #[test]
+    fn builtin_sensitive_rejection_blocks_exact_repeat_and_cleanup_is_idempotent() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let risks = vec![BuiltinMcpToolRiskKind::PageScriptExecution];
+        let approval = prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-sensitive-first",
+            risks.clone(),
+        )
+        .unwrap();
+        harness
+            .runtime
+            .reject_builtin_mcp_tool_approval(&approval)
+            .unwrap();
+        let repeated = prepare_sensitive(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-sensitive-repeat",
+            risks,
+        )
+        .unwrap_err();
+        assert_eq!(
+            repeated.code(),
+            Some("builtin_mcp_tool.previously_rejected")
+        );
+        harness
+            .runtime
+            .dismiss_builtin_mcp_tool_approval(&approval)
+            .unwrap();
+        harness
+            .runtime
+            .dismiss_builtin_mcp_tool_approval(&approval)
+            .unwrap();
+        let state = harness.provider.lock_grants().unwrap();
+        assert!(state.pending_builtin_tools.is_empty());
+        assert!(state.approved_builtin_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_target_prepare_drains_late_success_and_releases_exact_binding() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let managed_runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
+        harness
+            .provider
+            .attach_managed_runtime(Arc::clone(&managed_runtime))
+            .unwrap();
+        let (outbound, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        managed_runtime.bridge().attach_outbound(outbound).unwrap();
+
+        let invocation = sensitive_invocation(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-cancelled-prepare",
+            json!({
+                "function": "() => document.title",
+                "approval_origin": "https://mail.example.test",
+                "call_reason": "Read the reviewed fixture title."
+            }),
+        );
+        let cancellation = AgentCancellationToken::new();
+        let invoke_cancellation = cancellation.clone();
+        let runtime = harness.runtime.clone();
+        let proposal = tokio::spawn(async move {
+            runtime
+                .prepare_builtin_mcp_tool_approval_async(
+                    invocation,
+                    "The model requests running a reviewed script in the managed page.".to_string(),
+                    "page_script_execution".to_string(),
+                    BuiltinMcpToolResourceSummary {
+                        scope: "page_script_execution".to_string(),
+                        display_name: "page script execution".to_string(),
+                        file_basenames: Vec::new(),
+                        origin: Some("https://mail.example.test".to_string()),
+                    },
+                    "https://mail.example.test".to_string(),
+                    vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+                    invoke_cancellation,
+                )
+                .await
+        });
+
+        let prepare: ManagedPlaywrightCommandNotification = serde_json::from_value(
+            commands.recv().await.expect("prepare command missing")["params"].clone(),
+        )
+        .unwrap();
+        let ManagedPlaywrightCommand::PrepareSensitiveTool { input } = prepare.command else {
+            panic!("expected proposal-time target prepare command");
+        };
+        cancellation.cancel();
+        // AgentCancellationToken currently polls at a bounded 50 ms cadence. Keep Main pending
+        // until the cancellation branch is waiting to drain this exact completion.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        let binding_id = Uuid::new_v4().to_string();
+        assert!(managed_runtime
+            .bridge()
+            .complete(ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: prepare.request_id,
+                outcome: ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
+                    binding_id: binding_id.clone(),
+                    target_binding_digest: format!("sha256:{}", "8".repeat(64)),
+                    origin: "https://mail.example.test".to_string(),
+                    created_at_ms: input.created_at_ms,
+                    expires_at_ms: input.expires_at_ms,
+                },
+            })
+            .unwrap());
+
+        let release: ManagedPlaywrightCommandNotification = serde_json::from_value(
+            tokio::time::timeout(Duration::from_secs(1), commands.recv())
+                .await
+                .expect("release command timed out")
+                .expect("release command missing")["params"]
+                .clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            release.command,
+            ManagedPlaywrightCommand::ReleaseSensitiveToolBinding {
+                binding_id: released_binding,
+                reason: ManagedPlaywrightSensitiveBindingReleaseReason::Cancelled,
+                ..
+            } if released_binding == binding_id
+        ));
+        let error = proposal.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), Some("mcp.tool_cancelled_before_dispatch"));
+        assert!(harness
+            .provider
+            .lock_grants()
+            .unwrap()
+            .pending_builtin_tools
+            .is_empty());
+    }
+
+    #[test]
+    fn pending_sensitive_action_serialization_contains_only_the_safe_projection() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let secret = "BUILTIN_PENDING_SECRET_CANARY";
+        let invocation = sensitive_invocation(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-private-pending",
+            json!({
+                "function": format!("() => document.cookie + '{secret}'"),
+                "password": secret,
+                "authorization": format!("Bearer {secret}"),
+                "storageValue": secret,
+                "path": format!("browser-file:{secret}"),
+                "approval_origin": "https://mail.example.test",
+                "call_reason": "Read the reviewed page state.",
+            }),
+        );
+        let request = sensitive_approval_request(
+            &harness,
+            invocation,
+            "https://mail.example.test".to_string(),
+            "Read the reviewed page state.",
+            "page_script_execution",
+            BuiltinMcpToolResourceSummary {
+                scope: "page_script_execution".to_string(),
+                display_name: "Current managed page".to_string(),
+                file_basenames: Vec::new(),
+                origin: Some("https://mail.example.test".to_string()),
+            },
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+        )
+        .unwrap();
+        let approval = harness
+            .provider
+            .prepare_builtin_mcp_tool_approval(request)
+            .unwrap();
+        let action = mycopilot_core::AgentProposedAction::BuiltinMcpToolApproval {
+            approval: Box::new(approval.clone()),
+        };
+        let serialized_action = serde_json::to_string(&action).unwrap();
+        assert!(!serialized_action.contains(secret));
+        assert!(!serialized_action.contains("document.cookie"));
+        assert!(!serialized_action.contains("browser-file:"));
+        assert!(!serialized_action.contains("authorization"));
+        let state = harness.provider.lock_grants().unwrap();
+        let sealed = state
+            .pending_builtin_tools
+            .get(&approval.identity.approval_id)
+            .unwrap();
+        assert!(serde_json::to_string(&sealed.invocation.arguments)
+            .unwrap()
+            .contains(secret));
     }
 
     #[test]
@@ -1297,6 +2970,7 @@ mod tests {
             host_input_schema_digest: format!("sha256:{}", "c".repeat(64)),
             call_id: "call-unreviewed".to_string(),
             arguments: serde_json::json!({}),
+            builtin_tool_grant: None,
         };
         let error = harness
             .provider

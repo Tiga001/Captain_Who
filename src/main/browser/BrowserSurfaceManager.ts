@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { WebContents } from 'electron'
+import type { Event, WebContents } from 'electron'
 import type { Browser, BrowserContext } from 'playwright'
 import { chromium } from 'playwright'
 import {
@@ -15,7 +15,11 @@ import {
 } from '@mycopilot/protocol'
 import { BrowserTargetBroker } from './BrowserTargetBroker'
 import type { ElectronGuestCdpTransport } from './ElectronGuestCdpTransport'
-import { BrowserNetworkGuard, type BrowserNetworkOperationLease } from './BrowserNetworkGuard'
+import {
+  BrowserNetworkGuard,
+  type BrowserMainFrameNavigationFence,
+  type BrowserNetworkOperationLease
+} from './BrowserNetworkGuard'
 import type { BrowserRiskOperationInput } from './BrowserRiskCoordinator'
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 10_000
@@ -60,12 +64,46 @@ export interface BrowserSurfaceView {
   url: string
 }
 
+/** Main-only document identity. This type must never cross Renderer IPC. */
+export interface BrowserSensitiveTargetIdentity {
+  generation: number
+  navigationEpoch: number
+  origin: string
+  surfaceId: string
+}
+
+export interface BrowserSensitiveDispatchFence {
+  finish(): void
+}
+
+interface ActiveSensitiveDispatchFence {
+  finishSilently(): boolean
+}
+
 interface ManagedSurface {
   createdSequence: number
+  dispatchFence?: ActiveSensitiveDispatchFence
   generation: number
   guest: WebContents
+  handleDidFailLoad: (
+    event: Event,
+    errorCode: number,
+    errorDescription: string,
+    validatedURL: string,
+    isMainFrame: boolean
+  ) => void
+  handleDidNavigate: () => void
+  handleDidStartNavigation: (
+    event: Event,
+    url: string,
+    isInPlace: boolean,
+    isMainFrame: boolean
+  ) => void
+  handleDidStopLoading: () => void
   handleDestroyed: () => void
   host: WebContents
+  navigationEpoch: number
+  navigationInProgress: boolean
   surfaceId: string
 }
 
@@ -183,20 +221,56 @@ export class BrowserSurfaceManager {
     const generation = (this.generationBySurface.get(surfaceId) ?? 0) + 1
     this.generationBySurface.set(surfaceId, generation)
     const handleDestroyed = (): void => this.handleTargetClosed(surfaceId, generation, input.guest)
+    const handleDidStartNavigation = (
+      _event: Event,
+      _url: string,
+      isInPlace: boolean,
+      isMainFrame: boolean
+    ): void => {
+      const current = this.surfaces.get(surfaceId)
+      if (!current || current.generation !== generation || !isMainFrame || isInPlace) return
+      current.navigationEpoch += 1
+      current.navigationInProgress = true
+    }
+    const finishMainFrameNavigation = (): void => {
+      const current = this.surfaces.get(surfaceId)
+      if (current?.generation === generation) current.navigationInProgress = false
+    }
+    const handleDidFailLoad = (
+      _event: Event,
+      _errorCode: number,
+      _errorDescription: string,
+      _validatedURL: string,
+      isMainFrame: boolean
+    ): void => {
+      if (isMainFrame) finishMainFrameNavigation()
+    }
     const surface: ManagedSurface = {
       createdSequence: ++this.createSequence,
       generation,
       guest: input.guest,
+      handleDidFailLoad,
+      handleDidNavigate: finishMainFrameNavigation,
+      handleDidStartNavigation,
+      handleDidStopLoading: finishMainFrameNavigation,
       handleDestroyed,
       host: input.host,
+      navigationEpoch: 1,
+      navigationInProgress:
+        typeof input.guest.isLoadingMainFrame === 'function' && input.guest.isLoadingMainFrame(),
       surfaceId
     }
     this.surfaces.set(surfaceId, surface)
     input.guest.once('destroyed', handleDestroyed)
+    input.guest.on('did-start-navigation', handleDidStartNavigation)
+    input.guest.on('did-navigate', surface.handleDidNavigate)
+    input.guest.on('did-fail-load', handleDidFailLoad)
+    input.guest.on('did-stop-loading', surface.handleDidStopLoading)
     try {
       this.networkGuard?.registerGuest({ generation, guest: input.guest, surfaceId })
     } catch {
       input.guest.removeListener('destroyed', handleDestroyed)
+      this.removeNavigationListeners(surface)
       this.surfaces.delete(surfaceId)
       this.broker.releaseSurface(surfaceId)
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
@@ -353,6 +427,102 @@ export class BrowserSurfaceManager {
       : null
   }
 
+  /** Returns a stable, non-navigating Main-only document identity without attaching automation. */
+  getSensitiveTargetIdentity(): BrowserSensitiveTargetIdentity | null {
+    if (this.disposed) return null
+    const surfaceId = this.isActiveAttachmentUsable(this.active)
+      ? this.active.surfaceId
+      : this.activeSurfaceId
+    if (!surfaceId) return null
+    const surface = this.surfaces.get(surfaceId)
+    if (!surface || surface.guest.isDestroyed() || surface.navigationInProgress) return null
+    const origin = safeHttpOrigin(surface.guest.getURL())
+    if (!origin) return null
+    return {
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      navigationEpoch: surface.navigationEpoch,
+      origin
+    }
+  }
+
+  /**
+   * Atomically fences the approved document against a main-frame swap for one sensitive dispatch.
+   * The permanent navigation epoch rejects work that was already in flight; the network and
+   * webContents fences prevent a new redirect/navigation until the original Tool reaches terminal.
+   */
+  beginSensitiveDispatchFence(
+    expected: BrowserSensitiveTargetIdentity
+  ): BrowserSensitiveDispatchFence {
+    this.assertUsable()
+    const initial = this.getSensitiveTargetIdentity()
+    if (!sameSensitiveTarget(initial, expected)) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const surface = this.surfaces.get(expected.surfaceId)
+    if (
+      !surface ||
+      surface.generation !== expected.generation ||
+      surface.dispatchFence ||
+      surface.guest.isDestroyed()
+    ) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+
+    let blockedByWebContents = false
+    let networkFence: BrowserMainFrameNavigationFence | undefined
+    let finished = false
+    const blockNavigation = (
+      event: Event,
+      _url: string,
+      _isInPlace: boolean,
+      isMainFrame: boolean
+    ) => {
+      if (!isMainFrame) return
+      blockedByWebContents = true
+      event.preventDefault()
+    }
+    surface.guest.on('will-navigate', blockNavigation)
+    surface.guest.on('will-redirect', blockNavigation)
+    try {
+      networkFence = this.networkGuard?.beginMainFrameNavigationFence(
+        surface.guest,
+        surface.generation
+      )
+      if (!sameSensitiveTarget(this.getSensitiveTargetIdentity(), expected)) {
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+    } catch (error) {
+      surface.guest.removeListener('will-navigate', blockNavigation)
+      surface.guest.removeListener('will-redirect', blockNavigation)
+      networkFence?.finish()
+      throw error
+    }
+
+    const finishSilently = (): boolean => {
+      if (finished) return false
+      finished = true
+      surface.guest.removeListener('will-navigate', blockNavigation)
+      surface.guest.removeListener('will-redirect', blockNavigation)
+      networkFence?.finish()
+      if (surface.dispatchFence === record) surface.dispatchFence = undefined
+      return (
+        blockedByWebContents ||
+        Boolean(networkFence?.blocked()) ||
+        !sameSensitiveTarget(this.getSensitiveTargetIdentity(), expected)
+      )
+    }
+    const record: ActiveSensitiveDispatchFence = { finishSilently }
+    surface.dispatchFence = record
+    return {
+      finish: () => {
+        if (finishSilently()) {
+          throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+        }
+      }
+    }
+  }
+
   ensureGroup(): void {
     this.assertUsable()
     const host = this.resolveHost()
@@ -448,11 +618,7 @@ export class BrowserSurfaceManager {
     const identity = this.getActiveSurfaceIdentity()
     if (!identity) throw new BrowserSurfaceManagerError('browser.target_closed')
     const surface = this.surfaces.get(identity.surfaceId)
-    if (
-      !surface ||
-      surface.generation !== identity.generation ||
-      surface.guest.isDestroyed()
-    ) {
+    if (!surface || surface.generation !== identity.generation || surface.guest.isDestroyed()) {
       throw new BrowserSurfaceManagerError('browser.target_closed')
     }
 
@@ -551,7 +717,9 @@ export class BrowserSurfaceManager {
 
     const orderedBeforeClose = this.allOrderedSurfaces()
     const closedIndex = orderedBeforeClose.findIndex((candidate) => candidate === surface)
+    surface.dispatchFence?.finishSilently()
     surface.guest.removeListener('destroyed', surface.handleDestroyed)
+    this.removeNavigationListeners(surface)
     this.surfaces.delete(surfaceId)
     const closeWaiter = this.closeWaiters.get(surfaceId)
     if (closeWaiter?.generation === generation) {
@@ -626,7 +794,9 @@ export class BrowserSurfaceManager {
       detachError = error
     }
     for (const surface of this.surfaces.values()) {
+      surface.dispatchFence?.finishSilently()
       surface.guest.removeListener('destroyed', surface.handleDestroyed)
+      this.removeNavigationListeners(surface)
     }
     this.surfaces.clear()
     this.closingSurfaceIds.clear()
@@ -1043,6 +1213,13 @@ export class BrowserSurfaceManager {
     )
   }
 
+  private removeNavigationListeners(surface: ManagedSurface): void {
+    surface.guest.removeListener('did-start-navigation', surface.handleDidStartNavigation)
+    surface.guest.removeListener('did-navigate', surface.handleDidNavigate)
+    surface.guest.removeListener('did-fail-load', surface.handleDidFailLoad)
+    surface.guest.removeListener('did-stop-loading', surface.handleDidStopLoading)
+  }
+
   private assertUsable(): void {
     if (this.disposed) throw new BrowserSurfaceManagerError('browser.manager_shutdown')
   }
@@ -1111,6 +1288,35 @@ function safeSurfaceUrl(value: string): string {
   } catch {
     return 'about:blank'
   }
+}
+
+function safeHttpOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value)
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      parsed.username !== '' ||
+      parsed.password !== ''
+    ) {
+      return null
+    }
+    return parsed.origin
+  } catch {
+    return null
+  }
+}
+
+function sameSensitiveTarget(
+  left: BrowserSensitiveTargetIdentity | null,
+  right: BrowserSensitiveTargetIdentity
+): boolean {
+  return Boolean(
+    left &&
+    left.surfaceId === right.surfaceId &&
+    left.generation === right.generation &&
+    left.navigationEpoch === right.navigationEpoch &&
+    left.origin === right.origin
+  )
 }
 
 function isSafeManagedPageUrl(value: string): boolean {

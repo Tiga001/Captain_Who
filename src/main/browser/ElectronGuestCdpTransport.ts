@@ -21,6 +21,16 @@ interface CdpTargetInfo {
   url: string
 }
 
+interface ChildReadiness {
+  readonly promise: Promise<boolean>
+  settle(ready: boolean): void
+}
+
+interface ChildFocusProbe {
+  readonly sessionId: string
+  readonly frameId: string
+}
+
 const MAX_METHOD_LENGTH = 256
 const MAX_SESSION_ID_LENGTH = 512
 const MAX_CDP_STRING_LENGTH = 4_096
@@ -34,10 +44,16 @@ const MAX_CDP_PROPERTY_NAME_BYTES = 256
 const MAX_CDP_VALUE_STRING_BYTES = 1 * 1_024 * 1_024
 const MAX_CDP_EVENT_QUEUE = 1_024
 const MAX_CDP_EVENTS_PER_SECOND = 4_096
+const MAX_CHILD_SESSIONS = 64
+const FOCUS_PROBE_TIMEOUT_MS = 500
 
 export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private readonly childSessionIds = new Set<string>()
+  private readonly childReadiness = new Map<string, ChildReadiness>()
+  private readonly childFrameIds = new Map<string, string>()
+  private readonly childTargetIds = new Map<string, string>()
   private readonly debuggerClient: Debugger
+  private readonly focusWorldName = `mycopilot-focus-${randomUUID()}`
   private readonly syntheticSessionId = `mycopilot-page-${randomUUID()}`
   private targetInfo: CdpTargetInfo
   private browserVersion: CdpParams = {
@@ -153,15 +169,18 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       return
     }
     if (method === 'Target.attachedToTarget') {
-      const childSessionId = safeParams.sessionId
-      if (
-        typeof childSessionId !== 'string' ||
-        childSessionId.length === 0 ||
-        childSessionId.length > MAX_SESSION_ID_LENGTH
-      ) {
+      const attached = this.validateAttachedChild(safeParams, sessionId)
+      if (!attached) return
+      if (this.childSessionIds.size >= MAX_CHILD_SESSIONS) {
+        this.terminate('cdp_child_session_limit_exceeded')
         return
       }
-      this.childSessionIds.add(childSessionId)
+      this.childSessionIds.add(attached.sessionId)
+      this.childTargetIds.set(attached.sessionId, attached.targetId)
+      this.childReadiness.set(
+        attached.sessionId,
+        attached.waitingForDebugger ? createChildReadiness() : resolvedChildReadiness()
+      )
     }
 
     const mappedSessionId = sessionId || this.syntheticSessionId
@@ -169,11 +188,70 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       return
     }
 
-    this.enqueueEvent({ method, params: safeParams, sessionId: mappedSessionId })
+    if (
+      mappedSessionId !== this.syntheticSessionId &&
+      ((method === 'Page.lifecycleEvent' && safeParams.name === 'commit') ||
+        method === 'Page.frameNavigated')
+    ) {
+      if (method === 'Page.frameNavigated') {
+        const frame = safeParams.frame
+        if (isRecord(frame) && typeof frame.id === 'string' && frame.id.length > 0) {
+          this.childFrameIds.set(mappedSessionId, frame.id)
+        }
+      }
+      this.childReadiness.get(mappedSessionId)?.settle(true)
+    }
+
+    const event = { method, params: safeParams, sessionId: mappedSessionId }
+    this.enqueueEvent(event)
 
     if (method === 'Target.detachedFromTarget') {
       const childSessionId = safeParams.sessionId
-      if (typeof childSessionId === 'string') this.childSessionIds.delete(childSessionId)
+      if (typeof childSessionId === 'string') {
+        this.childSessionIds.delete(childSessionId)
+        this.childFrameIds.delete(childSessionId)
+        this.childTargetIds.delete(childSessionId)
+        this.childReadiness.get(childSessionId)?.settle(false)
+        this.childReadiness.delete(childSessionId)
+      }
+    }
+  }
+
+  private validateAttachedChild(
+    params: CdpParams,
+    parentSessionId: string
+  ): { sessionId: string; targetId: string; waitingForDebugger: boolean } | null {
+    const childSessionId = params.sessionId
+    const targetInfo = params.targetInfo
+    if (
+      typeof childSessionId !== 'string' ||
+      childSessionId.length === 0 ||
+      childSessionId.length > MAX_SESSION_ID_LENGTH ||
+      !isRecord(targetInfo) ||
+      targetInfo.type !== 'iframe' ||
+      targetInfo.attached !== true ||
+      typeof targetInfo.targetId !== 'string' ||
+      targetInfo.targetId.length === 0 ||
+      targetInfo.targetId.length > MAX_SESSION_ID_LENGTH ||
+      targetInfo.browserContextId !== this.targetInfo.browserContextId ||
+      (params.waitingForDebugger !== true && params.waitingForDebugger !== false)
+    ) {
+      return null
+    }
+    const expectedParentTarget = parentSessionId
+      ? this.childTargetIds.get(parentSessionId)
+      : this.targetInfo.targetId
+    if (!expectedParentTarget || targetInfo.parentFrameId !== expectedParentTarget) return null
+    if (
+      this.childSessionIds.has(childSessionId) ||
+      [...this.childTargetIds.values()].includes(targetInfo.targetId)
+    ) {
+      return null
+    }
+    return {
+      sessionId: childSessionId,
+      targetId: targetInfo.targetId,
+      waitingForDebugger: params.waitingForDebugger
     }
   }
 
@@ -233,31 +311,61 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
 
     const childSessionId =
       request.sessionId === this.syntheticSessionId ? undefined : request.sessionId
+    if (request.method === 'Target.setAutoAttach') {
+      return await this.debuggerClient.sendCommand(
+        request.method,
+        withoutTargetPause(request.params),
+        childSessionId
+      )
+    }
+    if (request.method === 'Page.createIsolatedWorld' && childSessionId) {
+      const ready = await this.childReadiness.get(childSessionId)?.promise
+      if (ready !== true) throw new CdpPolicyError('frame_detached')
+    }
     if (request.method === 'Input.insertText') {
       return await this.insertText(request.params, childSessionId)
     }
-    if (
-      request.method === 'Input.dispatchKeyEvent' &&
-      (request.params?.type === 'char' || request.params?.type === 'keyDown') &&
-      typeof request.params.text === 'string'
-    ) {
-      // Electron currently drops text-bearing key dispatch for a guest webview even though
-      // non-text keydown/up events are delivered. Route only a non-empty bounded text payload
-      // through the same narrow insertion shim; navigation keys and shortcuts still use native
-      // Input.dispatchKeyEvent.
-      if (request.params.text.length === 0) {
-        return await this.debuggerClient.sendCommand(request.method, request.params, childSessionId)
+    if (request.method === 'Input.dispatchKeyEvent') {
+      // Keep the exact admitted guest internally focused even when its containing window is not
+      // foregrounded. This does not activate another Target or bring the application forward.
+      this.guest.hostWebContents?.focus()
+      this.guest.focus()
+      if (
+        (request.params?.type === 'char' || request.params?.type === 'keyDown') &&
+        typeof request.params.text === 'string' &&
+        request.params.text.length > 0
+      ) {
+        if (request.params.type === 'keyDown') {
+          // Electron drops the text payload for guest keyDown. Forward the native key event with
+          // every key/code/modifier/repeat field intact, but without its ineffective insertion
+          // fields, then deliver exactly one insertion to the frame that owns focus. The later
+          // native keyUp remains untouched.
+          const result = await this.debuggerClient.sendCommand(
+            request.method,
+            withoutTextInsertion(request.params),
+            childSessionId
+          )
+          await this.insertText({ text: request.params.text }, childSessionId)
+          return result
+        }
+        return await this.insertText({ text: request.params.text }, childSessionId)
       }
-      return await this.insertText({ text: request.params.text }, childSessionId)
     }
-    return await this.debuggerClient.sendCommand(request.method, request.params, childSessionId)
+    const result = await this.debuggerClient.sendCommand(
+      request.method,
+      request.params,
+      request.method === 'Page.createIsolatedWorld' ? undefined : childSessionId
+    )
+    return result
   }
 
   /**
    * Electron's debugger currently acknowledges `Input.insertText` for a webview guest but drops
-   * the text, even when Playwright has focused the exact input. Keep this compatibility shim
-   * narrow: the fixed expression only applies a bounded string to the current guest selection.
-   * Remove it once Electron's guest debugger reliably implements `Input.insertText`.
+   * the text, even when Playwright has focused the exact input. WebContents.insertText is the
+   * narrow native compatibility path: it targets this exact admitted guest and follows the
+   * renderer's focused frame, including an iframe/OOPIF. It does not execute page-provided code or
+   * require access to the frame DOM. Remove it once Electron's guest debugger reliably implements
+   * `Input.insertText`.
    */
   private async insertText(
     params: CdpParams | undefined,
@@ -273,36 +381,96 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     }
     if (params.text.length === 0) return {}
 
-    const serializedText = JSON.stringify(params.text)
-      .replaceAll('\u2028', '\\u2028')
-      .replaceAll('\u2029', '\\u2029')
-    let evaluated: unknown
     try {
-      evaluated = await this.debuggerClient.sendCommand(
-        'Runtime.evaluate',
-        {
-          expression: `(() => {
-            const execCommand = Object.getPrototypeOf(document)?.execCommand;
-            if (typeof execCommand !== 'function' || !document.activeElement) return false;
-            return execCommand.call(document, 'insertText', false, ${serializedText}) === true;
-          })()`,
-          returnByValue: true
-        },
-        sessionId
-      )
-    } catch {
-      throw new CdpPolicyError('Unable to insert text into managed target')
-    }
-
-    if (
-      !isRecord(evaluated) ||
-      !isRecord(evaluated.result) ||
-      evaluated.result.value !== true ||
-      isRecord(evaluated.exceptionDetails)
-    ) {
-      throw new CdpPolicyError('Unable to insert text into managed target')
+      // An OOPIF has its own admitted child CDP session. Electron's WebContents.insertText can
+      // crash that remote renderer when it owns focus, while the child Input domain targets it
+      // precisely. Same-process frames have no child session, so use the exact guest's native
+      // insertion API there; unlike a top-document Runtime.evaluate shim it follows frame focus.
+      if (sessionId) {
+        return await this.debuggerClient.sendCommand('Input.insertText', params, sessionId)
+      }
+      const focusedChildSession = await this.findFocusedChildSession()
+      if (focusedChildSession) {
+        return await this.debuggerClient.sendCommand(
+          'Input.insertText',
+          params,
+          focusedChildSession
+        )
+      }
+      this.guest.focus()
+      await this.guest.insertText(params.text)
+    } catch (error) {
+      if (error instanceof CdpPolicyError) throw error
+      throw new CdpPolicyError('frame_input_delivery_failed')
     }
     return {}
+  }
+
+  private async findFocusedChildSession(): Promise<string | undefined> {
+    const probes = [...this.childSessionIds].map((sessionId): ChildFocusProbe | null => {
+      const frameId = this.childFrameIds.get(sessionId)
+      return frameId ? { sessionId, frameId } : null
+    })
+    if (probes.some((probe) => probe === null)) {
+      // A live child without an exact navigated frame identity may own focus. Falling back to the
+      // top document in that state could deliver text to the wrong renderer.
+      throw new CdpPolicyError('frame_input_delivery_failed')
+    }
+    const focused = (
+      await Promise.all(
+        (probes as ChildFocusProbe[]).map(async (probe) => ({
+          sessionId: probe.sessionId,
+          focused: await withTimeout(
+            this.probeChildFocusInIsolatedWorld(probe),
+            FOCUS_PROBE_TIMEOUT_MS
+          )
+        }))
+      )
+    ).filter((probe) => probe.focused)
+    if (focused.length > 1) throw new CdpPolicyError('frame_input_delivery_failed')
+    return focused[0]?.sessionId
+  }
+
+  private async probeChildFocusInIsolatedWorld(probe: ChildFocusProbe): Promise<boolean> {
+    try {
+      // Never ask the page's main world whether it owns focus: page script can replace
+      // document.hasFocus and redirect typed secrets into a malicious iframe. A named isolated
+      // world has its own pristine JavaScript intrinsics while observing the same browser focus
+      // state. Both commands use the exact admitted, ready child session and its last observed
+      // frame identity; neither command can escape to another Target.
+      const world = await this.debuggerClient.sendCommand(
+        'Page.createIsolatedWorld',
+        {
+          frameId: probe.frameId,
+          worldName: this.focusWorldName
+        },
+        probe.sessionId
+      )
+      const executionContextId =
+        isRecord(world) &&
+        typeof world.executionContextId === 'number' &&
+        Number.isSafeInteger(world.executionContextId) &&
+        world.executionContextId > 0
+          ? world.executionContextId
+          : undefined
+      if (!executionContextId) throw new Error('focus-world-missing')
+      const result = await this.debuggerClient.sendCommand(
+        'Runtime.evaluate',
+        {
+          expression: 'Document.prototype.hasFocus.call(document) === true',
+          contextId: executionContextId,
+          returnByValue: true,
+          silent: true
+        },
+        probe.sessionId
+      )
+      const evaluated =
+        isRecord(result) && isRecord(result.result) ? result.result.value : undefined
+      if (evaluated !== true && evaluated !== false) throw new Error('focus-result-invalid')
+      return evaluated
+    } catch {
+      throw new CdpPolicyError('frame_input_delivery_failed')
+    }
   }
 
   private async dispatchBrowserCommand(method: string, params?: CdpParams): Promise<unknown> {
@@ -434,7 +602,11 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       }
     }
     this.ownsDebugger = false
+    for (const readiness of this.childReadiness.values()) readiness.settle(false)
+    this.childReadiness.clear()
     this.childSessionIds.clear()
+    this.childFrameIds.clear()
+    this.childTargetIds.clear()
     this.eventQueue = []
     this.handleClosed(this)
     this.closeReason = reason
@@ -455,6 +627,26 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
 }
 
 class CdpPolicyError extends Error {}
+
+function createChildReadiness(): ChildReadiness {
+  let settled = false
+  let resolvePromise!: (ready: boolean) => void
+  const promise = new Promise<boolean>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    settle(ready) {
+      if (settled) return
+      settled = true
+      resolvePromise(ready)
+    }
+  }
+}
+
+function resolvedChildReadiness(): ChildReadiness {
+  return { promise: Promise.resolve(true), settle: () => undefined }
+}
 
 function isForbiddenTargetCommand(method: string): boolean {
   return (
@@ -498,6 +690,20 @@ function parseRequest(value: object): CdpRequest | null {
   }
   if (typeof sessionId === 'string') request.sessionId = sessionId
   return request
+}
+
+function withoutTargetPause(params: CdpParams | undefined): CdpParams {
+  if (!params || params.autoAttach !== true || params.flatten !== true) {
+    throw new CdpPolicyError('Invalid target auto-attach request')
+  }
+  return { ...params, waitForDebuggerOnStart: false }
+}
+
+function withoutTextInsertion(params: CdpParams): CdpParams {
+  const forwarded = { ...params }
+  delete forwarded.text
+  delete forwarded.unmodifiedText
+  return forwarded
 }
 
 function cloneBoundedCdpRecord(value: Record<string, unknown>): CdpParams {
@@ -669,6 +875,18 @@ function normalizeTargetInfo(value: unknown, fallback: CdpTargetInfo): CdpTarget
 
 function boundedString(value: unknown): string {
   return typeof value === 'string' ? value.slice(0, MAX_CDP_STRING_LENGTH) : ''
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new CdpPolicyError('frame_input_delivery_failed')), timeoutMs)
+  })
+  try {
+    return await Promise.race([operation, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

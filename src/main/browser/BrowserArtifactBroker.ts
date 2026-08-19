@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, renameSync } from 'node:fs'
 import {
   chmod,
   lstat,
@@ -69,6 +69,8 @@ export interface BrowserArtifactCreateInput {
   kind: BrowserArtifactKind
   mimeType: string
   suggestedFileName: string
+  /** Defaults to true. Sensitive exports set false so bytes can never cross the preview IPC. */
+  allowPreview?: boolean
 }
 
 export interface BrowserArtifactReservation {
@@ -102,6 +104,10 @@ export interface BrowserArtifactBrokerOptions {
   rootDirectory: string
   /** Injectable deterministic publication barrier used by race/conformance tests. */
   beforePublish?: () => Promise<void>
+  /** Injectable deterministic export barrier used by revocation/shutdown race tests. */
+  beforeExportPublish?: () => Promise<void>
+  /** Synchronous final export hook used only to prove the no-await TTL publication boundary. */
+  beforeExportFinalPublish?: () => void
   clock?: BrowserArtifactBrokerClock
   maxArtifactBytes?: number
   maxArtifacts?: number
@@ -156,6 +162,8 @@ const DEFAULT_CLOCK: BrowserArtifactBrokerClock = {
  */
 export class BrowserArtifactBroker {
   private readonly clock: BrowserArtifactBrokerClock
+  private readonly beforeExportFinalPublish: () => void
+  private readonly beforeExportPublish: () => Promise<void>
   private readonly beforePublish: () => Promise<void>
   private readonly maxArtifactBytes: number
   private readonly maxArtifacts: number
@@ -173,6 +181,7 @@ export class BrowserArtifactBroker {
   private readonly closedSurfaces = new Set<string>()
   private readonly closedToolCalls = new Set<string>()
   private readonly finalizedRuns = new Set<string>()
+  private readonly releasedRuns = new Set<string>()
   private readonly revokedActivations = new Set<string>()
   private readonly reservations = new Map<string, ReservationRecord>()
   private readonly runUsage = new Map<string, RunUsage>()
@@ -197,6 +206,8 @@ export class BrowserArtifactBroker {
     this.objectsDirectory = join(this.rootDirectory, 'objects')
     this.sessionsDirectory = join(this.rootDirectory, 'sessions')
     this.clock = options.clock ?? DEFAULT_CLOCK
+    this.beforeExportFinalPublish = options.beforeExportFinalPublish ?? (() => undefined)
+    this.beforeExportPublish = options.beforeExportPublish ?? (() => Promise.resolve())
     this.beforePublish = options.beforePublish ?? (() => Promise.resolve())
     this.maxArtifactBytes = positiveBound(options.maxArtifactBytes, DEFAULT_MAX_ARTIFACT_BYTES)
     this.maxArtifacts = positiveBound(options.maxArtifacts, DEFAULT_MAX_ARTIFACTS)
@@ -219,15 +230,27 @@ export class BrowserArtifactBroker {
     this.assertUsable()
     const id = randomUUID()
     const directory = join(this.sessionsDirectory, id)
-    await mkdir(directory, { mode: 0o700 })
-    await chmod(directory, 0o700)
-    const record: SessionRecord = { closed: false, directory, id, reservations: new Set() }
-    this.sessions.set(id, record)
-    return {
-      outputDirectory: directory,
-      reserveFile: (input) => this.reserveInSession(record, input),
-      adoptFile: (input) => this.adoptInSession(record, input),
-      close: () => this.closeSession(record)
+    try {
+      await mkdir(directory, { mode: 0o700 })
+      await chmod(directory, 0o700)
+      // `shutdown()` installs its fence before waiting for filesystem cleanup. Re-check after the
+      // final directory await so an open racing shutdown cannot republish a stale SessionRecord or
+      // leave a freshly-created private directory behind.
+      this.assertUsable()
+      const record: SessionRecord = { closed: false, directory, id, reservations: new Set() }
+      this.sessions.set(id, record)
+      return {
+        outputDirectory: directory,
+        reserveFile: (input) => this.reserveInSession(record, input),
+        adoptFile: (input) => this.adoptInSession(record, input),
+        close: () => this.closeSession(record)
+      }
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true }).catch(() => undefined)
+      if (error instanceof BrowserArtifactBrokerError) throw error
+      throw new BrowserArtifactBrokerError(
+        this.closed ? 'browser.artifact.closed' : 'browser.artifact.unavailable'
+      )
     }
   }
 
@@ -307,9 +330,99 @@ export class BrowserArtifactBroker {
     }
   }
 
+  /**
+   * Copies an exact frozen Artifact reference to a path selected by Main's native save dialog.
+   *
+   * The destination is never accepted over Renderer IPC and this method returns only a safe
+   * basename. Publication uses a 0600 random sibling followed by one synchronous rename, so a
+   * revocation/shutdown fence cannot interleave with the final filesystem side effect.
+   */
+  async exportArtifact(
+    referenceValue: unknown,
+    destinationValue: unknown
+  ): Promise<{ displayName: string }> {
+    await this.ensureInitialized()
+    this.assertUsable()
+    const reference = parseBrowserArtifactReference(referenceValue)
+    const destination = await resolveExportDestination(destinationValue, this.rootDirectory)
+    return this.withMutationLock(async () => {
+      let temporaryPath: string | undefined
+      try {
+        const record = await this.requireExportableRecord(reference)
+        const bytes = await readVerifiedArtifactBytes(
+          record.path,
+          this.objectsDirectory,
+          record.reference.sizeBytes,
+          record.sha256
+        )
+        await assertExportDirectoryIdentity(destination)
+        await assertReplaceableExportLeaf(destination.path)
+
+        temporaryPath = join(
+          destination.directory,
+          `.${destination.displayName}.${randomUUID()}.tmp`
+        )
+        const handle = await open(
+          temporaryPath,
+          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
+          0o600
+        )
+        try {
+          await handle.writeFile(bytes)
+          await handle.sync()
+          const written = await handle.stat()
+          if (!written.isFile() || written.nlink !== 1 || written.size !== bytes.byteLength) {
+            throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+          }
+        } finally {
+          await handle.close()
+        }
+        await chmod(temporaryPath, 0o600)
+        if ((await hashFile(temporaryPath)) !== record.sha256) {
+          throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+        }
+
+        await this.beforeExportPublish()
+        await this.requireExportableRecord(reference)
+        await assertExportDirectoryIdentity(destination)
+        await assertReplaceableExportLeaf(destination.path)
+        const staged = await lstat(temporaryPath)
+        if (
+          !staged.isFile() ||
+          staged.isSymbolicLink() ||
+          staged.nlink !== 1 ||
+          staged.size !== record.reference.sizeBytes
+        ) {
+          throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+        }
+        if ((await hashFile(temporaryPath)) !== record.sha256) {
+          throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+        }
+
+        // No await is permitted between this final fence and publication. `renameSync` replaces a
+        // raced leaf atomically rather than following it, and the staged inode already has 0600.
+        this.beforeExportFinalPublish()
+        this.assertExportRecordLive(reference, record)
+        renameSync(temporaryPath, destination.path)
+        temporaryPath = undefined
+        return { displayName: destination.displayName }
+      } catch (error) {
+        if (error instanceof BrowserArtifactBrokerError) throw error
+        throw new BrowserArtifactBrokerError('browser.artifact.unavailable')
+      } finally {
+        if (temporaryPath) await rm(temporaryPath, { force: true }).catch(() => undefined)
+      }
+    })
+  }
+
   async releaseRun(runId: string): Promise<void> {
     this.finalizedRuns.add(runId)
-    await this.releaseWhere((owner) => owner.runId === runId)
+    this.releasedRuns.add(runId)
+    try {
+      await this.releaseWhere((owner) => owner.runId === runId)
+    } finally {
+      this.releasedRuns.delete(runId)
+    }
   }
 
   /**
@@ -408,6 +521,7 @@ export class BrowserArtifactBroker {
       this.closedSurfaces.clear()
       this.closedToolCalls.clear()
       this.finalizedRuns.clear()
+      this.releasedRuns.clear()
       this.revokedActivations.clear()
       this.runUsage.clear()
       this.totalBytes = 0
@@ -513,6 +627,7 @@ export class BrowserArtifactBroker {
       throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
     }
     reservation.state = 'committing'
+    let publishedPath: string | undefined
     try {
       return await this.withMutationLock(async () => {
         this.assertUsable()
@@ -537,10 +652,6 @@ export class BrowserArtifactBroker {
         )
         this.assertCommitCapacity(reservation.input.owner.runId, metadata.size)
         const sha256 = await hashFile(reservation.managedPath)
-        await this.beforePublish()
-        this.assertUsable()
-        this.assertSession(reservation.session)
-        this.assertOwnerLive(reservation.input.owner)
         const unchanged = await lstat(reservation.managedPath)
         if (
           unchanged.dev !== metadata.dev ||
@@ -556,7 +667,28 @@ export class BrowserArtifactBroker {
         const destination = join(this.objectsDirectory, artifactUuid)
         await chmod(reservation.managedPath, 0o600)
         await rename(reservation.managedPath, destination)
+        publishedPath = destination
         await chmod(destination, 0o600)
+        // Revocation/finalization fences are installed synchronously outside the mutation queue.
+        // Pause only after the final mutating filesystem operation, then re-check both authority
+        // and the exact inode immediately before the synchronous publication step. This closes the
+        // rename-to-record window without allowing a late commit to escape a run/capability/tool/
+        // surface shutdown fence.
+        await this.beforePublish()
+        const published = await lstat(destination)
+        if (
+          published.dev !== metadata.dev ||
+          published.ino !== metadata.ino ||
+          published.size !== metadata.size ||
+          published.isSymbolicLink() ||
+          !published.isFile()
+        ) {
+          throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+        }
+        this.assertUsable()
+        this.assertSession(reservation.session)
+        this.assertOwnerLive(reservation.input.owner)
+        this.assertCommitCapacity(reservation.input.owner.runId, metadata.size)
         const createdAt = this.clock.now()
         const reference: BrowserArtifactReference = {
           schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
@@ -573,7 +705,8 @@ export class BrowserArtifactBroker {
             reservation.input.kind,
             metadata.size,
             this.maxPreviewBytes,
-            this.maxTextPreviewBytes
+            this.maxTextPreviewBytes,
+            reservation.input.allowPreview !== false
           )
         }
         const record: ArtifactRecord = {
@@ -593,6 +726,7 @@ export class BrowserArtifactBroker {
         return structuredClone(reference)
       })
     } catch (error) {
+      if (publishedPath) await rm(publishedPath, { force: true }).catch(() => undefined)
       await this.discardReservation(id, reservation)
       if (error instanceof BrowserArtifactBrokerError) throw error
       throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
@@ -697,6 +831,51 @@ export class BrowserArtifactBroker {
     }
   }
 
+  private async requireExportableRecord(
+    reference: BrowserArtifactReference
+  ): Promise<ArtifactRecord> {
+    this.assertUsable()
+    const record = this.artifacts.get(reference.artifactId)
+    if (!record) throw new BrowserArtifactBrokerError('browser.artifact.not_found')
+    if (!sameReference(reference, record.reference)) {
+      throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+    }
+    if (record.reference.expiresAt <= this.clock.now()) {
+      await this.deleteRecord(record)
+      throw new BrowserArtifactBrokerError('browser.artifact.expired')
+    }
+    this.assertExportAuthority(record.owner)
+    return record
+  }
+
+  private assertExportAuthority(owner: BrowserArtifactOwner): void {
+    if (
+      this.releasedRuns.has(owner.runId) ||
+      this.revokedActivations.has(owner.activationId) ||
+      this.closedToolCalls.has(keyForToolCall(owner.runId, owner.toolCallId))
+    ) {
+      throw new BrowserArtifactBrokerError('browser.artifact.closed')
+    }
+  }
+
+  /** Exact synchronous authority check immediately adjacent to the atomic export rename. */
+  private assertExportRecordLive(
+    reference: BrowserArtifactReference,
+    record: ArtifactRecord
+  ): void {
+    this.assertUsable()
+    if (
+      this.artifacts.get(reference.artifactId) !== record ||
+      !sameReference(reference, record.reference)
+    ) {
+      throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+    }
+    if (record.reference.expiresAt <= this.clock.now()) {
+      throw new BrowserArtifactBrokerError('browser.artifact.expired')
+    }
+    this.assertExportAuthority(record.owner)
+  }
+
   private armExpirationTimer(): void {
     if (this.closed) return
     if (this.expirationTimer) this.clock.clearTimeout(this.expirationTimer)
@@ -757,13 +936,17 @@ function validateCreateInput(input: BrowserArtifactCreateInput): BrowserArtifact
     throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
   }
   parseBrowserSurfaceId(owner.surfaceId)
+  if (input.allowPreview !== undefined && typeof input.allowPreview !== 'boolean') {
+    throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+  }
   const mimeType = input.mimeType.trim().toLowerCase()
   validateKindMime(input.kind, mimeType)
   return {
     owner: { ...owner },
     kind: input.kind,
     mimeType,
-    suggestedFileName: safeSuggestedFileName(input.suggestedFileName)
+    suggestedFileName: safeSuggestedFileName(input.suggestedFileName),
+    ...(input.allowPreview === undefined ? {} : { allowPreview: input.allowPreview })
   }
 }
 
@@ -851,8 +1034,10 @@ function previewFor(
   kind: BrowserArtifactKind,
   size: number,
   maxPreviewBytes: number,
-  maxTextPreviewBytes: number
+  maxTextPreviewBytes: number,
+  allowPreview: boolean
 ): BrowserArtifactPreview {
+  if (!allowPreview) return 'none'
   if (kind === 'image' && size <= maxPreviewBytes) return 'image'
   if (
     ['text', 'json', 'snapshot', 'console', 'network'].includes(kind) &&
@@ -935,8 +1120,145 @@ async function hashFile(path: string): Promise<string> {
   }
 }
 
+async function readVerifiedArtifactBytes(
+  path: string,
+  expectedRoot: string,
+  expectedSize: number,
+  expectedSha256: string
+): Promise<Uint8Array> {
+  const validated = await validatedRegularFile(path, expectedRoot)
+  if (validated.size !== expectedSize) {
+    throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+  }
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  try {
+    const before = await handle.stat()
+    if (
+      !before.isFile() ||
+      before.nlink !== 1 ||
+      before.dev !== validated.dev ||
+      before.ino !== validated.ino ||
+      before.size !== expectedSize
+    ) {
+      throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+    }
+    const bytes = await handle.readFile()
+    const after = await handle.stat()
+    if (
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.nlink !== 1 ||
+      after.size !== before.size ||
+      bytes.byteLength !== expectedSize ||
+      hashBytes(bytes) !== expectedSha256
+    ) {
+      throw new BrowserArtifactBrokerError('browser.artifact.identity_mismatch')
+    }
+    return Uint8Array.from(bytes)
+  } finally {
+    await handle.close()
+  }
+}
+
+interface BrowserArtifactExportDestination {
+  directory: string
+  directoryDev: bigint | number
+  directoryIno: bigint | number
+  displayName: string
+  path: string
+}
+
+async function resolveExportDestination(
+  value: unknown,
+  managedRoot: string
+): Promise<BrowserArtifactExportDestination> {
+  if (typeof value !== 'string' || value.length > 4_096 || hasAsciiControl(value)) {
+    throw new BrowserArtifactBrokerError('browser.artifact.invalid_name')
+  }
+  const lexicalPath = resolve(value)
+  if (!isAbsolute(value) || value !== lexicalPath) {
+    throw new BrowserArtifactBrokerError('browser.artifact.invalid_name')
+  }
+  const rawDisplayName = basename(lexicalPath)
+  const displayName = safeSuggestedFileName(rawDisplayName)
+  if (displayName !== rawDisplayName) {
+    throw new BrowserArtifactBrokerError('browser.artifact.invalid_name')
+  }
+  try {
+    const [directory, privateRoot] = await Promise.all([
+      realpath(dirname(lexicalPath)),
+      realpath(managedRoot)
+    ])
+    const directoryMetadata = await lstat(directory)
+    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()) {
+      throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+    }
+    const destinationPath = join(directory, displayName)
+    const privateRelative = relative(privateRoot, destinationPath)
+    if (
+      privateRelative === '' ||
+      (!privateRelative.startsWith('..') && !isAbsolute(privateRelative))
+    ) {
+      throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+    }
+    return {
+      directory,
+      directoryDev: directoryMetadata.dev,
+      directoryIno: directoryMetadata.ino,
+      displayName,
+      path: destinationPath
+    }
+  } catch (error) {
+    if (error instanceof BrowserArtifactBrokerError) throw error
+    throw new BrowserArtifactBrokerError('browser.artifact.unavailable')
+  }
+}
+
+async function assertExportDirectoryIdentity(
+  destination: BrowserArtifactExportDestination
+): Promise<void> {
+  try {
+    const metadata = await lstat(destination.directory)
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      metadata.dev !== destination.directoryDev ||
+      metadata.ino !== destination.directoryIno
+    ) {
+      throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+    }
+  } catch (error) {
+    if (error instanceof BrowserArtifactBrokerError) throw error
+    throw new BrowserArtifactBrokerError('browser.artifact.unavailable')
+  }
+}
+
+async function assertReplaceableExportLeaf(path: string): Promise<void> {
+  try {
+    const metadata = await lstat(path)
+    // Existing regular files may be replaced after Electron's native overwrite confirmation.
+    // Symlinks and special files are never followed or replaced.
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new BrowserArtifactBrokerError('browser.artifact.invalid_file')
+    }
+  } catch (error) {
+    if (isFileSystemError(error, 'ENOENT')) return
+    if (error instanceof BrowserArtifactBrokerError) throw error
+    throw new BrowserArtifactBrokerError('browser.artifact.unavailable')
+  }
+}
+
 function hashBytes(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+function isFileSystemError(error: unknown, code: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === code
+  )
 }
 
 function sameReference(left: BrowserArtifactReference, right: BrowserArtifactReference): boolean {

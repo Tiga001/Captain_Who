@@ -920,6 +920,7 @@ mod tests {
                 call_id: "browser-call".to_string(),
                 trigger_tool_name: "browser_navigate".to_string(),
                 call_reason: "Open the private fixture.".to_string(),
+                builtin_tool_grant: None,
             },
             destination: BrowserRiskDestinationInput {
                 normalized_url: "http://10.0.0.1:8080/a".to_string(),

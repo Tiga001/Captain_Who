@@ -439,7 +439,7 @@ pub(super) fn deferred_external_tool_calls_context_item(count: u32) -> ContextIt
     ContextItem::text(
         LlmMessageRole::System,
         format!(
-            "MCP_DEFERRED_CALLS_NEED_REPREPARE count={count}. These additional external tool calls from the earlier model response were not executed or persisted because each MCP invocation requires its own one-time preparation and approval. If they are still needed, issue fresh tool calls now, one approval boundary at a time. Do not assume any deferred call ran."
+            "MCP_PRIVATE_CALLS_NEED_REPREPARE count={count}. These additional private MCP calls from the earlier model response were not executed or persisted because each sensitive invocation requires its own one-time preparation and, where applicable, approval. If they are still needed, issue fresh tool calls now, one approval boundary at a time. Do not assume any deferred call ran."
         ),
         ContextSource::RuntimeGuard,
         ContextScope::Run,

@@ -18,6 +18,7 @@ import {
 } from './persistedAgentRunCommandValidators'
 import { parseStoredMcpInvocation } from './persistedAgentRunMcpValidators'
 import { parseTimelineItem } from './persistedAgentRunTimelineValidators'
+import { projectBuiltinCapabilityToolResult } from '../agentRun/builtinCapabilityResultProjection'
 import {
   MAX_STORED_RUN_ITEMS,
   hasExactKeys,
@@ -468,11 +469,26 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
       action.type === 'builtin_capability_activation' ? [action.approval.callId] : []
     )
   )
+  const builtinCapabilityToolCallIds = new Set(
+    run.timeline.flatMap((item) =>
+      item.type === 'tool_call' && item.identity?.type === 'builtin_capability' ? [item.callId] : []
+    )
+  )
   const commandSessions = projectDurableCommandSessions(run.commandSessions, runCommandCallIds)
   const persistedRun: Record<string, unknown> = {
     ...run,
-    toolCalls: run.toolCalls.filter((call) => !builtinCapabilityCallIds.has(call.id)),
-    toolResults: run.toolResults.filter((result) => !builtinCapabilityCallIds.has(result.callId)),
+    toolCalls: run.toolCalls
+      .filter((call) => !builtinCapabilityCallIds.has(call.id))
+      .map((call) =>
+        builtinCapabilityToolCallIds.has(call.id) ? { ...call, args: {}, reason: null } : call
+      ),
+    toolResults: run.toolResults
+      .filter((result) => !builtinCapabilityCallIds.has(result.callId))
+      .map((result) =>
+        builtinCapabilityToolCallIds.has(result.callId)
+          ? projectBuiltinCapabilityToolResult(result)
+          : result
+      ),
     webSearchActivities: run.webSearchActivities ?? [],
     readActivities: run.readActivities ?? [],
     approvals: run.approvals.filter(
@@ -480,10 +496,17 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
         action
       ): action is Exclude<
         AgentProposedAction,
-        { type: 'mcp_tool_call' | 'builtin_capability_activation' | 'browser_risk_approval' }
+        {
+          type:
+            | 'mcp_tool_call'
+            | 'builtin_capability_activation'
+            | 'builtin_mcp_tool_approval'
+            | 'browser_risk_approval'
+        }
       > =>
         action.type !== 'mcp_tool_call' &&
         action.type !== 'builtin_capability_activation' &&
+        action.type !== 'builtin_mcp_tool_approval' &&
         action.type !== 'browser_risk_approval'
     ),
     fileDrafts: run.fileDrafts ?? [],

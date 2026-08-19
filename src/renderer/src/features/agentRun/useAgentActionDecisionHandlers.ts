@@ -147,6 +147,7 @@ function logAgentActionDecisionError(
   if (
     action.type === 'mcp_tool_call' ||
     action.type === 'builtin_capability_activation' ||
+    action.type === 'builtin_mcp_tool_approval' ||
     action.type === 'browser_risk_approval'
   ) {
     // Protected Host actions may carry internal error details. Keep the entire

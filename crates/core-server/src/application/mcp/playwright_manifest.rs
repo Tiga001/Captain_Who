@@ -1,6 +1,7 @@
 use mycopilot_core::{
     AgentError, AgentResult, AgentToolSafety, BuiltinCapabilityDescriptor, BuiltinCapabilityId,
     BuiltinCapabilityManifest, BuiltinCapabilityProviderContract, BuiltinCapabilityToolDescriptor,
+    BuiltinMcpToolApprovalMode, BuiltinMcpToolRiskKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -22,6 +23,7 @@ const REVIEWED_POLICY_JSON: &str =
 const FIXED_UPSTREAM_TOOL_COUNT: usize = 69;
 const MAX_REVIEWED_EXPOSED_TOOLS: usize = 128;
 const CALL_REASON_PROPERTY: &str = "call_reason";
+const APPROVAL_ORIGIN_PROPERTY: &str = "approval_origin";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PlaywrightToolIdentity(String);
@@ -108,6 +110,7 @@ impl PlaywrightToolContract {
                 self.handling_mode,
                 PlaywrightToolHandlingMode::PassThrough
                     | PlaywrightToolHandlingMode::HostAdapted
+                    | PlaywrightToolHandlingMode::ApprovalRequired
                     | PlaywrightToolHandlingMode::ArtifactManaged
             )
             && !self.reason_code.is_empty()
@@ -184,10 +187,16 @@ struct ReviewedToolPolicy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostSchemaOverlay {
     add_call_reason: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    add_approval_origin: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remove_properties: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     property_overrides: BTreeMap<String, Value>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub(crate) fn load_playwright_browser_manifest() -> AgentResult<BuiltinCapabilityManifest> {
@@ -267,9 +276,7 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
         if policy.exposed
             && matches!(
                 policy.handling_mode,
-                PlaywrightToolHandlingMode::ApprovalRequired
-                    | PlaywrightToolHandlingMode::Sandboxed
-                    | PlaywrightToolHandlingMode::Unsupported
+                PlaywrightToolHandlingMode::Sandboxed | PlaywrightToolHandlingMode::Unsupported
             )
         {
             return Err(AgentError::new(
@@ -288,7 +295,7 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
 
         *handling_counts.entry(policy.handling_mode).or_default() += 1;
         if policy.exposed {
-            let descriptor = BuiltinCapabilityToolDescriptor::new(
+            let mut descriptor = BuiltinCapabilityToolDescriptor::new(
                 identity.as_str(),
                 &policy.model_name,
                 &upstream_tool.description,
@@ -301,6 +308,15 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
                 &upstream_tool.schema_digest,
                 &policy.host_overlay_digest,
             )?;
+            if policy.handling_mode == PlaywrightToolHandlingMode::ApprovalRequired {
+                let mode = if matches!(identity.as_str(), "browser_drop" | "browser_file_upload") {
+                    BuiltinMcpToolApprovalMode::Dynamic
+                } else {
+                    BuiltinMcpToolApprovalMode::Always
+                };
+                descriptor = descriptor
+                    .with_builtin_approval_policy(mode, approval_risk_kinds(identity.as_str())?)?;
+            }
             if descriptor.schema_digest != host_schema_digest {
                 return Err(AgentError::new(
                     "内置浏览器 Provider schema 链的 digest 不匹配。",
@@ -402,7 +418,58 @@ fn validate_policy_reason_and_constraints(policy: &ReviewedToolPolicy) -> AgentR
             "内置 Playwright Tool policy 缺少 handling 约束。",
         ));
     }
+    let expects_origin = policy.handling_mode == PlaywrightToolHandlingMode::ApprovalRequired;
+    if policy.host_overlay.add_approval_origin != expects_origin {
+        return Err(AgentError::new(
+            "内置 Playwright Tool approval_origin overlay 与 handling policy 不一致。",
+        ));
+    }
     Ok(())
+}
+
+fn approval_risk_kinds(raw_name: &str) -> AgentResult<Vec<BuiltinMcpToolRiskKind>> {
+    use BuiltinMcpToolRiskKind as Risk;
+    let risks = match raw_name {
+        "browser_cookie_get" | "browser_cookie_list" => vec![Risk::CookieRead],
+        "browser_cookie_clear" | "browser_cookie_delete" | "browser_cookie_set" => {
+            vec![Risk::CookieWrite]
+        }
+        "browser_drop" | "browser_file_upload" => {
+            vec![Risk::FileRead, Risk::FileUpload]
+        }
+        "browser_evaluate" => vec![Risk::PageScriptExecution],
+        "browser_localstorage_get" | "browser_localstorage_list" => {
+            vec![Risk::LocalStorageRead]
+        }
+        "browser_localstorage_clear"
+        | "browser_localstorage_delete"
+        | "browser_localstorage_set" => vec![Risk::LocalStorageWrite],
+        "browser_network_request" => vec![Risk::NetworkSensitiveRead],
+        "browser_sessionstorage_get" | "browser_sessionstorage_list" => {
+            vec![Risk::SessionStorageRead]
+        }
+        "browser_sessionstorage_clear"
+        | "browser_sessionstorage_delete"
+        | "browser_sessionstorage_set" => vec![Risk::SessionStorageWrite],
+        "browser_set_storage_state" => vec![
+            Risk::FileRead,
+            Risk::CookieWrite,
+            Risk::LocalStorageWrite,
+            Risk::StorageStateImport,
+        ],
+        "browser_storage_state" => vec![
+            Risk::FileWrite,
+            Risk::CookieRead,
+            Risk::LocalStorageRead,
+            Risk::StorageStateExport,
+        ],
+        _ => {
+            return Err(AgentError::new(
+                "ApprovalRequired Playwright Tool 缺少精确风险分类。",
+            ))
+        }
+    };
+    Ok(risks)
 }
 
 fn validate_top_level_identity(
@@ -553,6 +620,23 @@ fn apply_host_schema_overlay(
         }),
     );
     required.push(Value::String(CALL_REASON_PROPERTY.to_string()));
+    if overlay.add_approval_origin {
+        if properties.contains_key(APPROVAL_ORIGIN_PROPERTY) {
+            return Err(AgentError::new(
+                "upstream schema 意外占用了 Host approval_origin 字段。",
+            ));
+        }
+        properties.insert(
+            APPROVAL_ORIGIN_PROPERTY.to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Exact HTTP(S) origin of the active managed page for sensitive-tool approval. Do not include credentials, path, query, or fragment.",
+                "minLength": 8,
+                "maxLength": 512
+            }),
+        );
+        required.push(Value::String(APPROVAL_ORIGIN_PROPERTY.to_string()));
+    }
     host_object.insert("required".to_string(), Value::Array(required));
 
     verify_structural_schema_preserved(upstream_schema, &host_schema, &removed)?;
@@ -659,6 +743,8 @@ fn verify_structural_schema_preserved(
         .iter()
         .any(|required| !host_required.contains(required))
         || !host_required.contains(&Value::String(CALL_REASON_PROPERTY.to_string()))
+        || (host_properties.contains_key(APPROVAL_ORIGIN_PROPERTY)
+            != host_required.contains(&Value::String(APPROVAL_ORIGIN_PROPERTY.to_string())))
     {
         return Err(AgentError::new(
             "Host overlay 丢失了 upstream required 字段。",
@@ -757,17 +843,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_catalog_classifies_all_69_tools_and_exposes_reviewed_40() {
+    fn fixed_catalog_classifies_all_69_tools_and_exposes_reviewed_61() {
         let contract = load_playwright_browser_contract().unwrap();
         assert_eq!(contract.tools.len(), 69);
-        assert_eq!(contract.manifest.tools.len(), 40);
+        assert_eq!(contract.manifest.tools.len(), 61);
         assert_eq!(
             contract.upstream_catalog_digest,
             "sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf"
         );
         assert_eq!(
             contract.policy_digest,
-            "sha256:23cf8923a8d0aecceeea4fdf45113629f7cb6af186c3b704d26505239d3878a5"
+            "sha256:522934676363be5d6c113fc373cfa1c47309da4b8a101e4619d0c815f9d80ade"
         );
 
         let counts = contract.tools.values().fold(
@@ -812,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_manifest_contains_new_pass_through_tools_but_not_sensitive_tools() {
+    fn provider_manifest_contains_reviewed_pass_through_and_sensitive_tools() {
         let manifest = load_playwright_browser_manifest().unwrap();
         let names = manifest
             .tools
@@ -831,14 +917,17 @@ mod tests {
         ] {
             assert!(names.contains(expected), "{expected}");
         }
-        for forbidden in [
+        for sensitive in [
             "browser_evaluate",
             "browser_file_upload",
             "browser_cookie_list",
-            "browser_run_code_unsafe",
+            "browser_network_request",
+            "browser_storage_state",
         ] {
-            assert!(!names.contains(forbidden), "{forbidden}");
+            assert!(names.contains(sensitive), "{sensitive}");
         }
+        let forbidden = "browser_run_code_unsafe";
+        assert!(!names.contains(forbidden), "{forbidden}");
     }
 
     #[test]
@@ -880,6 +969,15 @@ mod tests {
             let required = tool.host_input_schema["required"].as_array().unwrap();
             assert!(properties.contains_key(CALL_REASON_PROPERTY));
             assert!(required.contains(&serde_json::json!(CALL_REASON_PROPERTY)));
+            let is_sensitive = tool.handling_mode == PlaywrightToolHandlingMode::ApprovalRequired;
+            assert_eq!(
+                properties.contains_key(APPROVAL_ORIGIN_PROPERTY),
+                is_sensitive
+            );
+            assert_eq!(
+                required.contains(&serde_json::json!(APPROVAL_ORIGIN_PROPERTY)),
+                is_sensitive
+            );
             assert_eq!(
                 schema_digest(&tool.host_input_schema).unwrap(),
                 tool.host_schema_digest
@@ -889,6 +987,7 @@ mod tests {
                 tool.handling_mode,
                 PlaywrightToolHandlingMode::PassThrough
                     | PlaywrightToolHandlingMode::HostAdapted
+                    | PlaywrightToolHandlingMode::ApprovalRequired
                     | PlaywrightToolHandlingMode::ArtifactManaged
             ));
             assert!(!tool.reason_code.is_empty());
@@ -947,6 +1046,7 @@ mod tests {
         });
         let overlay = HostSchemaOverlay {
             add_call_reason: true,
+            add_approval_origin: false,
             remove_properties: Vec::new(),
             property_overrides: BTreeMap::from([(
                 "fields".to_string(),
@@ -993,6 +1093,7 @@ mod tests {
         ] {
             let overlay = HostSchemaOverlay {
                 add_call_reason: true,
+                add_approval_origin: false,
                 remove_properties: Vec::new(),
                 property_overrides: BTreeMap::from([(
                     "action".to_string(),
@@ -1012,6 +1113,7 @@ mod tests {
         ] {
             let overlay = HostSchemaOverlay {
                 add_call_reason: true,
+                add_approval_origin: false,
                 remove_properties: Vec::new(),
                 property_overrides: BTreeMap::from([(
                     "action".to_string(),

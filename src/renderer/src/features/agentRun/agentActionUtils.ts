@@ -24,6 +24,17 @@ export function shouldHydratePendingAgentAction(snapshot: PendingAgentActionSnap
       snapshot.toolCallId === approval.callId
     )
   }
+  if (snapshot.action.type === 'builtin_mcp_tool_approval') {
+    const approval = snapshot.action.approval
+    return (
+      snapshot.status === 'pending' &&
+      approval.approvalStatus === 'required' &&
+      snapshot.actionId === approval.identity.actionId &&
+      snapshot.runId === approval.identity.runId &&
+      snapshot.toolName === approval.identity.rawName &&
+      snapshot.toolCallId === approval.identity.callId
+    )
+  }
   return true
 }
 
@@ -38,6 +49,7 @@ export function getAgentActionApprovalStatus(action: AgentProposedAction) {
   if (action.type === 'mcp_tool_call') return action.approval.call.approvalStatus
   if (action.type === 'builtin_capability_activation') return action.approval.approvalStatus
   if (action.type === 'browser_risk_approval') return action.approval.approvalStatus
+  if (action.type === 'builtin_mcp_tool_approval') return action.approval.approvalStatus
   return action.call.approvalStatus
 }
 
@@ -52,5 +64,6 @@ export function getAgentActionId(action: AgentProposedAction) {
   if (action.type === 'mcp_tool_call') return action.approval.identity.actionId
   if (action.type === 'builtin_capability_activation') return action.approval.actionId
   if (action.type === 'browser_risk_approval') return action.approval.actionId
+  if (action.type === 'builtin_mcp_tool_approval') return action.approval.identity.actionId
   return action.call.id
 }

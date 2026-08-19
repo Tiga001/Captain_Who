@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -158,6 +158,180 @@ describe('BrowserArtifactBroker', () => {
       })
     ).rejects.toMatchObject({ code: 'browser.artifact.capacity' })
     await broker.shutdown()
+  })
+
+  it('keeps sensitive JSON as metadata-only even when it is small enough to preview', async () => {
+    const { broker, root } = await createBroker()
+    const artifact = await broker.storeText({
+      owner: OWNER,
+      kind: 'json',
+      mimeType: 'application/json',
+      suggestedFileName: 'storage-state.json',
+      allowPreview: false,
+      text: JSON.stringify({
+        cookies: [{ name: 'session', value: 'PRIVATE_COOKIE_CANARY' }],
+        origins: [{ origin: 'https://fixture.example', localStorage: [] }]
+      })
+    })
+    expect(artifact.preview).toBe('none')
+    expect(JSON.stringify(artifact)).not.toContain('PRIVATE_COOKIE_CANARY')
+    await expect(broker.readPreview(artifact)).rejects.toMatchObject({
+      code: 'browser.artifact.preview_unavailable'
+    })
+    const exportDirectory = join(root, '..', 'exports')
+    await mkdir(exportDirectory)
+    const destination = join(exportDirectory, 'storage-state-copy.json')
+    await expect(broker.exportArtifact(artifact, destination)).resolves.toEqual({
+      displayName: 'storage-state-copy.json'
+    })
+    expect(await readFile(destination, 'utf8')).toContain('PRIVATE_COOKIE_CANARY')
+    expect((await lstat(destination)).mode & 0o777).toBe(0o600)
+    await broker.shutdown()
+  })
+
+  it('requires an exact live reference and fails closed for traversal and symlink destinations', async () => {
+    const { broker, root } = await createBroker()
+    const artifact = await broker.storeText({
+      owner: OWNER,
+      kind: 'snapshot',
+      mimeType: 'text/plain',
+      suggestedFileName: 'snapshot.txt',
+      text: 'trusted snapshot'
+    })
+    const exportDirectory = join(root, '..', 'exports')
+    await mkdir(exportDirectory)
+
+    await expect(
+      broker.exportArtifact(
+        { ...artifact, displayName: 'forged.txt' },
+        join(exportDirectory, 'forged.txt')
+      )
+    ).rejects.toMatchObject({ code: 'browser.artifact.identity_mismatch' })
+    await expect(
+      broker.exportArtifact(artifact, `${exportDirectory}/nested/../traversal.txt`)
+    ).rejects.toMatchObject({ code: 'browser.artifact.invalid_name' })
+    await expect(
+      broker.exportArtifact(artifact, join(root, 'objects', 'forbidden.txt'))
+    ).rejects.toMatchObject({ code: 'browser.artifact.invalid_file' })
+
+    const symlinkTarget = join(exportDirectory, 'target.txt')
+    const symlinkDestination = join(exportDirectory, 'copy.txt')
+    await writeFile(symlinkTarget, 'must remain unchanged')
+    await symlink(symlinkTarget, symlinkDestination)
+    await expect(broker.exportArtifact(artifact, symlinkDestination)).rejects.toMatchObject({
+      code: 'browser.artifact.invalid_file'
+    })
+    expect(await readFile(symlinkTarget, 'utf8')).toBe('must remain unchanged')
+    expect((await lstat(symlinkDestination)).isSymbolicLink()).toBe(true)
+    expect(await readdir(exportDirectory)).toEqual(['copy.txt', 'target.txt'])
+    await broker.shutdown()
+  })
+
+  it('rechecks the source hash and expiry immediately before an export', async () => {
+    let now = 1_000
+    const clock: BrowserArtifactBrokerClock = {
+      now: () => now,
+      setTimeout: (handler, delayMs) => setTimeout(handler, delayMs),
+      clearTimeout: (timer) => clearTimeout(timer)
+    }
+    const { broker, root } = await createBroker({ clock, ttlMs: 100 })
+    const first = await broker.storeText({
+      owner: OWNER,
+      kind: 'text',
+      mimeType: 'text/plain',
+      suggestedFileName: 'first.txt',
+      text: 'first'
+    })
+    const exportDirectory = join(root, '..', 'exports')
+    await mkdir(exportDirectory)
+    const [objectName] = await readdir(join(root, 'objects'))
+    await writeFile(join(root, 'objects', objectName), 'other')
+    await expect(
+      broker.exportArtifact(first, join(exportDirectory, 'corrupt.txt'))
+    ).rejects.toMatchObject({ code: 'browser.artifact.identity_mismatch' })
+
+    const second = await broker.storeText({
+      owner: { ...OWNER, toolCallId: 'call-2' },
+      kind: 'text',
+      mimeType: 'text/plain',
+      suggestedFileName: 'second.txt',
+      text: 'second'
+    })
+    now = second.expiresAt
+    await expect(
+      broker.exportArtifact(second, join(exportDirectory, 'expired.txt'))
+    ).rejects.toMatchObject({ code: 'browser.artifact.expired' })
+    expect(await readdir(exportDirectory)).toEqual([])
+    await broker.shutdown()
+  })
+
+  it('does not export when TTL expires after the last asynchronous verification', async () => {
+    let now = 2_000
+    const clock: BrowserArtifactBrokerClock = {
+      now: () => now,
+      setTimeout: (handler, delayMs) => setTimeout(handler, delayMs),
+      clearTimeout: (timer) => clearTimeout(timer)
+    }
+    const { broker, root } = await createBroker({
+      clock,
+      ttlMs: 100,
+      beforeExportFinalPublish: () => {
+        now += 100
+      }
+    })
+    const artifact = await broker.storeText({
+      owner: OWNER,
+      kind: 'text',
+      mimeType: 'text/plain',
+      suggestedFileName: 'expires-at-publish.txt',
+      text: 'bounded output'
+    })
+    const exportDirectory = join(root, '..', 'exports-final-expiry')
+    await mkdir(exportDirectory)
+
+    await expect(
+      broker.exportArtifact(artifact, join(exportDirectory, 'must-not-exist.txt'))
+    ).rejects.toMatchObject({ code: 'browser.artifact.expired' })
+    expect(await readdir(exportDirectory)).toEqual([])
+    await broker.shutdown()
+  })
+
+  it('does not publish or retain a temporary export across revocation and shutdown races', async () => {
+    const fences = ['release', 'shutdown'] as const
+    for (const fence of fences) {
+      let enterExport!: () => void
+      const exportEntered = new Promise<void>((resolveEntered) => {
+        enterExport = resolveEntered
+      })
+      let releaseExport!: () => void
+      const exportGate = new Promise<void>((resolveGate) => {
+        releaseExport = resolveGate
+      })
+      const { broker, root } = await createBroker({
+        beforeExportPublish: async () => {
+          enterExport()
+          await exportGate
+        }
+      })
+      const artifact = await broker.storeText({
+        owner: OWNER,
+        kind: 'snapshot',
+        mimeType: 'text/plain',
+        suggestedFileName: `${fence}.txt`,
+        text: fence
+      })
+      const exportDirectory = join(root, '..', `exports-${fence}`)
+      await mkdir(exportDirectory)
+      const exporting = broker.exportArtifact(artifact, join(exportDirectory, `${fence}.txt`))
+      await exportEntered
+      const fencing =
+        fence === 'release' ? broker.releaseCapability(OWNER.activationId) : broker.shutdown()
+      releaseExport()
+      await expect(exporting, fence).rejects.toMatchObject({ code: 'browser.artifact.closed' })
+      await fencing
+      expect(await readdir(exportDirectory), fence).toEqual([])
+      if (fence === 'release') await broker.shutdown()
+    }
   })
 
   it('requires an exact reference and preserves committed previews across target close', async () => {
@@ -356,5 +530,73 @@ describe('BrowserArtifactBroker', () => {
       runs: 0
     })
     await expect(lstat(root)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rechecks every owner fence after the final rename and removes the unpublished object', async () => {
+    const fences: ReadonlyArray<{
+      name: string
+      apply(broker: BrowserArtifactBroker): Promise<void>
+    }> = [
+      { name: 'finalizeRun', apply: (broker) => broker.finalizeRun(OWNER.runId) },
+      { name: 'releaseRun', apply: (broker) => broker.releaseRun(OWNER.runId) },
+      {
+        name: 'releaseCapability',
+        apply: (broker) => broker.releaseCapability(OWNER.activationId)
+      },
+      {
+        name: 'releaseToolCall',
+        apply: (broker) =>
+          broker.releaseToolCall({ runId: OWNER.runId, toolCallId: OWNER.toolCallId })
+      },
+      {
+        name: 'releaseSurface',
+        apply: (broker) =>
+          broker.releaseSurface({ surfaceId: OWNER.surfaceId, generation: OWNER.generation })
+      }
+    ]
+
+    for (const fence of fences) {
+      let enterPublish!: () => void
+      const publishEntered = new Promise<void>((resolveEntered) => {
+        enterPublish = resolveEntered
+      })
+      let releasePublish!: () => void
+      const publishGate = new Promise<void>((resolveGate) => {
+        releasePublish = resolveGate
+      })
+      const { broker, root } = await createBroker({
+        beforePublish: async () => {
+          enterPublish()
+          await publishGate
+        }
+      })
+      const session = await broker.openSession()
+      const reservation = await session.reserveFile({
+        owner: OWNER,
+        kind: 'text',
+        mimeType: 'text/plain',
+        suggestedFileName: `${fence.name}.txt`
+      })
+      await writeFile(reservation.managedPath, fence.name)
+
+      const committing = reservation.commit()
+      await publishEntered
+      const revoking = fence.apply(broker)
+      releasePublish()
+
+      await expect(committing, fence.name).rejects.toMatchObject({
+        code: 'browser.artifact.closed'
+      })
+      await revoking
+      expect(broker.snapshot(), fence.name).toMatchObject({
+        artifacts: 0,
+        bytes: 0,
+        reservations: 0,
+        runs: 0
+      })
+      await expect(readdir(join(root, 'objects')), fence.name).resolves.toEqual([])
+      await session.close()
+      await broker.shutdown()
+    }
   })
 })

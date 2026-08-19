@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   BROWSER_ARTIFACT_SCHEMA_VERSION,
+  parseBrowserArtifactExportInput,
+  parseBrowserArtifactExportOutput,
   parseBrowserArtifactReadInput,
   parseBrowserArtifactReadOutput,
   parseBrowserArtifactReference,
@@ -70,6 +72,46 @@ describe('Browser Artifact protocol', () => {
         bytes: Uint8Array.from({ length: 42 })
       })
     ).toThrow(/does not permit Renderer content/)
+  })
+
+  it('exports only an exact reference and returns no filesystem path', () => {
+    const input = { schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION, artifact }
+    expect(parseBrowserArtifactExportInput(input)).toEqual(input)
+    expect(() => parseBrowserArtifactExportInput({ ...input, path: '/tmp/page.png' })).toThrow(
+      /unexpected field path/
+    )
+    expect(
+      parseBrowserArtifactExportOutput({
+        schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+        status: 'exported',
+        displayName: 'saved-page.png'
+      })
+    ).toEqual({
+      schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+      status: 'exported',
+      displayName: 'saved-page.png'
+    })
+    expect(
+      parseBrowserArtifactExportOutput({
+        schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+        status: 'cancelled'
+      })
+    ).toEqual({ schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION, status: 'cancelled' })
+    expect(() =>
+      parseBrowserArtifactExportOutput({
+        schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+        status: 'exported',
+        displayName: 'page.png',
+        path: '/tmp/page.png'
+      })
+    ).toThrow(/unexpected field path/)
+    expect(() =>
+      parseBrowserArtifactExportOutput({
+        schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+        status: 'cancelled',
+        displayName: 'page.png'
+      })
+    ).toThrow(/must be omitted/)
   })
 
   it('parses the narrow builtin tool projection without raw content', () => {

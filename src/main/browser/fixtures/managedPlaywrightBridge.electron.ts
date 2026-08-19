@@ -42,6 +42,7 @@ import {
   ManagedPlaywrightBridgeHost,
   type ManagedPlaywrightBridgeCore
 } from '../../mcp/ManagedPlaywrightBridgeHost'
+import { ManagedPlaywrightSensitiveTargetBindingBroker } from '../../mcp/ManagedPlaywrightSensitiveTargetBindingBroker'
 
 const READY_MARKER = 'MYCOPILOT_MANAGED_PLAYWRIGHT_READY='
 const COMPLETION_MARKER = 'MYCOPILOT_MANAGED_PLAYWRIGHT_COMPLETION='
@@ -82,8 +83,9 @@ class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuth
     { resolve: (output: BrowserRiskAuthorizeOutput) => void }
   >()
 
-  async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<void> {
+  async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean> {
     await writeProtocolLine(`${COMPLETION_MARKER}${JSON.stringify(input)}`)
+    return true
   }
 
   async authorizeBrowserRisk(
@@ -209,6 +211,54 @@ async function main(): Promise<void> {
         <html><body><main><h1>Secondary Fixture Page</h1></main></body></html>`)
       return
     }
+    if (request.url === '/mail-frame') {
+      response.end(`<!doctype html>
+        <html><body>
+          <label for="frame-subject">Frame Subject</label>
+          <input id="frame-subject" />
+          <div id="slow-editor" contenteditable></div>
+          <div id="mail-body" contenteditable></div>
+          <output id="frame-status">frame-idle</output>
+          <output id="subject-value">subject:</output>
+          <output id="body-value">body:</output>
+          <output id="body-events">body-events:</output>
+          <output id="slow-events">slow-events:</output>
+          <script>
+            const slowEvents = []
+            const slowEditor = document.querySelector('#slow-editor')
+            for (const eventName of ['keydown', 'beforeinput', 'input', 'keyup']) {
+              slowEditor.addEventListener(eventName, event => {
+                slowEvents.push(event.type)
+                document.querySelector('#slow-events').textContent =
+                  'slow-events:' + slowEvents.join(',')
+              })
+            }
+            document.addEventListener('focusin', event => {
+              document.querySelector('#frame-status').textContent =
+                'focused:' + (event.target.id || 'unknown')
+            })
+            document.querySelector('#frame-subject').addEventListener('input', event => {
+              document.querySelector('#subject-value').textContent =
+                'subject:' + event.target.value
+            })
+            document.querySelector('#mail-body').addEventListener('input', event => {
+              document.querySelector('#body-value').textContent =
+                'body:' + event.target.textContent
+              document.querySelector('#frame-status').textContent =
+                'focused:' + (document.activeElement.id || 'unknown')
+            })
+            const bodyEvents = []
+            for (const eventName of ['keydown', 'beforeinput', 'input', 'keyup']) {
+              document.querySelector('#mail-body').addEventListener(eventName, event => {
+                bodyEvents.push(event.type)
+                document.querySelector('#body-events').textContent =
+                  'body-events:' + bodyEvents.join(',')
+              })
+            }
+          </script>
+        </body></html>`)
+      return
+    }
     response.end(`<!doctype html>
       <html><body>
         <main>
@@ -227,6 +277,7 @@ async function main(): Promise<void> {
           <div id="drop-target" role="region" aria-label="Drop target">Drop target</div>
           <ul aria-label="Visible items"><li>Alpha</li><li>Beta</li></ul>
           <output id="output">idle</output>
+          <iframe id="mail-frame" src="/mail-frame"></iframe>
         </main>
         <script>
           console.warn('managed fixture warning')
@@ -348,8 +399,13 @@ async function main(): Promise<void> {
     pendingEnsure = undefined
   })
 
+  const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
+    beginDispatchFence: (target) => manager.beginSensitiveDispatchFence(target),
+    getActiveTarget: () => manager.getSensitiveTargetIdentity()
+  })
   const bridgeHost = new ManagedPlaywrightBridgeHost({
     core,
+    sensitiveTargetBindings,
     createHost: createManagedPlaywrightHostFactory({
       getBrowserContext: () => manager.getBrowserContext(),
       closeSurface: () => manager.closeSurface(),
@@ -358,6 +414,7 @@ async function main(): Promise<void> {
       artifactBroker,
       finalizeBrowserRun: (runId) => networkGuard.finalizeRun(runId),
       getActiveSurfaceIdentity: () => manager.getActiveSurfaceIdentity(),
+      sensitiveTargetBindings,
       releaseBrowserCapability: (activationId) => networkGuard.releaseCapability(activationId),
       releaseBrowserToolCall: (input) => networkGuard.releaseToolCall(input),
       surfaceGroup: manager
@@ -481,5 +538,4 @@ function expectRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
-void main()
-  .catch(() => app.exit(1))
+void main().catch(() => app.exit(1))

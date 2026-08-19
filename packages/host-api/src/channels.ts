@@ -53,6 +53,7 @@ export const HOST_CHANNELS = {
     selectInputAttachments: 'host:attachments.selectInputAttachments'
   },
   browser: {
+    artifactExport: 'host:browser.artifact.export',
     artifactReadPreview: 'host:browser.artifact.readPreview',
     clearBrowsingData: 'host:browser.clearBrowsingData',
     surfaceCommand: 'host:browser.surfaceCommand',

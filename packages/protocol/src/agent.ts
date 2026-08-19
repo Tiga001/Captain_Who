@@ -1893,6 +1893,72 @@ export interface AgentBrowserRiskApproval {
   approvalStatus: AgentApprovalStatus
 }
 
+export type AgentBuiltinMcpToolRiskKind =
+  | 'file_read'
+  | 'file_write'
+  | 'file_upload'
+  | 'file_download'
+  | 'cookie_read'
+  | 'cookie_write'
+  | 'local_storage_read'
+  | 'local_storage_write'
+  | 'session_storage_read'
+  | 'session_storage_write'
+  | 'storage_state_import'
+  | 'storage_state_export'
+  | 'network_sensitive_read'
+  | 'page_script_execution'
+  | 'unsafe_code_execution'
+
+export interface AgentBuiltinMcpToolResourceSummary {
+  scope: string
+  displayName: string
+  fileBasenames: string[]
+  origin: string | null
+}
+
+export interface AgentBuiltinMcpToolApprovalIdentity {
+  actionId: string
+  approvalId: string
+  runId: string
+  callId: string
+  capabilityId: McpBuiltinCapabilityId
+  capabilityActivationId: string
+  managedMcpId: string
+  packageName: string
+  packageVersion: string
+  upstreamCatalogDigest: string
+  manifestDigest: string
+  policyDigest: string
+  policyRevision: number
+  toolId: string
+  rawName: string
+  modelName: string
+  upstreamSchemaDigest: string
+  hostOverlayDigest: string
+  hostInputSchemaDigest: string
+  argumentsDigest: string
+  resourceScopeDigest: string
+  origin: string | null
+}
+
+/** Renderer-safe, value-free projection of one exact built-in MCP sensitive Tool decision. */
+export interface AgentBuiltinMcpToolApproval {
+  schemaVersion: 1
+  identity: AgentBuiltinMcpToolApprovalIdentity
+  capabilityDisplayName: string
+  toolDisplayName: string
+  callReason: string
+  operationCategory: string
+  resourceSummary: AgentBuiltinMcpToolResourceSummary
+  riskKinds: AgentBuiltinMcpToolRiskKind[]
+  /** Unix timestamp in seconds. */
+  createdAt: number
+  /** Unix timestamp in seconds. */
+  expiresAt: number
+  approvalStatus: AgentApprovalStatus
+}
+
 export type AgentProposedAction =
   | { type: 'tool_call'; call: AgentToolCall }
   | { type: 'mcp_tool_call'; approval: AgentMcpToolApproval }
@@ -1900,6 +1966,7 @@ export type AgentProposedAction =
       type: 'builtin_capability_activation'
       approval: AgentBuiltinCapabilityActivationApproval
     }
+  | { type: 'builtin_mcp_tool_approval'; approval: AgentBuiltinMcpToolApproval }
   | { type: 'browser_risk_approval'; approval: AgentBrowserRiskApproval }
   | { type: 'diff'; diff: AgentDiffProposal }
   | { type: 'file_write'; fileWrite: AgentFileWriteProposal }

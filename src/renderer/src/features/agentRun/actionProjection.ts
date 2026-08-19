@@ -16,6 +16,9 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
   if (action.type === 'browser_risk_approval') {
     return null
   }
+  if (action.type === 'builtin_mcp_tool_approval') {
+    return null
+  }
 
   if (action.type === 'diff') {
     return {
@@ -167,6 +170,12 @@ export function withActionApprovalStatus(
     }
   }
   if (action.type === 'browser_risk_approval') {
+    return {
+      ...action,
+      approval: { ...action.approval, approvalStatus }
+    }
+  }
+  if (action.type === 'builtin_mcp_tool_approval') {
     return {
       ...action,
       approval: { ...action.approval, approvalStatus }

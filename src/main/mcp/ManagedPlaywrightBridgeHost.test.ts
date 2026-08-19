@@ -8,6 +8,7 @@ import {
   type ManagedPlaywrightCompletionInput
 } from '@mycopilot/protocol'
 import { ManagedPlaywrightBridgeHost } from './ManagedPlaywrightBridgeHost'
+import { ManagedPlaywrightSensitiveTargetBindingBroker } from './ManagedPlaywrightSensitiveTargetBindingBroker'
 import {
   ManagedPlaywrightMcpHost,
   type ManagedMcpClient,
@@ -35,8 +36,15 @@ class FakeCore {
   private cancel?: (input: ManagedPlaywrightCancelNotification) => void
   private command?: (input: ManagedPlaywrightCommandNotification) => void
 
-  async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<void> {
+  constructor(
+    private readonly completeResult: (
+      input: ManagedPlaywrightCompletionInput
+    ) => Promise<boolean> = async () => true
+  ) {}
+
+  async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean> {
     this.completions.push(input)
+    return await this.completeResult(input)
   }
 
   onManagedPlaywrightCancel(
@@ -72,6 +80,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
     let resolveConnect: (() => void) | undefined
     const host = new ManagedPlaywrightBridgeHost({
       core,
+      sensitiveTargetBindings: targetBindingBroker(),
       createHost: () =>
         hostWith({
           createOfficialConnection: async () => ({
@@ -106,6 +115,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
       .mockRejectedValueOnce(new Error('untrusted upstream failure'))
     const host = new ManagedPlaywrightBridgeHost({
       core,
+      sensitiveTargetBindings: targetBindingBroker(),
       createHost: () => hostWith({ callTool })
     })
 
@@ -157,6 +167,12 @@ describe('ManagedPlaywrightBridgeHost', () => {
   it('preserves the stable surface-capacity error before any page action is dispatched', async () => {
     const core = new FakeCore()
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => ({
+        surfaceId: 'surface-1',
+        generation: 1,
+        navigationEpoch: 1,
+        origin: 'http://127.0.0.1'
+      }),
       ensureActiveSurface: vi.fn(async () => surfaceView()),
       listSurfaces: vi.fn(() => [surfaceView()]),
       createSurface: vi.fn(async () => {
@@ -169,6 +185,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
     }
     const host = new ManagedPlaywrightBridgeHost({
       core,
+      sensitiveTargetBindings: targetBindingBroker(),
       createHost: () => hostWith({ surfaceGroup })
     })
     const request = command({
@@ -201,6 +218,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
     const detachAutomation = vi.fn(async () => undefined)
     const bridge = new ManagedPlaywrightBridgeHost({
       core,
+      sensitiveTargetBindings: targetBindingBroker(),
       createHost: () =>
         hostWith({
           detachAutomation,
@@ -230,6 +248,88 @@ describe('ManagedPlaywrightBridgeHost', () => {
     expect(detachAutomation).toHaveBeenCalled()
     await bridge.close()
   })
+
+  it('releases a prepared binding when Core no longer accepts the late completion', async () => {
+    let releaseCompletion!: () => void
+    const completionBarrier = new Promise<void>((resolve) => {
+      releaseCompletion = resolve
+    })
+    const core = new FakeCore(async () => {
+      await completionBarrier
+      return false
+    })
+    const bindings = targetBindingBroker()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: bindings,
+      createHost: () => hostWith({})
+    })
+    const now = Date.now()
+    const request = command({
+      type: 'prepare_sensitive_tool',
+      input: {
+        bindingRequestId: randomUUID(),
+        runId: 'run-1',
+        capabilityId: 'browser_automation',
+        activationId: AUTHORIZATION_CONTEXT.activationId,
+        manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+        policyRevision: 1,
+        grantExpiresAtMs: now + 120_000,
+        callId: 'call-sensitive-late',
+        toolName: 'browser_evaluate',
+        argumentsDigest: `sha256:${'b'.repeat(64)}`,
+        createdAtMs: now,
+        expiresAtMs: now + 60_000
+      }
+    })
+    core.emitCommand(request)
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(core.completions[0].outcome.type).toBe('sensitive_tool_prepared')
+    expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+    core.emitCancel({
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+      requestId: request.requestId,
+      reason: 'cancelled'
+    })
+    releaseCompletion()
+    await vi.waitFor(() => expect(bindings.snapshot()).toEqual({ bindings: 0, requests: 0 }))
+    await bridge.close()
+  })
+
+  it('releases a prepared binding when the Core completion never settles', async () => {
+    const core = new FakeCore(async () => await new Promise<boolean>(() => undefined))
+    const bindings = targetBindingBroker()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      completionSettleMs: 10,
+      sensitiveTargetBindings: bindings,
+      createHost: () => hostWith({})
+    })
+    const now = Date.now()
+    core.emitCommand(
+      command({
+        type: 'prepare_sensitive_tool',
+        input: {
+          bindingRequestId: randomUUID(),
+          runId: 'run-1',
+          capabilityId: 'browser_automation',
+          activationId: AUTHORIZATION_CONTEXT.activationId,
+          manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+          policyRevision: 1,
+          grantExpiresAtMs: now + 120_000,
+          callId: 'call-sensitive-completion-timeout',
+          toolName: 'browser_evaluate',
+          argumentsDigest: `sha256:${'c'.repeat(64)}`,
+          createdAtMs: now,
+          expiresAtMs: now + 60_000
+        }
+      })
+    )
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+    await vi.waitFor(() => expect(bindings.snapshot()).toEqual({ bindings: 0, requests: 0 }))
+    await bridge.close()
+  })
 })
 
 function command(
@@ -242,6 +342,18 @@ function command(
     deadlineMs: Date.now() + 5_000,
     command: commandValue
   }
+}
+
+function targetBindingBroker(): ManagedPlaywrightSensitiveTargetBindingBroker {
+  return new ManagedPlaywrightSensitiveTargetBindingBroker({
+    beginDispatchFence: () => ({ finish: () => undefined }),
+    getActiveTarget: () => ({
+      surfaceId: 'surface-1',
+      generation: 1,
+      navigationEpoch: 1,
+      origin: 'http://127.0.0.1'
+    })
+  })
 }
 
 function hostWith(options: {

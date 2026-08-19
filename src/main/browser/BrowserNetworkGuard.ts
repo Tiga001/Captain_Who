@@ -33,7 +33,17 @@ interface GuestRecord {
   generation: number
   guest: WebContents
   handleDestroyed: () => void
+  navigationFence?: MainFrameNavigationFenceRecord
   surfaceId: string
+}
+
+interface MainFrameNavigationFenceRecord {
+  blocked: boolean
+}
+
+export interface BrowserMainFrameNavigationFence {
+  blocked(): boolean
+  finish(): void
 }
 
 interface ActiveOperation {
@@ -412,6 +422,41 @@ export class BrowserNetworkGuard {
     )
   }
 
+  /**
+   * Blocks every main-frame network request for one exact registered guest generation.
+   *
+   * Sensitive page-context tools use this after proposal-time document freezing and before
+   * dispatch. Subresources continue normally, while redirects, page script navigation and manual
+   * navigation cannot swap the approved document underneath the in-flight tool.
+   */
+  beginMainFrameNavigationFence(
+    guest: WebContents,
+    generation: number
+  ): BrowserMainFrameNavigationFence {
+    this.assertUsable()
+    const record = this.guests.get(guest.id)
+    if (
+      !record ||
+      record.guest !== guest ||
+      record.generation !== generation ||
+      guest.isDestroyed()
+    ) {
+      throw new Error('browser.target_closed')
+    }
+    if (record.navigationFence) throw new Error('browser.network_guard.target_busy')
+    const fence: MainFrameNavigationFenceRecord = { blocked: false }
+    record.navigationFence = fence
+    let finished = false
+    return {
+      blocked: () => fence.blocked,
+      finish: () => {
+        if (finished) return
+        finished = true
+        if (record.navigationFence === fence) record.navigationFence = undefined
+      }
+    }
+  }
+
   deactivateAutomation(surfaceId?: string): void {
     for (const record of this.guests.values()) {
       if (surfaceId && record.surfaceId !== surfaceId) continue
@@ -537,10 +582,21 @@ export class BrowserNetworkGuard {
 
   private async authorizeRequest(details: OnBeforeRequestListenerDetails): Promise<void> {
     if (this.disposed) throw new Error('browser.network_guard.closed')
+    const registeredRecord = this.requestGuest(details)
+    if (registeredRecord?.navigationFence && details.resourceType === 'mainFrame') {
+      registeredRecord.navigationFence.blocked = true
+      registeredRecord.active?.operation.recordFailure({
+        code: 'browser.risk_outcome_unknown',
+        dispatchCertainty: registeredRecord.active.dispatched
+          ? 'possibly_dispatched'
+          : 'definitely_not_dispatched'
+      })
+      throw new Error('browser.sensitive_navigation_blocked')
+    }
     if (details.url === 'about:blank' || parseBrowserSurfaceBootstrapUrl(details.url) !== null) {
       return
     }
-    const record = this.requestGuest(details)
+    const record = registeredRecord
     if (
       !record ||
       (details.webContents !== undefined && record.guest !== details.webContents) ||
@@ -706,6 +762,10 @@ export class BrowserNetworkGuard {
     record.active?.unlinkCaller()
     record.active?.operation.close()
     record.active = undefined
+    if (record.navigationFence) {
+      record.navigationFence.blocked = true
+      record.navigationFence = undefined
+    }
     this.downloadBroker?.unregisterGuest(record.guest, record.generation)
     void this.downloadBroker
       ?.releaseSurface({ surfaceId: record.surfaceId, generation: record.generation })

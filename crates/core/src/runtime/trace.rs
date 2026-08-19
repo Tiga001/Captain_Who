@@ -108,12 +108,17 @@ pub(super) fn conversation_trace_from_input_checkpoint(
             // from the frozen typed Tool provenance, never from an action UUID or model-visible
             // name. Otherwise a built-in activation result can be rewritten as an external MCP
             // result and correctly rejected by the append-only prefix guard.
-            let uses_external_mcp_projection =
-                checkpoint_continuation_uses_external_mcp_projection(checkpoint)?;
-            let durable_result = if uses_external_mcp_projection {
-                crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
-            } else {
-                continuation.result.clone()
+            let projection = checkpoint_continuation_projection(checkpoint)?;
+            let durable_result = match projection {
+                CheckpointContinuationProjection::Standard => continuation.result.clone(),
+                CheckpointContinuationProjection::ExternalMcp => {
+                    crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
+                }
+                CheckpointContinuationProjection::BuiltinCapability => {
+                    crate::tools::builtin_capability_tool_result_persistence_projection(
+                        &continuation.result,
+                    )
+                }
             };
             let projected =
                 crate::tools::model_projection_for_persisted_continuation(&durable_result);

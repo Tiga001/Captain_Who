@@ -42,6 +42,10 @@ describe('browser surface Host bridge availability', () => {
     const unsubscribe = vi.fn()
     const browser: BrowserHostApi = {
       clearBrowsingData: vi.fn(async () => undefined),
+      exportArtifact: vi.fn(async () => ({
+        ok: true as const,
+        value: { schemaVersion: 1 as const, status: 'cancelled' as const }
+      })),
       readArtifactPreview: vi.fn(async () => ({
         ok: false as const,
         error: { code: -32_001, message: 'not found' }

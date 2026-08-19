@@ -157,14 +157,14 @@ pub fn list_interrupted_actions(
         FROM agent_pending_actions
         WHERE (
                 status IN ('approved', 'executing')
-                AND action_type <> 'mcp_tool_call'
+                AND action_type NOT IN ('mcp_tool_call', 'builtin_mcp_tool_approval')
               )
            OR (
                 -- A pre-dispatch rejection receipt may be committed just before the in-memory
                 -- lifecycle status advances. Only that exact crash window belongs to the generic
                 -- receipt reconciler.
                 status IN ('pending', 'approved')
-                AND action_type = 'mcp_tool_call'
+                AND action_type IN ('mcp_tool_call', 'builtin_mcp_tool_approval')
                 AND target_status = 'rejected'
               )
            OR (

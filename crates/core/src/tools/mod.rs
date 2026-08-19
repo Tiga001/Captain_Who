@@ -47,6 +47,7 @@ use crate::protocol::{
 use agent_collaboration::{AgentCollaborationTool, AgentCollaborationToolKind};
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
+pub use builtin_capability::builtin_capability_tool_result_persistence_projection;
 pub(crate) use builtin_capability::{
     tool_capability_id as builtin_tool_capability_id, ActivateCapabilityTool,
     BuiltinCapabilityAgentTool,
@@ -278,6 +279,8 @@ fn value_contains_true(value: &Value) -> bool {
 
 pub(crate) type BoxAgentToolFuture<'a> =
     Pin<Box<dyn Future<Output = AgentResult<AgentToolExecutionValue>> + Send + 'a>>;
+pub(crate) type BoxAgentProposedActionFuture<'a> =
+    Pin<Box<dyn Future<Output = AgentResult<AgentProposedAction>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentToolResultPersistence {
@@ -361,12 +364,21 @@ impl AgentToolHandler {
         self.tool().cancellation_settlement()
     }
 
+    #[cfg(test)]
     fn proposed_action(
         &self,
         context: &ToolExecutionContext,
         call: &AgentToolCall,
     ) -> AgentResult<AgentProposedAction> {
         self.tool().proposed_action(context, call)
+    }
+
+    fn proposed_action_async<'a>(
+        &'a self,
+        context: &'a ToolExecutionContext,
+        call: &'a AgentToolCall,
+    ) -> BoxAgentProposedActionFuture<'a> {
+        self.tool().proposed_action_async(context, call)
     }
 
     fn invalidate_proposed_action(&self, action: &AgentProposedAction) -> AgentResult<()> {
@@ -723,6 +735,7 @@ impl ToolRegistry {
         self.tools.keys().any(|name| name.starts_with(tool_name))
     }
 
+    #[cfg(test)]
     pub fn proposed_action(
         &self,
         context: &ToolExecutionContext,
@@ -732,7 +745,23 @@ impl ToolRegistry {
             return Err(AgentError::new(format!("未知工具：{}", call.tool)));
         };
 
-        tool.proposed_action(context, call)
+        // Proposal construction can freeze process-only payloads just like execution. Bind the
+        // exact model call identity at this single Registry boundary so every runtime call site
+        // gets the same call_id and cannot accidentally approve an unbound invocation.
+        let call_context = context.clone().with_tool_call_id(call.id.clone());
+        tool.proposed_action(&call_context, call)
+    }
+
+    pub async fn proposed_action_async(
+        &self,
+        context: &ToolExecutionContext,
+        call: &AgentToolCall,
+    ) -> AgentResult<AgentProposedAction> {
+        let Some(tool) = self.tools.get(&call.tool) else {
+            return Err(AgentError::new(format!("未知工具：{}", call.tool)));
+        };
+        let call_context = context.clone().with_tool_call_id(call.id.clone());
+        tool.proposed_action_async(&call_context, call).await
     }
 
     /// Releases Host resources prepared while constructing an action that never reached a durable
@@ -747,6 +776,9 @@ impl ToolRegistry {
             }
             AgentProposedAction::ToolCall { call } => call.tool.as_str(),
             AgentProposedAction::BuiltinCapabilityActivation { .. } => "activate_capability",
+            AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                approval.identity.model_name.as_str()
+            }
             AgentProposedAction::BrowserRiskApproval { approval } => {
                 approval.trigger_tool_name.as_str()
             }
@@ -1251,6 +1283,14 @@ pub(crate) trait AgentTool: Send + Sync {
         Ok(AgentProposedAction::ToolCall { call: call.clone() })
     }
 
+    fn proposed_action_async<'a>(
+        &'a self,
+        context: &'a ToolExecutionContext,
+        call: &'a AgentToolCall,
+    ) -> BoxAgentProposedActionFuture<'a> {
+        Box::pin(async move { self.proposed_action(context, call) })
+    }
+
     fn invalidate_proposed_action(&self, _action: &AgentProposedAction) -> AgentResult<()> {
         Ok(())
     }
@@ -1468,6 +1508,69 @@ mod tests {
                 }
             }))
         }
+    }
+
+    struct ProposalCallIdentityTool;
+
+    impl AgentTool for ProposalCallIdentityTool {
+        fn exposure(&self) -> AgentToolExposure {
+            AgentToolExposure::Stable
+        }
+
+        fn permission_policy(&self) -> AgentToolPermissionPolicy {
+            AgentToolPermissionPolicy::Default
+        }
+
+        fn definition(&self) -> AgentToolDefinition {
+            AgentToolDefinition {
+                name: "proposal_call_identity".to_string(),
+                description: "test".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                safety: AgentToolSafety::ReadOnly,
+                requires_workspace: false,
+                requires_approval: true,
+                approval_mode: crate::protocol::AgentToolApprovalMode::Always,
+            }
+        }
+
+        fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
+            Ok(json!({}))
+        }
+
+        fn proposed_action(
+            &self,
+            context: &ToolExecutionContext,
+            call: &AgentToolCall,
+        ) -> AgentResult<AgentProposedAction> {
+            if context.tool_call_id()? != call.id {
+                return Err(AgentError::new("proposal call identity was not bound"));
+            }
+            Ok(AgentProposedAction::ToolCall { call: call.clone() })
+        }
+    }
+
+    #[test]
+    fn proposed_action_registry_boundary_binds_the_exact_tool_call_id() {
+        let mut registry = ToolRegistry::empty();
+        registry.register_test_tool(ProposalCallIdentityTool);
+        let context = ToolExecutionContext::from_run_context(None)
+            .with_runtime_services("proposal-run".to_string(), None);
+        let call = AgentToolCall {
+            id: "proposal-call-id".to_string(),
+            tool: "proposal_call_identity".to_string(),
+            args: json!({}),
+            approval_status: crate::protocol::AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let action = registry.proposed_action(&context, &call).unwrap();
+        assert!(matches!(
+            action,
+            AgentProposedAction::ToolCall { call: proposed } if proposed.id == call.id
+        ));
     }
 
     #[test]

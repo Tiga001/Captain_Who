@@ -12,6 +12,9 @@ const translations: Record<string, string> = {
   'agent.builtinCapability.activation.completed': 'Enabled {capability}',
   'agent.builtinCapability.activity.reason': 'Call reason',
   'agent.builtinCapability.artifact.list': 'Browser artifacts',
+  'agent.builtinCapability.artifact.export': 'Export',
+  'agent.builtinCapability.artifact.exported': 'Exported',
+  'agent.builtinCapability.artifact.exportUnavailable': 'Export unavailable',
   'agent.builtinCapability.artifact.preview': 'Preview',
   'agent.builtinCapability.artifact.previewTruncated': 'Preview truncated',
   'agent.builtinCapability.artifact.previewUnavailable': 'Preview unavailable',
@@ -88,9 +91,17 @@ const translations: Record<string, string> = {
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => translations[key] ?? key })
 }))
-const hostMocks = vi.hoisted(() => ({ readArtifactPreview: vi.fn() }))
+const hostMocks = vi.hoisted(() => ({
+  exportArtifact: vi.fn(),
+  readArtifactPreview: vi.fn()
+}))
 vi.mock('../../host/hostClient', () => ({
-  hostClient: { browser: { readArtifactPreview: hostMocks.readArtifactPreview } }
+  hostClient: {
+    browser: {
+      exportArtifact: hostMocks.exportArtifact,
+      readArtifactPreview: hostMocks.readArtifactPreview
+    }
+  }
 }))
 
 const CANARY = 'PRIVATE_BROWSER_ARGUMENT_RESULT_CDP_CANARY'
@@ -366,6 +377,84 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.textContent).not.toContain('managedPath')
   })
 
+  it('exports a preview-disabled Artifact explicitly and treats dialog cancellation normally', async () => {
+    const artifact = {
+      schemaVersion: 1,
+      artifactId: 'browser-artifact:123e4567-e89b-42d3-a456-426614174000',
+      kind: 'json',
+      displayName: 'storage-state.json',
+      mimeType: 'application/json',
+      sizeBytes: 42,
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      lifecycle: 'run',
+      owner: 'browser_automation',
+      preview: 'none'
+    } as const
+    let resolveCancellation!: (value: {
+      ok: true
+      value: { schemaVersion: 1; status: 'cancelled' }
+    }) => void
+    hostMocks.exportArtifact
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveCancellation = resolve
+          })
+      )
+      .mockResolvedValueOnce({
+        ok: true,
+        value: { schemaVersion: 1, status: 'exported', displayName: 'user-copy.json' }
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { message: '/private/secret/export-path' }
+      })
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_storage_state')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'browser_storage_state',
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'completed',
+            contentOmitted: true,
+            artifacts: [artifact]
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('browser_storage_state', 'browser_storage_state')}
+      />
+    )
+    screen.container.querySelector('summary')?.click()
+    expect(screen.container.textContent).not.toContain('Preview')
+
+    const exportButton = [...screen.container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Export'
+    )
+    expect(exportButton).toBeDefined()
+    const callsBeforeExport = hostMocks.exportArtifact.mock.calls.length
+    exportButton?.click()
+    exportButton?.click()
+    await expect.poll(() => hostMocks.exportArtifact.mock.calls.length).toBe(callsBeforeExport + 1)
+    expect(hostMocks.exportArtifact).toHaveBeenLastCalledWith({ schemaVersion: 1, artifact })
+    resolveCancellation({ ok: true, value: { schemaVersion: 1, status: 'cancelled' } })
+    await expect.poll(() => exportButton?.textContent).toBe('Export')
+    expect(screen.container.textContent).not.toContain('Export unavailable')
+
+    exportButton?.click()
+    await expect.poll(() => exportButton?.textContent).toBe('Exported')
+    expect(screen.container.textContent).not.toContain('user-copy.json')
+
+    exportButton?.click()
+    await expect.poll(() => screen.container.textContent).toContain('Export unavailable')
+    expect(screen.container.textContent).not.toContain('/private/secret/export-path')
+  })
+
   it.each([`<img-${CANARY}>.png`, `../${CANARY}.png`])(
     'drops an unsafe Artifact display name instead of adding it to the DOM',
     async (displayName) => {
@@ -420,6 +509,38 @@ describe('BuiltinCapabilityToolActivity', () => {
           schemaVersion: 1,
           type: 'builtin_capability_tool',
           status: 'failed',
+          contentOmitted: true
+        }
+      } satisfies AgentToolResult,
+      undefined,
+      'Failed to click page'
+    ],
+    [
+      'rejected',
+      {
+        callId: 'call-browser-capability',
+        tool: 'browser_click',
+        ok: true,
+        result: {
+          schemaVersion: 1,
+          type: 'builtin_capability_tool',
+          status: 'rejected',
+          contentOmitted: true
+        }
+      } satisfies AgentToolResult,
+      undefined,
+      'Cancelled clicking page'
+    ],
+    [
+      'expired',
+      {
+        callId: 'call-browser-capability',
+        tool: 'browser_click',
+        ok: false,
+        result: {
+          schemaVersion: 1,
+          type: 'builtin_capability_tool',
+          status: 'expired',
           contentOmitted: true
         }
       } satisfies AgentToolResult,

@@ -56,6 +56,24 @@ export interface BrowserArtifactReadOutput {
   bytes: Uint8Array
 }
 
+/** Requests a user-directed export without accepting a Renderer-selected filesystem path. */
+export interface BrowserArtifactExportInput {
+  schemaVersion: typeof BROWSER_ARTIFACT_SCHEMA_VERSION
+  artifact: BrowserArtifactReference
+}
+
+/** Path-free result of the native save dialog and Host-owned export operation. */
+export type BrowserArtifactExportOutput =
+  | {
+      schemaVersion: typeof BROWSER_ARTIFACT_SCHEMA_VERSION
+      status: 'exported'
+      displayName: string
+    }
+  | {
+      schemaVersion: typeof BROWSER_ARTIFACT_SCHEMA_VERSION
+      status: 'cancelled'
+    }
+
 export interface BrowserArtifactToolProjection {
   schemaVersion: typeof BROWSER_ARTIFACT_SCHEMA_VERSION
   type: 'builtin_capability_tool'
@@ -113,24 +131,7 @@ export function parseBrowserArtifactReference(
   if (!ARTIFACT_ID_PATTERN.test(artifactId)) {
     throw invalidProtocolValue(`${context}.artifactId`, 'must be an opaque Browser Artifact id')
   }
-  const displayName = expectString(record.displayName, `${context}.displayName`)
-  const canonicalDisplayName = displayName.normalize('NFKC').trim()
-  if (
-    displayName !== canonicalDisplayName ||
-    displayName.length < 1 ||
-    displayName.length > MAX_DISPLAY_NAME_LENGTH ||
-    hasAsciiControlCharacter(displayName) ||
-    displayName === '.' ||
-    displayName === '..' ||
-    displayName.startsWith('.') ||
-    displayName.endsWith('.') ||
-    /[<>:"/\\|?*]/u.test(displayName)
-  ) {
-    throw invalidProtocolValue(
-      `${context}.displayName`,
-      'must be a canonical bounded path-free name'
-    )
-  }
+  const displayName = parseBrowserArtifactDisplayName(record.displayName, `${context}.displayName`)
   const rawMimeType = expectString(record.mimeType, `${context}.mimeType`)
   const mimeType = rawMimeType.toLowerCase()
   if (rawMimeType !== mimeType || !MIME_TYPE_PATTERN.test(mimeType)) {
@@ -197,6 +198,56 @@ export function parseBrowserArtifactReadOutput(value: unknown): BrowserArtifactR
     artifact,
     bytes: Uint8Array.from(bytes)
   }
+}
+
+export function parseBrowserArtifactExportInput(value: unknown): BrowserArtifactExportInput {
+  const context = 'Browser Artifact export request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'artifact'] as const, context)
+  expectSchemaVersion(record, BROWSER_ARTIFACT_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+    artifact: parseBrowserArtifactReference(record.artifact, `${context}.artifact`)
+  }
+}
+
+export function parseBrowserArtifactExportOutput(value: unknown): BrowserArtifactExportOutput {
+  const context = 'Browser Artifact export response'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'status', 'displayName'] as const, context)
+  expectSchemaVersion(record, BROWSER_ARTIFACT_SCHEMA_VERSION, context)
+  const status = expectEnum(record.status, ['exported', 'cancelled'] as const, `${context}.status`)
+  if (status === 'cancelled') {
+    if (record.displayName !== undefined) {
+      throw invalidProtocolValue(`${context}.displayName`, 'must be omitted when cancelled')
+    }
+    return { schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION, status }
+  }
+  const displayName = parseBrowserArtifactDisplayName(record.displayName, `${context}.displayName`)
+  return {
+    schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
+    status,
+    displayName
+  }
+}
+
+function parseBrowserArtifactDisplayName(value: unknown, context: string): string {
+  const displayName = expectString(value, context)
+  const canonicalDisplayName = displayName.normalize('NFKC').trim()
+  if (
+    displayName !== canonicalDisplayName ||
+    displayName.length < 1 ||
+    displayName.length > MAX_DISPLAY_NAME_LENGTH ||
+    hasAsciiControlCharacter(displayName) ||
+    displayName === '.' ||
+    displayName === '..' ||
+    displayName.startsWith('.') ||
+    displayName.endsWith('.') ||
+    /[<>:"/\\|?*]/u.test(displayName)
+  ) {
+    throw invalidProtocolValue(context, 'must be a canonical bounded path-free name')
+  }
+  return displayName
 }
 
 export function parseBrowserArtifactToolProjection(value: unknown): BrowserArtifactToolProjection {

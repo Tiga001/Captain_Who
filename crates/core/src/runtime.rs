@@ -74,8 +74,8 @@ use crate::{
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
-    checkpoint_continuation_uses_external_mcp_projection, continuation_result_sequence,
-    create_run_checkpoint, restore_run_checkpoint_with_model_projection, QueuedToolCall,
+    checkpoint_continuation_projection, continuation_result_sequence, create_run_checkpoint,
+    restore_run_checkpoint_with_model_projection, CheckpointContinuationProjection, QueuedToolCall,
     RestoredRunCheckpoint, RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
@@ -1814,7 +1814,10 @@ impl AgentRuntime {
                         && is_policy_process_tool
                         && tool_is_exposed
                     {
-                        match tool_registry.proposed_action(&tool_context, &call) {
+                        match tool_registry
+                            .proposed_action_async(&tool_context, &call)
+                            .await
+                        {
                             Ok(action) => match if call.tool == "run_command" {
                                 prepare_command_dispatch(
                                     &call,
@@ -2073,7 +2076,9 @@ impl AgentRuntime {
                                 ))
                             })
                         } else {
-                            tool_registry.proposed_action(&tool_context, &call)
+                            tool_registry
+                                .proposed_action_async(&tool_context, &call)
+                                .await
                         };
                         let action = match action_result {
                             Ok(action) => {
@@ -2301,15 +2306,18 @@ impl AgentRuntime {
                                 diff: diff.clone(),
                             });
                         }
-                        if matches!(&action, AgentProposedAction::McpToolCall { .. })
+                        if matches!(
+                            &action,
+                            AgentProposedAction::McpToolCall { .. }
+                                | AgentProposedAction::BuiltinMcpToolApproval { .. }
+                        )
                             && !provider_runtime_capabilities
                                 .allows_encrypted_checkpoint_rehydration()
                         {
                             let deferred_calls = tool_batch.defer_external_calls(|queued| {
-                                matches!(
-                                    tool_registry.identity(&queued.call.name),
-                                    Some(crate::protocol::AgentToolIdentity::Mcp { .. })
-                                )
+                                queued.checkpoint_persistence
+                                    != crate::tools::AgentToolCallCheckpointPersistence::Allowed
+                                    || queued.checkpoint_call.args != queued.call.args
                             });
                             let deferred_call_ids = deferred_calls
                                 .into_iter()
@@ -2497,6 +2505,11 @@ impl AgentRuntime {
                         } = &action
                         {
                             checkpoint.pending_action_id = Some(approval.action_id.clone());
+                        } else if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
+                            &action
+                        {
+                            checkpoint.pending_action_id =
+                                Some(approval.identity.action_id.clone());
                         }
                         event_stream.emit(AgentEvent::ApprovalRequired {
                             run_id: run_id.clone(),
@@ -2547,7 +2560,9 @@ impl AgentRuntime {
                                 ))
                             })
                         } else {
-                            tool_registry.proposed_action(&tool_context, &call)
+                            tool_registry
+                                .proposed_action_async(&tool_context, &call)
+                                .await
                         };
                         match action_result {
                             Ok(action) => {
