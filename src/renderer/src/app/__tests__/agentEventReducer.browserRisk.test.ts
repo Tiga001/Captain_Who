@@ -199,7 +199,7 @@ describe('browser risk approval reducer identity', () => {
     expect(JSON.stringify(withResult.agentRun)).not.toContain('AUTHORIZATION_COOKIE_CANARY')
   })
 
-  it('retains only the allowlisted outcome-unknown status for managed browser Tools', () => {
+  it('drops the entire managed projection when any non-allowlisted field is present', () => {
     const withResult = applyAgentEventToChatMessage(withBrowserCall(), {
       type: 'tool_result',
       runId: RUN_ID,
@@ -218,19 +218,56 @@ describe('browser risk approval reducer identity', () => {
       }
     })
     expect(withResult.agentRun?.toolResults).toEqual([
-      {
+      { callId: CALL_ID, tool: 'browser_navigate', ok: false }
+    ])
+    expect(JSON.stringify(withResult.agentRun)).not.toContain('PRIVATE_PAGE_TREE_CANARY')
+    expect(JSON.stringify(withResult.agentRun)).not.toContain('AUTHORIZATION_COOKIE_CANARY')
+  })
+
+  it('preserves a strictly parsed Artifact reference and cancelled receipt', () => {
+    const artifact = {
+      schemaVersion: 1,
+      artifactId: 'browser-artifact:123e4567-e89b-42d3-a456-426614174000',
+      kind: 'snapshot',
+      displayName: 'page.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 4,
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      lifecycle: 'run',
+      owner: 'browser_automation',
+      preview: 'text'
+    } as const
+    const withResult = applyAgentEventToChatMessage(withBrowserCall(), {
+      type: 'tool_result',
+      runId: RUN_ID,
+      result: {
         callId: CALL_ID,
-        tool: 'browser_navigate',
+        tool: 'browser_snapshot',
         ok: false,
         result: {
           schemaVersion: 1,
           type: 'builtin_capability_tool',
-          status: 'outcome_unknown',
-          contentOmitted: true
+          status: 'cancelled',
+          contentOmitted: true,
+          artifacts: [artifact]
+        }
+      }
+    })
+
+    expect(withResult.agentRun?.toolResults).toEqual([
+      {
+        callId: CALL_ID,
+        tool: 'browser_snapshot',
+        ok: false,
+        result: {
+          schemaVersion: 1,
+          type: 'builtin_capability_tool',
+          status: 'cancelled',
+          contentOmitted: true,
+          artifacts: [artifact]
         }
       }
     ])
-    expect(JSON.stringify(withResult.agentRun)).not.toContain('PRIVATE_PAGE_TREE_CANARY')
-    expect(JSON.stringify(withResult.agentRun)).not.toContain('AUTHORIZATION_COOKIE_CANARY')
   })
 })

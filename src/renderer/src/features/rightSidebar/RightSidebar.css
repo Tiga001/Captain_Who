@@ -74,6 +74,18 @@
   -webkit-app-region: no-drag;
 }
 
+.right-sidebar__tab-shell[data-automation-active='true']::after {
+  position: absolute;
+  top: 4px;
+  left: 5px;
+  width: 6px;
+  height: 6px;
+  content: '';
+  background: var(--mc-color-text-accent);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
 .right-sidebar__tab {
   display: flex;
   width: 100%;

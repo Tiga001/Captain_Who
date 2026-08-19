@@ -104,11 +104,13 @@ async function main(): Promise<void> {
     if (!selectedGuest || !secondGuest) throw new Error('fixture guests missing')
 
     broker.claimSurface({
+      generation: 1,
       guestWebContentsId: selectedGuest.id,
       host: window.webContents,
       surfaceId: 'fixture-selected'
     })
     broker.claimSurface({
+      generation: 1,
       guestWebContentsId: secondGuest.id,
       host: window.webContents,
       surfaceId: 'fixture-second'

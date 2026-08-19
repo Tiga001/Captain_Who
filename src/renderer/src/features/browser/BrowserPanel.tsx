@@ -13,6 +13,7 @@ import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 import { createBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
 import type { WebviewTag } from 'electron'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { hostClient } from '../../host/hostClient'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
 import { WebviewSurface } from '../rightSidebar/surfaces/WebviewSurface'
 import type { BrowserPageMetadata } from './browserTypes'
@@ -24,10 +25,16 @@ import './BrowserPanel.css'
 interface BrowserPanelProps {
   automationRequestId?: string
   isActive: boolean
-  onAutomationSurfaceReady?: (surfaceId: string, requestId: string) => void
+  onAutomationSurfaceReady?: (
+    surfaceId: string,
+    requestId: string,
+    viewport?: { height: number; width: number }
+  ) => void
   onPageMetadataChange?: (metadata: BrowserPageMetadata) => void
   onSurfaceFocus?: () => void
   pageId: string
+  surfaceId?: string
+  viewport?: { height: number; width: number }
 }
 
 const ZOOM_STEP = 0.1
@@ -42,7 +49,9 @@ export function BrowserPanel({
   onAutomationSurfaceReady,
   onPageMetadataChange,
   onSurfaceFocus,
-  pageId
+  pageId,
+  surfaceId,
+  viewport
 }: BrowserPanelProps) {
   const { t } = useFrontendConfig()
   const menuAnchorRef = useRef<HTMLDivElement>(null)
@@ -52,7 +61,7 @@ export function BrowserPanel({
   const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [zoom, setZoomState] = useState(1)
-  const viewId = browserSurfaceIdForPage(pageId)
+  const viewId = surfaceId ?? browserSurfaceIdForPage(pageId)
   const {
     clearBrowsingData,
     currentUrl,
@@ -84,9 +93,24 @@ export function BrowserPanel({
         return
       }
       submittedAutomationRequestRef.current = automationRequestId
-      onAutomationSurfaceReady?.(viewId, automationRequestId)
+      const appliedViewport = viewport ? measureVisibleWebviewViewport(webview) : undefined
+      onAutomationSurfaceReady?.(viewId, automationRequestId, appliedViewport)
     },
-    [automationRequestId, onAutomationSurfaceReady, viewId]
+    [automationRequestId, onAutomationSurfaceReady, viewport, viewId]
+  )
+
+  const reportManualSurfaceSelection = useCallback(
+    (webview: WebviewTag | null): void => {
+      if (!isActive || !webview) return
+      try {
+        void hostClient.browser
+          .surfaceSelected({ schemaVersion: 1, surfaceId: viewId })
+          .catch(() => undefined)
+      } catch {
+        // Browser previews without an Electron Host intentionally have no selection channel.
+      }
+    },
+    [isActive, viewId]
   )
 
   const handleWebviewReady = useCallback(
@@ -94,8 +118,9 @@ export function BrowserPanel({
       webviewRef.current = webview
       setWebview(webview)
       reportAutomationSurfaceReady(webview)
+      reportManualSurfaceSelection(webview)
     },
-    [reportAutomationSurfaceReady, setWebview]
+    [reportAutomationSurfaceReady, reportManualSurfaceSelection, setWebview]
   )
 
   useEffect(() => {
@@ -107,10 +132,9 @@ export function BrowserPanel({
   }, [automationRequestId, reportAutomationSurfaceReady])
 
   useEffect(() => {
-    if (!isActive) {
-      setIsMenuOpen(false)
-    }
-  }, [isActive])
+    if (!isActive) setIsMenuOpen(false)
+    reportManualSurfaceSelection(webviewRef.current)
+  }, [isActive, reportManualSurfaceSelection])
 
   useEffect(() => {
     if (!isAddressEditing) {
@@ -286,7 +310,7 @@ export function BrowserPanel({
         </div>
       </header>
 
-      <div className="browser-panel__content">
+      <div className="browser-panel__content" data-fixed-viewport={viewport ? 'true' : undefined}>
         <WebviewSurface
           accessibleTitle={t('browser.title')}
           initialUrl={createBrowserSurfaceBootstrapUrl(viewId)}
@@ -297,6 +321,7 @@ export function BrowserPanel({
           onReady={handleWebviewReady}
           partition={BROWSER_WEBVIEW_PARTITION}
           surfaceId={viewId}
+          viewport={viewport}
         />
         {!currentUrl && (
           <div className="browser-panel__empty">
@@ -309,4 +334,25 @@ export function BrowserPanel({
       </div>
     </section>
   )
+}
+
+function measureVisibleWebviewViewport(webview: WebviewTag): { height: number; width: number } {
+  const guestBounds = webview.getBoundingClientRect()
+  const contentBounds = webview.closest('.browser-panel__content')?.getBoundingClientRect()
+  const left = Math.max(guestBounds.left, contentBounds?.left ?? 0, 0)
+  const top = Math.max(guestBounds.top, contentBounds?.top ?? 0, 0)
+  const right = Math.min(
+    guestBounds.right,
+    contentBounds?.right ?? window.innerWidth,
+    window.innerWidth
+  )
+  const bottom = Math.min(
+    guestBounds.bottom,
+    contentBounds?.bottom ?? window.innerHeight,
+    window.innerHeight
+  )
+  return {
+    height: Math.round(Math.max(0, bottom - top)),
+    width: Math.round(Math.max(0, right - left))
+  }
 }

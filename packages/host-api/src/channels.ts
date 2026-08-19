@@ -53,9 +53,11 @@ export const HOST_CHANNELS = {
     selectInputAttachments: 'host:attachments.selectInputAttachments'
   },
   browser: {
+    artifactReadPreview: 'host:browser.artifact.readPreview',
     clearBrowsingData: 'host:browser.clearBrowsingData',
     surfaceCommand: 'host:browser.surfaceCommand',
-    surfaceReady: 'host:browser.surfaceReady'
+    surfaceReady: 'host:browser.surfaceReady',
+    surfaceSelected: 'host:browser.surfaceSelected'
   },
   git: {
     getReviewFileContent: 'host:git.getReviewFileContent',

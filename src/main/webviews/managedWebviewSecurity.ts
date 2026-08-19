@@ -21,6 +21,7 @@ export interface ManagedWebviewTargetRegistry {
     partition: string
     surfaceId?: string
   }): void
+  handlePopup?(input: { guest: WebContents; url: string }): Promise<void> | void
 }
 
 export interface ManagedWebviewHostOptions {
@@ -104,7 +105,7 @@ export function configureManagedWebviewHost(
       return
     }
 
-    configureManagedGuest(guest, policy, options.networkGuard)
+    configureManagedGuest(guest, policy, options.networkGuard, options.targetRegistry)
     if (options.targetRegistry) {
       registerManagedGuestWhenIdentified(
         options.targetRegistry,
@@ -211,7 +212,8 @@ function enforceManagedWebPreferences(
 function configureManagedGuest(
   guest: WebContents,
   policy: ManagedWebviewPolicy,
-  networkGuard?: BrowserNetworkGuard
+  networkGuard?: BrowserNetworkGuard,
+  targetRegistry?: ManagedWebviewTargetRegistry
 ): void {
   guest.setWindowOpenHandler(({ url }) => {
     if (
@@ -220,7 +222,15 @@ function configureManagedGuest(
       url !== SAFE_INITIAL_URL
     ) {
       if (networkGuard) {
-        networkGuard.handleWindowOpen(guest, url)
+        if (targetRegistry?.handlePopup) {
+          networkGuard.handleWindowOpen(guest, url, () =>
+            Promise.resolve(targetRegistry.handlePopup?.({ guest, url }))
+          )
+        } else {
+          networkGuard.handleWindowOpen(guest, url)
+        }
+      } else if (targetRegistry?.handlePopup) {
+        void Promise.resolve(targetRegistry.handlePopup({ guest, url })).catch(() => undefined)
       } else {
         setImmediate(() => navigateManagedGuest(guest, url))
       }

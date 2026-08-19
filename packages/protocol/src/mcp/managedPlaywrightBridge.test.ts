@@ -114,6 +114,16 @@ describe('managed Playwright bridge wire contract', () => {
       }
     }
     expect(parseManagedPlaywrightCompletionInput(completion)).toEqual(completion)
+    expect(
+      parseManagedPlaywrightCompletionInput({
+        ...completion,
+        outcome: {
+          type: 'error',
+          code: 'surface_capacity_exceeded',
+          dispatchCertainty: 'definitely_not_dispatched'
+        }
+      })
+    ).toMatchObject({ outcome: { code: 'surface_capacity_exceeded' } })
     expect(() =>
       parseManagedPlaywrightCompletionInput({
         ...completion,

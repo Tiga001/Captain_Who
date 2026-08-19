@@ -11,6 +11,10 @@ const translations: Record<string, string> = {
   'agent.builtinCapability.activation.waiting': 'Waiting for approval to use {capability}',
   'agent.builtinCapability.activation.completed': 'Enabled {capability}',
   'agent.builtinCapability.activity.reason': 'Call reason',
+  'agent.builtinCapability.artifact.list': 'Browser artifacts',
+  'agent.builtinCapability.artifact.preview': 'Preview',
+  'agent.builtinCapability.artifact.previewTruncated': 'Preview truncated',
+  'agent.builtinCapability.artifact.previewUnavailable': 'Preview unavailable',
   'agent.builtinCapability.browser.navigate.running': 'Opening page',
   'agent.builtinCapability.browser.navigate.completed': 'Opened page',
   'agent.builtinCapability.browser.navigate.outcomeUnknown':
@@ -84,7 +88,10 @@ const translations: Record<string, string> = {
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => translations[key] ?? key })
 }))
-vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
+const hostMocks = vi.hoisted(() => ({ readArtifactPreview: vi.fn() }))
+vi.mock('../../host/hostClient', () => ({
+  hostClient: { browser: { readArtifactPreview: hostMocks.readArtifactPreview } }
+}))
 
 const CANARY = 'PRIVATE_BROWSER_ARGUMENT_RESULT_CDP_CANARY'
 
@@ -301,6 +308,105 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.querySelector('button')).toBeNull()
     expect(screen.container.querySelector('a')).toBeNull()
   })
+
+  it('renders only safe Artifact metadata and reads a text preview on explicit request', async () => {
+    const artifact = {
+      schemaVersion: 1,
+      artifactId: 'browser-artifact:123e4567-e89b-42d3-a456-426614174000',
+      kind: 'snapshot',
+      displayName: 'page-snapshot.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 13,
+      createdAt: 1_000,
+      expiresAt: 2_000,
+      lifecycle: 'run',
+      owner: 'browser_automation',
+      preview: 'text'
+    } as const
+    hostMocks.readArtifactPreview.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        artifact,
+        bytes: new TextEncoder().encode('safe snapshot')
+      }
+    })
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_snapshot')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'browser_snapshot',
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'completed',
+            contentOmitted: true,
+            artifacts: [artifact]
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('browser_snapshot', 'browser_snapshot')}
+      />
+    )
+    screen.container.querySelector('summary')?.click()
+    expect(screen.container.textContent).toContain('page-snapshot.txt')
+    expect(screen.container.querySelector('b')).toBeNull()
+    expect(screen.container.textContent).toContain('text/plain · 13 B')
+    expect(hostMocks.readArtifactPreview).not.toHaveBeenCalled()
+    const previewButton = [...screen.container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Preview'
+    )
+    expect(previewButton).toBeDefined()
+    previewButton?.click()
+    await expect.poll(() => screen.container.textContent).toContain('safe snapshot')
+    expect(hostMocks.readArtifactPreview).toHaveBeenCalledWith({ schemaVersion: 1, artifact })
+    expect(screen.container.textContent).not.toContain('managedPath')
+  })
+
+  it.each([`<img-${CANARY}>.png`, `../${CANARY}.png`])(
+    'drops an unsafe Artifact display name instead of adding it to the DOM',
+    async (displayName) => {
+      const screen = await render(
+        <AgentToolActivity
+          call={call('browser_take_screenshot')}
+          result={{
+            callId: 'call-browser-capability',
+            tool: 'browser_take_screenshot',
+            ok: true,
+            result: {
+              schemaVersion: 1,
+              type: 'builtin_capability_tool',
+              status: 'completed',
+              contentOmitted: true,
+              artifacts: [
+                {
+                  schemaVersion: 1,
+                  artifactId: 'browser-artifact:123e4567-e89b-42d3-a456-426614174000',
+                  kind: 'image',
+                  displayName,
+                  mimeType: 'image/png',
+                  sizeBytes: 1,
+                  createdAt: 1_000,
+                  expiresAt: 2_000,
+                  lifecycle: 'run',
+                  owner: 'browser_automation',
+                  preview: 'image'
+                }
+              ]
+            }
+          }}
+          run={run()}
+          showImageGenerationPreview={false}
+          toolIdentity={identity('browser_take_screenshot', 'browser_take_screenshot')}
+        />
+      )
+      expect(screen.container.querySelector('.browser-artifact-list')).toBeNull()
+      expect(screen.container.textContent).not.toContain(CANARY)
+    }
+  )
 
   it.each([
     ['running', undefined, undefined, 'Clicking page'],

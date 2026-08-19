@@ -7,11 +7,13 @@ import type { TrustedIpcMain } from '../ipc/trustedIpc'
 
 describe('browser surface Main IPC', () => {
   it('strictly parses Renderer readiness before handing it to the manager', () => {
-    let registered: ((event: { sender: WebContents }, input: unknown) => unknown) | undefined
+    const registered = new Map<
+      string,
+      (event: { sender: WebContents }, input: unknown) => unknown
+    >()
     const ipcMain = {
       handle: vi.fn((channel, handler) => {
-        expect(channel).toBe(HOST_CHANNELS.browser.surfaceReady)
-        registered = handler as typeof registered
+        registered.set(channel, handler)
       }),
       on: vi.fn()
     } as unknown as TrustedIpcMain
@@ -21,24 +23,42 @@ describe('browser surface Main IPC', () => {
       accepted: true as const,
       surfaceId: 'right-sidebar-browser-fixture'
     }))
-    registerBrowserSurfaceIpc(ipcMain, { attach } as unknown as BrowserSurfaceManager)
-    if (!registered) throw new Error('handler was not registered')
+    const selectManualSurface = vi.fn((_sender: WebContents, input: { surfaceId: string }) => ({
+      schemaVersion: 1 as const,
+      accepted: true as const,
+      surfaceId: input.surfaceId
+    }))
+    registerBrowserSurfaceIpc(ipcMain, {
+      attach,
+      selectManualSurface
+    } as unknown as BrowserSurfaceManager)
+    const readyHandler = registered.get(HOST_CHANNELS.browser.surfaceReady)
+    const selectedHandler = registered.get(HOST_CHANNELS.browser.surfaceSelected)
+    if (!readyHandler || !selectedHandler) throw new Error('handlers were not registered')
 
     const input = {
       schemaVersion: 1,
       requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
       surfaceId: 'right-sidebar-browser-fixture'
     }
-    expect(registered({ sender }, input)).toEqual({
+    expect(readyHandler({ sender }, input)).toEqual({
       schemaVersion: 1,
       accepted: true,
       surfaceId: input.surfaceId
     })
     expect(attach).toHaveBeenCalledWith(sender, input)
 
-    expect(() => registered?.({ sender }, { ...input, webContentsId: 42 })).toThrow(
+    expect(() => readyHandler({ sender }, { ...input, webContentsId: 42 })).toThrow(
       'unknown fields'
     )
     expect(attach).toHaveBeenCalledTimes(1)
+
+    const selection = { schemaVersion: 1, surfaceId: input.surfaceId }
+    expect(selectedHandler({ sender }, selection)).toEqual({
+      schemaVersion: 1,
+      accepted: true,
+      surfaceId: input.surfaceId
+    })
+    expect(selectManualSurface).toHaveBeenCalledWith(sender, selection)
   })
 })

@@ -407,12 +407,12 @@ function parsePolicyManifest(
     ).map((mode) => [mode, reviewed.filter((tool) => tool.handlingMode === mode).length])
   )
   if (
-    handlingCounts.pass_through !== 26 ||
-    handlingCounts.host_adapted !== 9 ||
+    handlingCounts.pass_through !== 25 ||
+    handlingCounts.host_adapted !== 8 ||
     handlingCounts.approval_required !== 21 ||
-    handlingCounts.artifact_managed !== 12 ||
+    handlingCounts.artifact_managed !== 7 ||
     handlingCounts.sandboxed !== 1 ||
-    handlingCounts.unsupported !== 0
+    handlingCounts.unsupported !== 7
   ) {
     throw new Error('Managed Playwright policy manifest handling classification is invalid')
   }

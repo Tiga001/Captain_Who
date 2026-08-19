@@ -1,11 +1,20 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import type { BrowserContext } from 'playwright'
+import type { BrowserContext, Route } from 'playwright'
+import type { BrowserArtifactKind, BrowserArtifactReference } from '@mycopilot/protocol'
 import { createConnection } from '@playwright/mcp'
-import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { extname, join } from 'node:path'
 import type { BrowserNetworkOperationLease } from '../browser/BrowserNetworkGuard'
+import {
+  BrowserArtifactBrokerError,
+  type BrowserArtifactBroker,
+  BrowserArtifactOutputSession,
+  BrowserArtifactOwner,
+  BrowserArtifactReservation
+} from '../browser/BrowserArtifactBroker'
+import { BrowserDownloadBrokerError } from '../browser/BrowserDownloadBroker'
 import type {
   BrowserRiskAuthorizationContext,
   BrowserRiskFailure
@@ -56,6 +65,7 @@ export type ManagedPlaywrightMcpHostErrorCode =
   | 'mcp.builtin_playwright.output_too_large'
   | 'mcp.builtin_playwright.protocol_error'
   | 'browser.surface_unavailable'
+  | 'browser.surface_capacity_exceeded'
   | 'browser.target_closed'
   | 'browser.risk_outcome_unknown'
 
@@ -132,11 +142,39 @@ export interface ManagedPlaywrightMcpHostOptions {
     signal: AbortSignal
   }) => Promise<BrowserNetworkOperationLease>
   getBrowserContext: () => Promise<BrowserContext>
+  getActiveSurfaceIdentity?: () => { surfaceId: string; generation: number } | null
+  artifactBroker?: BrowserArtifactBroker
+  finalizeBrowserRun?: (runId: string) => Promise<void>
+  releaseBrowserCapability?: (activationId: string) => Promise<void>
+  releaseBrowserToolCall?: (input: { runId: string; toolCallId: string }) => Promise<void>
+  surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
   closeSurface: () => Promise<void>
   detachAutomation: () => Promise<void>
   toolTimeoutMs?: number
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   createClient?: () => ManagedMcpClient
+}
+
+export interface ManagedPlaywrightSurfaceView {
+  surfaceId: string
+  index: number
+  title: string
+  url: string
+  isActive: boolean
+  generation: number
+}
+
+export interface ManagedPlaywrightSurfaceGroupAdapter {
+  ensureActiveSurface(): Promise<ManagedPlaywrightSurfaceView>
+  listSurfaces(): readonly ManagedPlaywrightSurfaceView[]
+  createSurface(input?: { url?: string }): Promise<ManagedPlaywrightSurfaceView>
+  selectSurface(input: { index: number }): Promise<ManagedPlaywrightSurfaceView>
+  closeSurfaceByIndex(index?: number): Promise<void>
+  resizeActiveSurface?(input: { width: number; height: number }): Promise<{
+    width: number
+    height: number
+  }>
+  printActiveSurfaceToPdf?(): Promise<Uint8Array>
 }
 
 export type ManagedPlaywrightConnectionFactory = (
@@ -176,8 +214,46 @@ interface ActiveConnection {
   clientTransport: InMemoryTransport
   serverTransport: InMemoryTransport
   outputDirectory: string
+  outputSession?: BrowserArtifactOutputSession
   catalog?: ReadonlyMap<string, UpstreamToolDescriptor>
   cataloging?: Promise<ReadonlyMap<string, UpstreamToolDescriptor>>
+}
+
+interface ManagedRouteDefinition {
+  pattern: string
+  runId: string
+  status: number
+}
+
+interface AppliedContextNetworkState {
+  handleClose: () => void
+  routes: Map<ManagedRouteDefinition, (route: Route) => Promise<void>>
+  offline: boolean
+}
+
+interface ManagedTracingState {
+  context: BrowserContext
+  owner: BrowserArtifactOwner
+  reservation: BrowserArtifactReservation
+}
+
+interface ManagedUpstreamArtifactPlan {
+  hostWritesDiagnosticText: boolean
+  reservation: BrowserArtifactReservation
+  serverArguments: Record<string, unknown>
+}
+
+interface HostAdapterInput {
+  name: string
+  arguments: Record<string, unknown>
+  modelArguments: Record<string, unknown>
+  options: {
+    authorizationContext?: BrowserRiskAuthorizationContext
+    parentRequestId?: string
+  }
+  connection: ActiveConnection
+  signal: AbortSignal
+  markDispatched(): void
 }
 
 /**
@@ -188,24 +264,43 @@ interface ActiveConnection {
  * reviewed Host manifest, and calls outside that manifest are rejected before reaching upstream.
  */
 export class ManagedPlaywrightMcpHost {
+  private readonly artifactBroker?: BrowserArtifactBroker
   private readonly beginNetworkOperation?: ManagedPlaywrightMcpHostOptions['beginNetworkOperation']
   private readonly closeSurface: () => Promise<void>
   private readonly createClient: () => ManagedMcpClient
   private readonly createOfficialConnection: ManagedPlaywrightConnectionFactory
   private readonly detachAutomation: () => Promise<void>
   private readonly getBrowserContext: () => Promise<BrowserContext>
+  private readonly getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
+  private readonly surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
+  private readonly finalizeBrowserRun?: ManagedPlaywrightMcpHostOptions['finalizeBrowserRun']
+  private readonly releaseBrowserCapability?: ManagedPlaywrightMcpHostOptions['releaseBrowserCapability']
+  private readonly releaseBrowserToolCall?: ManagedPlaywrightMcpHostOptions['releaseBrowserToolCall']
   private readonly toolTimeoutMs: number
 
   private readonly activeCalls = new Set<AbortController>()
+  private readonly activationIds = new Set<string>()
+  private readonly contextNetworkState = new Map<BrowserContext, AppliedContextNetworkState>()
+  private dispatchTail: Promise<void> = Promise.resolve()
+  private readonly offlineRuns = new Set<string>()
+  private readonly routeDefinitions: ManagedRouteDefinition[] = []
   private readonly outputDirectories = new Set<string>()
+  private tracing?: ManagedTracingState
   private connection?: ActiveConnection
   private connecting?: Promise<ActiveConnection>
   private connectionEpoch = 0
   private closed = false
+  private stateOwnerRunId?: string
 
   constructor(options: ManagedPlaywrightMcpHostOptions) {
+    this.artifactBroker = options.artifactBroker
     this.beginNetworkOperation = options.beginNetworkOperation
     this.getBrowserContext = options.getBrowserContext
+    this.getActiveSurfaceIdentity = options.getActiveSurfaceIdentity
+    this.finalizeBrowserRun = options.finalizeBrowserRun
+    this.releaseBrowserCapability = options.releaseBrowserCapability
+    this.releaseBrowserToolCall = options.releaseBrowserToolCall
+    this.surfaceGroup = options.surfaceGroup
     this.closeSurface = options.closeSurface
     this.detachAutomation = options.detachAutomation
     this.createOfficialConnection = options.createOfficialConnection ?? createConnection
@@ -252,6 +347,35 @@ export class ManagedPlaywrightMcpHost {
     }
   }
 
+  /** Releases task-scoped Host overlays without closing any manual Browser surface. */
+  async releaseRun(runId: string): Promise<void> {
+    if (!runId || runId.length > 512) return
+    this.offlineRuns.delete(runId)
+    for (let index = this.routeDefinitions.length - 1; index >= 0; index -= 1) {
+      if (this.routeDefinitions[index].runId === runId) this.routeDefinitions.splice(index, 1)
+    }
+    if (this.tracing?.owner.runId === runId) {
+      const tracing = this.tracing
+      this.tracing = undefined
+      await settleWithin(
+        Promise.allSettled([
+          tracing.context.tracing.stop(),
+          tracing.reservation.discard()
+        ]),
+        CONNECTION_CLOSE_SETTLE_MS
+      )
+    }
+    await settleWithin(
+      this.reconcileManagedNetworkState().catch(() => undefined),
+      CONNECTION_CLOSE_SETTLE_MS
+    )
+    this.maybeReleaseStateOwner(runId)
+    const finalize = this.finalizeBrowserRun?.(runId) ?? this.artifactBroker?.finalizeRun(runId)
+    if (finalize) {
+      await settleWithin(finalize.catch(() => undefined), CONNECTION_CLOSE_SETTLE_MS)
+    }
+  }
+
   async listTools(signal?: AbortSignal): Promise<readonly ManagedPlaywrightToolDescriptor[]> {
     const catalog = await this.runBounded(async (operationSignal) => {
       const connection = await this.ensureConnected()
@@ -287,32 +411,39 @@ export class ManagedPlaywrightMcpHost {
     }
     const modelArguments = expectArgumentRecord(argumentsValue)
     validateReviewedArguments(reviewed, modelArguments)
-    const serverArguments = stripHostCallReason(modelArguments)
-
-    await this.runBounded(
-      async (operationSignal) => {
-        const connection = await this.ensureConnected()
-        await this.ensureOfficialCatalog(connection, operationSignal)
-      },
-      options.signal,
-      options.timeoutMs
-    )
-
-    if (name === 'browser_close') {
-      await this.runBounded(async () => this.closeSurface(), options.signal, options.timeoutMs)
-      await this.disposeConnection(false)
-      return {
-        content: [{ type: 'text', text: 'The managed browser page was closed.' }],
-        isError: false
-      }
+    if (options.authorizationContext?.activationId) {
+      this.activationIds.add(options.authorizationContext.activationId)
     }
+    this.assertRunStateAccess(options.authorizationContext?.runId)
+    const serverArguments = stripHostCallReason(modelArguments)
 
     let dispatchStarted = false
     let responseReceived = false
     try {
       return await this.runBounded(
-        async (operationSignal) => {
+        async (operationSignal) => this.serializeDispatch(operationSignal, async () => {
+          this.assertRunStateAccess(options.authorizationContext?.runId)
+          const connection = await this.ensureConnected()
+          await this.ensureOfficialCatalog(connection, operationSignal)
+          const hostAdapted = await this.executeHostAdapter({
+            name,
+            arguments: serverArguments,
+            modelArguments,
+            options,
+            connection,
+            signal: operationSignal,
+            markDispatched: () => {
+              dispatchStarted = true
+            }
+          })
+          if (hostAdapted) {
+            responseReceived = true
+            return hostAdapted
+          }
+
           let riskLease: BrowserNetworkOperationLease | undefined
+          let artifactPlan: ManagedUpstreamArtifactPlan | undefined
+          let artifactCommitted = false
           try {
             if (this.beginNetworkOperation) {
               if (!options.authorizationContext || !options.parentRequestId) {
@@ -338,16 +469,22 @@ export class ManagedPlaywrightMcpHost {
               }
             }
 
-            const connection = await this.ensureConnected()
             let rawResult: unknown
             try {
+              artifactPlan = await this.prepareUpstreamArtifactPlan({
+                name,
+                arguments: serverArguments,
+                modelArguments,
+                options,
+                connection
+              })
               // Once the official MCP handler receives the call, page script, navigation, or form
               // submission may already have happened. Later network refusals are therefore never
               // represented as a safe pre-dispatch denial and must not be replayed automatically.
               riskLease?.markDispatched()
               dispatchStarted = true
               rawResult = await connection.client.callTool(
-                { name, arguments: serverArguments },
+                { name, arguments: artifactPlan?.serverArguments ?? serverArguments },
                 undefined,
                 {
                   signal: operationSignal,
@@ -357,6 +494,7 @@ export class ManagedPlaywrightMcpHost {
               )
               responseReceived = true
             } catch (error) {
+              await artifactPlan?.reservation.discard().catch(() => undefined)
               try {
                 await riskLease?.settle()
               } catch {
@@ -375,16 +513,75 @@ export class ManagedPlaywrightMcpHost {
               throw error
             }
             const failure = riskLease?.failure()
-            if (failure) return riskFailureResult(failure)
-            return adaptReviewedToolResult(name, parseBoundedToolResult(rawResult))
+            if (failure) {
+              await artifactPlan?.reservation.discard().catch(() => undefined)
+              return riskFailureResult(failure)
+            }
+            if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
+            const parsed = adaptReviewedToolResult(
+              name,
+              parseBoundedToolResult(rawResult, isSafeDiagnosticTool(name))
+            )
+            const downloadArtifacts = riskLease?.artifacts() ?? []
+            if (!artifactPlan) {
+              return withArtifactReferences(parsed, downloadArtifacts)
+            }
+            if (parsed.isError) {
+              await artifactPlan.reservation.discard().catch(() => undefined)
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: 'The managed browser Artifact operation failed before publication.'
+                  }
+                ],
+                structuredContent: {
+                  status: 'artifact_failed',
+                  ...(downloadArtifacts.length > 0 ? { artifacts: downloadArtifacts } : {})
+                },
+                isError: true
+              }
+            }
+            if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
+            if (artifactPlan.hostWritesDiagnosticText) {
+              const text = parsed.content
+                .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+                .join('\n')
+              await writeFile(
+                artifactPlan.reservation.managedPath,
+                text || 'No matching managed browser diagnostics.',
+                { flag: 'wx', mode: 0o600 }
+              )
+            }
+            if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
+            const artifact = await artifactPlan.reservation.commit()
+            artifactCommitted = true
+            if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
+            return artifactToolResult([artifact, ...downloadArtifacts])
           } finally {
+            if (artifactPlan && !artifactCommitted) {
+              await artifactPlan.reservation.discard().catch(() => undefined)
+            }
             riskLease?.finish()
           }
-        },
+        }),
         options.signal,
         options.timeoutMs
       )
     } catch (error) {
+      const authorization = options.authorizationContext
+      if (authorization) {
+        const release =
+          this.releaseBrowserToolCall?.({
+            runId: authorization.runId,
+            toolCallId: authorization.callId
+          }) ??
+          this.artifactBroker?.releaseToolCall({
+            runId: authorization.runId,
+            toolCallId: authorization.callId
+          })
+        if (release) await settleWithin(release.catch(() => undefined), CONNECTION_CLOSE_SETTLE_MS)
+      }
       const mapped = mapSafeHostError(error)
       if (mapped.dispatchCertainty) throw mapped
       throw new ManagedPlaywrightMcpHostError(
@@ -398,11 +595,457 @@ export class ManagedPlaywrightMcpHost {
     }
   }
 
+  private async serializeDispatch<T>(
+    signal: AbortSignal,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    let release!: () => void
+    const slot = new Promise<void>((resolveSlot) => {
+      release = resolveSlot
+    })
+    const previous = this.dispatchTail.catch(() => undefined)
+    this.dispatchTail = previous.then(() => slot)
+    try {
+      await raceWithAbort(previous, signal)
+      return await operation()
+    } finally {
+      release()
+    }
+  }
+
+  private assertRunStateAccess(runId: string | undefined): void {
+    if (this.stateOwnerRunId && runId !== this.stateOwnerRunId) {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.busy')
+    }
+  }
+
+  private claimStateOwner(runId: string): void {
+    if (this.stateOwnerRunId && this.stateOwnerRunId !== runId) {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.busy')
+    }
+    this.stateOwnerRunId = runId
+  }
+
+  private maybeReleaseStateOwner(runId: string): void {
+    if (
+      this.stateOwnerRunId === runId &&
+      !this.offlineRuns.has(runId) &&
+      !this.routeDefinitions.some((route) => route.runId === runId) &&
+      this.tracing?.owner.runId !== runId
+    ) {
+      this.stateOwnerRunId = undefined
+    }
+  }
+
+  private async executeHostAdapter(
+    input: HostAdapterInput
+  ): Promise<ManagedPlaywrightCallResult | undefined> {
+    switch (input.name) {
+      case 'browser_close': {
+        input.markDispatched()
+        await this.cleanupManagedState()
+        await this.closeSurface()
+        await this.disposeConnection(false, false)
+        return textToolResult('The managed browser tab was closed.')
+      }
+      case 'browser_get_config':
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Managed browser automation uses the built-in Electron Browser surfaces.'
+            }
+          ],
+          structuredContent: {
+            packageName: '@playwright/mcp',
+            packageVersion: MANAGED_PLAYWRIGHT_PACKAGE_VERSION,
+            browser: 'managed_electron_guest',
+            sharedBrowserContext: true,
+            imageResponses: 'artifact_only',
+            codegen: 'none'
+          },
+          isError: false
+        }
+      case 'browser_tabs':
+        return this.executeTabsAdapter(input)
+      case 'browser_resize': {
+        const width = expectPositiveDimension(input.arguments.width)
+        const height = expectPositiveDimension(input.arguments.height)
+        if (!this.surfaceGroup?.resizeActiveSurface) {
+          throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+        }
+        await this.surfaceGroup.ensureActiveSurface()
+        input.markDispatched()
+        const actual = await this.surfaceGroup.resizeActiveSurface({ width, height })
+        return {
+          content: [
+            { type: 'text', text: `Managed browser viewport resized to ${actual.width}x${actual.height}.` }
+          ],
+          structuredContent: { width: actual.width, height: actual.height },
+          isError: false
+        }
+      }
+      case 'browser_pdf_save': {
+        if (!this.surfaceGroup?.printActiveSurfaceToPdf || !this.artifactBroker) {
+          throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+        }
+        await this.getManagedBrowserContext()
+        const spec = artifactSpec(input.name, input.modelArguments)
+        if (!spec) {
+          throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+        }
+        const owner = this.artifactOwner(input.options)
+        input.markDispatched()
+        const bytes = await this.surfaceGroup.printActiveSurfaceToPdf()
+        if (input.signal.aborted) throw cancellationError(input.signal.reason)
+        const artifact = await this.artifactBroker.storeBytes({
+          owner,
+          kind: spec.kind,
+          mimeType: spec.mimeType,
+          suggestedFileName: spec.suggestedFileName,
+          bytes
+        })
+        if (input.signal.aborted) throw cancellationError(input.signal.reason)
+        return artifactToolResult(artifact)
+      }
+      case 'browser_network_state_set': {
+        const runId = requiredRunId(input.options.authorizationContext)
+        const state = input.arguments.state
+        if (state !== 'online' && state !== 'offline') {
+          throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+        }
+        await this.getManagedBrowserContext()
+        const wasOffline = this.offlineRuns.has(runId)
+        if (state === 'offline') this.claimStateOwner(runId)
+        input.markDispatched()
+        if (state === 'offline') this.offlineRuns.add(runId)
+        else this.offlineRuns.delete(runId)
+        try {
+          await this.reconcileManagedNetworkState()
+        } catch (error) {
+          if (wasOffline) this.offlineRuns.add(runId)
+          else this.offlineRuns.delete(runId)
+          await this.reconcileManagedNetworkState().catch(() => undefined)
+          this.maybeReleaseStateOwner(runId)
+          throw error
+        }
+        this.maybeReleaseStateOwner(runId)
+        return textToolResult(`Managed browser network is now ${state}.`)
+      }
+      case 'browser_route': {
+        const runId = requiredRunId(input.options.authorizationContext)
+        const pattern = input.arguments.pattern
+        const status = input.arguments.status ?? 200
+        if (
+          typeof pattern !== 'string' ||
+          pattern.length < 1 ||
+          pattern.length > 2_048 ||
+          !Number.isSafeInteger(status) ||
+          Number(status) < 100 ||
+          Number(status) > 599
+        ) {
+          throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+        }
+        await this.getManagedBrowserContext()
+        this.claimStateOwner(runId)
+        input.markDispatched()
+        const definition = { pattern, runId, status: Number(status) }
+        this.routeDefinitions.push(definition)
+        try {
+          await this.reconcileManagedNetworkState()
+        } catch (error) {
+          const index = this.routeDefinitions.indexOf(definition)
+          if (index >= 0) this.routeDefinitions.splice(index, 1)
+          await this.reconcileManagedNetworkState().catch(() => undefined)
+          this.maybeReleaseStateOwner(runId)
+          throw error
+        }
+        return textToolResult(`A managed response route was added for ${safeRoutePattern(pattern)}.`)
+      }
+      case 'browser_route_list': {
+        const runId = requiredRunId(input.options.authorizationContext)
+        await this.getManagedBrowserContext()
+        const routes = this.routeDefinitions.filter((route) => route.runId === runId)
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                routes.length === 0
+                  ? 'No active managed routes.'
+                  : routes
+                      .map(
+                        (route, index) =>
+                          `${index + 1}. ${safeRoutePattern(route.pattern)} (status=${route.status})`
+                      )
+                      .join('\n')
+            }
+          ],
+          structuredContent: {
+            routes: routes.map((route) => ({
+              pattern: safeRoutePattern(route.pattern),
+              status: route.status
+            }))
+          },
+          isError: false
+        }
+      }
+      case 'browser_unroute': {
+        const runId = requiredRunId(input.options.authorizationContext)
+        const pattern = input.arguments.pattern
+        if (pattern !== undefined && (typeof pattern !== 'string' || pattern.length > 2_048)) {
+          throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+        }
+        await this.getManagedBrowserContext()
+        input.markDispatched()
+        let removed = 0
+        for (let index = this.routeDefinitions.length - 1; index >= 0; index -= 1) {
+          const route = this.routeDefinitions[index]
+          if (route.runId === runId && (pattern === undefined || route.pattern === pattern)) {
+            this.routeDefinitions.splice(index, 1)
+            removed += 1
+          }
+        }
+        await this.reconcileManagedNetworkState()
+        this.maybeReleaseStateOwner(runId)
+        return textToolResult(`Removed ${removed} managed route${removed === 1 ? '' : 's'}.`)
+      }
+      case 'browser_start_tracing':
+        return this.startTracing(input)
+      case 'browser_stop_tracing':
+        return this.stopTracing(input)
+      default:
+        return undefined
+    }
+  }
+
+  private async executeTabsAdapter(input: HostAdapterInput): Promise<ManagedPlaywrightCallResult> {
+    if (!this.surfaceGroup) {
+      throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+    }
+    const action = input.arguments.action
+    if (action === 'list') {
+      await this.surfaceGroup.ensureActiveSurface()
+      return tabsToolResult(this.surfaceGroup.listSurfaces())
+    }
+    if (this.stateOwnerRunId) {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.busy')
+    }
+    if (action === 'new') {
+      const url = input.arguments.url
+      if (url !== undefined && typeof url !== 'string') {
+        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+      }
+      input.markDispatched()
+      await this.surfaceGroup.createSurface(url === undefined ? {} : { url })
+    } else if (action === 'select') {
+      const index = expectTabIndex(input.arguments.index, true)
+      if (index === undefined) {
+        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+      }
+      input.markDispatched()
+      await this.surfaceGroup.selectSurface({ index })
+    } else if (action === 'close') {
+      const index = expectTabIndex(input.arguments.index, false)
+      input.markDispatched()
+      await this.surfaceGroup.closeSurfaceByIndex(index)
+    } else {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+    }
+    await this.disposeConnection(false, false)
+    return tabsToolResult(this.surfaceGroup.listSurfaces())
+  }
+
+  private async startTracing(input: HostAdapterInput): Promise<ManagedPlaywrightCallResult> {
+    if (this.tracing) {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.busy')
+    }
+    const runId = requiredRunId(input.options.authorizationContext)
+    this.claimStateOwner(runId)
+    let reservation: BrowserArtifactReservation | undefined
+    try {
+      const context = await this.getManagedBrowserContext()
+      const owner = this.artifactOwner(input.options)
+      const session = input.connection.outputSession
+      if (!session) throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+      reservation = await session.reserveFile({
+        owner,
+        kind: 'trace',
+        mimeType: 'application/zip',
+        suggestedFileName: 'browser-trace.zip'
+      })
+      input.markDispatched()
+      await context.tracing.start({ screenshots: true, snapshots: true, sources: false })
+      this.tracing = { context, owner, reservation }
+      return textToolResult('Managed browser trace recording started.')
+    } catch (error) {
+      await reservation?.discard().catch(() => undefined)
+      this.maybeReleaseStateOwner(runId)
+      throw error
+    }
+  }
+
+  private async stopTracing(input: HostAdapterInput): Promise<ManagedPlaywrightCallResult> {
+    const tracing = this.tracing
+    const runId = requiredRunId(input.options.authorizationContext)
+    if (!tracing || tracing.owner.runId !== runId) {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+    }
+    input.markDispatched()
+    this.tracing = undefined
+    try {
+      await tracing.context.tracing.stop({ path: tracing.reservation.managedPath })
+      const artifact = await tracing.reservation.commit()
+      this.maybeReleaseStateOwner(runId)
+      return artifactToolResult(artifact)
+    } catch (error) {
+      await tracing.reservation.discard().catch(() => undefined)
+      this.maybeReleaseStateOwner(runId)
+      throw error
+    }
+  }
+
+  private artifactOwner(input: HostAdapterInput['options']): BrowserArtifactOwner {
+    const authorization = input.authorizationContext
+    const identity = this.getActiveSurfaceIdentity?.()
+    if (!authorization || !identity) {
+      throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+    }
+    return {
+      runId: authorization.runId,
+      activationId: authorization.activationId,
+      capabilityId: 'browser_automation',
+      surfaceId: identity.surfaceId,
+      generation: identity.generation,
+      toolCallId: authorization.callId
+    }
+  }
+
+  private async prepareUpstreamArtifactPlan(input: {
+    name: string
+    arguments: Record<string, unknown>
+    modelArguments: Record<string, unknown>
+    options: HostAdapterInput['options']
+    connection: ActiveConnection
+  }): Promise<ManagedUpstreamArtifactPlan | undefined> {
+    const spec = artifactSpec(input.name, input.modelArguments)
+    if (!spec) return undefined
+    await this.getManagedBrowserContext()
+    const session = input.connection.outputSession
+    if (!session) throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+    const reservation = await session.reserveFile({
+      owner: this.artifactOwner(input.options),
+      kind: spec.kind,
+      mimeType: spec.mimeType,
+      suggestedFileName: spec.suggestedFileName
+    })
+    const hostWritesDiagnosticText = spec.kind === 'console' || spec.kind === 'network'
+    const adaptedArguments = { ...input.arguments }
+    if (hostWritesDiagnosticText) delete adaptedArguments.filename
+    return {
+      hostWritesDiagnosticText,
+      reservation,
+      serverArguments: hostWritesDiagnosticText
+        ? adaptedArguments
+        : {
+            ...input.arguments,
+            filename: reservation.fileName,
+            _meta: { cwd: input.connection.outputDirectory }
+          }
+    }
+  }
+
   /** Stops managed automation without closing the user's right-sidebar browser page. */
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    await this.cleanupManagedState()
     await this.disposeConnection(true)
+    await Promise.allSettled(
+      [...this.activationIds].map((activationId) =>
+        this.releaseBrowserCapability?.(activationId) ??
+        this.artifactBroker?.releaseCapability(activationId)
+      )
+    )
+    this.activationIds.clear()
+  }
+
+  private async getManagedBrowserContext(): Promise<BrowserContext> {
+    const context = await this.getBrowserContext()
+    await this.applyManagedNetworkState(context)
+    return context
+  }
+
+  private async applyManagedNetworkState(context: BrowserContext): Promise<void> {
+    let applied = this.contextNetworkState.get(context)
+    if (!applied) {
+      const handleClose = (): void => this.handleManagedContextClosed(context)
+      applied = { handleClose, routes: new Map(), offline: false }
+      this.contextNetworkState.set(context, applied)
+      context.once('close', handleClose)
+    }
+    for (const definition of this.routeDefinitions) {
+      if (applied.routes.has(definition)) continue
+      const handler = async (route: Route): Promise<void> => {
+        await route.fulfill({ status: definition.status, body: '' })
+      }
+      await context.route(definition.pattern, handler)
+      applied.routes.set(definition, handler)
+    }
+    for (const [definition, handler] of [...applied.routes]) {
+      if (this.routeDefinitions.includes(definition)) continue
+      await context.unroute(definition.pattern, handler).catch(() => undefined)
+      applied.routes.delete(definition)
+    }
+    const offline = this.offlineRuns.size > 0
+    if (applied.offline !== offline) {
+      await context.setOffline(offline)
+      applied.offline = offline
+    }
+  }
+
+  private async reconcileManagedNetworkState(): Promise<void> {
+    await Promise.all(
+      [...this.contextNetworkState.keys()].map((context) => this.applyManagedNetworkState(context))
+    )
+  }
+
+  private async cleanupManagedState(): Promise<void> {
+    this.routeDefinitions.length = 0
+    this.offlineRuns.clear()
+    this.stateOwnerRunId = undefined
+    if (this.tracing) {
+      const tracing = this.tracing
+      this.tracing = undefined
+      await settleWithin(
+        Promise.allSettled([
+          tracing.context.tracing.stop(),
+          tracing.reservation.discard()
+        ]),
+        CONNECTION_CLOSE_SETTLE_MS
+      )
+    }
+    await settleWithin(
+      this.reconcileManagedNetworkState().catch(() => undefined),
+      CONNECTION_CLOSE_SETTLE_MS
+    )
+    for (const [context, applied] of this.contextNetworkState) {
+      context.off('close', applied.handleClose)
+    }
+    this.contextNetworkState.clear()
+  }
+
+  private handleManagedContextClosed(context: BrowserContext): void {
+    const applied = this.contextNetworkState.get(context)
+    if (applied) {
+      context.off('close', applied.handleClose)
+      this.contextNetworkState.delete(context)
+    }
+    if (this.tracing?.context !== context) return
+    const tracing = this.tracing
+    this.tracing = undefined
+    this.maybeReleaseStateOwner(tracing.owner.runId)
+    void tracing.reservation.discard().catch(() => undefined)
   }
 
   private async ensureConnected(): Promise<ActiveConnection> {
@@ -430,12 +1073,13 @@ export class ManagedPlaywrightMcpHost {
 
   private async createConnection(): Promise<ActiveConnection> {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-    const outputDirectory = await createSecureOutputDirectory()
+    const outputSession = await this.artifactBroker?.openSession()
+    const outputDirectory = outputSession?.outputDirectory ?? (await createSecureOutputDirectory())
     if (this.closed) {
-      await removeOutputDirectory(outputDirectory)
+      await (outputSession?.close() ?? removeOutputDirectory(outputDirectory))
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.closed')
     }
-    this.outputDirectories.add(outputDirectory)
+    if (!outputSession) this.outputDirectories.add(outputDirectory)
     let server: ManagedMcpServer | undefined
     let client: ManagedMcpClient | undefined
     try {
@@ -455,11 +1099,18 @@ export class ManagedPlaywrightMcpHost {
             settle: 500
           }
         },
-        this.getBrowserContext
+        () => this.getManagedBrowserContext()
       )
       client = this.createClient()
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
-      return { client, server, clientTransport, serverTransport, outputDirectory }
+      return {
+        client,
+        server,
+        clientTransport,
+        serverTransport,
+        outputDirectory,
+        ...(outputSession ? { outputSession } : {})
+      }
     } catch {
       await settleWithin(
         Promise.allSettled([
@@ -470,8 +1121,8 @@ export class ManagedPlaywrightMcpHost {
         ]),
         CONNECTION_CLOSE_SETTLE_MS
       )
-      await removeOutputDirectory(outputDirectory)
-      this.outputDirectories.delete(outputDirectory)
+      await (outputSession?.close() ?? removeOutputDirectory(outputDirectory))
+      if (!outputSession) this.outputDirectories.delete(outputDirectory)
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
     }
   }
@@ -562,9 +1213,14 @@ export class ManagedPlaywrightMcpHost {
     }
   }
 
-  private async disposeConnection(detachAutomation: boolean): Promise<void> {
+  private async disposeConnection(
+    detachAutomation: boolean,
+    cancelActiveCalls = true
+  ): Promise<void> {
     this.connectionEpoch += 1
-    for (const controller of this.activeCalls) controller.abort('host_close')
+    if (cancelActiveCalls) {
+      for (const controller of this.activeCalls) controller.abort('host_close')
+    }
     const connection = this.connection
     this.connection = undefined
     const connecting = this.connecting
@@ -645,6 +1301,183 @@ function riskFailureResult(failure: BrowserRiskFailure | null): ManagedPlaywrigh
   }
 }
 
+function textToolResult(text: string): ManagedPlaywrightCallResult {
+  return { content: [{ type: 'text', text }], isError: false }
+}
+
+function artifactToolResult(
+  artifactOrArtifacts: BrowserArtifactReference | readonly BrowserArtifactReference[]
+): ManagedPlaywrightCallResult {
+  const artifacts = Array.isArray(artifactOrArtifacts)
+    ? [...artifactOrArtifacts]
+    : [artifactOrArtifacts]
+  const primary = artifacts[0]
+  if (!primary) {
+    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+  }
+  return {
+    content: [
+      {
+        type: 'text',
+        text:
+          artifacts.length === 1
+            ? `Created managed ${primary.kind} Artifact “${primary.displayName}” (${primary.sizeBytes} bytes).`
+            : `Created ${artifacts.length} managed browser Artifacts.`
+      }
+    ],
+    structuredContent: { status: 'completed', artifacts },
+    isError: false
+  }
+}
+
+function withArtifactReferences(
+  result: ManagedPlaywrightCallResult,
+  artifacts: readonly BrowserArtifactReference[]
+): ManagedPlaywrightCallResult {
+  if (artifacts.length === 0) return result
+  return {
+    ...result,
+    structuredContent: {
+      ...(result.structuredContent ?? {}),
+      artifacts: [...artifacts]
+    }
+  }
+}
+
+function tabsToolResult(
+  surfaces: readonly ManagedPlaywrightSurfaceView[]
+): ManagedPlaywrightCallResult {
+  const tabs = surfaces.map((surface) => ({
+    index: surface.index,
+    title: surface.title,
+    url: surface.url,
+    current: surface.isActive
+  }))
+  return {
+    content: [
+      {
+        type: 'text',
+        text:
+          tabs.length === 0
+            ? 'No managed browser tabs are open.'
+            : tabs
+                .map(
+                  (tab) =>
+                    `${tab.current ? '- (current)' : '-'} ${tab.index}: ${tab.title} (${tab.url})`
+                )
+                .join('\n')
+      }
+    ],
+    structuredContent: { tabs },
+    isError: false
+  }
+}
+
+function requiredRunId(
+  authorization: BrowserRiskAuthorizationContext | undefined
+): string {
+  const runId = authorization?.runId
+  if (!runId || runId.length > 512) {
+    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+  }
+  return runId
+}
+
+function expectTabIndex(value: unknown, required: boolean): number | undefined {
+  if (value === undefined && !required) return undefined
+  if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > 15) {
+    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+  }
+  return Number(value)
+}
+
+function expectPositiveDimension(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 100 || Number(value) > 8_192) {
+    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+  }
+  return Number(value)
+}
+
+function safeRoutePattern(value: string): string {
+  let sanitized = ''
+  for (const character of value) {
+    const code = character.charCodeAt(0)
+    sanitized += code <= 0x1f || code === 0x7f ? ' ' : character
+  }
+  sanitized = sanitized.trim()
+  return sanitized.length <= 256 ? sanitized : `${sanitized.slice(0, 253)}...`
+}
+
+function artifactSpec(
+  toolName: string,
+  modelArguments: Record<string, unknown>
+): {
+  kind: BrowserArtifactKind
+  mimeType: string
+  suggestedFileName: string
+} | undefined {
+  const suggested = modelArguments.filename
+  const optionalSuggestion = (fallback: string): string => {
+    if (suggested === undefined) return fallback
+    if (typeof suggested !== 'string') {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+    }
+    return suggested
+  }
+  switch (toolName) {
+    case 'browser_take_screenshot': {
+      const explicitType = modelArguments.type
+      const suggestedExtension =
+        typeof suggested === 'string' ? extname(suggested).toLowerCase() : ''
+      const type =
+        explicitType === 'jpeg' || explicitType === 'webp' || explicitType === 'png'
+          ? explicitType
+          : suggestedExtension === '.jpg' || suggestedExtension === '.jpeg'
+            ? 'jpeg'
+            : suggestedExtension === '.webp'
+              ? 'webp'
+              : 'png'
+      return {
+        kind: 'image',
+        mimeType: `image/${type}`,
+        suggestedFileName: optionalSuggestion(`browser-screenshot.${type === 'jpeg' ? 'jpg' : type}`)
+      }
+    }
+    case 'browser_pdf_save':
+      return {
+        kind: 'pdf',
+        mimeType: 'application/pdf',
+        suggestedFileName: optionalSuggestion('browser-page.pdf')
+      }
+    case 'browser_snapshot':
+      return suggested === undefined
+        ? undefined
+        : {
+            kind: 'snapshot',
+            mimeType: 'text/plain',
+            suggestedFileName: optionalSuggestion('browser-snapshot.yml')
+          }
+    case 'browser_console_messages':
+      return suggested === undefined
+        ? undefined
+        : {
+            kind: 'console',
+            mimeType: 'text/plain',
+            suggestedFileName: optionalSuggestion('browser-console.log')
+          }
+    case 'browser_network_requests':
+      return suggested === undefined
+        ? undefined
+        : {
+            kind: 'network',
+            mimeType: 'text/plain',
+            suggestedFileName: optionalSuggestion('browser-network.log')
+          }
+    default:
+      return undefined
+  }
+}
+
 async function settleWithin<T>(
   operation: Promise<T>,
   timeoutMs: number
@@ -697,7 +1530,10 @@ function validateReviewedArguments(
   }
 }
 
-function parseBoundedToolResult(value: unknown): ManagedPlaywrightCallResult {
+function parseBoundedToolResult(
+  value: unknown,
+  discardStructuredContent = false
+): ManagedPlaywrightCallResult {
   const result = expectRecord(value)
   if (!Array.isArray(result.content) || result.content.length > MAX_CONTENT_BLOCKS) {
     throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.output_too_large')
@@ -719,7 +1555,7 @@ function parseBoundedToolResult(value: unknown): ManagedPlaywrightCallResult {
   if (totalEncodedMediaBytes > MAX_TOTAL_ENCODED_MEDIA_BYTES) {
     throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.output_too_large')
   }
-  const structuredContent = result.structuredContent
+  const structuredContent = discardStructuredContent ? undefined : result.structuredContent
   if (
     structuredContent !== undefined &&
     (structuredContent === null ||
@@ -741,19 +1577,23 @@ function parseBoundedToolResult(value: unknown): ManagedPlaywrightCallResult {
   return bounded
 }
 
+function isSafeDiagnosticTool(toolName: string): boolean {
+  return toolName === 'browser_network_requests' || toolName === 'browser_console_messages'
+}
+
 function adaptReviewedToolResult(
   toolName: string,
   result: ManagedPlaywrightCallResult
 ): ManagedPlaywrightCallResult {
-  if (toolName !== 'browser_network_requests' && toolName !== 'browser_console_messages') {
+  if (!isSafeDiagnosticTool(toolName)) {
     return result
   }
   // These reviewed diagnostics intentionally expose bounded text, not arbitrary protocol data.
   // Keep that boundary even if page-controlled console output or a future upstream implementation
   // includes credential-bearing URL components or common authentication header lines.
-  if (result.structuredContent !== undefined) {
-    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
-  }
+  // Upstream may additionally emit a machine-readable request/console ledger. Its shape is not a
+  // reviewed Host DTO and can contain headers or bodies, so deliberately drop it while retaining
+  // the separately bounded and redacted text projection.
   return {
     content: result.content.map((block) => {
       if (block.type !== 'text') {
@@ -1026,7 +1866,7 @@ async function closeConnection(connection: ActiveConnection): Promise<void> {
     ]),
     CONNECTION_CLOSE_SETTLE_MS
   )
-  await removeOutputDirectory(connection.outputDirectory)
+  await (connection.outputSession?.close() ?? removeOutputDirectory(connection.outputDirectory))
 }
 
 async function createSecureOutputDirectory(): Promise<string> {
@@ -1049,10 +1889,67 @@ function boundedTimeout(value: number | undefined): number {
 
 function mapSafeHostError(error: unknown): ManagedPlaywrightMcpHostError {
   if (error instanceof ManagedPlaywrightMcpHostError) return error
+  if (error instanceof BrowserDownloadBrokerError) {
+    switch (error.code) {
+      case 'browser.download.cancelled':
+        return new ManagedPlaywrightMcpHostError(
+          'mcp.builtin_playwright.cancelled',
+          error.dispatchCertainty
+        )
+      case 'browser.download.target_closed':
+        return new ManagedPlaywrightMcpHostError(
+          'browser.target_closed',
+          error.dispatchCertainty
+        )
+      case 'browser.download.too_large':
+        return new ManagedPlaywrightMcpHostError(
+          'mcp.builtin_playwright.output_too_large',
+          error.dispatchCertainty
+        )
+      case 'browser.download.busy':
+        return new ManagedPlaywrightMcpHostError(
+          'mcp.builtin_playwright.busy',
+          error.dispatchCertainty
+        )
+      case 'browser.download.interrupted':
+      case 'browser.download.outcome_unknown':
+        return new ManagedPlaywrightMcpHostError(
+          error.dispatchCertainty === 'possibly_dispatched'
+            ? 'browser.risk_outcome_unknown'
+            : 'mcp.builtin_playwright.protocol_error',
+          error.dispatchCertainty
+        )
+      case 'browser.download.artifact_failed':
+      case 'browser.download.closed':
+        return new ManagedPlaywrightMcpHostError(
+          'mcp.builtin_playwright.protocol_error',
+          error.dispatchCertainty
+        )
+    }
+  }
+  if (error instanceof BrowserArtifactBrokerError) {
+    if (error.code === 'browser.artifact.invalid_name') {
+      return new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+    }
+    if (error.code === 'browser.artifact.too_large') {
+      return new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.output_too_large')
+    }
+    if (error.code === 'browser.artifact.capacity') {
+      return new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.busy')
+    }
+    return new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+  }
   if (error !== null && typeof error === 'object' && 'code' in error) {
     const code = (error as { code?: unknown }).code
-    if (code === 'browser.surface_unavailable' || code === 'browser.target_closed') {
-      return new ManagedPlaywrightMcpHostError(code)
+    if (
+      code === 'browser.surface_unavailable' ||
+      code === 'browser.surface_capacity_exceeded' ||
+      code === 'browser.target_closed'
+    ) {
+      return new ManagedPlaywrightMcpHostError(
+        code,
+        code === 'browser.surface_capacity_exceeded' ? 'definitely_not_dispatched' : undefined
+      )
     }
   }
   return new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')

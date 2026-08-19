@@ -28,6 +28,7 @@ export interface ManagedBrowserGuestRegistration {
 }
 
 export interface ManagedBrowserSurfaceClaim {
+  generation: number
   guestWebContentsId: number
   host: WebContents
   surfaceId: string
@@ -43,12 +44,18 @@ interface RegisteredGuest {
   partition: string
   pendingTransport?: ElectronGuestCdpTransport
   surfaceId?: string
+  surfaceGeneration?: number
+}
+
+interface SurfaceClaim {
+  generation: number
+  guestId: number
 }
 
 export class BrowserTargetBroker {
   private static readonly MAX_REGISTERED_GUESTS = 32
   private readonly guests = new Map<number, RegisteredGuest>()
-  private readonly surfaces = new Map<string, number>()
+  private readonly surfaces = new Map<string, SurfaceClaim>()
   private disposed = false
 
   constructor(
@@ -88,14 +95,20 @@ export class BrowserTargetBroker {
     if (!isValidSurfaceId(input.surfaceId)) {
       throw new BrowserTargetBrokerError('surface_conflict')
     }
+    if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
+      throw new BrowserTargetBrokerError('surface_conflict')
+    }
     const record = this.guests.get(input.guestWebContentsId)
     if (!record || record.host !== input.host) {
       throw new BrowserTargetBrokerError('guest_not_found')
     }
     this.revalidateRecord(record)
 
-    const claimedGuestId = this.surfaces.get(input.surfaceId)
-    if (claimedGuestId !== undefined && claimedGuestId !== input.guestWebContentsId) {
+    const claim = this.surfaces.get(input.surfaceId)
+    if (
+      claim !== undefined &&
+      (claim.guestId !== input.guestWebContentsId || claim.generation !== input.generation)
+    ) {
       throw new BrowserTargetBrokerError('surface_conflict')
     }
     if (record.surfaceId !== undefined && record.surfaceId !== input.surfaceId) {
@@ -103,12 +116,16 @@ export class BrowserTargetBroker {
     }
 
     record.surfaceId = input.surfaceId
-    this.surfaces.set(input.surfaceId, input.guestWebContentsId)
+    record.surfaceGeneration = input.generation
+    this.surfaces.set(input.surfaceId, {
+      generation: input.generation,
+      guestId: input.guestWebContentsId
+    })
   }
 
-  async connect(surfaceId: string): Promise<ElectronGuestCdpTransport> {
+  async connect(surfaceId: string, generation?: number): Promise<ElectronGuestCdpTransport> {
     this.assertUsable()
-    const record = this.getClaimedGuest(surfaceId)
+    const record = this.getClaimedGuest(surfaceId, generation)
     this.revalidateRecord(record)
     if (record.connecting || record.activeTransport) {
       throw new BrowserTargetBrokerError('target_busy')
@@ -130,7 +147,8 @@ export class BrowserTargetBroker {
         !this.isExactGuest(record) ||
         this.guests.get(record.guest.id) !== record ||
         record.surfaceId !== surfaceId ||
-        this.surfaces.get(surfaceId) !== record.guest.id
+        this.surfaces.get(surfaceId)?.guestId !== record.guest.id ||
+        this.surfaces.get(surfaceId)?.generation !== record.surfaceGeneration
       ) {
         transport.close()
         throw new BrowserTargetBrokerError('target_closed')
@@ -146,13 +164,16 @@ export class BrowserTargetBroker {
     }
   }
 
-  releaseSurface(surfaceId: string): void {
-    const guestId = this.surfaces.get(surfaceId)
-    if (guestId === undefined) return
-    const record = this.guests.get(guestId)
+  releaseSurface(surfaceId: string, generation?: number): void {
+    const claim = this.surfaces.get(surfaceId)
+    if (claim === undefined || (generation !== undefined && claim.generation !== generation)) return
+    const record = this.guests.get(claim.guestId)
     record?.pendingTransport?.close()
     record?.activeTransport?.close()
-    if (record?.surfaceId === surfaceId) record.surfaceId = undefined
+    if (record?.surfaceId === surfaceId) {
+      record.surfaceId = undefined
+      record.surfaceGeneration = undefined
+    }
     this.surfaces.delete(surfaceId)
   }
 
@@ -180,10 +201,15 @@ export class BrowserTargetBroker {
     }
   }
 
-  private getClaimedGuest(surfaceId: string): RegisteredGuest {
-    const guestId = this.surfaces.get(surfaceId)
-    const record = guestId === undefined ? undefined : this.guests.get(guestId)
-    if (!record || record.surfaceId !== surfaceId) {
+  private getClaimedGuest(surfaceId: string, generation?: number): RegisteredGuest {
+    const claim = this.surfaces.get(surfaceId)
+    const record = claim === undefined ? undefined : this.guests.get(claim.guestId)
+    if (
+      !record ||
+      record.surfaceId !== surfaceId ||
+      record.surfaceGeneration !== claim?.generation ||
+      (generation !== undefined && claim?.generation !== generation)
+    ) {
       throw new BrowserTargetBrokerError('guest_not_found')
     }
     return record
@@ -197,7 +223,12 @@ export class BrowserTargetBroker {
       record.pendingTransport?.close()
       record.activeTransport?.close()
     }
-    if (record.surfaceId) this.surfaces.delete(record.surfaceId)
+    if (record.surfaceId) {
+      const claim = this.surfaces.get(record.surfaceId)
+      if (claim?.guestId === guestId && claim.generation === record.surfaceGeneration) {
+        this.surfaces.delete(record.surfaceId)
+      }
+    }
     this.guests.delete(guestId)
   }
 

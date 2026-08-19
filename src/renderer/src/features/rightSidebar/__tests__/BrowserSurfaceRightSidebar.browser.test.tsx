@@ -17,6 +17,8 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 const { RightSidebar } = await import('../RightSidebar')
 const surfaceLifecycle = vi.fn()
 const NOOP = () => undefined
+const SURFACE_ID = 'managed-browser-fixture'
+const SECOND_SURFACE_ID = 'managed-browser-fixture-second'
 
 const BROWSER_MODULE: RightSidebarModuleDefinition = {
   contextBinding: 'global',
@@ -58,7 +60,7 @@ describe('RightSidebar browser automation surface bridge', () => {
     await expect.poll(() => ready).toHaveBeenCalledTimes(1)
     const surface = getSurface(screen.container)
     const surfaceId = surface.dataset.surfaceId
-    expect(surfaceId).toMatch(/^right-sidebar-browser-browser-/)
+    expect(surfaceId).toBe(SURFACE_ID)
     expect(ready).toHaveBeenCalledWith({
       schemaVersion: 1,
       requestId: first.requestId,
@@ -116,13 +118,75 @@ describe('RightSidebar browser automation surface bridge', () => {
       .toBeNull()
     expect(surfaceLifecycle.mock.calls.filter(([event]) => event === 'unmount')).toHaveLength(1)
   })
+
+  it('creates a background popup tab and selects it only on an explicit Host command', async () => {
+    const ready = vi.fn(async () => undefined)
+    const first = ensureCommand('44444444-4444-4444-8444-444444444444')
+    const screen = await render(
+      <RightSidebar
+        browserSurfaceCommand={first}
+        isMaximized={false}
+        isOpen
+        modules={[BROWSER_MODULE]}
+        onBrowserSurfaceReady={ready}
+        onToggleMaximized={NOOP}
+      />
+    )
+    await expect.poll(() => ready).toHaveBeenCalledTimes(1)
+
+    const create: BrowserSurfaceCommand = {
+      schemaVersion: 1,
+      kind: 'createSurface',
+      requestId: '55555555-5555-4555-8555-555555555555',
+      surfaceId: SECOND_SURFACE_ID,
+      activate: false
+    }
+    await screen.rerender(
+      <RightSidebar
+        browserSurfaceCommand={create}
+        isMaximized={false}
+        isOpen
+        modules={[BROWSER_MODULE]}
+        onBrowserSurfaceReady={ready}
+        onToggleMaximized={NOOP}
+      />
+    )
+    await expect.poll(() => ready).toHaveBeenCalledTimes(2)
+    const secondSurface = [
+      ...screen.container.querySelectorAll<HTMLElement>('[data-surface-id]')
+    ].find((candidate) => candidate.dataset.surfaceId === SECOND_SURFACE_ID)
+    expect(secondSurface).toBeDefined()
+    expect(secondSurface?.closest('.right-sidebar__page')).toHaveAttribute('aria-hidden', 'true')
+
+    const select: BrowserSurfaceCommand = {
+      schemaVersion: 1,
+      kind: 'selectSurface',
+      requestId: '66666666-6666-4666-8666-666666666666',
+      surfaceId: SECOND_SURFACE_ID
+    }
+    await screen.rerender(
+      <RightSidebar
+        browserSurfaceCommand={select}
+        isMaximized={false}
+        isOpen
+        modules={[BROWSER_MODULE]}
+        onBrowserSurfaceReady={ready}
+        onToggleMaximized={NOOP}
+      />
+    )
+    await expect.poll(() => ready).toHaveBeenCalledTimes(3)
+    expect(secondSurface?.closest('.right-sidebar__page')).not.toHaveAttribute('aria-hidden')
+  })
 })
 
 function BrowserSurfaceFixture({ page }: RightSidebarModuleRenderProps) {
   const { browserSurfaceRequest, onBrowserSurfaceReady } = useRightSidebarRuntimeContext()
   const requestId =
     browserSurfaceRequest?.pageId === page.id ? browserSurfaceRequest.requestId : null
-  const surfaceId = browserSurfaceIdForPage(page.id)
+  const surfaceId =
+    page.moduleState?.kind === 'browser-surface'
+      ? page.moduleState.surfaceId
+      : browserSurfaceIdForPage(page.id)
 
   useEffect(() => {
     surfaceLifecycle('mount', page.id)
@@ -137,7 +201,7 @@ function BrowserSurfaceFixture({ page }: RightSidebarModuleRenderProps) {
 }
 
 function ensureCommand(requestId: string): BrowserSurfaceCommand {
-  return { schemaVersion: 1, kind: 'ensureAttached', requestId }
+  return { schemaVersion: 1, kind: 'ensureAttached', requestId, surfaceId: SURFACE_ID }
 }
 
 function getSurface(container: HTMLElement): HTMLElement {

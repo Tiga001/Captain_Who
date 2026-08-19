@@ -5,7 +5,9 @@ import {
   parseBrowserSurfaceBootstrapUrl,
   parseBrowserSurfaceCommand,
   parseBrowserSurfaceReadyInput,
-  parseBrowserSurfaceReadyOutput
+  parseBrowserSurfaceReadyOutput,
+  parseBrowserSurfaceSelectedInput,
+  parseBrowserSurfaceSelectedOutput
 } from './browser'
 
 const REQUEST_ID = '5ee8f693-c8e6-48ab-a2c1-9ed774bc18a9'
@@ -23,11 +25,49 @@ describe('browser surface protocol', () => {
   it('strictly parses ensure and close commands', () => {
     expect(
       parseBrowserSurfaceCommand({
+        schemaVersion: 1,
+        kind: 'createSurface',
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        activate: false
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      kind: 'createSurface',
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID,
+      activate: false
+    })
+    expect(
+      parseBrowserSurfaceCommand({
         schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
         kind: 'ensureAttached',
-        requestId: REQUEST_ID
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID
       })
-    ).toEqual({ schemaVersion: 1, kind: 'ensureAttached', requestId: REQUEST_ID })
+    ).toEqual({
+      schemaVersion: 1,
+      kind: 'ensureAttached',
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID
+    })
+    expect(
+      parseBrowserSurfaceCommand({
+        schemaVersion: 1,
+        kind: 'resizeSurface',
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        width: 1280,
+        height: 720
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      kind: 'resizeSurface',
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID,
+      width: 1280,
+      height: 720
+    })
     expect(
       parseBrowserSurfaceCommand({
         schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
@@ -49,6 +89,7 @@ describe('browser surface protocol', () => {
         schemaVersion: 1,
         kind: 'ensureAttached',
         requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
         webContentsId: 42
       })
     ).toThrow('unknown fields')
@@ -66,9 +107,15 @@ describe('browser surface protocol', () => {
       parseBrowserSurfaceReadyInput({
         schemaVersion: 1,
         requestId: REQUEST_ID,
-        surfaceId: SURFACE_ID
+        surfaceId: SURFACE_ID,
+        viewport: { height: 0, width: 0 }
       })
-    ).toEqual({ schemaVersion: 1, requestId: REQUEST_ID, surfaceId: SURFACE_ID })
+    ).toEqual({
+      schemaVersion: 1,
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID,
+      viewport: { height: 0, width: 0 }
+    })
     expect(
       parseBrowserSurfaceReadyOutput({
         schemaVersion: 1,
@@ -76,5 +123,26 @@ describe('browser surface protocol', () => {
         surfaceId: SURFACE_ID
       })
     ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: SURFACE_ID })
+  })
+
+  it('strictly parses the safe manual surface selection acknowledgement', () => {
+    expect(parseBrowserSurfaceSelectedInput({ schemaVersion: 1, surfaceId: SURFACE_ID })).toEqual({
+      schemaVersion: 1,
+      surfaceId: SURFACE_ID
+    })
+    expect(
+      parseBrowserSurfaceSelectedOutput({
+        schemaVersion: 1,
+        accepted: true,
+        surfaceId: SURFACE_ID
+      })
+    ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: SURFACE_ID })
+    expect(() =>
+      parseBrowserSurfaceSelectedInput({
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        webContentsId: 42
+      })
+    ).toThrow('unknown fields')
   })
 })

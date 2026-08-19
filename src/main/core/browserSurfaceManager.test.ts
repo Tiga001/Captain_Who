@@ -69,7 +69,7 @@ class FakeWebContents extends EventEmitter {
   constructor(
     readonly id: number,
     readonly kind: ReturnType<WebContents['getType']>,
-    readonly url: string,
+    public url: string,
     public hostWebContents: WebContents | null = null,
     public session: Session = EXPECTED_SESSION
   ) {
@@ -88,6 +88,10 @@ class FakeWebContents extends EventEmitter {
   isDestroyed(): boolean {
     return this.destroyed
   }
+  async loadURL(url: string): Promise<void> {
+    this.url = url
+  }
+  printToPDF = vi.fn(async () => Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
@@ -127,6 +131,7 @@ function createHarness(overrides: Partial<BrowserSurfaceManagerOptions> = {}) {
     attachTimeoutMs: 1_000,
     broker,
     closeTimeoutMs: 1_000,
+    createSurfaceId: () => SURFACE_ID,
     connectOverCdp: async (transport) => {
       const browser = createFakeBrowser(transport)
       browsers.push(browser)
@@ -197,6 +202,225 @@ describe('BrowserSurfaceManager', () => {
     await manager.shutdown()
   })
 
+  it('creates, lists, selects, resizes, and closes a bounded managed surface group', async () => {
+    const surfaceIds = ['browser-one', 'browser-two']
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'browser-over-capacity',
+      maxSurfaces: 2
+    })
+    const firstContext = manager.getBrowserContext()
+    const ensure = commands.at(-1)
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await firstContext
+
+    const create = manager.createSurface({ url: 'http://127.0.0.1/second' })
+    const createCommand = commands.at(-1)
+    if (!createCommand || createCommand.kind !== 'createSurface') {
+      throw new Error('create command missing')
+    }
+    attachGuest(manager, host, 3, createCommand.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: createCommand.requestId,
+      surfaceId: createCommand.surfaceId
+    })
+    await expect(create).resolves.toEqual(
+      expect.objectContaining({ index: 1, isActive: true, surfaceId: 'browser-two' })
+    )
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ index: 0, isActive: false, surfaceId: 'browser-one' }),
+      expect.objectContaining({ index: 1, isActive: true, surfaceId: 'browser-two' })
+    ])
+
+    const selected = manager.selectSurface({ index: 0 })
+    const selectCommand = commands.at(-1)
+    if (!selectCommand || selectCommand.kind !== 'selectSurface') {
+      throw new Error('select command missing')
+    }
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: selectCommand.requestId,
+      surfaceId: selectCommand.surfaceId
+    })
+    await expect(selected).resolves.toEqual(
+      expect.objectContaining({ index: 0, isActive: true, surfaceId: 'browser-one' })
+    )
+    await expect(manager.createSurface()).rejects.toEqual(
+      expect.objectContaining({ code: 'browser.surface_capacity_exceeded' })
+    )
+
+    const reconnected = manager.getBrowserContext()
+    await reconnected
+    const resized = manager.resizeActiveSurface({ height: 720, width: 1280 })
+    const resizeCommand = commands.at(-1)
+    if (!resizeCommand || resizeCommand.kind !== 'resizeSurface') {
+      throw new Error('resize command missing')
+    }
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: resizeCommand.requestId,
+      surfaceId: resizeCommand.surfaceId,
+      viewport: { height: 720, width: 1280 }
+    })
+    await expect(resized).resolves.toEqual({ height: 720, width: 1280 })
+    await expect(manager.printActiveSurfaceToPdf()).resolves.toEqual(
+      Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
+    )
+
+    const clipped = manager.resizeActiveSurface({ height: 720, width: 1280 })
+    const clippedAssertion = expect(clipped).rejects.toEqual(
+      expect.objectContaining({ code: 'browser.surface_unavailable' })
+    )
+    const clippedCommand = commands.at(-1)
+    if (!clippedCommand || clippedCommand.kind !== 'resizeSurface') {
+      throw new Error('clipped resize command missing')
+    }
+    expect(() =>
+      manager.attach(host.asWebContents(), {
+        schemaVersion: 1,
+        requestId: clippedCommand.requestId,
+        surfaceId: clippedCommand.surfaceId,
+        viewport: { height: 600, width: 800 }
+      })
+    ).toThrow(expect.objectContaining({ code: 'browser.surface_unavailable' }))
+    await clippedAssertion
+
+    const secondGuest = manager.listSurfaces()[1]
+    if (!secondGuest) throw new Error('second surface missing')
+    const close = manager.closeSurfaceByIndex(1)
+    const closeCommand = commands.at(-1)
+    if (!closeCommand || closeCommand.kind !== 'closeSurface') {
+      throw new Error('close command missing')
+    }
+    manager.handleTargetClosed(closeCommand.surfaceId, secondGuest.generation)
+    await close
+    expect(manager.listSurfaces()).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it('serializes concurrent new-tab requests without dropping or duplicating either command', async () => {
+    const surfaceIds = ['concurrent-one', 'concurrent-two']
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-surface',
+      maxSurfaces: 2
+    })
+    const first = manager.createSurface()
+    const second = manager.createSurface()
+    expect(commands).toHaveLength(1)
+    const firstCommand = commands[0]
+    if (!firstCommand || firstCommand.kind !== 'createSurface') {
+      throw new Error('first create command missing')
+    }
+    attachGuest(manager, host, 2, firstCommand.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: firstCommand.requestId,
+      surfaceId: firstCommand.surfaceId
+    })
+
+    await vi.waitFor(() => expect(commands).toHaveLength(2))
+    const secondCommand = commands[1]
+    if (!secondCommand || secondCommand.kind !== 'createSurface') {
+      throw new Error('second create command missing')
+    }
+    attachGuest(manager, host, 3, secondCommand.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: secondCommand.requestId,
+      surfaceId: secondCommand.surfaceId
+    })
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual([
+      'concurrent-one',
+      'concurrent-two'
+    ])
+    await manager.shutdown()
+  })
+
+  it('reuses the trusted manually selected tab without granting unselected targets', async () => {
+    const { broker, host, manager } = createHarness()
+    attachGuest(manager, host, 2, 'manual-one')
+    attachGuest(manager, host, 3, 'manual-two')
+
+    expect(
+      manager.selectManualSurface(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: 'manual-two'
+      })
+    ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: 'manual-two' })
+    await expect(manager.ensureActiveSurface()).resolves.toEqual(
+      expect.objectContaining({ isActive: true, surfaceId: 'manual-two' })
+    )
+    await manager.getBrowserContext()
+    expect(broker.snapshot().claimedSurfaces).toBe(1)
+    expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'manual-two' })
+
+    manager.selectManualSurface(host.asWebContents(), {
+      schemaVersion: 1,
+      surfaceId: 'manual-one'
+    })
+    expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'manual-two' })
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: false, surfaceId: 'manual-one' }),
+      expect.objectContaining({ isActive: true, surfaceId: 'manual-two' })
+    ])
+
+    await manager.detachAutomation()
+    expect(broker.snapshot().claimedSurfaces).toBe(0)
+    expect(manager.snapshot().surfaces).toBe(2)
+    await manager.shutdown()
+  })
+
+  it('creates an automated popup in the background without disconnecting the opener call', async () => {
+    const surfaceIds = ['popup-opener', 'popup-child']
+    const { browsers, commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-popup'
+    })
+    const context = manager.getBrowserContext()
+    const ensure = commands.at(-1)
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const opener = attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await context
+
+    const popup = manager.handlePopup({
+      guest: opener.asWebContents(),
+      url: 'http://127.0.0.1/popup'
+    })
+    const create = commands.at(-1)
+    if (!create || create.kind !== 'createSurface') throw new Error('popup command missing')
+    expect(create.activate).toBe(false)
+    attachGuest(manager, host, 3, create.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await popup
+
+    expect(browsers[0]?.browser.isConnected()).toBe(true)
+    expect(manager.getActiveSurfaceIdentity()).toEqual({
+      generation: 1,
+      surfaceId: 'popup-opener'
+    })
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: true, surfaceId: 'popup-opener' }),
+      expect.objectContaining({ isActive: false, surfaceId: 'popup-child' })
+    ])
+    await manager.shutdown()
+  })
+
   it('reuses the risk-preflight surface when Playwright connects after approval', async () => {
     const lease = {
       failure: vi.fn(() => null),
@@ -263,7 +487,7 @@ describe('BrowserSurfaceManager', () => {
   })
 
   it('detaches automation without destroying the manually usable guest', async () => {
-    const { browsers, commands, host, manager } = createHarness()
+    const { broker, browsers, commands, host, manager } = createHarness()
     const contextPromise = manager.getBrowserContext()
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
@@ -281,6 +505,7 @@ describe('BrowserSurfaceManager', () => {
     expect(browsers[0]?.browser.isConnected()).toBe(false)
     expect(manager.getActiveSurfaceIdentity()).toBeNull()
     expect(manager.snapshot().surfaces).toBe(1)
+    expect(broker.snapshot().claimedSurfaces).toBe(0)
     await manager.shutdown()
   })
 

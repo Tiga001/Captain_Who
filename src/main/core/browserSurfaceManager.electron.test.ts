@@ -10,6 +10,7 @@ const RESULT_MARKER = 'MYCOPILOT_BROWSER_SURFACE_RESULT='
 interface FixtureResult {
   ariaSnapshot: boolean
   closeCommands: number
+  createCommands: number
   concurrentSingleFlight: boolean
   ensureCommands: number
   finalText: string
@@ -19,6 +20,16 @@ interface FixtureResult {
   inputValueAfterFill: string
   mainWindowAliveAfterClose: boolean
   minimizedTitle: string
+  multiTab: {
+    createdSurfaceId: string
+    popupKeptOpenerActive: boolean
+    popupTitle: string
+    selectedRetainedText: string
+    secondTitle: string
+    tabsAfterBackgroundClose: number
+    tabsAfterCreate: number
+    tabsAfterPopup: number
+  }
   noRemoteDebuggingPort: boolean
   oldTargetRejected: boolean
   pageCount: number
@@ -77,7 +88,8 @@ describe.runIf(process.platform === 'darwin')('BrowserSurfaceManager Electron fi
       const result = JSON.parse(resultLine!.slice(RESULT_MARKER.length)) as FixtureResult
       expect(result).toEqual({
         ariaSnapshot: true,
-        closeCommands: 1,
+        closeCommands: 3,
+        createCommands: 2,
         concurrentSingleFlight: true,
         ensureCommands: 2,
         finalText: 'applied:hello',
@@ -87,6 +99,16 @@ describe.runIf(process.platform === 'darwin')('BrowserSurfaceManager Electron fi
         inputValueAfterFill: 'hidden',
         mainWindowAliveAfterClose: true,
         minimizedTitle: 'Browser Surface Fixture',
+        multiTab: {
+          createdSurfaceId: 'right-sidebar-browser-electron-fixture-second',
+          popupKeptOpenerActive: true,
+          popupTitle: 'Browser Surface Fixture',
+          selectedRetainedText: 'applied:hidden',
+          secondTitle: 'Browser Surface Fixture',
+          tabsAfterBackgroundClose: 1,
+          tabsAfterCreate: 2,
+          tabsAfterPopup: 2
+        },
         noRemoteDebuggingPort: true,
         oldTargetRejected: true,
         pageCount: 1,

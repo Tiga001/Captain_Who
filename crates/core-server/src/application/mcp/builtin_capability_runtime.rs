@@ -748,13 +748,20 @@ fn project_managed_browser_result(result: McpToolResult) -> AgentResult<Value> {
             }),
         })
         .collect::<Vec<_>>();
+    let structured_content = projected.structured_content.and_then(|structured| {
+        if structured.get("artifacts").is_none() {
+            return Some(structured);
+        }
+        mycopilot_core::browser_artifacts::safe_browser_artifact_references(&structured)
+            .map(|artifacts| json!({"artifacts": artifacts}))
+    });
     let envelope = json!({
         "schemaVersion": 1,
         "type": "managed_mcp_tool_result",
         "outcome": if projected.is_error { "tool_error" } else { "completed" },
         "isError": projected.is_error,
         "content": content,
-        "structuredContent": projected.structured_content,
+        "structuredContent": structured_content,
         "truncated": projected.truncated_at_source,
         "dispatchCertainty": "response_received",
     });
@@ -1349,6 +1356,68 @@ mod tests {
         ] {
             assert!(!serialized.contains(canary), "leaked {canary}");
         }
+    }
+
+    #[test]
+    fn managed_result_projection_keeps_only_strict_artifact_references() {
+        let artifact = json!({
+            "schemaVersion": 1,
+            "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+            "kind": "pdf",
+            "displayName": "page.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": 42,
+            "createdAt": 1_000,
+            "expiresAt": 2_000,
+            "lifecycle": "run",
+            "owner": "browser_automation",
+            "preview": "none"
+        });
+        let projected = project_managed_browser_result(McpToolResult {
+            content: vec![McpContentBlock::Text {
+                text: "Created a managed PDF Artifact.".to_string(),
+            }],
+            structured_content: Some(json!({
+                "status": "completed",
+                "artifacts": [artifact.clone()],
+                "privatePath": "/tmp/private-output/page.pdf",
+            })),
+            is_error: false,
+        })
+        .unwrap();
+        assert_eq!(
+            projected["structuredContent"],
+            json!({"artifacts": [artifact]})
+        );
+        assert!(!serde_json::to_string(&projected)
+            .unwrap()
+            .contains("private-output"));
+
+        let malformed = project_managed_browser_result(McpToolResult {
+            content: vec![],
+            structured_content: Some(json!({
+                "artifacts": [{
+                    "schemaVersion": 1,
+                    "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+                    "kind": "pdf",
+                    "displayName": "page.pdf",
+                    "mimeType": "application/pdf",
+                    "sizeBytes": 42,
+                    "createdAt": 1_000,
+                    "expiresAt": 2_000,
+                    "lifecycle": "run",
+                    "owner": "browser_automation",
+                    "preview": "none",
+                    "managedPath": "/tmp/private-output/page.pdf"
+                }]
+            })),
+            is_error: false,
+        })
+        .unwrap();
+        assert!(malformed["structuredContent"].is_null());
+        assert!(!serde_json::to_string(&malformed)
+            .unwrap()
+            .contains("private-output"));
     }
 
     #[test]

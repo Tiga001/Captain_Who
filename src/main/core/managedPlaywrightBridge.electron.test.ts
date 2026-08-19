@@ -18,6 +18,7 @@ describe.runIf(process.platform === 'darwin')(
       const cwdArtifact = join(process.cwd(), '.playwright-mcp')
       expect(await exists(cwdArtifact)).toBe(false)
       const temporaryOutputsBefore = await managedOutputDirectories()
+      const profileDirectoriesBefore = await managedProfileDirectories()
       try {
         await build({
           build: {
@@ -75,6 +76,13 @@ describe.runIf(process.platform === 'darwin')(
         expect(await managedOutputDirectories()).toEqual(temporaryOutputsBefore)
       } finally {
         await rm(outputDirectory, { force: true, recursive: true })
+        const currentProfiles = await managedProfileDirectories()
+        await Promise.all(
+          currentProfiles
+            .filter((name) => !profileDirectoriesBefore.includes(name))
+            .map((name) => rm(join(tmpdir(), name), { force: true, recursive: true }))
+        )
+        expect(await managedProfileDirectories()).toEqual(profileDirectoriesBefore)
       }
     }, 180_000)
   }
@@ -92,6 +100,12 @@ async function exists(path: string): Promise<boolean> {
 async function managedOutputDirectories(): Promise<string[]> {
   return (await readdir(tmpdir()))
     .filter((name) => name.startsWith('mycopilot-playwright-mcp-'))
+    .sort()
+}
+
+async function managedProfileDirectories(): Promise<string[]> {
+  return (await readdir(tmpdir()))
+    .filter((name) => name.startsWith('mycopilot-managed-playwright-profile-'))
     .sort()
 }
 

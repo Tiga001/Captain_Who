@@ -143,6 +143,7 @@ function createRegisteredGuest(broker: BrowserTargetBroker, id = 2, surfaceId = 
     partition: PARTITION
   })
   broker.claimSurface({
+    generation: 1,
     guestWebContentsId: guest.id,
     host: host.asWebContents(),
     surfaceId
@@ -226,6 +227,7 @@ describe('BrowserTargetBroker', () => {
 
     expect(() =>
       broker.claimSurface({
+        generation: 1,
         guestWebContentsId: second.guest.id,
         host: second.host.asWebContents(),
         surfaceId: first.surfaceId
@@ -233,6 +235,7 @@ describe('BrowserTargetBroker', () => {
     ).toThrow(expect.objectContaining({ code: 'surface_conflict' }))
     expect(() =>
       broker.claimSurface({
+        generation: 2,
         guestWebContentsId: first.guest.id,
         host: first.host.asWebContents(),
         surfaceId: 'browser-rebound'
@@ -499,6 +502,25 @@ describe('BrowserTargetBroker', () => {
       claimedSurfaces: 0,
       registeredGuests: 1
     })
+  })
+
+  it('rejects a stale surface generation after the same identity is reclaimed', async () => {
+    const broker = createBroker()
+    const { guest, host, surfaceId } = createRegisteredGuest(broker)
+    broker.releaseSurface(surfaceId, 1)
+    broker.claimSurface({
+      generation: 2,
+      guestWebContentsId: guest.id,
+      host: host.asWebContents(),
+      surfaceId
+    })
+
+    await expect(broker.connect(surfaceId, 1)).rejects.toEqual(
+      expect.objectContaining<Partial<BrowserTargetBrokerError>>({ code: 'guest_not_found' })
+    )
+    const current = await broker.connect(surfaceId, 2)
+    current.close()
+    broker.dispose()
   })
 
   it('fails closed when partition identity or guest ownership drifts before connect', async () => {

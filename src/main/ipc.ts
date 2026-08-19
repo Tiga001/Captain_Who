@@ -24,6 +24,8 @@ import { createTrustedIpcMain } from './ipc/trustedIpc'
 import { registerWorkspaceFilesIpc } from './ipc/workspaceFilesIpc'
 import type { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
 import { registerBrowserSurfaceIpc } from './ipc/browserSurfaceIpc'
+import { registerBrowserArtifactIpc } from './ipc/browserArtifactIpc'
+import type { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -275,7 +277,8 @@ export function registerHostIpc(
   terminalBridge: TerminalBridge,
   faviconResourceCache: FaviconResourceCache,
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean,
-  browserSurfaceManager?: BrowserSurfaceManager
+  browserSurfaceManager?: BrowserSurfaceManager,
+  browserArtifactBroker?: BrowserArtifactBroker
 ): () => void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
@@ -319,6 +322,9 @@ export function registerHostIpc(
   })
   if (browserSurfaceManager) {
     registerBrowserSurfaceIpc(ipcMain, browserSurfaceManager)
+  }
+  if (browserArtifactBroker) {
+    registerBrowserArtifactIpc(ipcMain, browserArtifactBroker)
   }
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)

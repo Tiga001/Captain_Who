@@ -14,6 +14,7 @@ import {
   MANAGED_PLAYWRIGHT_CAPABILITIES,
   MANAGED_PLAYWRIGHT_CATALOG_LOCK,
   MANAGED_PLAYWRIGHT_EXPOSED_TOOLS,
+  MANAGED_PLAYWRIGHT_POLICY_MANIFEST,
   MANAGED_PLAYWRIGHT_TOOL_CAPABILITIES,
   digestJson,
   managedPlaywrightCatalogConformanceReport,
@@ -58,16 +59,16 @@ describe('managed Playwright fixed Catalog', () => {
       browser_tabs: 'core-tabs',
       browser_type: 'core-input'
     })
-    expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS).toHaveLength(31)
+    expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS).toHaveLength(40)
     expect(
       MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter((tool) => tool.handlingMode === 'pass_through')
-    ).toHaveLength(26)
+    ).toHaveLength(25)
     expect(
       MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter((tool) => tool.handlingMode === 'host_adapted')
-    ).toHaveLength(2)
+    ).toHaveLength(8)
     expect(
       MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter((tool) => tool.handlingMode === 'artifact_managed')
-    ).toHaveLength(3)
+    ).toHaveLength(7)
     expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.map((tool) => tool.rawName)).not.toContain(
       'browser_run_code_unsafe'
     )
@@ -77,12 +78,12 @@ describe('managed Playwright fixed Catalog', () => {
     )
     const snapshotProperties = snapshot?.inputSchema.properties as Record<string, unknown>
     expect(snapshotProperties).toHaveProperty('call_reason')
-    expect(snapshotProperties).not.toHaveProperty('filename')
+    expect(snapshotProperties).toHaveProperty('filename')
     expect(snapshot?.inputSchema.required).toContain('call_reason')
 
     const tabs = MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.find((tool) => tool.rawName === 'browser_tabs')
     expect(tabs?.inputSchema).toMatchObject({
-      properties: { action: { enum: ['list'] } },
+      properties: { action: { enum: ['list', 'new', 'close', 'select'] } },
       required: ['action', 'call_reason']
     })
 
@@ -93,8 +94,55 @@ describe('managed Playwright fixed Catalog', () => {
       properties: { level: { enum: ['error', 'warning'], default: 'warning' } },
       required: ['level', 'call_reason']
     })
-    expect(consoleMessages?.inputSchema).not.toHaveProperty('properties.filename')
+    expect(consoleMessages?.inputSchema).toHaveProperty('properties.filename')
     expect(consoleMessages?.inputSchema).not.toHaveProperty('properties.all')
+  })
+
+  it('records machine-readable evidence for tools that cannot be safely equivalent in a guest', () => {
+    const unsupported = new Map(
+      MANAGED_PLAYWRIGHT_POLICY_MANIFEST.tools
+        .filter((tool) => tool.handlingMode === 'unsupported')
+        .map((tool) => [tool.rawName, tool] as const)
+    )
+    expect([...unsupported.keys()].sort()).toEqual(
+      [
+        'browser_annotate',
+        'browser_resume',
+        'browser_start_video',
+        'browser_stop_video',
+        'browser_video_chapter',
+        'browser_video_hide_actions',
+        'browser_video_show_actions'
+      ].sort()
+    )
+    expect(unsupported.get('browser_annotate')).toMatchObject({
+      exposed: false,
+      reasonCode: 'upstream_external_dashboard_forbidden',
+      constraints: expect.arrayContaining(['external_dashboard_process_forbidden'])
+    })
+    expect(unsupported.get('browser_resume')).toMatchObject({
+      exposed: false,
+      reasonCode: 'managed_guest_has_no_test_debugger_pause',
+      constraints: expect.arrayContaining(['no_managed_pause_source'])
+    })
+    for (const name of ['browser_start_video', 'browser_stop_video']) {
+      expect(unsupported.get(name)).toMatchObject({
+        exposed: false,
+        reasonCode: 'production_ffmpeg_not_bundled',
+        constraints: expect.arrayContaining(['external_video_encoder_unavailable'])
+      })
+    }
+    for (const name of [
+      'browser_video_chapter',
+      'browser_video_hide_actions',
+      'browser_video_show_actions'
+    ]) {
+      expect(unsupported.get(name)).toMatchObject({
+        exposed: false,
+        reasonCode: 'managed_video_recording_unavailable',
+        constraints: expect.arrayContaining(['managed_video_recording_unavailable'])
+      })
+    }
   })
 
   it('matches all upstream capability assignments from the fixed coreBundle', () => {
@@ -189,10 +237,10 @@ describe('managed Playwright fixed Catalog', () => {
       packageVersion: '0.0.79',
       status: 'exact',
       upstreamToolCount: 69,
-      exposedToolCount: 31,
+      exposedToolCount: 40,
       upstreamCatalogDigest:
         'sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf',
-      policyDigest: 'sha256:5fede120ec5887791faae7c543b0df1c07883eb8350e71af522a6f6d05facc03'
+      policyDigest: 'sha256:23cf8923a8d0aecceeea4fdf45113629f7cb6af186c3b704d26505239d3878a5'
     })
 
     const titleDrift = structuredClone(live)

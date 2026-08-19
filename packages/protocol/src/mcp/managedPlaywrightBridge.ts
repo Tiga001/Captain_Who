@@ -57,6 +57,7 @@ export type ManagedPlaywrightBridgeErrorCode =
   | 'closed'
   | 'busy'
   | 'surface_unavailable'
+  | 'surface_capacity_exceeded'
   | 'target_closed'
   | 'tool_not_reviewed'
   | 'invalid_arguments'
@@ -502,6 +503,7 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
         'closed',
         'busy',
         'surface_unavailable',
+        'surface_capacity_exceeded',
         'target_closed',
         'tool_not_reviewed',
         'invalid_arguments',

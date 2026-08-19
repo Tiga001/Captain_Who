@@ -19,6 +19,8 @@ import { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
 import { BrowserNetworkPolicy, ElectronSessionDnsResolver } from './browser/BrowserNetworkPolicy'
 import { BrowserRiskCoordinator } from './browser/BrowserRiskCoordinator'
 import { BrowserNetworkGuard } from './browser/BrowserNetworkGuard'
+import { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
+import { BrowserDownloadBroker } from './browser/BrowserDownloadBroker'
 import { CoreBrowserRiskAuthorizer } from './browser/CoreBrowserRiskAuthorizer'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 import {
@@ -44,6 +46,8 @@ let disposeHostIpc: (() => void) | null = null
 let mainWindow: BrowserWindow | null = null
 let browserSurfaceManager: BrowserSurfaceManager | null = null
 let browserNetworkGuard: BrowserNetworkGuard | null = null
+let browserArtifactBroker: BrowserArtifactBroker | null = null
+let browserDownloadBroker: BrowserDownloadBroker | null = null
 let managedPlaywrightBridgeHost: ManagedPlaywrightBridgeHost | null = null
 const mainWindowLifecycle = new MainWindowLifecycleController(process.platform)
 const trustedRendererEntries = new Map<number, string>()
@@ -224,6 +228,13 @@ app.whenReady().then(() => {
   coreServer.start()
   faviconResourceCache.registerProtocol()
   const managedBrowserSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
+  browserArtifactBroker = new BrowserArtifactBroker({
+    rootDirectory: join(appDataRoot, 'browser-automation-artifacts')
+  })
+  browserDownloadBroker = new BrowserDownloadBroker({
+    artifacts: browserArtifactBroker,
+    expectedSession: managedBrowserSession
+  })
   const browserNetworkPolicy = new BrowserNetworkPolicy({
     blockedOrigins: [getRendererEntryUrl()],
     dnsResolver: new ElectronSessionDnsResolver(managedBrowserSession)
@@ -234,6 +245,7 @@ app.whenReady().then(() => {
       authorizer: new CoreBrowserRiskAuthorizer(coreServer),
       policy: browserNetworkPolicy
     }),
+    downloadBroker: browserDownloadBroker,
     expectedSession: managedBrowserSession,
     policy: browserNetworkPolicy
   })
@@ -250,6 +262,14 @@ app.whenReady().then(() => {
     core: coreServer,
     createHost: createManagedPlaywrightHostFactory({
       getBrowserContext: () => getBrowserSurfaceManager().getBrowserContext(),
+      getActiveSurfaceIdentity: () => getBrowserSurfaceManager().getActiveSurfaceIdentity(),
+      artifactBroker: browserArtifactBroker,
+      finalizeBrowserRun: (runId) => browserNetworkGuard?.finalizeRun(runId) ?? Promise.resolve(),
+      releaseBrowserCapability: (activationId) =>
+        browserNetworkGuard?.releaseCapability(activationId) ?? Promise.resolve(),
+      releaseBrowserToolCall: (input) =>
+        browserNetworkGuard?.releaseToolCall(input) ?? Promise.resolve(),
+      surfaceGroup: browserSurfaceManager,
       closeSurface: () => getBrowserSurfaceManager().closeSurface(),
       detachAutomation: () => getBrowserSurfaceManager().detachAutomation(),
       beginNetworkOperation: (input) => getBrowserSurfaceManager().beginNetworkOperation(input)
@@ -265,7 +285,8 @@ app.whenReady().then(() => {
     terminalBridge,
     faviconResourceCache,
     isTrustedRendererEvent,
-    browserSurfaceManager
+    browserSurfaceManager,
+    browserArtifactBroker
   )
 
   createWindow()
@@ -297,7 +318,12 @@ app.on('before-quit', (event) => {
     await Promise.allSettled([terminalBridge.stop(), coreServer.shutdown()])
     await managedPlaywrightBridgeHost?.close()
     managedPlaywrightBridgeHost = null
-    await browserSurfaceManager?.shutdown()
+    await browserSurfaceManager?.shutdown().catch(() => undefined)
+    browserSurfaceManager = null
+    browserNetworkGuard = null
+    browserDownloadBroker = null
+    await browserArtifactBroker?.shutdown().catch(() => undefined)
+    browserArtifactBroker = null
   })().finally(() => app.quit())
 })
 
@@ -308,6 +334,10 @@ app.on('will-quit', () => {
   disposeAdaptiveAppIcon = null
   terminalBridge.killNow()
   managedPlaywrightBridgeHost = null
+  browserDownloadBroker = null
+  browserNetworkGuard = null
+  browserSurfaceManager = null
+  browserArtifactBroker = null
   coreServer.stop()
 })
 

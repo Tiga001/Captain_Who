@@ -10,6 +10,31 @@ export interface BrowserSurfaceEnsureAttachedCommand {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
   kind: 'ensureAttached'
   requestId: string
+  surfaceId: string
+}
+
+export interface BrowserSurfaceCreateCommand {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  kind: 'createSurface'
+  requestId: string
+  surfaceId: string
+  activate: boolean
+}
+
+export interface BrowserSurfaceSelectCommand {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  kind: 'selectSurface'
+  requestId: string
+  surfaceId: string
+}
+
+export interface BrowserSurfaceResizeCommand {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  kind: 'resizeSurface'
+  requestId: string
+  surfaceId: string
+  width: number
+  height: number
 }
 
 export interface BrowserSurfaceCloseCommand {
@@ -19,15 +44,32 @@ export interface BrowserSurfaceCloseCommand {
   surfaceId: string
 }
 
-export type BrowserSurfaceCommand = BrowserSurfaceEnsureAttachedCommand | BrowserSurfaceCloseCommand
+export type BrowserSurfaceCommand =
+  | BrowserSurfaceEnsureAttachedCommand
+  | BrowserSurfaceCreateCommand
+  | BrowserSurfaceSelectCommand
+  | BrowserSurfaceResizeCommand
+  | BrowserSurfaceCloseCommand
 
 export interface BrowserSurfaceReadyInput {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
   requestId: string
   surfaceId: string
+  viewport?: { height: number; width: number }
 }
 
 export interface BrowserSurfaceReadyOutput {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  accepted: true
+  surfaceId: string
+}
+
+export interface BrowserSurfaceSelectedInput {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  surfaceId: string
+}
+
+export interface BrowserSurfaceSelectedOutput {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
   accepted: true
   surfaceId: string
@@ -56,13 +98,44 @@ export function parseBrowserSurfaceBootstrapUrl(value: string): string | null {
 
 export function parseBrowserSurfaceCommand(value: unknown): BrowserSurfaceCommand {
   const record = expectRecord(value, 'browser surface command')
-  const kind = expectEnum(record.kind, ['ensureAttached', 'closeSurface'] as const)
-  if (kind === 'ensureAttached') {
-    expectOnlyKeys(record, ['schemaVersion', 'kind', 'requestId'])
+  const kind = expectEnum(record.kind, [
+    'ensureAttached',
+    'createSurface',
+    'selectSurface',
+    'resizeSurface',
+    'closeSurface'
+  ] as const)
+  if (kind === 'resizeSurface') {
+    expectOnlyKeys(record, ['schemaVersion', 'kind', 'requestId', 'surfaceId', 'width', 'height'])
     return {
       schemaVersion: expectSchemaVersion(record.schemaVersion),
       kind,
-      requestId: expectRequestId(record.requestId)
+      requestId: expectRequestId(record.requestId),
+      surfaceId: parseBrowserSurfaceId(record.surfaceId),
+      width: expectViewportDimension(record.width, 'width'),
+      height: expectViewportDimension(record.height, 'height')
+    }
+  }
+  if (kind === 'createSurface') {
+    expectOnlyKeys(record, ['schemaVersion', 'kind', 'requestId', 'surfaceId', 'activate'])
+    if (typeof record.activate !== 'boolean') {
+      throw new Error('Invalid browser surface activation mode')
+    }
+    return {
+      schemaVersion: expectSchemaVersion(record.schemaVersion),
+      kind,
+      requestId: expectRequestId(record.requestId),
+      surfaceId: parseBrowserSurfaceId(record.surfaceId),
+      activate: record.activate
+    }
+  }
+  if (kind !== 'closeSurface') {
+    expectOnlyKeys(record, ['schemaVersion', 'kind', 'requestId', 'surfaceId'])
+    return {
+      schemaVersion: expectSchemaVersion(record.schemaVersion),
+      kind,
+      requestId: expectRequestId(record.requestId),
+      surfaceId: parseBrowserSurfaceId(record.surfaceId)
     }
   }
 
@@ -75,20 +148,64 @@ export function parseBrowserSurfaceCommand(value: unknown): BrowserSurfaceComman
   }
 }
 
+function expectViewportDimension(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 240 || (value as number) > 4_096) {
+    throw new Error(`Invalid browser surface ${name}`)
+  }
+  return value as number
+}
+
 export function parseBrowserSurfaceReadyInput(value: unknown): BrowserSurfaceReadyInput {
   const record = expectRecord(value, 'browser surface ready input')
-  expectOnlyKeys(record, ['schemaVersion', 'requestId', 'surfaceId'])
+  expectOnlyKeys(record, ['schemaVersion', 'requestId', 'surfaceId', 'viewport'])
+  let viewport: BrowserSurfaceReadyInput['viewport']
+  if (record.viewport !== undefined) {
+    const candidate = expectRecord(record.viewport, 'browser surface viewport')
+    expectOnlyKeys(candidate, ['width', 'height'])
+    viewport = {
+      width: expectMeasuredViewportDimension(candidate.width, 'width'),
+      height: expectMeasuredViewportDimension(candidate.height, 'height')
+    }
+  }
   return {
     schemaVersion: expectSchemaVersion(record.schemaVersion),
     requestId: expectRequestId(record.requestId),
-    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+    surfaceId: parseBrowserSurfaceId(record.surfaceId),
+    ...(viewport ? { viewport } : {})
   }
+}
+
+function expectMeasuredViewportDimension(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 4_096) {
+    throw new Error(`Invalid measured browser surface ${name}`)
+  }
+  return value as number
 }
 
 export function parseBrowserSurfaceReadyOutput(value: unknown): BrowserSurfaceReadyOutput {
   const record = expectRecord(value, 'browser surface ready output')
   expectOnlyKeys(record, ['schemaVersion', 'accepted', 'surfaceId'])
   if (record.accepted !== true) throw new Error('Invalid browser surface ready output')
+  return {
+    schemaVersion: expectSchemaVersion(record.schemaVersion),
+    accepted: true,
+    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+  }
+}
+
+export function parseBrowserSurfaceSelectedInput(value: unknown): BrowserSurfaceSelectedInput {
+  const record = expectRecord(value, 'browser surface selected input')
+  expectOnlyKeys(record, ['schemaVersion', 'surfaceId'])
+  return {
+    schemaVersion: expectSchemaVersion(record.schemaVersion),
+    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+  }
+}
+
+export function parseBrowserSurfaceSelectedOutput(value: unknown): BrowserSurfaceSelectedOutput {
+  const record = expectRecord(value, 'browser surface selected output')
+  expectOnlyKeys(record, ['schemaVersion', 'accepted', 'surfaceId'])
+  if (record.accepted !== true) throw new Error('Invalid browser surface selected output')
   return {
     schemaVersion: expectSchemaVersion(record.schemaVersion),
     accepted: true,

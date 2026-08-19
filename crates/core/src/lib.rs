@@ -3,6 +3,7 @@ mod agent_collaboration_harness;
 mod agent_delivery;
 mod agent_graph;
 pub mod artifact_runtime;
+pub mod browser_artifacts;
 pub mod builtin_capabilities;
 mod cancellation;
 pub mod command;

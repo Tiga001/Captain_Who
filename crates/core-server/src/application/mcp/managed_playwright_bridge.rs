@@ -1116,7 +1116,8 @@ fn error_from_outcome(
         ManagedPlaywrightBridgeErrorCode::Timeout => {
             McpError::timeout("managed Playwright operation", 0)
         }
-        ManagedPlaywrightBridgeErrorCode::Busy => McpError::capacity(message),
+        ManagedPlaywrightBridgeErrorCode::Busy
+        | ManagedPlaywrightBridgeErrorCode::SurfaceCapacityExceeded => McpError::capacity(message),
         ManagedPlaywrightBridgeErrorCode::Closed => McpError::shutdown(message),
         ManagedPlaywrightBridgeErrorCode::OutputTooLarge => {
             McpError::output_too_large("managed Playwright tools/call", message)
@@ -1160,6 +1161,9 @@ fn safe_error_message(code: ManagedPlaywrightBridgeErrorCode) -> &'static str {
         ManagedPlaywrightBridgeErrorCode::Closed => "managed Playwright Host is closed",
         ManagedPlaywrightBridgeErrorCode::Busy => "managed Playwright Host is busy",
         ManagedPlaywrightBridgeErrorCode::SurfaceUnavailable => "browser surface is unavailable",
+        ManagedPlaywrightBridgeErrorCode::SurfaceCapacityExceeded => {
+            "browser surface capacity was exceeded"
+        }
         ManagedPlaywrightBridgeErrorCode::TargetClosed => "browser target was closed",
         ManagedPlaywrightBridgeErrorCode::ToolNotReviewed => "browser tool is not reviewed",
         ManagedPlaywrightBridgeErrorCode::InvalidArguments => "browser tool arguments are invalid",
@@ -1897,6 +1901,119 @@ mod tests {
         let drag_source_ref = snapshot_ref(&snapshot_text, "Drag source");
         let drop_target_ref = snapshot_ref(&snapshot_text, "Drop target");
         let list_ref = snapshot_ref(&snapshot_text, "Visible items");
+        let download_ref = snapshot_ref(&snapshot_text, "Download fixture");
+
+        for (tool, arguments) in [
+            (
+                "browser_resize",
+                json!({"width": 360, "height": 240, "call_reason": "Resize the visible fixture guest."}),
+            ),
+            (
+                "browser_route",
+                json!({
+                    "pattern": "**/api/host-adapted",
+                    "status": 204,
+                    "call_reason": "Install a run-scoped local fixture route."
+                }),
+            ),
+            (
+                "browser_route_list",
+                json!({"call_reason": "Inspect the run-scoped local fixture route."}),
+            ),
+            (
+                "browser_unroute",
+                json!({
+                    "pattern": "**/api/host-adapted",
+                    "call_reason": "Remove the run-scoped local fixture route."
+                }),
+            ),
+            (
+                "browser_network_state_set",
+                json!({"state": "offline", "call_reason": "Exercise local offline state."}),
+            ),
+            (
+                "browser_network_state_set",
+                json!({"state": "online", "call_reason": "Restore local online state."}),
+            ),
+        ] {
+            let result =
+                invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
+            assert!(
+                !result.is_error,
+                "managed fixture {tool} Host adapter failed: {}",
+                tool_result_text(&result)
+            );
+        }
+
+        for (tool, arguments, kind) in [
+            (
+                "browser_take_screenshot",
+                json!({
+                    "scale": "css",
+                    "filename": "fixture-page.png",
+                    "call_reason": "Capture the repository-owned fixture."
+                }),
+                "image",
+            ),
+            (
+                "browser_snapshot",
+                json!({
+                    "filename": "fixture-snapshot.yml",
+                    "call_reason": "Export the repository-owned fixture snapshot."
+                }),
+                "snapshot",
+            ),
+            (
+                "browser_pdf_save",
+                json!({
+                    "filename": "fixture-page.pdf",
+                    "call_reason": "Export the repository-owned fixture PDF."
+                }),
+                "pdf",
+            ),
+        ] {
+            let result =
+                invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
+            assert!(
+                !result.is_error,
+                "managed fixture {tool} Artifact failed: {}",
+                tool_result_text(&result)
+            );
+            assert_safe_browser_artifact(&result, kind);
+        }
+        let trace_start = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_start_tracing",
+            json!({"call_reason": "Start a trace for the repository-owned fixture."}),
+        )
+        .await;
+        assert!(!trace_start.is_error);
+        let trace_stop = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_stop_tracing",
+            json!({"call_reason": "Publish the repository-owned fixture trace."}),
+        )
+        .await;
+        assert!(!trace_stop.is_error);
+        assert_safe_browser_artifact(&trace_stop, "trace");
+        let download = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_click",
+            json!({
+                "target": download_ref,
+                "call_reason": "Download the repository-owned text fixture."
+            }),
+        )
+        .await;
+        assert!(
+            !download.is_error,
+            "managed fixture download failed: {}",
+            tool_result_text(&download)
+        );
+        assert_safe_browser_artifact(&download, "download");
 
         for (tool, arguments) in [
             (
@@ -2179,6 +2296,73 @@ mod tests {
         )
         .await;
         assert!(!tabs.is_error);
+        assert_eq!(managed_tab_count(&tabs), 1);
+
+        let new_tab = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({
+                "action": "new",
+                "url": secondary_url.clone(),
+                "call_reason": "Open a second repository-owned fixture tab."
+            }),
+        )
+        .await;
+        assert!(
+            !new_tab.is_error,
+            "managed fixture tabs new failed: {}",
+            tool_result_text(&new_tab)
+        );
+        let second_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Inspect the second managed fixture tab."}),
+        )
+        .await;
+        assert!(tool_result_text(&second_snapshot).contains("Secondary Fixture Page"));
+        let two_tabs = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({"action": "list", "call_reason": "Verify both managed fixture tabs."}),
+        )
+        .await;
+        assert_eq!(managed_tab_count(&two_tabs), 2);
+
+        let select_first = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({"action": "select", "index": 0, "call_reason": "Return to the first tab."}),
+        )
+        .await;
+        assert!(!select_first.is_error);
+        let restored_first = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Verify the first tab retained its page."}),
+        )
+        .await;
+        assert!(tool_result_text(&restored_first).contains("Managed Playwright Bridge Fixture"));
+        let close_second = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({"action": "close", "index": 1, "call_reason": "Close the background fixture tab."}),
+        )
+        .await;
+        assert!(!close_second.is_error);
+        let one_tab = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({"action": "list", "call_reason": "Verify one managed fixture tab remains."}),
+        )
+        .await;
+        assert_eq!(managed_tab_count(&one_tab), 1);
 
         let console = invoke_browser_tool_with_grant(
             &runtime,
@@ -2204,6 +2388,31 @@ mod tests {
         .await;
         assert!(!requests.is_error);
         assert!(!tool_result_text(&requests).contains("fixture-query-canary"));
+        for (tool, arguments, kind) in [
+            (
+                "browser_console_messages",
+                json!({
+                    "level": "warning",
+                    "filename": "fixture-console.log",
+                    "call_reason": "Export bounded local fixture warnings."
+                }),
+                "console",
+            ),
+            (
+                "browser_network_requests",
+                json!({
+                    "static": false,
+                    "filename": "fixture-network.log",
+                    "call_reason": "Export the bounded local fixture request list."
+                }),
+                "network",
+            ),
+        ] {
+            let result =
+                invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
+            assert!(!result.is_error, "{tool}: {}", tool_result_text(&result));
+            assert_safe_browser_artifact(&result, kind);
+        }
 
         let secondary = invoke_browser_tool_with_grant(
             &runtime,
@@ -2280,8 +2489,8 @@ mod tests {
         assert_eq!(approval_count.load(Ordering::Acquire), 0);
         assert_eq!(risk_authorize_count.load(Ordering::Acquire), 0);
         assert!(exit.success(), "fixture failed: {stderr}");
-        assert_eq!(result["ensureCommands"], 1);
-        assert_eq!(result["closeCommands"], 1);
+        assert_eq!(result["ensureCommands"], 2);
+        assert_eq!(result["closeCommands"], 2);
         assert_eq!(result["targetClosed"], true);
         assert_eq!(result["mainWindowAlive"], true);
         assert_eq!(result["broker"]["activeConnections"], 0);
@@ -2427,6 +2636,39 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_safe_browser_artifact(result: &McpToolResult, expected_kind: &str) {
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("managed Artifact structured content");
+        let artifacts = structured["artifacts"]
+            .as_array()
+            .expect("managed Artifact reference array");
+        assert_eq!(artifacts.len(), 1);
+        let artifact = artifacts[0].as_object().expect("managed Artifact object");
+        assert_eq!(artifact["schemaVersion"], 1);
+        assert_eq!(artifact["kind"], expected_kind);
+        assert_eq!(artifact["owner"], "browser_automation");
+        assert_eq!(artifact["lifecycle"], "run");
+        assert_eq!(artifact.len(), 11);
+        for forbidden in ["path", "managedPath", "outputDir", "data", "body"] {
+            assert!(!artifact.contains_key(forbidden));
+        }
+        let serialized = serde_json::to_string(artifact).unwrap();
+        assert!(!serialized.contains("base64"));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn managed_tab_count(result: &McpToolResult) -> usize {
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|structured| structured["tabs"].as_array())
+            .map(Vec::len)
+            .expect("managed tabs structured content")
     }
 
     #[cfg(target_os = "macos")]

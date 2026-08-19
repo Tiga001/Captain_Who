@@ -42,6 +42,10 @@ describe('browser surface Host bridge availability', () => {
     const unsubscribe = vi.fn()
     const browser: BrowserHostApi = {
       clearBrowsingData: vi.fn(async () => undefined),
+      readArtifactPreview: vi.fn(async () => ({
+        ok: false as const,
+        error: { code: -32_001, message: 'not found' }
+      })),
       onSurfaceCommand: vi.fn((nextListener) => {
         listener = nextListener
         return unsubscribe
@@ -50,6 +54,11 @@ describe('browser surface Host bridge availability', () => {
         schemaVersion: 1 as const,
         accepted: true as const,
         surfaceId: 'right-sidebar-browser-test'
+      })),
+      surfaceSelected: vi.fn(async (input) => ({
+        schemaVersion: 1 as const,
+        accepted: true as const,
+        surfaceId: input.surfaceId
       }))
     }
     exposeHost({ browser })
@@ -60,7 +69,8 @@ describe('browser surface Host bridge availability', () => {
     listener?.({
       schemaVersion: 1,
       kind: 'ensureAttached',
-      requestId: '11111111-1111-4111-8111-111111111111'
+      requestId: '11111111-1111-4111-8111-111111111111',
+      surfaceId: 'right-sidebar-browser-test'
     })
     await expect.element(screen.getByTestId('command')).toHaveTextContent('ensureAttached')
     expect(openRightSidebar).toHaveBeenCalledTimes(1)

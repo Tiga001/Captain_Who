@@ -8,7 +8,12 @@ interface RightSidebarRuntimeContextValue {
   activeWorkspaceKey: string | null
   collaborationSnapshot: CollaborationStoreSnapshot | null
   browserSurfaceRequest?: { pageId: string; requestId: string }
-  onBrowserSurfaceReady?: (pageId: string, surfaceId: string, requestId: string) => void
+  onBrowserSurfaceReady?: (
+    pageId: string,
+    surfaceId: string,
+    requestId: string,
+    viewport?: { height: number; width: number }
+  ) => void
   onOpenAgentTemplates?: () => void
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
 }

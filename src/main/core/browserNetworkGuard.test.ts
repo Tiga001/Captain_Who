@@ -14,6 +14,11 @@ import {
   type BrowserNetworkAccessPolicy
 } from '../browser/BrowserNetworkGuard'
 import {
+  BrowserDownloadBrokerError,
+  type BrowserDownloadBroker,
+  type BrowserDownloadToolLease
+} from '../browser/BrowserDownloadBroker'
+import {
   BrowserNetworkPolicy,
   type BrowserDnsResolver,
   type BrowserNetworkPolicyOptions
@@ -126,7 +131,8 @@ function createHarness(
   decision?: BrowserRiskAuthorizationDecision,
   resolved: readonly string[] | Error = ['127.0.0.1'],
   policyOptions: Omit<BrowserNetworkPolicyOptions, 'dnsResolver'> = {},
-  accessPolicy: BrowserNetworkAccessPolicy = 'risk_approval'
+  accessPolicy: BrowserNetworkAccessPolicy = 'risk_approval',
+  downloadBroker?: BrowserDownloadBroker
 ) {
   const { emitter, session, webRequest } = createSession()
   const authorizer = new Authorizer(decision)
@@ -140,6 +146,7 @@ function createHarness(
   const guard = new BrowserNetworkGuard({
     accessPolicy,
     coordinator,
+    downloadBroker,
     expectedSession: session,
     policy
   })
@@ -181,6 +188,133 @@ function begin(harness: ReturnType<typeof createHarness>, signal?: AbortSignal) 
 }
 
 describe('BrowserNetworkGuard', () => {
+  it('keeps provisional generation zero network-only until the SurfaceGroup registers authority', () => {
+    const { session } = createSession()
+    const policy = new BrowserNetworkPolicy({ dnsResolver: new Resolver(['93.184.216.34']) })
+    const downloadBroker = {
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      unregisterGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserDownloadBroker
+    const guard = new BrowserNetworkGuard({
+      accessPolicy: 'host_boundaries_only',
+      coordinator: new BrowserRiskCoordinator({ authorizer: new Authorizer(), policy }),
+      downloadBroker,
+      expectedSession: session,
+      policy
+    })
+    const guest = createGuest(session)
+
+    guard.registerGuest({ generation: 0, guest, surfaceId: 'surface-1' })
+    expect(downloadBroker.registerGuest).not.toHaveBeenCalled()
+
+    guard.registerGuest({ generation: 1, guest, surfaceId: 'surface-1' })
+    expect(downloadBroker.registerGuest).toHaveBeenCalledOnce()
+    expect(downloadBroker.registerGuest).toHaveBeenCalledWith({
+      generation: 1,
+      guest,
+      surfaceId: 'surface-1'
+    })
+  })
+
+  it('records an OutcomeUnknown when a managed download fails after dispatch', async () => {
+    const downloadLease: BrowserDownloadToolLease = {
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => {
+        throw new BrowserDownloadBrokerError('browser.download.too_large', 'possibly_dispatched')
+      }),
+      artifacts: vi.fn(() => []),
+      finish: vi.fn()
+    }
+    const downloadBroker = {
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      beginTool: vi.fn(() => downloadLease),
+      unregisterGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      finalizeRun: vi.fn(async () => undefined),
+      releaseCapability: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 }))
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+    const lease = begin(harness)
+    lease.markDispatched()
+
+    await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.too_large' })
+    expect(lease.failure()).toEqual({
+      code: 'browser.risk_outcome_unknown',
+      dispatchCertainty: 'possibly_dispatched'
+    })
+    expect(downloadLease.markDispatched).toHaveBeenCalledOnce()
+    lease.finish()
+    expect(downloadLease.finish).toHaveBeenCalledOnce()
+  })
+
+  it('releases operation ownership when download staging cannot become ready', async () => {
+    const failedFinish = vi.fn()
+    const healthyFinish = vi.fn()
+    const failedLease: BrowserDownloadToolLease = {
+      ready: vi.fn(async () => {
+        throw new BrowserDownloadBrokerError(
+          'browser.download.artifact_failed',
+          'definitely_not_dispatched'
+        )
+      }),
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => []),
+      artifacts: vi.fn(() => []),
+      finish: failedFinish
+    }
+    const healthyLease: BrowserDownloadToolLease = {
+      ready: vi.fn(async () => undefined),
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => []),
+      artifacts: vi.fn(() => []),
+      finish: healthyFinish
+    }
+    const beginTool = vi
+      .fn()
+      .mockReturnValueOnce(failedLease)
+      .mockReturnValueOnce(healthyLease)
+    const downloadBroker = {
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      beginTool,
+      unregisterGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 }))
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+
+    const failed = begin(harness)
+    await expect(failed.ready()).rejects.toMatchObject({
+      code: 'browser.download.artifact_failed'
+    })
+    expect(failedFinish).toHaveBeenCalledOnce()
+    expect(harness.guard.snapshot().activeOperations).toBe(0)
+
+    const healthy = begin(harness)
+    await expect(healthy.ready()).resolves.toBeUndefined()
+    healthy.finish()
+    expect(healthyFinish).toHaveBeenCalledOnce()
+  })
+
   it('holds a risky request before dispatch and calls its callback exactly once', async () => {
     const harness = createHarness()
     const lease = begin(harness)

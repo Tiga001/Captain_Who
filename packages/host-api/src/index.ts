@@ -59,9 +59,13 @@ import type {
   AgentUsageSummaryOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
+  BrowserArtifactReadInput,
+  BrowserArtifactReadOutput,
   BrowserSurfaceCommand,
   BrowserSurfaceReadyInput,
   BrowserSurfaceReadyOutput,
+  BrowserSurfaceSelectedInput,
+  BrowserSurfaceSelectedOutput,
   CorePingRequest,
   CorePingResponse,
   GitRepositoryInspectInput,
@@ -156,8 +160,14 @@ export interface AttachmentsHostApi {
 
 export interface BrowserHostApi {
   clearBrowsingData(): Promise<void>
+  /** Reads bounded preview bytes for an exact Host-owned Browser Artifact reference. */
+  readArtifactPreview(
+    input: BrowserArtifactReadInput
+  ): Promise<HostInvocationResult<BrowserArtifactReadOutput>>
   /** Acknowledges an exact, already attached right-sidebar browser surface. */
   surfaceReady(input: BrowserSurfaceReadyInput): Promise<BrowserSurfaceReadyOutput>
+  /** Reports the visible Browser tab without granting any target or debugger authority. */
+  surfaceSelected(input: BrowserSurfaceSelectedInput): Promise<BrowserSurfaceSelectedOutput>
   /** Receives Host-owned reveal/create/close requests without exposing guest or CDP identity. */
   onSurfaceCommand(handler: (command: BrowserSurfaceCommand) => void): () => void
 }

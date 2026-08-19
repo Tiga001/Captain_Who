@@ -12,6 +12,7 @@ interface WebviewSurfaceProps {
   onReady: (webview: WebviewTag | null) => void
   partition: string
   surfaceId: string
+  viewport?: { height: number; width: number }
 }
 
 interface WebviewSurfaceCallbacks {
@@ -28,7 +29,8 @@ export function WebviewSurface({
   onFocus,
   onReady,
   partition,
-  surfaceId
+  surfaceId,
+  viewport
 }: WebviewSurfaceProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const webviewRef = useRef<WebviewTag | null>(null)
@@ -89,6 +91,17 @@ export function WebviewSurface({
       data-active={isActive ? 'true' : undefined}
       data-visible={isVisible ? 'true' : undefined}
       ref={hostRef}
+      style={
+        viewport
+          ? {
+              height: `${viewport.height}px`,
+              inset: 'auto',
+              left: 0,
+              top: 0,
+              width: `${viewport.width}px`
+            }
+          : undefined
+      }
     />
   )
 }

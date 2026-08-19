@@ -24,6 +24,7 @@ export type RightSidebarPlatformAction =
   | {
       module: RightSidebarModuleDefinition
       moduleState?: RightSidebarModulePageState
+      activate?: boolean
       pageId: string
       t: Translate
       type: 'open'
@@ -68,7 +69,7 @@ export function reduceRightSidebarPlatform(
         }
         return {
           ...state,
-          activePageId: existingPage.id,
+          activePageId: action.activate === false ? state.activePageId : existingPage.id,
           pages:
             moduleState === existingPage.moduleState
               ? state.pages
@@ -90,7 +91,7 @@ export function reduceRightSidebarPlatform(
         action.workspace
       )
       return {
-        activePageId: page.id,
+        activePageId: action.activate === false ? state.activePageId : page.id,
         pages: [...state.pages, page]
       }
     }

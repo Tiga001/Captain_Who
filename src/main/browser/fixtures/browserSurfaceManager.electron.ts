@@ -18,6 +18,9 @@ import {
 
 const RESULT_MARKER = 'MYCOPILOT_BROWSER_SURFACE_RESULT='
 const SURFACE_ID = 'right-sidebar-browser-electron-fixture'
+const SECOND_SURFACE_ID = 'right-sidebar-browser-electron-fixture-second'
+const POPUP_SURFACE_ID = 'right-sidebar-browser-electron-fixture-popup'
+const REPLACEMENT_SURFACE_ID = 'right-sidebar-browser-electron-fixture-replacement'
 const PROFILE_DIRECTORY = mkdtempSync(join(tmpdir(), 'mycopilot-browser-surface-profile-'))
 
 app.setPath('userData', PROFILE_DIRECTORY)
@@ -38,6 +41,7 @@ async function main(): Promise<void> {
           <label for="message">Message</label>
           <input id="message" />
           <button id="apply">Apply</button>
+          <button id="open-popup">Open popup</button>
           <output id="output">idle</output>
           <div aria-label="Rich Message" contenteditable="true" id="rich-message"></div>
         </main>
@@ -51,6 +55,9 @@ async function main(): Promise<void> {
           document.querySelector('#apply').addEventListener('click', () => {
             document.querySelector('#output').textContent =
               'applied:' + document.querySelector('#message').value
+          })
+          document.querySelector('#open-popup').addEventListener('click', () => {
+            window.open('/popup', '_blank')
           })
         </script>
       </body></html>`)
@@ -85,33 +92,59 @@ async function main(): Promise<void> {
     BROWSER_WEBVIEW_PARTITION,
     session.fromPartition(BROWSER_WEBVIEW_PARTITION)
   )
-  let pendingEnsure: Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' }> | undefined
-  let guest: WebContents | undefined
+  let pendingEnsure:
+    Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' | 'createSurface' }> | undefined
+  const guests = new Map<string, WebContents>()
+  const allocatedSurfaceIds = [
+    SURFACE_ID,
+    SECOND_SURFACE_ID,
+    POPUP_SURFACE_ID,
+    REPLACEMENT_SURFACE_ID
+  ]
   let ensureCommands = 0
+  let createCommands = 0
   let closeCommands = 0
 
   const manager = new BrowserSurfaceManager({
     attachTimeoutMs: 10_000,
     broker,
     closeTimeoutMs: 5_000,
+    createSurfaceId: () => allocatedSurfaceIds.shift() ?? `unexpected-${Date.now()}`,
     resolveHost: () => window.webContents,
     sendCommand: (_host, command) => {
-      if (command.kind === 'ensureAttached') {
-        ensureCommands += 1
+      if (command.kind === 'ensureAttached' || command.kind === 'createSurface') {
+        if (command.kind === 'ensureAttached') ensureCommands += 1
+        else createCommands += 1
         pendingEnsure = command
-        void ensureFixtureSurface(window, Boolean(guest && !guest.isDestroyed())).then(
+        const existingGuest = guests.get(command.surfaceId)
+        void ensureFixtureSurface(
+          window,
+          command.surfaceId,
+          Boolean(existingGuest && !existingGuest.isDestroyed())
+        ).then(
           (alreadyAttached) => {
             if (alreadyAttached && pendingEnsure?.requestId === command.requestId) {
               manager.attach(window.webContents, {
                 schemaVersion: 1,
                 requestId: command.requestId,
-                surfaceId: SURFACE_ID
+                surfaceId: command.surfaceId
               })
               pendingEnsure = undefined
             }
           },
           () => undefined
         )
+        return
+      }
+
+      if (command.kind === 'selectSurface' || command.kind === 'resizeSurface') {
+        void setFixtureVisibility(window, command.surfaceId, true).then(() => {
+          manager.attach(window.webContents, {
+            schemaVersion: 1,
+            requestId: command.requestId,
+            surfaceId: command.surfaceId
+          })
+        })
         return
       }
 
@@ -123,13 +156,14 @@ async function main(): Promise<void> {
     targetRegistry: manager
   })
   window.webContents.on('did-attach-webview', (_event, attachedGuest) => {
-    guest = attachedGuest
     const command = pendingEnsure
     if (!command) return
+    guests.set(command.surfaceId, attachedGuest)
+    attachedGuest.once('destroyed', () => guests.delete(command.surfaceId))
     manager.attach(window.webContents, {
       schemaVersion: 1,
       requestId: command.requestId,
-      surfaceId: SURFACE_ID
+      surfaceId: command.surfaceId
     })
     pendingEnsure = undefined
   })
@@ -149,9 +183,9 @@ async function main(): Promise<void> {
     await firstPage.getByRole('button', { name: 'Apply' }).click()
     const finalText = await firstPage.locator('#output').textContent()
 
-    await setFixtureVisibility(window, false)
+    await setFixtureVisibility(window, SURFACE_ID, false)
     const hiddenTitle = await firstPage.locator('h1').textContent()
-    await setFixtureVisibility(window, true)
+    await setFixtureVisibility(window, SURFACE_ID, true)
     const messageInput = firstPage.getByLabel('Message', { exact: true })
     await messageInput.fill('hidden')
     const inputValueAfterFill = await messageInput.inputValue()
@@ -171,17 +205,50 @@ async function main(): Promise<void> {
     await waitFor(() => window.isMinimized(), 'fixture window did not minimize')
     const minimizedTitle = await firstPage.locator('h1').textContent()
     window.restore()
-    await setFixtureVisibility(window, true)
+    await setFixtureVisibility(window, SURFACE_ID, true)
 
     await manager.detachAutomation()
-    const retainedAfterDetach = Boolean(guest && !guest.isDestroyed())
+    const retainedAfterDetach = Boolean(
+      guests.get(SURFACE_ID) && !guests.get(SURFACE_ID)?.isDestroyed()
+    )
     const reattachedContext = await manager.getBrowserContext()
     const reattachedPage = reattachedContext.pages()[0]
     if (!reattachedPage) throw new Error('reattached page missing')
     const retainedText = await reattachedPage.locator('#output').textContent()
 
+    const created = await manager.createSurface({ url: `${fixtureUrl}?tab=second` })
+    const secondContext = await manager.getBrowserContext()
+    const secondPage = secondContext.pages()[0]
+    if (!secondPage) throw new Error('second managed page missing')
+    const secondTitle = await secondPage.locator('h1').textContent()
+    const tabsAfterCreate = manager.listSurfaces()
+    const selectedFirst = manager.selectSurface({ index: 0 })
+    await selectedFirst
+    const selectedContext = await manager.getBrowserContext()
+    const selectedPage = selectedContext.pages()[0]
+    if (!selectedPage) throw new Error('reselected managed page missing')
+    const selectedRetainedText = await selectedPage.locator('#output').textContent()
+    await manager.closeSurfaceByIndex(1)
+    const tabsAfterBackgroundClose = manager.listSurfaces()
+
+    await selectedPage.getByRole('button', { name: 'Open popup' }).click()
+    await waitFor(
+      () => manager.listSurfaces().some((surface) => surface.surfaceId === POPUP_SURFACE_ID),
+      'window.open did not create a managed background surface'
+    )
+    const tabsAfterPopup = manager.listSurfaces()
+    const popupKeptOpenerActive =
+      manager.getActiveSurfaceIdentity()?.surfaceId === SURFACE_ID &&
+      (await selectedPage.locator('#output').textContent()) === 'applied:hidden'
+    await manager.selectSurface({ surfaceId: POPUP_SURFACE_ID })
+    const popupContext = await manager.getBrowserContext()
+    const popupPage = popupContext.pages()[0]
+    if (!popupPage) throw new Error('managed popup page missing')
+    const popupTitle = await popupPage.locator('h1').textContent()
+    await manager.closeSurface(POPUP_SURFACE_ID)
+
     await manager.closeSurface()
-    await waitFor(() => Boolean(guest?.isDestroyed()), 'explicit close did not destroy target')
+    await waitFor(() => !guests.has(SURFACE_ID), 'explicit close did not destroy target')
     const mainWindowAliveAfterClose = !window.isDestroyed()
     let oldTargetRejected = false
     try {
@@ -200,6 +267,7 @@ async function main(): Promise<void> {
       `${RESULT_MARKER}${JSON.stringify({
         ariaSnapshot: snapshot.includes('Browser Surface Fixture'),
         closeCommands,
+        createCommands,
         concurrentSingleFlight: firstContext === concurrentContext,
         ensureCommands,
         finalText,
@@ -208,6 +276,16 @@ async function main(): Promise<void> {
         isolatedProfile: app.getPath('userData') === PROFILE_DIRECTORY,
         inputValueAfterFill,
         mainWindowAliveAfterClose,
+        multiTab: {
+          createdSurfaceId: created.surfaceId,
+          selectedRetainedText,
+          secondTitle,
+          popupKeptOpenerActive,
+          popupTitle,
+          tabsAfterBackgroundClose: tabsAfterBackgroundClose.length,
+          tabsAfterCreate: tabsAfterCreate.length,
+          tabsAfterPopup: tabsAfterPopup.length
+        },
         minimizedTitle,
         noRemoteDebuggingPort: true,
         oldTargetRejected,
@@ -231,18 +309,20 @@ async function main(): Promise<void> {
 
 async function ensureFixtureSurface(
   window: BrowserWindow,
+  surfaceId: string,
   isAlreadyAttached: boolean
 ): Promise<boolean> {
-  const bootstrapUrl = createBrowserSurfaceBootstrapUrl(SURFACE_ID)
+  const bootstrapUrl = createBrowserSurfaceBootstrapUrl(surfaceId)
   return await window.webContents.executeJavaScript(`(() => {
-    const existing = document.querySelector('webview[data-surface-id=${JSON.stringify(SURFACE_ID)}]')
+    const existing = document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')
     if (existing) {
       existing.hidden = false
       return true
     }
     const webview = document.createElement('webview')
-    webview.dataset.surfaceId = ${JSON.stringify(SURFACE_ID)}
+    webview.dataset.surfaceId = ${JSON.stringify(surfaceId)}
     webview.setAttribute('partition', ${JSON.stringify(BROWSER_WEBVIEW_PARTITION)})
+    webview.setAttribute('allowpopups', '')
     webview.setAttribute('src', ${JSON.stringify(bootstrapUrl)})
     webview.style.width = '320px'
     webview.style.height = '220px'
@@ -257,9 +337,13 @@ async function removeFixtureSurface(window: BrowserWindow, surfaceId: string): P
   })()`)
 }
 
-async function setFixtureVisibility(window: BrowserWindow, visible: boolean): Promise<void> {
+async function setFixtureVisibility(
+  window: BrowserWindow,
+  surfaceId: string,
+  visible: boolean
+): Promise<void> {
   await window.webContents.executeJavaScript(`(() => {
-    const webview = document.querySelector('webview[data-surface-id=${JSON.stringify(SURFACE_ID)}]')
+    const webview = document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')
     if (webview) webview.hidden = ${JSON.stringify(!visible)}
   })()`)
 }

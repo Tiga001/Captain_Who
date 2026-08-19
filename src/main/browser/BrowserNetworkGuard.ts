@@ -6,7 +6,7 @@ import type {
   Session,
   WebContents
 } from 'electron'
-import { parseBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
+import { parseBrowserSurfaceBootstrapUrl, type BrowserArtifactReference } from '@mycopilot/protocol'
 
 import { BrowserNetworkPolicy, type BrowserRiskKind } from './BrowserNetworkPolicy'
 import {
@@ -17,6 +17,7 @@ import {
   type BrowserRiskOperationInput,
   type BrowserRiskTrigger
 } from './BrowserRiskCoordinator'
+import { BrowserDownloadBroker, type BrowserDownloadToolLease } from './BrowserDownloadBroker'
 
 const MAX_REGISTERED_GUESTS = 32
 const MAX_REDIRECT_MARKERS = 1_024
@@ -72,7 +73,8 @@ export class BrowserNetworkOperationLease {
     readonly operation: BrowserRiskOperation,
     private readonly preflightNavigation: (url: string) => Promise<void>,
     private readonly markLeaseDispatched: () => void,
-    private readonly finishLease: () => void
+    private readonly finishLease: () => void,
+    private readonly downloadLease?: BrowserDownloadToolLease
   ) {}
 
   async preflight(url: string): Promise<void> {
@@ -85,10 +87,20 @@ export class BrowserNetworkOperationLease {
     await this.preflightNavigation(url)
   }
 
+  async ready(): Promise<void> {
+    try {
+      await this.downloadLease?.ready?.()
+    } catch (error) {
+      this.finish()
+      throw error
+    }
+  }
+
   markDispatched(): void {
     if (!this.finished) {
       this.dispatched = true
       this.markLeaseDispatched()
+      this.downloadLease?.markDispatched()
     }
   }
 
@@ -100,6 +112,7 @@ export class BrowserNetworkOperationLease {
     if (this.finished) return
     try {
       await this.operation.settle()
+      await this.downloadLease?.settle()
     } catch (error) {
       if (this.dispatched) {
         this.operation.recordFailure({
@@ -111,9 +124,14 @@ export class BrowserNetworkOperationLease {
     }
   }
 
+  artifacts(): readonly BrowserArtifactReference[] {
+    return this.downloadLease?.artifacts() ?? []
+  }
+
   finish(): void {
     if (this.finished) return
     this.finished = true
+    this.downloadLease?.finish()
     this.finishLease()
   }
 }
@@ -121,6 +139,7 @@ export class BrowserNetworkOperationLease {
 export class BrowserNetworkGuard {
   private readonly accessPolicy: BrowserNetworkAccessPolicy
   private readonly coordinator: BrowserRiskCoordinator
+  private readonly downloadBroker?: BrowserDownloadBroker
   private readonly downloads = new Set<ActiveDownload>()
   private readonly expectedSession: Session
   private readonly guests = new Map<number, GuestRecord>()
@@ -157,6 +176,7 @@ export class BrowserNetworkGuard {
     item: DownloadItem,
     webContents: WebContents
   ): void => {
+    if (this.downloadBroker) return
     const record = this.guests.get(webContents.id)
     if (!record || record.guest !== webContents) {
       item.cancel()
@@ -260,11 +280,13 @@ export class BrowserNetworkGuard {
   constructor(options: {
     accessPolicy?: BrowserNetworkAccessPolicy
     coordinator: BrowserRiskCoordinator
+    downloadBroker?: BrowserDownloadBroker
     expectedSession: Session
     policy: BrowserNetworkPolicy
   }) {
     this.accessPolicy = options.accessPolicy ?? 'risk_approval'
     this.coordinator = options.coordinator
+    this.downloadBroker = options.downloadBroker
     this.expectedSession = options.expectedSession
     this.policy = options.policy
   }
@@ -278,6 +300,7 @@ export class BrowserNetworkGuard {
     this.expectedSession.webRequest.onCompleted(this.clearRequest)
     this.expectedSession.webRequest.onErrorOccurred(this.clearRequest)
     this.expectedSession.on('will-download', this.handleDownload)
+    this.downloadBroker?.install()
   }
 
   registerGuest(input: { generation: number; guest: WebContents; surfaceId: string }): void {
@@ -299,6 +322,18 @@ export class BrowserNetworkGuard {
     }
     this.guests.set(input.guest.id, record)
     input.guest.once('destroyed', record.handleDestroyed)
+    try {
+      // The webview security hook registers a generation-0 identity as soon as it can prove the
+      // inert bootstrap surface. That provisional record closes the did-attach -> dom-ready
+      // network window, but it is not Target authority and must never admit downloads. The
+      // BrowserSurfaceGroup replaces it with the first positive generation before automation can
+      // acquire a Tool/download lease.
+      if (input.generation > 0) this.downloadBroker?.registerGuest(input)
+    } catch (error) {
+      input.guest.removeListener('destroyed', record.handleDestroyed)
+      this.guests.delete(input.guest.id)
+      throw error
+    }
   }
 
   beginOperation(
@@ -318,6 +353,27 @@ export class BrowserNetworkGuard {
     if (input.signal?.aborted) controller.abort(input.signal.reason)
     const operationInput = { ...input, signal: controller.signal }
     const operation = this.coordinator.beginOperation(operationInput)
+    let downloadLease: BrowserDownloadToolLease | undefined
+    try {
+      downloadLease = this.downloadBroker
+        ? this.downloadBroker.beginTool({
+            guest,
+            owner: {
+              runId: input.authorizationContext.runId,
+              activationId: input.authorizationContext.activationId,
+              capabilityId: input.authorizationContext.capabilityId,
+              surfaceId: record.surfaceId,
+              generation: record.generation,
+              toolCallId: input.authorizationContext.callId
+            },
+            signal: controller.signal
+          })
+        : undefined
+    } catch (error) {
+      operation.close()
+      input.signal?.removeEventListener('abort', abortFromCaller)
+      throw error
+    }
     const active: ActiveOperation = {
       controller,
       dispatched: false,
@@ -351,7 +407,8 @@ export class BrowserNetworkGuard {
         active.controller.abort('operation_finished')
         active.unlinkCaller()
         operation.close()
-      }
+      },
+      downloadLease
     )
   }
 
@@ -367,20 +424,38 @@ export class BrowserNetworkGuard {
     }
   }
 
+  async finalizeRun(runId: string): Promise<void> {
+    await this.downloadBroker?.finalizeRun(runId)
+  }
+
+  async releaseCapability(activationId: string): Promise<void> {
+    await this.downloadBroker?.releaseCapability(activationId)
+  }
+
+  async releaseToolCall(input: { runId: string; toolCallId: string }): Promise<void> {
+    await this.downloadBroker?.releaseToolCall(input)
+  }
+
   async preflight(lease: BrowserNetworkOperationLease, url: string): Promise<void> {
     await lease.preflight(url)
   }
 
-  handleWindowOpen(guest: WebContents, url: string): void {
+  handleWindowOpen(guest: WebContents, url: string, createPopup?: () => Promise<void>): void {
     const record = this.guests.get(guest.id)
     if (!record || record.guest !== guest) return
     const view = this.operationFor(record)
     if (!view) {
+      if (createPopup) {
+        void this.authorizeManualRequest(url)
+          .then(createPopup, () => undefined)
+          .catch(() => undefined)
+        return
+      }
       this.navigateManualGuest(guest, url)
       return
     }
     if (this.accessPolicy === 'host_boundaries_only') {
-      this.navigateAutomatedGuest(guest, url, view)
+      this.navigateAutomatedGuest(guest, url, view, createPopup)
       return
     }
     const approvalAndNavigation = view.operation
@@ -393,7 +468,8 @@ export class BrowserNetworkGuard {
       .then(async () => {
         if (guest.isDestroyed()) return
         try {
-          await guest.loadURL(url)
+          if (createPopup) await createPopup()
+          else await guest.loadURL(url)
         } catch {
           view.operation.recordFailure({
             code: 'browser.risk_outcome_unknown',
@@ -432,6 +508,7 @@ export class BrowserNetworkGuard {
       this.installed = false
     }
     this.policy.shutdown()
+    await this.downloadBroker?.shutdown()
     await this.coordinator.shutdown()
   }
 
@@ -449,7 +526,9 @@ export class BrowserNetworkGuard {
     }
     return {
       activeOperations,
-      downloads: this.downloads.size + this.passiveDownloads.size,
+      downloads:
+        this.downloadBroker?.snapshot().downloads ??
+        this.downloads.size + this.passiveDownloads.size,
       guests: this.guests.size,
       redirectMarkers: this.redirectTargets.size,
       stickyContexts
@@ -546,12 +625,18 @@ export class BrowserNetworkGuard {
     )
   }
 
-  private navigateAutomatedGuest(guest: WebContents, url: string, view: OperationView): void {
+  private navigateAutomatedGuest(
+    guest: WebContents,
+    url: string,
+    view: OperationView,
+    createPopup?: () => Promise<void>
+  ): void {
     const navigation = this.authorizeHostBoundary(url, view)
       .then(async () => {
         if (guest.isDestroyed()) return
         try {
-          await guest.loadURL(url)
+          if (createPopup) await createPopup()
+          else await guest.loadURL(url)
         } catch {
           view.operation.recordFailure({
             code: 'browser.risk_outcome_unknown',
@@ -621,6 +706,10 @@ export class BrowserNetworkGuard {
     record.active?.unlinkCaller()
     record.active?.operation.close()
     record.active = undefined
+    this.downloadBroker?.unregisterGuest(record.guest, record.generation)
+    void this.downloadBroker
+      ?.releaseSurface({ surfaceId: record.surfaceId, generation: record.generation })
+      .catch(() => undefined)
     this.cancelDownloadsFor(record, true)
     this.cancelPassiveDownloadsFor(record)
     this.guests.delete(record.guest.id)

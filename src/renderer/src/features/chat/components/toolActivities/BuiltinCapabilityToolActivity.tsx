@@ -1,10 +1,16 @@
-import type { AgentToolIdentity, AgentToolResult } from '@mycopilot/protocol'
+import {
+  parseBrowserArtifactToolProjection,
+  type AgentToolIdentity,
+  type AgentToolResult,
+  type BrowserArtifactReference
+} from '@mycopilot/protocol'
 import { Ban, CheckCircle2, CircleAlert, LoaderCircle, XCircle } from 'lucide-react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { toSafeMcpDisplayText } from '../../../mcp/mcpSafeDisplay'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
+import { BrowserArtifactCards } from './BrowserArtifactCards'
 
 type BuiltinCapabilityIdentity = Extract<AgentToolIdentity, { type: 'builtin_capability' }>
 type BrowserToolStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'outcomeUnknown'
@@ -361,6 +367,14 @@ function safeProjectedStatus(result: AgentToolResult | undefined): string | null
   return typeof record.status === 'string' ? record.status : null
 }
 
+function safeProjectedArtifacts(result: AgentToolResult | undefined): BrowserArtifactReference[] {
+  try {
+    return parseBrowserArtifactToolProjection(result?.result).artifacts ?? []
+  } catch {
+    return []
+  }
+}
+
 function getStatus(
   result: AgentToolResult | undefined,
   settledStatus: SettledToolStatus | undefined,
@@ -392,6 +406,7 @@ export function BuiltinCapabilityToolActivity({
 }: BuiltinCapabilityToolActivityProps) {
   const { t } = useFrontendConfig()
   const reason = displayReason ? toSafeMcpDisplayText(displayReason, 512).trim() : ''
+  const artifacts = safeProjectedArtifacts(result)
   const status = getStatus(result, settledStatus, cancelled)
   const Icon =
     status === 'outcomeUnknown'
@@ -407,7 +422,7 @@ export function BuiltinCapabilityToolActivity({
   return (
     <AgentActivityDisclosure
       className="builtin-capability-tool-activity"
-      hasDetails={Boolean(reason)}
+      hasDetails={Boolean(reason) || artifacts.length > 0}
       icon={Icon}
       isPending={status === 'running'}
       label={t(getStatusKey(identity.toolId, status))}
@@ -418,6 +433,7 @@ export function BuiltinCapabilityToolActivity({
           <p>{reason}</p>
         </div>
       ) : null}
+      <BrowserArtifactCards artifacts={artifacts} />
     </AgentActivityDisclosure>
   )
 }

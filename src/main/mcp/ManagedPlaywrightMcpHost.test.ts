@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { access, stat } from 'node:fs/promises'
-import { isAbsolute } from 'node:path'
+import { access, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
+import type { BrowserContext } from 'playwright'
 import type { BrowserNetworkOperationLease } from '../browser/BrowserNetworkGuard'
+import { BrowserArtifactBroker } from '../browser/BrowserArtifactBroker'
 import type {
   BrowserRiskAuthorizationContext,
   BrowserRiskFailure
@@ -12,6 +15,7 @@ import {
   ManagedPlaywrightMcpHostError,
   type ManagedPlaywrightConnectionFactory,
   type ManagedPlaywrightMcpHostOptions,
+  type ManagedPlaywrightSurfaceGroupAdapter,
   type ManagedMcpClient
 } from './ManagedPlaywrightMcpHost'
 import {
@@ -63,7 +67,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(tools.map((tool) => tool.name)).toEqual(
       MANAGED_PLAYWRIGHT_MANIFEST.tools.map((tool) => tool.rawName)
     )
-    expect(tools).toHaveLength(31)
+    expect(tools).toHaveLength(40)
     expect(tools.map((tool) => tool.name)).not.toContain('browser_run_code_unsafe')
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
@@ -75,11 +79,11 @@ describe('ManagedPlaywrightMcpHost', () => {
         'browser_generate_locator'
       ])
     )
-    expect(tools.find((tool) => tool.name === 'browser_snapshot')?.inputSchema).not.toHaveProperty(
+    expect(tools.find((tool) => tool.name === 'browser_snapshot')?.inputSchema).toHaveProperty(
       'properties.filename'
     )
     expect(tools.find((tool) => tool.name === 'browser_tabs')?.inputSchema).toMatchObject({
-      properties: { action: { enum: ['list'] } },
+      properties: { action: { enum: ['list', 'new', 'close', 'select'] } },
       required: ['action', 'call_reason']
     })
     expect(tools.find((tool) => tool.name === 'browser_snapshot')?.annotations).toEqual({
@@ -154,12 +158,12 @@ describe('ManagedPlaywrightMcpHost', () => {
     ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
     await expect(
       host.callTool('browser_snapshot', {
-        filename: '/tmp/forbidden.md',
+        filename: 42,
         call_reason: 'Write a file.'
       })
     ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
     await expect(
-      host.callTool('browser_tabs', { action: 'new', call_reason: 'Open another tab.' })
+      host.callTool('browser_tabs', { action: 'unknown', call_reason: 'Open another tab.' })
     ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
     await expect(
       host.callTool('browser_run_code_unsafe', { call_reason: 'Run arbitrary code.' })
@@ -239,6 +243,14 @@ describe('ManagedPlaywrightMcpHost', () => {
             ].join('\n')
           }
         ],
+        // Upstream diagnostics are not a reviewed DTO. Even a malformed/non-object value is
+        // discarded before the safe bounded text projection is returned.
+        structuredContent: [
+          {
+            headers: { authorization: 'structured-bearer-canary' },
+            url: 'https://example.test/?token=structured-query-canary'
+          }
+        ],
         isError: false
       }))
     })
@@ -263,7 +275,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       isError: false
     })
     expect(JSON.stringify(result)).not.toMatch(
-      /alice|password|query-canary|fragment-canary|bearer-header-canary|cookie-header-canary/
+      /alice|password|query-canary|fragment-canary|bearer-header-canary|cookie-header-canary|structured-bearer-canary|structured-query-canary/
     )
   })
 
@@ -331,6 +343,275 @@ describe('ManagedPlaywrightMcpHost', () => {
 
     expect(closeSurface).toHaveBeenCalledOnce()
     expect(callTool).not.toHaveBeenCalled()
+  })
+
+  it('implements tabs and resize through the SurfaceGroup without exposing target identity', async () => {
+    let surfaces = [surfaceView(0, true)]
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ensureActiveSurface: vi.fn(async () => surfaces[0]),
+      listSurfaces: () => surfaces,
+      createSurface: vi.fn(async () => {
+        surfaces = surfaces.map((surface) => ({ ...surface, isActive: false }))
+        const created = surfaceView(surfaces.length, true)
+        surfaces.push(created)
+        return created
+      }),
+      selectSurface: vi.fn(async ({ index }) => {
+        surfaces = surfaces.map((surface) => ({ ...surface, isActive: surface.index === index }))
+        return surfaces[index]
+      }),
+      closeSurfaceByIndex: vi.fn(async (index) => {
+        const selected = index ?? surfaces.find((surface) => surface.isActive)?.index ?? 0
+        surfaces = surfaces
+          .filter((surface) => surface.index !== selected)
+          .map((surface, nextIndex) => ({ ...surface, index: nextIndex }))
+        if (surfaces.length > 0 && !surfaces.some((surface) => surface.isActive)) {
+          surfaces[0] = { ...surfaces[0], isActive: true }
+        }
+      }),
+      resizeActiveSurface: vi.fn(async ({ width, height }) => ({ width, height }))
+    }
+    const host = fakeHost({ surfaceGroup })
+
+    const listed = await host.callTool('browser_tabs', {
+      action: 'list',
+      call_reason: 'List tabs.'
+    })
+    expect(surfaceGroup.ensureActiveSurface).toHaveBeenCalledOnce()
+    expect(JSON.stringify(listed)).not.toMatch(/surface-0|generation|webContents|target/i)
+
+    await expect(
+      host.callTool('browser_tabs', { action: 'new', call_reason: 'Open a new tab.' })
+    ).resolves.toMatchObject({ structuredContent: { tabs: expect.any(Array) }, isError: false })
+    await expect(
+      host.callTool('browser_tabs', { action: 'select', index: 0, call_reason: 'Select a tab.' })
+    ).resolves.toMatchObject({ isError: false })
+    await expect(
+      host.callTool('browser_tabs', { action: 'close', index: 1, call_reason: 'Close a tab.' })
+    ).resolves.toMatchObject({ isError: false })
+    await expect(
+      host.callTool('browser_resize', { width: 960, height: 640, call_reason: 'Resize.' })
+    ).resolves.toMatchObject({ structuredContent: { width: 960, height: 640 } })
+    expect(surfaceGroup.resizeActiveSurface).toHaveBeenCalledWith({ width: 960, height: 640 })
+  })
+
+  it('isolates persistent network state to one run and cleans it at run completion', async () => {
+    const setOffline = vi.fn(async () => undefined)
+    const route = vi.fn(async () => undefined)
+    const unroute = vi.fn(async () => undefined)
+    const context = fakeBrowserContext({ route, setOffline, unroute })
+    const callTool = vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
+    const host = fakeHost({ callTool, getBrowserContext: async () => context })
+    const runA = { ...RISK_CONTEXT, runId: 'run-a', callId: 'call-a' }
+    const runB = { ...RISK_CONTEXT, runId: 'run-b', callId: 'call-b' }
+
+    await host.callTool(
+      'browser_network_state_set',
+      { state: 'offline', call_reason: 'Test offline state.' },
+      { authorizationContext: runA }
+    )
+    expect(setOffline).toHaveBeenLastCalledWith(true)
+    await expect(
+      host.callTool(
+        'browser_network_state_set',
+        { state: 'online', call_reason: 'Restore another run.' },
+        { authorizationContext: runB }
+      )
+    ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.busy' })
+    expect(setOffline).not.toHaveBeenCalledWith(false)
+
+    await host.releaseRun('run-a')
+    expect(setOffline).toHaveBeenLastCalledWith(false)
+    await expect(
+      host.callTool(
+        'browser_navigate',
+        { url: 'http://127.0.0.1/fixture', call_reason: 'Navigate after cleanup.' },
+        { authorizationContext: runB }
+      )
+    ).resolves.toMatchObject({ isError: false })
+  })
+
+  it('publishes file tools only as path-free Artifact references and hides upstream paths', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-artifact-test-'))
+    const broker = new BrowserArtifactBroker({
+      rootDirectory: join(parent, 'browser-automation-artifacts')
+    })
+    const context = fakeBrowserContext()
+    const callTool = vi.fn(async ({ arguments: args }: { arguments: Record<string, unknown> }) => {
+      const meta = args._meta as { cwd: string }
+      await writeFile(join(meta.cwd, String(args.filename)), Uint8Array.from([1, 2, 3]))
+      return {
+        content: [{ type: 'text', text: `saved to ${meta.cwd}/${String(args.filename)}` }],
+        isError: false
+      }
+    })
+    const host = fakeHost({
+      artifactBroker: broker,
+      callTool: callTool as ManagedMcpClient['callTool'],
+      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
+      getBrowserContext: async () => context
+    })
+    try {
+      await expect(
+        host.callTool(
+          'browser_take_screenshot',
+          { scale: 'css', filename: '../../escape.png', call_reason: 'Take a screenshot.' },
+          { authorizationContext: RISK_CONTEXT }
+        )
+      ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
+      expect(callTool).not.toHaveBeenCalled()
+
+      const result = await host.callTool(
+        'browser_take_screenshot',
+        { scale: 'css', filename: 'page.png', call_reason: 'Take a screenshot.' },
+        { authorizationContext: { ...RISK_CONTEXT, callId: 'call-screenshot-success' } }
+      )
+      expect(result).toMatchObject({
+        structuredContent: {
+          status: 'completed',
+          artifacts: [
+            {
+              schemaVersion: 1,
+              kind: 'image',
+              displayName: 'page.png',
+              mimeType: 'image/png',
+              sizeBytes: 3,
+              owner: 'browser_automation'
+            }
+          ]
+        },
+        isError: false
+      })
+      expect(JSON.stringify(result)).not.toContain(parent)
+      expect(callTool).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          arguments: expect.objectContaining({
+            filename: expect.not.stringContaining('page.png/'),
+            _meta: { cwd: expect.stringContaining('browser-automation-artifacts') }
+          })
+        }),
+        undefined,
+        expect.any(Object)
+      )
+    } finally {
+      await host.close()
+      await broker.shutdown()
+      await rm(parent, { force: true, recursive: true })
+    }
+  })
+
+  it('renders PDF from the exact managed Electron guest and publishes only an Artifact reference', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-pdf-test-'))
+    const broker = new BrowserArtifactBroker({
+      rootDirectory: join(parent, 'browser-automation-artifacts')
+    })
+    const printActiveSurfaceToPdf = vi.fn(async () =>
+      Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
+    )
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ensureActiveSurface: vi.fn(async () => surfaceView(0, true)),
+      listSurfaces: () => [surfaceView(0, true)],
+      createSurface: vi.fn(async () => surfaceView(0, true)),
+      selectSurface: vi.fn(async () => surfaceView(0, true)),
+      closeSurfaceByIndex: vi.fn(async () => undefined),
+      printActiveSurfaceToPdf
+    }
+    const upstreamCall = vi.fn(async () => ({ content: [], isError: false }))
+    const host = fakeHost({
+      artifactBroker: broker,
+      callTool: upstreamCall,
+      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
+      getBrowserContext: async () => fakeBrowserContext(),
+      surfaceGroup
+    })
+    try {
+      const result = await host.callTool(
+        'browser_pdf_save',
+        { filename: 'fixture.pdf', call_reason: 'Save the fixture as a PDF.' },
+        { authorizationContext: { ...RISK_CONTEXT, callId: 'call-pdf-success' } }
+      )
+      expect(printActiveSurfaceToPdf).toHaveBeenCalledOnce()
+      expect(upstreamCall).not.toHaveBeenCalled()
+      expect(result).toMatchObject({
+        structuredContent: {
+          status: 'completed',
+          artifacts: [
+            {
+              schemaVersion: 1,
+              kind: 'pdf',
+              displayName: 'fixture.pdf',
+              mimeType: 'application/pdf',
+              owner: 'browser_automation'
+            }
+          ]
+        },
+        isError: false
+      })
+      expect(JSON.stringify(result)).not.toContain(parent)
+    } finally {
+      await host.close()
+      await broker.shutdown()
+      await rm(parent, { force: true, recursive: true })
+    }
+  })
+
+  it('exports console and network diagnostics only after Host redaction', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-diagnostic-test-'))
+    const broker = new BrowserArtifactBroker({
+      rootDirectory: join(parent, 'browser-automation-artifacts')
+    })
+    const callTool = vi.fn(
+      async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => ({
+        content: [
+          {
+            type: 'text',
+            text:
+              name === 'browser_network_requests'
+                ? 'GET https://alice:password@example.test/api?token=query-canary Authorization: bearer-canary'
+                : 'token=console-canary Set-Cookie: cookie-canary'
+          }
+        ],
+        structuredContent: [{ rawSecret: 'structured-canary' }],
+        isError: false,
+        observedArguments: args
+      })
+    )
+    const host = fakeHost({
+      artifactBroker: broker,
+      callTool: callTool as ManagedMcpClient['callTool'],
+      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
+      getBrowserContext: async () => fakeBrowserContext()
+    })
+    try {
+      for (const [name, filename, kind, callId] of [
+        ['browser_network_requests', 'requests.log', 'network', 'call-network-export'],
+        ['browser_console_messages', 'console.log', 'console', 'call-console-export']
+      ] as const) {
+        const result = await host.callTool(
+          name,
+          name === 'browser_network_requests'
+            ? { static: false, filename, call_reason: 'Export safe diagnostics.' }
+            : { level: 'warning', filename, call_reason: 'Export safe diagnostics.' },
+          { authorizationContext: { ...RISK_CONTEXT, callId } }
+        )
+        const artifact = (result.structuredContent as { artifacts: unknown[] }).artifacts[0]
+        expect(artifact).toEqual(expect.objectContaining({ kind, displayName: filename }))
+        const preview = await broker.readPreview(artifact)
+        const text = new TextDecoder().decode(preview.bytes)
+        expect(text).not.toMatch(
+          /alice|password|query-canary|bearer-canary|console-canary|cookie-canary|structured-canary/
+        )
+      }
+      for (const invocation of callTool.mock.calls) {
+        const parameters = invocation[0] as { arguments: Record<string, unknown> }
+        expect(parameters.arguments).not.toHaveProperty('filename')
+        expect(parameters.arguments).not.toHaveProperty('_meta')
+      }
+    } finally {
+      await host.close()
+      await broker.shutdown()
+      await rm(parent, { force: true, recursive: true })
+    }
   })
 
   it('preflights browser_navigate before upstream dispatch', async () => {
@@ -816,13 +1097,46 @@ describe('ManagedPlaywrightMcpHost', () => {
   })
 })
 
+function surfaceView(index: number, isActive: boolean) {
+  return {
+    surfaceId: `surface-${index}`,
+    index,
+    title: `Tab ${index}`,
+    url: `http://127.0.0.1/tab-${index}`,
+    isActive,
+    generation: index + 1
+  }
+}
+
+function fakeBrowserContext(overrides: {
+  route?: (...args: unknown[]) => Promise<void>
+  setOffline?: (offline: boolean) => Promise<void>
+  unroute?: (...args: unknown[]) => Promise<void>
+} = {}): BrowserContext {
+  return {
+    route: overrides.route ?? vi.fn(async () => undefined),
+    unroute: overrides.unroute ?? vi.fn(async () => undefined),
+    setOffline: overrides.setOffline ?? vi.fn(async () => undefined),
+    once: vi.fn(),
+    off: vi.fn(),
+    tracing: {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined)
+    }
+  } as unknown as BrowserContext
+}
+
 function fakeHost(overrides: {
+  artifactBroker?: BrowserArtifactBroker
   beginNetworkOperation?: ManagedPlaywrightMcpHostOptions['beginNetworkOperation']
   callTool?: ManagedMcpClient['callTool']
   closeSurface?: () => Promise<void>
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
+  getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
+  getBrowserContext?: () => Promise<BrowserContext>
   listTools?: ManagedMcpClient['listTools']
+  surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
 }): ManagedPlaywrightMcpHost {
   const upstreamTools = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
     name: tool.name,
@@ -831,10 +1145,15 @@ function fakeHost(overrides: {
     annotations: structuredClone(tool.annotations ?? {})
   }))
   const host = new ManagedPlaywrightMcpHost({
+    artifactBroker: overrides.artifactBroker,
     beginNetworkOperation: overrides.beginNetworkOperation,
-    getBrowserContext: async () => {
-      throw new Error('not needed by fake MCP client')
-    },
+    getActiveSurfaceIdentity: overrides.getActiveSurfaceIdentity,
+    getBrowserContext:
+      overrides.getBrowserContext ??
+      (async () => {
+        throw new Error('not needed by fake MCP client')
+      }),
+    surfaceGroup: overrides.surfaceGroup,
     closeSurface: overrides.closeSurface ?? vi.fn(async () => undefined),
     detachAutomation: overrides.detachAutomation ?? vi.fn(async () => undefined),
     createOfficialConnection:
@@ -878,6 +1197,7 @@ function riskLease(options: {
       (typeof options.failure === 'function' ? options.failure() : options.failure) ?? null,
     markDispatched,
     settle,
+    artifacts: () => [],
     finish
   } as unknown as BrowserNetworkOperationLease
   return { finish, lease, markDispatched, settle }

@@ -220,6 +220,7 @@ pub enum ManagedPlaywrightBridgeErrorCode {
     Closed,
     Busy,
     SurfaceUnavailable,
+    SurfaceCapacityExceeded,
     TargetClosed,
     ToolNotReviewed,
     InvalidArguments,
@@ -373,5 +374,12 @@ mod tests {
                 dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
             }
         );
+
+        let capacity = serde_json::to_value(ManagedPlaywrightCompletionOutcome::Error {
+            code: ManagedPlaywrightBridgeErrorCode::SurfaceCapacityExceeded,
+            dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+        })
+        .unwrap();
+        assert_eq!(capacity["code"], "surface_capacity_exceeded");
     }
 }

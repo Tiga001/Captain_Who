@@ -470,16 +470,12 @@ fn validate_upstream_tool(tool: &LockedUpstreamTool) -> AgentResult<()> {
 fn validate_classification_counts(
     counts: &BTreeMap<PlaywrightToolHandlingMode, usize>,
 ) -> AgentResult<()> {
-    let valid = counts.get(&PlaywrightToolHandlingMode::PassThrough) == Some(&26)
-        && counts.get(&PlaywrightToolHandlingMode::HostAdapted) == Some(&9)
+    let valid = counts.get(&PlaywrightToolHandlingMode::PassThrough) == Some(&25)
+        && counts.get(&PlaywrightToolHandlingMode::HostAdapted) == Some(&8)
         && counts.get(&PlaywrightToolHandlingMode::ApprovalRequired) == Some(&21)
-        && counts.get(&PlaywrightToolHandlingMode::ArtifactManaged) == Some(&12)
+        && counts.get(&PlaywrightToolHandlingMode::ArtifactManaged) == Some(&7)
         && counts.get(&PlaywrightToolHandlingMode::Sandboxed) == Some(&1)
-        && counts
-            .get(&PlaywrightToolHandlingMode::Unsupported)
-            .copied()
-            .unwrap_or_default()
-            == 0
+        && counts.get(&PlaywrightToolHandlingMode::Unsupported) == Some(&7)
         && counts.values().sum::<usize>() == FIXED_UPSTREAM_TOOL_COUNT;
     if !valid {
         return Err(AgentError::new(
@@ -761,17 +757,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_catalog_classifies_all_69_tools_and_exposes_reviewed_31() {
+    fn fixed_catalog_classifies_all_69_tools_and_exposes_reviewed_40() {
         let contract = load_playwright_browser_contract().unwrap();
         assert_eq!(contract.tools.len(), 69);
-        assert_eq!(contract.manifest.tools.len(), 31);
+        assert_eq!(contract.manifest.tools.len(), 40);
         assert_eq!(
             contract.upstream_catalog_digest,
             "sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf"
         );
         assert_eq!(
             contract.policy_digest,
-            "sha256:5fede120ec5887791faae7c543b0df1c07883eb8350e71af522a6f6d05facc03"
+            "sha256:23cf8923a8d0aecceeea4fdf45113629f7cb6af186c3b704d26505239d3878a5"
         );
 
         let counts = contract.tools.values().fold(
@@ -908,7 +904,11 @@ mod tests {
             "browser_snapshot",
         ] {
             let tool = contract.tool(tool_name).unwrap();
-            assert!(tool.host_input_schema["properties"]["filename"].is_null());
+            assert!(tool.host_input_schema["properties"]["filename"].is_object());
+            assert_eq!(
+                tool.host_input_schema["properties"]["filename"]["type"],
+                "string"
+            );
         }
         let console = contract.tool("browser_console_messages").unwrap();
         assert!(console.host_input_schema["properties"]["all"].is_null());
@@ -923,7 +923,7 @@ mod tests {
         let tabs = contract.tool("browser_tabs").unwrap();
         assert_eq!(
             tabs.host_input_schema["properties"]["action"]["enum"],
-            serde_json::json!(["list"])
+            serde_json::json!(["list", "new", "close", "select"])
         );
         assert!(tabs.host_input_schema["properties"]["index"].is_object());
         assert!(tabs.host_input_schema["properties"]["url"].is_object());

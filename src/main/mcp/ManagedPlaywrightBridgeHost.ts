@@ -1,5 +1,6 @@
 import {
   MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+  type AgentEvent,
   type ManagedPlaywrightBridgeErrorCode,
   type ManagedPlaywrightCancelNotification,
   type ManagedPlaywrightCommandNotification,
@@ -27,6 +28,7 @@ export interface ManagedPlaywrightBridgeCore {
   onManagedPlaywrightCommand(
     handler: (input: ManagedPlaywrightCommandNotification) => void
   ): () => void
+  onAgentEvent?(handler: (event: AgentEvent) => void): () => void
 }
 
 export interface ManagedPlaywrightBridgeHostOptions {
@@ -54,6 +56,7 @@ export class ManagedPlaywrightBridgeHost {
   private readonly now: () => number
   private readonly unsubscribeCancel: () => void
   private readonly unsubscribeCommand: () => void
+  private readonly unsubscribeAgentEvent: () => void
 
   private host?: ManagedPlaywrightMcpHost
   private closed = false
@@ -68,6 +71,10 @@ export class ManagedPlaywrightBridgeHost {
     this.unsubscribeCancel = this.core.onManagedPlaywrightCancel((input) =>
       this.cancelCommand(input)
     )
+    this.unsubscribeAgentEvent =
+      this.core.onAgentEvent?.((event) => {
+        if (event.type === 'done') void this.host?.releaseRun(event.runId)
+      }) ?? (() => undefined)
   }
 
   async close(): Promise<void> {
@@ -75,6 +82,7 @@ export class ManagedPlaywrightBridgeHost {
     this.closed = true
     this.unsubscribeCommand()
     this.unsubscribeCancel()
+    this.unsubscribeAgentEvent()
     for (const active of this.active.values()) {
       clearTimeout(active.timer)
       active.controller.abort('shutdown')
@@ -266,6 +274,7 @@ function mapError(
     'mcp.builtin_playwright.output_too_large': 'output_too_large',
     'mcp.builtin_playwright.protocol_error': 'protocol_error',
     'browser.surface_unavailable': 'surface_unavailable',
+    'browser.surface_capacity_exceeded': 'surface_capacity_exceeded',
     'browser.target_closed': 'target_closed',
     'browser.risk_outcome_unknown': 'outcome_unknown'
   }

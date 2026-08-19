@@ -64,6 +64,11 @@ export interface RightSidebarPageUpdate {
 
 export type RightSidebarModulePageState =
   | {
+      kind: 'browser-surface'
+      surfaceId: string
+      viewport?: { height: number; width: number }
+    }
+  | {
       kind: 'workspace-file'
       path: string
       preview?: {

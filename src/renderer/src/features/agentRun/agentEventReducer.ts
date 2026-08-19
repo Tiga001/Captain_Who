@@ -1,10 +1,11 @@
-import type {
-  AgentActionExecutionOutput,
-  AgentApprovalStatus,
-  AgentChatOutput,
-  AgentEvent,
-  AgentProposedAction,
-  AgentToolResult
+import {
+  parseBrowserArtifactToolProjection,
+  type AgentActionExecutionOutput,
+  type AgentApprovalStatus,
+  type AgentChatOutput,
+  type AgentEvent,
+  type AgentProposedAction,
+  type AgentToolResult
 } from '@mycopilot/protocol'
 import type {
   ChatAgentInterruptionView,
@@ -113,42 +114,19 @@ const SAFE_MODEL_REQUEST_INTERRUPTION_REASONS = new Set<ChatAgentInterruptionVie
   'request_failed'
 ])
 
-const SAFE_BUILTIN_CAPABILITY_RESULT_STATUSES = new Set([
-  'completed',
-  'failed',
-  'outcome_unknown'
-] as const)
-
 function projectBuiltinCapabilityToolResult(result: AgentToolResult): AgentToolResult {
-  const value = result.result
-  const record =
-    typeof value === 'object' && value !== null && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null
-  const status = record?.status
-  const hasSafeProjection =
-    record?.schemaVersion === 1 &&
-    record.type === 'builtin_capability_tool' &&
-    record.contentOmitted === true &&
-    typeof status === 'string' &&
-    SAFE_BUILTIN_CAPABILITY_RESULT_STATUSES.has(
-      status as 'completed' | 'failed' | 'outcome_unknown'
-    )
+  let safeProjection
+  try {
+    safeProjection = parseBrowserArtifactToolProjection(result.result)
+  } catch {
+    safeProjection = undefined
+  }
 
   return {
     callId: result.callId,
     tool: result.tool,
     ok: result.ok,
-    ...(hasSafeProjection
-      ? {
-          result: {
-            schemaVersion: 1,
-            type: 'builtin_capability_tool',
-            status,
-            contentOmitted: true
-          }
-        }
-      : {})
+    ...(safeProjection ? { result: safeProjection } : {})
   }
 }
 

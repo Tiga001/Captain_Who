@@ -2,6 +2,7 @@ import { lazy, memo, Suspense, useCallback } from 'react'
 import { Bot, FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
 import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
 import type { BrowserPageMetadata } from '../browser/browserTypes'
+import { browserSurfaceIdForPage } from '../browser/browserSurface'
 import { useRightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
 import type {
   RightSidebarModuleCreateContext,
@@ -144,6 +145,14 @@ function renderBrowserModule({
       onPageUpdate={onPageUpdate}
       onSurfaceFocus={onSurfaceFocus}
       pageId={page.id}
+      surfaceId={
+        page.moduleState?.kind === 'browser-surface'
+          ? page.moduleState.surfaceId
+          : browserSurfaceIdForPage(page.id)
+      }
+      viewport={
+        page.moduleState?.kind === 'browser-surface' ? page.moduleState.viewport : undefined
+      }
       t={t}
     />
   )
@@ -154,6 +163,8 @@ type BrowserModuleSurfaceProps = Pick<
   'activity' | 'onPageUpdate' | 'onSurfaceFocus' | 't'
 > & {
   pageId: string
+  surfaceId: string
+  viewport?: { height: number; width: number }
 }
 
 const BrowserModuleSurface = memo(function BrowserModuleSurface({
@@ -161,6 +172,8 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   onPageUpdate,
   onSurfaceFocus,
   pageId,
+  surfaceId,
+  viewport,
   t
 }: BrowserModuleSurfaceProps) {
   const { browserSurfaceRequest, onBrowserSurfaceReady } = useRightSidebarRuntimeContext()
@@ -182,12 +195,14 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
           browserSurfaceRequest?.pageId === pageId ? browserSurfaceRequest.requestId : undefined
         }
         isActive={activity === 'foreground'}
-        onAutomationSurfaceReady={(surfaceId, requestId) =>
-          onBrowserSurfaceReady?.(pageId, surfaceId, requestId)
+        onAutomationSurfaceReady={(surfaceId, requestId, appliedViewport) =>
+          onBrowserSurfaceReady?.(pageId, surfaceId, requestId, appliedViewport)
         }
         onPageMetadataChange={handlePageMetadataChange}
         onSurfaceFocus={onSurfaceFocus}
         pageId={pageId}
+        surfaceId={surfaceId}
+        viewport={viewport}
       />
     </Suspense>
   )

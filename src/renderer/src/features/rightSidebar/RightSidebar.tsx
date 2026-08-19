@@ -121,9 +121,9 @@ export const RightSidebar = memo(function RightSidebar({
     activePageId,
     availableModules,
     closePage,
-    ensureModulePage,
     moduleAvailability,
     openModule: openPlatformModule,
+    openModulePage,
     openRelatedPage,
     pages,
     updatePage
@@ -136,6 +136,7 @@ export const RightSidebar = memo(function RightSidebar({
     workspaceName,
     workspacePath
   })
+  const [agentBrowserSurfaceId, setAgentBrowserSurfaceId] = useState<string | null>(null)
 
   useEffect(() => {
     if (
@@ -146,40 +147,95 @@ export const RightSidebar = memo(function RightSidebar({
     }
     handledBrowserSurfaceRequestIdRef.current = browserSurfaceCommand.requestId
 
+    const surfaceForPage = (page: (typeof pages)[number]): string | null =>
+      page.moduleId === 'browser'
+        ? page.moduleState?.kind === 'browser-surface'
+          ? page.moduleState.surfaceId
+          : browserSurfaceIdForPage(page.id)
+        : null
+
     if (browserSurfaceCommand.kind === 'closeSurface') {
       const page = pages.find(
-        (candidate) =>
-          candidate.moduleId === 'browser' &&
-          browserSurfaceIdForPage(candidate.id) === browserSurfaceCommand.surfaceId
+        (candidate) => surfaceForPage(candidate) === browserSurfaceCommand.surfaceId
       )
       if (page) closePage(page.id)
+      setAgentBrowserSurfaceId((current) =>
+        current === browserSurfaceCommand.surfaceId ? null : current
+      )
       setBrowserSurfaceRequest((current) => (current?.pageId === page?.id ? null : current))
       return
     }
 
-    const pageId = ensureModulePage('browser')
+    const existing = pages.find(
+      (candidate) => surfaceForPage(candidate) === browserSurfaceCommand.surfaceId
+    )
+    if (browserSurfaceCommand.kind === 'resizeSurface' && existing) {
+      updatePage(existing.id, {
+        moduleState: {
+          kind: 'browser-surface',
+          surfaceId: browserSurfaceCommand.surfaceId,
+          viewport: {
+            height: browserSurfaceCommand.height,
+            width: browserSurfaceCommand.width
+          }
+        }
+      })
+    }
+    const pageId = existing
+      ? existing.id
+      : browserSurfaceCommand.kind === 'selectSurface'
+        ? null
+        : openModulePage(
+            'browser',
+            {
+              kind: 'browser-surface',
+              surfaceId: browserSurfaceCommand.surfaceId
+            },
+            browserSurfaceCommand.kind !== 'createSurface' || browserSurfaceCommand.activate
+          )
     if (!pageId) return
+    const shouldActivate =
+      browserSurfaceCommand.kind !== 'createSurface' || browserSurfaceCommand.activate
+    if (shouldActivate) {
+      activatePage(pageId)
+      setAgentBrowserSurfaceId(browserSurfaceCommand.surfaceId)
+    }
     submittedBrowserSurfaceRequestIdRef.current = null
     setBrowserSurfaceRequest({ pageId, requestId: browserSurfaceCommand.requestId })
-  }, [browserSurfaceCommand, closePage, ensureModulePage, pages])
+  }, [activatePage, browserSurfaceCommand, closePage, openModulePage, pages, updatePage])
 
   const handleBrowserSurfaceReady = useCallback(
-    (pageId: string, surfaceId: string, requestId: string): void => {
+    (
+      pageId: string,
+      surfaceId: string,
+      requestId: string,
+      viewport?: { height: number; width: number }
+    ): void => {
+      const page = pages.find((candidate) => candidate.id === pageId)
+      const expectedSurfaceId =
+        page?.moduleState?.kind === 'browser-surface'
+          ? page.moduleState.surfaceId
+          : browserSurfaceIdForPage(pageId)
       if (
         browserSurfaceRequest?.pageId !== pageId ||
         browserSurfaceRequest.requestId !== requestId ||
-        browserSurfaceIdForPage(pageId) !== surfaceId ||
+        expectedSurfaceId !== surfaceId ||
         submittedBrowserSurfaceRequestIdRef.current === requestId
       ) {
         return
       }
       submittedBrowserSurfaceRequestIdRef.current = requestId
       if (!onBrowserSurfaceReady) return
-      void onBrowserSurfaceReady({ schemaVersion: 1, requestId, surfaceId }).finally(() => {
+      void onBrowserSurfaceReady({
+        schemaVersion: 1,
+        requestId,
+        surfaceId,
+        ...(viewport ? { viewport } : {})
+      }).finally(() => {
         setBrowserSurfaceRequest((current) => (current?.requestId === requestId ? null : current))
       })
     },
-    [browserSurfaceRequest, onBrowserSurfaceReady]
+    [browserSurfaceRequest, onBrowserSurfaceReady, pages]
   )
   const hasOpenPages = pages.length > 0
   const fileTreeProjectIds = useMemo(
@@ -362,6 +418,14 @@ export const RightSidebar = memo(function RightSidebar({
                   <div
                     className="right-sidebar__tab-shell"
                     data-active={isSelected ? 'true' : undefined}
+                    data-automation-active={
+                      page.moduleId === 'browser' &&
+                      (page.moduleState?.kind === 'browser-surface'
+                        ? page.moduleState.surfaceId
+                        : browserSurfaceIdForPage(page.id)) === agentBrowserSurfaceId
+                        ? 'true'
+                        : undefined
+                    }
                     key={page.id}
                   >
                     <button

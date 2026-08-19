@@ -244,6 +244,10 @@
   background: var(--mc-color-surface-right-panel);
 }
 
+.browser-panel__content[data-fixed-viewport='true'] {
+  overflow: auto;
+}
+
 .browser-panel__empty {
   position: absolute;
   inset: 0;

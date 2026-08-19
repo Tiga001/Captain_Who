@@ -4,13 +4,13 @@
   "packageVersion": "0.0.79",
   "managedMcpId": "builtin.browser_automation.mcp",
   "capabilityId": "browser_automation",
-  "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v2",
+  "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v4",
   "upstreamCatalogDigest": "sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf",
   "tools": [
     {
       "rawName": "browser_annotate",
       "modelName": "browser_annotate",
-      "handlingMode": "host_adapted",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
@@ -18,10 +18,11 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
-      "reasonCode": "host_browser_surface_semantics",
+      "reasonCode": "upstream_external_dashboard_forbidden",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "not_model_visible",
+        "external_dashboard_process_forbidden"
       ]
     },
     {
@@ -55,7 +56,8 @@
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
       ]
     },
     {
@@ -67,7 +69,6 @@
       "hostOverlay": {
         "addCallReason": true,
         "removeProperties": [
-          "filename",
           "all"
         ],
         "propertyOverrides": {
@@ -78,17 +79,20 @@
             ],
             "default": "warning",
             "description": "Return only warning or error console messages; defaults to warning."
+          },
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed console Artifact; paths are ignored."
           }
         }
       },
-      "hostOverlayDigest": "sha256:8fb9e97ea2aa0fc8266ae9995ff9489836b56fa84065b83132a1acb5ca2dbd9e",
-      "hostInputSchemaDigest": "sha256:71d68de8c98c4e53e05305242944bb5f50744803b4643e129db35a78e1d2e834",
+      "hostOverlayDigest": "sha256:aa92578c35a642be2f288addb3018ccfaaa716b55a134fe3cedf398de6b80a82",
+      "hostInputSchemaDigest": "sha256:aa4087122695b196536301d0c716fca23c097b85474ed07fabfef9e1f6b4015a",
       "reasonCode": "host_artifact_lifecycle",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
         "no_arbitrary_output_path",
-        "filename_removed_until_artifact_broker"
+        "host_owned_output_only"
       ]
     },
     {
@@ -306,7 +310,7 @@
       "rawName": "browser_get_config",
       "modelName": "browser_get_config",
       "handlingMode": "host_adapted",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
         "addCallReason": true
@@ -316,7 +320,8 @@
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
       ]
     },
     {
@@ -639,25 +644,27 @@
       "upstreamSchemaDigest": "sha256:86d566ed7630b826e22f89987152935cd5963d5d31cf04e90c33f7918389646a",
       "hostOverlay": {
         "addCallReason": true,
-        "removeProperties": [
-          "filename"
-        ]
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed network-list Artifact; paths are ignored."
+          }
+        }
       },
-      "hostOverlayDigest": "sha256:2ab6e291a32fdd6366257774bcc3ea975b3d1a149b3f0abb0230bbad26fc2471",
-      "hostInputSchemaDigest": "sha256:2c7785c197b1c6be8eebf561adc2264dc1a838a6f681e303d3d742f575e37c5e",
+      "hostOverlayDigest": "sha256:a840f03650e687105c504a942b7bca7ac9a8b66431acb33a2799f8075e6de221",
+      "hostInputSchemaDigest": "sha256:cbf01b6eff4bf95935c77ec6143ff782c8b3134b04db8e7c0eaac6059c007364",
       "reasonCode": "host_artifact_lifecycle",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
         "no_arbitrary_output_path",
-        "filename_removed_until_artifact_broker"
+        "host_owned_output_only"
       ]
     },
     {
       "rawName": "browser_network_state_set",
       "modelName": "browser_network_state_set",
       "handlingMode": "host_adapted",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:37b3130631c34dd03a17b55931f80c8fefa3bcb73044f4af2b3a7a99f12b52b6",
       "hostOverlay": {
         "addCallReason": true
@@ -667,25 +674,32 @@
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
       ]
     },
     {
       "rawName": "browser_pdf_save",
       "modelName": "browser_pdf_save",
       "handlingMode": "artifact_managed",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:9ef6269f3a795e2f49cc03b9478671ee10e0cc2bd3a78fb2fc3d9fa48907d6e3",
       "hostOverlay": {
-        "addCallReason": true
+        "addCallReason": true,
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed PDF Artifact; paths are ignored."
+          }
+        }
       },
-      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
-      "hostInputSchemaDigest": "sha256:acade06dc09290c88437682a35e7a856c7f075fb7578ba1ce13f7988a9e3edda",
+      "hostOverlayDigest": "sha256:9143a7cc349609a500915141dc319c7d2a322d631bfaf57a4872dd0b7eca8d48",
+      "hostInputSchemaDigest": "sha256:9a10b2606be8a84e813887629e4bb7486227beec471f7122e53585f0b1d580d2",
       "reasonCode": "host_artifact_lifecycle",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
       ]
     },
     {
@@ -709,7 +723,7 @@
       "rawName": "browser_resize",
       "modelName": "browser_resize",
       "handlingMode": "host_adapted",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:4a80d1f511092cf5e94b689f81afd36ec42b0ac74a510f7220a7c9987af00b84",
       "hostOverlay": {
         "addCallReason": true
@@ -719,13 +733,14 @@
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped"
       ]
     },
     {
       "rawName": "browser_resume",
       "modelName": "browser_resume",
-      "handlingMode": "host_adapted",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:1752e516807d7ad0aa23b0fb247a38db166dc6336915e44fe657f04871f8fc25",
       "hostOverlay": {
@@ -733,33 +748,42 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:4fd944a8fe1931d5c6138eede447529877fdb57ab785c95da502d2f42357b41a",
-      "reasonCode": "host_browser_surface_semantics",
+      "reasonCode": "managed_guest_has_no_test_debugger_pause",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "not_model_visible",
+        "no_managed_pause_source"
       ]
     },
     {
       "rawName": "browser_route",
       "modelName": "browser_route",
       "handlingMode": "host_adapted",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:51f39167e639a0b6b559ec6a263e3a0aa97ffe7bb9beb0c5249ef6bc2be7f3c3",
       "hostOverlay": {
-        "addCallReason": true
+        "addCallReason": true,
+        "removeProperties": [
+          "body",
+          "contentType",
+          "headers",
+          "removeHeaders"
+        ]
       },
-      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
-      "hostInputSchemaDigest": "sha256:7778c2e32357073eeafe0cf4d179cc92e0a696cf6dfeab64f0e88b59b9979485",
+      "hostOverlayDigest": "sha256:7c0e7c3a3f08cc771c6f2c29de82e2a11d403568ba82dce0b25cfdd3a6f4079d",
+      "hostInputSchemaDigest": "sha256:b0d6b1f163f4576e9662b0d042da00f10a1777e0f4d43b44535731c04558c675",
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped",
+        "no_header_or_body_capture"
       ]
     },
     {
       "rawName": "browser_route_list",
       "modelName": "browser_route_list",
-      "handlingMode": "pass_through",
+      "handlingMode": "host_adapted",
       "exposed": true,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
@@ -767,10 +791,12 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
-      "reasonCode": "direct_managed_page_operation",
+      "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "managed_page_context_only"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped",
+        "no_header_or_body_capture"
       ]
     },
     {
@@ -924,25 +950,27 @@
       "upstreamSchemaDigest": "sha256:36ee5bbb5798a52e26015635e1f6015b8f4b62f44119d53ad2516837667fcd61",
       "hostOverlay": {
         "addCallReason": true,
-        "removeProperties": [
-          "filename"
-        ]
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed snapshot Artifact; paths are ignored."
+          }
+        }
       },
-      "hostOverlayDigest": "sha256:2ab6e291a32fdd6366257774bcc3ea975b3d1a149b3f0abb0230bbad26fc2471",
-      "hostInputSchemaDigest": "sha256:f198ed3151866d8fb169e5f36cb2ba05993e008370102525121642b3fcf036ae",
+      "hostOverlayDigest": "sha256:b88c092e3c7bd54086e6747a289d9d4ee93ffc6c2c3d930e923444ce7976535d",
+      "hostInputSchemaDigest": "sha256:1396504699b99aba27d69f1124056fdc0b1690e24405adf3dd34e4fd3ec2cd8b",
       "reasonCode": "host_artifact_lifecycle",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
         "no_arbitrary_output_path",
-        "filename_removed_until_artifact_broker"
+        "host_owned_output_only"
       ]
     },
     {
       "rawName": "browser_start_tracing",
       "modelName": "browser_start_tracing",
       "handlingMode": "artifact_managed",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
         "addCallReason": true
@@ -953,13 +981,14 @@
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
       ]
     },
     {
       "rawName": "browser_start_video",
       "modelName": "browser_start_video",
-      "handlingMode": "artifact_managed",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:4225dd42b296a31349b8fda248a62fe2e693aa51fd6f170a79ebeb45a041034c",
       "hostOverlay": {
@@ -967,18 +996,18 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:fce6cd04b6170f1ed566605cda48d3cfbb3c8f197f6d11a0c0d54b342b0fbf0b",
-      "reasonCode": "host_artifact_lifecycle",
+      "reasonCode": "production_ffmpeg_not_bundled",
       "constraints": [
         "requires_call_reason",
-        "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "not_model_visible",
+        "external_video_encoder_unavailable"
       ]
     },
     {
       "rawName": "browser_stop_tracing",
       "modelName": "browser_stop_tracing",
       "handlingMode": "artifact_managed",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
         "addCallReason": true
@@ -989,13 +1018,14 @@
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
       ]
     },
     {
       "rawName": "browser_stop_video",
       "modelName": "browser_stop_video",
-      "handlingMode": "artifact_managed",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
@@ -1003,11 +1033,11 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
-      "reasonCode": "host_artifact_lifecycle",
+      "reasonCode": "production_ffmpeg_not_bundled",
       "constraints": [
         "requires_call_reason",
-        "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "not_model_visible",
+        "external_video_encoder_unavailable"
       ]
     },
     {
@@ -1035,41 +1065,39 @@
       "exposed": true,
       "upstreamSchemaDigest": "sha256:268e0f3eca6295e0fef99d2ef85adfbd3d843c054087817fe96e02ccd8145711",
       "hostOverlay": {
-        "addCallReason": true,
-        "propertyOverrides": {
-          "action": {
-            "enum": [
-              "list"
-            ],
-            "description": "Only the reviewed list operation is supported"
-          }
-        }
+        "addCallReason": true
       },
-      "hostOverlayDigest": "sha256:01563ccc0bab8203bee0378167cb6dc5b14c9979998fc9ba937898f006fba10b",
-      "hostInputSchemaDigest": "sha256:b02d9f67e7d17e74ee4ffef3ab90dc4798770b18482ce441a5479cb53dbf2ce2",
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:2c2a85334e59617732c2a6dafb420af14362a8fcf6404f72906692d48170fbfd",
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
         "host_lifecycle_adapter_required",
-        "list_only_until_multi_target_broker"
+        "task_surface_group_scoped"
       ]
     },
     {
       "rawName": "browser_take_screenshot",
       "modelName": "browser_take_screenshot",
       "handlingMode": "artifact_managed",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:8862e5da1b5030fc1a927c9ead00f2690872f24f282bc0d4cc3dbf017e041b34",
       "hostOverlay": {
-        "addCallReason": true
+        "addCallReason": true,
+        "propertyOverrides": {
+          "filename": {
+            "description": "Optional safe display-name suggestion for a managed image Artifact; paths are ignored."
+          }
+        }
       },
-      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
-      "hostInputSchemaDigest": "sha256:d0ca1955c16ad535e47d3fa9ee2cd628683a225b72f633eec56d4170e02e4dbb",
+      "hostOverlayDigest": "sha256:28f11372f85b2966b3622ddd611e905009852027231ede45f0b9ec5566ba7fdb",
+      "hostInputSchemaDigest": "sha256:b47799f66fd41613608d90592e36fb8ebb8ddf334e7a0573b6af508ec9e8cc36",
       "reasonCode": "host_artifact_lifecycle",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "no_arbitrary_output_path",
+        "host_owned_output_only"
       ]
     },
     {
@@ -1093,7 +1121,7 @@
       "rawName": "browser_unroute",
       "modelName": "browser_unroute",
       "handlingMode": "host_adapted",
-      "exposed": false,
+      "exposed": true,
       "upstreamSchemaDigest": "sha256:df78d9c8d3a3244dc2ecadbcfa0d18be70611b813db6392cc77f5d5cef257d22",
       "hostOverlay": {
         "addCallReason": true
@@ -1103,7 +1131,9 @@
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
-        "host_lifecycle_adapter_required"
+        "host_lifecycle_adapter_required",
+        "task_surface_group_scoped",
+        "no_header_or_body_capture"
       ]
     },
     {
@@ -1177,7 +1207,7 @@
     {
       "rawName": "browser_video_chapter",
       "modelName": "browser_video_chapter",
-      "handlingMode": "artifact_managed",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:d9cedd643d08f5521b7106ef63865f18863fbd033854155cf14068fd68e415a3",
       "hostOverlay": {
@@ -1185,17 +1215,17 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:6583b23ccc61ad8b6f5c52819da97968134b62ddae3cd18f73da81d417b3e596",
-      "reasonCode": "host_artifact_lifecycle",
+      "reasonCode": "managed_video_recording_unavailable",
       "constraints": [
         "requires_call_reason",
-        "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "not_model_visible",
+        "managed_video_recording_unavailable"
       ]
     },
     {
       "rawName": "browser_video_hide_actions",
       "modelName": "browser_video_hide_actions",
-      "handlingMode": "artifact_managed",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
       "hostOverlay": {
@@ -1203,17 +1233,17 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
-      "reasonCode": "host_artifact_lifecycle",
+      "reasonCode": "managed_video_recording_unavailable",
       "constraints": [
         "requires_call_reason",
-        "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "not_model_visible",
+        "managed_video_recording_unavailable"
       ]
     },
     {
       "rawName": "browser_video_show_actions",
       "modelName": "browser_video_show_actions",
-      "handlingMode": "artifact_managed",
+      "handlingMode": "unsupported",
       "exposed": false,
       "upstreamSchemaDigest": "sha256:a43cfdca9b032d31076ed1fa91679dbd0aefbb541864f59fd162f8fbca5dcb71",
       "hostOverlay": {
@@ -1221,11 +1251,11 @@
       },
       "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
       "hostInputSchemaDigest": "sha256:7596705525d22ab2ac365aa7f3339c6b9a4b22fad33134c501db012504ecf125",
-      "reasonCode": "host_artifact_lifecycle",
+      "reasonCode": "managed_video_recording_unavailable",
       "constraints": [
         "requires_call_reason",
-        "artifact_handle_only",
-        "no_arbitrary_output_path"
+        "not_model_visible",
+        "managed_video_recording_unavailable"
       ]
     },
     {
@@ -1246,6 +1276,6 @@
       ]
     }
   ],
-  "exposedToolCount": 31,
-  "policyDigest": "sha256:5fede120ec5887791faae7c543b0df1c07883eb8350e71af522a6f6d05facc03"
+  "exposedToolCount": 40,
+  "policyDigest": "sha256:23cf8923a8d0aecceeea4fdf45113629f7cb6af186c3b704d26505239d3878a5"
 }

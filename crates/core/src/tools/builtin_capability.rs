@@ -527,17 +527,27 @@ fn sanitize_builtin_capability_display_reason(value: &str) -> Option<String> {
 }
 
 fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentToolResult {
-    let outcome_unknown = result
-        .result
-        .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|details| {
-            details.get("errorCode").and_then(Value::as_str) == Some("mcp.tool_outcome_unknown")
-                || details.get("outcome").and_then(Value::as_str) == Some("outcome_unknown")
-                || details.get("code").and_then(Value::as_str) == Some("outcomeUnknown")
+    let details = result.result.as_ref().and_then(Value::as_object);
+    let outcome_unknown = details.is_some_and(|details| {
+        details.get("errorCode").and_then(Value::as_str) == Some("mcp.tool_outcome_unknown")
+            || details.get("outcome").and_then(Value::as_str) == Some("outcome_unknown")
+            || details.get("code").and_then(Value::as_str) == Some("outcomeUnknown")
+    });
+    let cancelled = !outcome_unknown
+        && details.is_some_and(|details| {
+            matches!(
+                details.get("errorCode").and_then(Value::as_str),
+                Some("mcp.tool_cancelled" | "mcp.tool_cancelled_before_dispatch")
+            ) || matches!(
+                details.get("code").and_then(Value::as_str),
+                Some("mcp.tool_cancelled" | "cancelled")
+            ) || details.get("outcome").and_then(Value::as_str) == Some("cancelled")
+                || details.get("status").and_then(Value::as_str) == Some("cancelled")
         });
     let status = if outcome_unknown {
         "outcome_unknown"
+    } else if cancelled {
+        "cancelled"
     } else if result.ok {
         "completed"
     } else {
@@ -552,6 +562,14 @@ fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentT
     if outcome_unknown {
         safe_result["errorCode"] = json!("mcp.tool_outcome_unknown");
         safe_result["retryable"] = json!(false);
+    }
+    if let Some(artifacts) = result
+        .result
+        .as_ref()
+        .and_then(|value| value.get("structuredContent"))
+        .and_then(crate::browser_artifacts::safe_browser_artifact_references)
+    {
+        safe_result["artifacts"] = Value::Array(artifacts);
     }
     AgentToolResult {
         exact_archive_file: None,
@@ -965,6 +983,58 @@ mod tests {
             assert_eq!(projected.result.unwrap()["contentOmitted"], true);
         }
 
+        let artifact = json!({
+            "schemaVersion": 1,
+            "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+            "kind": "image",
+            "displayName": "page.png",
+            "mimeType": "image/png",
+            "sizeBytes": 42,
+            "createdAt": 1_000,
+            "expiresAt": 2_000,
+            "lifecycle": "run",
+            "owner": "browser_automation",
+            "preview": "image"
+        });
+        let artifact_result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({
+                "type": "managed_mcp_tool_result",
+                "structuredContent": {
+                    "status": "completed",
+                    "artifacts": [artifact.clone()],
+                    "privateDiagnostic": secret,
+                },
+                "content": [{"type": "text", "text": secret}],
+            })),
+            error: None,
+        };
+        let projected = tool.checkpoint_projection(&artifact_result);
+        let safe = projected.result.unwrap();
+        assert_eq!(safe["artifacts"], json!([artifact.clone()]));
+        assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
+
+        let mut malformed = artifact;
+        malformed["managedPath"] = json!("/tmp/private-canary.png");
+        let malformed_result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({
+                "structuredContent": {"artifacts": [malformed]}
+            })),
+            error: None,
+        };
+        let safe = tool.event_projection(&malformed_result).result.unwrap();
+        assert!(safe.get("artifacts").is_none());
+        assert!(!serde_json::to_string(&safe)
+            .unwrap()
+            .contains("private-canary"));
+
         let outcome_unknown = AgentToolResult {
             exact_archive_file: None,
             call_id: call.id.clone(),
@@ -984,6 +1054,22 @@ mod tests {
         assert_eq!(safe["status"], "outcome_unknown");
         assert_eq!(safe["errorCode"], "mcp.tool_outcome_unknown");
         assert_eq!(safe["retryable"], false);
+        assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
+
+        let cancelled = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: false,
+            result: Some(json!({
+                "status": "cancelled",
+                "errorCode": "mcp.tool_cancelled",
+                "privateDiagnostic": secret,
+            })),
+            error: Some(secret.to_string()),
+        };
+        let safe = tool.checkpoint_projection(&cancelled).result.unwrap();
+        assert_eq!(safe["status"], "cancelled");
         assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
 
         let oversized_arguments = json!({"payload": "x".repeat(BUILTIN_TOOL_ARGUMENT_MAX_BYTES)});

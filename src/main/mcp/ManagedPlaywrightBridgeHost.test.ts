@@ -11,7 +11,8 @@ import { ManagedPlaywrightBridgeHost } from './ManagedPlaywrightBridgeHost'
 import {
   ManagedPlaywrightMcpHost,
   type ManagedMcpClient,
-  type ManagedPlaywrightConnectionFactory
+  type ManagedPlaywrightConnectionFactory,
+  type ManagedPlaywrightSurfaceGroupAdapter
 } from './ManagedPlaywrightMcpHost'
 import { MANAGED_PLAYWRIGHT_CATALOG_LOCK } from './managedPlaywrightCatalog'
 import { MANAGED_PLAYWRIGHT_SERVER_ID } from './managedPlaywrightManifest'
@@ -153,6 +154,45 @@ describe('ManagedPlaywrightBridgeHost', () => {
     await host.close()
   })
 
+  it('preserves the stable surface-capacity error before any page action is dispatched', async () => {
+    const core = new FakeCore()
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ensureActiveSurface: vi.fn(async () => surfaceView()),
+      listSurfaces: vi.fn(() => [surfaceView()]),
+      createSurface: vi.fn(async () => {
+        throw Object.assign(new Error('untrusted capacity detail'), {
+          code: 'browser.surface_capacity_exceeded'
+        })
+      }),
+      selectSurface: vi.fn(async () => surfaceView()),
+      closeSurfaceByIndex: vi.fn(async () => undefined)
+    }
+    const host = new ManagedPlaywrightBridgeHost({
+      core,
+      createHost: () => hostWith({ surfaceGroup })
+    })
+    const request = command({
+      type: 'call_tool',
+      name: 'browser_tabs',
+      arguments: { action: 'new', call_reason: 'Open another local fixture tab.' },
+      timeoutMs: 1_000,
+      authorizationContext: {
+        ...AUTHORIZATION_CONTEXT,
+        triggerToolName: 'browser_tabs',
+        callReason: 'Open another local fixture tab.'
+      }
+    })
+    core.emitCommand(request)
+
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(core.completions[0].outcome).toEqual({
+      type: 'error',
+      code: 'surface_capacity_exceeded',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    await host.close()
+  })
+
   it('cancels and retires an in-progress connect so late completion cannot revive it', async () => {
     const core = new FakeCore()
     let resolveConnection:
@@ -208,6 +248,7 @@ function hostWith(options: {
   callTool?: ManagedMcpClient['callTool']
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
+  surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
 }): ManagedPlaywrightMcpHost {
   const upstreamTools = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
     name: tool.name,
@@ -221,6 +262,7 @@ function hostWith(options: {
     },
     closeSurface: vi.fn(async () => undefined),
     detachAutomation: options.detachAutomation ?? vi.fn(async () => undefined),
+    surfaceGroup: options.surfaceGroup,
     createOfficialConnection:
       options.createOfficialConnection ??
       (async () => ({
@@ -236,4 +278,15 @@ function hostWith(options: {
         vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
     })
   })
+}
+
+function surfaceView(): Awaited<ReturnType<ManagedPlaywrightSurfaceGroupAdapter['createSurface']>> {
+  return {
+    surfaceId: 'surface-1',
+    index: 0,
+    title: 'Fixture',
+    url: 'about:blank',
+    isActive: true,
+    generation: 1
+  }
 }

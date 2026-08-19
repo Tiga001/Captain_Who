@@ -59,26 +59,40 @@ export function useRightSidebarPlatform({
     [moduleAvailability, modules]
   )
 
-  const openModule = useCallback(
-    (moduleId: RightSidebarModuleId, moduleState?: RightSidebarModulePageState) => {
+  const openModulePage = useCallback(
+    (
+      moduleId: RightSidebarModuleId,
+      moduleState?: RightSidebarModulePageState,
+      activate = true
+    ) => {
       const module = modules.find((candidate) => candidate.id === moduleId)
       if (
         !module ||
         getRightSidebarModuleAvailability(moduleAvailability, moduleId) !== 'available'
       ) {
-        return
+        return null
       }
 
+      const pageId = createPageId(moduleId)
       dispatch({
+        activate,
         module,
         moduleState,
-        pageId: createPageId(moduleId),
+        pageId,
         t,
         type: 'open',
         workspace
       })
+      return pageId
     },
     [moduleAvailability, modules, t, workspace]
+  )
+
+  const openModule = useCallback(
+    (moduleId: RightSidebarModuleId, moduleState?: RightSidebarModulePageState) => {
+      void openModulePage(moduleId, moduleState)
+    },
+    [openModulePage]
   )
 
   const ensureModulePage = useCallback(
@@ -160,6 +174,7 @@ export function useRightSidebarPlatform({
     ensureModulePage,
     moduleAvailability,
     openModule,
+    openModulePage,
     openRelatedPage,
     pages: state.pages,
     updatePage

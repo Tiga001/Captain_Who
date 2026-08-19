@@ -23,6 +23,8 @@ import {
 import { app, BrowserWindow, session, type WebContents } from 'electron'
 
 import { BrowserSurfaceManager } from '../BrowserSurfaceManager'
+import { BrowserArtifactBroker } from '../BrowserArtifactBroker'
+import { BrowserDownloadBroker } from '../BrowserDownloadBroker'
 import { BrowserTargetBroker } from '../BrowserTargetBroker'
 import { BrowserNetworkGuard } from '../BrowserNetworkGuard'
 import { BrowserNetworkPolicy, ElectronSessionDnsResolver } from '../BrowserNetworkPolicy'
@@ -50,8 +52,18 @@ const RISK_DECISION_METHOD = 'fixture.browserRisk.decision'
 const MAX_INPUT_LINE_BYTES = 8 * 1024 * 1024
 const PROFILE_DIRECTORY = mkdtempSync(join(tmpdir(), 'mycopilot-managed-playwright-profile-'))
 const SURFACE_ID = 'right-sidebar-managed-playwright-fixture'
+let surfaceSequence = 0
+let profileDirectoryRemoved = false
 
 app.setPath('userData', PROFILE_DIRECTORY)
+app.once('quit', removeFixtureProfileDirectory)
+process.once('exit', removeFixtureProfileDirectory)
+
+function removeFixtureProfileDirectory(): void {
+  if (profileDirectoryRemoved) return
+  profileDirectoryRemoved = true
+  rmSync(PROFILE_DIRECTORY, { force: true, recursive: true })
+}
 
 /**
  * Test-process adapter for the production reverse bridge.
@@ -126,7 +138,6 @@ class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuth
     }
     if (envelope.method === MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD) {
       const input = parseManagedPlaywrightCommandNotification(envelope.params)
-      process.stderr.write(`managed fixture command: ${input.command.type}\n`)
       for (const handler of this.commandHandlers) handler(input)
       return
     }
@@ -159,6 +170,13 @@ async function main(): Promise<void> {
   await app.whenReady()
   const core = new JsonLineBridgeCore()
   const managedSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
+  const artifactBroker = new BrowserArtifactBroker({
+    rootDirectory: join(PROFILE_DIRECTORY, 'browser-automation-artifacts')
+  })
+  const downloadBroker = new BrowserDownloadBroker({
+    artifacts: artifactBroker,
+    expectedSession: managedSession
+  })
   const networkPolicy = new BrowserNetworkPolicy({
     dnsResolver: new ElectronSessionDnsResolver(managedSession)
   })
@@ -169,6 +187,7 @@ async function main(): Promise<void> {
       policy: networkPolicy
     }),
     expectedSession: managedSession,
+    downloadBroker,
     policy: networkPolicy
   })
   initializeManagedWebviewSessions({ networkGuard })
@@ -176,6 +195,12 @@ async function main(): Promise<void> {
     if (request.url?.startsWith('/api/ping')) {
       response.setHeader('content-type', 'application/json; charset=utf-8')
       response.end(JSON.stringify({ ok: true }))
+      return
+    }
+    if (request.url === '/download') {
+      response.setHeader('content-type', 'text/plain; charset=utf-8')
+      response.setHeader('content-disposition', 'attachment; filename="fixture-download.txt"')
+      response.end('repository-owned download fixture')
       return
     }
     response.setHeader('content-type', 'text/html; charset=utf-8')
@@ -197,6 +222,7 @@ async function main(): Promise<void> {
           </select>
           <button id="apply">Apply</button>
           <button id="dialog">Show dialog</button>
+          <a href="/download" download="fixture-download.txt">Download fixture</a>
           <div id="drag-source" role="button" tabindex="0" draggable="true">Drag source</div>
           <div id="drop-target" role="region" aria-label="Drop target">Drop target</div>
           <ul aria-label="Visible items"><li>Alpha</li><li>Beta</li></ul>
@@ -251,8 +277,10 @@ async function main(): Promise<void> {
   )
 
   const broker = new BrowserTargetBroker(BROWSER_WEBVIEW_PARTITION, managedSession)
-  let pendingEnsure: Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' }> | undefined
+  let pendingEnsure:
+    Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' | 'createSurface' }> | undefined
   let guest: WebContents | undefined
+  const guests = new Map<string, WebContents>()
   let ensureCommands = 0
   let closeCommands = 0
   const manager = new BrowserSurfaceManager({
@@ -260,25 +288,42 @@ async function main(): Promise<void> {
     broker,
     networkGuard,
     closeTimeoutMs: 5_000,
+    createSurfaceId: () =>
+      surfaceSequence++ === 0 ? SURFACE_ID : `right-sidebar-managed-playwright-${surfaceSequence}`,
     resolveHost: () => window.webContents,
     sendCommand: (_host, command) => {
-      if (command.kind === 'ensureAttached') {
-        process.stderr.write('managed fixture surface: ensureAttached\n')
+      if (command.kind === 'ensureAttached' || command.kind === 'createSurface') {
         ensureCommands += 1
         pendingEnsure = command
-        void ensureFixtureSurface(window, Boolean(guest && !guest.isDestroyed())).then(
+        const existingGuest = guests.get(command.surfaceId)
+        void ensureFixtureSurface(
+          window,
+          command.surfaceId,
+          Boolean(existingGuest && !existingGuest.isDestroyed())
+        ).then(
           (alreadyAttached) => {
             if (alreadyAttached && pendingEnsure?.requestId === command.requestId) {
               manager.attach(window.webContents, {
                 schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
                 requestId: command.requestId,
-                surfaceId: SURFACE_ID
+                surfaceId: command.surfaceId
               })
               pendingEnsure = undefined
             }
           },
           () => undefined
         )
+        return
+      }
+      if (command.kind === 'selectSurface' || command.kind === 'resizeSurface') {
+        void applyFixtureSurfaceCommand(window, command).then((viewport) => {
+          manager.attach(window.webContents, {
+            schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+            requestId: command.requestId,
+            surfaceId: command.surfaceId,
+            ...(viewport ? { viewport } : {})
+          })
+        })
         return
       }
       closeCommands += 1
@@ -290,14 +335,15 @@ async function main(): Promise<void> {
     targetRegistry: manager
   })
   window.webContents.on('did-attach-webview', (_event, attachedGuest) => {
-    process.stderr.write('managed fixture surface: did-attach-webview\n')
     guest = attachedGuest
     const command = pendingEnsure
     if (!command) return
+    guests.set(command.surfaceId, attachedGuest)
+    attachedGuest.once('destroyed', () => guests.delete(command.surfaceId))
     manager.attach(window.webContents, {
       schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
       requestId: command.requestId,
-      surfaceId: SURFACE_ID
+      surfaceId: command.surfaceId
     })
     pendingEnsure = undefined
   })
@@ -305,15 +351,16 @@ async function main(): Promise<void> {
   const bridgeHost = new ManagedPlaywrightBridgeHost({
     core,
     createHost: createManagedPlaywrightHostFactory({
-      getBrowserContext: async () => {
-        process.stderr.write('managed fixture surface: getBrowserContext start\n')
-        const context = await manager.getBrowserContext()
-        process.stderr.write('managed fixture surface: getBrowserContext ready\n')
-        return context
-      },
+      getBrowserContext: () => manager.getBrowserContext(),
       closeSurface: () => manager.closeSurface(),
       detachAutomation: () => manager.detachAutomation(),
-      beginNetworkOperation: (input) => manager.beginNetworkOperation(input)
+      beginNetworkOperation: (input) => manager.beginNetworkOperation(input),
+      artifactBroker,
+      finalizeBrowserRun: (runId) => networkGuard.finalizeRun(runId),
+      getActiveSurfaceIdentity: () => manager.getActiveSurfaceIdentity(),
+      releaseBrowserCapability: (activationId) => networkGuard.releaseCapability(activationId),
+      releaseBrowserToolCall: (input) => networkGuard.releaseToolCall(input),
+      surfaceGroup: manager
     })
   })
   const input = createInterface({ input: process.stdin })
@@ -341,6 +388,7 @@ async function main(): Promise<void> {
   } finally {
     await bridgeHost.close().catch(() => undefined)
     await manager.shutdown().catch(() => undefined)
+    await artifactBroker.shutdown().catch(() => undefined)
     await writeProtocolLine(
       `${RESULT_MARKER}${JSON.stringify({
         broker: broker.snapshot(),
@@ -359,23 +407,47 @@ async function main(): Promise<void> {
 
 async function ensureFixtureSurface(
   window: BrowserWindow,
+  surfaceId: string,
   isAlreadyAttached: boolean
 ): Promise<boolean> {
-  const bootstrapUrl = createBrowserSurfaceBootstrapUrl(SURFACE_ID)
+  const bootstrapUrl = createBrowserSurfaceBootstrapUrl(surfaceId)
   return await window.webContents.executeJavaScript(`(() => {
-    const existing = document.querySelector('webview[data-surface-id=${JSON.stringify(SURFACE_ID)}]')
+    const existing = document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')
     if (existing) {
       existing.hidden = false
       return true
     }
     const webview = document.createElement('webview')
-    webview.dataset.surfaceId = ${JSON.stringify(SURFACE_ID)}
+    webview.dataset.surfaceId = ${JSON.stringify(surfaceId)}
     webview.setAttribute('partition', ${JSON.stringify(BROWSER_WEBVIEW_PARTITION)})
     webview.setAttribute('src', ${JSON.stringify(bootstrapUrl)})
     webview.style.width = '320px'
     webview.style.height = '220px'
     document.querySelector('#host').appendChild(webview)
     return ${JSON.stringify(isAlreadyAttached)}
+  })()`)
+}
+
+async function applyFixtureSurfaceCommand(
+  window: BrowserWindow,
+  command: Extract<BrowserSurfaceCommand, { kind: 'selectSurface' | 'resizeSurface' }>
+): Promise<{ height: number; width: number } | undefined> {
+  return await window.webContents.executeJavaScript(`(() => {
+    const webview = document.querySelector('webview[data-surface-id=${JSON.stringify(command.surfaceId)}]')
+    if (!webview) throw new Error('managed surface missing')
+    webview.hidden = false
+    ${
+      command.kind === 'resizeSurface'
+        ? `webview.style.width = ${JSON.stringify(`${command.width}px`)};
+           webview.style.height = ${JSON.stringify(`${command.height}px`)};`
+        : ''
+    }
+    if (${JSON.stringify(command.kind)} !== 'resizeSurface') return undefined
+    const bounds = webview.getBoundingClientRect()
+    return {
+      height: Math.round(Math.max(0, Math.min(bounds.bottom, window.innerHeight) - Math.max(bounds.top, 0))),
+      width: Math.round(Math.max(0, Math.min(bounds.right, window.innerWidth) - Math.max(bounds.left, 0)))
+    }
   })()`)
 }
 
@@ -410,12 +482,4 @@ function expectRecord(value: unknown): Record<string, unknown> {
 }
 
 void main()
-  .catch((error: unknown) => {
-    process.stderr.write(
-      `Managed Playwright bridge fixture failed: ${error instanceof Error ? error.message : 'unknown'}\n`
-    )
-    app.exit(1)
-  })
-  .finally(() => {
-    rmSync(PROFILE_DIRECTORY, { force: true, recursive: true })
-  })
+  .catch(() => app.exit(1))
