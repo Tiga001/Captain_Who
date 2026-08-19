@@ -183,11 +183,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     ).resolves.toMatchObject({ isError: false })
 
     expect(order).toEqual(['preflight', 'dispatched', 'upstream'])
-    expect(check).toHaveBeenCalledWith({
-      url: 'http://127.0.0.1:3000/',
-      trigger: 'tool_argument',
-      dispatchCertainty: 'definitely_not_dispatched'
-    })
+    expect(check).toHaveBeenCalledWith('http://127.0.0.1:3000/')
     expect(risk.markDispatched).toHaveBeenCalledOnce()
     expect(risk.finish).toHaveBeenCalledOnce()
   })
@@ -698,6 +694,7 @@ function riskLease(options: {
   const markDispatched = vi.fn()
   const settle = vi.fn(options.settle ?? (async () => undefined))
   const lease = {
+    preflight: options.check ?? vi.fn(async () => undefined),
     operation: {
       check: options.check ?? vi.fn(async () => undefined)
     },

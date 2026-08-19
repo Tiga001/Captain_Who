@@ -9,7 +9,9 @@ const translations: Record<string, string> = {
   'agent.approval.dialog.approve': 'Yes',
   'agent.approval.dialog.reject': 'No',
   'agent.approval.dialog.rejectPlaceholder': 'No, tell me how to adjust',
-  'agent.builtinCapability.approval.title': 'Allow me to activate “{capability}”?',
+  'mcp.builtin.browserAutomation.name': 'Browser automation',
+  'agent.builtinCapability.approval.title': 'Allow {capability}?',
+  'agent.builtinCapability.approval.reason': 'Call reason',
   'agent.builtinCapability.approval.taskGrantHint':
     'After approval, reviewed tools for this capability may run automatically for this task.',
   'agent.builtinCapability.approval.expired': 'This capability activation request has expired.'
@@ -59,7 +61,7 @@ afterEach(() => {
 })
 
 describe('BuiltinCapabilityActivationApprovalCard', () => {
-  it('uses the native approval shell and renders only capability name, reason, and task grant copy', async () => {
+  it('localizes the capability name and never renders the Host display name', async () => {
     const action = createAction()
     const onApprove = vi.fn()
     const screen = await render(
@@ -71,14 +73,14 @@ describe('BuiltinCapabilityActivationApprovalCard', () => {
 
     const dialog = screen.container.querySelector('.agent-approval-dialog')
     expect(dialog?.getAttribute('data-approval-kind')).toBe('standard')
-    expect(screen.container.textContent).toContain(
-      'Allow me to activate “<img src=x onerror=alert(1)>Browser automation”'
-    )
+    expect(screen.container.textContent).toContain('Allow Browser automation?')
+    expect(screen.container.textContent).toContain('Call reason')
     expect(screen.container.textContent).toContain(action.approval.reason)
     expect(screen.container.textContent).toContain(
       'reviewed tools for this capability may run automatically for this task'
     )
     expect(screen.container.querySelector('img')).toBeNull()
+    expect(screen.container.textContent).not.toContain(action.approval.displayName)
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
     expect(screen.container.textContent).not.toContain(action.approval.capabilityId)
     expect(screen.container.textContent).not.toContain(action.approval.manifestDigest)

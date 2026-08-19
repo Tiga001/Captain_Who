@@ -163,6 +163,7 @@ async function main(): Promise<void> {
     dnsResolver: new ElectronSessionDnsResolver(managedSession)
   })
   const networkGuard = new BrowserNetworkGuard({
+    accessPolicy: 'host_boundaries_only',
     coordinator: new BrowserRiskCoordinator({
       authorizer: new CoreBrowserRiskAuthorizer(core),
       policy: networkPolicy
@@ -171,35 +172,7 @@ async function main(): Promise<void> {
     policy: networkPolicy
   })
   initializeManagedWebviewSessions({ networkGuard })
-  const rejectedServer = createServer((_request, response) => {
-    response.setHeader('content-type', 'text/html; charset=utf-8')
-    response.end('<!doctype html><html><body><h1>Rejected destination</h1></body></html>')
-  })
-  await listenOnLoopback(rejectedServer)
-  const rejectedAddress = rejectedServer.address()
-  if (!rejectedAddress || typeof rejectedAddress === 'string') {
-    throw new Error('local rejected fixture did not bind')
-  }
-  const rejectedUrl = `http://127.0.0.1:${rejectedAddress.port}/rejected`
-
-  const redirectTargetServer = createServer((_request, response) => {
-    response.setHeader('content-type', 'text/html; charset=utf-8')
-    response.end('<!doctype html><html><body><h1>Redirect target</h1></body></html>')
-  })
-  await listenOnLoopback(redirectTargetServer)
-  const redirectTargetAddress = redirectTargetServer.address()
-  if (!redirectTargetAddress || typeof redirectTargetAddress === 'string') {
-    throw new Error('local redirect target fixture did not bind')
-  }
-  const redirectTargetUrl = `http://127.0.0.1:${redirectTargetAddress.port}/target`
-
-  const server = createServer((request, response) => {
-    if (request.url === '/redirect') {
-      response.statusCode = 302
-      response.setHeader('location', redirectTargetUrl)
-      response.end()
-      return
-    }
+  const server = createServer((_request, response) => {
     response.setHeader('content-type', 'text/html; charset=utf-8')
     response.end(`<!doctype html>
       <html><body>
@@ -222,7 +195,6 @@ async function main(): Promise<void> {
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('local fixture did not bind')
   const fixtureUrl = `http://127.0.0.1:${address.port}/interactive`
-  const redirectUrl = `http://127.0.0.1:${address.port}/redirect`
 
   const window = new BrowserWindow({
     height: 320,
@@ -277,7 +249,10 @@ async function main(): Promise<void> {
       void removeFixtureSurface(window, command.surfaceId)
     }
   })
-  configureManagedWebviewHost(window.webContents, { targetRegistry: manager })
+  configureManagedWebviewHost(window.webContents, {
+    networkGuard,
+    targetRegistry: manager
+  })
   window.webContents.on('did-attach-webview', (_event, attachedGuest) => {
     process.stderr.write('managed fixture surface: did-attach-webview\n')
     guest = attachedGuest
@@ -322,9 +297,7 @@ async function main(): Promise<void> {
   })
 
   try {
-    await writeProtocolLine(
-      `${READY_MARKER}${JSON.stringify({ fixtureUrl, redirectUrl, rejectedUrl, schemaVersion: 1 })}`
-    )
+    await writeProtocolLine(`${READY_MARKER}${JSON.stringify({ fixtureUrl, schemaVersion: 1 })}`)
     await inputClosed
     if (inputFailure) throw inputFailure
   } finally {
@@ -341,11 +314,7 @@ async function main(): Promise<void> {
       })}`
     ).catch(() => undefined)
     if (!window.isDestroyed()) window.destroy()
-    await Promise.all([
-      closeServer(server),
-      closeServer(rejectedServer),
-      closeServer(redirectTargetServer)
-    ])
+    await closeServer(server)
     app.quit()
   }
 }

@@ -3755,7 +3755,8 @@ fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
         run_id,
         Some(&action_id),
         &call,
-        AgentToolIdentity::Builtin {
+        AgentToolIdentity::RuntimeExtension {
+            extension_id: "builtin.capabilities".to_string(),
             tool_name: "activate_capability".to_string(),
         },
     ));
@@ -3987,7 +3988,8 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
         run_id,
         Some(&action_id),
         &call,
-        AgentToolIdentity::Builtin {
+        AgentToolIdentity::RuntimeExtension {
+            extension_id: "builtin.capabilities".to_string(),
             tool_name: "activate_capability".to_string(),
         },
     ));
@@ -3999,7 +4001,8 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
         assistant_message_id,
         run_id,
         &call,
-        AgentToolIdentity::Builtin {
+        AgentToolIdentity::RuntimeExtension {
+            extension_id: "builtin.capabilities".to_string(),
             tool_name: "activate_capability".to_string(),
         },
         expiry_now_ms.saturating_sub(1_000),
@@ -4056,10 +4059,18 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
         trace.terminal_status,
         ConversationTurnTraceTerminalStatus::Failed
     );
-    assert!(trace.items.iter().any(|item| matches!(
-        item,
-        ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
-    )));
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+            ))
+            .count(),
+        1,
+        "expiry must settle the original activation call exactly once"
+    );
     let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
     let assistant = conversation
         .messages

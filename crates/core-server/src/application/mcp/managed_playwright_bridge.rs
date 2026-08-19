@@ -1809,15 +1809,6 @@ mod tests {
             .as_str()
             .expect("fixture URL")
             .to_string();
-        let rejected_url = ready["rejectedUrl"]
-            .as_str()
-            .expect("fixture rejected URL")
-            .to_string();
-        let redirect_url = ready["redirectUrl"]
-            .as_str()
-            .expect("fixture redirect URL")
-            .to_string();
-
         runtime.request_start().unwrap();
         join_owned_lifecycle_tasks(&runtime).await;
         let status = runtime
@@ -1923,35 +1914,6 @@ mod tests {
         .await;
         assert!(!tabs.is_error);
 
-        let rejected = invoke_browser_tool_with_grant(
-            &runtime,
-            &capability_grant,
-            "browser_navigate",
-            json!({"url": rejected_url, "call_reason": "Exercise a declined destination."}),
-        )
-        .await;
-        assert!(rejected.is_error);
-        let rejected_text = tool_result_text(&rejected);
-        assert!(rejected_text.contains("The user declined"));
-        assert!(rejected_text.contains("fixture user declined this destination"));
-
-        let redirect_error = invoke_browser_tool_with_grant_result(
-            &runtime,
-            &capability_grant,
-            "browser_navigate",
-            json!({"url": redirect_url, "call_reason": "Exercise a declined redirect."}),
-        )
-        .await
-        .expect_err("a rejected post-dispatch redirect must be outcome unknown");
-        assert_eq!(
-            redirect_error.kind,
-            mycopilot_mcp_client::McpErrorKind::OutcomeUnknown
-        );
-        assert_eq!(
-            redirect_error.dispatch_certainty,
-            Some(mycopilot_mcp_client::McpDispatchCertainty::PossiblyDispatched)
-        );
-
         let closed = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
@@ -1980,8 +1942,8 @@ mod tests {
         risk_approver.abort();
         let _ = risk_approver.await;
         assert!(risk_coordinator.list_pending().is_empty());
-        assert_eq!(approval_count.load(Ordering::Acquire), 3);
-        assert!(risk_authorize_count.load(Ordering::Acquire) >= 6);
+        assert_eq!(approval_count.load(Ordering::Acquire), 0);
+        assert_eq!(risk_authorize_count.load(Ordering::Acquire), 0);
         assert!(exit.success(), "fixture failed: {stderr}");
         assert_eq!(result["ensureCommands"], 1);
         assert_eq!(result["closeCommands"], 1);

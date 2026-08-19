@@ -1,5 +1,6 @@
 import type { McpBuiltinCapabilityListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { getBuiltinCapabilityDisplayName } from './builtinCapabilityPresentation'
 import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 
 interface McpBuiltinCapabilityListProps {
@@ -19,7 +20,7 @@ export function McpBuiltinCapabilityList({
     <div className="mcp-builtin-capability-list">
       {capabilities.map((capability) => {
         const pending = pendingCapabilities.has(capability.capabilityId)
-        const name = capabilityName(capability, t)
+        const name = getBuiltinCapabilityDisplayName(capability.capabilityId, t)
         const description = capabilityDescription(capability, t)
         return (
           <article
@@ -51,15 +52,6 @@ export function McpBuiltinCapabilityList({
 }
 
 type Translate = ReturnType<typeof useFrontendConfig>['t']
-
-function capabilityName(capability: McpBuiltinCapabilityListItem, t: Translate): string {
-  switch (capability.capabilityId) {
-    case 'browser_automation':
-      return t('mcp.builtin.browserAutomation.name')
-    default:
-      return toSafeMcpDisplayText(capability.displayName, 256)
-  }
-}
 
 function capabilityDescription(capability: McpBuiltinCapabilityListItem, t: Translate): string {
   switch (capability.capabilityId) {

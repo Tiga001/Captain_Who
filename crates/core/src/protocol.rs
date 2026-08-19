@@ -329,8 +329,9 @@ pub struct AgentRunCheckpoint {
     /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
     /// epoch; it never reconstructs authority from rendered model context.
     pub run_world_state: WorldStateSnapshot,
-    /// Approval-record identity. MCP uses an application UUID independent of the provider Tool
-    /// Call identity. Built-in checkpoints may omit this field and use `pending_tool_call_id`.
+    /// Approval-record identity when it differs from the Provider Tool Call identity. External MCP
+    /// and built-in capability activation both use an application UUID here. Tool kind and
+    /// projection authority always come from the frozen typed Tool provenance, never this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_action_id: Option<String>,
     pub pending_tool_call_id: String,

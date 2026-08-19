@@ -1425,12 +1425,17 @@ impl StorageService {
         if require_builtin_identity
             && !matches!(
                 &durable.provenance,
-                crate::AgentToolIdentity::Builtin { tool_name }
-                    if tool_name == "activate_capability"
+                crate::AgentToolIdentity::RuntimeExtension {
+                    extension_id,
+                    tool_name,
+                } if extension_id
+                    == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+                    && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME
             )
         {
             return Err(
-                "built-in capability expiry requires durable built-in Tool provenance".to_string(),
+                "built-in capability expiry requires durable activation Tool provenance"
+                    .to_string(),
             );
         }
         let conversation_id = record

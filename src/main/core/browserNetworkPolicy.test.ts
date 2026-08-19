@@ -20,6 +20,86 @@ class SequenceResolver implements BrowserDnsResolver {
 }
 
 describe('BrowserNetworkPolicy', () => {
+  it('checks manual browsing boundaries without consulting DNS or classifying reviewable risks', async () => {
+    const resolve = vi.fn(async () => ['198.18.0.42'])
+    const policy = new BrowserNetworkPolicy({ dnsResolver: { resolve } })
+
+    await expect(policy.assessStaticHostBoundary('https://public.test/')).resolves.toBeNull()
+    await expect(policy.assessStaticHostBoundary('http://localhost:3000/')).resolves.toBeNull()
+    await expect(policy.assessStaticHostBoundary('https://198.18.0.42/')).resolves.toBeNull()
+    await expect(policy.assessStaticHostBoundary('wss://public.test/socket')).resolves.toBeNull()
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('keeps exact Host endpoints and privileged schemes outside manual browsing authority', async () => {
+    const policy = new BrowserNetworkPolicy({
+      blockedOrigins: ['http://localhost:5173/'],
+      debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
+      mcpControlEndpoints: [{ host: '127.0.0.1', port: 8765 }]
+    })
+
+    await expect(policy.assessStaticHostBoundary('http://127.0.0.1:5173/private')).resolves.toBe(
+      'main_renderer'
+    )
+    await expect(policy.assessStaticHostBoundary('http://127.0.0.1:9222/json')).resolves.toBe(
+      'internal_debug'
+    )
+    await expect(policy.assessStaticHostBoundary('http://127.0.0.1:8765/rpc')).resolves.toBe(
+      'mcp_control'
+    )
+    await expect(policy.assessStaticHostBoundary('devtools://devtools/bundled/')).resolves.toBe(
+      'privileged_electron'
+    )
+    await expect(policy.assessStaticHostBoundary('not a URL')).resolves.toBe('unsupported_scheme')
+  })
+
+  it('resolves aliases only on protected Host ports and fails those ports closed', async () => {
+    const aliasPolicy = new BrowserNetworkPolicy({
+      blockedOrigins: ['http://127.0.0.1:5173/'],
+      dnsResolver: new SequenceResolver([['127.0.0.1']])
+    })
+    const unavailablePolicy = new BrowserNetworkPolicy({
+      debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
+      dnsResolver: {
+        async resolve(): Promise<readonly string[]> {
+          throw new Error('fixture DNS unavailable')
+        }
+      }
+    })
+
+    await expect(
+      aliasPolicy.assessStaticHostBoundary('http://renderer-alias.test:5173/private')
+    ).resolves.toBe('main_renderer')
+    await expect(
+      unavailablePolicy.assessStaticHostBoundary('http://debug-alias.test:9222/json')
+    ).resolves.toBe('resolution_unavailable')
+  })
+
+  it('keeps WebSocket aliases to protected Host ports closed', async () => {
+    const policy = new BrowserNetworkPolicy({
+      blockedOrigins: ['http://127.0.0.1:5173/'],
+      dnsResolver: new SequenceResolver([['127.0.0.1']])
+    })
+
+    await expect(
+      policy.assessStaticHostBoundary('ws://renderer-alias.test:5173/socket')
+    ).resolves.toBe('main_renderer')
+  })
+
+  it('uses exactly one DNS answer when active automation targets a protected port', async () => {
+    const resolve = vi.fn(async () => ['93.184.216.34'])
+    const policy = new BrowserNetworkPolicy({
+      debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
+      dnsResolver: { resolve }
+    })
+
+    await expect(policy.assess('https://public.test:9222/path')).resolves.toMatchObject({
+      disposition: 'approval_required',
+      riskKinds: ['non_standard_port']
+    })
+    expect(resolve).toHaveBeenCalledOnce()
+  })
+
   it('allows ordinary public HTTPS without an approval', async () => {
     const policy = new BrowserNetworkPolicy({
       dnsResolver: new SequenceResolver([['93.184.216.34']])

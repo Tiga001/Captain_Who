@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AgentProposedAction } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
+import { getBuiltinCapabilityDisplayName } from '../../mcp/builtinCapabilityPresentation'
 import { toSafeMcpDisplayText } from '../../mcp/mcpSafeDisplay'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
 
@@ -70,7 +71,7 @@ export function BuiltinCapabilityActivationApprovalCard({
     operation()
   }
 
-  const displayName = toSafeMcpDisplayText(approval.displayName, 256)
+  const displayName = getBuiltinCapabilityDisplayName(approval.capabilityId, t)
   const reason = toSafeMcpDisplayText(approval.reason, 4096)
 
   return (
@@ -79,8 +80,14 @@ export function BuiltinCapabilityActivationApprovalCard({
       approveDisabled={!canApprove}
       approveLabel={t('agent.approval.dialog.approve')}
       ariaBusy={isSubmitting}
-      code={reason}
-      codeMultiline={/[\r\n]/u.test(reason)}
+      details={
+        <dl className="agent-builtin-capability-approval__details">
+          <div>
+            <dt>{t('agent.builtinCapability.approval.reason')}</dt>
+            <dd>{reason}</dd>
+          </div>
+        </dl>
+      }
       isSubmitting={isSubmitting}
       onApprove={() => submitOnce(() => onApprove?.(messageId, action))}
       onCancel={canCancel ? () => submitOnce(() => onCancel?.(messageId, action)) : undefined}

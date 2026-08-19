@@ -102,16 +102,15 @@ pub(super) fn conversation_trace_from_input_checkpoint(
     };
     let snapshot = match input.tool_continuation.as_ref() {
         Some(continuation) => {
-            // `pending_action_id` is the typed checkpoint marker for an MCP approval. The live
-            // continuation still carries the bounded authoritative result for the next model
-            // request, but the trace observer must see the exact same safe projection that was
-            // atomically committed with the pending-action settlement. Otherwise the first
-            // resumed trace publication attempts to rewrite the already committed ToolResult
-            // and correctly fails the append-only prefix check.
-            //
-            // Deliberately do not infer MCP identity from the provider-visible tool name.
-            let is_mcp = checkpoint.pending_action_id.is_some();
-            let durable_result = if is_mcp {
+            // The live continuation still carries the bounded authoritative result for the next
+            // model request, but the trace observer must see the exact same safe projection that
+            // was atomically committed with the pending-action settlement. Select that projection
+            // from the frozen typed Tool provenance, never from an action UUID or model-visible
+            // name. Otherwise a built-in activation result can be rewritten as an external MCP
+            // result and correctly rejected by the append-only prefix guard.
+            let uses_external_mcp_projection =
+                checkpoint_continuation_uses_external_mcp_projection(checkpoint)?;
+            let durable_result = if uses_external_mcp_projection {
                 crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
             } else {
                 continuation.result.clone()

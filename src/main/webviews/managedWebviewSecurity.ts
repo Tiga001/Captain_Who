@@ -106,21 +106,27 @@ export function configureManagedWebviewHost(
 
     configureManagedGuest(guest, policy, options.networkGuard)
     if (options.targetRegistry) {
-      registerManagedGuestWhenIdentified(options.targetRegistry, {
-        guest,
-        host,
-        partition: policy.partition
-      })
+      registerManagedGuestWhenIdentified(
+        options.targetRegistry,
+        {
+          guest,
+          host,
+          partition: policy.partition
+        },
+        options.networkGuard
+      )
     }
   })
 }
 
 function registerManagedGuestWhenIdentified(
   registry: ManagedWebviewTargetRegistry,
-  input: { guest: WebContents; host: WebContents; partition: string }
+  input: { guest: WebContents; host: WebContents; partition: string },
+  networkGuard?: BrowserNetworkGuard
 ): void {
   let settled = false
   let identifiedSurfaceId: string | null = null
+  let provisionallyRegistered = false
   const timeout = setTimeout(() => failClosed(), 2_000)
   const cleanup = (): void => {
     clearTimeout(timeout)
@@ -138,7 +144,23 @@ function registerManagedGuestWhenIdentified(
   const rememberIdentity = (candidateUrl: string): void => {
     if (settled || input.guest.isDestroyed()) return
     const surfaceId = parseBrowserSurfaceBootstrapUrl(candidateUrl)
-    if (surfaceId) identifiedSurfaceId = surfaceId
+    if (!surfaceId) return
+    if (identifiedSurfaceId && identifiedSurfaceId !== surfaceId) {
+      failClosed()
+      return
+    }
+    identifiedSurfaceId = surfaceId
+    if (networkGuard && !provisionallyRegistered) {
+      try {
+        // Network admission must begin as soon as the inert bootstrap identity is known. Waiting
+        // for dom-ready leaves a did-attach -> registration window in which a real manual
+        // navigation has an explicit but unknown WebContents identity and is correctly denied.
+        networkGuard.registerGuest({ generation: 0, guest: input.guest, surfaceId })
+        provisionallyRegistered = true
+      } catch {
+        failClosed()
+      }
+    }
   }
   const attemptReadyRegistration = (): void => {
     if (settled || input.guest.isDestroyed()) return

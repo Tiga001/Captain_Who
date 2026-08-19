@@ -82,25 +82,29 @@
   color: var(--mc-color-text-secondary);
 }
 
-.agent-browser-risk-approval__details {
+.agent-browser-risk-approval__details,
+.agent-builtin-capability-approval__details {
   display: grid;
   margin: 0;
   gap: 8px;
   font-family: var(--mc-font-family);
 }
 
-.agent-browser-risk-approval__details > div {
+.agent-browser-risk-approval__details > div,
+.agent-builtin-capability-approval__details > div {
   display: grid;
   grid-template-columns: minmax(72px, 0.22fr) minmax(0, 1fr);
   gap: 10px;
 }
 
-.agent-browser-risk-approval__details dt {
+.agent-browser-risk-approval__details dt,
+.agent-builtin-capability-approval__details dt {
   color: var(--mc-color-text-muted);
   font-weight: var(--mc-font-weight-medium);
 }
 
-.agent-browser-risk-approval__details dd {
+.agent-browser-risk-approval__details dd,
+.agent-builtin-capability-approval__details dd {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;

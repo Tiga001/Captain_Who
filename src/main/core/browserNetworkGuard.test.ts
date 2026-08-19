@@ -9,8 +9,15 @@ import type {
 } from 'electron'
 import { describe, expect, it, vi } from 'vitest'
 
-import { BrowserNetworkGuard } from '../browser/BrowserNetworkGuard'
-import { BrowserNetworkPolicy, type BrowserDnsResolver } from '../browser/BrowserNetworkPolicy'
+import {
+  BrowserNetworkGuard,
+  type BrowserNetworkAccessPolicy
+} from '../browser/BrowserNetworkGuard'
+import {
+  BrowserNetworkPolicy,
+  type BrowserDnsResolver,
+  type BrowserNetworkPolicyOptions
+} from '../browser/BrowserNetworkPolicy'
 import {
   BrowserRiskCoordinator,
   type BrowserRiskAuthorizationContext,
@@ -69,9 +76,12 @@ function createSession() {
 
 function createGuest(session: Session, id = 42): WebContents {
   const emitter = new EventEmitter()
+  const mainFrame = { parent: null } as WebContents['mainFrame']
+  Object.assign(mainFrame, { top: mainFrame })
   let destroyed = false
   return Object.assign(emitter, {
     id,
+    mainFrame,
     session,
     getType: () => 'webview',
     isDestroyed: () => destroyed,
@@ -84,8 +94,12 @@ function createGuest(session: Session, id = 42): WebContents {
 }
 
 class Resolver implements BrowserDnsResolver {
-  constructor(private readonly answer: readonly string[]) {}
+  calls = 0
+
+  constructor(private readonly answer: readonly string[] | Error) {}
   async resolve(): Promise<readonly string[]> {
+    this.calls += 1
+    if (this.answer instanceof Error) throw this.answer
     return this.answer
   }
 }
@@ -110,21 +124,29 @@ class Authorizer implements BrowserRiskAuthorizer {
 
 function createHarness(
   decision?: BrowserRiskAuthorizationDecision,
-  resolved: readonly string[] = ['127.0.0.1']
+  resolved: readonly string[] | Error = ['127.0.0.1'],
+  policyOptions: Omit<BrowserNetworkPolicyOptions, 'dnsResolver'> = {},
+  accessPolicy: BrowserNetworkAccessPolicy = 'risk_approval'
 ) {
   const { emitter, session, webRequest } = createSession()
   const authorizer = new Authorizer(decision)
-  const policy = new BrowserNetworkPolicy({ dnsResolver: new Resolver(resolved) })
+  const resolver = new Resolver(resolved)
+  const policy = new BrowserNetworkPolicy({ ...policyOptions, dnsResolver: resolver })
   const coordinator = new BrowserRiskCoordinator({
     authorizer,
     now: () => 1_000_000,
     policy
   })
-  const guard = new BrowserNetworkGuard({ coordinator, expectedSession: session, policy })
+  const guard = new BrowserNetworkGuard({
+    accessPolicy,
+    coordinator,
+    expectedSession: session,
+    policy
+  })
   guard.install()
   const guest = createGuest(session)
   guard.registerGuest({ generation: 1, guest, surfaceId: 'surface-1' })
-  return { authorizer, emitter, guard, guest, webRequest }
+  return { authorizer, emitter, guard, guest, resolver, webRequest }
 }
 
 function request(
@@ -432,6 +454,133 @@ describe('BrowserNetworkGuard', () => {
     )
   })
 
+  it('allows a complex automated page without DNS, approvals, or the 32-request risk cap', async () => {
+    const harness = createHarness(
+      undefined,
+      new Error('ordinary automated traffic must not resolve through the risk policy'),
+      {},
+      'host_boundaries_only'
+    )
+    const lease = begin(harness)
+    lease.markDispatched()
+    const resourceTypes: OnBeforeRequestListenerDetails['resourceType'][] = [
+      'script',
+      'stylesheet',
+      'image',
+      'font',
+      'xhr',
+      'subFrame'
+    ]
+
+    const responses = await Promise.all(
+      Array.from({ length: 128 }, (_, index) =>
+        request(harness, {
+          id: index + 1,
+          resourceType: resourceTypes[index % resourceTypes.length],
+          url: `https://asset-${index}.public.test/resource`
+        })
+      )
+    )
+
+    expect(responses).toEqual(Array.from({ length: 128 }, () => ({})))
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+    expect(lease.failure()).toBeNull()
+    await expect(lease.settle()).resolves.toBeUndefined()
+    lease.finish()
+  })
+
+  it('uses only the non-approvable Host boundary for automated navigation preflight', async () => {
+    const harness = createHarness(
+      undefined,
+      ['127.0.0.1'],
+      { blockedOrigins: ['http://127.0.0.1:5173/'] },
+      'host_boundaries_only'
+    )
+    const lease = begin(harness)
+
+    await expect(lease.preflight('http://127.0.0.1:3000/page')).resolves.toBeUndefined()
+    await expect(lease.preflight('http://127.0.0.1:5173/private')).rejects.toMatchObject({
+      failure: {
+        code: 'browser.unsupported_host_boundary',
+        dispatchCertainty: 'definitely_not_dispatched'
+      }
+    })
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+    lease.finish()
+  })
+
+  it('allows identity-less service-worker traffic during host-boundary-only automation', async () => {
+    const harness = createHarness(undefined, ['198.18.0.42'], {}, 'host_boundaries_only')
+    const lease = begin(harness)
+    lease.markDispatched()
+
+    await expect(
+      request(harness, {
+        resourceType: 'other',
+        url: 'https://public.test/service-worker.js',
+        webContents: undefined,
+        webContentsId: undefined
+      })
+    ).resolves.toEqual({})
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+    lease.finish()
+  })
+
+  it('allows an automated WebSocket without DNS or a destination approval', async () => {
+    const harness = createHarness(
+      undefined,
+      new Error('must not resolve'),
+      {},
+      'host_boundaries_only'
+    )
+    const lease = begin(harness)
+    lease.markDispatched()
+
+    await expect(
+      request(harness, {
+        resourceType: 'webSocket',
+        url: 'wss://socket.public.test/connect'
+      })
+    ).resolves.toEqual({})
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+    lease.finish()
+  })
+
+  it('allows blob and data subresources but not top-level embedded navigation', async () => {
+    const harness = createHarness(undefined, [], {}, 'host_boundaries_only')
+    const lease = begin(harness)
+    lease.markDispatched()
+
+    await expect(
+      request(harness, {
+        id: 1,
+        resourceType: 'other',
+        url: 'blob:https://public.test/123e4567-e89b-42d3-a456-426614174000'
+      })
+    ).resolves.toEqual({})
+    await expect(
+      request(harness, {
+        id: 2,
+        resourceType: 'image',
+        url: 'data:image/png;base64,AA=='
+      })
+    ).resolves.toEqual({})
+    await expect(
+      request(harness, {
+        id: 3,
+        resourceType: 'mainFrame',
+        url: 'data:text/html,blocked'
+      })
+    ).resolves.toEqual({ cancel: true })
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+    lease.finish()
+  })
+
   it('records a synchronously blocked privileged navigation on the active operation', () => {
     const harness = createHarness()
     const lease = begin(harness)
@@ -606,14 +755,222 @@ describe('BrowserNetworkGuard', () => {
     lease.finish()
   })
 
-  it('fails closed for risky requests without a task-scoped automation operation', async () => {
+  it('allows manual HTTP and localhost requests without borrowing Agent approval authority', async () => {
     const harness = createHarness()
 
-    await expect(request(harness)).resolves.toEqual({ cancel: true })
+    await expect(request(harness)).resolves.toEqual({})
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+  })
+
+  it('allows manual public HTTPS when a proxy resolver returns fake-IP or is unavailable', async () => {
+    const fakeIpHarness = createHarness(undefined, ['198.18.0.42'])
+    const unavailableHarness = createHarness(undefined, new Error('proxy owns DNS'))
+
+    await expect(request(fakeIpHarness, { url: 'https://public.test/page' })).resolves.toEqual({})
+    await expect(request(unavailableHarness, { url: 'https://public.test/page' })).resolves.toEqual(
+      {}
+    )
+    expect(fakeIpHarness.resolver.calls).toBe(0)
+    expect(unavailableHarness.resolver.calls).toBe(0)
+  })
+
+  it('allows unattributed manual and service-worker traffic only when no automation is active', async () => {
+    const harness = createHarness()
+
+    await expect(
+      request(harness, {
+        resourceType: 'other',
+        url: 'https://public.test/service-worker.js',
+        webContents: undefined,
+        webContentsId: undefined
+      })
+    ).resolves.toEqual({})
+
+    const lease = begin(harness)
+    await expect(
+      request(harness, {
+        id: 2,
+        resourceType: 'other',
+        url: 'https://public.test/service-worker.js',
+        webContents: undefined,
+        webContentsId: undefined
+      })
+    ).resolves.toEqual({ cancel: true })
+    lease.finish()
+  })
+
+  it('always rejects an explicit but unregistered WebContents identity', async () => {
+    const harness = createHarness()
+
+    await expect(
+      request(harness, {
+        url: 'https://public.test/unregistered',
+        webContents: undefined,
+        webContentsId: harness.guest.id + 1
+      })
+    ).resolves.toEqual({ cancel: true })
+    expect(harness.resolver.calls).toBe(0)
+  })
+
+  it('attributes frame-only requests to the exact registered guest', async () => {
+    const harness = createHarness()
+    const unknownTopFrame = { parent: null } as WebContents['mainFrame']
+    Object.assign(unknownTopFrame, { top: unknownTopFrame })
+
+    await expect(
+      request(harness, {
+        frame: harness.guest.mainFrame,
+        url: 'https://public.test/frame-resource',
+        webContents: undefined,
+        webContentsId: undefined
+      })
+    ).resolves.toEqual({})
+    await expect(
+      request(harness, {
+        frame: unknownTopFrame,
+        id: 2,
+        url: 'https://public.test/unknown-frame',
+        webContents: undefined,
+        webContentsId: undefined
+      })
+    ).resolves.toEqual({ cancel: true })
+  })
+
+  it('keeps static Host boundaries closed during manual and unattributed requests', async () => {
+    const harness = createHarness(undefined, ['127.0.0.1'], {
+      blockedOrigins: ['http://localhost:5173/'],
+      debugEndpoints: [{ host: '127.0.0.1', port: 9222 }],
+      mcpControlEndpoints: [{ host: '127.0.0.1', port: 8765 }]
+    })
+
+    await expect(request(harness, { url: 'http://127.0.0.1:5173/private' })).resolves.toEqual({
+      cancel: true
+    })
+    await expect(
+      request(harness, {
+        id: 2,
+        url: 'http://127.0.0.1:9222/json',
+        webContents: undefined,
+        webContentsId: undefined
+      })
+    ).resolves.toEqual({ cancel: true })
+    await expect(request(harness, { id: 3, url: 'http://127.0.0.1:8765/rpc' })).resolves.toEqual({
+      cancel: true
+    })
+    expect(harness.resolver.calls).toBe(0)
+  })
+
+  it('navigates a manual popup in the current guest without an Agent approval', async () => {
+    const harness = createHarness()
+
+    harness.guard.handleWindowOpen(harness.guest, 'http://127.0.0.1:3000/manual-popup')
+
+    await vi.waitFor(() => expect(harness.guest.loadURL).toHaveBeenCalledOnce())
+    expect(harness.guest.loadURL).toHaveBeenCalledWith('http://127.0.0.1:3000/manual-popup')
     expect(harness.authorizer.requests).toHaveLength(0)
   })
 
-  it('allows ordinary public HTTPS without retaining a completed run authority', async () => {
+  it('navigates an automated popup without creating a destination approval', async () => {
+    const harness = createHarness(undefined, ['10.0.0.4'], {}, 'host_boundaries_only')
+    const lease = begin(harness)
+    lease.markDispatched()
+
+    harness.guard.handleWindowOpen(harness.guest, 'http://10.0.0.4:8080/automated-popup')
+
+    await vi.waitFor(() => expect(harness.guest.loadURL).toHaveBeenCalledOnce())
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+    lease.finish()
+  })
+
+  it('keeps a registered manual tab usable while another surface has active automation', async () => {
+    const harness = createHarness()
+    const manualGuest = createGuest(harness.guest.session, harness.guest.id + 1)
+    harness.guard.registerGuest({ generation: 1, guest: manualGuest, surfaceId: 'surface-2' })
+    const lease = begin(harness)
+
+    await expect(
+      request(harness, {
+        url: 'http://127.0.0.1:3000/manual-tab',
+        webContents: manualGuest,
+        webContentsId: manualGuest.id
+      })
+    ).resolves.toEqual({})
+    harness.guard.handleWindowOpen(manualGuest, 'https://public.test/manual-popup')
+    await vi.waitFor(() => expect(manualGuest.loadURL).toHaveBeenCalledOnce())
+
+    lease.finish()
+  })
+
+  it('does not navigate a popup for an unregistered guest', () => {
+    const harness = createHarness()
+    const unknownGuest = createGuest(harness.guest.session, harness.guest.id + 1)
+
+    harness.guard.handleWindowOpen(unknownGuest, 'https://public.test/unknown-popup')
+
+    expect(unknownGuest.loadURL).not.toHaveBeenCalled()
+  })
+
+  it('does not cancel a manual download without an Agent operation', () => {
+    const harness = createHarness()
+    const item = Object.assign(new EventEmitter(), {
+      cancel: vi.fn(),
+      getURL: () => 'http://127.0.0.1:3000/manual-download',
+      pause: vi.fn(),
+      resume: vi.fn()
+    }) as unknown as DownloadItem
+
+    harness.emitter.emit('will-download', {} as Event, item, harness.guest)
+
+    expect(item.cancel).not.toHaveBeenCalled()
+    expect(item.pause).not.toHaveBeenCalled()
+    expect(item.resume).not.toHaveBeenCalled()
+  })
+
+  it('does not pause an automated download for approval in host-boundary-only mode', () => {
+    const harness = createHarness(undefined, ['10.0.0.4'], {}, 'host_boundaries_only')
+    const lease = begin(harness)
+    lease.markDispatched()
+    const item = Object.assign(new EventEmitter(), {
+      cancel: vi.fn(),
+      getReceivedBytes: () => 0,
+      getTotalBytes: () => 1024,
+      getURL: () => 'http://10.0.0.4:8080/automated-download',
+      pause: vi.fn(),
+      resume: vi.fn()
+    }) as unknown as DownloadItem
+
+    harness.emitter.emit('will-download', {} as Event, item, harness.guest)
+
+    expect(item.cancel).not.toHaveBeenCalled()
+    expect(item.pause).not.toHaveBeenCalled()
+    expect(item.resume).not.toHaveBeenCalled()
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.guard.snapshot().downloads).toBe(1)
+    item.emit('done', {} as Event, 'completed')
+    expect(harness.guard.snapshot().downloads).toBe(0)
+    lease.finish()
+  })
+
+  it('cancels a download attributed to an unregistered guest', () => {
+    const harness = createHarness()
+    const unknownGuest = createGuest(harness.guest.session, harness.guest.id + 1)
+    const item = Object.assign(new EventEmitter(), {
+      cancel: vi.fn(),
+      getURL: () => 'https://public.test/unknown-download',
+      pause: vi.fn(),
+      resume: vi.fn()
+    }) as unknown as DownloadItem
+
+    harness.emitter.emit('will-download', {} as Event, item, unknownGuest)
+
+    expect(item.cancel).toHaveBeenCalledOnce()
+    expect(item.pause).not.toHaveBeenCalled()
+    expect(item.resume).not.toHaveBeenCalled()
+  })
+
+  it('returns to manual browsing semantics without retaining a completed run authority', async () => {
     const harness = createHarness(undefined, ['93.184.216.34'])
     const lease = begin(harness)
     lease.finish()
@@ -621,7 +978,7 @@ describe('BrowserNetworkGuard', () => {
     await expect(request(harness, { url: 'https://public.test/page' })).resolves.toEqual({})
     await expect(
       request(harness, { id: 2, url: 'http://127.0.0.1:3000/late-subresource' })
-    ).resolves.toEqual({ cancel: true })
+    ).resolves.toEqual({})
     expect(harness.authorizer.requests).toHaveLength(0)
     expect(harness.guard.snapshot().stickyContexts).toBe(0)
   })

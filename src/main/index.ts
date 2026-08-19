@@ -229,6 +229,7 @@ app.whenReady().then(() => {
     dnsResolver: new ElectronSessionDnsResolver(managedBrowserSession)
   })
   browserNetworkGuard = new BrowserNetworkGuard({
+    accessPolicy: 'host_boundaries_only',
     coordinator: new BrowserRiskCoordinator({
       authorizer: new CoreBrowserRiskAuthorizer(coreServer),
       policy: browserNetworkPolicy

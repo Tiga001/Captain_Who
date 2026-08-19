@@ -29,6 +29,7 @@ import { SkillScriptToolActivity } from './SkillToolActivity'
 import { SkillInstallationToolActivity } from './SkillInstallationToolActivity'
 import { McpToolActivity } from './McpToolActivity'
 import { BuiltinCapabilityToolActivity } from './BuiltinCapabilityToolActivity'
+import { ActivateCapabilityToolActivity } from './ActivateCapabilityToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
@@ -66,10 +67,27 @@ export function AgentToolActivity({
   showImageGenerationPreview,
   toolIdentity
 }: AgentToolActivityProps): ReactElement {
+  if (
+    call.tool === 'activate_capability' &&
+    toolIdentity?.type === 'runtime_extension' &&
+    toolIdentity.extensionId === 'builtin.capabilities' &&
+    toolIdentity.toolName === 'activate_capability'
+  ) {
+    return (
+      <ActivateCapabilityToolActivity
+        call={call}
+        cancelled={cancelled && !result}
+        result={result}
+        settledStatus={settledStatus}
+      />
+    )
+  }
+
   if (toolIdentity?.type === 'builtin_capability') {
     return (
       <BuiltinCapabilityToolActivity
         cancelled={cancelled && !result}
+        displayReason={call.reason}
         identity={toolIdentity}
         result={result}
         settledStatus={settledStatus}

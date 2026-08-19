@@ -1,5 +1,322 @@
 use super::*;
 
+fn builtin_activation_identity() -> AgentToolIdentity {
+    AgentToolIdentity::RuntimeExtension {
+        extension_id: crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+            .to_string(),
+        tool_name: crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME.to_string(),
+    }
+}
+
+fn freeze_pending_provenance(checkpoint: &mut AgentRunCheckpoint, provenance: AgentToolIdentity) {
+    let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let frozen = checkpoint
+        .conversation_trace_items
+        .iter_mut()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                provenance,
+                ..
+            } if call_id == &pending_call_id => Some(provenance),
+            _ => None,
+        })
+        .expect("pending ToolCall has frozen provenance");
+    *frozen = provenance;
+}
+
+fn observer_setup_trace(
+    checkpoint: &AgentRunCheckpoint,
+    continuation: &AgentToolContinuation,
+    assistant_message_id: &str,
+) -> crate::ConversationTraceSnapshot {
+    let mut input: crate::AgentChatInput = serde_json::from_value(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "checkpoint-test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    input.resume_checkpoint = Some(checkpoint.clone());
+    input.tool_continuation = Some(continuation.clone());
+    input.assistant_message_id = Some(assistant_message_id.to_string());
+    crate::runtime::conversation_trace_from_input_checkpoint(
+        &input,
+        &ModelToolResultGate::new(crate::context::ContextTextBudget::heuristic(
+            crate::context::MODEL_TOOL_RESULT_MAX_TOKENS,
+        )),
+        &ConversationHistoryArchiveTraceMetadata::default(),
+    )
+    .unwrap()
+    .snapshot()
+}
+
+#[test]
+fn builtin_activation_action_id_preserves_the_standard_tool_result_prefix() {
+    let (mut checkpoint, mut continuation) =
+        restorable_checkpoint_fixture_for_pending_tool("activate_capability");
+    checkpoint.pending_action_id = Some(uuid::Uuid::new_v4().to_string());
+    freeze_pending_provenance(&mut checkpoint, builtin_activation_identity());
+    continuation.result.result = Some(json!({
+        "status": "active",
+        "capability": "browser_automation",
+    }));
+
+    assert!(!checkpoint_continuation_uses_external_mcp_projection(&checkpoint).unwrap());
+    let host_committed = crate::conversation_trace::
+        conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
+            &checkpoint,
+            &continuation.call,
+            &continuation.result,
+            Some("assistant-builtin-activation"),
+            "Browser automation is active for this task.",
+            ConversationHistoryArchiveTraceMetadata::default(),
+        )
+        .unwrap();
+    let observer_setup =
+        observer_setup_trace(&checkpoint, &continuation, "assistant-builtin-activation");
+    let restored =
+        restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+    let runtime_setup = restored.conversation_trace.snapshot();
+
+    assert_eq!(observer_setup.items, host_committed.items);
+    assert_eq!(runtime_setup.items, host_committed.items);
+    let rendered = serde_json::to_string(&runtime_setup.items).unwrap();
+    assert!(rendered.contains("browser_automation"));
+    assert!(!rendered.contains("\"type\":\"mcp_tool\""));
+    assert!(!rendered.contains("\"external\":true"));
+}
+
+#[test]
+fn builtin_activation_decisions_are_one_result_of_the_original_tool_call() {
+    let call_id = "builtin-activation-decision-call";
+    let approval = crate::AgentBuiltinCapabilityActivationApproval {
+        action_id: uuid::Uuid::new_v4().to_string(),
+        activation_id: uuid::Uuid::new_v4().to_string(),
+        run_id: "builtin-activation-decision-run".to_string(),
+        call_id: call_id.to_string(),
+        capability_id: "browser_automation".to_string(),
+        display_name: "Browser automation".to_string(),
+        reason: "Open the requested page".to_string(),
+        manifest_digest: format!("sha256:{}", "1".repeat(64)),
+        policy_revision: 1,
+        created_at: 1,
+        expires_at: 901,
+        approval_status: AgentApprovalStatus::Required,
+    };
+    let outcomes = [
+        (
+            "approved_and_succeeded",
+            crate::builtin_capability_activation_result(
+                &approval,
+                crate::CapabilityActivationState::Active,
+                None,
+            ),
+            None,
+        ),
+        (
+            "approved_and_failed",
+            AgentToolResult {
+                exact_archive_file: None,
+                call_id: call_id.to_string(),
+                tool: "activate_capability".to_string(),
+                ok: false,
+                result: Some(json!({
+                    "status": "revoked",
+                    "capability": "browser_automation",
+                })),
+                error: Some("fixture activation failure".to_string()),
+            },
+            None,
+        ),
+        (
+            "rejected_without_reason",
+            crate::builtin_capability_activation_rejected_result(&approval, None),
+            None,
+        ),
+        (
+            "rejected_with_reason",
+            crate::builtin_capability_activation_rejected_result(
+                &approval,
+                Some("Do not use the browser for this task"),
+            ),
+            Some("Do not use the browser for this task"),
+        ),
+    ];
+
+    for (label, result, expected_feedback) in outcomes {
+        assert_eq!(result.call_id, call_id, "{label}");
+        assert_eq!(result.tool, "activate_capability", "{label}");
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("userFeedback"))
+                .and_then(serde_json::Value::as_str),
+            expected_feedback,
+            "{label} must keep optional rejection guidance inside the ToolResult"
+        );
+        if label.starts_with("rejected") {
+            assert!(result.ok, "{label} is a normal tool settlement");
+        }
+
+        let (mut checkpoint, mut continuation) =
+            restorable_checkpoint_fixture_for_pending_tool("activate_capability");
+        let original_call_id = checkpoint.pending_tool_call_id.clone();
+        checkpoint.pending_action_id = Some(approval.action_id.clone());
+        freeze_pending_provenance(&mut checkpoint, builtin_activation_identity());
+        continuation.call.id = original_call_id.clone();
+        continuation.result = AgentToolResult {
+            call_id: original_call_id.clone(),
+            ..result
+        };
+        continuation.call.approval_status = if label.starts_with("rejected") {
+            AgentApprovalStatus::Rejected
+        } else {
+            AgentApprovalStatus::Approved
+        };
+
+        let restored =
+            restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+        let items = restored.conversation_trace.snapshot().items;
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall { call_id, .. }
+                        if call_id == &original_call_id
+                ))
+                .count(),
+            1,
+            "{label} must retain one original ToolCall"
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolResult { call_id, .. }
+                        if call_id == &original_call_id
+                ))
+                .count(),
+            1,
+            "{label} must settle with one ToolResult"
+        );
+    }
+}
+
+#[test]
+fn external_mcp_continuation_still_uses_its_content_free_projection() {
+    let (mut checkpoint, mut continuation) =
+        restorable_checkpoint_fixture_for_pending_tool("mcp__fixture__read");
+    checkpoint.pending_action_id = Some(uuid::Uuid::new_v4().to_string());
+    continuation.result.result = Some(json!({
+        "status": "completed",
+        "content": "external-result-canary-that-must-not-persist",
+        "isError": false,
+    }));
+
+    assert!(checkpoint_continuation_uses_external_mcp_projection(&checkpoint).unwrap());
+    let durable_result = crate::tools::mcp_tool_result_persistence_projection(&continuation.result);
+    let host_committed = crate::conversation_trace::
+        conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
+            &checkpoint,
+            &continuation.call,
+            &durable_result,
+            Some("assistant-external-mcp"),
+            "External MCP tool completed.",
+            ConversationHistoryArchiveTraceMetadata::default(),
+        )
+        .unwrap();
+    let observer_setup = observer_setup_trace(&checkpoint, &continuation, "assistant-external-mcp");
+    let restored =
+        restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+    let runtime_setup = restored.conversation_trace.snapshot();
+    let rendered = serde_json::to_string(&runtime_setup.items).unwrap();
+
+    assert_eq!(observer_setup.items, host_committed.items);
+    assert_eq!(runtime_setup.items, host_committed.items);
+    assert!(rendered.contains("\"type\":\"mcp_tool\""));
+    assert!(rendered.contains("\"external\":true"));
+    assert!(!rendered.contains("external-result-canary-that-must-not-persist"));
+    assert_eq!(
+        runtime_setup
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. }
+                    if call_id == &continuation.call.id
+            ))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn continuation_projection_rejects_untrusted_or_mismatched_approval_identity() {
+    let trusted_builtin = AgentToolIdentity::Builtin {
+        tool_name: "read_file".to_string(),
+    };
+    let cases = [
+        (
+            "unregistered",
+            AgentToolIdentity::Unregistered {
+                tool_name: "activate_capability".to_string(),
+            },
+            true,
+            true,
+        ),
+        (
+            "wrong_extension",
+            AgentToolIdentity::RuntimeExtension {
+                extension_id: "another.extension".to_string(),
+                tool_name: "activate_capability".to_string(),
+            },
+            true,
+            true,
+        ),
+        (
+            "ordinary_builtin_with_action",
+            trusted_builtin.clone(),
+            true,
+            true,
+        ),
+        (
+            "ordinary_builtin_without_action",
+            trusted_builtin,
+            false,
+            false,
+        ),
+        (
+            "activation_without_action",
+            builtin_activation_identity(),
+            false,
+            true,
+        ),
+    ];
+
+    for (label, provenance, has_action_id, should_fail) in cases {
+        let (mut checkpoint, _) =
+            restorable_checkpoint_fixture_for_pending_tool("activate_capability");
+        checkpoint.pending_action_id = has_action_id.then(|| uuid::Uuid::new_v4().to_string());
+        freeze_pending_provenance(&mut checkpoint, provenance);
+
+        let result = checkpoint_continuation_uses_external_mcp_projection(&checkpoint);
+        assert_eq!(result.is_err(), should_fail, "{label}");
+        if !should_fail {
+            assert!(!result.unwrap(), "{label}");
+        }
+    }
+
+    let (mut mcp_without_action, _) =
+        restorable_checkpoint_fixture_for_pending_tool("mcp__fixture__read");
+    mcp_without_action.pending_action_id = None;
+    assert!(checkpoint_continuation_uses_external_mcp_projection(&mcp_without_action).is_err());
+}
+
 #[test]
 fn approval_checkpoint_rejects_private_queued_tool_arguments_without_leaking_them() {
     let secret = "fixture-token-that-must-not-persist";

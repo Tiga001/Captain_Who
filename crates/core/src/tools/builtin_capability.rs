@@ -27,6 +27,7 @@ const BUILTIN_TOOL_MODEL_MAX_DEPTH: usize = 16;
 const BUILTIN_TOOL_MODEL_MAX_OBJECT_FIELDS: usize = 64;
 const BUILTIN_TOOL_MODEL_MAX_ARRAY_ITEMS: usize = 64;
 const BUILTIN_TOOL_MODEL_MAX_STRING_CHARS: usize = 16 * 1024;
+const BUILTIN_TOOL_DISPLAY_REASON_MAX_BYTES: usize = 512;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -257,7 +258,7 @@ impl AgentTool for BuiltinCapabilityAgentTool {
     }
 
     fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
-        builtin_capability_private_call_projection(call)
+        builtin_capability_event_call_projection(call)
     }
 
     fn checkpoint_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
@@ -431,6 +432,50 @@ fn builtin_capability_private_call_projection(call: &AgentToolCall) -> AgentTool
     projected.args = json!({});
     projected.reason = None;
     projected
+}
+
+fn builtin_capability_event_call_projection(call: &AgentToolCall) -> AgentToolCall {
+    let mut projected = builtin_capability_private_call_projection(call);
+    projected.reason = call
+        .args
+        .get("call_reason")
+        .and_then(Value::as_str)
+        .and_then(sanitize_builtin_capability_display_reason);
+    projected
+}
+
+fn sanitize_builtin_capability_display_reason(value: &str) -> Option<String> {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '\u{00ad}'
+                        | '\u{061c}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{feff}'
+                )
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    let mut end = sanitized.len().min(BUILTIN_TOOL_DISPLAY_REASON_MAX_BYTES);
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    (end > 0).then(|| sanitized[..end].to_string())
 }
 
 fn builtin_capability_persistence_projection(result: &AgentToolResult) -> AgentToolResult {
@@ -817,19 +862,34 @@ mod tests {
         let call = AgentToolCall {
             id: "private-call".to_string(),
             tool: "browser_snapshot".to_string(),
-            args: json!({"value": secret}),
+            args: json!({
+                "value": secret,
+                "call_reason": "Read\u{202e} the requested\npage",
+            }),
             approval_status: AgentApprovalStatus::Approved,
             reason: Some(secret.to_string()),
         };
         for projected in [
             tool.trace_call_projection(&call),
-            tool.event_call_projection(&call),
             tool.checkpoint_call_projection(&call),
         ] {
             assert_eq!(projected.args, json!({}));
             assert_eq!(projected.reason, None);
             assert!(!serde_json::to_string(&projected).unwrap().contains(secret));
         }
+        let event_call = tool.event_call_projection(&call);
+        assert_eq!(event_call.args, json!({}));
+        assert_eq!(
+            event_call.reason.as_deref(),
+            Some("Read  the requested page")
+        );
+        assert!(!serde_json::to_string(&event_call).unwrap().contains(secret));
+        assert!(
+            sanitize_builtin_capability_display_reason(&"界".repeat(512))
+                .unwrap()
+                .len()
+                <= BUILTIN_TOOL_DISPLAY_REASON_MAX_BYTES
+        );
         let raw_result = AgentToolResult {
             exact_archive_file: None,
             call_id: call.id.clone(),

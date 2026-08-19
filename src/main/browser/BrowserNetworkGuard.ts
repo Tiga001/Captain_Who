@@ -24,6 +24,9 @@ const MAX_ACTIVE_DOWNLOADS = 4
 const MAX_SINGLE_DOWNLOAD_BYTES = 64 * 1024 * 1024
 const MAX_TOTAL_ACTIVE_DOWNLOAD_BYTES = 128 * 1024 * 1024
 
+/** Host-owned policy; Renderer and model cannot select or weaken it. */
+export type BrowserNetworkAccessPolicy = 'host_boundaries_only' | 'risk_approval'
+
 interface GuestRecord {
   active?: ActiveOperation
   generation: number
@@ -48,6 +51,13 @@ interface ActiveDownload {
   view: OperationView
 }
 
+interface PassiveDownload {
+  handleDone: () => void
+  handleUpdated: () => void
+  item: DownloadItem
+  record: GuestRecord
+}
+
 interface OperationView {
   dispatchCertainty: 'definitely_not_dispatched' | 'possibly_dispatched'
   finish: () => void
@@ -60,9 +70,20 @@ export class BrowserNetworkOperationLease {
 
   constructor(
     readonly operation: BrowserRiskOperation,
+    private readonly preflightNavigation: (url: string) => Promise<void>,
     private readonly markLeaseDispatched: () => void,
     private readonly finishLease: () => void
   ) {}
+
+  async preflight(url: string): Promise<void> {
+    if (this.finished) {
+      throw new BrowserRiskError({
+        code: 'browser.risk_cancelled',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+    }
+    await this.preflightNavigation(url)
+  }
 
   markDispatched(): void {
     if (!this.finished) {
@@ -98,11 +119,13 @@ export class BrowserNetworkOperationLease {
 }
 
 export class BrowserNetworkGuard {
+  private readonly accessPolicy: BrowserNetworkAccessPolicy
   private readonly coordinator: BrowserRiskCoordinator
   private readonly downloads = new Set<ActiveDownload>()
   private readonly expectedSession: Session
   private readonly guests = new Map<number, GuestRecord>()
   private readonly policy: BrowserNetworkPolicy
+  private readonly passiveDownloads = new Set<PassiveDownload>()
   private readonly redirectTargets = new Map<number, string>()
   private disposed = false
   private installed = false
@@ -119,6 +142,7 @@ export class BrowserNetworkGuard {
   }
 
   private readonly handleBeforeRedirect = (details: OnBeforeRedirectListenerDetails): void => {
+    if (this.accessPolicy === 'host_boundaries_only') return
     if (!this.requestGuest(details)) return
     if (this.redirectTargets.size >= MAX_REDIRECT_MARKERS) this.redirectTargets.clear()
     this.redirectTargets.set(details.id, safeRequestMarker(details.redirectURL))
@@ -134,12 +158,18 @@ export class BrowserNetworkGuard {
     webContents: WebContents
   ): void => {
     const record = this.guests.get(webContents.id)
-    if (!record || record.guest !== webContents) return
+    if (!record || record.guest !== webContents) {
+      item.cancel()
+      return
+    }
     const view = this.operationFor(record)
     if (!view) {
-      // Downloads have already crossed a side-effect boundary. Without a task-scoped automation
-      // operation there is no typed BrowserRiskApproval to bind, so fail closed on the exact item.
-      item.cancel()
+      // A manual download belongs to the user's browser session, not to an Agent operation. It
+      // must not inherit or require a task-scoped BrowserRiskGrant.
+      return
+    }
+    if (this.accessPolicy === 'host_boundaries_only') {
+      this.trackPassiveDownload(record, item)
       return
     }
     if (this.downloads.size >= MAX_ACTIVE_DOWNLOADS || this.downloadBudgetExceeded(item)) {
@@ -228,10 +258,12 @@ export class BrowserNetworkGuard {
   }
 
   constructor(options: {
+    accessPolicy?: BrowserNetworkAccessPolicy
     coordinator: BrowserRiskCoordinator
     expectedSession: Session
     policy: BrowserNetworkPolicy
   }) {
+    this.accessPolicy = options.accessPolicy ?? 'risk_approval'
     this.coordinator = options.coordinator
     this.expectedSession = options.expectedSession
     this.policy = options.policy
@@ -295,6 +327,21 @@ export class BrowserNetworkGuard {
     record.active = active
     return new BrowserNetworkOperationLease(
       operation,
+      async (url) => {
+        if (this.accessPolicy === 'risk_approval') {
+          await operation.check({
+            url,
+            trigger: 'tool_argument',
+            dispatchCertainty: 'definitely_not_dispatched'
+          })
+          return
+        }
+        await this.authorizeHostBoundary(url, {
+          dispatchCertainty: 'definitely_not_dispatched',
+          finish: () => undefined,
+          operation
+        })
+      },
       () => {
         if (record.active === active) active.dispatched = true
       },
@@ -316,26 +363,26 @@ export class BrowserNetworkGuard {
       record.active?.operation.close()
       record.active = undefined
       this.cancelDownloadsFor(record, true)
+      this.cancelPassiveDownloadsFor(record)
     }
   }
 
-  async preflight(
-    lease: BrowserNetworkOperationLease,
-    url: string,
-    trigger: BrowserRiskTrigger = 'tool_argument'
-  ): Promise<void> {
-    await lease.operation.check({
-      url,
-      trigger,
-      dispatchCertainty: 'definitely_not_dispatched'
-    })
+  async preflight(lease: BrowserNetworkOperationLease, url: string): Promise<void> {
+    await lease.preflight(url)
   }
 
   handleWindowOpen(guest: WebContents, url: string): void {
     const record = this.guests.get(guest.id)
     if (!record || record.guest !== guest) return
     const view = this.operationFor(record)
-    if (!view) return
+    if (!view) {
+      this.navigateManualGuest(guest, url)
+      return
+    }
+    if (this.accessPolicy === 'host_boundaries_only') {
+      this.navigateAutomatedGuest(guest, url, view)
+      return
+    }
     const approvalAndNavigation = view.operation
       .check({
         url,
@@ -402,7 +449,7 @@ export class BrowserNetworkGuard {
     }
     return {
       activeOperations,
-      downloads: this.downloads.size,
+      downloads: this.downloads.size + this.passiveDownloads.size,
       guests: this.guests.size,
       redirectMarkers: this.redirectTargets.size,
       stickyContexts
@@ -415,17 +462,28 @@ export class BrowserNetworkGuard {
       return
     }
     const record = this.requestGuest(details)
-    if (!record) {
-      throw new Error('browser.network_guard.unregistered_request')
-    }
     if (
+      !record ||
       (details.webContents !== undefined && record.guest !== details.webContents) ||
       record.guest.isDestroyed()
     ) {
-      throw new Error('browser.network_guard.unregistered_request')
+      if (hasExplicitRequestIdentity(details)) {
+        throw new Error('browser.network_guard.unregistered_request')
+      }
+      if (this.accessPolicy === 'host_boundaries_only' && isEmbeddedSubresource(details)) return
+      await this.authorizeManualRequest(details.url)
+      if (this.accessPolicy === 'risk_approval' && this.hasActiveOperation()) {
+        throw new Error('browser.network_guard.unregistered_request')
+      }
+      return
     }
 
     const view = this.operationFor(record)
+    if (this.accessPolicy === 'host_boundaries_only') {
+      if (isEmbeddedSubresource(details)) return
+      await this.authorizeHostBoundary(details.url, view)
+      return
+    }
     const trigger = this.requestTrigger(details)
     const additionalRisks: BrowserRiskKind[] = []
     const fileUpload = hasFileUpload(details.uploadData)
@@ -446,13 +504,64 @@ export class BrowserNetworkGuard {
       return
     }
 
-    // There is no typed task/run identity to bind a BrowserRiskApproval to. Public HTTPS stays
-    // usable, but any reviewable network boundary fails closed instead of inheriting authority
-    // from a completed or previous automation operation.
-    const assessment = await this.policy.assess(details.url)
-    if (assessment.disposition !== 'allow') {
+    await this.authorizeManualRequest(details.url)
+  }
+
+  private async authorizeManualRequest(url: string): Promise<void> {
+    if ((await this.policy.assessStaticHostBoundary(url)) !== null) {
       throw new Error('browser.unsupported_host_boundary')
     }
+  }
+
+  private async authorizeHostBoundary(url: string, view: OperationView | null): Promise<void> {
+    if ((await this.policy.assessStaticHostBoundary(url)) === null) return
+    const failure: BrowserRiskFailure = {
+      code: 'browser.unsupported_host_boundary',
+      dispatchCertainty: view?.dispatchCertainty ?? 'definitely_not_dispatched'
+    }
+    view?.operation.recordFailure(failure)
+    throw new BrowserRiskError(failure)
+  }
+
+  private hasActiveOperation(): boolean {
+    for (const record of this.guests.values()) {
+      if (record.active) return true
+    }
+    return false
+  }
+
+  private navigateManualGuest(guest: WebContents, url: string): void {
+    if (guest.isDestroyed() || guest.session !== this.expectedSession) return
+    void this.authorizeManualRequest(url).then(
+      () => {
+        setImmediate(() => {
+          if (guest.isDestroyed()) return
+          void guest.loadURL(url).catch(() => {
+            // Electron errors can contain query values; keep manual navigation failures out of
+            // logs.
+          })
+        })
+      },
+      () => undefined
+    )
+  }
+
+  private navigateAutomatedGuest(guest: WebContents, url: string, view: OperationView): void {
+    const navigation = this.authorizeHostBoundary(url, view)
+      .then(async () => {
+        if (guest.isDestroyed()) return
+        try {
+          await guest.loadURL(url)
+        } catch {
+          view.operation.recordFailure({
+            code: 'browser.risk_outcome_unknown',
+            dispatchCertainty: 'possibly_dispatched'
+          })
+        }
+      })
+      .catch(() => undefined)
+      .finally(view.finish)
+    void view.operation.track(navigation).catch(() => undefined)
   }
 
   private requestTrigger(details: OnBeforeRequestListenerDetails): BrowserRiskTrigger {
@@ -465,20 +574,31 @@ export class BrowserNetworkGuard {
   }
 
   private requestGuest(details: {
+    frame?: OnBeforeRequestListenerDetails['frame']
     webContents?: WebContents
     webContentsId?: number
   }): GuestRecord | undefined {
-    const objectWebContentsId = details.webContents?.id
-    if (
-      details.webContentsId !== undefined &&
-      objectWebContentsId !== undefined &&
-      details.webContentsId !== objectWebContentsId
-    ) {
+    const candidates: (GuestRecord | undefined)[] = []
+    if (details.webContentsId !== undefined) {
+      candidates.push(this.guests.get(details.webContentsId))
+    }
+    if (details.webContents !== undefined) {
+      const record = this.guests.get(details.webContents.id)
+      candidates.push(record?.guest === details.webContents ? record : undefined)
+    }
+    if (details.frame !== undefined && details.frame !== null) {
+      const topFrame = details.frame.top ?? (details.frame.parent === null ? details.frame : null)
+      candidates.push(
+        topFrame
+          ? [...this.guests.values()].find((record) => record.guest.mainFrame === topFrame)
+          : undefined
+      )
+    }
+    if (candidates.length === 0 || candidates.some((candidate) => candidate === undefined)) {
       return undefined
     }
-    const record = this.guests.get(details.webContentsId ?? objectWebContentsId ?? -1)
-    if (details.webContents !== undefined && record?.guest !== details.webContents) return undefined
-    return record
+    const [first] = candidates as GuestRecord[]
+    return candidates.every((candidate) => candidate === first) ? first : undefined
   }
 
   private operationFor(record: GuestRecord): OperationView | null {
@@ -502,6 +622,7 @@ export class BrowserNetworkGuard {
     record.active?.operation.close()
     record.active = undefined
     this.cancelDownloadsFor(record, true)
+    this.cancelPassiveDownloadsFor(record)
     this.guests.delete(record.guest.id)
   }
 
@@ -530,6 +651,51 @@ export class BrowserNetworkGuard {
     }
   }
 
+  private trackPassiveDownload(record: GuestRecord, item: DownloadItem): void {
+    if (
+      this.downloads.size + this.passiveDownloads.size >= MAX_ACTIVE_DOWNLOADS ||
+      this.downloadBudgetExceeded(item)
+    ) {
+      item.cancel()
+      return
+    }
+    const download = {} as PassiveDownload
+    const cleanup = (): void => {
+      if (!this.passiveDownloads.delete(download)) return
+      item.removeListener('done', download.handleDone)
+      item.removeListener('updated', download.handleUpdated)
+    }
+    const handleDone = (): void => cleanup()
+    const handleUpdated = (): void => {
+      if (!this.passiveDownloads.has(download) || !this.downloadBudgetExceeded(item, download)) {
+        return
+      }
+      cleanup()
+      try {
+        item.cancel()
+      } catch {
+        // The DownloadItem may already have reached a terminal state.
+      }
+    }
+    Object.assign(download, { handleDone, handleUpdated, item, record })
+    this.passiveDownloads.add(download)
+    item.once('done', handleDone)
+    item.on('updated', handleUpdated)
+  }
+
+  private cancelPassiveDownloadsFor(record: GuestRecord): void {
+    for (const download of [...this.passiveDownloads]) {
+      if (download.record !== record || !this.passiveDownloads.delete(download)) continue
+      download.item.removeListener('done', download.handleDone)
+      download.item.removeListener('updated', download.handleUpdated)
+      try {
+        download.item.cancel()
+      } catch {
+        // A terminal DownloadItem can reject cancellation.
+      }
+    }
+  }
+
   private finishDownload(
     download: ActiveDownload,
     state: 'completed' | 'cancelled' | 'interrupted'
@@ -546,7 +712,10 @@ export class BrowserNetworkGuard {
     download.settleLifetime()
   }
 
-  private downloadBudgetExceeded(item: DownloadItem, exclude?: ActiveDownload): boolean {
+  private downloadBudgetExceeded(
+    item: DownloadItem,
+    exclude?: ActiveDownload | PassiveDownload
+  ): boolean {
     const candidate = Math.max(
       safeDownloadBytes(item, 'getTotalBytes'),
       safeDownloadBytes(item, 'getReceivedBytes')
@@ -558,6 +727,14 @@ export class BrowserNetworkGuard {
       total += Math.max(
         safeDownloadBytes(active.item, 'getTotalBytes'),
         safeDownloadBytes(active.item, 'getReceivedBytes')
+      )
+      if (total > MAX_TOTAL_ACTIVE_DOWNLOAD_BYTES) return true
+    }
+    for (const passive of this.passiveDownloads) {
+      if (passive === exclude) continue
+      total += Math.max(
+        safeDownloadBytes(passive.item, 'getTotalBytes'),
+        safeDownloadBytes(passive.item, 'getReceivedBytes')
       )
       if (total > MAX_TOTAL_ACTIVE_DOWNLOAD_BYTES) return true
     }
@@ -607,6 +784,24 @@ function hasFileUpload(uploadData: OnBeforeRequestListenerDetails['uploadData'])
       typeof entry === 'object' &&
       (Object.hasOwn(entry, 'file') || Object.hasOwn(entry, 'blobUUID'))
   )
+}
+
+function hasExplicitRequestIdentity(details: OnBeforeRequestListenerDetails): boolean {
+  return (
+    details.webContentsId !== undefined ||
+    details.webContents !== undefined ||
+    (details.frame !== undefined && details.frame !== null)
+  )
+}
+
+function isEmbeddedSubresource(details: OnBeforeRequestListenerDetails): boolean {
+  if (details.resourceType === 'mainFrame') return false
+  try {
+    const protocol = new URL(details.url).protocol
+    return protocol === 'blob:' || protocol === 'data:'
+  } catch {
+    return false
+  }
 }
 
 function safeDownloadBytes(

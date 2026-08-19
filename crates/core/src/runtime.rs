@@ -74,9 +74,9 @@ use crate::{
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
-    continuation_result_sequence, create_run_checkpoint,
-    restore_run_checkpoint_with_model_projection, QueuedToolCall, RestoredRunCheckpoint,
-    RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
+    checkpoint_continuation_uses_external_mcp_projection, continuation_result_sequence,
+    create_run_checkpoint, restore_run_checkpoint_with_model_projection, QueuedToolCall,
+    RestoredRunCheckpoint, RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{

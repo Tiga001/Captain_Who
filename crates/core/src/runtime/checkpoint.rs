@@ -25,8 +25,8 @@ use crate::protocol::{
     AgentAssistantTurnCheckpointIdentity, AgentContextCheckpointItem,
     AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
     AgentProviderToolCallIdentity, AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint,
-    AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
-    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, AgentToolIdentity,
+    ModelCapabilities, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::resolve_provider_runtime_capabilities;
@@ -805,6 +805,8 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         ));
     }
 
+    let continuation_uses_external_mcp_projection =
+        checkpoint_continuation_uses_external_mcp_projection(&checkpoint)?;
     let continuation_result_sequence =
         continuation_result_sequence(&checkpoint, &continuation.call.id);
     let provider_profile_config = checkpoint.provider_profile_config.clone();
@@ -866,13 +868,12 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         name: continuation.call.tool.clone(),
         args: continuation.call.args.clone(),
     };
-    let is_mcp = checkpoint.pending_action_id.is_some();
-    let durable_result = if is_mcp {
+    let durable_result = if continuation_uses_external_mcp_projection {
         crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
     } else {
         canonical_tool_result_for_context(&continuation.result)
     };
-    let llm_result = if is_mcp {
+    let llm_result = if continuation_uses_external_mcp_projection {
         crate::tools::mcp_tool_result_model_projection(&continuation.result)
     } else {
         crate::tools::model_projection_for_persisted_continuation(&continuation.result)
@@ -884,7 +885,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         &llm_result,
         archive_metadata,
     )?;
-    let persisted_model_observation = if is_mcp {
+    let persisted_model_observation = if continuation_uses_external_mcp_projection {
         super::finalize_model_tool_observation(
             model_tool_result_gate,
             &continuation.call.id,
@@ -898,9 +899,9 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     context.append_tool_continuation_in_batch(
         &continuation_call,
         model_observation.clone(),
-        is_mcp.then_some(persisted_model_observation.clone()),
+        continuation_uses_external_mcp_projection.then_some(persisted_model_observation.clone()),
         !continuation.result.ok,
-        is_mcp,
+        continuation_uses_external_mcp_projection,
         assistant_message_id.map(|assistant_message_id| {
             ContextOrigin::conversation_trace_item(
                 assistant_message_id,
@@ -945,6 +946,86 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         provider_protocol_key,
         provider_continuation_refs,
     })
+}
+
+/// Selects the external-MCP continuation projection from the immutable Tool provenance frozen in
+/// the approval checkpoint.
+///
+/// `pending_action_id` is only the identity of an approval record. External MCP calls and built-in
+/// capability activation both need an action UUID distinct from the Provider Tool Call ID, so the
+/// field cannot safely double as a tool-kind flag. Re-projecting a built-in result as MCP would
+/// rewrite an already committed ToolResult and violate the append-only Trace prefix.
+pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
+    checkpoint: &AgentRunCheckpoint,
+) -> AgentResult<bool> {
+    let mut matching_provenance = checkpoint
+        .conversation_trace_items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                provenance,
+                ..
+            } if call_id == &checkpoint.pending_tool_call_id => Some(provenance),
+            _ => None,
+        });
+    let provenance = matching_provenance
+        .next()
+        .ok_or_else(|| AgentError::new("无法恢复运行检查点：待审批调用缺少冻结的工具来源身份。"))?;
+    if matching_provenance.next().is_some() {
+        return Err(AgentError::new(
+            "无法恢复运行检查点：待审批调用存在重复的工具来源身份。",
+        ));
+    }
+    match (provenance, checkpoint.pending_action_id.as_deref()) {
+        (AgentToolIdentity::Mcp { .. }, Some(_)) => Ok(true),
+        (AgentToolIdentity::Mcp { .. }, None) => Err(AgentError::new(
+            "无法恢复运行检查点：外部 MCP 审批缺少冻结的动作身份。",
+        )),
+        (
+            AgentToolIdentity::RuntimeExtension {
+                extension_id,
+                tool_name,
+            },
+            Some(_),
+        ) if extension_id
+            == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+            && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME =>
+        {
+            Ok(false)
+        }
+        (
+            AgentToolIdentity::RuntimeExtension {
+                extension_id,
+                tool_name,
+            },
+            None,
+        ) if extension_id
+            == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+            && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME =>
+        {
+            Err(AgentError::new(
+                "无法恢复运行检查点：内置能力激活审批缺少冻结的动作身份。",
+            ))
+        }
+        (AgentToolIdentity::Unregistered { .. }, _) => Err(AgentError::new(
+            "无法恢复运行检查点：未注册工具不能获得续跑权限。",
+        )),
+        (
+            AgentToolIdentity::Builtin { .. }
+            | AgentToolIdentity::RuntimeExtension { .. }
+            | AgentToolIdentity::BuiltinCapability { .. },
+            None,
+        ) => Ok(false),
+        (
+            AgentToolIdentity::Builtin { .. }
+            | AgentToolIdentity::RuntimeExtension { .. }
+            | AgentToolIdentity::BuiltinCapability { .. },
+            Some(_),
+        ) => Err(AgentError::new(
+            "无法恢复运行检查点：审批动作身份与冻结的工具来源不匹配。",
+        )),
+    }
 }
 
 fn validate_checkpoint_provider_protocol_revision(

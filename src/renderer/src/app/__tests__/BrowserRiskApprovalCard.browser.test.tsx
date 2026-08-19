@@ -6,6 +6,7 @@ import '../../styles/global.css'
 import '../../features/chat/ChatConversationPage.approvals.css'
 
 const translations: Record<string, string> = {
+  'mcp.builtin.browserAutomation.name': 'Browser automation',
   'agent.approval.dialog.approve': 'Yes',
   'agent.approval.dialog.reject': 'No',
   'agent.approval.dialog.rejectPlaceholder': 'No, tell me how to adjust',
@@ -89,8 +90,9 @@ describe('BrowserRiskApprovalCard', () => {
     )
 
     expect(screen.container.textContent).toContain(
-      'Allow “<img src=x onerror=alert(1)>Browser automation”'
+      'Allow “Browser automation” to access this destination?'
     )
+    expect(screen.container.textContent).not.toContain(proposed.approval.displayName)
     expect(screen.container.textContent).toContain(
       '<script>alert(1)</script>Inspect the local fixture'
     )

@@ -8,7 +8,8 @@ use crate::tools::{
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-pub(super) const BUILTIN_CAPABILITY_EXTENSION_ID: &str = "builtin.capabilities";
+pub(super) const BUILTIN_CAPABILITY_EXTENSION_ID: &str =
+    crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID;
 const BUILTIN_CAPABILITY_EXTENSION_VERSION: u32 = 1;
 
 pub(super) struct BuiltinCapabilityExtension {

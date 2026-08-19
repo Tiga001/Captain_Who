@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AgentBrowserRiskKind, AgentProposedAction } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
+import { getBuiltinCapabilityDisplayName } from '../../mcp/builtinCapabilityPresentation'
 import { toSafeMcpDisplayText } from '../../mcp/mcpSafeDisplay'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
 
@@ -94,7 +95,7 @@ export function BrowserRiskApprovalCard({
     operation()
   }
 
-  const displayName = toSafeMcpDisplayText(approval.displayName, 256)
+  const displayName = getBuiltinCapabilityDisplayName(approval.capabilityId, t)
   const reason = toSafeMcpDisplayText(approval.reason, 4096)
   const normalizedUrl = toSafeMcpDisplayText(approval.destination.normalizedUrl, 2048)
   const origin = toSafeMcpDisplayText(approval.destination.origin, 512)

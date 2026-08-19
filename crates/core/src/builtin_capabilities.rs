@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 pub const BUILTIN_CAPABILITY_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS: u64 = 15 * 60;
+pub(crate) const BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID: &str = "builtin.capabilities";
+pub(crate) const ACTIVATE_CAPABILITY_TOOL_NAME: &str = "activate_capability";
 /// Process-memory grants are run-bound and deliberately outlive the approval prompt.
 ///
 /// They are never persisted, are unusable from another run, and are revalidated against the live

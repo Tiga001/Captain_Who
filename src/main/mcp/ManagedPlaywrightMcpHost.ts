@@ -315,11 +315,7 @@ export class ManagedPlaywrightMcpHost {
                   )
                 }
                 try {
-                  await riskLease.operation.check({
-                    url,
-                    trigger: 'tool_argument',
-                    dispatchCertainty: 'definitely_not_dispatched'
-                  })
+                  await riskLease.preflight(url)
                 } catch {
                   return riskFailureResult(riskLease.failure())
                 }

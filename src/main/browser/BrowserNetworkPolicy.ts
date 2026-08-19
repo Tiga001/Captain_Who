@@ -118,6 +118,7 @@ export class BrowserNetworkPolicy {
   private readonly dnsResolver: BrowserDnsResolver
   private readonly dnsTimeoutMs: number
   private readonly mcpControlEndpoints: ReadonlySet<string>
+  private readonly protectedPorts: ReadonlySet<number>
   private readonly identityKey = randomBytes(32)
   private readonly pendingResolutions = new Map<
     string,
@@ -137,6 +138,42 @@ export class BrowserNetworkPolicy {
     this.dnsResolver = options.dnsResolver ?? new NodeBrowserDnsResolver()
     this.dnsTimeoutMs = normalizeTimeout(options.dnsTimeoutMs)
     this.mcpControlEndpoints = new Set((options.mcpControlEndpoints ?? []).map(endpointKey))
+    this.protectedPorts = new Set([
+      ...blockedOrigins.map((entry) => entry.port),
+      ...(options.debugEndpoints ?? []).map((entry) => entry.port),
+      ...(options.mcpControlEndpoints ?? []).map((entry) => entry.port)
+    ])
+  }
+
+  /**
+   * Checks only boundaries that are known from the URL and Host-owned endpoint configuration.
+   *
+   * Manual browsing and Host-configured unrestricted automation use this check instead of
+   * `assess`: reviewable HTTP/private-network risks do not need a destination approval and a
+   * proxy-owned DNS result (including fake-IP ranges) must not break the browser. Non-reviewable
+   * Host boundaries remain forbidden regardless of who initiated the navigation.
+   */
+  async assessStaticHostBoundary(
+    untrustedUrl: string,
+    signal?: AbortSignal
+  ): Promise<BrowserHostBoundaryCode | null> {
+    const literal = this.assessLiteralHostBoundary(untrustedUrl, true)
+    if ('boundary' in literal) return literal.boundary
+    const { url } = literal
+
+    const hostname = normalizeHostname(url.hostname)
+    const port = effectivePort(url)
+
+    // DNS aliases matter only on ports that can reach a protected Host service. Resolving every
+    // manual destination would make normal browsing depend on local DNS even when Chromium is
+    // using a proxy or fake-IP network. Protected ports remain fail closed.
+    if (this.protectedPorts.has(port)) {
+      const resolved = await this.resolve(hostname, signal)
+      if (resolved.overflow) return 'resolution_overflow'
+      if (resolved.failed) return 'resolution_unavailable'
+      return this.classifyResolvedBoundary(resolved.addresses, port)
+    }
+    return null
   }
 
   async assess(
@@ -144,36 +181,15 @@ export class BrowserNetworkPolicy {
     options: BrowserDestinationAssessmentOptions = {}
   ): Promise<BrowserDestinationAssessment> {
     if (this.disposed) return { disposition: 'deny', code: 'resolution_unavailable' }
-    if (typeof untrustedUrl !== 'string' || byteLength(untrustedUrl) > MAX_URL_BYTES) {
-      return { disposition: 'deny', code: 'unsupported_scheme' }
-    }
-
-    let url: URL
-    try {
-      url = new URL(untrustedUrl)
-    } catch {
-      return { disposition: 'deny', code: 'unsupported_scheme' }
-    }
-
-    const schemeBoundary = classifySchemeBoundary(url.protocol)
-    if (schemeBoundary) return { disposition: 'deny', code: schemeBoundary }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      return { disposition: 'deny', code: 'unsupported_scheme' }
-    }
+    const literal = this.assessLiteralHostBoundary(untrustedUrl)
+    if ('boundary' in literal) return { disposition: 'deny', code: literal.boundary }
+    const { url } = literal
 
     const hostname = normalizeHostname(url.hostname)
     const port = effectivePort(url)
-    const endpoint = endpointKey({ host: hostname, port })
-    if (this.blockedOrigins.has(url.origin)) {
-      return { disposition: 'deny', code: 'main_renderer' }
-    }
-    if (this.debugEndpoints.has(endpoint)) {
-      return { disposition: 'deny', code: 'internal_debug' }
-    }
-    if (this.mcpControlEndpoints.has(endpoint)) {
-      return { disposition: 'deny', code: 'mcp_control' }
-    }
 
+    // Active automation resolves exactly once here. Do not call the manual async boundary helper:
+    // a second lookup would consume a new DNS-rebinding answer before the grant identity is built.
     const resolved = await this.resolve(hostname, options.signal)
     if (resolved.overflow) return { disposition: 'deny', code: 'resolution_overflow' }
     if (resolved.failed) return { disposition: 'deny', code: 'resolution_unavailable' }
@@ -210,6 +226,42 @@ export class BrowserNetworkPolicy {
     return riskKinds.length === 0
       ? { disposition: 'allow', destination, riskKinds: [] }
       : { disposition: 'approval_required', destination, riskKinds }
+  }
+
+  private assessLiteralHostBoundary(
+    untrustedUrl: string,
+    allowWebSocket = false
+  ): { boundary: BrowserHostBoundaryCode } | { url: URL } {
+    if (typeof untrustedUrl !== 'string' || byteLength(untrustedUrl) > MAX_URL_BYTES) {
+      return { boundary: 'unsupported_scheme' }
+    }
+
+    let url: URL
+    try {
+      url = new URL(untrustedUrl)
+    } catch {
+      return { boundary: 'unsupported_scheme' }
+    }
+
+    const schemeBoundary = classifySchemeBoundary(url.protocol)
+    if (schemeBoundary) return { boundary: schemeBoundary }
+    const supportedNetworkScheme =
+      url.protocol === 'http:' ||
+      url.protocol === 'https:' ||
+      (allowWebSocket && (url.protocol === 'ws:' || url.protocol === 'wss:'))
+    if (!supportedNetworkScheme) {
+      return { boundary: 'unsupported_scheme' }
+    }
+
+    const hostname = normalizeHostname(url.hostname)
+    const port = effectivePort(url)
+    const endpoint = endpointKey({ host: hostname, port })
+    if (this.blockedOrigins.has(url.origin) || this.rendererEndpoints.has(endpoint)) {
+      return { boundary: 'main_renderer' }
+    }
+    if (this.debugEndpoints.has(endpoint)) return { boundary: 'internal_debug' }
+    if (this.mcpControlEndpoints.has(endpoint)) return { boundary: 'mcp_control' }
+    return { url }
   }
 
   private async resolve(hostname: string, callerSignal?: AbortSignal): Promise<ResolutionResult> {
@@ -477,7 +529,7 @@ function normalizeConfiguredOrigin(
 
 function effectivePort(url: URL): number {
   if (url.port.length > 0) return Number(url.port)
-  return url.protocol === 'https:' ? 443 : 80
+  return url.protocol === 'https:' || url.protocol === 'wss:' ? 443 : 80
 }
 
 function isStandardPort(protocol: string, port: number): boolean {
