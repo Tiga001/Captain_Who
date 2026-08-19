@@ -112,11 +112,17 @@ pub struct BuiltinCapabilityDescriptor {
 pub struct BuiltinCapabilityToolDescriptor {
     /// Host-owned identity used to address the reviewed managed-server tool.
     pub tool_id: String,
+    /// Exact upstream raw name. This remains distinct from the Host routing id and model name.
+    pub raw_name: String,
     /// Stable Provider-facing name. It is presentation only and is never parsed for routing.
     pub model_name: String,
     pub description: String,
     pub input_schema: Value,
     pub schema_digest: String,
+    /// Exact fixed Provider schema before Host overlays are applied.
+    pub upstream_schema_digest: String,
+    /// Digest of the reviewed Host overlay applied to the upstream schema.
+    pub host_overlay_digest: String,
     pub safety: crate::protocol::AgentToolSafety,
     pub requires_workspace: bool,
 }
@@ -130,13 +136,18 @@ impl BuiltinCapabilityToolDescriptor {
         safety: crate::protocol::AgentToolSafety,
         requires_workspace: bool,
     ) -> AgentResult<Self> {
-        let schema_digest = schema_digest(&input_schema)?;
+        let input_schema_digest = schema_digest(&input_schema)?;
+        let empty_overlay_digest = schema_digest(&json!({}))?;
+        let tool_id = tool_id.into();
         let descriptor = Self {
-            tool_id: tool_id.into(),
+            raw_name: tool_id.clone(),
+            tool_id,
             model_name: model_name.into(),
             description: description.into(),
             input_schema,
-            schema_digest,
+            upstream_schema_digest: input_schema_digest.clone(),
+            host_overlay_digest: empty_overlay_digest,
+            schema_digest: input_schema_digest,
             safety,
             requires_workspace,
         };
@@ -144,8 +155,22 @@ impl BuiltinCapabilityToolDescriptor {
         Ok(descriptor)
     }
 
+    pub fn with_upstream_contract(
+        mut self,
+        raw_name: impl Into<String>,
+        upstream_schema_digest: impl Into<String>,
+        host_overlay_digest: impl Into<String>,
+    ) -> AgentResult<Self> {
+        self.raw_name = raw_name.into();
+        self.upstream_schema_digest = upstream_schema_digest.into();
+        self.host_overlay_digest = host_overlay_digest.into();
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> AgentResult<()> {
         BuiltinCapabilityId::parse(self.tool_id.clone())?;
+        BuiltinCapabilityId::parse(self.raw_name.clone())?;
         if self.model_name.is_empty()
             || self.model_name.len() > 64
             || !self
@@ -154,6 +179,8 @@ impl BuiltinCapabilityToolDescriptor {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
             || self.description.trim().is_empty()
             || self.description.len() > DESCRIPTION_MAX_BYTES
+            || !valid_sha256_digest(&self.upstream_schema_digest)
+            || !valid_sha256_digest(&self.host_overlay_digest)
         {
             return Err(AgentError::new("内置能力 Tool identity/description 无效。"));
         }
@@ -187,6 +214,69 @@ impl BuiltinCapabilityToolDescriptor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinCapabilityProviderContract {
+    pub package_name: String,
+    pub package_version: String,
+    pub upstream_catalog_digest: String,
+    pub policy_digest: String,
+}
+
+impl BuiltinCapabilityProviderContract {
+    pub fn new(
+        package_name: impl Into<String>,
+        package_version: impl Into<String>,
+        upstream_catalog_digest: impl Into<String>,
+        policy_digest: impl Into<String>,
+    ) -> AgentResult<Self> {
+        let contract = Self {
+            package_name: package_name.into(),
+            package_version: package_version.into(),
+            upstream_catalog_digest: upstream_catalog_digest.into(),
+            policy_digest: policy_digest.into(),
+        };
+        contract.validate()?;
+        Ok(contract)
+    }
+
+    fn host_native(managed_mcp_id: &str, version: &str) -> AgentResult<Self> {
+        Self::new(
+            managed_mcp_id,
+            version,
+            schema_digest(&json!({
+                "kind": "host_native_catalog",
+                "managedMcpId": managed_mcp_id,
+                "version": version,
+            }))?,
+            schema_digest(&json!({
+                "kind": "host_native_policy",
+                "managedMcpId": managed_mcp_id,
+                "version": version,
+            }))?,
+        )
+    }
+
+    pub fn validate(&self) -> AgentResult<()> {
+        if self.package_name.trim().is_empty()
+            || self.package_name.trim() != self.package_name
+            || self.package_name.len() > 256
+            || self.package_name.chars().any(char::is_control)
+            || self.package_version.trim().is_empty()
+            || self.package_version.trim() != self.package_version
+            || self.package_version.len() > 128
+            || self.package_version.chars().any(char::is_control)
+            || !valid_sha256_digest(&self.upstream_catalog_digest)
+            || !valid_sha256_digest(&self.policy_digest)
+        {
+            return Err(AgentError::new(
+                "内置能力 Provider package/catalog/policy identity 无效。",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuiltinCapabilityManifest {
@@ -194,6 +284,7 @@ pub struct BuiltinCapabilityManifest {
     pub descriptor: BuiltinCapabilityDescriptor,
     /// Stable non-secret identity of the Host-managed MCP implementation.
     pub managed_mcp_id: String,
+    pub provider_contract: BuiltinCapabilityProviderContract,
     pub version: String,
     pub tools: Vec<BuiltinCapabilityToolDescriptor>,
     pub manifest_digest: String,
@@ -204,6 +295,26 @@ impl BuiltinCapabilityManifest {
         descriptor: BuiltinCapabilityDescriptor,
         managed_mcp_id: impl Into<String>,
         version: impl Into<String>,
+        tools: Vec<BuiltinCapabilityToolDescriptor>,
+    ) -> AgentResult<Self> {
+        let managed_mcp_id = managed_mcp_id.into();
+        let version = version.into();
+        let provider_contract =
+            BuiltinCapabilityProviderContract::host_native(&managed_mcp_id, &version)?;
+        Self::new_with_provider_contract(
+            descriptor,
+            managed_mcp_id,
+            version,
+            provider_contract,
+            tools,
+        )
+    }
+
+    pub fn new_with_provider_contract(
+        descriptor: BuiltinCapabilityDescriptor,
+        managed_mcp_id: impl Into<String>,
+        version: impl Into<String>,
+        provider_contract: BuiltinCapabilityProviderContract,
         mut tools: Vec<BuiltinCapabilityToolDescriptor>,
     ) -> AgentResult<Self> {
         tools.sort_by(|left, right| {
@@ -215,6 +326,7 @@ impl BuiltinCapabilityManifest {
             schema_version: BUILTIN_CAPABILITY_MANIFEST_SCHEMA_VERSION,
             descriptor,
             managed_mcp_id: managed_mcp_id.into(),
+            provider_contract,
             version: version.into(),
             tools,
             manifest_digest: String::new(),
@@ -238,6 +350,7 @@ impl BuiltinCapabilityManifest {
             return Err(AgentError::new("不支持的内置能力 manifest 版本。"));
         }
         BuiltinCapabilityId::parse(self.descriptor.id.as_str().to_string())?;
+        self.provider_contract.validate()?;
         if self.descriptor.display_name.trim().is_empty()
             || self.descriptor.display_name.len() > DISPLAY_NAME_MAX_BYTES
             || self.descriptor.description.trim().is_empty()
@@ -282,6 +395,7 @@ impl BuiltinCapabilityManifest {
             schema_version: u32,
             descriptor: &'a BuiltinCapabilityDescriptor,
             managed_mcp_id: &'a str,
+            provider_contract: &'a BuiltinCapabilityProviderContract,
             version: &'a str,
             tools: Vec<&'a BuiltinCapabilityToolDescriptor>,
         }
@@ -295,6 +409,7 @@ impl BuiltinCapabilityManifest {
             schema_version: self.schema_version,
             descriptor: &self.descriptor,
             managed_mcp_id: &self.managed_mcp_id,
+            provider_contract: &self.provider_contract,
             version: &self.version,
             tools,
         })
@@ -328,6 +443,8 @@ pub struct CapabilityGrant {
     pub capability_id: BuiltinCapabilityId,
     pub activation_id: CapabilityActivationId,
     pub manifest_digest: String,
+    pub upstream_catalog_digest: String,
+    pub provider_policy_digest: String,
     pub policy_revision: u64,
     pub created_at: u64,
     pub expires_at: u64,
@@ -345,6 +462,8 @@ impl CapabilityGrant {
             && self.run_id == run_id
             && self.capability_id == manifest.descriptor.id
             && self.manifest_digest == manifest.manifest_digest
+            && self.upstream_catalog_digest == manifest.provider_contract.upstream_catalog_digest
+            && self.provider_policy_digest == manifest.provider_contract.policy_digest
             && self.policy_revision == policy.revision
             && self.expires_at > now
     }
@@ -496,11 +615,19 @@ pub struct BuiltinCapabilityInvocation {
     pub run_id: String,
     pub capability_id: BuiltinCapabilityId,
     pub managed_mcp_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub upstream_catalog_digest: String,
+    pub policy_digest: String,
     pub activation_id: CapabilityActivationId,
     pub manifest_digest: String,
     pub policy_revision: u64,
     pub tool_id: String,
+    pub raw_name: String,
     pub model_name: String,
+    pub upstream_schema_digest: String,
+    pub host_overlay_digest: String,
+    pub host_input_schema_digest: String,
     pub call_id: String,
     pub arguments: Value,
 }
@@ -510,9 +637,17 @@ pub(crate) struct BuiltinCapabilityDispatchRequest {
     pub run_id: String,
     pub capability_id: BuiltinCapabilityId,
     pub managed_mcp_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub upstream_catalog_digest: String,
+    pub policy_digest: String,
     pub manifest_digest: String,
     pub tool_id: String,
+    pub raw_name: String,
     pub model_name: String,
+    pub upstream_schema_digest: String,
+    pub host_overlay_digest: String,
+    pub host_input_schema_digest: String,
     pub call_id: String,
     pub arguments: Value,
     pub cancellation: AgentCancellationToken,
@@ -886,8 +1021,17 @@ impl BuiltinCapabilityRuntime {
             .iter()
             .find(|tool| tool.tool_id == request.tool_id && tool.model_name == request.model_name);
         if manifest.managed_mcp_id != request.managed_mcp_id
+            || manifest.provider_contract.package_name != request.package_name
+            || manifest.provider_contract.package_version != request.package_version
+            || manifest.provider_contract.upstream_catalog_digest != request.upstream_catalog_digest
+            || manifest.provider_contract.policy_digest != request.policy_digest
             || manifest.manifest_digest != request.manifest_digest
-            || reviewed_tool.is_none()
+            || reviewed_tool.is_none_or(|tool| {
+                tool.raw_name != request.raw_name
+                    || tool.upstream_schema_digest != request.upstream_schema_digest
+                    || tool.host_overlay_digest != request.host_overlay_digest
+                    || tool.schema_digest != request.host_input_schema_digest
+            })
         {
             return Err(AgentError::new("内置能力工具不在已审核 manifest 中。"));
         }
@@ -899,11 +1043,19 @@ impl BuiltinCapabilityRuntime {
             run_id: request.run_id,
             capability_id: request.capability_id,
             managed_mcp_id: request.managed_mcp_id,
+            package_name: request.package_name,
+            package_version: request.package_version,
+            upstream_catalog_digest: request.upstream_catalog_digest,
+            policy_digest: request.policy_digest,
             activation_id: grant.activation_id.clone(),
             manifest_digest: request.manifest_digest,
             policy_revision: policy.revision,
             tool_id: request.tool_id,
+            raw_name: request.raw_name,
             model_name: request.model_name,
+            upstream_schema_digest: request.upstream_schema_digest,
+            host_overlay_digest: request.host_overlay_digest,
+            host_input_schema_digest: request.host_input_schema_digest,
             call_id: request.call_id,
             arguments: request.arguments,
         };
@@ -1423,5 +1575,87 @@ mod tests {
         .unwrap();
         assert_eq!(left.manifest_digest, right.manifest_digest);
         assert_eq!(left.tools, right.tools);
+    }
+
+    #[test]
+    fn capability_grant_binds_catalog_policy_and_manifest_digests() {
+        let descriptor = BuiltinCapabilityDescriptor {
+            id: BuiltinCapabilityId::parse("browser.automation").unwrap(),
+            display_name: "Browser automation".to_string(),
+            description: "Managed browser".to_string(),
+        };
+        let tool = BuiltinCapabilityToolDescriptor::new(
+            "browser.snapshot",
+            "browser_snapshot",
+            "Read page",
+            json!({"type":"object","properties":{}}),
+            crate::protocol::AgentToolSafety::ReadOnly,
+            false,
+        )
+        .unwrap();
+        let provider_contract = BuiltinCapabilityProviderContract::new(
+            "@playwright/mcp",
+            "0.0.79",
+            format!("sha256:{}", "a".repeat(64)),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap();
+        let manifest = BuiltinCapabilityManifest::new_with_provider_contract(
+            descriptor.clone(),
+            "builtin.browser_automation.mcp",
+            "v2",
+            provider_contract.clone(),
+            vec![tool.clone()],
+        )
+        .unwrap();
+        let policy = BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 7,
+        };
+        let grant = CapabilityGrant {
+            run_id: "run-1".to_string(),
+            capability_id: manifest.descriptor.id.clone(),
+            activation_id: CapabilityActivationId::generate(),
+            manifest_digest: manifest.manifest_digest.clone(),
+            upstream_catalog_digest: provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: provider_contract.policy_digest.clone(),
+            policy_revision: policy.revision,
+            created_at: 1,
+            expires_at: 100,
+        };
+        assert!(grant.is_live_for("run-1", &manifest, &policy, 2));
+
+        let catalog_drift = BuiltinCapabilityManifest::new_with_provider_contract(
+            descriptor.clone(),
+            "builtin.browser_automation.mcp",
+            "v2",
+            BuiltinCapabilityProviderContract::new(
+                "@playwright/mcp",
+                "0.0.79",
+                format!("sha256:{}", "c".repeat(64)),
+                provider_contract.policy_digest.clone(),
+            )
+            .unwrap(),
+            vec![tool.clone()],
+        )
+        .unwrap();
+        assert!(!grant.is_live_for("run-1", &catalog_drift, &policy, 2));
+
+        let policy_drift = BuiltinCapabilityManifest::new_with_provider_contract(
+            descriptor,
+            "builtin.browser_automation.mcp",
+            "v2",
+            BuiltinCapabilityProviderContract::new(
+                "@playwright/mcp",
+                "0.0.79",
+                provider_contract.upstream_catalog_digest,
+                format!("sha256:{}", "d".repeat(64)),
+            )
+            .unwrap(),
+            vec![tool],
+        )
+        .unwrap();
+        assert!(!grant.is_live_for("run-1", &policy_drift, &policy, 2));
+        assert_ne!(manifest.manifest_digest, policy_drift.manifest_digest);
     }
 }

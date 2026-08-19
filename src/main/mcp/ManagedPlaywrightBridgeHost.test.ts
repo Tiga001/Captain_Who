@@ -13,6 +13,7 @@ import {
   type ManagedMcpClient,
   type ManagedPlaywrightConnectionFactory
 } from './ManagedPlaywrightMcpHost'
+import { MANAGED_PLAYWRIGHT_CATALOG_LOCK } from './managedPlaywrightCatalog'
 import { MANAGED_PLAYWRIGHT_SERVER_ID } from './managedPlaywrightManifest'
 
 const AUTHORIZATION_CONTEXT = {
@@ -208,6 +209,12 @@ function hostWith(options: {
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
 }): ManagedPlaywrightMcpHost {
+  const upstreamTools = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: structuredClone(tool.inputSchema),
+    annotations: structuredClone(tool.annotations ?? {})
+  }))
   return new ManagedPlaywrightMcpHost({
     getBrowserContext: async () => {
       throw new Error('not used by this bridge fixture')
@@ -223,7 +230,7 @@ function hostWith(options: {
     createClient: () => ({
       connect: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
-      listTools: vi.fn(async () => ({ tools: [] })),
+      listTools: vi.fn(async () => ({ tools: upstreamTools })),
       callTool:
         options.callTool ??
         vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))

@@ -5,9 +5,17 @@ const identity = {
   type: 'builtin_capability' as const,
   capabilityId: 'browser_automation' as const,
   managedMcpId: 'builtin.browser_automation.mcp',
+  packageName: '@playwright/mcp',
+  packageVersion: '0.0.79',
+  upstreamCatalogDigest: `sha256:${'1'.repeat(64)}`,
+  policyDigest: `sha256:${'2'.repeat(64)}`,
   manifestDigest: `sha256:${'a'.repeat(64)}`,
   toolId: 'browser.navigate',
-  modelName: 'browser_navigate'
+  rawName: 'browser_navigate',
+  modelName: 'browser_navigate',
+  upstreamSchemaDigest: `sha256:${'3'.repeat(64)}`,
+  hostOverlayDigest: `sha256:${'4'.repeat(64)}`,
+  hostInputSchemaDigest: `sha256:${'5'.repeat(64)}`
 }
 
 describe('persisted Tool timeline identity', () => {
@@ -36,6 +44,39 @@ describe('persisted Tool timeline identity', () => {
         type: 'tool_call',
         callId: 'call-browser',
         identity: { ...identity, cdpEndpoint: 'PRIVATE_CDP_CANARY' }
+      })
+    ).toBeUndefined()
+  })
+
+  it('loads only the exact legacy identity as generic display-only provenance', () => {
+    const legacyIdentity = {
+      type: 'builtin_capability',
+      capabilityId: 'browser_automation',
+      managedMcpId: 'builtin.browser_automation.mcp',
+      manifestDigest: `sha256:${'a'.repeat(64)}`,
+      toolId: 'browser_snapshot',
+      modelName: 'browser_snapshot'
+    }
+    expect(
+      parseTimelineItem({
+        id: 'tool-call-browser-legacy',
+        type: 'tool_call',
+        callId: 'call-browser-legacy',
+        identity: legacyIdentity
+      })
+    ).toEqual({
+      id: 'tool-call-browser-legacy',
+      type: 'tool_call',
+      callId: 'call-browser-legacy',
+      identity: { type: 'unregistered', toolName: 'browser_snapshot' }
+    })
+
+    expect(
+      parseTimelineItem({
+        id: 'tool-call-browser-legacy-forged',
+        type: 'tool_call',
+        callId: 'call-browser-legacy-forged',
+        identity: { ...legacyIdentity, upstreamCatalogDigest: `sha256:${'b'.repeat(64)}` }
       })
     ).toBeUndefined()
   })

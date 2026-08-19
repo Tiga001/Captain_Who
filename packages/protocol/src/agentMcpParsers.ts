@@ -758,7 +758,22 @@ export function parseAgentToolIdentityForHost(value: unknown): AgentToolIdentity
     case 'builtin_capability':
       expectOnlyKeys(
         record,
-        ['type', 'capabilityId', 'managedMcpId', 'manifestDigest', 'toolId', 'modelName'] as const,
+        [
+          'type',
+          'capabilityId',
+          'managedMcpId',
+          'packageName',
+          'packageVersion',
+          'upstreamCatalogDigest',
+          'policyDigest',
+          'manifestDigest',
+          'toolId',
+          'rawName',
+          'modelName',
+          'upstreamSchemaDigest',
+          'hostOverlayDigest',
+          'hostInputSchemaDigest'
+        ] as const,
         context
       )
       return {
@@ -768,12 +783,40 @@ export function parseAgentToolIdentityForHost(value: unknown): AgentToolIdentity
           record.managedMcpId,
           `${context}.managedMcpId`
         ),
+        packageName: expectBuiltinCapabilityPackageIdentity(
+          record.packageName,
+          `${context}.packageName`,
+          256
+        ),
+        packageVersion: expectBuiltinCapabilityPackageIdentity(
+          record.packageVersion,
+          `${context}.packageVersion`,
+          128
+        ),
+        upstreamCatalogDigest: expectVersionedSha256Digest(
+          record.upstreamCatalogDigest,
+          `${context}.upstreamCatalogDigest`
+        ),
+        policyDigest: expectVersionedSha256Digest(record.policyDigest, `${context}.policyDigest`),
         manifestDigest: expectVersionedSha256Digest(
           record.manifestDigest,
           `${context}.manifestDigest`
         ),
         toolId: expectBuiltinCapabilityStableId(record.toolId, `${context}.toolId`),
-        modelName: expectBuiltinCapabilityModelName(record.modelName, `${context}.modelName`)
+        rawName: expectBuiltinCapabilityStableId(record.rawName, `${context}.rawName`),
+        modelName: expectBuiltinCapabilityModelName(record.modelName, `${context}.modelName`),
+        upstreamSchemaDigest: expectVersionedSha256Digest(
+          record.upstreamSchemaDigest,
+          `${context}.upstreamSchemaDigest`
+        ),
+        hostOverlayDigest: expectVersionedSha256Digest(
+          record.hostOverlayDigest,
+          `${context}.hostOverlayDigest`
+        ),
+        hostInputSchemaDigest: expectVersionedSha256Digest(
+          record.hostInputSchemaDigest,
+          `${context}.hostInputSchemaDigest`
+        )
       }
     case 'mcp':
       expectOnlyKeys(record, ['type', 'provenance'] as const, context)
@@ -2015,6 +2058,18 @@ function expectBuiltinCapabilityModelName(value: unknown, context: string): stri
     !/^[A-Za-z0-9_-]+$/.test(result)
   ) {
     throw invalidProtocolValue(context, 'expected a bounded Provider-visible Tool name')
+  }
+  return result
+}
+
+function expectBuiltinCapabilityPackageIdentity(
+  value: unknown,
+  context: string,
+  maxBytes: number
+): string {
+  const result = expectBoundedNonEmptyString(value, context, maxBytes)
+  if (result.trim() !== result || hasAnyControl(result)) {
+    throw invalidProtocolValue(context, 'expected a trimmed package identity without controls')
   }
   return result
 }

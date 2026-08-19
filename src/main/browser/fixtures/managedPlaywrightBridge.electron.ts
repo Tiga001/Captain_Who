@@ -172,21 +172,56 @@ async function main(): Promise<void> {
     policy: networkPolicy
   })
   initializeManagedWebviewSessions({ networkGuard })
-  const server = createServer((_request, response) => {
+  const server = createServer((request, response) => {
+    if (request.url?.startsWith('/api/ping')) {
+      response.setHeader('content-type', 'application/json; charset=utf-8')
+      response.end(JSON.stringify({ ok: true }))
+      return
+    }
     response.setHeader('content-type', 'text/html; charset=utf-8')
+    if (request.url === '/secondary') {
+      response.end(`<!doctype html>
+        <html><body><main><h1>Secondary Fixture Page</h1></main></body></html>`)
+      return
+    }
     response.end(`<!doctype html>
       <html><body>
         <main>
           <h1>Managed Playwright Bridge Fixture</h1>
           <label for="message">Message</label>
           <input id="message" />
+          <label for="plan">Plan</label>
+          <select id="plan">
+            <option value="basic">Basic</option>
+            <option value="pro">Pro</option>
+          </select>
           <button id="apply">Apply</button>
+          <button id="dialog">Show dialog</button>
+          <div id="drag-source" role="button" tabindex="0" draggable="true">Drag source</div>
+          <div id="drop-target" role="region" aria-label="Drop target">Drop target</div>
+          <ul aria-label="Visible items"><li>Alpha</li><li>Beta</li></ul>
           <output id="output">idle</output>
         </main>
         <script>
+          console.warn('managed fixture warning')
+          fetch('/api/ping?token=fixture-query-canary').catch(() => undefined)
           document.querySelector('#apply').addEventListener('click', () => {
             document.querySelector('#output').textContent =
               'applied:' + document.querySelector('#message').value
+          })
+          document.querySelector('#dialog').addEventListener('click', () => {
+            alert('managed fixture dialog')
+          })
+          document.querySelector('#drag-source').addEventListener('dragstart', event => {
+            event.dataTransfer.setData('text/plain', 'fixture-drag')
+          })
+          document.querySelector('#drop-target').addEventListener('dragover', event => {
+            event.preventDefault()
+          })
+          document.querySelector('#drop-target').addEventListener('drop', event => {
+            event.preventDefault()
+            document.querySelector('#output').textContent =
+              event.dataTransfer.getData('text/plain') === 'fixture-drag' ? 'dragged' : 'bad-drag'
           })
         </script>
       </body></html>`)
@@ -195,6 +230,7 @@ async function main(): Promise<void> {
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('local fixture did not bind')
   const fixtureUrl = `http://127.0.0.1:${address.port}/interactive`
+  const secondaryUrl = `http://127.0.0.1:${address.port}/secondary`
 
   const window = new BrowserWindow({
     height: 320,
@@ -297,7 +333,9 @@ async function main(): Promise<void> {
   })
 
   try {
-    await writeProtocolLine(`${READY_MARKER}${JSON.stringify({ fixtureUrl, schemaVersion: 1 })}`)
+    await writeProtocolLine(
+      `${READY_MARKER}${JSON.stringify({ fixtureUrl, schemaVersion: 1, secondaryUrl })}`
+    )
     await inputClosed
     if (inputFailure) throw inputFailure
   } finally {

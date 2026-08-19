@@ -1008,8 +1008,12 @@ pub(super) fn checkpoint_continuation_uses_external_mcp_projection(
                 "无法恢复运行检查点：内置能力激活审批缺少冻结的动作身份。",
             ))
         }
-        (AgentToolIdentity::Unregistered { .. }, _) => Err(AgentError::new(
-            "无法恢复运行检查点：未注册工具不能获得续跑权限。",
+        (
+            AgentToolIdentity::Unregistered { .. }
+            | AgentToolIdentity::LegacyBuiltinCapability { .. },
+            _,
+        ) => Err(AgentError::new(
+            "无法恢复运行检查点：未注册或旧版工具身份不能获得续跑权限。",
         )),
         (
             AgentToolIdentity::Builtin { .. }

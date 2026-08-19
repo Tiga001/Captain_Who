@@ -331,6 +331,12 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
             capability_id,
             activation_id,
             manifest_digest: approval.manifest_digest.clone(),
+            upstream_catalog_digest: self
+                .manifest
+                .provider_contract
+                .upstream_catalog_digest
+                .clone(),
+            provider_policy_digest: self.manifest.provider_contract.policy_digest.clone(),
             policy_revision: policy.revision,
             created_at: now,
             expires_at: now.saturating_add(BUILTIN_CAPABILITY_GRANT_TTL_SECONDS),
@@ -644,10 +650,20 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
             if live != expected_grant
                 || invocation.activation_id != live.activation_id
                 || invocation.managed_mcp_id != manifest.managed_mcp_id
+                || invocation.package_name != manifest.provider_contract.package_name
+                || invocation.package_version != manifest.provider_contract.package_version
+                || invocation.upstream_catalog_digest
+                    != manifest.provider_contract.upstream_catalog_digest
+                || invocation.policy_digest != manifest.provider_contract.policy_digest
                 || invocation.manifest_digest != manifest.manifest_digest
                 || invocation.policy_revision != live.policy_revision
                 || !manifest.tools.iter().any(|tool| {
-                    tool.tool_id == invocation.tool_id && tool.model_name == invocation.model_name
+                    tool.tool_id == invocation.tool_id
+                        && tool.raw_name == invocation.raw_name
+                        && tool.model_name == invocation.model_name
+                        && tool.upstream_schema_digest == invocation.upstream_schema_digest
+                        && tool.host_overlay_digest == invocation.host_overlay_digest
+                        && tool.schema_digest == invocation.host_input_schema_digest
                 })
             {
                 return Err(AgentError::new(
@@ -1254,15 +1270,24 @@ mod tests {
             .unwrap();
         let approval = approved(&harness, Uuid::new_v4(), Uuid::new_v4());
         let grant = harness.runtime.approve_activation(&approval).unwrap();
+        let manifest = harness.runtime.manifests()[0].clone();
         let invocation = BuiltinCapabilityInvocation {
             run_id: grant.run_id.clone(),
             capability_id: grant.capability_id.clone(),
             managed_mcp_id: BROWSER_AUTOMATION_MANAGED_MCP_ID.to_string(),
+            package_name: manifest.provider_contract.package_name.clone(),
+            package_version: manifest.provider_contract.package_version.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            policy_digest: manifest.provider_contract.policy_digest.clone(),
             activation_id: grant.activation_id.clone(),
             manifest_digest: grant.manifest_digest.clone(),
             policy_revision: grant.policy_revision,
             tool_id: "browser_unreviewed".to_string(),
+            raw_name: "browser_unreviewed".to_string(),
             model_name: "browser_unreviewed".to_string(),
+            upstream_schema_digest: format!("sha256:{}", "a".repeat(64)),
+            host_overlay_digest: format!("sha256:{}", "b".repeat(64)),
+            host_input_schema_digest: format!("sha256:{}", "c".repeat(64)),
             call_id: "call-unreviewed".to_string(),
             arguments: serde_json::json!({}),
         };

@@ -1,6 +1,8 @@
 import type { AgentToolCall, AgentToolIdentity, AgentToolResult } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { enUSTranslations } from '../../config/frontendTranslations.enUS'
+import { zhCNTranslations } from '../../config/frontendTranslations.zhCN'
 import type { ChatAgentRunView, ChatMcpToolInvocationView } from '../../features/chat/chatTypes'
 import { AgentToolActivity } from '../../features/chat/components/toolActivities/AgentToolActivity'
 
@@ -24,9 +26,51 @@ const translations: Record<string, string> = {
   'agent.builtinCapability.browser.type.completed': 'Typed into page',
   'agent.builtinCapability.browser.fillForm.completed': 'Filled form',
   'agent.builtinCapability.browser.pressKey.completed': 'Sent key press',
-  'agent.builtinCapability.browser.tabs.completed': 'Viewed browser tabs',
+  'agent.builtinCapability.browser.tabs.completed': 'Managed browser tabs',
   'agent.builtinCapability.browser.waitFor.completed': 'Finished waiting for page',
   'agent.builtinCapability.browser.close.completed': 'Closed page',
+  'agent.builtinCapability.browser.pageInteraction.completed': 'Interacted with page',
+  'agent.builtinCapability.browser.hover.running': 'Hovering over page element',
+  'agent.builtinCapability.browser.hover.completed': 'Hovered over page element',
+  'agent.builtinCapability.browser.hover.failed': 'Failed to hover over page element',
+  'agent.builtinCapability.browser.hover.cancelled': 'Cancelled hovering over page element',
+  'agent.builtinCapability.browser.hover.outcomeUnknown':
+    'Hover outcome uncertain; the action may have occurred',
+  'agent.builtinCapability.browser.selectOption.running': 'Selecting page option',
+  'agent.builtinCapability.browser.selectOption.completed': 'Selected page option',
+  'agent.builtinCapability.browser.selectOption.failed': 'Failed to select page option',
+  'agent.builtinCapability.browser.selectOption.cancelled': 'Cancelled selecting page option',
+  'agent.builtinCapability.browser.selectOption.outcomeUnknown':
+    'Option selection outcome uncertain; the selection may have changed',
+  'agent.builtinCapability.browser.drag.running': 'Dragging page item',
+  'agent.builtinCapability.browser.drag.completed': 'Dragged page item',
+  'agent.builtinCapability.browser.drag.failed': 'Failed to drag page item',
+  'agent.builtinCapability.browser.drag.cancelled': 'Cancelled dragging page item',
+  'agent.builtinCapability.browser.drag.outcomeUnknown':
+    'Drag outcome uncertain; the item may have moved',
+  'agent.builtinCapability.browser.dialog.completed': 'Handled page dialog',
+  'agent.builtinCapability.browser.navigateBack.completed': 'Went back a page',
+  'agent.builtinCapability.browser.resize.completed': 'Resized browser page',
+  'agent.builtinCapability.browser.screenshot.completed': 'Captured page screenshot',
+  'agent.builtinCapability.browser.upload.completed': 'Uploaded file to page',
+  'agent.builtinCapability.browser.upload.outcomeUnknown':
+    'File upload outcome uncertain; the upload may have occurred',
+  'agent.builtinCapability.browser.script.completed': 'Ran browser script',
+  'agent.builtinCapability.browser.config.completed': 'Read browser configuration',
+  'agent.builtinCapability.browser.console.completed': 'Read page console',
+  'agent.builtinCapability.browser.networkRead.completed': 'Read page network activity',
+  'agent.builtinCapability.browser.networkConfigure.completed': 'Configured page network',
+  'agent.builtinCapability.browser.storageRead.completed': 'Read browser storage',
+  'agent.builtinCapability.browser.storageWrite.completed': 'Updated browser storage',
+  'agent.builtinCapability.browser.devtools.completed': 'Updated browser diagnostics',
+  'agent.builtinCapability.browser.resume.completed': 'Resumed browser page',
+  'agent.builtinCapability.browser.networkRules.completed': 'Read page network rules',
+  'agent.builtinCapability.browser.recordStart.completed': 'Started browser recording',
+  'agent.builtinCapability.browser.recordStop.completed': 'Stopped browser recording',
+  'agent.builtinCapability.browser.recordEdit.completed': 'Updated browser recording',
+  'agent.builtinCapability.browser.pdf.completed': 'Saved page as PDF',
+  'agent.builtinCapability.browser.locator.completed': 'Generated page locator',
+  'agent.builtinCapability.browser.verify.completed': 'Checked page state',
   'agent.builtinCapability.browser.fallback.running': 'Running browser action',
   'agent.builtinCapability.browser.fallback.completed': 'Completed browser action',
   'agent.builtinCapability.browser.fallback.outcomeUnknown':
@@ -67,14 +111,25 @@ function call(tool = 'managed-visible-name', reason: string | null = null): Agen
   }
 }
 
-function identity(modelName = 'browser_navigate', toolId = modelName): AgentToolIdentity {
+function identity(
+  modelName = 'browser_navigate',
+  toolId = modelName
+): Extract<AgentToolIdentity, { type: 'builtin_capability' }> {
   return {
     type: 'builtin_capability',
     capabilityId: 'browser_automation',
     managedMcpId: 'builtin.browser_automation.mcp',
+    packageName: '@playwright/mcp',
+    packageVersion: '0.0.79',
+    upstreamCatalogDigest: `sha256:${'1'.repeat(64)}`,
+    policyDigest: `sha256:${'2'.repeat(64)}`,
     manifestDigest: `sha256:${'a'.repeat(64)}`,
     toolId,
-    modelName
+    rawName: toolId,
+    modelName,
+    upstreamSchemaDigest: `sha256:${'3'.repeat(64)}`,
+    hostOverlayDigest: `sha256:${'4'.repeat(64)}`,
+    hostInputSchemaDigest: `sha256:${'5'.repeat(64)}`
   }
 }
 
@@ -300,6 +355,25 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.querySelector('pre')).toBeNull()
   })
 
+  it('removes control characters and bounds the only expanded call_reason field', async () => {
+    const visiblePrefix = 'R'.repeat(512)
+    const reason = `${visiblePrefix}\u202e${CANARY}`
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_click', reason)}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('browser_click', 'browser_click')}
+      />
+    )
+
+    expect(screen.container.textContent).toContain(visiblePrefix)
+    expect(screen.container.textContent).not.toContain('\u202e')
+    expect(screen.container.textContent).not.toContain(CANARY)
+    expect(screen.container.querySelector('details')).not.toBeNull()
+    expect(screen.container.querySelector('pre')).toBeNull()
+  })
+
   it.each([
     ['browser_navigate', 'Opened page'],
     ['browser_snapshot', 'Read page'],
@@ -308,7 +382,7 @@ describe('BuiltinCapabilityToolActivity', () => {
     ['browser_type', 'Typed into page'],
     ['browser_fill_form', 'Filled form'],
     ['browser_press_key', 'Sent key press'],
-    ['browser_tabs', 'Viewed browser tabs'],
+    ['browser_tabs', 'Managed browser tabs'],
     ['browser_wait_for', 'Finished waiting for page'],
     ['browser_close', 'Closed page']
   ])('renders reviewed tool %s with product copy', async (toolId, expected) => {
@@ -337,18 +411,260 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.querySelector('pre')).toBeNull()
   })
 
+  it.each([
+    ['browser_annotate', 'Updated browser diagnostics'],
+    ['browser_console_messages', 'Read page console'],
+    ['browser_cookie_clear', 'Updated browser storage'],
+    ['browser_cookie_delete', 'Updated browser storage'],
+    ['browser_cookie_get', 'Read browser storage'],
+    ['browser_cookie_list', 'Read browser storage'],
+    ['browser_cookie_set', 'Updated browser storage'],
+    ['browser_drag', 'Dragged page item'],
+    ['browser_drop', 'Dragged page item'],
+    ['browser_evaluate', 'Ran browser script'],
+    ['browser_file_upload', 'Uploaded file to page'],
+    ['browser_generate_locator', 'Generated page locator'],
+    ['browser_get_config', 'Read browser configuration'],
+    ['browser_handle_dialog', 'Handled page dialog'],
+    ['browser_hide_highlight', 'Updated browser diagnostics'],
+    ['browser_highlight', 'Updated browser diagnostics'],
+    ['browser_hover', 'Hovered over page element'],
+    ['browser_localstorage_clear', 'Updated browser storage'],
+    ['browser_localstorage_delete', 'Updated browser storage'],
+    ['browser_localstorage_get', 'Read browser storage'],
+    ['browser_localstorage_list', 'Read browser storage'],
+    ['browser_localstorage_set', 'Updated browser storage'],
+    ['browser_mouse_click_xy', 'Interacted with page'],
+    ['browser_mouse_down', 'Interacted with page'],
+    ['browser_mouse_drag_xy', 'Interacted with page'],
+    ['browser_mouse_move_xy', 'Interacted with page'],
+    ['browser_mouse_up', 'Interacted with page'],
+    ['browser_mouse_wheel', 'Interacted with page'],
+    ['browser_navigate_back', 'Went back a page'],
+    ['browser_network_request', 'Read page network activity'],
+    ['browser_network_requests', 'Read page network activity'],
+    ['browser_network_state_set', 'Configured page network'],
+    ['browser_pdf_save', 'Saved page as PDF'],
+    ['browser_resize', 'Resized browser page'],
+    ['browser_resume', 'Resumed browser page'],
+    ['browser_route', 'Configured page network'],
+    ['browser_route_list', 'Read page network rules'],
+    ['browser_run_code_unsafe', 'Ran browser script'],
+    ['browser_select_option', 'Selected page option'],
+    ['browser_sessionstorage_clear', 'Updated browser storage'],
+    ['browser_sessionstorage_delete', 'Updated browser storage'],
+    ['browser_sessionstorage_get', 'Read browser storage'],
+    ['browser_sessionstorage_list', 'Read browser storage'],
+    ['browser_sessionstorage_set', 'Updated browser storage'],
+    ['browser_set_storage_state', 'Updated browser storage'],
+    ['browser_start_tracing', 'Started browser recording'],
+    ['browser_start_video', 'Started browser recording'],
+    ['browser_stop_tracing', 'Stopped browser recording'],
+    ['browser_stop_video', 'Stopped browser recording'],
+    ['browser_storage_state', 'Read browser storage'],
+    ['browser_take_screenshot', 'Captured page screenshot'],
+    ['browser_unroute', 'Configured page network'],
+    ['browser_verify_element_visible', 'Checked page state'],
+    ['browser_verify_list_visible', 'Checked page state'],
+    ['browser_verify_text_visible', 'Checked page state'],
+    ['browser_verify_value', 'Checked page state'],
+    ['browser_video_chapter', 'Updated browser recording'],
+    ['browser_video_hide_actions', 'Updated browser recording'],
+    ['browser_video_show_actions', 'Updated browser recording']
+  ])('renders expanded tool %s through its typed toolId family', async (toolId, expected) => {
+    const screen = await render(
+      <AgentToolActivity
+        call={call('opaque-model-name')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'opaque-model-name',
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'completed',
+            contentOmitted: true,
+            rawResult: CANARY
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('opaque-model-name', toolId)}
+      />
+    )
+
+    expect(screen.container.textContent).toContain(expected)
+    expect(screen.container.textContent).not.toContain(toolId)
+    expect(screen.container.textContent).not.toContain(CANARY)
+    expect(screen.container.querySelector('pre')).toBeNull()
+  })
+
+  it.each([
+    ['browser_hover', 'running', undefined, undefined, 'Hovering over page element'],
+    [
+      'browser_hover',
+      'failed',
+      { ok: false, status: 'failed' },
+      undefined,
+      'Failed to hover over page element'
+    ],
+    ['browser_hover', 'cancelled', undefined, 'cancelled', 'Cancelled hovering over page element'],
+    [
+      'browser_hover',
+      'outcomeUnknown',
+      { ok: false, status: 'outcome_unknown' },
+      undefined,
+      'Hover outcome uncertain; the action may have occurred'
+    ],
+    ['browser_select_option', 'running', undefined, undefined, 'Selecting page option'],
+    [
+      'browser_select_option',
+      'failed',
+      { ok: false, status: 'failed' },
+      undefined,
+      'Failed to select page option'
+    ],
+    [
+      'browser_select_option',
+      'cancelled',
+      undefined,
+      'cancelled',
+      'Cancelled selecting page option'
+    ],
+    [
+      'browser_select_option',
+      'outcomeUnknown',
+      { ok: false, status: 'outcome_unknown' },
+      undefined,
+      'Option selection outcome uncertain; the selection may have changed'
+    ],
+    ['browser_drag', 'running', undefined, undefined, 'Dragging page item'],
+    [
+      'browser_drag',
+      'failed',
+      { ok: false, status: 'failed' },
+      undefined,
+      'Failed to drag page item'
+    ],
+    ['browser_drag', 'cancelled', undefined, 'cancelled', 'Cancelled dragging page item'],
+    [
+      'browser_drag',
+      'outcomeUnknown',
+      { ok: false, status: 'outcome_unknown' },
+      undefined,
+      'Drag outcome uncertain; the item may have moved'
+    ]
+  ] as const)(
+    'renders %s %s with dedicated copy',
+    async (toolId, _statusName, projected, settledStatus, expected) => {
+      const result = projected
+        ? ({
+            callId: 'call-browser-capability',
+            tool: 'opaque-model-name',
+            ok: projected.ok,
+            result: {
+              schemaVersion: 1,
+              type: 'builtin_capability_tool',
+              status: projected.status,
+              contentOmitted: true
+            }
+          } satisfies AgentToolResult)
+        : undefined
+      const screen = await render(
+        <AgentToolActivity
+          call={call('opaque-model-name')}
+          result={result}
+          run={run()}
+          settledStatus={settledStatus}
+          showImageGenerationPreview={false}
+          toolIdentity={identity('opaque-model-name', toolId)}
+        />
+      )
+
+      expect(screen.container.textContent).toContain(expected)
+      expect(screen.container.textContent).not.toContain(toolId)
+      expect(screen.container.textContent).not.toContain(CANARY)
+      if (_statusName === 'outcomeUnknown') {
+        expect(screen.container.querySelector('button')).toBeNull()
+        expect(screen.container.querySelector('a')).toBeNull()
+      }
+    }
+  )
+
+  it('localizes representative expanded browser categories in Chinese and English', () => {
+    expect(zhCNTranslations['agent.builtinCapability.browser.screenshot.completed']).toBe(
+      '已截取网页'
+    )
+    expect(enUSTranslations['agent.builtinCapability.browser.screenshot.completed']).toBe(
+      'Captured page screenshot'
+    )
+    expect(zhCNTranslations['agent.builtinCapability.browser.storageWrite.completed']).toBe(
+      '已更新浏览器存储'
+    )
+    expect(enUSTranslations['agent.builtinCapability.browser.storageWrite.completed']).toBe(
+      'Updated browser storage'
+    )
+    expect(zhCNTranslations['agent.builtinCapability.browser.upload.completed']).toBe(
+      '已向网页上传文件'
+    )
+    expect(enUSTranslations['agent.builtinCapability.browser.upload.completed']).toBe(
+      'Uploaded file to page'
+    )
+  })
+
+  it('renders an expanded OutcomeUnknown state without exposing a retry control or payload', async () => {
+    const screen = await render(
+      <AgentToolActivity
+        call={call('opaque-model-name', 'Upload the selected file.')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'opaque-model-name',
+          ok: false,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'outcome_unknown',
+            contentOmitted: true,
+            rawUrl: `https://${CANARY}.invalid`,
+            cdpEndpoint: CANARY
+          },
+          error: CANARY
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('opaque-model-name', 'browser_file_upload')}
+      />
+    )
+
+    expect(screen.container.textContent).toContain(
+      'File upload outcome uncertain; the upload may have occurred'
+    )
+    expect(screen.container.textContent).toContain('Upload the selected file.')
+    expect(screen.container.textContent).not.toContain(CANARY)
+    expect(screen.container.querySelector('button')).toBeNull()
+    expect(screen.container.querySelector('a')).toBeNull()
+    expect(screen.container.querySelector('pre')).toBeNull()
+  })
+
   it('uses a safe fallback for a future reviewed Tool without exposing its raw name', async () => {
+    const internalIdentity = {
+      ...identity('opaque-model-name', 'future.reviewed.tool'),
+      packageName: '@private/cdp-canary',
+      rawName: 'private_cdp_canary'
+    } satisfies AgentToolIdentity
     const screen = await render(
       <AgentToolActivity
         call={call('opaque-model-name')}
         run={run()}
         showImageGenerationPreview={false}
-        toolIdentity={identity('opaque-model-name', 'future.reviewed.tool')}
+        toolIdentity={internalIdentity}
       />
     )
 
     expect(screen.container.textContent).toContain('Running browser action')
     expect(screen.container.textContent).not.toContain('opaque-model-name')
     expect(screen.container.textContent).not.toContain('future.reviewed.tool')
+    expect(screen.container.textContent).not.toContain('private_cdp_canary')
+    expect(screen.container.textContent).not.toContain('@private/cdp-canary')
   })
 })

@@ -1199,11 +1199,33 @@ pub enum AgentToolIdentity {
     },
     /// Tool reviewed and packaged as part of one Host-owned built-in capability manifest.
     BuiltinCapability {
-        capability_id: String,
-        managed_mcp_id: String,
-        manifest_digest: String,
-        tool_id: String,
-        model_name: String,
+        capability_id: Box<str>,
+        managed_mcp_id: Box<str>,
+        package_name: Box<str>,
+        package_version: Box<str>,
+        upstream_catalog_digest: Box<str>,
+        policy_digest: Box<str>,
+        manifest_digest: Box<str>,
+        tool_id: Box<str>,
+        raw_name: Box<str>,
+        model_name: Box<str>,
+        upstream_schema_digest: Box<str>,
+        host_overlay_digest: Box<str>,
+        host_input_schema_digest: Box<str>,
+    },
+    /// Historical built-in capability provenance from the pre-Catalog wire contract.
+    ///
+    /// Only the durable conversation-trace repository may construct this variant while decoding
+    /// the exact legacy five-field payload. It deliberately carries none of the Catalog, policy,
+    /// schema, or Host-overlay bindings required for current authority and must therefore never be
+    /// accepted for checkpoint, approval, resume, or dispatch.
+    #[serde(rename = "builtin_capability", skip_deserializing)]
+    LegacyBuiltinCapability {
+        capability_id: Box<str>,
+        managed_mcp_id: Box<str>,
+        manifest_digest: Box<str>,
+        tool_id: Box<str>,
+        model_name: Box<str>,
     },
     Mcp {
         provenance: AgentMcpToolProvenance,

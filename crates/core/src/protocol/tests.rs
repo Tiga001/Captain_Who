@@ -8,11 +8,19 @@ use serde_json::{json, Value};
 #[test]
 fn builtin_capability_tool_identity_serializes_all_typed_routing_fields() {
     let identity = AgentToolIdentity::BuiltinCapability {
-        capability_id: "browser_automation".to_string(),
-        managed_mcp_id: "builtin.browser_automation.mcp".to_string(),
-        manifest_digest: format!("sha256:{}", "a".repeat(64)),
-        tool_id: "browser.snapshot".to_string(),
-        model_name: "browser_snapshot".to_string(),
+        capability_id: "browser_automation".into(),
+        managed_mcp_id: "builtin.browser_automation.mcp".into(),
+        package_name: "@playwright/mcp".into(),
+        package_version: "0.0.79".into(),
+        upstream_catalog_digest: format!("sha256:{}", "b".repeat(64)).into(),
+        policy_digest: format!("sha256:{}", "c".repeat(64)).into(),
+        manifest_digest: format!("sha256:{}", "a".repeat(64)).into(),
+        tool_id: "browser.snapshot".into(),
+        raw_name: "browser_snapshot".into(),
+        model_name: "browser_snapshot".into(),
+        upstream_schema_digest: format!("sha256:{}", "d".repeat(64)).into(),
+        host_overlay_digest: format!("sha256:{}", "e".repeat(64)).into(),
+        host_input_schema_digest: format!("sha256:{}", "f".repeat(64)).into(),
     };
     let encoded = serde_json::to_value(&identity).unwrap();
     assert_eq!(
@@ -21,9 +29,17 @@ fn builtin_capability_tool_identity_serializes_all_typed_routing_fields() {
             "type": "builtin_capability",
             "capabilityId": "browser_automation",
             "managedMcpId": "builtin.browser_automation.mcp",
+            "packageName": "@playwright/mcp",
+            "packageVersion": "0.0.79",
+            "upstreamCatalogDigest": format!("sha256:{}", "b".repeat(64)),
+            "policyDigest": format!("sha256:{}", "c".repeat(64)),
             "manifestDigest": format!("sha256:{}", "a".repeat(64)),
             "toolId": "browser.snapshot",
-            "modelName": "browser_snapshot"
+            "rawName": "browser_snapshot",
+            "modelName": "browser_snapshot",
+            "upstreamSchemaDigest": format!("sha256:{}", "d".repeat(64)),
+            "hostOverlayDigest": format!("sha256:{}", "e".repeat(64)),
+            "hostInputSchemaDigest": format!("sha256:{}", "f".repeat(64))
         })
     );
     assert_eq!(

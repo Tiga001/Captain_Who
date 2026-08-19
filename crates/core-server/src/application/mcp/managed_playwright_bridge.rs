@@ -28,8 +28,10 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio::task::{JoinHandle, JoinSet};
 use uuid::{Uuid, Version};
 
+#[cfg(test)]
+use super::playwright_manifest::load_playwright_browser_manifest;
 use super::playwright_manifest::{
-    load_playwright_browser_manifest, BROWSER_AUTOMATION_MANAGED_SERVER_ID,
+    load_playwright_browser_contract, BROWSER_AUTOMATION_MANAGED_SERVER_ID,
 };
 
 pub(crate) const MANAGED_PLAYWRIGHT_BRIDGE_CHANNEL: &str = "builtin.playwright.v1";
@@ -973,8 +975,17 @@ impl ManagedPlaywrightMcpRuntime {
     }
 
     fn validate_reviewed_catalog(&self) -> Result<(), McpError> {
-        let reviewed = load_playwright_browser_manifest()
+        let reviewed_contract = load_playwright_browser_contract()
             .map_err(|_| McpError::config("managed Playwright manifest is invalid"))?;
+        let reviewed = &reviewed_contract.manifest;
+        if reviewed.provider_contract.upstream_catalog_digest
+            != reviewed_contract.upstream_catalog_digest
+            || reviewed.provider_contract.policy_digest != reviewed_contract.policy_digest
+        {
+            return Err(McpError::config(
+                "managed Playwright provider contract identity drifted",
+            ));
+        }
         let catalog = self
             .manager
             .catalog(self.server_id)?
@@ -988,6 +999,11 @@ impl ManagedPlaywrightMcpRuntime {
             ));
         }
         for reviewed_tool in &reviewed.tools {
+            let Some(contract_tool) = reviewed_contract.tool(&reviewed_tool.raw_name) else {
+                return Err(McpError::config(
+                    "managed Playwright typed tool contract is unavailable",
+                ));
+            };
             let Some(tool) = catalog
                 .tools
                 .iter()
@@ -997,7 +1013,12 @@ impl ManagedPlaywrightMcpRuntime {
                     "managed Playwright reviewed tool is unavailable",
                 ));
             };
-            if tool.descriptor.input_schema != reviewed_tool.input_schema
+            if !contract_tool.is_runtime_exposable()
+                || contract_tool.upstream_schema_digest != reviewed_tool.upstream_schema_digest
+                || contract_tool.host_overlay_digest != reviewed_tool.host_overlay_digest
+                || contract_tool.host_schema_digest != reviewed_tool.schema_digest
+                || contract_tool.host_input_schema != reviewed_tool.input_schema
+                || tool.descriptor.input_schema != reviewed_tool.input_schema
                 || tool.raw_name != reviewed_tool.tool_id
                 || tool.descriptor.name != reviewed_tool.model_name
                 || tool.schema_digest != mcp_schema_digest(&reviewed_tool.input_schema, None)?
@@ -1185,7 +1206,7 @@ mod tests {
         InMemoryMcpRegistry, McpApprovalMode, McpContentBlock, McpHostBridgeConfig,
         McpManagerPolicy, McpRegistry, McpServerScope, McpTrustLevel,
     };
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
 
     #[cfg(target_os = "macos")]
     use crate::application::mcp::browser_risk::BrowserRiskCoordinator;
@@ -1809,6 +1830,10 @@ mod tests {
             .as_str()
             .expect("fixture URL")
             .to_string();
+        let secondary_url = ready["secondaryUrl"]
+            .as_str()
+            .expect("secondary fixture URL")
+            .to_string();
         runtime.request_start().unwrap();
         join_owned_lifecycle_tasks(&runtime).await;
         let status = runtime
@@ -1818,7 +1843,30 @@ mod tests {
             .unwrap();
         assert_eq!(status.state, mycopilot_mcp_client::McpServerState::Ready);
         let catalog = runtime.manager.catalog(runtime.server_id).unwrap().unwrap();
-        assert_eq!(catalog.tools.len(), 10);
+        let reviewed_manifest = load_playwright_browser_manifest().unwrap();
+        assert_eq!(catalog.tools.len(), reviewed_manifest.tools.len());
+        let catalog_names = catalog
+            .tools
+            .iter()
+            .map(|tool| tool.raw_name.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "browser_drag",
+            "browser_handle_dialog",
+            "browser_hover",
+            "browser_navigate_back",
+            "browser_select_option",
+        ] {
+            assert!(catalog_names.contains(expected), "{expected}");
+        }
+        for forbidden in [
+            "browser_evaluate",
+            "browser_file_upload",
+            "browser_cookie_list",
+            "browser_run_code_unsafe",
+        ] {
+            assert!(!catalog_names.contains(forbidden), "{forbidden}");
+        }
 
         let navigate = invoke_browser_tool_with_grant(
             &runtime,
@@ -1844,6 +1892,125 @@ mod tests {
         assert!(snapshot_text.contains("Managed Playwright Bridge Fixture"));
         let input_ref = snapshot_ref(&snapshot_text, "Message");
         let button_ref = snapshot_ref(&snapshot_text, "Apply");
+        let dialog_button_ref = snapshot_ref(&snapshot_text, "Show dialog");
+        let select_ref = snapshot_ref(&snapshot_text, "Plan");
+        let drag_source_ref = snapshot_ref(&snapshot_text, "Drag source");
+        let drop_target_ref = snapshot_ref(&snapshot_text, "Drop target");
+        let list_ref = snapshot_ref(&snapshot_text, "Visible items");
+
+        for (tool, arguments) in [
+            (
+                "browser_find",
+                json!({
+                    "text": "Managed Playwright Bridge Fixture",
+                    "call_reason": "Find the local fixture heading."
+                }),
+            ),
+            (
+                "browser_generate_locator",
+                json!({
+                    "target": button_ref.clone(),
+                    "call_reason": "Generate a locator for the local apply button."
+                }),
+            ),
+            (
+                "browser_highlight",
+                json!({
+                    "target": button_ref.clone(),
+                    "call_reason": "Highlight the local apply button."
+                }),
+            ),
+            (
+                "browser_hide_highlight",
+                json!({
+                    "target": button_ref.clone(),
+                    "call_reason": "Remove the local fixture highlight."
+                }),
+            ),
+            (
+                "browser_verify_element_visible",
+                json!({
+                    "role": "heading",
+                    "accessibleName": "Managed Playwright Bridge Fixture",
+                    "call_reason": "Verify the local fixture heading."
+                }),
+            ),
+            (
+                "browser_verify_text_visible",
+                json!({
+                    "text": "Managed Playwright Bridge Fixture",
+                    "call_reason": "Verify the local fixture text."
+                }),
+            ),
+            (
+                "browser_verify_list_visible",
+                json!({
+                    "element": "fixture item list",
+                    "target": list_ref.clone(),
+                    "items": ["Alpha", "Beta"],
+                    "call_reason": "Verify the local fixture list."
+                }),
+            ),
+            (
+                "browser_route_list",
+                json!({"call_reason": "List active routes for the local fixture."}),
+            ),
+        ] {
+            let result =
+                invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
+            assert!(
+                !result.is_error,
+                "managed fixture {tool} failed: {}",
+                tool_result_text(&result)
+            );
+        }
+
+        let hovered = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_hover",
+            json!({
+                "target": button_ref.clone(),
+                "call_reason": "Exercise the newly exposed hover path."
+            }),
+        )
+        .await;
+        assert!(
+            !hovered.is_error,
+            "managed fixture hover failed: {}",
+            tool_result_text(&hovered)
+        );
+
+        let opened_dialog = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_click",
+            json!({
+                "target": dialog_button_ref,
+                "call_reason": "Open the repository-owned fixture dialog."
+            }),
+        )
+        .await;
+        assert!(
+            !opened_dialog.is_error,
+            "managed fixture dialog trigger failed: {}",
+            tool_result_text(&opened_dialog)
+        );
+        let handled_dialog = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_handle_dialog",
+            json!({
+                "accept": true,
+                "call_reason": "Accept the repository-owned fixture dialog."
+            }),
+        )
+        .await;
+        assert!(
+            !handled_dialog.is_error,
+            "managed fixture dialog handling failed: {}",
+            tool_result_text(&handled_dialog)
+        );
 
         assert!(
             !invoke_browser_tool_with_grant(
@@ -1863,6 +2030,105 @@ mod tests {
             .await
             .is_error
         );
+        assert!(
+            !invoke_browser_tool_with_grant(
+                &runtime,
+                &capability_grant,
+                "browser_select_option",
+                json!({
+                    "target": select_ref.clone(),
+                    "values": ["pro"],
+                    "call_reason": "Select the local fixture plan."
+                }),
+            )
+            .await
+            .is_error
+        );
+        assert!(
+            !invoke_browser_tool_with_grant(
+                &runtime,
+                &capability_grant,
+                "browser_verify_value",
+                json!({
+                    "type": "combobox",
+                    "element": "Plan",
+                    "target": select_ref,
+                    "value": "pro",
+                    "call_reason": "Verify the selected local fixture plan."
+                }),
+            )
+            .await
+            .is_error
+        );
+        let dragged = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_drag",
+            json!({
+                "startTarget": drag_source_ref,
+                "endTarget": drop_target_ref,
+                "call_reason": "Drag between local fixture elements."
+            }),
+        )
+        .await;
+        assert!(
+            !dragged.is_error,
+            "managed fixture drag failed: {}",
+            tool_result_text(&dragged)
+        );
+        let drag_wait = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_wait_for",
+            json!({"text": "dragged", "call_reason": "Wait for the local drag result."}),
+        )
+        .await;
+        assert!(tool_result_text(&drag_wait).contains("dragged"));
+
+        for (tool, arguments) in [
+            (
+                "browser_mouse_move_xy",
+                json!({"x": 4, "y": 4, "call_reason": "Move within the local fixture."}),
+            ),
+            (
+                "browser_mouse_down",
+                json!({"button": "left", "call_reason": "Press the mouse in the local fixture."}),
+            ),
+            (
+                "browser_mouse_up",
+                json!({"button": "left", "call_reason": "Release the mouse in the local fixture."}),
+            ),
+            (
+                "browser_mouse_click_xy",
+                json!({"x": 4, "y": 4, "call_reason": "Click a safe local fixture coordinate."}),
+            ),
+            (
+                "browser_mouse_drag_xy",
+                json!({
+                    "startX": 4,
+                    "startY": 4,
+                    "endX": 8,
+                    "endY": 8,
+                    "call_reason": "Drag across safe local fixture coordinates."
+                }),
+            ),
+            (
+                "browser_mouse_wheel",
+                json!({
+                    "deltaX": 0,
+                    "deltaY": 8,
+                    "call_reason": "Scroll the local fixture."
+                }),
+            ),
+        ] {
+            let result =
+                invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
+            assert!(
+                !result.is_error,
+                "managed fixture {tool} failed: {}",
+                tool_result_text(&result)
+            );
+        }
         assert!(
             !invoke_browser_tool_with_grant(
                 &runtime,
@@ -1913,6 +2179,75 @@ mod tests {
         )
         .await;
         assert!(!tabs.is_error);
+
+        let console = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_console_messages",
+            json!({
+                "level": "warning",
+                "call_reason": "Read bounded local fixture warnings."
+            }),
+        )
+        .await;
+        assert!(!console.is_error);
+        assert!(tool_result_text(&console).contains("managed fixture warning"));
+        let requests = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_network_requests",
+            json!({
+                "static": false,
+                "call_reason": "Read the bounded local fixture request list."
+            }),
+        )
+        .await;
+        assert!(!requests.is_error);
+        assert!(!tool_result_text(&requests).contains("fixture-query-canary"));
+
+        let secondary = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_navigate",
+            json!({
+                "url": secondary_url,
+                "call_reason": "Open the secondary local fixture page."
+            }),
+        )
+        .await;
+        assert!(
+            !secondary.is_error,
+            "managed fixture secondary navigate failed: {}",
+            tool_result_text(&secondary)
+        );
+        let secondary_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Inspect the secondary local fixture page."}),
+        )
+        .await;
+        assert!(tool_result_text(&secondary_snapshot).contains("Secondary Fixture Page"));
+        let back = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_navigate_back",
+            json!({"call_reason": "Return to the primary local fixture page."}),
+        )
+        .await;
+        assert!(
+            !back.is_error,
+            "managed fixture navigate back failed: {}",
+            tool_result_text(&back)
+        );
+        let back_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Inspect the restored primary local fixture page."}),
+        )
+        .await;
+        assert!(tool_result_text(&back_snapshot).contains("Managed Playwright Bridge Fixture"));
 
         let closed = invoke_browser_tool_with_grant(
             &runtime,

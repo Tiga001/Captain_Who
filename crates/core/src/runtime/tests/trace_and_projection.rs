@@ -77,6 +77,19 @@ fn resume_accepts_only_tool_provenance_from_the_frozen_registry() {
     );
     assert!(validate_resumed_tool_provenance(&unregistered, &registry).is_err());
 
+    let mut legacy_builtin_capability = ConversationTraceRecorder::default();
+    legacy_builtin_capability.record_tool_call_with_identity(
+        &registered_call,
+        AgentToolIdentity::LegacyBuiltinCapability {
+            capability_id: "browser_automation".into(),
+            managed_mcp_id: "builtin.browser_automation.mcp".into(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)).into(),
+            tool_id: registered_call.tool.clone().into(),
+            model_name: registered_call.tool.clone().into(),
+        },
+    );
+    assert!(validate_resumed_tool_provenance(&legacy_builtin_capability, &registry).is_err());
+
     let mut spoofed = ConversationTraceRecorder::default();
     spoofed.record_tool_call_with_identity(
         &registered_call,

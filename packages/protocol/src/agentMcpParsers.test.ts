@@ -259,9 +259,17 @@ describe('built-in capability Host-boundary contract', () => {
       type: 'builtin_capability',
       capabilityId: 'browser_automation',
       managedMcpId: 'builtin.browser_automation.mcp',
+      packageName: '@playwright/mcp',
+      packageVersion: '0.0.79',
+      upstreamCatalogDigest: `sha256:${'1'.repeat(64)}`,
+      policyDigest: `sha256:${'2'.repeat(64)}`,
       manifestDigest: `sha256:${'f'.repeat(64)}`,
       toolId: 'browser.navigate',
-      modelName: 'browser_navigate'
+      rawName: 'browser_navigate',
+      modelName: 'browser_navigate',
+      upstreamSchemaDigest: `sha256:${'3'.repeat(64)}`,
+      hostOverlayDigest: `sha256:${'4'.repeat(64)}`,
+      hostInputSchemaDigest: `sha256:${'5'.repeat(64)}`
     }
     expect(parseAgentToolIdentityForHost(identity)).toEqual(identity)
     expect(() =>
@@ -275,10 +283,27 @@ describe('built-in capability Host-boundary contract', () => {
         type: identity.type,
         capabilityId: identity.capabilityId,
         managedMcpId: identity.managedMcpId,
+        packageName: identity.packageName,
+        packageVersion: identity.packageVersion,
+        upstreamCatalogDigest: identity.upstreamCatalogDigest,
+        policyDigest: identity.policyDigest,
         manifestDigest: identity.manifestDigest,
-        toolId: identity.toolId
+        toolId: identity.toolId,
+        rawName: identity.rawName,
+        upstreamSchemaDigest: identity.upstreamSchemaDigest,
+        hostOverlayDigest: identity.hostOverlayDigest,
+        hostInputSchemaDigest: identity.hostInputSchemaDigest
       })
     ).toThrow(/modelName/)
+    expect(() =>
+      parseAgentToolIdentityForHost({ ...identity, packageName: ' @playwright/mcp' })
+    ).toThrow(/packageName/)
+    expect(() =>
+      parseAgentToolIdentityForHost({ ...identity, upstreamCatalogDigest: 'a'.repeat(64) })
+    ).toThrow(/upstreamCatalogDigest/)
+    expect(() =>
+      parseAgentToolIdentityForHost({ ...identity, rawName: 'Browser.Navigate' })
+    ).toThrow(/rawName/)
     expect(() =>
       parseAgentToolIdentityForHost({ ...identity, modelName: 'browser.navigate' })
     ).toThrow(/Provider-visible Tool name/)
@@ -504,9 +529,17 @@ describe('durable presentation trace ordering contract', () => {
         type: 'builtin_capability',
         capabilityId: 'browser_automation',
         managedMcpId: 'builtin.browser_automation.mcp',
+        packageName: '@playwright/mcp',
+        packageVersion: '0.0.79',
+        upstreamCatalogDigest: `sha256:${'1'.repeat(64)}`,
+        policyDigest: `sha256:${'2'.repeat(64)}`,
         manifestDigest: `sha256:${'e'.repeat(64)}`,
         toolId: 'browser.navigate',
-        modelName: 'browser_navigate'
+        rawName: 'browser_navigate',
+        modelName: 'browser_navigate',
+        upstreamSchemaDigest: `sha256:${'3'.repeat(64)}`,
+        hostOverlayDigest: `sha256:${'4'.repeat(64)}`,
+        hostInputSchemaDigest: `sha256:${'5'.repeat(64)}`
       },
       call: {
         id: callId,

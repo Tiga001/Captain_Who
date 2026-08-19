@@ -10,6 +10,11 @@ import type {
   BrowserRiskAuthorizationContext,
   BrowserRiskFailure
 } from '../browser/BrowserRiskCoordinator'
+import { matchesBoundedJsonSchema } from './boundedJsonSchema'
+import {
+  MANAGED_PLAYWRIGHT_CAPABILITIES,
+  validateAndIndexOfficialPlaywrightCatalog
+} from './managedPlaywrightCatalog'
 
 import {
   MANAGED_PLAYWRIGHT_MANIFEST,
@@ -70,10 +75,7 @@ export interface ManagedPlaywrightToolDescriptor {
   name: string
   description: string
   inputSchema: Record<string, unknown>
-  annotations: {
-    readOnlyHint: boolean
-    destructiveHint: boolean
-  }
+  annotations: Record<string, unknown>
 }
 
 export interface ManagedPlaywrightCallResult {
@@ -165,6 +167,7 @@ interface UpstreamToolDescriptor {
   name: string
   description?: string
   inputSchema: Record<string, unknown>
+  annotations?: Record<string, unknown>
 }
 
 interface ActiveConnection {
@@ -173,6 +176,8 @@ interface ActiveConnection {
   clientTransport: InMemoryTransport
   serverTransport: InMemoryTransport
   outputDirectory: string
+  catalog?: ReadonlyMap<string, UpstreamToolDescriptor>
+  cataloging?: Promise<ReadonlyMap<string, UpstreamToolDescriptor>>
 }
 
 /**
@@ -216,7 +221,10 @@ export class ManagedPlaywrightMcpHost {
 
   async connect(signal?: AbortSignal): Promise<void> {
     try {
-      await this.runBounded(() => this.ensureConnected(), signal)
+      await this.runBounded(async (operationSignal) => {
+        const connection = await this.ensureConnected()
+        await this.ensureOfficialCatalog(connection, operationSignal)
+      }, signal)
     } catch (error) {
       await this.disposeConnection(true)
       throw error
@@ -245,23 +253,22 @@ export class ManagedPlaywrightMcpHost {
   }
 
   async listTools(signal?: AbortSignal): Promise<readonly ManagedPlaywrightToolDescriptor[]> {
-    const upstream = await this.runBounded(async (operationSignal) => {
+    const catalog = await this.runBounded(async (operationSignal) => {
       const connection = await this.ensureConnected()
-      return connection.client.listTools(undefined, {
-        signal: operationSignal,
-        timeout: this.toolTimeoutMs
-      })
+      return this.ensureOfficialCatalog(connection, operationSignal)
     }, signal)
-    validateUpstreamCatalog(upstream.tools)
-    return MANAGED_PLAYWRIGHT_MANIFEST.tools.map((tool) => ({
-      name: tool.rawName,
-      description: tool.description,
-      inputSchema: structuredClone(tool.inputSchema),
-      annotations: {
-        readOnlyHint: tool.safety === 'read_only',
-        destructiveHint: tool.safety === 'destructive'
+    return MANAGED_PLAYWRIGHT_MANIFEST.tools.map((tool) => {
+      const upstream = catalog.get(tool.rawName)
+      if (!upstream?.annotations) {
+        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.catalog_drift')
       }
-    }))
+      return {
+        name: tool.rawName,
+        description: tool.description,
+        inputSchema: structuredClone(tool.inputSchema),
+        annotations: structuredClone(upstream.annotations)
+      }
+    })
   }
 
   async callTool(
@@ -281,6 +288,15 @@ export class ManagedPlaywrightMcpHost {
     const modelArguments = expectArgumentRecord(argumentsValue)
     validateReviewedArguments(reviewed, modelArguments)
     const serverArguments = stripHostCallReason(modelArguments)
+
+    await this.runBounded(
+      async (operationSignal) => {
+        const connection = await this.ensureConnected()
+        await this.ensureOfficialCatalog(connection, operationSignal)
+      },
+      options.signal,
+      options.timeoutMs
+    )
 
     if (name === 'browser_close') {
       await this.runBounded(async () => this.closeSurface(), options.signal, options.timeoutMs)
@@ -360,7 +376,7 @@ export class ManagedPlaywrightMcpHost {
             }
             const failure = riskLease?.failure()
             if (failure) return riskFailureResult(failure)
-            return parseBoundedToolResult(rawResult)
+            return adaptReviewedToolResult(name, parseBoundedToolResult(rawResult))
           } finally {
             riskLease?.finish()
           }
@@ -426,7 +442,7 @@ export class ManagedPlaywrightMcpHost {
       server = await this.createOfficialConnection(
         {
           browser: { isolated: false },
-          capabilities: ['core'],
+          capabilities: [...MANAGED_PLAYWRIGHT_CAPABILITIES],
           codegen: 'none',
           imageResponses: 'omit',
           outputDir: outputDirectory,
@@ -458,6 +474,53 @@ export class ManagedPlaywrightMcpHost {
       this.outputDirectories.delete(outputDirectory)
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
     }
+  }
+
+  private async ensureOfficialCatalog(
+    connection: ActiveConnection,
+    signal: AbortSignal
+  ): Promise<ReadonlyMap<string, UpstreamToolDescriptor>> {
+    if (connection.catalog) return connection.catalog
+    if (connection.cataloging) return connection.cataloging
+    const cataloging = this.discoverOfficialCatalog(connection, signal)
+    connection.cataloging = cataloging
+    try {
+      const catalog = await cataloging
+      connection.catalog = catalog
+      return catalog
+    } finally {
+      if (connection.cataloging === cataloging) connection.cataloging = undefined
+    }
+  }
+
+  private async discoverOfficialCatalog(
+    connection: ActiveConnection,
+    signal: AbortSignal
+  ): Promise<ReadonlyMap<string, UpstreamToolDescriptor>> {
+    const tools: UpstreamToolDescriptor[] = []
+    let cursor: string | undefined
+    for (let page = 0; page < 8; page += 1) {
+      const result = await connection.client.listTools(cursor ? { cursor } : undefined, {
+        signal,
+        timeout: this.toolTimeoutMs
+      })
+      tools.push(...result.tools)
+      if (tools.length > 256) {
+        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.catalog_drift')
+      }
+      if (!result.nextCursor) {
+        try {
+          return validateAndIndexOfficialPlaywrightCatalog(tools)
+        } catch {
+          throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.catalog_drift')
+        }
+      }
+      if (result.nextCursor === cursor) {
+        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.catalog_drift')
+      }
+      cursor = result.nextCursor
+    }
+    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.catalog_drift')
   }
 
   private async runBounded<T>(
@@ -601,42 +664,6 @@ async function settleWithin<T>(
   }
 }
 
-function validateUpstreamCatalog(upstreamTools: readonly UpstreamToolDescriptor[]): void {
-  const byName = new Map(upstreamTools.map((tool) => [tool.name, tool] as const))
-  for (const reviewed of MANAGED_PLAYWRIGHT_MANIFEST.tools) {
-    const upstream = byName.get(reviewed.rawName)
-    const serverSchema = withoutHostCallReasonSchema(reviewed.inputSchema)
-    if (!upstream || !reviewedSchemaIsCompatible(serverSchema, upstream.inputSchema)) {
-      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.catalog_drift')
-    }
-  }
-}
-
-function reviewedSchemaIsCompatible(reviewed: unknown, upstream: unknown, key?: string): boolean {
-  if (key === 'description') return typeof reviewed === 'string'
-  if (Array.isArray(reviewed)) {
-    if (!Array.isArray(upstream)) return false
-    if (key === 'enum') return reviewed.every((value) => upstream.includes(value))
-    if (key === 'required') {
-      return (
-        reviewed.length === upstream.length && reviewed.every((value) => upstream.includes(value))
-      )
-    }
-    return (
-      reviewed.length === upstream.length &&
-      reviewed.every((value, index) => reviewedSchemaIsCompatible(value, upstream[index]))
-    )
-  }
-  if (reviewed !== null && typeof reviewed === 'object') {
-    if (upstream === null || typeof upstream !== 'object' || Array.isArray(upstream)) return false
-    const upstreamRecord = upstream as Record<string, unknown>
-    return Object.entries(reviewed as Record<string, unknown>).every(([childKey, value]) =>
-      reviewedSchemaIsCompatible(value, upstreamRecord[childKey], childKey)
-    )
-  }
-  return Object.is(reviewed, upstream)
-}
-
 function expectArgumentRecord(value: unknown): Record<string, unknown> {
   const record = expectRecordWithoutThrow(value)
   if (!record) {
@@ -651,20 +678,6 @@ function stripHostCallReason(record: Record<string, unknown>): Record<string, un
   return copy
 }
 
-function withoutHostCallReasonSchema(
-  schemaValue: Readonly<Record<string, unknown>>
-): Record<string, unknown> {
-  const schema = structuredClone(schemaValue) as Record<string, unknown>
-  const properties = expectRecordWithoutThrow(schema.properties)
-  if (properties) delete properties.call_reason
-  if (Array.isArray(schema.required)) {
-    const required = schema.required.filter((value) => value !== 'call_reason')
-    if (required.length === 0) delete schema.required
-    else schema.required = required
-  }
-  return schema
-}
-
 function validateReviewedArguments(
   tool: ManagedPlaywrightToolManifestEntry,
   value: Record<string, unknown>
@@ -672,60 +685,16 @@ function validateReviewedArguments(
   if (Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_ARGUMENT_BYTES) {
     throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
   }
-  let nodes = 0
-  if (!matchesSchema(value, tool.inputSchema, 0, () => ++nodes)) {
+  if (
+    !matchesBoundedJsonSchema(value, tool.inputSchema, {
+      maxDepth: MAX_ARGUMENT_DEPTH,
+      maxNodes: MAX_ARGUMENT_NODES,
+      maxArrayItems: 256,
+      maxObjectProperties: 256
+    })
+  ) {
     throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
   }
-}
-
-function matchesSchema(
-  value: unknown,
-  schemaValue: unknown,
-  depth: number,
-  countNode: () => number
-): boolean {
-  if (depth > MAX_ARGUMENT_DEPTH || countNode() > MAX_ARGUMENT_NODES) return false
-  const schema = expectRecordWithoutThrow(schemaValue)
-  if (!schema) return false
-  if (schema.type === 'object') {
-    const record = expectRecordWithoutThrow(value)
-    const properties = expectRecordWithoutThrow(schema.properties) ?? {}
-    if (!record) return false
-    if (
-      schema.additionalProperties === false &&
-      Object.keys(record).some((key) => !(key in properties))
-    ) {
-      return false
-    }
-    if (
-      Array.isArray(schema.required) &&
-      schema.required.some((key) => typeof key !== 'string' || !(key in record))
-    ) {
-      return false
-    }
-    return Object.entries(record).every(([key, child]) =>
-      key in properties ? matchesSchema(child, properties[key], depth + 1, countNode) : true
-    )
-  }
-  if (schema.type === 'array') {
-    return (
-      Array.isArray(value) &&
-      value.length <= 256 &&
-      value.every((child) => matchesSchema(child, schema.items, depth + 1, countNode))
-    )
-  }
-  if (schema.type === 'string') {
-    if (typeof value !== 'string') return false
-    if (typeof schema.minLength === 'number' && value.length < schema.minLength) return false
-    if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) return false
-  }
-  if (schema.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value)))
-    return false
-  if (schema.type === 'integer' && (typeof value !== 'number' || !Number.isSafeInteger(value)))
-    return false
-  if (schema.type === 'boolean' && typeof value !== 'boolean') return false
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return false
-  return true
 }
 
 function parseBoundedToolResult(value: unknown): ManagedPlaywrightCallResult {
@@ -770,6 +739,55 @@ function parseBoundedToolResult(value: unknown): ManagedPlaywrightCallResult {
     throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.output_too_large')
   }
   return bounded
+}
+
+function adaptReviewedToolResult(
+  toolName: string,
+  result: ManagedPlaywrightCallResult
+): ManagedPlaywrightCallResult {
+  if (toolName !== 'browser_network_requests' && toolName !== 'browser_console_messages') {
+    return result
+  }
+  // These reviewed diagnostics intentionally expose bounded text, not arbitrary protocol data.
+  // Keep that boundary even if page-controlled console output or a future upstream implementation
+  // includes credential-bearing URL components or common authentication header lines.
+  if (result.structuredContent !== undefined) {
+    throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+  }
+  return {
+    content: result.content.map((block) => {
+      if (block.type !== 'text') {
+        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+      }
+      return { type: 'text' as const, text: sanitizeCredentialBearingText(block.text) }
+    }),
+    isError: result.isError
+  }
+}
+
+function sanitizeCredentialBearingText(text: string): string {
+  const withoutSensitiveUrlComponents = text.replace(/https?:\/\/[^\s<>"'`]+/gi, (rawUrl) => {
+    try {
+      const url = new URL(rawUrl)
+      url.username = ''
+      url.password = ''
+      url.search = ''
+      url.hash = ''
+      return url.toString()
+    } catch {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+    }
+  })
+  const withoutCredentialAssignments = withoutSensitiveUrlComponents
+    .replace(
+      /(\b(?:password|passwd|token|secret|api[_-]?key|session(?:id)?|authorization|cookie)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\n,;}\]]+)/gi,
+      '$1[redacted]'
+    )
+    .replace(/\b(bearer|basic)\s+[a-z0-9._~+/-]+=*/gi, '$1 [redacted]')
+  return withoutCredentialAssignments.replace(
+    /^(\s*)(authorization|proxy-authorization|cookie|set-cookie|x-api-key)\s*:.*$/gim,
+    '$1$2: [redacted]'
+  )
 }
 
 function cloneBoundedStructuredContent(value: object): Record<string, unknown> {

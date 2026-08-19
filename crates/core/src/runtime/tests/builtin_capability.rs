@@ -102,9 +102,48 @@ fn reviewed_browser_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "wait_for": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["visible", "hidden"] },
+                    "marker": { "const": "fixture" },
+                    "attempts": { "type": "integer", "minimum": 1, "maximum": 5 },
+                    "label": { "type": "string", "minLength": 1, "maxLength": 32 },
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" }
+                    },
+                    "tuple": {
+                        "type": "array",
+                        "prefixItems": [
+                            { "type": "string" },
+                            { "type": "number" }
+                        ],
+                        "items": false
+                    },
+                    "selector": {
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "object",
+                                "properties": { "ref": { "type": "string" } },
+                                "required": ["ref"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "timeout": {
+                        "anyOf": [
+                            { "type": "number", "minimum": 0 },
+                            { "type": "null" }
+                        ]
+                    },
+                    "rules": {
+                        "allOf": [
+                            { "type": "object" },
+                            {
+                                "properties": { "strict": { "type": "boolean" } },
+                                "required": ["strict"],
+                                "additionalProperties": false
+                            }
+                        ]
                     }
                 },
                 "required": ["wait_for"],
@@ -195,7 +234,9 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
                 run_id: run_id.to_string(),
                 capability_id: manifest.descriptor.id,
                 activation_id: CapabilityActivationId::generate(),
-                manifest_digest: manifest.manifest_digest,
+                manifest_digest: manifest.manifest_digest.clone(),
+                upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+                provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
                 policy_revision: 11,
                 created_at: now,
                 expires_at: now + 60,

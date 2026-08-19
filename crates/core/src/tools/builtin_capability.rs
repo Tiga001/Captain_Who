@@ -187,6 +187,10 @@ pub(crate) struct BuiltinCapabilityAgentTool {
     capability_id: BuiltinCapabilityId,
     capability_gate: ToolCapabilityId,
     managed_mcp_id: String,
+    package_name: String,
+    package_version: String,
+    upstream_catalog_digest: String,
+    policy_digest: String,
     manifest_digest: String,
     descriptor: BuiltinCapabilityToolDescriptor,
     runtime: BuiltinCapabilityRuntime,
@@ -203,6 +207,10 @@ impl BuiltinCapabilityAgentTool {
             capability_id: manifest.descriptor.id.clone(),
             capability_gate,
             managed_mcp_id: manifest.managed_mcp_id.clone(),
+            package_name: manifest.provider_contract.package_name.clone(),
+            package_version: manifest.provider_contract.package_version.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            policy_digest: manifest.provider_contract.policy_digest.clone(),
             manifest_digest: manifest.manifest_digest.clone(),
             descriptor,
             runtime,
@@ -221,12 +229,44 @@ impl BuiltinCapabilityAgentTool {
         &self.managed_mcp_id
     }
 
+    pub(crate) fn package_name(&self) -> &str {
+        &self.package_name
+    }
+
+    pub(crate) fn package_version(&self) -> &str {
+        &self.package_version
+    }
+
+    pub(crate) fn upstream_catalog_digest(&self) -> &str {
+        &self.upstream_catalog_digest
+    }
+
+    pub(crate) fn policy_digest(&self) -> &str {
+        &self.policy_digest
+    }
+
     pub(crate) fn tool_id(&self) -> &str {
         &self.descriptor.tool_id
     }
 
     pub(crate) fn model_name(&self) -> &str {
         &self.descriptor.model_name
+    }
+
+    pub(crate) fn raw_name(&self) -> &str {
+        &self.descriptor.raw_name
+    }
+
+    pub(crate) fn upstream_schema_digest(&self) -> &str {
+        &self.descriptor.upstream_schema_digest
+    }
+
+    pub(crate) fn host_overlay_digest(&self) -> &str {
+        &self.descriptor.host_overlay_digest
+    }
+
+    pub(crate) fn host_input_schema_digest(&self) -> &str {
+        &self.descriptor.schema_digest
     }
 }
 
@@ -298,9 +338,17 @@ impl AsyncAgentTool for BuiltinCapabilityAgentTool {
                     run_id: run_id.to_string(),
                     capability_id: self.capability_id.clone(),
                     managed_mcp_id: self.managed_mcp_id.clone(),
+                    package_name: self.package_name.clone(),
+                    package_version: self.package_version.clone(),
+                    upstream_catalog_digest: self.upstream_catalog_digest.clone(),
+                    policy_digest: self.policy_digest.clone(),
                     manifest_digest: self.manifest_digest.clone(),
                     tool_id: self.descriptor.tool_id.clone(),
+                    raw_name: self.descriptor.raw_name.clone(),
                     model_name: self.descriptor.model_name.clone(),
+                    upstream_schema_digest: self.descriptor.upstream_schema_digest.clone(),
+                    host_overlay_digest: self.descriptor.host_overlay_digest.clone(),
+                    host_input_schema_digest: self.descriptor.schema_digest.clone(),
                     call_id: call_id.to_string(),
                     arguments: args,
                     cancellation: context.cancellation_token(),
@@ -690,6 +738,8 @@ mod tests {
             capability_id: manifest.descriptor.id,
             activation_id: CapabilityActivationId::parse(approval.activation_id.clone()).unwrap(),
             manifest_digest: approval.manifest_digest.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
             policy_revision: approval.policy_revision,
             created_at: approval.created_at,
             expires_at: approval.created_at
@@ -711,7 +761,9 @@ mod tests {
             run_id: "run-1".to_string(),
             capability_id: manifest.descriptor.id,
             activation_id: CapabilityActivationId::generate(),
-            manifest_digest: manifest.manifest_digest,
+            manifest_digest: manifest.manifest_digest.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
             policy_revision: 7,
             created_at: now,
             expires_at: now + 60,
@@ -795,10 +847,10 @@ mod tests {
                 tool_id,
                 model_name,
                 ..
-            }) if capability_id == "browser.automation"
-                && managed_mcp_id == "builtin.browser_automation.mcp"
-                && tool_id == "browser.snapshot"
-                && model_name == "browser_snapshot"
+            }) if capability_id.as_ref() == "browser.automation"
+                && managed_mcp_id.as_ref() == "builtin.browser_automation.mcp"
+                && tool_id.as_ref() == "browser.snapshot"
+                && model_name.as_ref() == "browser_snapshot"
         ));
     }
 
@@ -811,6 +863,8 @@ mod tests {
             capability_id: manifest.descriptor.id.clone(),
             activation_id: CapabilityActivationId::generate(),
             manifest_digest: manifest.manifest_digest.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
             policy_revision: 7,
             created_at: crate::builtin_capabilities::unix_timestamp(),
             expires_at: crate::builtin_capabilities::unix_timestamp() + 60,
@@ -851,6 +905,8 @@ mod tests {
             capability_id: manifest.descriptor.id.clone(),
             activation_id: CapabilityActivationId::generate(),
             manifest_digest: manifest.manifest_digest.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
             policy_revision: 7,
             created_at: now,
             expires_at: now + 60,

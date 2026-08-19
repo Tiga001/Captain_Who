@@ -65,10 +65,10 @@ pub use builtin_capabilities::{
     BrowserRiskAuthorizationRequest, BrowserRiskGrant, BuiltinCapabilityDescriptor,
     BuiltinCapabilityFuture, BuiltinCapabilityId, BuiltinCapabilityInvocation,
     BuiltinCapabilityManifest, BuiltinCapabilityPolicy, BuiltinCapabilityPolicyStore,
-    BuiltinCapabilityProvider, BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor,
-    CapabilityActivationId, CapabilityActivationState, CapabilityGrant,
-    BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS, BUILTIN_CAPABILITY_GRANT_TTL_SECONDS,
-    BUILTIN_CAPABILITY_MANIFEST_SCHEMA_VERSION,
+    BuiltinCapabilityProvider, BuiltinCapabilityProviderContract, BuiltinCapabilityRuntime,
+    BuiltinCapabilityToolDescriptor, CapabilityActivationId, CapabilityActivationState,
+    CapabilityGrant, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
+    BUILTIN_CAPABILITY_GRANT_TTL_SECONDS, BUILTIN_CAPABILITY_MANIFEST_SCHEMA_VERSION,
 };
 pub use cancellation::AgentCancellationToken;
 pub use context::{

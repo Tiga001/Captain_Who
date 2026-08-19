@@ -163,6 +163,8 @@ mod tests {
             capability_id: manifest.descriptor.id.clone(),
             activation_id: CapabilityActivationId::generate(),
             manifest_digest: manifest.manifest_digest.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
             policy_revision: 3,
             created_at: now,
             expires_at: now + 60,

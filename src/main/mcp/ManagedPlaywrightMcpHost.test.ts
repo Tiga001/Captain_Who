@@ -18,6 +18,10 @@ import {
   MANAGED_PLAYWRIGHT_MANIFEST,
   MANAGED_PLAYWRIGHT_PACKAGE_VERSION
 } from './managedPlaywrightManifest'
+import {
+  MANAGED_PLAYWRIGHT_CAPABILITIES,
+  MANAGED_PLAYWRIGHT_CATALOG_LOCK
+} from './managedPlaywrightCatalog'
 
 const trackedHosts = new Set<ManagedPlaywrightMcpHost>()
 const RISK_CONTEXT: BrowserRiskAuthorizationContext = {
@@ -59,13 +63,30 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(tools.map((tool) => tool.name)).toEqual(
       MANAGED_PLAYWRIGHT_MANIFEST.tools.map((tool) => tool.rawName)
     )
+    expect(tools).toHaveLength(31)
     expect(tools.map((tool) => tool.name)).not.toContain('browser_run_code_unsafe')
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        'browser_hover',
+        'browser_select_option',
+        'browser_console_messages',
+        'browser_network_requests',
+        'browser_mouse_click_xy',
+        'browser_generate_locator'
+      ])
+    )
     expect(tools.find((tool) => tool.name === 'browser_snapshot')?.inputSchema).not.toHaveProperty(
       'properties.filename'
     )
     expect(tools.find((tool) => tool.name === 'browser_tabs')?.inputSchema).toMatchObject({
       properties: { action: { enum: ['list'] } },
       required: ['action', 'call_reason']
+    })
+    expect(tools.find((tool) => tool.name === 'browser_snapshot')?.annotations).toEqual({
+      title: 'Page snapshot',
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true
     })
     for (const tool of tools) {
       expect(tool.inputSchema).toMatchObject({
@@ -92,7 +113,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     await host.connect()
     expect(capturedConfig).toMatchObject({
       browser: { isolated: false },
-      capabilities: ['core'],
+      capabilities: [...MANAGED_PLAYWRIGHT_CAPABILITIES],
       codegen: 'none',
       imageResponses: 'omit',
       saveSession: false,
@@ -143,6 +164,160 @@ describe('ManagedPlaywrightMcpHost', () => {
     await expect(
       host.callTool('browser_run_code_unsafe', { call_reason: 'Run arbitrary code.' })
     ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.tool_not_reviewed' })
+
+    await expect(
+      host.callTool('browser_console_messages', {
+        level: 'info',
+        call_reason: 'Inspect console output.'
+      })
+    ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
+    await expect(
+      host.callTool('browser_console_messages', {
+        level: 'warning',
+        all: true,
+        call_reason: 'Inspect console output.'
+      })
+    ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
+
+    await expect(
+      host.callTool('browser_console_messages', {
+        level: 'warning',
+        call_reason: 'Inspect warnings.'
+      })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenLastCalledWith(
+      {
+        name: 'browser_console_messages',
+        arguments: { level: 'warning' }
+      },
+      undefined,
+      expect.objectContaining({ resetTimeoutOnProgress: false })
+    )
+  })
+
+  it('enforces every exposed Host schema before any upstream dispatch', async () => {
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'unexpected dispatch' }],
+      isError: false
+    }))
+    const host = fakeHost({ callTool })
+
+    for (const tool of MANAGED_PLAYWRIGHT_MANIFEST.tools) {
+      await expect(
+        host.callTool(tool.rawName, {
+          call_reason: `Validate ${tool.rawName}.`,
+          __unexpected: true
+        })
+      ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
+
+      const required = Array.isArray(tool.inputSchema.required)
+        ? tool.inputSchema.required.filter(
+            (name): name is string => typeof name === 'string' && name !== 'call_reason'
+          )
+        : []
+      if (required.length > 0) {
+        await expect(
+          host.callTool(tool.rawName, { call_reason: `Validate ${tool.rawName}.` })
+        ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.invalid_arguments' })
+      }
+    }
+
+    expect(callTool).not.toHaveBeenCalled()
+  })
+
+  it('redacts credential-bearing network-list output at the Host boundary', async () => {
+    const host = fakeHost({
+      callTool: vi.fn(async () => ({
+        content: [
+          {
+            type: 'text',
+            text: [
+              '### Result',
+              '1. [GET] https://alice:password@example.test/api/items?token=query-canary#fragment-canary => [200] OK',
+              'Authorization: bearer-header-canary',
+              'Cookie: cookie-header-canary'
+            ].join('\n')
+          }
+        ],
+        isError: false
+      }))
+    })
+
+    const result = await host.callTool('browser_network_requests', {
+      static: false,
+      call_reason: 'Inspect request failures.'
+    })
+
+    expect(result).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: [
+            '### Result',
+            '1. [GET] https://example.test/api/items => [200] OK',
+            'Authorization: [redacted]',
+            'Cookie: [redacted]'
+          ].join('\n')
+        }
+      ],
+      isError: false
+    })
+    expect(JSON.stringify(result)).not.toMatch(
+      /alice|password|query-canary|fragment-canary|bearer-header-canary|cookie-header-canary/
+    )
+  })
+
+  it('redacts page-controlled console output and rejects non-text diagnostic results', async () => {
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [
+          {
+            type: 'text',
+            text: [
+              'Error: fetch https://alice:password@example.test/failure?token=query-canary#fragment-canary',
+              'Set-Cookie: cookie-header-canary',
+              'token=console-token-canary',
+              'Authorization=Bearer console-bearer-canary'
+            ].join('\n')
+          }
+        ],
+        isError: false
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' }],
+        isError: false
+      })
+    const host = fakeHost({ callTool })
+
+    const result = await host.callTool('browser_console_messages', {
+      level: 'error',
+      call_reason: 'Inspect page errors.'
+    })
+    expect(result).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: [
+            'Error: fetch https://example.test/failure',
+            'Set-Cookie: [redacted]',
+            'token=[redacted]',
+            'Authorization=[redacted]'
+          ].join('\n')
+        }
+      ],
+      isError: false
+    })
+    expect(JSON.stringify(result)).not.toMatch(
+      /alice|password|query-canary|fragment-canary|cookie-header-canary|console-token-canary|console-bearer-canary/
+    )
+
+    await expect(
+      host.callTool('browser_console_messages', {
+        level: 'error',
+        call_reason: 'Inspect page errors.'
+      })
+    ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.protocol_error' })
   })
 
   it('intercepts browser_close through the Host-owned surface and never sends Target.closeTarget', async () => {
@@ -649,10 +824,11 @@ function fakeHost(overrides: {
   detachAutomation?: () => Promise<void>
   listTools?: ManagedMcpClient['listTools']
 }): ManagedPlaywrightMcpHost {
-  const upstreamTools = MANAGED_PLAYWRIGHT_MANIFEST.tools.map((tool) => ({
-    name: tool.rawName,
+  const upstreamTools = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
+    name: tool.name,
     description: tool.description,
-    inputSchema: serverInputSchema(tool.rawName, tool.inputSchema)
+    inputSchema: structuredClone(tool.inputSchema),
+    annotations: structuredClone(tool.annotations ?? {})
   }))
   const host = new ManagedPlaywrightMcpHost({
     beginNetworkOperation: overrides.beginNetworkOperation,
@@ -705,29 +881,4 @@ function riskLease(options: {
     finish
   } as unknown as BrowserNetworkOperationLease
   return { finish, lease, markDispatched, settle }
-}
-
-function serverInputSchema(
-  toolName: string,
-  reviewedSchema: Readonly<Record<string, unknown>>
-): Record<string, unknown> {
-  const schema = structuredClone(reviewedSchema) as Record<string, unknown>
-  const properties = schema.properties as Record<string, unknown>
-  delete properties.call_reason
-  const required = (schema.required as unknown[] | undefined)?.filter(
-    (value) => value !== 'call_reason'
-  )
-  if (required?.length) schema.required = required
-  else delete schema.required
-
-  if (schema === undefined) throw new Error('unreachable')
-  if (toolName === 'browser_tabs') {
-    ;(properties.action as Record<string, unknown>).enum = ['list', 'new', 'close', 'select']
-    ;(properties as Record<string, unknown>).index = { type: 'number' }
-    ;(properties as Record<string, unknown>).url = { type: 'string' }
-  }
-  if (toolName === 'browser_snapshot') {
-    properties.filename = { type: 'string' }
-  }
-  return schema
 }

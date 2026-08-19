@@ -3206,8 +3206,11 @@ fn validate_resumed_tool_provenance(
         else {
             continue;
         };
-        if matches!(provenance, AgentToolIdentity::Unregistered { .. })
-            || tool_registry.identity(&tool) != Some(&provenance)
+        if matches!(
+            provenance,
+            AgentToolIdentity::Unregistered { .. }
+                | AgentToolIdentity::LegacyBuiltinCapability { .. }
+        ) || tool_registry.identity(&tool) != Some(&provenance)
         {
             return Err(AgentError::new(
                 "运行检查点的工具来源与当前冻结工具注册不一致。",

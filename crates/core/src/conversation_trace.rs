@@ -1067,22 +1067,71 @@ fn validate_tool_identity(trace_tool: &str, identity: &AgentToolIdentity) -> Res
         AgentToolIdentity::BuiltinCapability {
             capability_id,
             managed_mcp_id,
+            package_name,
+            package_version,
+            upstream_catalog_digest,
+            policy_digest,
+            manifest_digest,
+            tool_id,
+            raw_name,
+            model_name,
+            upstream_schema_digest,
+            host_overlay_digest,
+            host_input_schema_digest,
+        } => {
+            let valid_digest = |digest: &str| {
+                digest.len() == "sha256:".len() + 64
+                    && digest.starts_with("sha256:")
+                    && digest["sha256:".len()..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            };
+            if crate::BuiltinCapabilityId::parse(capability_id.clone()).is_err()
+                || crate::BuiltinCapabilityId::parse(managed_mcp_id.clone()).is_err()
+                || crate::BuiltinCapabilityId::parse(tool_id.clone()).is_err()
+                || crate::BuiltinCapabilityId::parse(raw_name.clone()).is_err()
+                || package_name.trim().is_empty()
+                || package_name.trim() != package_name.as_ref()
+                || package_name.len() > 256
+                || package_name.chars().any(char::is_control)
+                || package_version.trim().is_empty()
+                || package_version.trim() != package_version.as_ref()
+                || package_version.len() > 128
+                || package_version.chars().any(char::is_control)
+                || !valid_digest(upstream_catalog_digest)
+                || !valid_digest(policy_digest)
+                || !valid_digest(manifest_digest)
+                || !valid_digest(upstream_schema_digest)
+                || !valid_digest(host_overlay_digest)
+                || !valid_digest(host_input_schema_digest)
+                || model_name.as_ref() != trace_tool
+            {
+                return Err(
+                    "conversation trace built-in capability provenance is invalid".to_string(),
+                );
+            }
+        }
+        AgentToolIdentity::LegacyBuiltinCapability {
+            capability_id,
+            managed_mcp_id,
             manifest_digest,
             tool_id,
             model_name,
         } => {
+            let valid_digest = manifest_digest.len() == "sha256:".len() + 64
+                && manifest_digest.starts_with("sha256:")
+                && manifest_digest["sha256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
             if crate::BuiltinCapabilityId::parse(capability_id.clone()).is_err()
                 || crate::BuiltinCapabilityId::parse(managed_mcp_id.clone()).is_err()
                 || crate::BuiltinCapabilityId::parse(tool_id.clone()).is_err()
-                || manifest_digest.len() != "sha256:".len() + 64
-                || !manifest_digest.starts_with("sha256:")
-                || !manifest_digest["sha256:".len()..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                || model_name != trace_tool
+                || !valid_digest
+                || model_name.as_ref() != trace_tool
             {
                 return Err(
-                    "conversation trace built-in capability provenance is invalid".to_string(),
+                    "conversation trace legacy built-in capability provenance is invalid"
+                        .to_string(),
                 );
             }
         }

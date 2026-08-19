@@ -310,9 +310,17 @@ export type AgentToolIdentity =
       type: 'builtin_capability'
       capabilityId: McpBuiltinCapabilityId
       managedMcpId: string
+      packageName: string
+      packageVersion: string
+      upstreamCatalogDigest: string
+      policyDigest: string
       manifestDigest: string
       toolId: string
+      rawName: string
       modelName: string
+      upstreamSchemaDigest: string
+      hostOverlayDigest: string
+      hostInputSchemaDigest: string
     }
   | { type: 'mcp'; provenance: AgentMcpToolProvenance }
   | { type: 'unregistered'; toolName: string }

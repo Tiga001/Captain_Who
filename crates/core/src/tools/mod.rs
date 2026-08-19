@@ -986,17 +986,33 @@ impl ToolRegistry {
     ) -> AgentResult<()> {
         let capability_id = tool.capability_id().as_str().to_string();
         let managed_mcp_id = tool.managed_mcp_id().to_string();
+        let package_name = tool.package_name().to_string();
+        let package_version = tool.package_version().to_string();
+        let upstream_catalog_digest = tool.upstream_catalog_digest().to_string();
+        let policy_digest = tool.policy_digest().to_string();
         let manifest_digest = tool.manifest_digest().to_string();
         let tool_id = tool.tool_id().to_string();
+        let raw_name = tool.raw_name().to_string();
         let model_name = tool.model_name().to_string();
+        let upstream_schema_digest = tool.upstream_schema_digest().to_string();
+        let host_overlay_digest = tool.host_overlay_digest().to_string();
+        let host_input_schema_digest = tool.host_input_schema_digest().to_string();
         self.register_handler(
             format!("builtin-capability:{capability_id}"),
             AgentToolIdentity::BuiltinCapability {
-                capability_id,
-                managed_mcp_id,
-                manifest_digest,
-                tool_id,
-                model_name,
+                capability_id: capability_id.into_boxed_str(),
+                managed_mcp_id: managed_mcp_id.into_boxed_str(),
+                package_name: package_name.into_boxed_str(),
+                package_version: package_version.into_boxed_str(),
+                upstream_catalog_digest: upstream_catalog_digest.into_boxed_str(),
+                policy_digest: policy_digest.into_boxed_str(),
+                manifest_digest: manifest_digest.into_boxed_str(),
+                tool_id: tool_id.into_boxed_str(),
+                raw_name: raw_name.into_boxed_str(),
+                model_name: model_name.into_boxed_str(),
+                upstream_schema_digest: upstream_schema_digest.into_boxed_str(),
+                host_overlay_digest: host_overlay_digest.into_boxed_str(),
+                host_input_schema_digest: host_input_schema_digest.into_boxed_str(),
             },
             AgentToolHandler::Async(Box::new(tool)),
         )

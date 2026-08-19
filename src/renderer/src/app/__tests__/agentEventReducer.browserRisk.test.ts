@@ -78,9 +78,17 @@ function withBrowserCall(): ChatMessage {
       type: 'builtin_capability',
       capabilityId: 'browser_automation',
       managedMcpId: 'builtin.browser_automation.mcp',
+      packageName: '@playwright/mcp',
+      packageVersion: '0.0.79',
+      upstreamCatalogDigest: `sha256:${'1'.repeat(64)}`,
+      policyDigest: `sha256:${'2'.repeat(64)}`,
       manifestDigest: `sha256:${'b'.repeat(64)}`,
       toolId: 'browser.navigate',
-      modelName: 'browser_navigate'
+      rawName: 'browser_navigate',
+      modelName: 'browser_navigate',
+      upstreamSchemaDigest: `sha256:${'3'.repeat(64)}`,
+      hostOverlayDigest: `sha256:${'4'.repeat(64)}`,
+      hostInputSchemaDigest: `sha256:${'5'.repeat(64)}`
     },
     call: {
       id: CALL_ID,
