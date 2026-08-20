@@ -66,6 +66,7 @@ class FakeDebugger extends EventEmitter {
 class FakeWebContents extends EventEmitter {
   readonly debugger = new FakeDebugger() as unknown as Debugger
   destroyed = false
+  loadingMainFrame = false
 
   constructor(
     readonly id: number,
@@ -88,6 +89,9 @@ class FakeWebContents extends EventEmitter {
   }
   isDestroyed(): boolean {
     return this.destroyed
+  }
+  isLoadingMainFrame(): boolean {
+    return this.loadingMainFrame
   }
   async loadURL(url: string): Promise<void> {
     this.url = url
@@ -195,11 +199,494 @@ function attachGuest(
   return guest
 }
 
+function selectBoundSurface(
+  manager: BrowserSurfaceManager,
+  host: FakeWebContents,
+  surfaceId: string,
+  selectionRevision: number
+) {
+  const surfaceInstanceId = probeSurfaceInstance(manager, host, surfaceId, selectionRevision)
+  return manager.selectManualSurface(host.asWebContents(), {
+    schemaVersion: 1,
+    surfaceId,
+    surfaceInstanceId,
+    selectionRevision
+  })
+}
+
+function probeSurfaceInstance(
+  manager: BrowserSurfaceManager,
+  host: FakeWebContents,
+  surfaceId: string,
+  selectionRevision: number
+): string {
+  const probe = manager.selectManualSurface(host.asWebContents(), {
+    schemaVersion: 1,
+    surfaceId,
+    surfaceInstanceId: null,
+    selectionRevision
+  })
+  if (probe.reason !== 'instance_required' || !probe.surfaceInstanceId) {
+    throw new Error(`surface instance probe failed: ${probe.reason}`)
+  }
+  return probe.surfaceInstanceId
+}
+
+function attachSurface(
+  manager: BrowserSurfaceManager,
+  host: WebContents,
+  input: Parameters<BrowserSurfaceManager['attach']>[1]
+): ReturnType<BrowserSurfaceManager['attach']> {
+  if (input.surfaceInstanceId !== undefined) return manager.attach(host, input)
+  const probe = manager.selectManualSurface(host, {
+    schemaVersion: 1,
+    surfaceId: input.surfaceId,
+    surfaceInstanceId: null,
+    selectionRevision: Number.MAX_SAFE_INTEGER
+  })
+  return manager.attach(host, {
+    ...input,
+    ...(probe.reason === 'instance_required' && probe.surfaceInstanceId
+      ? { surfaceInstanceId: probe.surfaceInstanceId }
+      : {})
+  })
+}
+
 afterEach(() => {
   vi.useRealTimers()
 })
 
 describe('BrowserSurfaceManager', () => {
+  it('keeps a production ensure pending until Renderer acknowledges the exact instance', async () => {
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, command.surfaceId)
+    const surfaceInstanceId = probeSurfaceInstance(
+      manager,
+      host,
+      command.surfaceId,
+      Number.MAX_SAFE_INTEGER
+    )
+
+    expect(
+      manager.attach(host.asWebContents(), {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId
+      })
+    ).toEqual(
+      expect.objectContaining({
+        accepted: false,
+        reason: 'instance_mismatch',
+        retryable: true,
+        surfaceInstanceId
+      })
+    )
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    expect(
+      manager.attach(host.asWebContents(), {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId,
+        surfaceInstanceId
+      })
+    ).toEqual(expect.objectContaining({ accepted: true, reason: 'surface_ready' }))
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ generation: 1, surfaceId: command.surfaceId })
+    )
+    await manager.shutdown()
+  })
+
+  it('registers a selectable instance early but keeps pending ensure behind document readiness', async () => {
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    guest.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: guest.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    const probe = manager.selectManualSurface(host.asWebContents(), {
+      schemaVersion: 1,
+      surfaceId: command.surfaceId,
+      surfaceInstanceId: null,
+      selectionRevision: 1
+    })
+    expect(probe).toEqual(
+      expect.objectContaining({
+        reason: 'instance_required',
+        surfaceInstanceId: expect.any(String)
+      })
+    )
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    guest.emit('dom-ready')
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ surfaceId: command.surfaceId })
+    )
+    await manager.shutdown()
+  })
+
+  it('hands a startup ready acknowledgement to the exact StrictMode replacement generation', async () => {
+    vi.useFakeTimers()
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    // Keep a rejection observer attached while this test deliberately retires generation 1.
+    void pending.catch(() => undefined)
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+
+    const first = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    first.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: first.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+
+    // React StrictMode removes the first layout-effect webview before its bootstrap document is
+    // ready. Its Renderer IPC can already be queued, so Main must not settle the logical request
+    // until the replacement incarnation has either registered or a bounded handoff expires.
+    first.destroy()
+    expect(() =>
+      attachSurface(manager, host.asWebContents(), {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId
+      })
+    ).not.toThrow()
+
+    const replacement = new FakeWebContents(
+      3,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    replacement.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: replacement.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    replacement.emit('dom-ready')
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ generation: 2, surfaceId: command.surfaceId, title: 'Fixture 3' })
+    )
+    expect(
+      attachSurface(manager, host.asWebContents(), {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId
+      })
+    ).toEqual(
+      expect.objectContaining({
+        accepted: false,
+        status: 'noop',
+        reason: 'already_ready',
+        requestId: command.requestId
+      })
+    )
+    await manager.shutdown()
+  })
+
+  it('never transfers generation-one Renderer readiness to a generation-two replacement', async () => {
+    vi.useFakeTimers()
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const first = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    first.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: first.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    first.destroy()
+
+    const replacement = new FakeWebContents(
+      3,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    replacement.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: replacement.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    replacement.emit('dom-ready')
+    let settled = false
+    void pending.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ generation: 2, surfaceId: command.surfaceId })
+    )
+    await manager.shutdown()
+  })
+
+  it('recognizes a bootstrap document whose dom-ready event preceded Main registration', async () => {
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    guest.loadingMainFrame = false
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: guest.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ generation: 1, surfaceId: command.surfaceId, title: 'Fixture 2' })
+    )
+    expect(guest.close).not.toHaveBeenCalled()
+    await manager.shutdown()
+  })
+
+  it('waits for the acknowledged bootstrap navigation to settle before stripping its marker', async () => {
+    const { commands, host, manager } = createHarness()
+    const context = manager.getBrowserContext()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    guest.loadingMainFrame = true
+    const loadURL = vi.spyOn(guest, 'loadURL')
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: guest.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    guest.emit('dom-ready')
+    await Promise.resolve()
+    expect(loadURL).not.toHaveBeenCalled()
+
+    guest.loadingMainFrame = false
+    guest.emit('did-stop-loading')
+    await expect(context).resolves.toBeDefined()
+    expect(loadURL).toHaveBeenCalledWith('about:blank')
+    await manager.shutdown()
+  })
+
+  it('returns typed stale readiness after a bounded handoff without reviving the old request', async () => {
+    vi.useFakeTimers()
+    const { commands, host, manager } = createHarness()
+    const pending = manager.ensureActiveSurface()
+    const rejection = expect(pending).rejects.toEqual(
+      expect.objectContaining({ code: 'browser.target_closed' })
+    )
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    guest.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: guest.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    guest.destroy()
+    await vi.advanceTimersByTimeAsync(100)
+    await rejection
+
+    expect(
+      attachSurface(manager, host.asWebContents(), {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      accepted: false,
+      status: 'stale',
+      reason: 'target_closed',
+      retryable: false,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    expect(manager.snapshot()).toMatchObject({ pendingEnsure: false, surfaces: 0 })
+
+    const otherHost = new FakeWebContents(99, 'window', 'file:///other-renderer.html')
+    expect(() =>
+      attachSurface(manager, otherHost.asWebContents(), {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId
+      })
+    ).toThrow(expect.objectContaining({ code: 'browser.surface_unavailable' }))
+    await manager.shutdown()
+  })
+
+  it('never queues an old-generation close for a replacement registered inside the handoff', async () => {
+    vi.useFakeTimers()
+    const delivered: BrowserSurfaceCommand[] = []
+    const { host, manager } = createHarness({
+      sendCommand: (_host, command) => delivered.push(command)
+    })
+    const pending = manager.ensureActiveSurface()
+    const command = delivered[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const first = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    first.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: first.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    first.destroy()
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+
+    await vi.advanceTimersByTimeAsync(50)
+    const replacement = new FakeWebContents(
+      3,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    replacement.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: replacement.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    replacement.emit('dom-ready')
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ generation: 2, surfaceId: command.surfaceId })
+    )
+    await vi.advanceTimersByTimeAsync(100)
+
+    // Model the Renderer consuming every scalar close that Main managed to enqueue. A stale
+    // generationless close would destroy the healthy replacement here.
+    for (const deliveredCommand of delivered) {
+      if (deliveredCommand.kind === 'closeSurface') replacement.destroy()
+    }
+    expect(
+      delivered.filter(
+        (deliveredCommand) =>
+          deliveredCommand.kind === 'closeSurface' &&
+          deliveredCommand.surfaceId === command.surfaceId
+      )
+    ).toHaveLength(0)
+    expect(replacement.isDestroyed()).toBe(false)
+    await manager.shutdown()
+  })
+
   it.each([
     ['same-origin', 'https://mail.example.test/compose'],
     ['cross-origin', 'https://other.example.test/compose']
@@ -209,7 +696,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const guest = attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: command.surfaceId
@@ -247,7 +734,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const guest = attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: command.surfaceId
@@ -285,12 +772,21 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     expect(
-      manager.attach(host.asWebContents(), {
+      attachSurface(manager, host.asWebContents(), {
         schemaVersion: 1,
         requestId: command.requestId,
         surfaceId: SURFACE_ID
       })
-    ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: SURFACE_ID })
+    ).toEqual({
+      schemaVersion: 1,
+      accepted: true,
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: command.requestId,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: expect.any(String)
+    })
 
     const [firstContext, secondContext] = await Promise.all([first, second])
     expect(firstContext).toBe(secondContext)
@@ -314,7 +810,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands.at(-1)
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const firstGuest = attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -327,7 +823,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('create command missing')
     }
     attachGuest(manager, host, 3, createCommand.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: createCommand.requestId,
       surfaceId: createCommand.surfaceId
@@ -345,7 +841,7 @@ describe('BrowserSurfaceManager', () => {
     if (!selectCommand || selectCommand.kind !== 'selectSurface') {
       throw new Error('select command missing')
     }
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: selectCommand.requestId,
       surfaceId: selectCommand.surfaceId
@@ -365,7 +861,7 @@ describe('BrowserSurfaceManager', () => {
     if (!resizeCommand || resizeCommand.kind !== 'resizeSurface') {
       throw new Error('resize command missing')
     }
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: resizeCommand.requestId,
       surfaceId: resizeCommand.surfaceId,
@@ -386,7 +882,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('clipped resize command missing')
     }
     expect(() =>
-      manager.attach(host.asWebContents(), {
+      attachSurface(manager, host.asWebContents(), {
         schemaVersion: 1,
         requestId: clippedCommand.requestId,
         surfaceId: clippedCommand.surfaceId,
@@ -434,7 +930,7 @@ describe('BrowserSurfaceManager', () => {
       events.push(`load:${url}`)
       guest.url = url
     })
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: command.surfaceId
@@ -479,7 +975,7 @@ describe('BrowserSurfaceManager', () => {
     )
     if (!create || create.kind !== 'createSurface') throw new Error('control create missing')
     const control = attachGuest(manager, host, 2, create.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -542,7 +1038,7 @@ describe('BrowserSurfaceManager', () => {
     )
     if (!create || create.kind !== 'createSurface') throw new Error('control create missing')
     const control = attachGuest(manager, host, 2, create.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -559,12 +1055,14 @@ describe('BrowserSurfaceManager', () => {
     })
     expect(networkGuests).toBe(0)
     expect(downloadGuests).toBe(0)
-    expect(
-      commands.filter(
-        (command) =>
-          command.kind === 'closeSurface' && command.surfaceId === 'zero-tab-storage-timeout'
-      ).length
-    ).toBeGreaterThanOrEqual(2)
+    await vi.waitFor(() =>
+      expect(
+        commands.filter(
+          (command) =>
+            command.kind === 'closeSurface' && command.surfaceId === 'zero-tab-storage-timeout'
+        ).length
+      ).toBeGreaterThanOrEqual(2)
+    )
     await manager.shutdown()
   })
 
@@ -584,7 +1082,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands.at(-1)
     if (!command || command.kind !== 'createSurface') throw new Error('create command missing')
     const guest = attachGuest(manager, host, 2, command.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: command.surfaceId
@@ -616,7 +1114,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('initial create command missing')
     }
     const opener = attachGuest(manager, host, 2, initialCommand.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: initialCommand.requestId,
       surfaceId: initialCommand.surfaceId
@@ -647,7 +1145,7 @@ describe('BrowserSurfaceManager', () => {
       events.push(`load:${url}`)
       popup.url = url
     })
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: popupCommand.requestId,
       surfaceId: popupCommand.surfaceId
@@ -681,7 +1179,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('initial create command missing')
     }
     const opener = attachGuest(manager, host, 2, initialCommand.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: initialCommand.requestId,
       surfaceId: initialCommand.surfaceId
@@ -710,7 +1208,7 @@ describe('BrowserSurfaceManager', () => {
       events.push(`load:${url}`)
       popup.url = url
     })
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: popupCommand.requestId,
       surfaceId: popupCommand.surfaceId
@@ -743,7 +1241,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('first create command missing')
     }
     attachGuest(manager, host, 2, firstCommand.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: firstCommand.requestId,
       surfaceId: firstCommand.surfaceId
@@ -755,7 +1253,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('second create command missing')
     }
     attachGuest(manager, host, 3, secondCommand.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: secondCommand.requestId,
       surfaceId: secondCommand.surfaceId
@@ -776,12 +1274,14 @@ describe('BrowserSurfaceManager', () => {
     manualOne.url = 'https://one.example.test/inbox'
     manualTwo.url = 'https://two.example.test/inbox'
 
-    expect(
-      manager.selectManualSurface(host.asWebContents(), {
+    expect(selectBoundSurface(manager, host, 'manual-two', 1)).toEqual(
+      expect.objectContaining({
         schemaVersion: 1,
-        surfaceId: 'manual-two'
+        status: 'applied',
+        surfaceId: 'manual-two',
+        selectionRevision: 1
       })
-    ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: 'manual-two' })
+    )
     await expect(manager.ensureActiveSurface()).resolves.toEqual(
       expect.objectContaining({ isActive: true, surfaceId: 'manual-two' })
     )
@@ -793,10 +1293,7 @@ describe('BrowserSurfaceManager', () => {
     expect(broker.snapshot().claimedSurfaces).toBe(2)
     expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'manual-two' })
 
-    manager.selectManualSurface(host.asWebContents(), {
-      schemaVersion: 1,
-      surfaceId: 'manual-one'
-    })
+    selectBoundSurface(manager, host, 'manual-one', 2)
     expect(manager.getSensitiveTargetIdentity()).toEqual(
       expect.objectContaining({ origin: 'https://two.example.test', surfaceId: 'manual-two' })
     )
@@ -825,6 +1322,206 @@ describe('BrowserSurfaceManager', () => {
     await manager.shutdown()
   })
 
+  it('returns a typed negative acknowledgement for an unregistered Renderer page', async () => {
+    const { host, manager } = createHarness()
+
+    expect(
+      manager.selectManualSurface(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: 'renderer-page-not-yet-registered',
+        surfaceInstanceId: null,
+        selectionRevision: 1
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      status: 'noop',
+      reason: 'not_registered',
+      retryable: true,
+      surfaceId: 'renderer-page-not-yet-registered',
+      surfaceInstanceId: null,
+      selectionRevision: 1,
+      authoritativeRevision: 0
+    })
+    expect(manager.listSurfaces()).toEqual([])
+    await manager.shutdown()
+  })
+
+  it('clears the active UI selection with a revision-idempotent null intent', async () => {
+    const { host, manager } = createHarness()
+    attachGuest(manager, host, 2, 'clear-selection')
+    selectBoundSurface(manager, host, 'clear-selection', 1)
+    const clearInput = {
+      schemaVersion: 1 as const,
+      surfaceId: null,
+      surfaceInstanceId: null,
+      selectionRevision: 2
+    }
+
+    expect(manager.selectManualSurface(host.asWebContents(), clearInput)).toEqual(
+      expect.objectContaining({ status: 'applied', authoritativeRevision: 2, surfaceId: null })
+    )
+    expect(manager.selectManualSurface(host.asWebContents(), clearInput)).toEqual(
+      expect.objectContaining({ status: 'noop', reason: 'selection_unchanged' })
+    )
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: false, surfaceId: 'clear-selection' })
+    ])
+    await manager.shutdown()
+  })
+
+  it('rejects stale A-B-A arrival order and keeps duplicate selection lease-idempotent', async () => {
+    const { host, manager } = createHarness()
+    attachGuest(manager, host, 2, 'ordered-a')
+    attachGuest(manager, host, 3, 'ordered-b')
+    const firstA = selectBoundSurface(manager, host, 'ordered-a', 1)
+    const tokenA = firstA.surfaceInstanceId
+    const tokenB = probeSurfaceInstance(manager, host, 'ordered-b', 2)
+    if (!tokenA) throw new Error('bound A token missing')
+
+    // These intents were created A1 -> B2 -> A3, but A3 reaches Main before delayed B2.
+    const latestA = manager.selectManualSurface(host.asWebContents(), {
+      schemaVersion: 1,
+      surfaceId: 'ordered-a',
+      surfaceInstanceId: tokenA,
+      selectionRevision: 3
+    })
+    expect(latestA).toEqual(
+      expect.objectContaining({
+        status: 'noop',
+        reason: 'selection_unchanged',
+        authoritativeRevision: 3
+      })
+    )
+    expect(
+      manager.selectManualSurface(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: 'ordered-b',
+        surfaceInstanceId: tokenB,
+        selectionRevision: 2
+      })
+    ).toEqual(
+      expect.objectContaining({
+        status: 'stale',
+        reason: 'stale_revision',
+        authoritativeRevision: 3
+      })
+    )
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: true, surfaceId: 'ordered-a' }),
+      expect.objectContaining({ isActive: false, surfaceId: 'ordered-b' })
+    ])
+
+    await manager.getBrowserContext()
+    const lease = await manager.beginToolSurfaceLease()
+    // A3 advanced Renderer ordering but did not mutate the same Main selection a second time.
+    expect(lease.selectionRevision).toBe(1)
+    lease.finish()
+    await manager.shutdown()
+  })
+
+  it('binds selection to one exact surface incarnation across StrictMode-style ABA remounts', async () => {
+    const { commands, host, manager } = createHarness()
+    const first = attachGuest(manager, host, 2, 'strict-aba')
+    const oldInstanceId = probeSurfaceInstance(manager, host, 'strict-aba', 1)
+    first.destroy()
+    const replacement = attachGuest(manager, host, 3, 'strict-aba')
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(
+      commands.filter(
+        (command) => command.kind === 'closeSurface' && command.surfaceId === 'strict-aba'
+      )
+    ).toHaveLength(0)
+
+    expect(
+      manager.selectManualSurface(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: 'strict-aba',
+        surfaceInstanceId: oldInstanceId,
+        selectionRevision: 1
+      })
+    ).toEqual(
+      expect.objectContaining({
+        status: 'stale',
+        reason: 'instance_mismatch',
+        authoritativeRevision: 0
+      })
+    )
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ generation: 2, isActive: false, surfaceId: 'strict-aba' })
+    ])
+    expect(selectBoundSurface(manager, host, 'strict-aba', 2)).toEqual(
+      expect.objectContaining({ status: 'applied', authoritativeRevision: 2 })
+    )
+
+    replacement.destroy()
+    await manager.shutdown()
+  })
+
+  it('does not mutate selection for a closing surface and never guesses a sidebar fallback', async () => {
+    const { commands, host, manager } = createHarness()
+    const first = attachGuest(manager, host, 2, 'closing-one')
+    const second = attachGuest(manager, host, 3, 'closing-two')
+    const firstSelection = selectBoundSurface(manager, host, 'closing-one', 1)
+    if (!firstSelection.surfaceInstanceId) throw new Error('bound closing token missing')
+
+    const closing = manager.closeSurface('closing-one')
+    await vi.waitFor(() =>
+      expect(commands.at(-1)).toEqual(expect.objectContaining({ kind: 'closeSurface' }))
+    )
+    expect(
+      manager.selectManualSurface(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: 'closing-one',
+        surfaceInstanceId: firstSelection.surfaceInstanceId,
+        selectionRevision: 2
+      })
+    ).toEqual(expect.objectContaining({ status: 'stale', reason: 'surface_closing' }))
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: false, surfaceId: 'closing-two' })
+    ])
+
+    first.destroy()
+    await expect(closing).resolves.toBeUndefined()
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: false, surfaceId: 'closing-two' })
+    ])
+    expect(selectBoundSurface(manager, host, 'closing-two', 3)).toEqual(
+      expect.objectContaining({ status: 'applied', surfaceId: 'closing-two' })
+    )
+
+    second.destroy()
+    await manager.shutdown()
+  })
+
+  it('hard-rejects a different host even with a well-formed surface selection', async () => {
+    const { host, manager } = createHarness()
+    const otherHost = new FakeWebContents(99, 'window', 'file:///other-renderer.html')
+    attachGuest(manager, host, 2, 'host-bound')
+    const instanceId = probeSurfaceInstance(manager, host, 'host-bound', 1)
+    selectBoundSurface(manager, host, 'host-bound', 1)
+
+    expect(() =>
+      manager.selectManualSurface(otherHost.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: 'host-bound',
+        surfaceInstanceId: instanceId,
+        selectionRevision: 1
+      })
+    ).toThrow('browser.surface_unavailable')
+    expect(() =>
+      manager.selectManualSurface(otherHost.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: null,
+        surfaceInstanceId: null,
+        selectionRevision: 2
+      })
+    ).toThrow('browser.surface_unavailable')
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: true, surfaceId: 'host-bound' })
+    ])
+    await manager.shutdown()
+  })
+
   it('keeps network preflight on the leased tab when the user selects another tab mid-call', async () => {
     const lease = {
       failure: vi.fn(() => null),
@@ -842,16 +1539,10 @@ describe('BrowserSurfaceManager', () => {
     const { commands, host, manager } = createHarness({ networkGuard })
     const first = attachGuest(manager, host, 2, 'lease-one')
     const second = attachGuest(manager, host, 3, 'lease-two')
-    manager.selectManualSurface(host.asWebContents(), {
-      schemaVersion: 1,
-      surfaceId: 'lease-one'
-    })
+    selectBoundSurface(manager, host, 'lease-one', 1)
     await manager.getBrowserContext()
     const toolLease = await manager.beginToolSurfaceLease()
-    manager.selectManualSurface(host.asWebContents(), {
-      schemaVersion: 1,
-      surfaceId: 'lease-two'
-    })
+    selectBoundSurface(manager, host, 'lease-two', 2)
 
     await expect(manager.beginNetworkOperation(RISK_OPERATION_INPUT)).resolves.toBe(lease)
     expect(networkGuard.beginOperation).toHaveBeenCalledWith(
@@ -864,7 +1555,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('resize request missing')
     }
     expect(resizeCommand.surfaceId).toBe('lease-one')
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: resizeCommand.requestId,
       surfaceId: 'lease-one',
@@ -892,10 +1583,7 @@ describe('BrowserSurfaceManager', () => {
     const first = attachGuest(manager, host, 2, 'index-first')
     attachGuest(manager, host, 3, 'index-leased')
     attachGuest(manager, host, 4, 'index-wrong-after-close')
-    manager.selectManualSurface(host.asWebContents(), {
-      schemaVersion: 1,
-      surfaceId: 'index-leased'
-    })
+    selectBoundSurface(manager, host, 'index-leased', 1)
     await manager.getBrowserContext()
     const cdp = createCdpHarness(groupTransport)
     await cdp.send('Target.setAutoAttach', {
@@ -970,7 +1658,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands[0]
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -994,7 +1682,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands[0]
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -1040,7 +1728,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands[0]
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -1095,7 +1783,7 @@ describe('BrowserSurfaceManager', () => {
       await loadBarrier
       targetGuest.url = url
     })
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -1120,7 +1808,7 @@ describe('BrowserSurfaceManager', () => {
       (command) => command.kind === 'selectSurface' && command.surfaceId === 'ordered-target'
     )
     if (!select || select.kind !== 'selectSurface') throw new Error('select command missing')
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: select.requestId,
       surfaceId: select.surfaceId
@@ -1152,7 +1840,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands[0]
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -1182,7 +1870,7 @@ describe('BrowserSurfaceManager', () => {
     if (!create || create.kind !== 'createSurface') throw new Error('create command missing')
     const hidden = attachGuest(manager, host, 3, create.surfaceId)
     vi.spyOn(hidden, 'loadURL').mockRejectedValueOnce(new Error('fixture second-stage failure'))
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -1252,7 +1940,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands[0]
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -1289,7 +1977,7 @@ describe('BrowserSurfaceManager', () => {
       events.push(`load:${url}`)
       hidden.url = url
     })
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -1323,7 +2011,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands[0]
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -1374,7 +2062,7 @@ describe('BrowserSurfaceManager', () => {
     const rejection = expect(creation).rejects.toEqual(
       expect.objectContaining({ code: 'browser.surface_unavailable' })
     )
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -1404,7 +2092,7 @@ describe('BrowserSurfaceManager', () => {
     const ensure = commands.at(-1)
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const opener = attachGuest(manager, host, 2, ensure.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
@@ -1432,7 +2120,7 @@ describe('BrowserSurfaceManager', () => {
       events.push(`load:${url}`)
       child.url = url
     })
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -1469,7 +2157,7 @@ describe('BrowserSurfaceManager', () => {
       throw new Error('ensure command missing')
     }
     const opener = attachGuest(manager, host, 2, ensureCommand.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensureCommand.requestId,
       surfaceId: ensureCommand.surfaceId
@@ -1486,7 +2174,7 @@ describe('BrowserSurfaceManager', () => {
     if (!create || create.kind !== 'createSurface') throw new Error('popup command missing')
     expect(create.activate).toBe(false)
     const child = attachGuest(manager, host, 3, create.surfaceId)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
@@ -1523,7 +2211,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: SURFACE_ID
@@ -1546,7 +2234,7 @@ describe('BrowserSurfaceManager', () => {
     const otherHost = new FakeWebContents(9, 'window', 'file:///other.html')
 
     expect(() =>
-      manager.attach(otherHost.asWebContents(), {
+      attachSurface(manager, otherHost.asWebContents(), {
         schemaVersion: 1,
         requestId: command.requestId,
         surfaceId: SURFACE_ID
@@ -1554,7 +2242,7 @@ describe('BrowserSurfaceManager', () => {
     ).toThrow(expect.objectContaining({ code: 'browser.surface_unavailable' }))
 
     const guest = attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: SURFACE_ID
@@ -1563,8 +2251,10 @@ describe('BrowserSurfaceManager', () => {
     await expect(context).rejects.toEqual(
       expect.objectContaining({ code: 'browser.target_closed' })
     )
-    expect(commands.at(-1)).toEqual(
-      expect.objectContaining({ kind: 'closeSurface', surfaceId: SURFACE_ID })
+    await vi.waitFor(() =>
+      expect(commands.at(-1)).toEqual(
+        expect.objectContaining({ kind: 'closeSurface', surfaceId: SURFACE_ID })
+      )
     )
     await vi.waitFor(() =>
       expect(releaseSurfaceResources).toHaveBeenCalledWith({
@@ -1581,7 +2271,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const guest = attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: SURFACE_ID
@@ -1617,13 +2307,20 @@ describe('BrowserSurfaceManager', () => {
       pendingEnsure: false,
       surfaces: 1
     })
-    expect(() =>
-      manager.attach(host.asWebContents(), {
+    expect(
+      attachSurface(manager, host.asWebContents(), {
         schemaVersion: 1,
         requestId: command.requestId,
         surfaceId: SURFACE_ID
       })
-    ).toThrow(expect.objectContaining({ code: 'browser.surface_unavailable' }))
+    ).toEqual(
+      expect.objectContaining({
+        accepted: false,
+        status: 'stale',
+        reason: 'request_cancelled',
+        requestId: command.requestId
+      })
+    )
     await manager.shutdown()
   })
 
@@ -1646,7 +2343,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const guest = attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: SURFACE_ID
@@ -1701,7 +2398,7 @@ describe('BrowserSurfaceManager', () => {
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
     const guest = attachGuest(manager, host)
-    manager.attach(host.asWebContents(), {
+    attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: command.requestId,
       surfaceId: SURFACE_ID

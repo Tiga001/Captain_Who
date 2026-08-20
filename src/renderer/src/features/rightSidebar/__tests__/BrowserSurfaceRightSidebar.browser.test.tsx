@@ -2,7 +2,11 @@ import { useEffect } from 'react'
 import { PanelTop } from 'lucide-react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { BrowserSurfaceCommand } from '@mycopilot/protocol'
+import type {
+  BrowserSurfaceCommand,
+  BrowserSurfaceReadyInput,
+  BrowserSurfaceReadyOutput
+} from '@mycopilot/protocol'
 import { browserSurfaceIdForPage } from '../../browser/browserSurface'
 import { useRightSidebarRuntimeContext } from '../RightSidebarRuntimeContext'
 import type {
@@ -19,6 +23,7 @@ const surfaceLifecycle = vi.fn()
 const NOOP = () => undefined
 const SURFACE_ID = 'managed-browser-fixture'
 const SECOND_SURFACE_ID = 'managed-browser-fixture-second'
+const SURFACE_INSTANCE_ID = 'instance-fixture-00001'
 
 const BROWSER_MODULE: RightSidebarModuleDefinition = {
   contextBinding: 'global',
@@ -44,7 +49,7 @@ afterEach(() => {
 
 describe('RightSidebar browser automation surface bridge', () => {
   it('creates once, reuses the exact surface, and only closes the requested browser page', async () => {
-    const ready = vi.fn(async () => undefined)
+    const ready = vi.fn(async (input: BrowserSurfaceReadyInput) => appliedReady(input))
     const first = ensureCommand('11111111-1111-4111-8111-111111111111')
     const screen = await render(
       <RightSidebar
@@ -64,7 +69,8 @@ describe('RightSidebar browser automation surface bridge', () => {
     expect(ready).toHaveBeenCalledWith({
       schemaVersion: 1,
       requestId: first.requestId,
-      surfaceId
+      surfaceId,
+      surfaceInstanceId: SURFACE_INSTANCE_ID
     })
     expect(surfaceLifecycle.mock.calls.filter(([event]) => event === 'mount')).toHaveLength(1)
 
@@ -97,10 +103,48 @@ describe('RightSidebar browser automation surface bridge', () => {
     expect(getSurface(screen.container)).toBe(surface)
     expect(surfaceLifecycle.mock.calls.filter(([event]) => event === 'mount')).toHaveLength(1)
 
-    const close: BrowserSurfaceCommand = {
+    const generationlessClose: BrowserSurfaceCommand = {
+      schemaVersion: 1,
+      kind: 'closeSurface',
+      requestId: '33333333-3333-4333-8333-333333333332',
+      surfaceId: surfaceId!
+    }
+    await screen.rerender(
+      <RightSidebar
+        browserSurfaceCommand={generationlessClose}
+        isMaximized={false}
+        isOpen
+        modules={[BROWSER_MODULE]}
+        onBrowserSurfaceReady={ready}
+        onToggleMaximized={NOOP}
+      />
+    )
+    expect(getSurface(screen.container)).toBe(surface)
+
+    const staleClose: BrowserSurfaceCommand = {
       schemaVersion: 1,
       kind: 'closeSurface',
       requestId: '33333333-3333-4333-8333-333333333333',
+      surfaceInstanceId: 'instance-stale-0000001',
+      surfaceId: surfaceId!
+    }
+    await screen.rerender(
+      <RightSidebar
+        browserSurfaceCommand={staleClose}
+        isMaximized={false}
+        isOpen
+        modules={[BROWSER_MODULE]}
+        onBrowserSurfaceReady={ready}
+        onToggleMaximized={NOOP}
+      />
+    )
+    expect(getSurface(screen.container)).toBe(surface)
+
+    const close: BrowserSurfaceCommand = {
+      schemaVersion: 1,
+      kind: 'closeSurface',
+      requestId: '33333333-3333-4333-8333-333333333334',
+      surfaceInstanceId: SURFACE_INSTANCE_ID,
       surfaceId: surfaceId!
     }
     await screen.rerender(
@@ -119,8 +163,39 @@ describe('RightSidebar browser automation surface bridge', () => {
     expect(surfaceLifecycle.mock.calls.filter(([event]) => event === 'unmount')).toHaveLength(1)
   })
 
+  it('retries a typed transient readiness response with the same exact instance', async () => {
+    const ready = vi
+      .fn<(input: BrowserSurfaceReadyInput) => Promise<BrowserSurfaceReadyOutput>>()
+      .mockImplementationOnce(async (input) => ({
+        schemaVersion: 1,
+        accepted: false,
+        status: 'noop',
+        reason: 'not_registered',
+        retryable: true,
+        requestId: input.requestId,
+        surfaceId: input.surfaceId,
+        surfaceInstanceId: input.surfaceInstanceId
+      }))
+      .mockImplementation(async (input) => appliedReady(input))
+    const command = ensureCommand('77777777-7777-4777-8777-777777777777')
+    const screen = await render(
+      <RightSidebar
+        browserSurfaceCommand={command}
+        isMaximized={false}
+        isOpen
+        modules={[BROWSER_MODULE]}
+        onBrowserSurfaceReady={ready}
+        onToggleMaximized={NOOP}
+      />
+    )
+
+    await expect.poll(() => ready).toHaveBeenCalledTimes(2)
+    expect(ready.mock.calls[0]?.[0]).toEqual(ready.mock.calls[1]?.[0])
+    expect(getSurface(screen.container).dataset.surfaceId).toBe(SURFACE_ID)
+  })
+
   it('creates a background popup tab and selects it only on an explicit Host command', async () => {
-    const ready = vi.fn(async () => undefined)
+    const ready = vi.fn(async (input: BrowserSurfaceReadyInput) => appliedReady(input))
     const first = ensureCommand('44444444-4444-4444-8444-444444444444')
     const screen = await render(
       <RightSidebar
@@ -180,7 +255,8 @@ describe('RightSidebar browser automation surface bridge', () => {
 })
 
 function BrowserSurfaceFixture({ page }: RightSidebarModuleRenderProps) {
-  const { browserSurfaceRequest, onBrowserSurfaceReady } = useRightSidebarRuntimeContext()
+  const { browserSurfaceRequest, onBrowserSurfaceInstance, onBrowserSurfaceReady } =
+    useRightSidebarRuntimeContext()
   const requestId =
     browserSurfaceRequest?.pageId === page.id ? browserSurfaceRequest.requestId : null
   const surfaceId =
@@ -190,11 +266,17 @@ function BrowserSurfaceFixture({ page }: RightSidebarModuleRenderProps) {
 
   useEffect(() => {
     surfaceLifecycle('mount', page.id)
-    return () => surfaceLifecycle('unmount', page.id)
-  }, [page.id])
+    onBrowserSurfaceInstance?.(page.id, surfaceId, SURFACE_INSTANCE_ID, true)
+    return () => {
+      onBrowserSurfaceInstance?.(page.id, surfaceId, SURFACE_INSTANCE_ID, false)
+      surfaceLifecycle('unmount', page.id)
+    }
+  }, [onBrowserSurfaceInstance, page.id, surfaceId])
 
   useEffect(() => {
-    if (requestId) onBrowserSurfaceReady?.(page.id, surfaceId, requestId)
+    if (requestId) {
+      onBrowserSurfaceReady?.(page.id, surfaceId, requestId, SURFACE_INSTANCE_ID)
+    }
   }, [onBrowserSurfaceReady, page.id, requestId, surfaceId])
 
   return <div data-surface-id={surfaceId} data-testid="browser-surface" />
@@ -208,4 +290,17 @@ function getSurface(container: HTMLElement): HTMLElement {
   const surface = container.querySelector<HTMLElement>('[data-testid="browser-surface"]')
   if (!surface) throw new Error('browser surface missing')
   return surface
+}
+
+function appliedReady(input: BrowserSurfaceReadyInput): BrowserSurfaceReadyOutput {
+  return {
+    schemaVersion: 1,
+    accepted: true,
+    status: 'applied',
+    reason: 'surface_ready',
+    retryable: false,
+    requestId: input.requestId,
+    surfaceId: input.surfaceId,
+    ...(input.surfaceInstanceId ? { surfaceInstanceId: input.surfaceInstanceId } : {})
+  }
 }

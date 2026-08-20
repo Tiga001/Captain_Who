@@ -442,11 +442,15 @@ export class BrowserNetworkGuard {
 
   /**
    * Creates a Tool owner before `Target.createTarget` has produced any guest. This is the only
-   * zero-tab path for `browser_tabs new`; it grants no existing page or partition-wide authority.
+   * zero-tab path for `browser_tabs new` and first-page `browser_navigate`; it grants no existing
+   * page or partition-wide authority.
    */
   beginTargetCreationOperation(input: BrowserRiskOperationInput): BrowserNetworkOperationLease {
     this.assertUsable()
-    if (input.authorizationContext.triggerToolName !== 'browser_tabs') {
+    if (
+      input.authorizationContext.triggerToolName !== 'browser_tabs' &&
+      input.authorizationContext.triggerToolName !== 'browser_navigate'
+    ) {
       throw new Error('browser.network_guard.target_creation_unavailable')
     }
     const active = this.createActiveOperation(input)
@@ -584,7 +588,9 @@ export class BrowserNetworkGuard {
       input.capabilityId !== context.capabilityId ||
       input.toolCallId !== context.callId ||
       input.toolId !== context.triggerToolName ||
-      (input.action === 'new' && input.toolId !== 'browser_tabs')
+      (input.action === 'new' &&
+        input.toolId !== 'browser_tabs' &&
+        input.toolId !== 'browser_navigate')
     ) {
       throw new Error('browser.network_guard.target_creation_unavailable')
     }

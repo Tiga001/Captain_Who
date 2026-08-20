@@ -29,6 +29,8 @@ const BUILTIN_TOOL_MODEL_MAX_DEPTH: usize = 16;
 const BUILTIN_TOOL_MODEL_MAX_OBJECT_FIELDS: usize = 64;
 const BUILTIN_TOOL_MODEL_MAX_ARRAY_ITEMS: usize = 64;
 const BUILTIN_TOOL_MODEL_MAX_STRING_CHARS: usize = 16 * 1024;
+const BUILTIN_BROWSER_DIAGNOSTIC_TOKEN_MAX_BYTES: usize = 128;
+const BUILTIN_BROWSER_DIAGNOSTIC_MAX_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -728,6 +730,93 @@ fn value_free_sensitive_approval_reason(operation_category: &str) -> &'static st
     }
 }
 
+fn safe_builtin_browser_diagnostic_token(value: &Value) -> Option<&str> {
+    let token = value.as_str()?;
+    let valid = !token.is_empty()
+        && token.len() <= BUILTIN_BROWSER_DIAGNOSTIC_TOKEN_MAX_BYTES
+        && token
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
+        && token.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && !token.ends_with(['.', '_', '-'])
+        && !token.contains("..");
+    valid.then_some(token)
+}
+
+fn safe_builtin_browser_error_code(value: &Value) -> Option<&str> {
+    let code = safe_builtin_browser_diagnostic_token(value)?;
+    let namespaced = code.starts_with("mcp.")
+        || code.starts_with("browser.")
+        || code.starts_with("builtin.browser_automation.")
+        || code.starts_with("builtin_mcp_tool.");
+    let reviewed_unprefixed = matches!(
+        code,
+        "cancelled"
+            | "timeout"
+            | "closed"
+            | "busy"
+            | "surface_unavailable"
+            | "surface_capacity_exceeded"
+            | "target_closed"
+            | "tool_not_reviewed"
+            | "invalid_arguments"
+            | "catalog_drift"
+            | "output_too_large"
+            | "protocol_error"
+            | "outcome_unknown"
+            | "internal_safe_error"
+            | "frame_not_found"
+            | "stale_frame_ref"
+            | "frame_not_editable"
+            | "frame_input_delivery_failed"
+            | "frame_detached"
+    );
+    (namespaced || reviewed_unprefixed).then_some(code)
+}
+
+fn safe_builtin_browser_dispatch_certainty(value: &Value) -> Option<&str> {
+    match value.as_str()? {
+        certainty @ ("definitely_not_dispatched" | "possibly_dispatched" | "response_received") => {
+            Some(certainty)
+        }
+        _ => None,
+    }
+}
+
+fn append_safe_builtin_browser_failure_diagnostics(
+    details: &serde_json::Map<String, Value>,
+    safe_result: &mut Value,
+) {
+    if let Some(error_code) = details
+        .get("errorCode")
+        .and_then(safe_builtin_browser_error_code)
+    {
+        safe_result["errorCode"] = json!(error_code);
+    }
+    if let Some(dispatch_certainty) = details
+        .get("dispatchCertainty")
+        .and_then(safe_builtin_browser_dispatch_certainty)
+    {
+        safe_result["dispatchCertainty"] = json!(dispatch_certainty);
+    }
+    if let Some(failure_stage) = details
+        .get("failureStage")
+        .and_then(safe_builtin_browser_diagnostic_token)
+    {
+        safe_result["failureStage"] = json!(failure_stage);
+    }
+    if let Some(duration_ms) = details
+        .get("durationMs")
+        .and_then(Value::as_u64)
+        .filter(|duration_ms| *duration_ms <= BUILTIN_BROWSER_DIAGNOSTIC_MAX_DURATION_MS)
+    {
+        safe_result["durationMs"] = json!(duration_ms);
+    }
+}
+
 pub fn builtin_capability_tool_result_persistence_projection(
     result: &AgentToolResult,
 ) -> AgentToolResult {
@@ -792,6 +881,14 @@ pub fn builtin_capability_tool_result_persistence_projection(
         "status": status,
         "contentOmitted": true,
     });
+    // Only Host-owned, bounded, value-free diagnostics cross the durable boundary. In particular,
+    // do not inspect nested `structuredContent`: it originates in the managed Tool response and
+    // may contain page-controlled values even when a field happens to look diagnostic.
+    if result.tool.starts_with("browser_") && matches!(status, "failed" | "outcome_unknown") {
+        if let Some(details) = details {
+            append_safe_builtin_browser_failure_diagnostics(details, &mut safe_result);
+        }
+    }
     if outcome_unknown || cancelled || expired || payload_unavailable {
         safe_result["errorCode"] = json!(if outcome_unknown {
             "mcp.tool_outcome_unknown"
@@ -1458,6 +1555,144 @@ mod tests {
             serde_json::to_vec(&projected.value).unwrap().len()
                 < BUILTIN_TOOL_MODEL_RESULT_MAX_BYTES
         );
+    }
+
+    #[test]
+    fn builtin_browser_failed_projection_keeps_only_safe_diagnostic_allowlist() {
+        let secret = "BUILTIN_BROWSER_FAILURE_PRIVATE_CANARY_7Yp9";
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "browser-call-1".to_string(),
+            tool: "browser_evaluate".to_string(),
+            ok: false,
+            result: Some(json!({
+                "errorCode": "builtin.browser_automation.tool_error",
+                "dispatchCertainty": "response_received",
+                "failureStage": "tool_execution",
+                "durationMs": 61,
+                "message": secret,
+                "content": [{"type": "text", "text": secret}],
+                "args": {"password": secret},
+                "url": format!("https://{secret}.invalid/private"),
+                "credentials": {"username": secret, "password": secret},
+                "structuredContent": {
+                    "errorCode": "target_closed",
+                    "failureStage": secret,
+                    "privateDiagnostic": secret,
+                },
+            })),
+            error: Some(secret.to_string()),
+        };
+
+        let projected = builtin_capability_tool_result_persistence_projection(&raw);
+        let safe = projected.result.as_ref().unwrap();
+        assert_eq!(safe["status"], "failed");
+        assert_eq!(safe["errorCode"], "builtin.browser_automation.tool_error");
+        assert_eq!(safe["dispatchCertainty"], "response_received");
+        assert_eq!(safe["failureStage"], "tool_execution");
+        assert_eq!(safe["durationMs"], 61);
+        assert_eq!(safe["contentOmitted"], true);
+        let keys = safe
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                "contentOmitted",
+                "dispatchCertainty",
+                "durationMs",
+                "errorCode",
+                "failureStage",
+                "schemaVersion",
+                "status",
+                "type",
+            ]
+        );
+        let serialized = serde_json::to_string(&projected).unwrap();
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("https://"));
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("target_closed"));
+
+        let mut non_browser = raw;
+        non_browser.tool = "future_builtin_capability".to_string();
+        let non_browser_safe = builtin_capability_tool_result_persistence_projection(&non_browser)
+            .result
+            .unwrap();
+        assert!(non_browser_safe.get("errorCode").is_none());
+        assert!(non_browser_safe.get("dispatchCertainty").is_none());
+        assert!(non_browser_safe.get("failureStage").is_none());
+        assert!(non_browser_safe.get("durationMs").is_none());
+    }
+
+    #[test]
+    fn builtin_browser_failed_projection_rejects_untrusted_diagnostic_values() {
+        let secret = "BUILTIN_BROWSER_DIAGNOSTIC_VALUE_CANARY";
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "browser-call-2".to_string(),
+            tool: "browser_snapshot".to_string(),
+            ok: false,
+            result: Some(json!({
+                "errorCode": secret,
+                "dispatchCertainty": format!("response_received_{secret}"),
+                "failureStage": format!("https://user:{secret}@example.invalid"),
+                "durationMs": BUILTIN_BROWSER_DIAGNOSTIC_MAX_DURATION_MS + 1,
+                "structuredContent": {
+                    "errorCode": "target_closed",
+                    "dispatchCertainty": "response_received",
+                    "failureStage": "tool_execution",
+                    "durationMs": 1,
+                },
+            })),
+            error: Some(secret.to_string()),
+        };
+
+        let projected = builtin_capability_tool_result_persistence_projection(&raw);
+        let safe = projected.result.as_ref().unwrap();
+        assert_eq!(
+            safe,
+            &json!({
+                "schemaVersion": 1,
+                "type": "builtin_capability_tool",
+                "status": "failed",
+                "contentOmitted": true,
+            })
+        );
+        assert!(!serde_json::to_string(&projected).unwrap().contains(secret));
+    }
+
+    #[test]
+    fn builtin_browser_outcome_unknown_keeps_safe_stage_and_duration() {
+        let secret = "BUILTIN_BROWSER_OUTCOME_UNKNOWN_PRIVATE_CANARY";
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "browser-call-3".to_string(),
+            tool: "browser_type".to_string(),
+            ok: false,
+            result: Some(json!({
+                "code": "outcomeUnknown",
+                "errorCode": "mcp.tool_outcome_unknown",
+                "dispatchCertainty": "possibly_dispatched",
+                "failureStage": "completion",
+                "durationMs": 60_001,
+                "message": secret,
+            })),
+            error: Some(secret.to_string()),
+        };
+
+        let projected = builtin_capability_tool_result_persistence_projection(&raw);
+        let safe = projected.result.as_ref().unwrap();
+        assert_eq!(safe["status"], "outcome_unknown");
+        assert_eq!(safe["errorCode"], "mcp.tool_outcome_unknown");
+        assert_eq!(safe["dispatchCertainty"], "possibly_dispatched");
+        assert_eq!(safe["failureStage"], "completion");
+        assert_eq!(safe["durationMs"], 60_001);
+        assert_eq!(safe["retryable"], false);
+        assert!(!serde_json::to_string(&projected).unwrap().contains(secret));
     }
 
     #[tokio::test]

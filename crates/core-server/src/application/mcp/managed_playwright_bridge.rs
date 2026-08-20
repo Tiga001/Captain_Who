@@ -9,17 +9,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mycopilot_mcp_client::{
     mcp_schema_digest, BoxMcpFuture, InMemoryMcpRegistry, McpActiveCallId, McpApprovalMode,
     McpCancellationToken, McpCatalogCompleteness, McpCatalogToolCall, McpCatalogToolCallIdentity,
-    McpConnectionManager, McpConnectionState, McpConnector, McpDispatchCertainty, McpError,
-    McpHostBridgeConfig, McpInvocationId, McpLifecycleKind, McpManagerPolicy, McpModelCallId,
-    McpOutcomeUnknownReason, McpPeer, McpProtocolSnapshot, McpRegistry, McpServerConfig,
-    McpServerId, McpServerScope, McpToolCall, McpToolId, McpToolPage, McpToolResult,
-    McpTransportConfig, McpTrustLevel,
+    McpConnectionManager, McpConnectionState, McpConnector, McpDispatchCertainty,
+    McpDispatchTracker, McpError, McpHostBridgeConfig, McpInvocationId, McpLifecycleKind,
+    McpManagerPolicy, McpModelCallId, McpOutcomeUnknownReason, McpPeer, McpProtocolSnapshot,
+    McpRegistry, McpServerConfig, McpServerId, McpServerScope, McpToolCall, McpToolId, McpToolPage,
+    McpToolResult, McpTransportConfig, McpTrustLevel,
 };
 use mycopilot_protocol_rs::{
     ManagedPlaywrightAuthorizationContext, ManagedPlaywrightBridgeErrorCode,
     ManagedPlaywrightCancelNotification, ManagedPlaywrightCancelReason, ManagedPlaywrightCommand,
     ManagedPlaywrightCommandNotification, ManagedPlaywrightCompletionInput,
     ManagedPlaywrightCompletionOutcome, ManagedPlaywrightDispatchCertainty,
+    ManagedPlaywrightDispatchPhase, ManagedPlaywrightDispatchPhaseInput,
     ManagedPlaywrightPrepareSensitiveToolInput, ManagedPlaywrightSensitiveBindingReleaseReason,
     MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION, MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD,
     MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
@@ -37,6 +38,7 @@ use super::playwright_manifest::{
 
 pub(crate) const MANAGED_PLAYWRIGHT_BRIDGE_CHANNEL: &str = "builtin.playwright.v1";
 const MAX_PENDING_REQUESTS: usize = 8;
+const MANAGED_PLAYWRIGHT_COMPLETION_GRACE: Duration = Duration::from_millis(100);
 pub(crate) const DEFAULT_MANAGED_PLAYWRIGHT_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const STATE_CONNECTING: u8 = 0;
 const STATE_READY: u8 = 1;
@@ -60,6 +62,76 @@ enum PendingOperation {
 struct PendingRequest {
     operation: PendingOperation,
     completion: oneshot::Sender<ManagedPlaywrightCompletionOutcome>,
+    manager_dispatch: Option<McpDispatchTracker>,
+    main_dispatch: Option<McpDispatchTracker>,
+}
+
+impl PendingRequest {
+    fn dispatch_certainty(&self) -> ManagedPlaywrightDispatchCertainty {
+        self.main_dispatch
+            .as_ref()
+            .map(McpDispatchTracker::certainty)
+            .map(managed_dispatch_certainty)
+            .unwrap_or(ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched)
+    }
+
+    fn acknowledge_phase(&self, phase: ManagedPlaywrightDispatchPhase) {
+        let Some(main_dispatch) = self.main_dispatch.as_ref() else {
+            return;
+        };
+        match phase {
+            ManagedPlaywrightDispatchPhase::PreDispatch => main_dispatch.mark_dispatching(),
+            ManagedPlaywrightDispatchPhase::PossiblyDispatched => {
+                main_dispatch.mark_request_queued()
+            }
+            ManagedPlaywrightDispatchPhase::ResponseReceived => {
+                main_dispatch.mark_response_received();
+                if let Some(manager_dispatch) = self.manager_dispatch.as_ref() {
+                    manager_dispatch.mark_response_received();
+                }
+            }
+        }
+    }
+
+    fn acknowledge_completion(&self, outcome: &ManagedPlaywrightCompletionOutcome) {
+        if self.operation != PendingOperation::CallTool {
+            return;
+        }
+        let phase = match outcome {
+            ManagedPlaywrightCompletionOutcome::ToolCalled { .. } => {
+                Some(ManagedPlaywrightDispatchPhase::ResponseReceived)
+            }
+            ManagedPlaywrightCompletionOutcome::Error {
+                dispatch_certainty: ManagedPlaywrightDispatchCertainty::PossiblyDispatched,
+                ..
+            } => Some(ManagedPlaywrightDispatchPhase::PossiblyDispatched),
+            ManagedPlaywrightCompletionOutcome::Error {
+                dispatch_certainty: ManagedPlaywrightDispatchCertainty::ResponseReceived,
+                ..
+            } => Some(ManagedPlaywrightDispatchPhase::ResponseReceived),
+            _ => None,
+        };
+        if let Some(phase) = phase {
+            self.acknowledge_phase(phase);
+        }
+    }
+
+    fn completion_is_monotonic(&self, outcome: &ManagedPlaywrightCompletionOutcome) -> bool {
+        if self.operation != PendingOperation::CallTool {
+            return true;
+        }
+        let completion_certainty = match outcome {
+            ManagedPlaywrightCompletionOutcome::ToolCalled { .. } => {
+                ManagedPlaywrightDispatchCertainty::ResponseReceived
+            }
+            ManagedPlaywrightCompletionOutcome::Error {
+                dispatch_certainty, ..
+            } => *dispatch_certainty,
+            _ => return false,
+        };
+        dispatch_certainty_rank(completion_certainty)
+            >= dispatch_certainty_rank(self.dispatch_certainty())
+    }
 }
 
 /// Strict, bounded reverse command bus from the Rust Core to Electron Main.
@@ -73,6 +145,31 @@ pub(crate) struct ManagedPlaywrightHostBridge {
     authorization_contexts:
         StdMutex<HashMap<McpInvocationId, ManagedPlaywrightAuthorizationContext>>,
     closed: AtomicBool,
+}
+
+/// Last-resort cleanup when the async request future itself is dropped (for example, when an outer
+/// Manager settlement budget is shorter than this bridge's completion grace). Normal settlement
+/// disarms the guard after Main completion or explicit pending removal.
+struct PendingRequestCleanup<'a> {
+    bridge: &'a ManagedPlaywrightHostBridge,
+    request_id: Uuid,
+    armed: bool,
+}
+
+impl PendingRequestCleanup<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRequestCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.bridge.remove_pending(self.request_id);
+            self.bridge
+                .send_cancel(self.request_id, ManagedPlaywrightCancelReason::Shutdown);
+        }
+    }
 }
 
 impl std::fmt::Debug for ManagedPlaywrightHostBridge {
@@ -127,24 +224,59 @@ impl ManagedPlaywrightHostBridge {
             ));
         }
         let request_id = parse_uuid_v4(&input.request_id)?;
-        let pending = self
+        let mut requests = self
             .pending
             .lock()
-            .map_err(|_| McpError::protocol("managed Playwright pending lock is unavailable"))?
-            .remove(&request_id);
-        let Some(pending) = pending else {
+            .map_err(|_| McpError::protocol("managed Playwright pending lock is unavailable"))?;
+        let Some(pending) = requests.remove(&request_id) else {
             return Ok(false);
         };
         if !outcome_matches(pending.operation, &input.outcome) {
+            let dispatch_certainty = pending.dispatch_certainty();
             let _ = pending
                 .completion
                 .send(ManagedPlaywrightCompletionOutcome::Error {
                     code: ManagedPlaywrightBridgeErrorCode::ProtocolError,
-                    dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+                    dispatch_certainty,
                 });
             return Ok(false);
         }
+        if !pending.completion_is_monotonic(&input.outcome) {
+            let dispatch_certainty = pending.dispatch_certainty();
+            let _ = pending
+                .completion
+                .send(ManagedPlaywrightCompletionOutcome::Error {
+                    code: ManagedPlaywrightBridgeErrorCode::ProtocolError,
+                    dispatch_certainty,
+                });
+            return Ok(false);
+        }
+        pending.acknowledge_completion(&input.outcome);
         Ok(pending.completion.send(input.outcome).is_ok())
+    }
+
+    pub(crate) fn acknowledge_dispatch_phase(
+        &self,
+        input: ManagedPlaywrightDispatchPhaseInput,
+    ) -> Result<bool, McpError> {
+        if input.schema_version != MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION {
+            return Err(McpError::protocol(
+                "managed Playwright dispatch phase schema is unsupported",
+            ));
+        }
+        let request_id = parse_uuid_v4(&input.request_id)?;
+        let requests = self
+            .pending
+            .lock()
+            .map_err(|_| McpError::protocol("managed Playwright pending lock is unavailable"))?;
+        let Some(request) = requests.get(&request_id) else {
+            return Ok(false);
+        };
+        if request.operation != PendingOperation::CallTool {
+            return Ok(false);
+        }
+        request.acknowledge_phase(input.phase);
+        Ok(true)
     }
 
     pub(crate) fn close_now(&self) {
@@ -154,11 +286,12 @@ impl ManagedPlaywrightHostBridge {
         if let Ok(mut pending) = self.pending.lock() {
             for (request_id, request) in pending.drain() {
                 self.send_cancel(request_id, ManagedPlaywrightCancelReason::Shutdown);
+                let dispatch_certainty = request.dispatch_certainty();
                 let _ = request
                     .completion
                     .send(ManagedPlaywrightCompletionOutcome::Error {
                         code: ManagedPlaywrightBridgeErrorCode::Closed,
-                        dispatch_certainty: certainty_for_operation(request.operation),
+                        dispatch_certainty,
                     });
             }
         }
@@ -183,6 +316,7 @@ impl ManagedPlaywrightHostBridge {
             // Proposal-time target freezing is deliberately drained to a terminal Main outcome.
             // Cancelling this bridge request could discard a late `sensitive_tool_prepared`
             // completion after Main created the binding, leaving that authority alive until TTL.
+            None,
             None,
         )
         .await
@@ -247,11 +381,12 @@ impl ManagedPlaywrightHostBridge {
         if let Ok(mut pending) = self.pending.lock() {
             for (request_id, request) in pending.drain() {
                 self.send_cancel(request_id, reason);
+                let dispatch_certainty = request.dispatch_certainty();
                 let _ = request
                     .completion
                     .send(ManagedPlaywrightCompletionOutcome::Error {
                         code: ManagedPlaywrightBridgeErrorCode::Closed,
-                        dispatch_certainty: certainty_for_operation(request.operation),
+                        dispatch_certainty,
                     });
             }
         }
@@ -290,29 +425,29 @@ impl ManagedPlaywrightHostBridge {
         operation: PendingOperation,
         timeout: Duration,
         cancellation: Option<McpCancellationToken>,
+        manager_dispatch: Option<McpDispatchTracker>,
     ) -> Result<ManagedPlaywrightCompletionOutcome, McpError> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(McpError::shutdown("managed Playwright bridge is closed"));
+            return Err(authoritative_pre_dispatch_error(McpError::shutdown(
+                "managed Playwright bridge is closed",
+            )));
+        }
+        if (operation == PendingOperation::CallTool) != manager_dispatch.is_some() {
+            return Err(authoritative_pre_dispatch_error(McpError::protocol(
+                "managed Playwright dispatch tracker is inconsistent",
+            )));
+        }
+        if cancellation
+            .as_ref()
+            .is_some_and(McpCancellationToken::is_cancelled)
+        {
+            return Err(authoritative_pre_dispatch_error(McpError::cancelled(
+                "managed Playwright tools/call",
+            )));
         }
         let request_id = Uuid::new_v4();
-        let (completion, receiver) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().map_err(|_| {
-                McpError::protocol("managed Playwright pending lock is unavailable")
-            })?;
-            if pending.len() >= MAX_PENDING_REQUESTS {
-                return Err(McpError::capacity(
-                    "managed Playwright bridge request limit was reached",
-                ));
-            }
-            pending.insert(
-                request_id,
-                PendingRequest {
-                    operation,
-                    completion,
-                },
-            );
-        }
+        let (completion, mut receiver) = oneshot::channel();
+        let main_dispatch = manager_dispatch.as_ref().map(|_| McpDispatchTracker::new());
         let notification = json!({
             "jsonrpc": "2.0",
             "method": MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
@@ -326,55 +461,157 @@ impl ManagedPlaywrightHostBridge {
                 command,
             },
         });
-        let sent = self
-            .outbound
-            .lock()
-            .map_err(|_| McpError::protocol("managed Playwright outbound lock is unavailable"))?
-            .as_ref()
-            .is_some_and(|outbound| outbound.send(notification).is_ok());
-        if !sent {
-            self.remove_pending(request_id);
-            return Err(McpError::shutdown(
-                "managed Playwright Host bridge is unavailable",
-            ));
+        {
+            // Keep the pending lock across the non-blocking send. A completion can therefore
+            // never observe a request before its Manager tracker crosses the exact send boundary,
+            // while `close_now` uses the same lock order (pending -> outbound).
+            let mut pending = self.pending.lock().map_err(|_| {
+                authoritative_pre_dispatch_error(McpError::protocol(
+                    "managed Playwright pending lock is unavailable",
+                ))
+            })?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(authoritative_pre_dispatch_error(McpError::shutdown(
+                    "managed Playwright bridge is closed",
+                )));
+            }
+            if pending.len() >= MAX_PENDING_REQUESTS {
+                return Err(authoritative_pre_dispatch_error(McpError::capacity(
+                    "managed Playwright bridge request limit was reached",
+                )));
+            }
+            let outbound = self.outbound.lock().map_err(|_| {
+                authoritative_pre_dispatch_error(McpError::protocol(
+                    "managed Playwright outbound lock is unavailable",
+                ))
+            })?;
+            let Some(outbound) = outbound.as_ref() else {
+                return Err(authoritative_pre_dispatch_error(McpError::shutdown(
+                    "managed Playwright Host bridge is unavailable",
+                )));
+            };
+            if cancellation
+                .as_ref()
+                .is_some_and(McpCancellationToken::is_cancelled)
+            {
+                return Err(authoritative_pre_dispatch_error(McpError::cancelled(
+                    "managed Playwright tools/call",
+                )));
+            }
+            pending.insert(
+                request_id,
+                PendingRequest {
+                    operation,
+                    completion,
+                    manager_dispatch: manager_dispatch.clone(),
+                    main_dispatch: main_dispatch.clone(),
+                },
+            );
+            if outbound.send(notification).is_err() {
+                pending.remove(&request_id);
+                return Err(authoritative_pre_dispatch_error(McpError::shutdown(
+                    "managed Playwright Host bridge is unavailable",
+                )));
+            }
+            // This is the sole reverse-peer transition to possibly dispatched. It is deliberately
+            // adjacent to a successful outbound send and runs before `pending` can be completed.
+            if let Some(dispatch) = manager_dispatch.as_ref() {
+                dispatch.mark_request_queued();
+            }
         }
+        let mut cleanup = PendingRequestCleanup {
+            bridge: self,
+            request_id,
+            armed: true,
+        };
 
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-        let outcome = if let Some(cancellation) = cancellation {
+        enum WaitOutcome {
+            Completed(Result<ManagedPlaywrightCompletionOutcome, oneshot::error::RecvError>),
+            Cancelled,
+            TimedOut,
+        }
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let wait = if let Some(cancellation) = cancellation {
             tokio::select! {
                 biased;
-                _ = cancellation.cancelled() => {
-                    self.remove_pending(request_id);
-                    self.send_cancel(request_id, ManagedPlaywrightCancelReason::Cancelled);
-                    return Err(interrupted_error(operation, McpOutcomeUnknownReason::Cancelled));
-                }
-                result = tokio::time::timeout(timeout, receiver) => result,
+                _ = cancellation.cancelled() => WaitOutcome::Cancelled,
+                result = &mut receiver => WaitOutcome::Completed(result),
+                _ = &mut deadline => WaitOutcome::TimedOut,
             }
         } else {
-            tokio::time::timeout(timeout, receiver).await
-        };
-        match outcome {
-            Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(_)) => Err(McpError::shutdown(
-                "managed Playwright completion channel closed",
-            )),
-            Err(_) => {
-                self.remove_pending(request_id);
-                self.send_cancel(request_id, ManagedPlaywrightCancelReason::Timeout);
-                if operation == PendingOperation::CallTool {
-                    Err(McpError::outcome_unknown(
-                        "managed Playwright tools/call",
-                        McpOutcomeUnknownReason::TimedOut,
-                        McpDispatchCertainty::PossiblyDispatched,
-                    ))
-                } else {
-                    Err(McpError::timeout(
-                        "managed Playwright Host bridge",
-                        timeout_ms,
-                    ))
-                }
+            tokio::select! {
+                result = &mut receiver => WaitOutcome::Completed(result),
+                _ = &mut deadline => WaitOutcome::TimedOut,
             }
+        };
+        let result = match wait {
+            WaitOutcome::Completed(Ok(outcome)) => Ok(outcome),
+            WaitOutcome::Completed(Err(_)) => {
+                self.remove_pending(request_id);
+                Err(interrupted_error(
+                    operation,
+                    McpOutcomeUnknownReason::Shutdown,
+                    dispatch_certainty_for(operation, main_dispatch.as_ref()),
+                    timeout_ms,
+                ))
+            }
+            WaitOutcome::Cancelled => {
+                self.settle_interrupted_request(
+                    request_id,
+                    &mut receiver,
+                    operation,
+                    ManagedPlaywrightCancelReason::Cancelled,
+                    McpOutcomeUnknownReason::Cancelled,
+                    main_dispatch.as_ref(),
+                    timeout_ms,
+                )
+                .await
+            }
+            WaitOutcome::TimedOut => {
+                self.settle_interrupted_request(
+                    request_id,
+                    &mut receiver,
+                    operation,
+                    ManagedPlaywrightCancelReason::Timeout,
+                    McpOutcomeUnknownReason::TimedOut,
+                    main_dispatch.as_ref(),
+                    timeout_ms,
+                )
+                .await
+            }
+        };
+        cleanup.disarm();
+        result
+    }
+
+    async fn settle_interrupted_request(
+        &self,
+        request_id: Uuid,
+        receiver: &mut oneshot::Receiver<ManagedPlaywrightCompletionOutcome>,
+        operation: PendingOperation,
+        cancel_reason: ManagedPlaywrightCancelReason,
+        unknown_reason: McpOutcomeUnknownReason,
+        main_dispatch: Option<&McpDispatchTracker>,
+        timeout_ms: u64,
+    ) -> Result<ManagedPlaywrightCompletionOutcome, McpError> {
+        self.send_cancel(request_id, cancel_reason);
+        match tokio::time::timeout(MANAGED_PLAYWRIGHT_COMPLETION_GRACE, &mut *receiver).await {
+            Ok(Ok(outcome)) => return Ok(outcome),
+            Ok(Err(_)) => {}
+            Err(_) => {}
         }
+        self.remove_pending(request_id);
+        if let Ok(outcome) = receiver.try_recv() {
+            return Ok(outcome);
+        }
+        Err(interrupted_error(
+            operation,
+            unknown_reason,
+            dispatch_certainty_for(operation, main_dispatch),
+            timeout_ms,
+        ))
     }
 
     fn remove_pending(&self, request_id: Uuid) {
@@ -389,12 +626,14 @@ impl ManagedPlaywrightHostBridge {
         context: ManagedPlaywrightAuthorizationContext,
     ) -> Result<(), McpError> {
         let mut contexts = self.authorization_contexts.lock().map_err(|_| {
-            McpError::protocol("managed Playwright authorization context is unavailable")
+            authoritative_pre_dispatch_error(McpError::protocol(
+                "managed Playwright authorization context is unavailable",
+            ))
         })?;
         if contexts.len() >= MAX_PENDING_REQUESTS || contexts.contains_key(&invocation_id) {
-            return Err(McpError::capacity(
+            return Err(authoritative_pre_dispatch_error(McpError::capacity(
                 "managed Playwright authorization context limit was reached",
-            ));
+            )));
         }
         contexts.insert(invocation_id, context);
         Ok(())
@@ -407,11 +646,15 @@ impl ManagedPlaywrightHostBridge {
         self.authorization_contexts
             .lock()
             .map_err(|_| {
-                McpError::protocol("managed Playwright authorization context is unavailable")
+                authoritative_pre_dispatch_error(McpError::protocol(
+                    "managed Playwright authorization context is unavailable",
+                ))
             })?
             .remove(&invocation_id)
             .ok_or_else(|| {
-                McpError::protocol("managed Playwright authorization context is missing")
+                authoritative_pre_dispatch_error(McpError::protocol(
+                    "managed Playwright authorization context is missing",
+                ))
             })
     }
 
@@ -472,6 +715,7 @@ impl McpConnector for ManagedPlaywrightHostBridgeConnector {
                     PendingOperation::Connect,
                     Duration::from_millis(config.connect_timeout_ms),
                     None,
+                    None,
                 )
                 .await?;
             let ManagedPlaywrightCompletionOutcome::Connected { protocol } = outcome else {
@@ -511,6 +755,60 @@ struct ManagedPlaywrightHostBridgePeer {
     state: AtomicU8,
 }
 
+impl ManagedPlaywrightHostBridgePeer {
+    fn call_tool_with_dispatch<'a>(
+        &'a self,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
+        dispatch: McpDispatchTracker,
+    ) -> BoxMcpFuture<'a, McpToolResult> {
+        dispatch.mark_dispatching();
+        Box::pin(async move {
+            if self.connection_state() != McpConnectionState::Ready {
+                return Err(authoritative_pre_dispatch_error(McpError::shutdown(
+                    "managed Playwright peer is not ready",
+                )));
+            }
+            let timeout = call
+                .timeout_ms
+                .map(Duration::from_millis)
+                .unwrap_or(self.request_timeout)
+                .min(Duration::from_secs(300));
+            let invocation_id = call.invocation_id.ok_or_else(|| {
+                authoritative_pre_dispatch_error(McpError::protocol(
+                    "managed Playwright active-call identity is missing",
+                ))
+            })?;
+            let authorization_context = self
+                .bridge
+                .take_authorization_context(invocation_id)
+                .map_err(authoritative_pre_dispatch_error)?;
+            let outcome = self
+                .bridge
+                .request(
+                    ManagedPlaywrightCommand::CallTool {
+                        name: call.name,
+                        arguments: call.arguments,
+                        timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                        authorization_context: Box::new(authorization_context),
+                    },
+                    PendingOperation::CallTool,
+                    timeout,
+                    Some(cancellation),
+                    Some(dispatch),
+                )
+                .await?;
+            let ManagedPlaywrightCompletionOutcome::ToolCalled { result } = outcome else {
+                return Err(error_from_outcome(outcome, PendingOperation::CallTool));
+            };
+            serde_json::from_value(result).map_err(|_| {
+                McpError::protocol("managed Playwright tools/call result is invalid")
+                    .with_authoritative_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
+            })
+        })
+    }
+}
+
 impl McpPeer for ManagedPlaywrightHostBridgePeer {
     fn server_id(&self) -> McpServerId {
         self.server_id
@@ -542,6 +840,7 @@ impl McpPeer for ManagedPlaywrightHostBridgePeer {
                     PendingOperation::ListTools,
                     self.request_timeout,
                     None,
+                    None,
                 )
                 .await?;
             let ManagedPlaywrightCompletionOutcome::ToolsListed { page } = outcome else {
@@ -557,39 +856,16 @@ impl McpPeer for ManagedPlaywrightHostBridgePeer {
         call: McpToolCall,
         cancellation: McpCancellationToken,
     ) -> BoxMcpFuture<'a, McpToolResult> {
-        Box::pin(async move {
-            if self.connection_state() != McpConnectionState::Ready {
-                return Err(McpError::shutdown("managed Playwright peer is not ready"));
-            }
-            let timeout = call
-                .timeout_ms
-                .map(Duration::from_millis)
-                .unwrap_or(self.request_timeout)
-                .min(Duration::from_secs(300));
-            let invocation_id = call.invocation_id.ok_or_else(|| {
-                McpError::protocol("managed Playwright active-call identity is missing")
-            })?;
-            let authorization_context = self.bridge.take_authorization_context(invocation_id)?;
-            let outcome = self
-                .bridge
-                .request(
-                    ManagedPlaywrightCommand::CallTool {
-                        name: call.name,
-                        arguments: call.arguments,
-                        timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                        authorization_context: Box::new(authorization_context),
-                    },
-                    PendingOperation::CallTool,
-                    timeout,
-                    Some(cancellation),
-                )
-                .await?;
-            let ManagedPlaywrightCompletionOutcome::ToolCalled { result } = outcome else {
-                return Err(error_from_outcome(outcome, PendingOperation::CallTool));
-            };
-            serde_json::from_value(result)
-                .map_err(|_| McpError::protocol("managed Playwright tools/call result is invalid"))
-        })
+        self.call_tool_with_dispatch(call, cancellation, McpDispatchTracker::new())
+    }
+
+    fn call_tool_tracked<'a>(
+        &'a self,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
+        dispatch: McpDispatchTracker,
+    ) -> BoxMcpFuture<'a, McpToolResult> {
+        self.call_tool_with_dispatch(call, cancellation, dispatch)
     }
 
     fn force_close(&self) -> bool {
@@ -621,6 +897,7 @@ impl McpPeer for ManagedPlaywrightHostBridgePeer {
                     ManagedPlaywrightCommand::Close,
                     PendingOperation::Close,
                     self.shutdown_timeout,
+                    None,
                     None,
                 )
                 .await;
@@ -1208,23 +1485,90 @@ fn error_from_outcome(
     error.with_authoritative_dispatch_certainty(certainty)
 }
 
-fn interrupted_error(operation: PendingOperation, reason: McpOutcomeUnknownReason) -> McpError {
-    if operation == PendingOperation::CallTool {
-        McpError::outcome_unknown(
-            "managed Playwright tools/call",
-            reason,
-            McpDispatchCertainty::PossiblyDispatched,
-        )
+fn authoritative_pre_dispatch_error(error: McpError) -> McpError {
+    error.with_authoritative_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
+}
+
+fn interrupted_error(
+    operation: PendingOperation,
+    reason: McpOutcomeUnknownReason,
+    certainty: ManagedPlaywrightDispatchCertainty,
+    timeout_ms: u64,
+) -> McpError {
+    if operation != PendingOperation::CallTool {
+        return if reason == McpOutcomeUnknownReason::TimedOut {
+            McpError::timeout("managed Playwright Host bridge", timeout_ms)
+        } else if reason == McpOutcomeUnknownReason::Shutdown {
+            McpError::shutdown("managed Playwright Host bridge stopped")
+        } else {
+            McpError::cancelled("managed Playwright Host bridge")
+        };
+    }
+
+    let certainty = mcp_dispatch_certainty(certainty);
+    if certainty != McpDispatchCertainty::DefinitelyNotDispatched {
+        return McpError::outcome_unknown("managed Playwright tools/call", reason, certainty);
+    }
+
+    let error = if reason == McpOutcomeUnknownReason::TimedOut {
+        McpError::timeout("managed Playwright tools/call", timeout_ms)
+    } else if reason == McpOutcomeUnknownReason::Shutdown {
+        McpError::shutdown("managed Playwright Host bridge stopped before Tool dispatch")
     } else {
-        McpError::cancelled("managed Playwright Host bridge")
+        McpError::cancelled("managed Playwright tools/call")
+    };
+    authoritative_pre_dispatch_error(error)
+}
+
+fn dispatch_certainty_for(
+    operation: PendingOperation,
+    dispatch: Option<&McpDispatchTracker>,
+) -> ManagedPlaywrightDispatchCertainty {
+    if operation != PendingOperation::CallTool {
+        return ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched;
+    }
+    dispatch
+        .map(McpDispatchTracker::certainty)
+        .map(managed_dispatch_certainty)
+        .unwrap_or(ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched)
+}
+
+fn managed_dispatch_certainty(
+    certainty: McpDispatchCertainty,
+) -> ManagedPlaywrightDispatchCertainty {
+    match certainty {
+        McpDispatchCertainty::DefinitelyNotDispatched => {
+            ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched
+        }
+        McpDispatchCertainty::PossiblyDispatched => {
+            ManagedPlaywrightDispatchCertainty::PossiblyDispatched
+        }
+        McpDispatchCertainty::ResponseReceived => {
+            ManagedPlaywrightDispatchCertainty::ResponseReceived
+        }
+        _ => ManagedPlaywrightDispatchCertainty::PossiblyDispatched,
     }
 }
 
-fn certainty_for_operation(operation: PendingOperation) -> ManagedPlaywrightDispatchCertainty {
-    if operation == PendingOperation::CallTool {
-        ManagedPlaywrightDispatchCertainty::PossiblyDispatched
-    } else {
-        ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched
+fn mcp_dispatch_certainty(certainty: ManagedPlaywrightDispatchCertainty) -> McpDispatchCertainty {
+    match certainty {
+        ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched => {
+            McpDispatchCertainty::DefinitelyNotDispatched
+        }
+        ManagedPlaywrightDispatchCertainty::PossiblyDispatched => {
+            McpDispatchCertainty::PossiblyDispatched
+        }
+        ManagedPlaywrightDispatchCertainty::ResponseReceived => {
+            McpDispatchCertainty::ResponseReceived
+        }
+    }
+}
+
+fn dispatch_certainty_rank(certainty: ManagedPlaywrightDispatchCertainty) -> u8 {
+    match certainty {
+        ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched => 0,
+        ManagedPlaywrightDispatchCertainty::PossiblyDispatched => 1,
+        ManagedPlaywrightDispatchCertainty::ResponseReceived => 2,
     }
 }
 
@@ -1313,6 +1657,599 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     #[cfg(target_os = "macos")]
     use tokio::process::Command;
+
+    fn test_authorization_context() -> ManagedPlaywrightAuthorizationContext {
+        ManagedPlaywrightAuthorizationContext {
+            run_id: "run-test".to_string(),
+            capability_id: "browser_automation".to_string(),
+            activation_id: Uuid::new_v4().to_string(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            policy_revision: 1,
+            grant_expires_at_ms: 2_000_000_000_000,
+            invocation_id: Uuid::new_v4().to_string(),
+            call_id: "call-test".to_string(),
+            trigger_tool_name: "browser_snapshot".to_string(),
+            call_reason: "Exercise the reverse bridge dispatch boundary.".to_string(),
+            builtin_tool_grant: None,
+        }
+    }
+
+    fn test_call_command() -> ManagedPlaywrightCommand {
+        ManagedPlaywrightCommand::CallTool {
+            name: "browser_snapshot".to_string(),
+            arguments: json!({
+                "call_reason": "Exercise the reverse bridge dispatch boundary."
+            }),
+            timeout_ms: 1_000,
+            authorization_context: Box::new(test_authorization_context()),
+        }
+    }
+
+    fn test_protocol_snapshot() -> McpProtocolSnapshot {
+        serde_json::from_value(json!({
+            "negotiatedVersion": "2025-11-25",
+            "lifecycle": "initialize_fallback",
+            "server": {"name": "@playwright/mcp", "version": "0.0.79"},
+            "capabilities": {
+                "tools": true,
+                "toolsListChanged": false,
+                "resources": false,
+                "resourcesListChanged": false,
+                "resourcesSubscribe": false,
+                "prompts": false,
+                "promptsListChanged": false,
+                "logging": false,
+                "completions": false,
+                "tasks": false,
+                "extensions": []
+            }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reverse_peer_pre_dispatch_rejections_never_cross_the_queue_boundary() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let error = bridge
+            .request(
+                test_call_command(),
+                PendingOperation::CallTool,
+                Duration::from_secs(1),
+                None,
+                Some(dispatch.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert_eq!(bridge.pending_request_count(), 0);
+
+        let cancelled_bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        cancelled_bridge.attach_outbound(outbound).unwrap();
+        let cancellation = McpCancellationToken::new();
+        cancellation.cancel();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let error = cancelled_bridge
+            .request(
+                test_call_command(),
+                PendingOperation::CallTool,
+                Duration::from_secs(1),
+                Some(cancellation),
+                Some(dispatch.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Cancelled);
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(cancelled_bridge.pending_request_count(), 0);
+
+        let (outbound, commands) = mpsc::unbounded_channel();
+        drop(commands);
+        bridge.attach_outbound(outbound).unwrap();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let error = bridge
+            .request(
+                test_call_command(),
+                PendingOperation::CallTool,
+                Duration::from_secs(1),
+                None,
+                Some(dispatch.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert_eq!(bridge.pending_request_count(), 0);
+
+        let poisoned_bridge = ManagedPlaywrightHostBridge::new(server_id);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let poisoned_bridge = Arc::clone(&poisoned_bridge);
+            move || {
+                let _outbound = poisoned_bridge.outbound.lock().unwrap();
+                panic!("poison the outbound lock");
+            }
+        }))
+        .is_err());
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let error = poisoned_bridge
+            .request(
+                test_call_command(),
+                PendingOperation::CallTool,
+                Duration::from_secs(1),
+                None,
+                Some(dispatch.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert_eq!(poisoned_bridge.pending_request_count(), 0);
+
+        bridge.close_now();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let error = bridge
+            .request(
+                test_call_command(),
+                PendingOperation::CallTool,
+                Duration::from_secs(1),
+                None,
+                Some(dispatch.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn reverse_bridge_capacity_rejection_does_not_queue_or_leak_the_rejected_request() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..MAX_PENDING_REQUESTS {
+            let bridge = Arc::clone(&bridge);
+            tasks.push(tokio::spawn(async move {
+                let dispatch = McpDispatchTracker::new();
+                dispatch.mark_dispatching();
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_secs(10),
+                        None,
+                        Some(dispatch),
+                    )
+                    .await
+            }));
+            let command = commands.recv().await.unwrap();
+            assert_eq!(
+                command["method"],
+                json!(MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD)
+            );
+        }
+        assert_eq!(bridge.pending_request_count(), MAX_PENDING_REQUESTS);
+
+        let rejected_dispatch = McpDispatchTracker::new();
+        rejected_dispatch.mark_dispatching();
+        let error = bridge
+            .request(
+                test_call_command(),
+                PendingOperation::CallTool,
+                Duration::from_secs(1),
+                None,
+                Some(rejected_dispatch.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Capacity);
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(
+            rejected_dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert_eq!(bridge.pending_request_count(), MAX_PENDING_REQUESTS);
+
+        bridge.abort_pending(ManagedPlaywrightCancelReason::Shutdown);
+        for task in tasks {
+            assert!(matches!(
+                task.await.unwrap().unwrap(),
+                ManagedPlaywrightCompletionOutcome::Error {
+                    code: ManagedPlaywrightBridgeErrorCode::Closed,
+                    dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+                }
+            ));
+        }
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_reverse_request_future_removes_pending_and_notifies_main() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let task = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move {
+                let dispatch = McpDispatchTracker::new();
+                dispatch.mark_dispatching();
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_secs(10),
+                        None,
+                        Some(dispatch),
+                    )
+                    .await
+            })
+        };
+        let command = commands.recv().await.unwrap();
+        let params: ManagedPlaywrightCommandNotification =
+            serde_json::from_value(command["params"].clone()).unwrap();
+        assert_eq!(bridge.pending_request_count(), 1);
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(bridge.pending_request_count(), 0);
+        let cancel = commands.recv().await.unwrap();
+        let cancel_params: ManagedPlaywrightCancelNotification =
+            serde_json::from_value(cancel["params"].clone()).unwrap();
+        assert_eq!(cancel_params.request_id, params.request_id);
+        assert_eq!(
+            cancel_params.reason,
+            ManagedPlaywrightCancelReason::Shutdown
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_reverse_send_is_the_only_manager_queue_boundary() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let task = {
+            let bridge = Arc::clone(&bridge);
+            let dispatch = dispatch.clone();
+            tokio::spawn(async move {
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_secs(1),
+                        None,
+                        Some(dispatch),
+                    )
+                    .await
+            })
+        };
+        let command = commands.recv().await.unwrap();
+        let params: ManagedPlaywrightCommandNotification =
+            serde_json::from_value(command["params"].clone()).unwrap();
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::PossiblyDispatched
+        );
+        assert_eq!(bridge.pending_request_count(), 1);
+        assert!(bridge
+            .complete(ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id,
+                outcome: ManagedPlaywrightCompletionOutcome::ToolCalled {
+                    result: json!({"content": [], "structuredContent": null, "isError": false}),
+                },
+            })
+            .unwrap());
+        assert!(matches!(
+            task.await.unwrap().unwrap(),
+            ManagedPlaywrightCompletionOutcome::ToolCalled { .. }
+        ));
+        assert_eq!(dispatch.certainty(), McpDispatchCertainty::ResponseReceived);
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_grace_accepts_exact_pre_dispatch_completion_without_leaking_pending() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let cancellation = McpCancellationToken::new();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let task = {
+            let bridge = Arc::clone(&bridge);
+            let cancellation = cancellation.clone();
+            let dispatch = dispatch.clone();
+            tokio::spawn(async move {
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_secs(10),
+                        Some(cancellation),
+                        Some(dispatch),
+                    )
+                    .await
+            })
+        };
+        let command = commands.recv().await.unwrap();
+        let params: ManagedPlaywrightCommandNotification =
+            serde_json::from_value(command["params"].clone()).unwrap();
+        assert!(bridge
+            .acknowledge_dispatch_phase(ManagedPlaywrightDispatchPhaseInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id.clone(),
+                phase: ManagedPlaywrightDispatchPhase::PreDispatch,
+            })
+            .unwrap());
+        cancellation.cancel();
+        let cancel = commands.recv().await.unwrap();
+        assert_eq!(
+            cancel["method"],
+            json!(MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD)
+        );
+        assert_eq!(bridge.pending_request_count(), 1);
+        assert!(bridge
+            .complete(ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id,
+                outcome: ManagedPlaywrightCompletionOutcome::Error {
+                    code: ManagedPlaywrightBridgeErrorCode::Cancelled,
+                    dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+                },
+            })
+            .unwrap());
+        let outcome = task.await.unwrap().unwrap();
+        let error = error_from_outcome(outcome, PendingOperation::CallTool);
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Cancelled);
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_main_dispatch_is_unknown_and_cleans_pending_after_grace() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let cancellation = McpCancellationToken::new();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let task = {
+            let bridge = Arc::clone(&bridge);
+            let cancellation = cancellation.clone();
+            let dispatch = dispatch.clone();
+            tokio::spawn(async move {
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_secs(10),
+                        Some(cancellation),
+                        Some(dispatch),
+                    )
+                    .await
+            })
+        };
+        let command = commands.recv().await.unwrap();
+        let params: ManagedPlaywrightCommandNotification =
+            serde_json::from_value(command["params"].clone()).unwrap();
+        assert!(bridge
+            .acknowledge_dispatch_phase(ManagedPlaywrightDispatchPhaseInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id.clone(),
+                phase: ManagedPlaywrightDispatchPhase::PossiblyDispatched,
+            })
+            .unwrap());
+        assert!(bridge
+            .acknowledge_dispatch_phase(ManagedPlaywrightDispatchPhaseInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id,
+                phase: ManagedPlaywrightDispatchPhase::PreDispatch,
+            })
+            .unwrap());
+        cancellation.cancel();
+        let _cancel = commands.recv().await.unwrap();
+        assert_eq!(bridge.pending_request_count(), 1);
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            mycopilot_mcp_client::McpErrorKind::OutcomeUnknown
+        );
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::PossiblyDispatched)
+        );
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn main_dispatch_completion_cannot_regress_acknowledged_certainty() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let task = {
+            let bridge = Arc::clone(&bridge);
+            let dispatch = dispatch.clone();
+            tokio::spawn(async move {
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_secs(1),
+                        None,
+                        Some(dispatch),
+                    )
+                    .await
+            })
+        };
+        let command = commands.recv().await.unwrap();
+        let params: ManagedPlaywrightCommandNotification =
+            serde_json::from_value(command["params"].clone()).unwrap();
+        assert!(bridge
+            .acknowledge_dispatch_phase(ManagedPlaywrightDispatchPhaseInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id.clone(),
+                phase: ManagedPlaywrightDispatchPhase::PossiblyDispatched,
+            })
+            .unwrap());
+        assert!(!bridge
+            .complete(ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id,
+                outcome: ManagedPlaywrightCompletionOutcome::Error {
+                    code: ManagedPlaywrightBridgeErrorCode::InvalidArguments,
+                    dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+                },
+            })
+            .unwrap());
+        let outcome = task.await.unwrap().unwrap();
+        assert!(matches!(
+            outcome,
+            ManagedPlaywrightCompletionOutcome::Error {
+                code: ManagedPlaywrightBridgeErrorCode::ProtocolError,
+                dispatch_certainty: ManagedPlaywrightDispatchCertainty::PossiblyDispatched,
+            }
+        ));
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn managed_peer_rejects_not_ready_and_missing_invocation_or_authorization_pre_dispatch() {
+        let server_id = McpServerId::new();
+        let bridge = ManagedPlaywrightHostBridge::new(server_id);
+        let peer = ManagedPlaywrightHostBridgePeer {
+            server_id,
+            protocol: test_protocol_snapshot(),
+            bridge,
+            request_timeout: Duration::from_secs(1),
+            shutdown_timeout: Duration::from_secs(1),
+            state: AtomicU8::new(STATE_CLOSED),
+        };
+        let dispatch = McpDispatchTracker::new();
+        let error = peer
+            .call_tool_tracked(
+                McpToolCall {
+                    name: "browser_snapshot".to_string(),
+                    arguments: json!({}),
+                    timeout_ms: None,
+                    invocation_id: None,
+                },
+                McpCancellationToken::new(),
+                dispatch.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Shutdown);
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+
+        peer.state.store(STATE_READY, Ordering::Release);
+        let dispatch = McpDispatchTracker::new();
+        let error = peer
+            .call_tool_tracked(
+                McpToolCall {
+                    name: "browser_snapshot".to_string(),
+                    arguments: json!({}),
+                    timeout_ms: None,
+                    invocation_id: None,
+                },
+                McpCancellationToken::new(),
+                dispatch.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Protocol);
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+
+        let dispatch = McpDispatchTracker::new();
+        let error = peer
+            .call_tool_tracked(
+                McpToolCall {
+                    name: "browser_snapshot".to_string(),
+                    arguments: json!({}),
+                    timeout_ms: None,
+                    invocation_id: Some(McpInvocationId::new()),
+                },
+                McpCancellationToken::new(),
+                dispatch.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Protocol);
+        assert_eq!(
+            dispatch.certainty(),
+            McpDispatchCertainty::DefinitelyNotDispatched
+        );
+        assert_eq!(peer.bridge.pending_request_count(), 0);
+    }
 
     #[tokio::test]
     async fn connector_flows_through_manager_catalog_without_surface_identity() {
@@ -1793,6 +2730,7 @@ mod tests {
     async fn managed_playwright_official_electron_e2e() {
         const READY_MARKER: &str = "MYCOPILOT_MANAGED_PLAYWRIGHT_READY=";
         const COMPLETION_MARKER: &str = "MYCOPILOT_MANAGED_PLAYWRIGHT_COMPLETION=";
+        const DISPATCH_PHASE_MARKER: &str = "MYCOPILOT_MANAGED_PLAYWRIGHT_DISPATCH_PHASE=";
         const RESULT_MARKER: &str = "MYCOPILOT_MANAGED_PLAYWRIGHT_RESULT=";
         const RISK_AUTHORIZE_MARKER: &str = "MYCOPILOT_BROWSER_RISK_AUTHORIZE=";
         const RISK_CANCEL_MARKER: &str = "MYCOPILOT_BROWSER_RISK_CANCEL=";
@@ -1925,6 +2863,32 @@ mod tests {
                         .expect("complete bridge request"));
                     continue;
                 }
+                if let Some(payload) = line.strip_prefix(DISPATCH_PHASE_MARKER) {
+                    let phase: ManagedPlaywrightDispatchPhaseInput =
+                        serde_json::from_str(payload).expect("parse fixture dispatch phase");
+                    let request_id = phase.request_id.clone();
+                    let phase_name = phase.phase;
+                    let accepted = reader_bridge
+                        .acknowledge_dispatch_phase(phase)
+                        .expect("acknowledge fixture dispatch phase");
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "method": "fixture.managedPlaywright.dispatchPhaseAck",
+                        "params": {
+                            "requestId": request_id,
+                            "phase": phase_name,
+                            "accepted": accepted,
+                        },
+                    });
+                    reader_fixture_input
+                        .lock()
+                        .expect("fixture input lock")
+                        .as_ref()
+                        .expect("fixture input remains attached while acknowledging dispatch")
+                        .send(response)
+                        .expect("write fixture dispatch phase acknowledgement");
+                    continue;
+                }
                 if let Some(payload) = line.strip_prefix(RISK_AUTHORIZE_MARKER) {
                     observed_authorize_count.fetch_add(1, Ordering::AcqRel);
                     let input: BrowserRiskAuthorizeInput =
@@ -2045,17 +3009,16 @@ mod tests {
         let first_tab = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
-            "browser_tabs",
+            "browser_navigate",
             json!({
-                "action": "new",
                 "url": fixture_url,
-                "call_reason": "Open exactly one first local fixture tab from the empty group."
+                "call_reason": "Navigate the empty managed context directly to the first local fixture."
             }),
         )
         .await;
         assert!(
             !first_tab.is_error,
-            "managed first browser_tabs new failed: {}",
+            "managed first browser_navigate failed: {}",
             tool_result_text(&first_tab)
         );
         let first_tab_list = invoke_browser_tool_with_grant(

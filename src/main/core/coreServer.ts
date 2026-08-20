@@ -96,6 +96,7 @@ import type {
   ManagedPlaywrightCancelNotification,
   ManagedPlaywrightCommandNotification,
   ManagedPlaywrightCompletionInput,
+  ManagedPlaywrightDispatchPhaseInput,
   BrowserRiskAuthorizeInput,
   BrowserRiskAuthorizeOutput,
   BrowserRiskCancelInput,
@@ -210,6 +211,7 @@ import {
   MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD,
   MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
   MANAGED_PLAYWRIGHT_COMPLETE_METHOD,
+  MANAGED_PLAYWRIGHT_DISPATCH_PHASE_METHOD,
   BROWSER_RISK_AUTHORIZE_METHOD,
   BROWSER_RISK_CANCEL_METHOD,
   MCP_SERVER_ADD_METHOD,
@@ -245,6 +247,8 @@ import {
   parseManagedPlaywrightCommandNotification,
   parseManagedPlaywrightCompletionInput,
   parseManagedPlaywrightCompletionOutput,
+  parseManagedPlaywrightDispatchPhaseInput,
+  parseManagedPlaywrightDispatchPhaseOutput,
   parseBrowserRiskAuthorizeInput,
   parseBrowserRiskAuthorizeOutput,
   parseBrowserRiskCancelInput,
@@ -820,6 +824,19 @@ export class CoreServer {
         request
       )
       .then(parseManagedPlaywrightCompletionOutput)
+      .then((output) => output.accepted)
+  }
+
+  acknowledgeManagedPlaywrightDispatchPhase(
+    input: ManagedPlaywrightDispatchPhaseInput
+  ): Promise<boolean> {
+    const request = parseManagedPlaywrightDispatchPhaseInput(input)
+    return this.rpc
+      .request<unknown, ManagedPlaywrightDispatchPhaseInput>(
+        MANAGED_PLAYWRIGHT_DISPATCH_PHASE_METHOD,
+        request
+      )
+      .then(parseManagedPlaywrightDispatchPhaseOutput)
       .then((output) => output.accepted)
   }
 

@@ -12,6 +12,7 @@ import {
 
 const REQUEST_ID = '5ee8f693-c8e6-48ab-a2c1-9ed774bc18a9'
 const SURFACE_ID = 'right-sidebar-browser-browser-1234'
+const SURFACE_INSTANCE_ID = 'instance-00000001'
 
 describe('browser surface protocol', () => {
   it('round-trips a bounded inert bootstrap URL', () => {
@@ -73,13 +74,15 @@ describe('browser surface protocol', () => {
         schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
         kind: 'closeSurface',
         requestId: REQUEST_ID,
-        surfaceId: SURFACE_ID
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
       })
     ).toEqual({
       schemaVersion: 1,
       kind: 'closeSurface',
       requestId: REQUEST_ID,
-      surfaceId: SURFACE_ID
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID
     })
   })
 
@@ -97,9 +100,31 @@ describe('browser surface protocol', () => {
       parseBrowserSurfaceReadyInput({
         schemaVersion: 1,
         requestId: 'not-random',
-        surfaceId: SURFACE_ID
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
       })
     ).toThrow('request identity')
+    expect(
+      parseBrowserSurfaceCommand({
+        schemaVersion: 1,
+        kind: 'closeSurface',
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      kind: 'closeSurface',
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID
+    })
+    expect(() =>
+      parseBrowserSurfaceReadyInput({
+        schemaVersion: 1,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: 'short'
+      })
+    ).toThrow('instance identity')
   })
 
   it('strictly parses the renderer readiness acknowledgement', () => {
@@ -108,41 +133,259 @@ describe('browser surface protocol', () => {
         schemaVersion: 1,
         requestId: REQUEST_ID,
         surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
         viewport: { height: 0, width: 0 }
       })
     ).toEqual({
       schemaVersion: 1,
       requestId: REQUEST_ID,
       surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID,
       viewport: { height: 0, width: 0 }
     })
     expect(
       parseBrowserSurfaceReadyOutput({
         schemaVersion: 1,
         accepted: true,
-        surfaceId: SURFACE_ID
+        status: 'applied',
+        reason: 'surface_ready',
+        retryable: false,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
       })
-    ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: SURFACE_ID })
+    ).toEqual({
+      schemaVersion: 1,
+      accepted: true,
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID
+    })
+    expect(
+      parseBrowserSurfaceReadyOutput({
+        schemaVersion: 1,
+        accepted: false,
+        status: 'stale',
+        reason: 'request_expired',
+        retryable: false,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      accepted: false,
+      status: 'stale',
+      reason: 'request_expired',
+      retryable: false,
+      requestId: REQUEST_ID,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID
+    })
+    expect(
+      parseBrowserSurfaceReadyOutput({
+        schemaVersion: 1,
+        accepted: false,
+        status: 'noop',
+        reason: 'not_registered',
+        retryable: true,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
+      })
+    ).toMatchObject({ status: 'noop', reason: 'not_registered', retryable: true })
+    expect(
+      parseBrowserSurfaceReadyOutput({
+        schemaVersion: 1,
+        accepted: false,
+        status: 'stale',
+        reason: 'instance_mismatch',
+        retryable: true,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
+      })
+    ).toMatchObject({ status: 'stale', reason: 'instance_mismatch', retryable: true })
+    expect(() =>
+      parseBrowserSurfaceReadyOutput({
+        schemaVersion: 1,
+        accepted: false,
+        status: 'noop',
+        reason: 'request_expired',
+        retryable: false,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
+      })
+    ).toThrow('noop output')
+    expect(() =>
+      parseBrowserSurfaceReadyOutput({
+        schemaVersion: 1,
+        accepted: false,
+        status: 'stale',
+        reason: 'instance_mismatch',
+        retryable: false,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
+      })
+    ).toThrow('stale output')
   })
 
-  it('strictly parses the safe manual surface selection acknowledgement', () => {
-    expect(parseBrowserSurfaceSelectedInput({ schemaVersion: 1, surfaceId: SURFACE_ID })).toEqual({
+  it('strictly parses bound, probe, and clear manual surface selections', () => {
+    expect(
+      parseBrowserSurfaceSelectedInput({
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
+        selectionRevision: 3
+      })
+    ).toEqual({
       schemaVersion: 1,
-      surfaceId: SURFACE_ID
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID,
+      selectionRevision: 3
+    })
+    expect(
+      parseBrowserSurfaceSelectedInput({
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: null,
+        selectionRevision: 4
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: null,
+      selectionRevision: 4
+    })
+    expect(
+      parseBrowserSurfaceSelectedInput({
+        schemaVersion: 1,
+        surfaceId: null,
+        surfaceInstanceId: null,
+        selectionRevision: 5
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      surfaceId: null,
+      surfaceInstanceId: null,
+      selectionRevision: 5
+    })
+  })
+
+  it('strictly parses applied, no-op, and stale selection results', () => {
+    expect(
+      parseBrowserSurfaceSelectedOutput({
+        schemaVersion: 1,
+        status: 'applied',
+        reason: 'selection_applied',
+        retryable: false,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
+        selectionRevision: 3,
+        authoritativeRevision: 3
+      })
+    ).toEqual({
+      schemaVersion: 1,
+      status: 'applied',
+      reason: 'selection_applied',
+      retryable: false,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID,
+      selectionRevision: 3,
+      authoritativeRevision: 3
     })
     expect(
       parseBrowserSurfaceSelectedOutput({
         schemaVersion: 1,
-        accepted: true,
-        surfaceId: SURFACE_ID
+        status: 'noop',
+        reason: 'instance_required',
+        retryable: true,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
+        selectionRevision: 4,
+        authoritativeRevision: 3
       })
-    ).toEqual({ schemaVersion: 1, accepted: true, surfaceId: SURFACE_ID })
+    ).toMatchObject({ status: 'noop', reason: 'instance_required', retryable: true })
+    expect(
+      parseBrowserSurfaceSelectedOutput({
+        schemaVersion: 1,
+        status: 'noop',
+        reason: 'not_registered',
+        retryable: true,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: null,
+        selectionRevision: 5,
+        authoritativeRevision: 3
+      })
+    ).toMatchObject({ status: 'noop', reason: 'not_registered', surfaceInstanceId: null })
+    expect(
+      parseBrowserSurfaceSelectedOutput({
+        schemaVersion: 1,
+        status: 'stale',
+        reason: 'stale_revision',
+        retryable: false,
+        surfaceId: null,
+        surfaceInstanceId: null,
+        selectionRevision: 2,
+        authoritativeRevision: 3
+      })
+    ).toMatchObject({ status: 'stale', reason: 'stale_revision' })
+  })
+
+  it('rejects malformed selection bindings, revisions, result variants, and unknown fields', () => {
     expect(() =>
       parseBrowserSurfaceSelectedInput({
         schemaVersion: 1,
         surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
+        selectionRevision: 1,
         webContentsId: 42
       })
     ).toThrow('unknown fields')
+    expect(() =>
+      parseBrowserSurfaceSelectedInput({
+        schemaVersion: 1,
+        surfaceId: null,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
+        selectionRevision: 1
+      })
+    ).toThrow('cannot carry an instance')
+    expect(() =>
+      parseBrowserSurfaceSelectedInput({
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: null,
+        selectionRevision: 0
+      })
+    ).toThrow('selection revision')
+    expect(() =>
+      parseBrowserSurfaceSelectedOutput({
+        schemaVersion: 1,
+        status: 'applied',
+        reason: 'not_registered',
+        retryable: true,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: null,
+        selectionRevision: 1,
+        authoritativeRevision: 0
+      })
+    ).toThrow('applied')
+    expect(() =>
+      parseBrowserSurfaceSelectedOutput({
+        schemaVersion: 1,
+        status: 'stale',
+        reason: 'instance_required',
+        retryable: true,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: null,
+        selectionRevision: 1,
+        authoritativeRevision: 0
+      })
+    ).toThrow('selection reason')
   })
 })

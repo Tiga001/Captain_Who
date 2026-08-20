@@ -23,23 +23,39 @@ pub fn root_agent_creation_request_id(conversation_id: &str) -> String {
 
 /// Applies the persisted root task-name constraints without changing the user-visible title.
 pub fn bounded_root_agent_task_name(title: &str) -> String {
+    const MAX_TASK_NAME_BYTES: usize = 256;
+
+    // Conversation titles are natural-language display text and may contain Markdown links.
+    // Root task names are persisted as one Agent task-path segment, so normalize only the
+    // internal identity instead of restricting or rewriting the user-visible title.
     let normalized = title
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || character == '/' {
                 ' '
             } else {
                 character
             }
         })
-        .collect::<String>();
-    let title = normalized.trim();
-    let title = if title.is_empty() { "Root" } else { title };
-    let mut boundary = title.len().min(256);
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = if normalized.is_empty() {
+        "Root"
+    } else {
+        normalized.as_str()
+    };
+    let mut boundary = title.len().min(MAX_TASK_NAME_BYTES);
     while boundary > 0 && !title.is_char_boundary(boundary) {
         boundary -= 1;
     }
-    title[..boundary].to_string()
+    let bounded = title[..boundary].trim();
+    if bounded.is_empty() {
+        "Root".to_string()
+    } else {
+        bounded.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

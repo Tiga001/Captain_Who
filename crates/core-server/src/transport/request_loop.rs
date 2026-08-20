@@ -235,17 +235,25 @@ where
                             let Ok(completion_request) = serde_json::from_str::<JsonRpcRequest>(&line) else {
                                 continue;
                             };
-                            if completion_request.jsonrpc == "2.0"
-                                && completion_request.method
-                                    == mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_COMPLETE_METHOD
-                            {
-                                enqueue_outbound(
-                                    outbound,
-                                    managed_playwright_completion_response(
-                                        managed_playwright_bridge.as_ref(),
-                                        completion_request,
-                                    ),
-                                )?;
+                            if completion_request.jsonrpc == "2.0" {
+                                let response = match completion_request.method.as_str() {
+                                    mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_COMPLETE_METHOD => {
+                                        Some(managed_playwright_completion_response(
+                                            managed_playwright_bridge.as_ref(),
+                                            completion_request,
+                                        ))
+                                    }
+                                    mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_DISPATCH_PHASE_METHOD => {
+                                        Some(managed_playwright_dispatch_phase_response(
+                                            managed_playwright_bridge.as_ref(),
+                                            completion_request,
+                                        ))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(response) = response {
+                                    enqueue_outbound(outbound, response)?;
+                                }
                             }
                         }
                     }
@@ -255,6 +263,14 @@ where
         }
 
         if request.jsonrpc == "2.0" {
+            if request.method == mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_DISPATCH_PHASE_METHOD {
+                let response = managed_playwright_dispatch_phase_response(
+                    managed_playwright_bridge.as_ref(),
+                    request,
+                );
+                enqueue_outbound(outbound, response)?;
+                continue;
+            }
             if request.method == mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_COMPLETE_METHOD {
                 let response = managed_playwright_completion_response(
                     managed_playwright_bridge.as_ref(),
@@ -682,6 +698,40 @@ fn managed_playwright_completion_response(
             Err(_) => response_error(Some(id), -32602, "Invalid managed Playwright completion"),
         },
         _ => response_error(Some(id), -32602, "Invalid managed Playwright completion"),
+    }
+}
+
+fn managed_playwright_dispatch_phase_response(
+    bridge: Option<
+        &Arc<crate::application::mcp::managed_playwright_bridge::ManagedPlaywrightHostBridge>,
+    >,
+    request: JsonRpcRequest,
+) -> Value {
+    let id = request.id;
+    let input = request.params.and_then(|params| {
+        serde_json::from_value::<mycopilot_protocol_rs::ManagedPlaywrightDispatchPhaseInput>(params)
+            .ok()
+    });
+    match (bridge, input) {
+        (Some(bridge), Some(input)) => match bridge.acknowledge_dispatch_phase(input) {
+            Ok(accepted) => response_success(
+                id,
+                mycopilot_protocol_rs::ManagedPlaywrightDispatchPhaseOutput {
+                    schema_version: mycopilot_protocol_rs::MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                    accepted,
+                },
+            ),
+            Err(_) => response_error(
+                Some(id),
+                -32602,
+                "Invalid managed Playwright dispatch phase",
+            ),
+        },
+        _ => response_error(
+            Some(id),
+            -32602,
+            "Invalid managed Playwright dispatch phase",
+        ),
     }
 }
 

@@ -10,9 +10,19 @@ describe('Browser IPC bridge', () => {
     const input = {
       schemaVersion: 1,
       requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
-      surfaceId: 'right-sidebar-browser-fixture'
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001'
     } as const
-    const output = { schemaVersion: 1, accepted: true, surfaceId: input.surfaceId } as const
+    const output = {
+      schemaVersion: 1,
+      accepted: true,
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
+    } as const
     const invoke = vi.fn(async (): Promise<unknown> => output)
     const bridge = createBrowserIpcBridge({
       invoke,
@@ -23,17 +33,82 @@ describe('Browser IPC bridge', () => {
     await expect(bridge.surfaceReady(input)).resolves.toEqual({
       schemaVersion: 1,
       accepted: true,
-      surfaceId: input.surfaceId
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
     })
     expect(invoke).toHaveBeenCalledWith(HOST_CHANNELS.browser.surfaceReady, input)
 
-    const selection = { schemaVersion: 1, surfaceId: input.surfaceId } as const
+    invoke.mockResolvedValueOnce({
+      schemaVersion: 1,
+      accepted: false,
+      status: 'stale',
+      reason: 'request_expired',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
+    })
+    await expect(bridge.surfaceReady(input)).resolves.toEqual({
+      schemaVersion: 1,
+      accepted: false,
+      status: 'stale',
+      reason: 'request_expired',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
+    })
+
+    const selection = {
+      schemaVersion: 1,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: null,
+      selectionRevision: 1
+    } as const
+    invoke.mockResolvedValueOnce({
+      schemaVersion: 1,
+      status: 'noop',
+      reason: 'instance_required',
+      retryable: true,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: 'instance-00000001',
+      selectionRevision: 1,
+      authoritativeRevision: 0
+    })
     await expect(bridge.surfaceSelected(selection)).resolves.toEqual({
       schemaVersion: 1,
-      accepted: true,
-      surfaceId: input.surfaceId
+      status: 'noop',
+      reason: 'instance_required',
+      retryable: true,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: 'instance-00000001',
+      selectionRevision: 1,
+      authoritativeRevision: 0
     })
     expect(invoke).toHaveBeenCalledWith(HOST_CHANNELS.browser.surfaceSelected, selection)
+
+    invoke.mockResolvedValueOnce({
+      schemaVersion: 1,
+      status: 'stale',
+      reason: 'selection_applied',
+      retryable: false,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: 'instance-00000001',
+      selectionRevision: 1,
+      authoritativeRevision: 2
+    })
+    await expect(bridge.surfaceSelected(selection)).rejects.toThrow('selection reason')
+    expect(() =>
+      bridge.surfaceSelected({
+        ...selection,
+        surfaceId: null,
+        surfaceInstanceId: 'instance-00000001'
+      })
+    ).toThrow('cannot carry an instance')
 
     invoke.mockResolvedValueOnce({ ...output, rawTargetId: 'forbidden' })
     await expect(bridge.surfaceReady(input)).rejects.toThrow('unknown fields')
@@ -68,6 +143,15 @@ describe('Browser IPC bridge', () => {
 
     listener?.({} as IpcRendererEvent, {
       schemaVersion: 1,
+      kind: 'closeSurface',
+      requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001'
+    })
+    expect(handler).toHaveBeenCalledTimes(2)
+
+    listener?.({} as IpcRendererEvent, {
+      schemaVersion: 1,
       kind: 'ensureAttached',
       requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
       surfaceId: 'right-sidebar-browser-fixture',
@@ -76,10 +160,16 @@ describe('Browser IPC bridge', () => {
     listener?.({} as IpcRendererEvent, {
       schemaVersion: 1,
       kind: 'closeSurface',
-      requestId: 'not-a-uuid',
+      requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
       surfaceId: 'right-sidebar-browser-fixture'
     })
-    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(3)
+    expect(handler).toHaveBeenLastCalledWith({
+      schemaVersion: 1,
+      kind: 'closeSurface',
+      requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
+      surfaceId: 'right-sidebar-browser-fixture'
+    })
 
     unsubscribe()
     expect(removeListener).toHaveBeenCalledWith(HOST_CHANNELS.browser.surfaceCommand, listener)

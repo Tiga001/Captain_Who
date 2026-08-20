@@ -18,7 +18,8 @@ import {
   type BrowserSurfaceCommand,
   type ManagedPlaywrightCancelNotification,
   type ManagedPlaywrightCommandNotification,
-  type ManagedPlaywrightCompletionInput
+  type ManagedPlaywrightCompletionInput,
+  type ManagedPlaywrightDispatchPhaseInput
 } from '@mycopilot/protocol'
 import { app, BrowserWindow, session, type WebContents } from 'electron'
 
@@ -47,10 +48,12 @@ import { ManagedPlaywrightSensitiveTargetBindingBroker } from '../../mcp/Managed
 
 const READY_MARKER = 'MYCOPILOT_MANAGED_PLAYWRIGHT_READY='
 const COMPLETION_MARKER = 'MYCOPILOT_MANAGED_PLAYWRIGHT_COMPLETION='
+const DISPATCH_PHASE_MARKER = 'MYCOPILOT_MANAGED_PLAYWRIGHT_DISPATCH_PHASE='
 const RESULT_MARKER = 'MYCOPILOT_MANAGED_PLAYWRIGHT_RESULT='
 const RISK_AUTHORIZE_MARKER = 'MYCOPILOT_BROWSER_RISK_AUTHORIZE='
 const RISK_CANCEL_MARKER = 'MYCOPILOT_BROWSER_RISK_CANCEL='
 const RISK_DECISION_METHOD = 'fixture.browserRisk.decision'
+const DISPATCH_PHASE_ACK_METHOD = 'fixture.managedPlaywright.dispatchPhaseAck'
 const MAX_INPUT_LINE_BYTES = 8 * 1024 * 1024
 const PROFILE_DIRECTORY = mkdtempSync(join(tmpdir(), 'mycopilot-managed-playwright-profile-'))
 const SURFACE_ID = 'right-sidebar-managed-playwright-fixture'
@@ -83,10 +86,28 @@ class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuth
     string,
     { resolve: (output: BrowserRiskAuthorizeOutput) => void }
   >()
+  private readonly dispatchPhaseRequests = new Map<
+    string,
+    { resolve: (accepted: boolean) => void }
+  >()
 
   async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean> {
     await writeProtocolLine(`${COMPLETION_MARKER}${JSON.stringify(input)}`)
     return true
+  }
+
+  async acknowledgeManagedPlaywrightDispatchPhase(
+    input: ManagedPlaywrightDispatchPhaseInput
+  ): Promise<boolean> {
+    const key = dispatchPhaseRequestKey(input.requestId, input.phase)
+    if (this.dispatchPhaseRequests.has(key)) {
+      throw new Error('duplicate fixture managed Playwright dispatch phase')
+    }
+    const pending = new Promise<boolean>((resolve) => {
+      this.dispatchPhaseRequests.set(key, { resolve })
+    })
+    await writeProtocolLine(`${DISPATCH_PHASE_MARKER}${JSON.stringify(input)}`)
+    return await pending
   }
 
   async authorizeBrowserRisk(
@@ -161,8 +182,28 @@ class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuth
       pending.resolve(output)
       return
     }
+    if (envelope.method === DISPATCH_PHASE_ACK_METHOD) {
+      const params = expectRecord(envelope.params)
+      if (
+        typeof params.requestId !== 'string' ||
+        (params.phase !== 'possibly_dispatched' && params.phase !== 'response_received') ||
+        typeof params.accepted !== 'boolean'
+      ) {
+        throw new Error('managed Playwright fixture received an invalid dispatch phase ack')
+      }
+      const key = dispatchPhaseRequestKey(params.requestId, params.phase)
+      const pending = this.dispatchPhaseRequests.get(key)
+      if (!pending) return
+      this.dispatchPhaseRequests.delete(key)
+      pending.resolve(params.accepted)
+      return
+    }
     throw new Error('managed Playwright fixture received an unsupported notification')
   }
+}
+
+function dispatchPhaseRequestKey(requestId: string, phase: string): string {
+  return `${requestId}:${phase}`
 }
 
 async function main(): Promise<void> {
@@ -499,8 +540,63 @@ async function main(): Promise<void> {
     Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' | 'createSurface' }> | undefined
   let guest: WebContents | undefined
   const guests = new Map<string, WebContents>()
+  const surfaceInstances = new Map<string, { guest: WebContents; surfaceInstanceId: string }>()
+  let rendererSelectionRevision = Math.max(1, Date.now())
   let ensureCommands = 0
   let closeCommands = 0
+  const probeExactSurfaceInstance = async (
+    surfaceId: string,
+    exactGuest: WebContents
+  ): Promise<string> => {
+    await waitForFixtureGuestDocumentReady(exactGuest, 10_000)
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      if (exactGuest.isDestroyed() || guests.get(surfaceId) !== exactGuest) {
+        throw new Error('fixture surface was replaced before Renderer acknowledgement')
+      }
+      const selectionRevision = Math.max(rendererSelectionRevision + 1, Date.now())
+      rendererSelectionRevision = selectionRevision
+      const output = manager.selectManualSurface(window.webContents, {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        surfaceId,
+        surfaceInstanceId: null,
+        selectionRevision
+      })
+      rendererSelectionRevision = Math.max(rendererSelectionRevision, output.authoritativeRevision)
+      if (output.reason === 'instance_required' && output.surfaceInstanceId) {
+        surfaceInstances.set(surfaceId, {
+          guest: exactGuest,
+          surfaceInstanceId: output.surfaceInstanceId
+        })
+        return output.surfaceInstanceId
+      }
+      if (!output.retryable && output.reason !== 'stale_revision') {
+        throw new Error(`fixture surface instance probe failed: ${output.reason}`)
+      }
+      await waitForFixtureTurn(20)
+    }
+    throw new Error('fixture surface instance probe timed out')
+  }
+  const acknowledgeFixtureSurface = async (
+    command: Exclude<BrowserSurfaceCommand, { kind: 'closeSurface' }>,
+    exactGuest: WebContents,
+    viewport?: { height: number; width: number }
+  ): Promise<void> => {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const surfaceInstanceId = await probeExactSurfaceInstance(command.surfaceId, exactGuest)
+      const output = manager.attach(window.webContents, {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId,
+        surfaceInstanceId,
+        ...(viewport ? { viewport } : {})
+      })
+      if (!output.retryable) return
+      await waitForFixtureTurn(20)
+    }
+    throw new Error('fixture surface readiness acknowledgement timed out')
+  }
   const manager = new BrowserSurfaceManager({
     attachTimeoutMs: 10_000,
     broker,
@@ -522,12 +618,13 @@ async function main(): Promise<void> {
         ).then(
           (alreadyAttached) => {
             if (alreadyAttached && pendingEnsure?.requestId === command.requestId) {
-              manager.attach(window.webContents, {
-                schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
-                requestId: command.requestId,
-                surfaceId: command.surfaceId
-              })
-              pendingEnsure = undefined
+              if (!existingGuest || existingGuest.isDestroyed()) return
+              void acknowledgeFixtureSurface(command, existingGuest).then(
+                () => {
+                  if (pendingEnsure?.requestId === command.requestId) pendingEnsure = undefined
+                },
+                () => undefined
+              )
             }
           },
           () => undefined
@@ -535,17 +632,26 @@ async function main(): Promise<void> {
         return
       }
       if (command.kind === 'selectSurface' || command.kind === 'resizeSurface') {
-        void applyFixtureSurfaceCommand(window, command).then((viewport) => {
-          manager.attach(window.webContents, {
-            schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
-            requestId: command.requestId,
-            surfaceId: command.surfaceId,
-            ...(viewport ? { viewport } : {})
-          })
+        void applyFixtureSurfaceCommand(window, command).then(async (viewport) => {
+          const exactGuest = guests.get(command.surfaceId)
+          if (!exactGuest || exactGuest.isDestroyed()) {
+            throw new Error('fixture selected surface is unavailable')
+          }
+          await acknowledgeFixtureSurface(command, exactGuest, viewport)
         })
         return
       }
       closeCommands += 1
+      const binding = surfaceInstances.get(command.surfaceId)
+      if (
+        !command.surfaceInstanceId ||
+        !binding ||
+        binding.surfaceInstanceId !== command.surfaceInstanceId ||
+        guests.get(command.surfaceId) !== binding.guest
+      ) {
+        return
+      }
+      surfaceInstances.delete(command.surfaceId)
       void removeFixtureSurface(window, command.surfaceId)
     }
   })
@@ -558,13 +664,18 @@ async function main(): Promise<void> {
     const command = pendingEnsure
     if (!command) return
     guests.set(command.surfaceId, attachedGuest)
-    attachedGuest.once('destroyed', () => guests.delete(command.surfaceId))
-    manager.attach(window.webContents, {
-      schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
-      requestId: command.requestId,
-      surfaceId: command.surfaceId
+    attachedGuest.once('destroyed', () => {
+      if (guests.get(command.surfaceId) !== attachedGuest) return
+      guests.delete(command.surfaceId)
+      const binding = surfaceInstances.get(command.surfaceId)
+      if (binding?.guest === attachedGuest) surfaceInstances.delete(command.surfaceId)
     })
-    pendingEnsure = undefined
+    void acknowledgeFixtureSurface(command, attachedGuest).then(
+      () => {
+        if (pendingEnsure?.requestId === command.requestId) pendingEnsure = undefined
+      },
+      () => undefined
+    )
   })
 
   const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
@@ -699,6 +810,43 @@ async function removeFixtureSurface(window: BrowserWindow, surfaceId: string): P
   await window.webContents.executeJavaScript(`(() => {
     document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')?.remove()
   })()`)
+}
+
+async function waitForFixtureGuestDocumentReady(
+  guest: WebContents,
+  timeoutMs: number
+): Promise<void> {
+  if (guest.isDestroyed()) throw new Error('fixture surface was destroyed before document-ready')
+  if (!guest.isLoadingMainFrame() && guest.getURL() !== '') return
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      guest.removeListener('dom-ready', handleReady)
+      guest.removeListener('did-finish-load', handleReady)
+      guest.removeListener('destroyed', handleDestroyed)
+      if (error) reject(error)
+      else resolve()
+    }
+    const handleReady = (): void => finish()
+    const handleDestroyed = (): void =>
+      finish(new Error('fixture surface was destroyed before document-ready'))
+    const timer = setTimeout(
+      () => finish(new Error('fixture surface document-ready timed out')),
+      timeoutMs
+    )
+    guest.once('dom-ready', handleReady)
+    guest.once('did-finish-load', handleReady)
+    guest.once('destroyed', handleDestroyed)
+    if (!guest.isLoadingMainFrame() && guest.getURL() !== '') finish()
+  })
+}
+
+async function waitForFixtureTurn(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
 }
 
 async function writeProtocolLine(line: string): Promise<void> {

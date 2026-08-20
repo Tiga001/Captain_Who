@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   BROWSER_WEBVIEW_PARTITION,
   createBrowserSurfaceBootstrapUrl,
+  parseBrowserSurfaceBootstrapUrl,
   type BrowserSurfaceCommand
 } from '@mycopilot/protocol'
 import { app, BrowserWindow, session } from 'electron'
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
   let pendingEnsure:
     Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' | 'createSurface' }> | undefined
   const guests = new Map<string, WebContents>()
+  const surfaceInstances = new Map<string, { guest: WebContents; surfaceInstanceId: string }>()
+  let rendererSelectionRevision = Math.max(1, Date.now())
   const allocatedSurfaceIds = [
     SURFACE_ID,
     SECOND_SURFACE_ID,
@@ -104,6 +107,64 @@ async function main(): Promise<void> {
   let ensureCommands = 0
   let createCommands = 0
   let closeCommands = 0
+  let rendererReadyAcks = 0
+  let newRendererReadyAcks = 0
+  const probeExactSurfaceInstance = async (
+    surfaceId: string,
+    exactGuest: WebContents
+  ): Promise<string> => {
+    await waitForFixtureGuestDocumentReady(exactGuest, 10_000)
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      if (exactGuest.isDestroyed() || guests.get(surfaceId) !== exactGuest) {
+        throw new Error('fixture surface was replaced before Renderer acknowledgement')
+      }
+      const selectionRevision = Math.max(rendererSelectionRevision + 1, Date.now())
+      rendererSelectionRevision = selectionRevision
+      const output = manager.selectManualSurface(window.webContents, {
+        schemaVersion: 1,
+        surfaceId,
+        surfaceInstanceId: null,
+        selectionRevision
+      })
+      rendererSelectionRevision = Math.max(rendererSelectionRevision, output.authoritativeRevision)
+      if (output.reason === 'instance_required' && output.surfaceInstanceId) {
+        surfaceInstances.set(surfaceId, {
+          guest: exactGuest,
+          surfaceInstanceId: output.surfaceInstanceId
+        })
+        return output.surfaceInstanceId
+      }
+      if (!output.retryable && output.reason !== 'stale_revision') {
+        throw new Error(`fixture surface instance probe failed: ${output.reason}`)
+      }
+      await waitForFixtureTurn(20)
+    }
+    throw new Error('fixture surface instance probe timed out')
+  }
+  const acknowledgeFixtureSurface = async (
+    command: Exclude<BrowserSurfaceCommand, { kind: 'closeSurface' }>,
+    exactGuest: WebContents,
+    viewport?: { height: number; width: number }
+  ): Promise<void> => {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const surfaceInstanceId = await probeExactSurfaceInstance(command.surfaceId, exactGuest)
+      const output = manager.attach(window.webContents, {
+        schemaVersion: 1,
+        requestId: command.requestId,
+        surfaceId: command.surfaceId,
+        surfaceInstanceId,
+        ...(viewport ? { viewport } : {})
+      })
+      if (output.status === 'applied' || output.reason === 'already_ready') return
+      if (!output.retryable) {
+        throw new Error(`unexpected Renderer ready result: ${output.reason}`)
+      }
+      await waitForFixtureTurn(20)
+    }
+    throw new Error('fixture surface readiness acknowledgement timed out')
+  }
 
   const manager = new BrowserSurfaceManager({
     attachTimeoutMs: 10_000,
@@ -121,34 +182,50 @@ async function main(): Promise<void> {
           window,
           command.surfaceId,
           Boolean(existingGuest && !existingGuest.isDestroyed())
-        ).then(
-          (alreadyAttached) => {
-            if (alreadyAttached && pendingEnsure?.requestId === command.requestId) {
-              manager.attach(window.webContents, {
-                schemaVersion: 1,
-                requestId: command.requestId,
-                surfaceId: command.surfaceId
-              })
-              pendingEnsure = undefined
-            }
-          },
-          () => undefined
         )
+          .then((alreadyAttached) => {
+            if (pendingEnsure?.requestId !== command.requestId) return
+            const exactGuest = guests.get(command.surfaceId)
+            if (!exactGuest || exactGuest.isDestroyed()) {
+              throw new Error('fixture Renderer ready guest is unavailable')
+            }
+            return acknowledgeFixtureSurface(command, exactGuest).then(() => {
+              rendererReadyAcks += 1
+              if (!alreadyAttached) newRendererReadyAcks += 1
+              if (pendingEnsure?.requestId === command.requestId) pendingEnsure = undefined
+            })
+          })
+          .catch((error: unknown) => {
+            process.stderr.write(
+              `Renderer readiness fixture failed: ${error instanceof Error ? error.message : 'unknown'}\n`
+            )
+            app.exit(1)
+          })
         return
       }
 
       if (command.kind === 'selectSurface' || command.kind === 'resizeSurface') {
-        void setFixtureVisibility(window, command.surfaceId, true).then(() => {
-          manager.attach(window.webContents, {
-            schemaVersion: 1,
-            requestId: command.requestId,
-            surfaceId: command.surfaceId
-          })
+        void applyFixtureSurfaceCommand(window, command).then(async (viewport) => {
+          const exactGuest = guests.get(command.surfaceId)
+          if (!exactGuest || exactGuest.isDestroyed()) {
+            throw new Error('fixture selected surface is unavailable')
+          }
+          await acknowledgeFixtureSurface(command, exactGuest, viewport)
         })
         return
       }
 
       closeCommands += 1
+      const binding = surfaceInstances.get(command.surfaceId)
+      if (
+        !command.surfaceInstanceId ||
+        !binding ||
+        binding.surfaceInstanceId !== command.surfaceInstanceId ||
+        guests.get(command.surfaceId) !== binding.guest
+      ) {
+        return
+      }
+      surfaceInstances.delete(command.surfaceId)
       void removeFixtureSurface(window, command.surfaceId)
     }
   })
@@ -156,16 +233,16 @@ async function main(): Promise<void> {
     targetRegistry: manager
   })
   window.webContents.on('did-attach-webview', (_event, attachedGuest) => {
-    const command = pendingEnsure
-    if (!command) return
-    guests.set(command.surfaceId, attachedGuest)
-    attachedGuest.once('destroyed', () => guests.delete(command.surfaceId))
-    manager.attach(window.webContents, {
-      schemaVersion: 1,
-      requestId: command.requestId,
-      surfaceId: command.surfaceId
+    const surfaceId =
+      parseBrowserSurfaceBootstrapUrl(attachedGuest.getURL()) ?? pendingEnsure?.surfaceId
+    if (!surfaceId) return
+    guests.set(surfaceId, attachedGuest)
+    attachedGuest.once('destroyed', () => {
+      if (guests.get(surfaceId) !== attachedGuest) return
+      guests.delete(surfaceId)
+      const binding = surfaceInstances.get(surfaceId)
+      if (binding?.guest === attachedGuest) surfaceInstances.delete(surfaceId)
     })
-    pendingEnsure = undefined
   })
 
   try {
@@ -247,7 +324,9 @@ async function main(): Promise<void> {
     const popupTitle = await popupPage.locator('h1').textContent()
     await manager.closeSurface(POPUP_SURFACE_ID)
 
-    await manager.closeSurface()
+    // This fixture removes webviews directly and does not run the Renderer tab-state fallback.
+    // Main intentionally no longer guesses the next visible tab after closing the popup.
+    await manager.closeSurface(SURFACE_ID)
     await waitFor(() => !guests.has(SURFACE_ID), 'explicit close did not destroy target')
     const mainWindowAliveAfterClose = !window.isDestroyed()
     let oldTargetRejected = false
@@ -257,6 +336,8 @@ async function main(): Promise<void> {
       oldTargetRejected = true
     }
 
+    await manager.ensureActiveSurface()
+    await manager.detachAutomation()
     const replacementContext = await manager.getBrowserContext()
     const replacementPage = replacementContext.pages()[0]
     if (!replacementPage) throw new Error('replacement page missing')
@@ -288,12 +369,14 @@ async function main(): Promise<void> {
         },
         minimizedTitle,
         noRemoteDebuggingPort: true,
+        newRendererReadyAcks,
         oldTargetRejected,
         pageCount: initialPageCount,
         pressKeyObserved,
         replacementIsInert,
         retainedAfterDetach,
         retainedText,
+        rendererReadyAcks,
         richText,
         snapshot: broker.snapshot(),
         waitCompleted
@@ -317,17 +400,50 @@ async function ensureFixtureSurface(
     const existing = document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')
     if (existing) {
       existing.hidden = false
-      return true
+      return Promise.resolve(true)
     }
-    const webview = document.createElement('webview')
-    webview.dataset.surfaceId = ${JSON.stringify(surfaceId)}
-    webview.setAttribute('partition', ${JSON.stringify(BROWSER_WEBVIEW_PARTITION)})
-    webview.setAttribute('allowpopups', '')
-    webview.setAttribute('src', ${JSON.stringify(bootstrapUrl)})
-    webview.style.width = '320px'
-    webview.style.height = '220px'
-    document.querySelector('#host').appendChild(webview)
-    return ${JSON.stringify(isAlreadyAttached)}
+    return new Promise((resolve, reject) => {
+      const webview = document.createElement('webview')
+      let attached = false
+      let documentReady = false
+      let settled = false
+      const cleanup = () => {
+        clearTimeout(timeout)
+        webview.removeEventListener('did-attach', handleAttached)
+        webview.removeEventListener('dom-ready', handleDocumentReady)
+        webview.removeEventListener('did-finish-load', handleDocumentReady)
+      }
+      const complete = () => {
+        if (settled || !attached || !documentReady) return
+        settled = true
+        cleanup()
+        resolve(${JSON.stringify(isAlreadyAttached)})
+      }
+      const handleAttached = () => {
+        attached = true
+        complete()
+      }
+      const handleDocumentReady = () => {
+        documentReady = true
+        complete()
+      }
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new Error('fixture webview did not reach Renderer document readiness'))
+      }, 5000)
+      webview.addEventListener('did-attach', handleAttached)
+      webview.addEventListener('dom-ready', handleDocumentReady)
+      webview.addEventListener('did-finish-load', handleDocumentReady)
+      webview.dataset.surfaceId = ${JSON.stringify(surfaceId)}
+      webview.setAttribute('partition', ${JSON.stringify(BROWSER_WEBVIEW_PARTITION)})
+      webview.setAttribute('allowpopups', '')
+      webview.setAttribute('src', ${JSON.stringify(bootstrapUrl)})
+      webview.style.width = '320px'
+      webview.style.height = '220px'
+      document.querySelector('#host').appendChild(webview)
+    })
   })()`)
 }
 
@@ -335,6 +451,66 @@ async function removeFixtureSurface(window: BrowserWindow, surfaceId: string): P
   await window.webContents.executeJavaScript(`(() => {
     document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')?.remove()
   })()`)
+}
+
+async function applyFixtureSurfaceCommand(
+  window: BrowserWindow,
+  command: Extract<BrowserSurfaceCommand, { kind: 'selectSurface' | 'resizeSurface' }>
+): Promise<{ height: number; width: number } | undefined> {
+  return await window.webContents.executeJavaScript(`(() => {
+    const webview = document.querySelector('webview[data-surface-id=${JSON.stringify(command.surfaceId)}]')
+    if (!webview) throw new Error('managed surface missing')
+    webview.hidden = false
+    ${
+      command.kind === 'resizeSurface'
+        ? `webview.style.width = ${JSON.stringify(`${command.width}px`)};
+           webview.style.height = ${JSON.stringify(`${command.height}px`)};`
+        : ''
+    }
+    if (${JSON.stringify(command.kind)} !== 'resizeSurface') return undefined
+    const bounds = webview.getBoundingClientRect()
+    return {
+      height: Math.round(Math.max(0, Math.min(bounds.bottom, window.innerHeight) - Math.max(bounds.top, 0))),
+      width: Math.round(Math.max(0, Math.min(bounds.right, window.innerWidth) - Math.max(bounds.left, 0)))
+    }
+  })()`)
+}
+
+async function waitForFixtureGuestDocumentReady(
+  guest: WebContents,
+  timeoutMs: number
+): Promise<void> {
+  if (guest.isDestroyed()) throw new Error('fixture surface was destroyed before document-ready')
+  if (!guest.isLoadingMainFrame() && guest.getURL() !== '') return
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      guest.removeListener('dom-ready', handleReady)
+      guest.removeListener('did-finish-load', handleReady)
+      guest.removeListener('destroyed', handleDestroyed)
+      if (error) reject(error)
+      else resolve()
+    }
+    const handleReady = (): void => finish()
+    const handleDestroyed = (): void =>
+      finish(new Error('fixture surface was destroyed before document-ready'))
+    const timer = setTimeout(
+      () => finish(new Error('fixture surface document-ready timed out')),
+      timeoutMs
+    )
+    guest.once('dom-ready', handleReady)
+    guest.once('did-finish-load', handleReady)
+    guest.once('destroyed', handleDestroyed)
+    if (!guest.isLoadingMainFrame() && guest.getURL() !== '') finish()
+  })
+}
+
+async function waitForFixtureTurn(delayMs: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
 }
 
 async function setFixtureVisibility(

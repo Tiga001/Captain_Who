@@ -7,6 +7,7 @@ import {
   type ManagedPlaywrightCompletionInput,
   type ManagedPlaywrightCompletionOutcome,
   type ManagedPlaywrightDispatchCertainty,
+  type ManagedPlaywrightDispatchPhaseInput,
   parseManagedPlaywrightCancelNotification,
   parseManagedPlaywrightCommandNotification
 } from '@mycopilot/protocol'
@@ -33,6 +34,9 @@ const MAX_IN_FLIGHT = 8
 const CORE_COMPLETION_SETTLE_MS = 2_000
 
 export interface ManagedPlaywrightBridgeCore {
+  acknowledgeManagedPlaywrightDispatchPhase(
+    input: ManagedPlaywrightDispatchPhaseInput
+  ): Promise<boolean>
   completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean>
   onManagedPlaywrightCancel(
     handler: (input: ManagedPlaywrightCancelNotification) => void
@@ -162,6 +166,7 @@ export class ManagedPlaywrightBridgeHost {
   ): Promise<void> {
     let outcome: ManagedPlaywrightCompletionOutcome
     let preparedBindingRequestId: string | undefined
+    let dispatchCertainty: ManagedPlaywrightDispatchCertainty = 'definitely_not_dispatched'
     try {
       const timeoutMs = Math.max(1, Math.min(300_000, input.deadlineMs - this.now()))
       switch (input.command.type) {
@@ -290,7 +295,19 @@ export class ManagedPlaywrightBridgeHost {
               signal: controller.signal,
               timeoutMs: Math.min(input.command.timeoutMs, timeoutMs),
               authorizationContext: input.command.authorizationContext,
-              parentRequestId: input.requestId
+              parentRequestId: input.requestId,
+              onDispatchPhase: async (phase) => {
+                const accepted = await this.core.acknowledgeManagedPlaywrightDispatchPhase({
+                  schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                  requestId: input.requestId,
+                  phase
+                })
+                if (accepted) {
+                  dispatchCertainty =
+                    phase === 'response_received' ? 'response_received' : 'possibly_dispatched'
+                }
+                return accepted
+              }
             }
           )
           outcome = { type: 'tool_called', result }
@@ -314,7 +331,7 @@ export class ManagedPlaywrightBridgeHost {
         this.host = undefined
         if (host) await host.close().catch(() => undefined)
       }
-      outcome = mapError(error, input.command.type)
+      outcome = mapError(error, input.command.type, dispatchCertainty)
     } finally {
       const active = this.active.get(input.requestId)
       if (active) clearTimeout(active.timer)
@@ -407,10 +424,10 @@ function errorOutcome(
 
 function mapError(
   error: unknown,
-  operation: ManagedPlaywrightCommandNotification['command']['type']
+  operation: ManagedPlaywrightCommandNotification['command']['type'],
+  observedCertainty: ManagedPlaywrightDispatchCertainty = 'definitely_not_dispatched'
 ): ManagedPlaywrightCompletionOutcome {
-  let certainty: ManagedPlaywrightDispatchCertainty =
-    operation === 'call_tool' ? 'possibly_dispatched' : 'definitely_not_dispatched'
+  let certainty: ManagedPlaywrightDispatchCertainty = observedCertainty
   if (!(error instanceof ManagedPlaywrightMcpHostError)) {
     if (error instanceof ManagedPlaywrightSensitiveTargetBindingError) {
       const code: ManagedPlaywrightBridgeErrorCode =

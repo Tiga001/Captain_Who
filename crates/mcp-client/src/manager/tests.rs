@@ -1,6 +1,6 @@
 //! Manager-internal invariants that require access to private coordination state.
 
-use super::invocation::normalize_dispatched_result;
+use super::invocation::{normalize_dispatched_result, settle_interrupted_call};
 use super::*;
 use crate::{InMemoryMcpRegistry, McpContentBlock};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -424,5 +424,68 @@ fn trusted_host_completion_preserves_authoritative_pre_dispatch_rejection() {
     assert_eq!(
         normalized.dispatch_certainty,
         Some(McpDispatchCertainty::DefinitelyNotDispatched)
+    );
+}
+
+#[tokio::test]
+async fn interrupted_settlement_only_becomes_unknown_after_the_peer_queue_boundary() {
+    fn control(model_call_id: &str) -> ActiveCallControl {
+        let server_id = McpServerId::new();
+        ActiveCallControl::new(
+            McpActiveCallId::new(
+                server_id,
+                McpInvocationId::new(),
+                McpModelCallId::new(model_call_id).unwrap(),
+            ),
+            McpActiveCallProvenance {
+                tool_id: McpToolId {
+                    server_id,
+                    raw_name: "managed_tool".to_string(),
+                },
+                model_name: "mcp__managed__tool".to_string(),
+                config_epoch: McpConfigEpoch::new(),
+                registry_revision: 1,
+                config_digest: "a".repeat(64).parse().unwrap(),
+                catalog_generation: 1,
+                catalog_digest: "b".repeat(64).parse().unwrap(),
+                schema_digest: "c".repeat(64).parse().unwrap(),
+            },
+            60_000,
+        )
+    }
+
+    let before_queue = control("interrupted-before-queue");
+    before_queue.dispatch.mark_dispatching();
+    let mut pending_call: BoxMcpFuture<'static, McpToolResult> = Box::pin(std::future::pending());
+    let error = settle_interrupted_call(
+        &mut pending_call,
+        &before_queue,
+        Duration::from_millis(1),
+        McpOutcomeUnknownReason::Cancelled,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, McpErrorKind::Cancelled);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::DefinitelyNotDispatched)
+    );
+    assert!(error.dispatch_certainty_is_authoritative());
+
+    let after_queue = control("interrupted-after-queue");
+    after_queue.dispatch.mark_request_queued();
+    let mut pending_call: BoxMcpFuture<'static, McpToolResult> = Box::pin(std::future::pending());
+    let error = settle_interrupted_call(
+        &mut pending_call,
+        &after_queue,
+        Duration::from_millis(1),
+        McpOutcomeUnknownReason::Cancelled,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::PossiblyDispatched)
     );
 }

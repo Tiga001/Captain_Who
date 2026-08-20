@@ -176,7 +176,8 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   viewport,
   t
 }: BrowserModuleSurfaceProps) {
-  const { browserSurfaceRequest, onBrowserSurfaceReady } = useRightSidebarRuntimeContext()
+  const { browserSurfaceRequest, onBrowserSurfaceInstance, onBrowserSurfaceReady } =
+    useRightSidebarRuntimeContext()
   const handlePageMetadataChange = useCallback(
     (metadata: BrowserPageMetadata) => {
       const title = metadata.title?.trim()
@@ -195,10 +196,13 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
           browserSurfaceRequest?.pageId === pageId ? browserSurfaceRequest.requestId : undefined
         }
         isActive={activity === 'foreground'}
-        onAutomationSurfaceReady={(surfaceId, requestId, appliedViewport) =>
-          onBrowserSurfaceReady?.(pageId, surfaceId, requestId, appliedViewport)
+        onAutomationSurfaceReady={(surfaceId, requestId, surfaceInstanceId, appliedViewport) =>
+          onBrowserSurfaceReady?.(pageId, surfaceId, requestId, surfaceInstanceId, appliedViewport)
         }
         onPageMetadataChange={handlePageMetadataChange}
+        onSurfaceInstanceChange={(surfaceId, surfaceInstanceId, isCurrent) =>
+          onBrowserSurfaceInstance?.(pageId, surfaceId, surfaceInstanceId, isCurrent)
+        }
         onSurfaceFocus={onSurfaceFocus}
         pageId={pageId}
         surfaceId={surfaceId}

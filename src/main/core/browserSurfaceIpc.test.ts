@@ -18,16 +18,37 @@ describe('browser surface Main IPC', () => {
       on: vi.fn()
     } as unknown as TrustedIpcMain
     const sender = {} as WebContents
-    const attach = vi.fn(() => ({
-      schemaVersion: 1 as const,
-      accepted: true as const,
-      surfaceId: 'right-sidebar-browser-fixture'
-    }))
-    const selectManualSurface = vi.fn((_sender: WebContents, input: { surfaceId: string }) => ({
-      schemaVersion: 1 as const,
-      accepted: true as const,
-      surfaceId: input.surfaceId
-    }))
+    const attach = vi.fn(
+      (): ReturnType<BrowserSurfaceManager['attach']> => ({
+        schemaVersion: 1,
+        accepted: true,
+        status: 'applied',
+        reason: 'surface_ready',
+        retryable: false,
+        requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
+        surfaceId: 'right-sidebar-browser-fixture',
+        surfaceInstanceId: 'instance-00000001'
+      })
+    )
+    const selectManualSurface = vi.fn(
+      (
+        _sender: WebContents,
+        input: {
+          surfaceId: string | null
+          surfaceInstanceId: string | null
+          selectionRevision: number
+        }
+      ) => ({
+        schemaVersion: 1 as const,
+        status: 'applied' as const,
+        reason: 'selection_applied' as const,
+        retryable: false as const,
+        surfaceId: input.surfaceId,
+        surfaceInstanceId: input.surfaceInstanceId,
+        selectionRevision: input.selectionRevision,
+        authoritativeRevision: input.selectionRevision
+      })
+    )
     registerBrowserSurfaceIpc(ipcMain, {
       attach,
       selectManualSurface
@@ -39,26 +60,71 @@ describe('browser surface Main IPC', () => {
     const input = {
       schemaVersion: 1,
       requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
-      surfaceId: 'right-sidebar-browser-fixture'
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001'
     }
     expect(readyHandler({ sender }, input)).toEqual({
       schemaVersion: 1,
       accepted: true,
-      surfaceId: input.surfaceId
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
     })
     expect(attach).toHaveBeenCalledWith(sender, input)
+
+    attach.mockReturnValueOnce({
+      schemaVersion: 1,
+      accepted: false,
+      status: 'stale',
+      reason: 'request_expired',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
+    })
+    expect(readyHandler({ sender }, input)).toEqual({
+      schemaVersion: 1,
+      accepted: false,
+      status: 'stale',
+      reason: 'request_expired',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
+    })
 
     expect(() => readyHandler({ sender }, { ...input, webContentsId: 42 })).toThrow(
       'unknown fields'
     )
-    expect(attach).toHaveBeenCalledTimes(1)
+    expect(attach).toHaveBeenCalledTimes(2)
 
-    const selection = { schemaVersion: 1, surfaceId: input.surfaceId }
+    const selection = {
+      schemaVersion: 1,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: 'instance-00000001',
+      selectionRevision: 1
+    }
     expect(selectedHandler({ sender }, selection)).toEqual({
       schemaVersion: 1,
-      accepted: true,
-      surfaceId: input.surfaceId
+      status: 'applied',
+      reason: 'selection_applied',
+      retryable: false,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: 'instance-00000001',
+      selectionRevision: 1,
+      authoritativeRevision: 1
     })
     expect(selectManualSurface).toHaveBeenCalledWith(sender, selection)
+
+    expect(() =>
+      selectedHandler(
+        { sender },
+        { ...selection, surfaceId: null, surfaceInstanceId: 'instance-00000001' }
+      )
+    ).toThrow('cannot carry an instance')
+    expect(selectManualSurface).toHaveBeenCalledTimes(1)
   })
 })

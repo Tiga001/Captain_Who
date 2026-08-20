@@ -4,6 +4,7 @@ export const BROWSER_SURFACE_SCHEMA_VERSION = 1 as const
 
 const BROWSER_SURFACE_BOOTSTRAP_PREFIX = 'about:blank#mycopilot-browser-surface='
 const SURFACE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}$/
+const SURFACE_INSTANCE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{15,127}$/
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 export interface BrowserSurfaceEnsureAttachedCommand {
@@ -42,6 +43,8 @@ export interface BrowserSurfaceCloseCommand {
   kind: 'closeSurface'
   requestId: string
   surfaceId: string
+  /** Main-generated exact retired incarnation. Optional only for legacy payload parsing. */
+  surfaceInstanceId?: string
 }
 
 export type BrowserSurfaceCommand =
@@ -55,25 +58,106 @@ export interface BrowserSurfaceReadyInput {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
   requestId: string
   surfaceId: string
+  /**
+   * Main-generated binding for the exact Renderer webview. Optional only for legacy payload
+   * parsing; a live pending command is not accepted without the matching identity.
+   */
+  surfaceInstanceId?: string
   viewport?: { height: number; width: number }
 }
 
-export interface BrowserSurfaceReadyOutput {
+interface BrowserSurfaceReadyOutputBase {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
-  accepted: true
+  requestId: string
   surfaceId: string
+  /** Main-owned identity when the exact registered guest is known. */
+  surfaceInstanceId?: string
+  retryable: boolean
 }
+
+export interface BrowserSurfaceReadyAppliedOutput extends BrowserSurfaceReadyOutputBase {
+  accepted: true
+  status: 'applied'
+  reason: 'surface_ready'
+  retryable: false
+}
+
+export interface BrowserSurfaceReadyAlreadyReadyOutput extends BrowserSurfaceReadyOutputBase {
+  accepted: false
+  status: 'noop'
+  reason: 'already_ready'
+  retryable: false
+}
+
+export interface BrowserSurfaceReadyNotRegisteredOutput extends BrowserSurfaceReadyOutputBase {
+  accepted: false
+  status: 'noop'
+  reason: 'not_registered'
+  retryable: true
+}
+
+export type BrowserSurfaceReadyNoopOutput =
+  BrowserSurfaceReadyAlreadyReadyOutput | BrowserSurfaceReadyNotRegisteredOutput
+
+export interface BrowserSurfaceReadyLifecycleStaleOutput extends BrowserSurfaceReadyOutputBase {
+  accepted: false
+  status: 'stale'
+  reason: 'request_expired' | 'request_superseded' | 'request_cancelled' | 'target_closed'
+  retryable: false
+}
+
+export interface BrowserSurfaceReadyInstanceMismatchOutput extends BrowserSurfaceReadyOutputBase {
+  accepted: false
+  status: 'stale'
+  reason: 'instance_mismatch'
+  retryable: true
+}
+
+export type BrowserSurfaceReadyStaleOutput =
+  BrowserSurfaceReadyLifecycleStaleOutput | BrowserSurfaceReadyInstanceMismatchOutput
+
+export type BrowserSurfaceReadyOutput =
+  BrowserSurfaceReadyAppliedOutput | BrowserSurfaceReadyNoopOutput | BrowserSurfaceReadyStaleOutput
 
 export interface BrowserSurfaceSelectedInput {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
-  surfaceId: string
+  /** `null` clears the trusted UI selection. A non-null surface without an instance is a probe. */
+  surfaceId: string | null
+  /** Main-generated opaque binding for one exact registered guest incarnation. */
+  surfaceInstanceId: string | null
+  /** Renderer-owned, strictly increasing sequence. Main decides whether it is authoritative. */
+  selectionRevision: number
 }
 
-export interface BrowserSurfaceSelectedOutput {
+interface BrowserSurfaceSelectedOutputBase {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
-  accepted: true
-  surfaceId: string
+  surfaceId: string | null
+  surfaceInstanceId: string | null
+  selectionRevision: number
+  authoritativeRevision: number
+  retryable: boolean
 }
+
+export interface BrowserSurfaceSelectionAppliedOutput extends BrowserSurfaceSelectedOutputBase {
+  status: 'applied'
+  reason: 'selection_applied'
+  retryable: false
+}
+
+export interface BrowserSurfaceSelectionNoopOutput extends BrowserSurfaceSelectedOutputBase {
+  status: 'noop'
+  reason: 'selection_unchanged' | 'instance_required' | 'not_registered'
+}
+
+export interface BrowserSurfaceSelectionStaleOutput extends BrowserSurfaceSelectedOutputBase {
+  status: 'stale'
+  reason: 'stale_revision' | 'instance_mismatch' | 'surface_closing'
+}
+
+export type BrowserSurfaceSelectedOutput =
+  | BrowserSurfaceSelectionAppliedOutput
+  | BrowserSurfaceSelectionNoopOutput
+  | BrowserSurfaceSelectionStaleOutput
 
 /**
  * Builds the inert, renderer-visible bootstrap URL used to bind a webview DOM surface to its
@@ -139,12 +223,15 @@ export function parseBrowserSurfaceCommand(value: unknown): BrowserSurfaceComman
     }
   }
 
-  expectOnlyKeys(record, ['schemaVersion', 'kind', 'requestId', 'surfaceId'])
+  expectOnlyKeys(record, ['schemaVersion', 'kind', 'requestId', 'surfaceId', 'surfaceInstanceId'])
   return {
     schemaVersion: expectSchemaVersion(record.schemaVersion),
     kind,
     requestId: expectRequestId(record.requestId),
-    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+    surfaceId: parseBrowserSurfaceId(record.surfaceId),
+    ...(record.surfaceInstanceId === undefined
+      ? {}
+      : { surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId) })
   }
 }
 
@@ -157,7 +244,13 @@ function expectViewportDimension(value: unknown, name: string): number {
 
 export function parseBrowserSurfaceReadyInput(value: unknown): BrowserSurfaceReadyInput {
   const record = expectRecord(value, 'browser surface ready input')
-  expectOnlyKeys(record, ['schemaVersion', 'requestId', 'surfaceId', 'viewport'])
+  expectOnlyKeys(record, [
+    'schemaVersion',
+    'requestId',
+    'surfaceId',
+    'surfaceInstanceId',
+    'viewport'
+  ])
   let viewport: BrowserSurfaceReadyInput['viewport']
   if (record.viewport !== undefined) {
     const candidate = expectRecord(record.viewport, 'browser surface viewport')
@@ -171,6 +264,9 @@ export function parseBrowserSurfaceReadyInput(value: unknown): BrowserSurfaceRea
     schemaVersion: expectSchemaVersion(record.schemaVersion),
     requestId: expectRequestId(record.requestId),
     surfaceId: parseBrowserSurfaceId(record.surfaceId),
+    ...(record.surfaceInstanceId === undefined
+      ? {}
+      : { surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId) }),
     ...(viewport ? { viewport } : {})
   }
 }
@@ -184,33 +280,197 @@ function expectMeasuredViewportDimension(value: unknown, name: string): number {
 
 export function parseBrowserSurfaceReadyOutput(value: unknown): BrowserSurfaceReadyOutput {
   const record = expectRecord(value, 'browser surface ready output')
-  expectOnlyKeys(record, ['schemaVersion', 'accepted', 'surfaceId'])
-  if (record.accepted !== true) throw new Error('Invalid browser surface ready output')
+  expectOnlyKeys(record, [
+    'schemaVersion',
+    'accepted',
+    'status',
+    'reason',
+    'retryable',
+    'requestId',
+    'surfaceId',
+    'surfaceInstanceId'
+  ])
+  const schemaVersion = expectSchemaVersion(record.schemaVersion)
+  const requestId = expectRequestId(record.requestId)
+  const surfaceId = parseBrowserSurfaceId(record.surfaceId)
+  const surfaceInstanceId =
+    record.surfaceInstanceId === undefined
+      ? undefined
+      : parseBrowserSurfaceInstanceId(record.surfaceInstanceId)
+  if (typeof record.retryable !== 'boolean') {
+    throw new Error('Invalid browser surface ready retryability')
+  }
+
+  if (record.status === 'applied') {
+    if (
+      record.accepted !== true ||
+      record.reason !== 'surface_ready' ||
+      record.retryable !== false
+    ) {
+      throw new Error('Invalid browser surface ready applied output')
+    }
+    return {
+      schemaVersion,
+      accepted: true,
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId,
+      surfaceId,
+      ...(surfaceInstanceId ? { surfaceInstanceId } : {})
+    }
+  }
+  if (record.status === 'noop') {
+    if (record.accepted !== false) {
+      throw new Error('Invalid browser surface ready noop output')
+    }
+    if (record.reason === 'already_ready' && record.retryable === false) {
+      return {
+        schemaVersion,
+        accepted: false,
+        status: 'noop',
+        reason: 'already_ready',
+        retryable: false,
+        requestId,
+        surfaceId,
+        ...(surfaceInstanceId ? { surfaceInstanceId } : {})
+      }
+    }
+    if (record.reason === 'not_registered' && record.retryable === true) {
+      return {
+        schemaVersion,
+        accepted: false,
+        status: 'noop',
+        reason: 'not_registered',
+        retryable: true,
+        requestId,
+        surfaceId,
+        ...(surfaceInstanceId ? { surfaceInstanceId } : {})
+      }
+    }
+    throw new Error('Invalid browser surface ready noop output')
+  }
+  if (record.status !== 'stale' || record.accepted !== false) {
+    throw new Error('Invalid browser surface ready output')
+  }
+  if (record.reason === 'instance_mismatch') {
+    if (record.retryable !== true) {
+      throw new Error('Invalid browser surface ready stale output')
+    }
+    return {
+      schemaVersion,
+      accepted: false,
+      status: 'stale',
+      reason: 'instance_mismatch',
+      retryable: true,
+      requestId,
+      surfaceId,
+      ...(surfaceInstanceId ? { surfaceInstanceId } : {})
+    }
+  }
+  if (record.retryable !== false) {
+    throw new Error('Invalid browser surface ready stale output')
+  }
+  const reason = expectEnum(record.reason, [
+    'request_expired',
+    'request_superseded',
+    'request_cancelled',
+    'target_closed'
+  ] as const)
   return {
-    schemaVersion: expectSchemaVersion(record.schemaVersion),
-    accepted: true,
-    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+    schemaVersion,
+    accepted: false,
+    status: 'stale',
+    reason,
+    retryable: false,
+    requestId,
+    surfaceId,
+    ...(surfaceInstanceId ? { surfaceInstanceId } : {})
   }
 }
 
 export function parseBrowserSurfaceSelectedInput(value: unknown): BrowserSurfaceSelectedInput {
   const record = expectRecord(value, 'browser surface selected input')
-  expectOnlyKeys(record, ['schemaVersion', 'surfaceId'])
+  expectOnlyKeys(record, ['schemaVersion', 'surfaceId', 'surfaceInstanceId', 'selectionRevision'])
+  const surfaceId = parseNullableBrowserSurfaceId(record.surfaceId)
+  const surfaceInstanceId = parseNullableBrowserSurfaceInstanceId(record.surfaceInstanceId)
+  if (surfaceId === null && surfaceInstanceId !== null) {
+    throw new Error('A cleared browser surface cannot carry an instance identity')
+  }
   return {
     schemaVersion: expectSchemaVersion(record.schemaVersion),
-    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+    surfaceId,
+    surfaceInstanceId,
+    selectionRevision: expectPositiveSelectionRevision(record.selectionRevision)
   }
 }
 
 export function parseBrowserSurfaceSelectedOutput(value: unknown): BrowserSurfaceSelectedOutput {
   const record = expectRecord(value, 'browser surface selected output')
-  expectOnlyKeys(record, ['schemaVersion', 'accepted', 'surfaceId'])
-  if (record.accepted !== true) throw new Error('Invalid browser surface selected output')
-  return {
-    schemaVersion: expectSchemaVersion(record.schemaVersion),
-    accepted: true,
-    surfaceId: parseBrowserSurfaceId(record.surfaceId)
+  expectOnlyKeys(record, [
+    'schemaVersion',
+    'status',
+    'surfaceId',
+    'surfaceInstanceId',
+    'selectionRevision',
+    'authoritativeRevision',
+    'reason',
+    'retryable'
+  ])
+  const status = expectEnum(
+    record.status,
+    ['applied', 'noop', 'stale'] as const,
+    'browser surface selection status'
+  )
+  const surfaceId = parseNullableBrowserSurfaceId(record.surfaceId)
+  const surfaceInstanceId = parseNullableBrowserSurfaceInstanceId(record.surfaceInstanceId)
+  if (surfaceId === null && surfaceInstanceId !== null) {
+    throw new Error('A cleared browser surface cannot carry an instance identity')
   }
+  if (typeof record.retryable !== 'boolean') {
+    throw new Error('Invalid browser surface selection retryability')
+  }
+  const base = {
+    schemaVersion: expectSchemaVersion(record.schemaVersion),
+    surfaceId,
+    surfaceInstanceId,
+    selectionRevision: expectPositiveSelectionRevision(record.selectionRevision),
+    authoritativeRevision: expectNonNegativeSelectionRevision(record.authoritativeRevision),
+    retryable: record.retryable
+  }
+  if (status === 'applied') {
+    if (
+      record.reason !== 'selection_applied' ||
+      record.retryable !== false ||
+      (surfaceId !== null && surfaceInstanceId === null)
+    ) {
+      throw new Error('Invalid applied browser surface selection output')
+    }
+    return { ...base, status, reason: 'selection_applied', retryable: false }
+  }
+  if (status === 'noop') {
+    const reason = expectEnum(
+      record.reason,
+      ['selection_unchanged', 'instance_required', 'not_registered'] as const,
+      'browser surface selection reason'
+    )
+    if (
+      (reason === 'selection_unchanged' && record.retryable) ||
+      (reason === 'instance_required' &&
+        (!record.retryable || surfaceId === null || surfaceInstanceId === null)) ||
+      (reason === 'not_registered' &&
+        (!record.retryable || surfaceId === null || surfaceInstanceId !== null))
+    ) {
+      throw new Error('Invalid no-op browser surface selection output')
+    }
+    return { ...base, status, reason }
+  }
+  const reason = expectEnum(
+    record.reason,
+    ['stale_revision', 'instance_mismatch', 'surface_closing'] as const,
+    'browser surface selection reason'
+  )
+  return { ...base, status, reason }
 }
 
 export function parseBrowserSurfaceId(value: unknown): string {
@@ -218,6 +478,36 @@ export function parseBrowserSurfaceId(value: unknown): string {
     throw new Error('Invalid browser surface identity')
   }
   return value
+}
+
+function parseNullableBrowserSurfaceId(value: unknown): string | null {
+  return value === null ? null : parseBrowserSurfaceId(value)
+}
+
+export function parseBrowserSurfaceInstanceId(value: unknown): string {
+  if (typeof value !== 'string' || !SURFACE_INSTANCE_ID_PATTERN.test(value)) {
+    throw new Error('Invalid browser surface instance identity')
+  }
+  return value
+}
+
+function parseNullableBrowserSurfaceInstanceId(value: unknown): string | null {
+  if (value === null) return null
+  return parseBrowserSurfaceInstanceId(value)
+}
+
+function expectPositiveSelectionRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new Error('Invalid browser surface selection revision')
+  }
+  return value as number
+}
+
+function expectNonNegativeSelectionRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error('Invalid authoritative browser surface selection revision')
+  }
+  return value as number
 }
 
 function expectRequestId(value: unknown): string {
@@ -248,9 +538,13 @@ function expectOnlyKeys(record: Record<string, unknown>, allowed: readonly strin
   }
 }
 
-function expectEnum<T extends string>(value: unknown, allowed: readonly T[]): T {
+function expectEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  context = 'browser surface command kind'
+): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
-    throw new Error('Invalid browser surface command kind')
+    throw new Error(`Invalid ${context}`)
   }
   return value as T
 }

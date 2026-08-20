@@ -12,7 +12,8 @@ import {
   MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
   type ManagedPlaywrightCancelNotification,
   type ManagedPlaywrightCommandNotification,
-  type ManagedPlaywrightCompletionInput
+  type ManagedPlaywrightCompletionInput,
+  type ManagedPlaywrightDispatchPhaseInput
 } from '@mycopilot/protocol'
 
 import {
@@ -181,6 +182,18 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
     const context = new BrowserContextHarness()
     const surfaces = new SurfaceGroupHarness()
     const harness = createHostHarness({
+      callTool: vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+        if (name === 'browser_tabs' && args.action === 'new') {
+          await surfaces.createSurface({
+            ...(typeof args.url === 'string' ? { url: args.url } : {})
+          })
+        } else if (name === 'browser_tabs' && args.action === 'close') {
+          await surfaces.closeSurfaceByIndex(
+            typeof args.index === 'number' ? args.index : undefined
+          )
+        }
+        return { content: [{ type: 'text', text: 'ok' }], isError: false }
+      }),
       getBrowserContext: async () => context.asBrowserContext(),
       surfaceGroup: surfaces
     })
@@ -205,10 +218,12 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
       }
       expect(surfaces.createSurface).toHaveBeenCalledTimes(100)
       expect(surfaces.closeSurfaceByIndex).toHaveBeenCalledTimes(100)
-      expect(harness.outputDirectories).toHaveLength(200)
+      // A SurfaceGroup is one stable official BrowserContext. Tab churn must not recreate the
+      // MCP connection or discard context-scoped route/offline/trace state between calls.
+      expect(harness.outputDirectories).toHaveLength(1)
       await Promise.all(
         harness.outputDirectories.map(async (directory) => {
-          await expect(access(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+          await expect(access(directory)).resolves.toBeUndefined()
         })
       )
 
@@ -688,8 +703,8 @@ function fakeSensitiveTargetBindings(
   return {
     acquire: (authorization) => {
       const grant = authorization.builtinToolGrant
-      const target = surfaceGroup?.getSensitiveTargetIdentity()
-      if (!grant || !target) {
+      const target = grant?.origin === null ? undefined : surfaceGroup?.getSensitiveTargetIdentity()
+      if (!grant || (grant.origin !== null && !target)) {
         throw new ManagedPlaywrightSensitiveTargetBindingError('origin_drifted')
       }
       if (consumed.has(grant.targetBindingId)) {
@@ -697,7 +712,7 @@ function fakeSensitiveTargetBindings(
       }
       let dispatched = false
       return {
-        target: Object.freeze({ ...target }),
+        target: target ? Object.freeze({ ...target }) : undefined,
         markDispatched: () => {
           if (dispatched || consumed.has(grant.targetBindingId)) {
             throw new ManagedPlaywrightSensitiveTargetBindingError('reused')
@@ -741,10 +756,8 @@ function sensitiveAuthorization(
 ): BrowserRiskAuthorizationContext {
   const policy = sensitivePolicyForTool(toolName)
   if (!policy) throw new Error(`fixture sensitive policy missing for ${toolName}`)
-  const origin =
-    sensitiveBindingScopeForInvocation(toolName, argumentsValue) === 'managed_browser_profile'
-      ? null
-      : 'http://127.0.0.1'
+  const bindingScope = sensitiveBindingScopeForInvocation(toolName, argumentsValue)
+  const origin = bindingScope === 'managed_browser_profile' ? null : 'http://127.0.0.1'
   const argumentsDigest = canonicalSha256(argumentsValue)
   const base = authorization(runId, callId, toolName)
   const targetBindingId = fixtureUuid(index * 2 + 3)
@@ -763,7 +776,7 @@ function sensitiveAuthorization(
         argumentsDigest,
         origin,
         riskKinds: [...policy.riskKinds],
-        scope: policy.scope,
+        scope: bindingScope,
         targetBindingDigest
       }),
       origin,
@@ -868,6 +881,13 @@ class RelayCore {
   async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean> {
     this.pending.get(input.requestId)?.(input)
     this.pending.delete(input.requestId)
+    return true
+  }
+
+  async acknowledgeManagedPlaywrightDispatchPhase(
+    input: ManagedPlaywrightDispatchPhaseInput
+  ): Promise<boolean> {
+    void input
     return true
   }
 

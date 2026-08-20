@@ -19,6 +19,7 @@ interface ManagedWebviewPolicy {
 
 export interface ManagedWebviewTargetRegistry {
   registerManagedGuest(input: {
+    documentReady?: boolean
     guest: WebContents
     host: WebContents
     partition: string
@@ -149,7 +150,21 @@ function registerManagedGuestWhenIdentified(
     cleanup()
     if (!input.guest.isDestroyed()) input.guest.close()
   }
-  const rememberIdentity = (candidateUrl: string): void => {
+  const registerIdentifiedGuest = (surfaceId: string, documentReady: boolean): void => {
+    if (settled || input.guest.isDestroyed()) return
+    settled = true
+    cleanup()
+    try {
+      // The bootstrap identity has already passed will-attach policy and strict protocol parsing.
+      // Register it in the Main Surface map immediately; waiting for DOM readiness creates a
+      // legitimate did-attach -> dom-ready interval where Renderer can only receive a false
+      // "missing surface" result.
+      registry.registerManagedGuest({ ...input, documentReady, surfaceId })
+    } catch {
+      if (!input.guest.isDestroyed()) input.guest.close()
+    }
+  }
+  const rememberIdentity = (candidateUrl: string, documentReady = false): void => {
     if (settled || input.guest.isDestroyed()) return
     const surfaceId = parseBrowserSurfaceBootstrapUrl(candidateUrl)
     if (!surfaceId) return
@@ -167,27 +182,17 @@ function registerManagedGuestWhenIdentified(
         provisionallyRegistered = true
       } catch {
         failClosed()
+        return
       }
     }
-  }
-  const attemptReadyRegistration = (): void => {
-    if (settled || input.guest.isDestroyed()) return
-    const surfaceId = parseBrowserSurfaceBootstrapUrl(input.guest.getURL()) ?? identifiedSurfaceId
-    if (!surfaceId) return
-    settled = true
-    cleanup()
-    try {
-      registry.registerManagedGuest({ ...input, surfaceId })
-    } catch {
-      if (!input.guest.isDestroyed()) input.guest.close()
-    }
+    registerIdentifiedGuest(surfaceId, documentReady)
   }
   const handleStartNavigation = (
     details: Event<WebContentsDidStartNavigationEventParams>
   ): void => {
     if (details.isMainFrame) rememberIdentity(details.url)
   }
-  const handleReady = (): void => attemptReadyRegistration()
+  const handleReady = (): void => rememberIdentity(input.guest.getURL(), true)
 
   input.guest.on('did-start-navigation', handleStartNavigation)
   input.guest.on('dom-ready', handleReady)

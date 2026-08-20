@@ -8,6 +8,7 @@ interface WebviewSurfaceProps {
   isActive: boolean
   isVisible: boolean
   openLinksInSameSurface?: boolean
+  onDocumentReady?: (webview: WebviewTag) => void
   onFocus?: () => void
   onReady: (webview: WebviewTag | null) => void
   partition: string
@@ -16,6 +17,7 @@ interface WebviewSurfaceProps {
 }
 
 interface WebviewSurfaceCallbacks {
+  onDocumentReady?: (webview: WebviewTag) => void
   onFocus?: () => void
   onReady: (webview: WebviewTag | null) => void
 }
@@ -26,6 +28,7 @@ export function WebviewSurface({
   isActive,
   isVisible,
   openLinksInSameSurface = false,
+  onDocumentReady,
   onFocus,
   onReady,
   partition,
@@ -34,11 +37,11 @@ export function WebviewSurface({
 }: WebviewSurfaceProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const webviewRef = useRef<WebviewTag | null>(null)
-  const callbacksRef = useRef<WebviewSurfaceCallbacks>({ onFocus, onReady })
+  const callbacksRef = useRef<WebviewSurfaceCallbacks>({ onDocumentReady, onFocus, onReady })
 
   useLayoutEffect(() => {
-    callbacksRef.current = { onFocus, onReady }
-  }, [onFocus, onReady])
+    callbacksRef.current = { onDocumentReady, onFocus, onReady }
+  }, [onDocumentReady, onFocus, onReady])
 
   useLayoutEffect(() => {
     const host = hostRef.current
@@ -46,8 +49,24 @@ export function WebviewSurface({
 
     const webview = document.createElement('webview')
     let isDisposed = false
+    let attached = false
+    let documentReadyObserved = false
+    let documentReadyReported = false
+    const reportDocumentReady = () => {
+      if (isDisposed || !attached || !documentReadyObserved || documentReadyReported) return
+      documentReadyReported = true
+      callbacksRef.current.onDocumentReady?.(webview)
+    }
     const handleAttached = () => {
-      if (!isDisposed) callbacksRef.current.onReady(webview)
+      if (isDisposed) return
+      attached = true
+      callbacksRef.current.onReady(webview)
+      reportDocumentReady()
+    }
+    const handleDocumentReady = () => {
+      if (isDisposed) return
+      documentReadyObserved = true
+      reportDocumentReady()
     }
     const handleFocus = () => {
       callbacksRef.current.onFocus?.()
@@ -63,6 +82,8 @@ export function WebviewSurface({
     if (openLinksInSameSurface) webview.setAttribute('allowpopups', '')
     webview.setAttribute('src', initialUrl)
     webview.addEventListener('did-attach', handleAttached)
+    webview.addEventListener('dom-ready', handleDocumentReady)
+    webview.addEventListener('did-finish-load', handleDocumentReady)
     webview.addEventListener('focus', handleFocus)
     host.replaceChildren(webview)
     webviewRef.current = webview
@@ -70,6 +91,8 @@ export function WebviewSurface({
     return () => {
       isDisposed = true
       webview.removeEventListener('did-attach', handleAttached)
+      webview.removeEventListener('dom-ready', handleDocumentReady)
+      webview.removeEventListener('did-finish-load', handleDocumentReady)
       webview.removeEventListener('focus', handleFocus)
       callbacksRef.current.onReady(null)
       webviewRef.current = null

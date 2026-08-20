@@ -1604,6 +1604,97 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(finishIntent).toHaveBeenCalledOnce()
   })
 
+  it('lets first browser_navigate create its page under targetless run authority', async () => {
+    const url = 'http://127.0.0.1/fixture-first-navigation'
+    const surfaces: ReturnType<typeof surfaceView>[] = []
+    const authority = {
+      action: 'new' as const,
+      claim: vi.fn<(binding: unknown) => Promise<void>>(async () => undefined),
+      finish: vi.fn()
+    }
+    const targetlessLease = {
+      ready: vi.fn(async () => undefined),
+      beginTargetCreationAuthority: vi.fn(async () => authority),
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => undefined),
+      failure: () => null,
+      artifacts: () => [],
+      finish: vi.fn()
+    } as unknown as BrowserNetworkOperationLease
+    const beginToolSurfaceLease = vi.fn(async () => {
+      throw new Error('browser_navigate must not precreate a blank Surface')
+    })
+    const beginExistingToolSurfaceLease = vi.fn(async () => null)
+    const finishIntent = vi.fn(() => authority.finish())
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
+      ensureActiveSurface: vi.fn(async () => {
+        throw new Error('the context must remain empty until fixed Playwright creates its Page')
+      }),
+      listSurfaces: () => surfaces,
+      createSurface: vi.fn(async () => {
+        throw new Error('generic Surface creation must not run')
+      }),
+      selectSurface: vi.fn(async () => {
+        throw new Error('there is no Surface to select before navigation')
+      }),
+      closeSurfaceByIndex: vi.fn(async () => undefined),
+      beginToolSurfaceLease,
+      beginExistingToolSurfaceLease,
+      beginTargetCreationIntent: vi.fn((_intent, receivedAuthority) => {
+        expect(receivedAuthority).toBe(authority)
+        return finishIntent
+      })
+    }
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+      expect(name).toBe('browser_navigate')
+      expect(args).toEqual({ url })
+      surfaces.push({ ...surfaceView(0, true), url })
+      await authority.claim({} as never)
+      return {
+        content: [{ type: 'text', text: `Navigated to ${url}` }],
+        isError: false
+      }
+    })
+    const beginTargetCreationOperation = vi.fn(async () => targetlessLease)
+    const host = fakeHost({
+      beginTargetCreationOperation,
+      callTool: upstream,
+      surfaceGroup
+    })
+    const authorizationContext = {
+      ...RISK_CONTEXT,
+      callId: 'call-navigate-first',
+      triggerToolName: 'browser_navigate'
+    }
+
+    await expect(
+      host.callTool(
+        'browser_navigate',
+        { url, call_reason: 'Open the first local fixture page.' },
+        { authorizationContext, parentRequestId: PARENT_REQUEST_ID }
+      )
+    ).resolves.toMatchObject({ isError: false })
+
+    expect(beginExistingToolSurfaceLease).toHaveBeenCalledOnce()
+    expect(beginToolSurfaceLease).not.toHaveBeenCalled()
+    expect(surfaces).toHaveLength(1)
+    expect(upstream).toHaveBeenCalledOnce()
+    expect(targetlessLease.beginTargetCreationAuthority).toHaveBeenCalledWith({
+      action: 'new',
+      runId: authorizationContext.runId,
+      activationId: authorizationContext.activationId,
+      capabilityId: 'browser_automation',
+      toolCallId: authorizationContext.callId,
+      toolId: 'browser_navigate',
+      url
+    })
+    expect(authority.claim).toHaveBeenCalledOnce()
+    expect(targetlessLease.markDispatched).toHaveBeenCalledOnce()
+    expect(targetlessLease.settle).toHaveBeenCalledOnce()
+    expect(finishIntent).toHaveBeenCalledOnce()
+  })
+
   it('creates one authorized blank target when the last tab closes during list lease admission', async () => {
     const surfaces: ReturnType<typeof surfaceView>[] = [surfaceView(0, true)]
     const claimAuthority = vi.fn<(binding: unknown) => Promise<void>>(async () => undefined)
@@ -1743,6 +1834,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       }),
       surfaceGroup
     })
+    const onDispatchPhase = vi.fn(async () => true)
 
     await expect(
       host.callTool(
@@ -1758,15 +1850,104 @@ describe('ManagedPlaywrightMcpHost', () => {
             callId: 'call-tabs-connect-failure',
             triggerToolName: 'browser_tabs'
           },
-          parentRequestId: PARENT_REQUEST_ID
+          parentRequestId: PARENT_REQUEST_ID,
+          onDispatchPhase
         }
       )
     ).rejects.toMatchObject({ dispatchCertainty: 'definitely_not_dispatched' })
 
     expect(markTargetCreationDispatched).not.toHaveBeenCalled()
+    expect(onDispatchPhase).not.toHaveBeenCalled()
     expect(authority.claim).not.toHaveBeenCalled()
     expect(authority.finish).toHaveBeenCalledOnce()
   })
+
+  it('acknowledges the exact dispatch boundary and authoritative response in order', async () => {
+    const order: string[] = []
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async () => {
+      order.push('official-call')
+      return { content: [{ type: 'text', text: 'snapshot' }], isError: false }
+    })
+    const onDispatchPhase = vi.fn(async (phase: string) => {
+      order.push(phase)
+      return true
+    })
+    const host = fakeHost({ callTool: upstream })
+
+    await expect(
+      host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Verify the local dispatch acknowledgement.' },
+        { onDispatchPhase }
+      )
+    ).resolves.toMatchObject({ isError: false })
+
+    expect(order).toEqual(['possibly_dispatched', 'official-call', 'response_received'])
+  })
+
+  it('fails closed before the official handler when dispatch acknowledgement is rejected', async () => {
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async () => ({
+      content: [{ type: 'text', text: 'must not run' }],
+      isError: false
+    }))
+    const host = fakeHost({ callTool: upstream })
+
+    await expect(
+      host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Verify rejected dispatch acknowledgement.' },
+        { onDispatchPhase: vi.fn(async () => false) }
+      )
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.protocol_error',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(upstream).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['surface generation drift', 'browser.target_closed'],
+    ['surface group drift', 'browser.surface_unavailable']
+  ] as const)(
+    'keeps %s definitely undispatched when the exact lease index rejects',
+    async (_case, code) => {
+      const surface = surfaceView(0, true)
+      const exactLease = {
+        surfaceId: surface.surfaceId,
+        generation: surface.generation,
+        selectionRevision: 1,
+        index: 0,
+        resolveIndex: vi.fn(async () => {
+          throw Object.assign(new Error(code), { code })
+        }),
+        closeSurface: vi.fn(async () => undefined),
+        finish: vi.fn()
+      }
+      const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+        ...singleSurfaceGroup([surface]),
+        beginToolSurfaceLease: vi.fn(async () => exactLease)
+      }
+      const upstream = vi.fn<ManagedMcpClient['callTool']>(async () => ({
+        content: [{ type: 'text', text: 'must not run' }],
+        isError: false
+      }))
+      const onDispatchPhase = vi.fn(async () => true)
+      const host = fakeHost({ callTool: upstream, surfaceGroup })
+
+      await expect(
+        host.callTool(
+          'browser_snapshot',
+          { call_reason: 'Exercise an exact local surface lease drift.' },
+          { onDispatchPhase }
+        )
+      ).rejects.toMatchObject({ code, dispatchCertainty: 'definitely_not_dispatched' })
+
+      expect(exactLease.resolveIndex).toHaveBeenCalledOnce()
+      expect(onDispatchPhase).not.toHaveBeenCalled()
+      expect(upstream).not.toHaveBeenCalled()
+      expect(exactLease.finish).toHaveBeenCalledOnce()
+    }
+  )
 
   it('freezes browser_tabs close by exact generation and treats that target close as expected', async () => {
     const order: string[] = []
@@ -2876,6 +3057,49 @@ describe('ManagedPlaywrightMcpHost', () => {
     ).rejects.toMatchObject({ code: 'mcp.builtin_playwright.output_too_large' })
   })
 
+  it('keeps an official connection after rejecting an authoritative oversized response', async () => {
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'x'.repeat(256 * 1024 + 1) }],
+        isError: false
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh bounded response' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const dispatchPhases: string[] = []
+    const onDispatchPhase = vi.fn(async (phase: 'possibly_dispatched' | 'response_received') => {
+      dispatchPhases.push(phase)
+      return true
+    })
+    const host = fakeHost({ callTool, createOfficialConnection, detachAutomation })
+
+    await expect(
+      host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Exercise an oversized authoritative response.' },
+        { onDispatchPhase }
+      )
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.output_too_large',
+      dispatchCertainty: 'response_received'
+    })
+    expect(dispatchPhases).toEqual(['possibly_dispatched', 'response_received'])
+    expect(detachAutomation).not.toHaveBeenCalled()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read a bounded response next.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(createOfficialConnection).toHaveBeenCalledOnce()
+    expect(detachAutomation).not.toHaveBeenCalled()
+  })
+
   it('bounds structuredContent before cloning or serializing it', async () => {
     let deep: Record<string, unknown> = { leaf: true }
     for (let index = 0; index < 34; index += 1) deep = { nested: deep }
@@ -3083,6 +3307,696 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(detachAutomation).toHaveBeenCalled()
   })
 
+  it('retires a closed managed BrowserContext before the next independent tool call', async () => {
+    const first = closableBrowserContext()
+    const second = closableBrowserContext()
+    let activeContext = first.context
+    const getBrowserContext = vi.fn(async () => activeContext)
+    const detachAutomation = vi.fn(async () => undefined)
+    const createOfficialConnection = vi.fn(async (_config, contextGetter) => {
+      await contextGetter()
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
+    const host = fakeHost({ createOfficialConnection, detachAutomation, getBrowserContext })
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the local fixture.' })
+    ).resolves.toMatchObject({ isError: false })
+    first.close()
+    await vi.waitFor(() => expect(detachAutomation).toHaveBeenCalledOnce())
+    activeContext = second.context
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the local fixture again.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+    expect(getBrowserContext).toHaveBeenCalledTimes(4)
+  })
+
+  it('does not replay a closed-target response and reconnects the following tool call', async () => {
+    const first = closableBrowserContext()
+    const second = closableBrowserContext()
+    const contexts = [first.context, second.context]
+    const callTool = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Target page, context or browser has been closed' }],
+        isError: true
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh snapshot' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async (_config, contextGetter) => {
+      await contextGetter()
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      getBrowserContext: async () => {
+        const context = contexts.shift()
+        if (!context) throw new Error('unexpected third context')
+        return context
+      }
+    })
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the closed local fixture.' })
+    ).resolves.toMatchObject({ isError: true })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(detachAutomation).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the replacement local fixture.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledTimes(2)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('retires a transport that closes after dispatch before the next independent call', async () => {
+    const first = closableBrowserContext()
+    const second = closableBrowserContext()
+    let activeContext = first.context
+    const callTool = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Transport is closed'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh snapshot' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async (_config, contextGetter) => {
+      await contextGetter()
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      getBrowserContext: async () => activeContext
+    })
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the local closed transport.' })
+    ).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(detachAutomation).toHaveBeenCalledOnce()
+
+    activeContext = second.context
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the reconnected local fixture.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledTimes(2)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('rebuilds the official connection after the first surface attach rejects during exact selection', async () => {
+    const surface = surfaceView(0, true)
+    const exactLease = {
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      selectionRevision: 1,
+      index: 0,
+      resolveIndex: vi.fn(async () => 0),
+      closeSurface: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...singleSurfaceGroup([surface]),
+      beginToolSurfaceLease: vi.fn(async () => exactLease),
+      beginExistingToolSurfaceLease: vi.fn(async () => exactLease)
+    }
+    let officialCall = 0
+    const callTool = vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+      officialCall += 1
+      if (officialCall === 1) throw new Error('fixture surface attach rejected')
+      if (name === 'browser_tabs' && args.action === 'select') {
+        return { content: [{ type: 'text', text: 'selected' }], isError: false }
+      }
+      return { content: [{ type: 'text', text: 'fresh snapshot' }], isError: false }
+    })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      surfaceGroup
+    })
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Trigger the local attach fixture.' })
+    ).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
+    expect(callTool).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_get_config', { call_reason: 'Read local managed configuration.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(createOfficialConnection).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the replacement local fixture.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledTimes(3)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+    expect(detachAutomation).toHaveBeenCalledOnce()
+  })
+
+  it('retires a rejected zero-tab target creation call before the next independent tool', async () => {
+    const authority = {
+      action: 'new' as const,
+      claim: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const targetlessLease = {
+      ready: vi.fn(async () => undefined),
+      preflight: vi.fn(async () => undefined),
+      beginTargetCreationAuthority: vi.fn(async () => authority),
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => undefined),
+      failure: () => null,
+      artifacts: () => [],
+      finish: vi.fn()
+    } as unknown as BrowserNetworkOperationLease
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => null,
+      ensureActiveSurface: vi.fn(async () => {
+        throw new Error('no surface')
+      }),
+      listSurfaces: () => [],
+      createSurface: vi.fn(async () => {
+        throw new Error('official target creation owns this fixture')
+      }),
+      selectSurface: vi.fn(async () => {
+        throw new Error('no surface')
+      }),
+      closeSurfaceByIndex: vi.fn(async () => undefined),
+      beginTargetCreationIntent: vi.fn(() => () => authority.finish())
+    }
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockRejectedValueOnce(new Error('fixture target attach rejected'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh snapshot' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      beginTargetCreationOperation: vi.fn(async () => targetlessLease),
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      surfaceGroup
+    })
+
+    await expect(
+      host.callTool(
+        'browser_tabs',
+        { action: 'new', call_reason: 'Create the first local fixture target.' },
+        {
+          authorizationContext: {
+            ...RISK_CONTEXT,
+            callId: 'call-zero-tab-attach-reject',
+            triggerToolName: 'browser_tabs'
+          },
+          parentRequestId: PARENT_REQUEST_ID
+        }
+      )
+    ).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(detachAutomation).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read a fresh local fixture context.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledTimes(2)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('invalidates a lazily unbound connection when its MCP transport closes', async () => {
+    const clients: ManagedMcpClient[] = []
+    const createClient = vi.fn(() => {
+      const client: ManagedMcpClient = {
+        connect: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        listTools: vi.fn(async () => ({
+          tools: MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: structuredClone(tool.inputSchema),
+            annotations: structuredClone(tool.annotations ?? {})
+          }))
+        })),
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'fresh snapshot' }],
+          isError: false
+        }))
+      }
+      clients.push(client)
+      return client
+    })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({ createClient, createOfficialConnection, detachAutomation })
+
+    await expect(host.listTools()).resolves.toHaveLength(61)
+    expect(clients).toHaveLength(1)
+    clients[0]?.onclose?.()
+    await vi.waitFor(() => expect(detachAutomation).toHaveBeenCalledOnce())
+
+    await expect(host.listTools()).resolves.toHaveLength(61)
+    expect(clients).toHaveLength(2)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for a delayed stale-generation detach before creating the replacement connection', async () => {
+    const order: string[] = []
+    let releaseFirstDetach!: () => void
+    let signalFirstDetachStarted!: () => void
+    const firstDetachStarted = new Promise<void>((resolve) => {
+      signalFirstDetachStarted = resolve
+    })
+    const firstDetachBarrier = new Promise<void>((resolve) => {
+      releaseFirstDetach = resolve
+    })
+    const detachAutomation = vi.fn(async () => {
+      const invocation = detachAutomation.mock.calls.length
+      order.push(`detach:${invocation}:start`)
+      if (invocation === 1) {
+        signalFirstDetachStarted()
+        await firstDetachBarrier
+      }
+      order.push(`detach:${invocation}:end`)
+    })
+    const clients: ManagedMcpClient[] = []
+    const createClient = vi.fn(() => {
+      const client: ManagedMcpClient = {
+        connect: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        listTools: vi.fn(async () => ({
+          tools: MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: structuredClone(tool.inputSchema),
+            annotations: structuredClone(tool.annotations ?? {})
+          }))
+        })),
+        callTool: vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
+      }
+      clients.push(client)
+      return client
+    })
+    const createOfficialConnection = vi.fn(async () => {
+      order.push(`create:${createOfficialConnection.mock.calls.length}`)
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
+    const host = fakeHost({ createClient, createOfficialConnection, detachAutomation })
+
+    await expect(host.listTools()).resolves.toHaveLength(61)
+    clients[0]?.onclose?.()
+    await firstDetachStarted
+
+    const replacement = host.listTools()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(createOfficialConnection).toHaveBeenCalledOnce()
+
+    releaseFirstDetach()
+    await expect(replacement).resolves.toHaveLength(61)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+    expect(order.indexOf('detach:1:end')).toBeLessThan(order.indexOf('create:2'))
+  })
+
+  it('coalesces a transport-close and caller-abort race into one generation retirement', async () => {
+    let signalOfficialCallStarted!: () => void
+    let resolveStaleCall!: (result: unknown) => void
+    const officialCallStarted = new Promise<void>((resolve) => {
+      signalOfficialCallStarted = resolve
+    })
+    const staleCall = new Promise<unknown>((resolve) => {
+      resolveStaleCall = resolve
+    })
+    const clients: ManagedMcpClient[] = []
+    const createClient = vi.fn(() => {
+      const generation = clients.length
+      const client: ManagedMcpClient = {
+        connect: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        listTools: vi.fn(async () => ({
+          tools: MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: structuredClone(tool.inputSchema),
+            annotations: structuredClone(tool.annotations ?? {})
+          }))
+        })),
+        callTool: vi.fn(async () => {
+          if (generation === 0) {
+            signalOfficialCallStarted()
+            return await staleCall
+          }
+          return { content: [{ type: 'text', text: 'fresh snapshot' }], isError: false }
+        })
+      }
+      clients.push(client)
+      return client
+    })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({ createClient, createOfficialConnection, detachAutomation })
+    const controller = new AbortController()
+
+    const pending = host.callTool(
+      'browser_snapshot',
+      { call_reason: 'Exercise a local close and abort race.' },
+      { signal: controller.signal }
+    )
+    await officialCallStarted
+    controller.abort()
+    clients[0]?.onclose?.()
+
+    await expect(pending).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
+    expect(detachAutomation).toHaveBeenCalledOnce()
+    expect(clients[0]?.close).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the replacement local fixture.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+    expect(detachAutomation).toHaveBeenCalledOnce()
+
+    resolveStaleCall({ content: [{ type: 'text', text: 'stale result' }], isError: false })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(detachAutomation).toHaveBeenCalledOnce()
+  })
+
+  it('retires a resolved terminal surface-selection error without replaying the current call', async () => {
+    const surface = surfaceView(0, true)
+    const exactLease = {
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      selectionRevision: 1,
+      index: 0,
+      resolveIndex: vi.fn(async () => 0),
+      closeSurface: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...singleSurfaceGroup([surface]),
+      beginToolSurfaceLease: vi.fn(async () => exactLease),
+      beginExistingToolSurfaceLease: vi.fn(async () => exactLease)
+    }
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Target page, context or browser has been closed' }],
+        isError: true
+      })
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'selected' }], isError: false })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh snapshot' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      surfaceGroup
+    })
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Exercise a terminal select response.' })
+    ).rejects.toMatchObject({
+      code: 'browser.target_closed',
+      dispatchCertainty: 'possibly_dispatched'
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(detachAutomation).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read the replacement local fixture.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledTimes(3)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves a resolved terminal zero-tab result and reconnects only the next call', async () => {
+    const authority = {
+      action: 'new' as const,
+      claim: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const targetlessLease = {
+      ready: vi.fn(async () => undefined),
+      preflight: vi.fn(async () => undefined),
+      beginTargetCreationAuthority: vi.fn(async () => authority),
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => undefined),
+      failure: () => null,
+      artifacts: () => [],
+      finish: vi.fn()
+    } as unknown as BrowserNetworkOperationLease
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => null,
+      ensureActiveSurface: vi.fn(async () => {
+        throw new Error('no surface')
+      }),
+      listSurfaces: () => [],
+      createSurface: vi.fn(async () => {
+        throw new Error('official target creation owns this fixture')
+      }),
+      selectSurface: vi.fn(async () => {
+        throw new Error('no surface')
+      }),
+      closeSurfaceByIndex: vi.fn(async () => undefined),
+      beginTargetCreationIntent: vi.fn(() => () => authority.finish())
+    }
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Target page, context or browser has been closed' }],
+        structuredContent: { errorCode: 'target_closed' },
+        isError: true
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh snapshot' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      beginTargetCreationOperation: vi.fn(async () => targetlessLease),
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      surfaceGroup
+    })
+
+    await expect(
+      host.callTool(
+        'browser_tabs',
+        { action: 'new', call_reason: 'Exercise a terminal first-target response.' },
+        {
+          authorizationContext: {
+            ...RISK_CONTEXT,
+            callId: 'call-zero-tab-terminal-result',
+            triggerToolName: 'browser_tabs'
+          },
+          parentRequestId: PARENT_REQUEST_ID
+        }
+      )
+    ).resolves.toMatchObject({
+      structuredContent: { errorCode: 'target_closed' },
+      isError: true
+    })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(detachAutomation).toHaveBeenCalledOnce()
+
+    await expect(
+      host.callTool('browser_snapshot', { call_reason: 'Read a fresh local fixture context.' })
+    ).resolves.toMatchObject({ isError: false })
+    expect(callTool).toHaveBeenCalledTimes(2)
+    expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('retires terminal and rejected post-drop snapshots without replaying the file drop', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-drop-retirement-test-'))
+    const source = join(parent, 'approved-drop.txt')
+    await writeFile(source, 'approved-drop-fixture')
+    const fileBroker = new BrowserFileBroker({
+      rootDirectory: join(parent, 'browser-automation-files'),
+      selectionProvider: { selectFiles: vi.fn(async () => []) }
+    })
+    await fileBroker.initialize()
+    const inputElement = {
+      setInputFiles: vi.fn<(paths: readonly string[]) => Promise<void>>(async () => undefined),
+      evaluate: vi.fn<(callback: unknown) => Promise<void>>(async () => undefined),
+      dispose: vi.fn(async () => undefined)
+    }
+    const targetElement = {
+      evaluateHandle: vi.fn<(callback: unknown) => Promise<{ asElement(): typeof inputElement }>>(
+        async () => ({ asElement: () => inputElement })
+      ),
+      evaluate: vi.fn<
+        (callback: unknown, argument: unknown) => Promise<{ accepted: boolean; fileCount: number }>
+      >(async () => ({ accepted: true, fileCount: 1 })),
+      dispose: vi.fn(async () => undefined)
+    }
+    const locator = { elementHandle: vi.fn(async () => targetElement) }
+    const page = { locator: vi.fn(() => locator) }
+    const context = {
+      ...fakeBrowserContext(),
+      pages: vi.fn(() => [page])
+    } as unknown as BrowserContext
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Target page, context or browser has been closed' }],
+        structuredContent: { errorCode: 'target_closed' },
+        isError: true
+      })
+      .mockRejectedValueOnce(new Error('fixture post-drop transport closed'))
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh snapshot' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({
+      callTool,
+      createOfficialConnection,
+      detachAutomation,
+      fileBroker,
+      getBrowserContext: vi.fn(async () => context),
+      surfaceGroup: singleSurfaceGroup()
+    })
+    const freezeDropHandle = async (callId: string): Promise<string> => {
+      const [reference] = await fileBroker.freezeResolvedForRead({
+        owner: {
+          runId: RISK_CONTEXT.runId,
+          activationId: RISK_CONTEXT.activationId,
+          capabilityId: 'browser_automation',
+          toolCallId: callId
+        },
+        paths: [source]
+      })
+      return reference.handle!
+    }
+
+    try {
+      const terminalCallId = 'call-drop-terminal-snapshot'
+      const terminalArguments = {
+        target: 'e17',
+        paths: [await freezeDropHandle(terminalCallId)],
+        call_reason: 'Exercise a terminal post-drop snapshot response.'
+      }
+      await expect(
+        host.callTool('browser_drop', terminalArguments, {
+          authorizationContext: sensitiveContext('browser_drop', terminalArguments, {
+            callId: terminalCallId
+          })
+        })
+      ).resolves.toMatchObject({
+        structuredContent: { status: 'completed', fileCount: 1, snapshotIncluded: false },
+        isError: false
+      })
+      expect(callTool).toHaveBeenCalledOnce()
+      expect(createOfficialConnection).toHaveBeenCalledOnce()
+      expect(detachAutomation).toHaveBeenCalledOnce()
+
+      const rejectedCallId = 'call-drop-rejected-snapshot'
+      const rejectedArguments = {
+        target: 'e17',
+        paths: [await freezeDropHandle(rejectedCallId)],
+        call_reason: 'Exercise a rejected post-drop snapshot request.'
+      }
+      await expect(
+        host.callTool('browser_drop', rejectedArguments, {
+          authorizationContext: sensitiveContext('browser_drop', rejectedArguments, {
+            callId: rejectedCallId
+          })
+        })
+      ).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
+      expect(callTool).toHaveBeenCalledTimes(2)
+      expect(createOfficialConnection).toHaveBeenCalledTimes(2)
+      expect(detachAutomation).toHaveBeenCalledTimes(2)
+
+      await expect(
+        host.callTool('browser_snapshot', {
+          call_reason: 'Read a fresh fixture after the rejected post-drop snapshot.'
+        })
+      ).resolves.toMatchObject({ isError: false })
+      expect(callTool).toHaveBeenCalledTimes(3)
+      expect(createOfficialConnection).toHaveBeenCalledTimes(3)
+      expect(inputElement.setInputFiles).toHaveBeenCalledTimes(2)
+    } finally {
+      await fileBroker.shutdown()
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps an authoritative isError result on the reusable official connection', async () => {
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fixture tool-level failure' }],
+        structuredContent: { status: 'failed', errorCode: 'fixture_failure' },
+        isError: true
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'fresh authoritative response' }],
+        isError: false
+      })
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const detachAutomation = vi.fn(async () => undefined)
+    const host = fakeHost({ callTool, createOfficialConnection, detachAutomation })
+
+    await expect(
+      host.callTool('browser_network_requests', {
+        static: false,
+        call_reason: 'Exercise a local authoritative tool error.'
+      })
+    ).resolves.toMatchObject({ isError: true })
+    await expect(
+      host.callTool('browser_network_requests', {
+        static: false,
+        call_reason: 'Exercise a following local response.'
+      })
+    ).resolves.toMatchObject({ isError: false })
+
+    expect(createOfficialConnection).toHaveBeenCalledOnce()
+    expect(detachAutomation).not.toHaveBeenCalled()
+  })
+
   it('fails closed when the fixed upstream catalog drifts', async () => {
     const host = fakeHost({
       listTools: vi.fn(async () => ({ tools: [] }))
@@ -3190,6 +4104,36 @@ function fakeBrowserContext(
   } as unknown as BrowserContext
 }
 
+function closableBrowserContext(): { context: BrowserContext; close(): void } {
+  let connected = true
+  let handleClose: (() => void) | undefined
+  const context = {
+    route: vi.fn(async () => undefined),
+    unroute: vi.fn(async () => undefined),
+    setOffline: vi.fn(async () => undefined),
+    once: vi.fn((event: string, handler: () => void) => {
+      if (event === 'close') handleClose = handler
+      return context
+    }),
+    off: vi.fn((event: string, handler: () => void) => {
+      if (event === 'close' && handleClose === handler) handleClose = undefined
+      return context
+    }),
+    browser: vi.fn(() => ({ isConnected: () => connected })),
+    tracing: {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined)
+    }
+  } as unknown as BrowserContext
+  return {
+    context,
+    close: () => {
+      connected = false
+      handleClose?.()
+    }
+  }
+}
+
 function fakeHost(overrides: {
   artifactBroker?: BrowserArtifactBroker
   fileBroker?: BrowserFileBroker
@@ -3197,6 +4141,7 @@ function fakeHost(overrides: {
   beginTargetCreationOperation?: ManagedPlaywrightMcpHostOptions['beginTargetCreationOperation']
   callTool?: ManagedMcpClient['callTool']
   closeSurface?: () => Promise<void>
+  createClient?: () => ManagedMcpClient
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
   getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
@@ -3237,14 +4182,16 @@ function fakeHost(overrides: {
         connect: vi.fn(async () => undefined),
         close: vi.fn(async () => undefined)
       })),
-    createClient: () => ({
-      connect: vi.fn(async () => undefined),
-      close: vi.fn(async () => undefined),
-      listTools: overrides.listTools ?? vi.fn(async () => ({ tools: upstreamTools })),
-      callTool:
-        overrides.callTool ??
-        vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
-    })
+    createClient:
+      overrides.createClient ??
+      (() => ({
+        connect: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+        listTools: overrides.listTools ?? vi.fn(async () => ({ tools: upstreamTools })),
+        callTool:
+          overrides.callTool ??
+          vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
+      }))
   })
   trackedHosts.add(host)
   return host

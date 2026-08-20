@@ -322,11 +322,13 @@ export type ManagedPlaywrightConnectionFactory = (
 ) => Promise<ManagedMcpServer>
 
 interface ManagedMcpServer {
+  onclose?: () => void
   connect(transport: InMemoryTransport): Promise<void>
   close(): Promise<void>
 }
 
 export interface ManagedMcpClient {
+  onclose?: () => void
   connect(transport: InMemoryTransport): Promise<void>
   listTools(
     params?: { cursor?: string },
@@ -357,6 +359,11 @@ interface ActiveConnection {
   outputSession?: BrowserArtifactOutputSession
   catalog?: ReadonlyMap<string, UpstreamToolDescriptor>
   cataloging?: Promise<ReadonlyMap<string, UpstreamToolDescriptor>>
+  context?: BrowserContext
+  contextCloseHandler?: () => void
+  closePromise?: Promise<void>
+  retirementPromise?: Promise<void>
+  stale: boolean
 }
 
 interface ManagedConnectionOutputLifetime {
@@ -407,7 +414,7 @@ interface HostAdapterInput {
   connection: ActiveConnection
   surfaceLease?: ManagedPlaywrightToolSurfaceLease
   signal: AbortSignal
-  markDispatched(): void
+  markDispatched(): Promise<void>
 }
 
 interface PreparedSensitiveGrant {
@@ -466,6 +473,8 @@ export class ManagedPlaywrightMcpHost {
   private tracing?: ManagedTracingState
   private connection?: ActiveConnection
   private connecting?: Promise<ActiveConnection>
+  private connectingEpoch?: number
+  private connectionLifecycleTail: Promise<void> = Promise.resolve()
   private connectionEpoch = 0
   private closed = false
   private stateOwnerRunId?: string
@@ -501,7 +510,7 @@ export class ManagedPlaywrightMcpHost {
         await this.ensureOfficialCatalog(connection, operationSignal)
       }, signal)
     } catch (error) {
-      await this.disposeConnection(true)
+      await this.disposeConnection(true, true)
       throw error
     }
   }
@@ -586,6 +595,7 @@ export class ManagedPlaywrightMcpHost {
       timeoutMs?: number
       authorizationContext?: BrowserRiskAuthorizationContext
       parentRequestId?: string
+      onDispatchPhase?: (phase: 'possibly_dispatched' | 'response_received') => Promise<boolean>
     } = {}
   ): Promise<ManagedPlaywrightCallResult> {
     const reviewed = managedPlaywrightTool(name)
@@ -602,6 +612,23 @@ export class ManagedPlaywrightMcpHost {
 
     let dispatchStarted = false
     let responseReceived = false
+    let acknowledgedDispatch = false
+    let acknowledgedResponse = false
+    const acknowledgeDispatchPhase = async (
+      phase: 'possibly_dispatched' | 'response_received'
+    ): Promise<void> => {
+      if (phase === 'possibly_dispatched' && acknowledgedDispatch) return
+      if (phase === 'response_received' && acknowledgedResponse) return
+      const accepted = (await options.onDispatchPhase?.(phase)) ?? true
+      if (!accepted) {
+        throw new ManagedPlaywrightMcpHostError(
+          'mcp.builtin_playwright.protocol_error',
+          phase === 'response_received' ? 'response_received' : 'definitely_not_dispatched'
+        )
+      }
+      if (phase === 'possibly_dispatched') acknowledgedDispatch = true
+      else acknowledgedResponse = true
+    }
     try {
       return await this.runBounded(
         async (operationSignal) =>
@@ -627,9 +654,10 @@ export class ManagedPlaywrightMcpHost {
                 // The visible surfaces are jointly owned by the user. `browser_close` retires
                 // only this automation generation, matching a shared official BrowserContext;
                 // browser_tabs close remains the sole tab-closing operation.
+                await acknowledgeDispatchPhase('possibly_dispatched')
                 dispatchStarted = true
                 await this.cleanupManagedState()
-                await this.disposeConnection(true, false)
+                await this.disposeConnection(true, false, true)
                 responseReceived = true
                 return textToolResult('The managed browser automation context was closed.')
               }
@@ -639,11 +667,12 @@ export class ManagedPlaywrightMcpHost {
                 this.beginTargetCreationOperation &&
                 this.surfaceGroup?.beginTargetCreationIntent
               ) {
-                const result = await this.executeManagedTabsNew({
+                const result = await this.executeManagedTargetCreatingTool({
                   arguments: serverArguments,
                   options,
                   signal: operationSignal,
-                  markDispatched: () => {
+                  markDispatched: async () => {
+                    await acknowledgeDispatchPhase('possibly_dispatched')
                     dispatchStarted = true
                   },
                   markResponseReceived: () => {
@@ -654,6 +683,30 @@ export class ManagedPlaywrightMcpHost {
               }
               surfaceLease = await this.acquireToolSurfaceLease(name, modelArguments)
               if (
+                name === 'browser_navigate' &&
+                !surfaceLease &&
+                this.beginTargetCreationOperation &&
+                this.surfaceGroup?.beginTargetCreationIntent
+              ) {
+                // Fixed Playwright implicitly creates its first Page for browser_navigate. That
+                // Target.createTarget must receive the same one-shot Main authority as an
+                // explicit browser_tabs new; otherwise the SurfaceGroup correctly rejects the
+                // creation after dispatch and the user is left on an inert blank tab.
+                return await this.executeManagedTargetCreatingTool({
+                  toolName: 'browser_navigate',
+                  arguments: serverArguments,
+                  options,
+                  signal: operationSignal,
+                  markDispatched: async () => {
+                    await acknowledgeDispatchPhase('possibly_dispatched')
+                    dispatchStarted = true
+                  },
+                  markResponseReceived: () => {
+                    responseReceived = true
+                  }
+                })
+              }
+              if (
                 name === 'browser_tabs' &&
                 modelArguments.action === 'list' &&
                 !surfaceLease &&
@@ -663,11 +716,12 @@ export class ManagedPlaywrightMcpHost {
                 // The last visible tab may close between the model-visible list snapshot and the
                 // optional exact lease. Fixed browser_tabs list then creates one blank page; give
                 // that Target.createTarget the same one-shot authority as a zero-group call.
-                return await this.executeManagedTabsNew({
+                return await this.executeManagedTargetCreatingTool({
                   arguments: serverArguments,
                   options,
                   signal: operationSignal,
-                  markDispatched: () => {
+                  markDispatched: async () => {
+                    await acknowledgeDispatchPhase('possibly_dispatched')
                     dispatchStarted = true
                   },
                   markResponseReceived: () => {
@@ -715,27 +769,32 @@ export class ManagedPlaywrightMcpHost {
               serverArguments = preparedFiles.arguments
               fileLease = preparedFiles.lease
               let toolDispatchMarked = false
-              const markDispatched = (): void => {
+              const markDispatched = async (): Promise<void> => {
                 if (toolDispatchMarked) return
-                fileLease?.markDispatched?.()
                 if (sensitiveGrant) {
                   if (sensitiveGrant.target) {
                     this.assertSensitiveDispatchTarget(sensitiveGrant.target)
                   }
+                }
+                await acknowledgeDispatchPhase('possibly_dispatched')
+                dispatchStarted = true
+                fileLease?.markDispatched?.()
+                if (sensitiveGrant) {
                   sensitiveGrant.targetBinding.markDispatched()
                   sensitiveGrant.lease.markDispatched()
                 }
                 toolDispatchMarked = true
-                dispatchStarted = true
               }
               let riskLease: BrowserNetworkOperationLease | undefined
               let riskDispatchMarked = false
-              const markOperationDispatched = (): void => {
+              const markOperationDispatched = async (): Promise<void> => {
                 if (!riskDispatchMarked) {
+                  await markDispatched()
                   riskLease?.markDispatched()
                   riskDispatchMarked = true
+                  return
                 }
-                markDispatched()
+                await markDispatched()
               }
               let artifactPlan: ManagedUpstreamArtifactPlan | undefined
               let artifactCommitted = false
@@ -784,13 +843,12 @@ export class ManagedPlaywrightMcpHost {
                 if (surfaceLease && shouldSynchronizeOfficialSurface(name, modelArguments)) {
                   // Bringing the exact managed guest to the front can synchronously run a page
                   // focus handler that navigates or downloads. Install the exact guest's risk /
-                  // download authority and conservatively cross the dispatch boundary first.
-                  markOperationDispatched()
-                  await this.selectOfficialSurface(
-                    connection,
-                    await surfaceLease.resolveIndex(),
-                    operationSignal
-                  )
+                  // download authority and conservatively cross the dispatch boundary first. The
+                  // lease index itself is a pure generation/group CAS and must settle before that
+                  // boundary: a drift rejection has not reached any official handler.
+                  const exactSurfaceIndex = await surfaceLease.resolveIndex()
+                  await markOperationDispatched()
+                  await this.selectOfficialSurface(connection, exactSurfaceIndex, operationSignal)
                 }
 
                 let hostAdapted: ManagedPlaywrightCallResult | undefined
@@ -833,7 +891,7 @@ export class ManagedPlaywrightMcpHost {
                   return withArtifactReferences(hostAdapted, riskLease?.artifacts() ?? [])
                 }
 
-                let rawResult: unknown
+                let officialResult: ManagedPlaywrightCallResult
                 try {
                   artifactPlan = await this.prepareUpstreamArtifactPlan({
                     name,
@@ -846,17 +904,21 @@ export class ManagedPlaywrightMcpHost {
                   // Once the official MCP handler receives the call, page script, navigation, or form
                   // submission may already have happened. Later network refusals are therefore never
                   // represented as a safe pre-dispatch denial and must not be replayed automatically.
-                  markOperationDispatched()
-                  rawResult = await connection.client.callTool(
+                  await markOperationDispatched()
+                  officialResult = await this.callOfficialTool(
+                    connection,
                     { name, arguments: artifactPlan?.serverArguments ?? serverArguments },
-                    undefined,
-                    {
-                      signal: operationSignal,
-                      timeout: boundedTimeout(options.timeoutMs ?? this.toolTimeoutMs),
-                      resetTimeoutOnProgress: false
+                    operationSignal,
+                    boundedTimeout(options.timeoutMs ?? this.toolTimeoutMs),
+                    async () => {
+                      // The official peer has produced an authoritative raw response. Record and
+                      // acknowledge that boundary before bounded parsing: a locally rejected
+                      // oversized/malformed response is still response_received, not a transport
+                      // ambiguity, and must not cause this healthy connection to be retired.
+                      responseReceived = true
+                      await acknowledgeDispatchPhase('response_received')
                     }
                   )
-                  responseReceived = true
                 } catch (error) {
                   await artifactPlan?.reservation.discard().catch(() => undefined)
                   try {
@@ -882,7 +944,7 @@ export class ManagedPlaywrightMcpHost {
                   return riskFailureResult(failure)
                 }
                 if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
-                let parsed = adaptReviewedToolResult(name, parseBoundedToolResult(rawResult))
+                let parsed = adaptReviewedToolResult(name, officialResult)
                 if (name === 'browser_snapshot' && !artifactPlan && !parsed.isError) {
                   try {
                     parsed = await this.appendSafeFrameEditorCandidates(
@@ -961,6 +1023,8 @@ export class ManagedPlaywrightMcpHost {
             }
             if (!outcome.ok) throw outcome.error
             if (targetFenceError) throw targetFenceError
+            await acknowledgeDispatchPhase('response_received')
+            responseReceived = true
             return outcome.result
           }),
         options.signal,
@@ -1072,14 +1136,15 @@ export class ManagedPlaywrightMcpHost {
     return lease ?? undefined
   }
 
-  private async executeManagedTabsNew(input: {
+  private async executeManagedTargetCreatingTool(input: {
+    toolName?: 'browser_tabs' | 'browser_navigate'
     arguments: Record<string, unknown>
     options: {
       authorizationContext?: BrowserRiskAuthorizationContext
       parentRequestId?: string
     }
     signal: AbortSignal
-    markDispatched(): void
+    markDispatched(): Promise<void>
     markResponseReceived(): void
   }): Promise<ManagedPlaywrightCallResult> {
     const authorization = input.options.authorizationContext
@@ -1094,9 +1159,15 @@ export class ManagedPlaywrightMcpHost {
     ) {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
     }
-    // The fixed schema shares `url` across the tabs action union. Official list ignores it; only
-    // `new` may navigate. Never let an inert list field widen target-creation/network authority.
-    const requestedUrl = input.arguments.action === 'new' ? input.arguments.url : undefined
+    const toolName = input.toolName ?? 'browser_tabs'
+    // The fixed tabs schema shares `url` across its action union. Official list ignores it; only
+    // `new` may navigate. browser_navigate always carries the authoritative destination URL.
+    const requestedUrl =
+      toolName === 'browser_navigate'
+        ? input.arguments.url
+        : input.arguments.action === 'new'
+          ? input.arguments.url
+          : undefined
     if (requestedUrl !== undefined && typeof requestedUrl !== 'string') {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
     }
@@ -1116,7 +1187,7 @@ export class ManagedPlaywrightMcpHost {
         activationId: authorization.activationId,
         capabilityId: authorization.capabilityId,
         toolCallId: authorization.callId,
-        toolId: 'browser_tabs',
+        toolId: toolName,
         url
       })
       finishIntent = surfaceGroup.beginTargetCreationIntent('interactive', authority)
@@ -1126,21 +1197,17 @@ export class ManagedPlaywrightMcpHost {
       // Intent registration and an empty-context/catalog handshake are reversible Host setup.
       // Cross the side-effect boundary only immediately before fixed official browser_tabs can
       // issue Target.createTarget/navigation, so an earlier connection failure stays definite.
+      await input.markDispatched()
       riskLease.markDispatched()
-      input.markDispatched()
-      const raw = await connection.client.callTool(
+      const officialResult = await this.callOfficialTool(
+        connection,
         {
-          name: 'browser_tabs',
+          name: toolName,
           arguments: input.arguments
         },
-        undefined,
-        {
-          signal: input.signal,
-          timeout: this.toolTimeoutMs,
-          resetTimeoutOnProgress: false
-        }
+        input.signal
       )
-      const result = adaptReviewedToolResult('browser_tabs', parseBoundedToolResult(raw))
+      const result = adaptReviewedToolResult(toolName, officialResult)
       input.markResponseReceived()
       await riskLease.settle()
       const failure = riskLease.failure()
@@ -1186,6 +1253,47 @@ export class ManagedPlaywrightMcpHost {
     throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
   }
 
+  private async callOfficialTool(
+    connection: ActiveConnection,
+    request: Parameters<ManagedMcpClient['callTool']>[0],
+    signal: AbortSignal,
+    timeoutMs = this.toolTimeoutMs,
+    onResponseReceived?: () => void | Promise<void>
+  ): Promise<ManagedPlaywrightCallResult> {
+    let rawResponseReceived = false
+    let rawResult: unknown
+    try {
+      rawResult = await connection.client.callTool(request, undefined, {
+        signal,
+        timeout: boundedTimeout(timeoutMs),
+        resetTimeoutOnProgress: false
+      })
+      rawResponseReceived = true
+      await onResponseReceived?.()
+    } catch (error) {
+      if (!rawResponseReceived && !signal.aborted) {
+        console.warn('[managed-playwright] official call rejected before response', {
+          reason: safeOfficialCallFailureReason(error),
+          tool: request.name
+        })
+        // The SDK exposes authoritative Tool-level failures as resolved `isError` results. A
+        // rejected request therefore has no authoritative response and may leave the official
+        // server's lazy shared-context promise or its in-memory transport unusable. Retire this
+        // generation exactly once, but never replay the current invocation.
+        await this.retireStaleConnection(connection).catch(() => undefined)
+      }
+      throw error
+    }
+    const result = parseBoundedToolResult(rawResult)
+    if (isTerminalManagedConnectionResult(result)) {
+      // A resolved Tool error is authoritative for this invocation and must never be replayed.
+      // Terminal connection failures still retire the generation before another independent
+      // call can reuse it. Ordinary Tool-level isError results deliberately remain reusable.
+      await this.retireStaleConnection(connection).catch(() => undefined)
+    }
+    return result
+  }
+
   private async selectOfficialSurface(
     connection: ActiveConnection,
     index: number,
@@ -1194,16 +1302,11 @@ export class ManagedPlaywrightMcpHost {
     if (!Number.isSafeInteger(index) || index < 0) {
       throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
     }
-    const raw = await connection.client.callTool(
+    const selected = await this.callOfficialTool(
+      connection,
       { name: 'browser_tabs', arguments: { action: 'select', index } },
-      undefined,
-      {
-        signal,
-        timeout: this.toolTimeoutMs,
-        resetTimeoutOnProgress: false
-      }
+      signal
     )
-    const selected = parseBoundedToolResult(raw)
     if (selected.isError) {
       throw new ManagedPlaywrightMcpHostError('browser.target_closed')
     }
@@ -1608,7 +1711,7 @@ export class ManagedPlaywrightMcpHost {
         if (!resize) {
           throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
         }
-        input.markDispatched()
+        await input.markDispatched()
         const actual = await resize({ width, height })
         return {
           content: [
@@ -1635,7 +1738,7 @@ export class ManagedPlaywrightMcpHost {
         await this.getManagedBrowserContext()
         const wasOffline = this.offlineRuns.has(runId)
         if (state === 'offline') this.claimStateOwner(runId)
-        input.markDispatched()
+        await input.markDispatched()
         if (state === 'offline') this.offlineRuns.add(runId)
         else this.offlineRuns.delete(runId)
         try {
@@ -1655,7 +1758,7 @@ export class ManagedPlaywrightMcpHost {
         const definition = managedRouteDefinition(runId, input.arguments)
         await this.getManagedBrowserContext()
         this.claimStateOwner(runId)
-        input.markDispatched()
+        await input.markDispatched()
         this.routeDefinitions.push(definition)
         try {
           await this.reconcileManagedNetworkState()
@@ -1685,7 +1788,7 @@ export class ManagedPlaywrightMcpHost {
           throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
         }
         await this.getManagedBrowserContext()
-        input.markDispatched()
+        await input.markDispatched()
         let removed = 0
         for (let index = this.routeDefinitions.length - 1; index >= 0; index -= 1) {
           const route = this.routeDefinitions[index]
@@ -1750,7 +1853,7 @@ export class ManagedPlaywrightMcpHost {
 
     let inputElement: ElementHandle<HTMLInputElement> | undefined
     try {
-      input.markDispatched()
+      await input.markDispatched()
       inputElement = (
         await targetElement.evaluateHandle((element) => {
           const fileInput = element.ownerDocument.createElement('input')
@@ -1826,16 +1929,10 @@ export class ManagedPlaywrightMcpHost {
       inputElement = undefined
       const snapshot = adaptReviewedToolResult(
         'browser_snapshot',
-        parseBoundedToolResult(
-          await input.connection.client.callTool(
-            { name: 'browser_snapshot', arguments: {} },
-            undefined,
-            {
-              signal: input.signal,
-              timeout: this.toolTimeoutMs,
-              resetTimeoutOnProgress: false
-            }
-          )
+        await this.callOfficialTool(
+          input.connection,
+          { name: 'browser_snapshot', arguments: {} },
+          input.signal
         )
       )
       if (input.signal.aborted) throw cancellationError(input.signal.reason)
@@ -1914,7 +2011,7 @@ export class ManagedPlaywrightMcpHost {
       return managedFrameFailureResult('frame_not_editable')
     }
 
-    input.markDispatched()
+    await input.markDispatched()
     try {
       if (input.name === 'browser_type') {
         const text = input.arguments.text
@@ -1976,7 +2073,7 @@ export class ManagedPlaywrightMcpHost {
         mimeType: 'application/zip',
         suggestedFileName: 'browser-trace.zip'
       })
-      input.markDispatched()
+      await input.markDispatched()
       await context.tracing.start({ screenshots: true, snapshots: true, sources: false })
       this.tracing = { context, owner, reservation }
       return textToolResult('Managed browser trace recording started.')
@@ -1993,7 +2090,7 @@ export class ManagedPlaywrightMcpHost {
     if (!tracing || tracing.owner.runId !== runId) {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
     }
-    input.markDispatched()
+    await input.markDispatched()
     this.tracing = undefined
     try {
       await tracing.context.tracing.stop({ path: tracing.reservation.managedPath })
@@ -2187,22 +2284,61 @@ export class ManagedPlaywrightMcpHost {
     if (this.closed) {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.closed')
     }
-    if (this.connection) return this.connection
-    if (this.connecting) return this.connecting
-
-    const epoch = this.connectionEpoch
-    const connecting = this.createConnection()
-    this.connecting = connecting
+    // Retirement owns the process-wide detachAutomation boundary. Never attach a fresh official
+    // generation until every previously queued close + detach has completed; detachAutomation is
+    // intentionally generation-less and could otherwise tear down the replacement connection.
+    await this.awaitConnectionLifecycle()
+    if (this.closed) {
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.closed')
+    }
+    if (this.connection) {
+      if (this.isConnectionUsable(this.connection)) return this.connection
+      await this.retireStaleConnection(this.connection)
+      return await this.ensureConnected()
+    }
+    let connecting = this.connecting
+    let epoch = this.connectingEpoch
+    if (!connecting) {
+      epoch = this.connectionEpoch
+      connecting = (async (): Promise<ActiveConnection> => {
+        const connection = await this.createConnection()
+        if (this.closed || this.connectionEpoch !== epoch) {
+          // A close/abort raced the asynchronous attach. Retire the late generation through the
+          // same global barrier; closing SDK endpoints alone is insufficient because the managed
+          // BrowserContext attachment is owned outside the in-memory transport.
+          await this.retireStaleConnection(connection)
+          throw new ManagedPlaywrightMcpHostError(
+            this.closed ? 'mcp.builtin_playwright.closed' : 'mcp.builtin_playwright.protocol_error'
+          )
+        }
+        if (!this.isConnectionUsable(connection)) {
+          await this.retireStaleConnection(connection)
+          throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+        }
+        this.connection = connection
+        return connection
+      })()
+      this.connecting = connecting
+      this.connectingEpoch = epoch
+    }
     try {
-      const connection = await connecting
-      if (this.closed || this.connectionEpoch !== epoch) {
-        await this.closeConnection(connection)
-        throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.closed')
+      return await connecting
+    } catch (error) {
+      const invalidated = !this.closed && this.connectionEpoch !== epoch
+      if (invalidated) {
+        if (this.connecting === connecting) {
+          this.connecting = undefined
+          this.connectingEpoch = undefined
+        }
+        await this.awaitConnectionLifecycle()
+        return await this.ensureConnected()
       }
-      this.connection = connection
-      return connection
+      throw error
     } finally {
-      if (this.connecting === connecting) this.connecting = undefined
+      if (this.connecting === connecting) {
+        this.connecting = undefined
+        this.connectingEpoch = undefined
+      }
     }
   }
 
@@ -2221,6 +2357,9 @@ export class ManagedPlaywrightMcpHost {
     if (!outputSession) this.outputDirectories.add(outputDirectory)
     let server: ManagedMcpServer | undefined
     let client: ManagedMcpClient | undefined
+    let activeConnection: ActiveConnection | undefined
+    let resolvedContext: BrowserContext | undefined
+    let transportClosed = false
     try {
       server = await this.createOfficialConnection(
         {
@@ -2242,20 +2381,35 @@ export class ManagedPlaywrightMcpHost {
             settle: 500
           }
         },
-        () => this.getManagedBrowserContext()
+        async () => {
+          const context = await this.getManagedBrowserContext()
+          resolvedContext = context
+          if (activeConnection) this.bindConnectionContext(activeConnection, context)
+          return context
+        }
       )
       client = this.createClient()
+      const handleTransportClose = (): void => {
+        transportClosed = true
+        if (activeConnection) this.handleConnectionInvalidated(activeConnection)
+      }
+      observeManagedProtocolClose(server, handleTransportClose)
+      observeManagedProtocolClose(client, handleTransportClose)
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
       if (!outputSession) this.outputDirectories.delete(outputDirectory)
-      return {
+      const connection: ActiveConnection = {
         client,
         server,
         clientTransport,
         serverTransport,
         outputDirectory,
         outputLifetime,
+        stale: transportClosed,
         ...(outputSession ? { outputSession } : {})
       }
+      activeConnection = connection
+      if (resolvedContext) this.bindConnectionContext(connection, resolvedContext)
+      return connection
     } catch {
       await settleWithin(
         Promise.allSettled([
@@ -2268,6 +2422,11 @@ export class ManagedPlaywrightMcpHost {
       )
       await outputLifetime.retireConnection()
       if (!outputSession) this.outputDirectories.delete(outputDirectory)
+      // createOfficialConnection may have attached the managed BrowserContext before the MCP
+      // handshake failed. No ActiveConnection exists to retire in that case, and no later attach
+      // can begin until this shared `connecting` promise settles, so detach the partial attempt
+      // here exactly once.
+      await this.detachAutomation().catch(() => undefined)
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
     }
   }
@@ -2364,33 +2523,140 @@ export class ManagedPlaywrightMcpHost {
 
   private async disposeConnection(
     detachAutomation: boolean,
-    cancelActiveCalls = true
+    cancelActiveCalls = true,
+    forceDetachWithoutConnection = false
   ): Promise<void> {
     this.connectionEpoch += 1
-    await this.clearFrameEditorCandidates()
     if (cancelActiveCalls) {
       for (const controller of this.activeCalls) controller.abort('host_close')
     }
     const connection = this.connection
     this.connection = undefined
     const connecting = this.connecting
-    this.connecting = undefined
+    // Queue lifecycle work synchronously, before the first await in this method. A concurrent
+    // ensureConnected observes this barrier and cannot attach a replacement generation early.
+    const retirement = connection
+      ? detachAutomation
+        ? this.retireStaleConnection(connection)
+        : this.enqueueConnectionLifecycle(async () => this.closeConnection(connection))
+      : undefined
+    const forcedDetach =
+      detachAutomation && forceDetachWithoutConnection && !connection && !connecting
+        ? this.enqueueConnectionLifecycle(async () => {
+            await this.detachAutomation().catch(() => undefined)
+          })
+        : undefined
+    await this.clearFrameEditorCandidates()
+    let connectingSettled = true
     if (connecting) {
       // `ensureConnected` remains the single owner of a connection under construction. Epoch
-      // invalidation makes that continuation close its late value exactly once; this bounded wait
-      // merely gives graceful settlement a chance without double-closing or blocking shutdown.
-      await settleWithin(connecting, CONNECTION_CLOSE_SETTLE_MS)
+      // invalidation makes that continuation retire its late value through the lifecycle barrier.
+      // Keep the shared promise installed so another ensure cannot start a replacement in parallel.
+      connectingSettled = Boolean(await settleWithin(connecting, CONNECTION_CLOSE_SETTLE_MS))
     }
-    if (connection) await this.closeConnection(connection)
-    const orphanedOutputDirectories = [...this.outputDirectories]
-    this.outputDirectories.clear()
-    await Promise.allSettled(orphanedOutputDirectories.map(removeOutputDirectory))
-    if (detachAutomation) await this.detachAutomation().catch(() => undefined)
+    await Promise.allSettled([
+      ...(retirement ? [retirement] : []),
+      ...(forcedDetach ? [forcedDetach] : [])
+    ])
+    await this.awaitConnectionLifecycle()
+    // An output directory still present here belongs to an attach attempt that has not completed.
+    // Its createConnection continuation remains responsible for cleanup; deleting it underneath
+    // the official server could turn a bounded shutdown into a later protocol cascade.
+    if (connectingSettled) {
+      const orphanedOutputDirectories = [...this.outputDirectories]
+      this.outputDirectories.clear()
+      await Promise.allSettled(orphanedOutputDirectories.map(removeOutputDirectory))
+    }
   }
 
   private async closeConnection(connection: ActiveConnection): Promise<void> {
-    await closeConnection(connection)
+    if (connection.context && connection.contextCloseHandler) {
+      connection.context.off('close', connection.contextCloseHandler)
+      connection.contextCloseHandler = undefined
+    }
+    connection.stale = true
+    connection.closePromise ??= closeConnection(connection)
+    await connection.closePromise
   }
+
+  private bindConnectionContext(connection: ActiveConnection, context: BrowserContext): void {
+    if (connection.context === context) return
+    if (connection.context) {
+      connection.stale = true
+      throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
+    }
+    const handleClose = (): void => this.handleConnectionInvalidated(connection)
+    connection.context = context
+    connection.contextCloseHandler = handleClose
+    context.once('close', handleClose)
+    if (!this.isConnectionUsable(connection)) handleClose()
+  }
+
+  private handleConnectionInvalidated(connection: ActiveConnection): void {
+    const wasStale = connection.stale
+    connection.stale = true
+    if (this.connection === connection) {
+      // Clear the reusable reference synchronously. The bounded retirement runs independently so
+      // a future serialized call can never re-enter a closed Context or MCP transport while the
+      // old SDK endpoints are still settling.
+      this.connection = undefined
+      this.connectionEpoch += 1
+    } else if (wasStale) {
+      return
+    }
+    void this.retireStaleConnection(connection).catch(() => undefined)
+  }
+
+  private isConnectionUsable(connection: ActiveConnection): boolean {
+    if (connection.stale) return false
+    const browser = connection.context?.browser?.()
+    return browser === undefined || browser === null || browser.isConnected()
+  }
+
+  private async retireStaleConnection(connection: ActiveConnection): Promise<void> {
+    connection.stale = true
+    if (this.connection === connection) {
+      this.connection = undefined
+      this.connectionEpoch += 1
+    }
+    connection.retirementPromise ??= this.enqueueConnectionLifecycle(async () => {
+      await this.closeConnection(connection)
+      await this.detachAutomation().catch(() => undefined)
+    })
+    await connection.retirementPromise
+  }
+
+  private enqueueConnectionLifecycle(operation: () => Promise<void>): Promise<void> {
+    const queued = this.connectionLifecycleTail.then(operation)
+    // Keep the shared barrier usable after best-effort close/detach failures while returning the
+    // original queued promise to the owner for observability.
+    this.connectionLifecycleTail = queued.catch(() => undefined)
+    return queued
+  }
+
+  private async awaitConnectionLifecycle(): Promise<void> {
+    // A close callback may enqueue a retirement while an earlier lifecycle task is settling.
+    // Observe until the tail remains stable across an await, not merely until one snapshot ends.
+    for (;;) {
+      const barrier = this.connectionLifecycleTail
+      await barrier
+      if (barrier === this.connectionLifecycleTail) return
+    }
+  }
+}
+
+function safeOfficialCallFailureReason(error: unknown): string {
+  if (error instanceof ManagedPlaywrightMcpHostError) return error.code
+  if (!(error instanceof Error)) return 'unknown_error'
+  const message = error.message.toLowerCase()
+  if (message.includes('transport') && message.includes('closed')) return 'transport_closed'
+  if (message.includes('connection') && message.includes('closed')) return 'connection_closed'
+  if (message.includes('target') && message.includes('closed')) return 'target_closed'
+  if (message.includes('waitforinitialized')) return 'page_initialization_failed'
+  if (message.includes('timed out') || message.includes('timeout')) return 'timeout'
+  if (message.includes('protocol')) return 'protocol_error'
+  if (message.includes('mcp error')) return 'mcp_error'
+  return error.name === 'Error' ? 'unclassified_error' : error.name.toLowerCase()
 }
 
 type FixedPlaywrightTargetParser = (
@@ -2810,6 +3076,11 @@ function toolSurfaceLeaseMode(
   name: string,
   modelArguments: Readonly<Record<string, unknown>>
 ): ToolSurfaceLeaseMode {
+  // On an empty BrowserContext, fixed Playwright implements browser_navigate by creating its
+  // first Page. Do not precreate an unauthorised blank Surface through beginToolSurfaceLease();
+  // an absent existing lease must reach executeManagedTargetCreatingTool so Target.createTarget
+  // is covered by the request's one-shot Main authority.
+  if (name === 'browser_navigate') return 'optional_existing'
   if (name === 'browser_tabs') {
     if (modelArguments.action === 'list') return 'optional_existing'
     if (modelArguments.action === 'close' && modelArguments.index === undefined) return 'existing'
@@ -2985,6 +3256,18 @@ function classifyFrameFailure(diagnostic: string): ManagedFrameFailureCode | und
     return 'frame_not_found'
   }
   return undefined
+}
+
+const TERMINAL_MANAGED_CONNECTION_PATTERN =
+  /(?:target page, context or browser|page|browser|connection|session|transport) (?:has been |was |is )?closed|target_closed|transportclosed|protocol error[^\n]*session closed/iu
+
+function isTerminalManagedConnectionResult(result: ManagedPlaywrightCallResult): boolean {
+  if (!result.isError) return false
+  if (result.structuredContent?.errorCode === 'target_closed') return true
+  const diagnostic = result.content
+    .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+    .join('\n')
+  return TERMINAL_MANAGED_CONNECTION_PATTERN.test(diagnostic)
 }
 
 const FRAME_INTERACTION_TOOLS = new Set([
@@ -3231,6 +3514,17 @@ async function closeConnection(connection: ActiveConnection): Promise<void> {
     CONNECTION_CLOSE_SETTLE_MS
   )
   await connection.outputLifetime.retireConnection()
+}
+
+function observeManagedProtocolClose(peer: { onclose?: () => void }, observer: () => void): void {
+  const previous = peer.onclose
+  peer.onclose = () => {
+    try {
+      previous?.()
+    } finally {
+      observer()
+    }
+  }
 }
 
 function createManagedConnectionOutputLifetime(

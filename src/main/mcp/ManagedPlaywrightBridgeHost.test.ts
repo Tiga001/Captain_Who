@@ -8,7 +8,8 @@ import {
   MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
   type ManagedPlaywrightCancelNotification,
   type ManagedPlaywrightCommandNotification,
-  type ManagedPlaywrightCompletionInput
+  type ManagedPlaywrightCompletionInput,
+  type ManagedPlaywrightDispatchPhaseInput
 } from '@mycopilot/protocol'
 import { ManagedPlaywrightBridgeHost } from './ManagedPlaywrightBridgeHost'
 import { ManagedPlaywrightSensitiveTargetBindingBroker } from './ManagedPlaywrightSensitiveTargetBindingBroker'
@@ -37,6 +38,7 @@ const AUTHORIZATION_CONTEXT = {
 
 class FakeCore {
   readonly completions: ManagedPlaywrightCompletionInput[] = []
+  readonly dispatchPhases: ManagedPlaywrightDispatchPhaseInput[] = []
   private cancel?: (input: ManagedPlaywrightCancelNotification) => void
   private command?: (input: ManagedPlaywrightCommandNotification) => void
 
@@ -49,6 +51,13 @@ class FakeCore {
   async completeManagedPlaywright(input: ManagedPlaywrightCompletionInput): Promise<boolean> {
     this.completions.push(input)
     return await this.completeResult(input)
+  }
+
+  async acknowledgeManagedPlaywrightDispatchPhase(
+    input: ManagedPlaywrightDispatchPhaseInput
+  ): Promise<boolean> {
+    this.dispatchPhases.push(input)
+    return true
   }
 
   onManagedPlaywrightCancel(
@@ -165,7 +174,46 @@ describe('ManagedPlaywrightBridgeHost', () => {
       code: 'protocol_error',
       dispatchCertainty: 'possibly_dispatched'
     })
+    expect(core.dispatchPhases.filter((phase) => phase.requestId === invalid.requestId)).toEqual([])
+    expect(core.dispatchPhases.filter((phase) => phase.requestId === oversized.requestId)).toEqual([
+      expect.objectContaining({ phase: 'possibly_dispatched' }),
+      expect.objectContaining({ phase: 'response_received' })
+    ])
+    expect(core.dispatchPhases.filter((phase) => phase.requestId === protocol.requestId)).toEqual([
+      expect.objectContaining({ phase: 'possibly_dispatched' })
+    ])
     await host.close()
+  })
+
+  it('keeps a raw Host-construction failure definitely undispatched', async () => {
+    const core = new FakeCore()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: targetBindingBroker(),
+      createHost: () => {
+        throw new Error('untrusted fixture construction failure')
+      }
+    })
+    const request = command({
+      type: 'call_tool',
+      name: 'browser_snapshot',
+      arguments: { call_reason: 'Inspect the local fixture.' },
+      timeoutMs: 1_000,
+      authorizationContext: AUTHORIZATION_CONTEXT
+    })
+
+    core.emitCommand(request)
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(core.dispatchPhases).toEqual([])
+    expect(core.completions[0]).toMatchObject({
+      requestId: request.requestId,
+      outcome: {
+        type: 'error',
+        code: 'internal_safe_error',
+        dispatchCertainty: 'definitely_not_dispatched'
+      }
+    })
+    await bridge.close()
   })
 
   it('preserves a sensitive Host rejection as definitely not dispatched', async () => {

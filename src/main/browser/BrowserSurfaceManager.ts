@@ -30,6 +30,9 @@ const DEFAULT_MAX_MANAGED_SURFACES = 8
 const MAX_CONFIGURED_MANAGED_SURFACES = 16
 const MAX_POPUPS_PER_SECOND = 4
 const MAX_PENDING_RENDERER_COMMANDS = 64
+const MAX_INITIAL_DOCUMENT_READY_MS = 2_000
+const STRICT_MODE_SURFACE_HANDOFF_MS = 100
+const MAX_SETTLED_SURFACE_REQUESTS = 256
 
 export type BrowserSurfaceManagerErrorCode =
   | 'browser.surface_unavailable'
@@ -103,6 +106,7 @@ interface ManagedSurface {
   dispatchFence?: ActiveSensitiveDispatchFence
   generation: number
   guest: WebContents
+  handleInitialDocumentReady: () => void
   handleDidFailLoad: (
     event: Event,
     errorCode: number,
@@ -120,8 +124,14 @@ interface ManagedSurface {
   handleDidStopLoading: () => void
   handleDestroyed: () => void
   host: WebContents
+  initialDocumentReady: boolean
+  initialDocumentReadyPromise: Promise<void>
+  initialDocumentReadyTimer?: ReturnType<typeof setTimeout>
   navigationEpoch: number
   navigationInProgress: boolean
+  releaseInitialDocumentReady: () => void
+  /** Opaque Renderer-visible binding for this exact Main-owned generation. */
+  surfaceInstanceId: string
   surfaceId: string
 }
 
@@ -140,7 +150,8 @@ interface PendingEnsure {
   surfaceId: string
   reject: (error: BrowserSurfaceManagerError) => void
   requestId: string
-  rendererReady: boolean
+  /** Main-issued binding echoed by the exact Renderer webview that acknowledged this request. */
+  rendererReadySurfaceInstanceId?: string
   resolve: (surface: ManagedSurface) => void
   settled: boolean
   timer: ReturnType<typeof setTimeout>
@@ -150,6 +161,27 @@ interface PendingClose {
   generation: number
   reject: (error: BrowserSurfaceManagerError) => void
   resolve: () => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+type SettledSurfaceReadyReason =
+  'already_ready' | 'request_expired' | 'request_superseded' | 'request_cancelled' | 'target_closed'
+
+interface SettledSurfaceRequest {
+  dimensions?: { height: number; width: number }
+  host: WebContents
+  kind: PendingEnsure['kind']
+  reason: SettledSurfaceReadyReason
+  requestId: string
+  surfaceInstanceId?: string
+  surfaceId: string
+}
+
+interface PendingSurfaceHandoff {
+  generation: number
+  host: WebContents
+  phase: 'waiting' | 'expired'
+  requestIds: ReadonlySet<string>
   timer: ReturnType<typeof setTimeout>
 }
 
@@ -201,6 +233,8 @@ export class BrowserSurfaceManager {
   private connecting?: Promise<BrowserContext>
   private disposed = false
   private readonly pendingSurfaceRequests = new Map<string, PendingEnsure>()
+  private readonly settledSurfaceRequests = new Map<string, SettledSurfaceRequest>()
+  private readonly pendingSurfaceHandoffs = new Map<string, PendingSurfaceHandoff>()
   private createSequence = 0
   private popupWindowStartedAt = 0
   private popupCount = 0
@@ -209,6 +243,9 @@ export class BrowserSurfaceManager {
   private rendererCommandBusy = false
   private readonly rendererCommandQueue: Array<() => void> = []
   private targetCreation?: ActiveTargetCreationIntent
+  /** Highest bound Renderer intent observed; probes and rejected identities do not advance it. */
+  private rendererSelectionRevision = 0
+  /** Main-owned mutation epoch retained by exact in-flight Tool leases. */
   private manualSelectionRevision = 0
   private toolSurfaceLease?: {
     generation: number
@@ -238,6 +275,7 @@ export class BrowserSurfaceManager {
 
   /** ManagedWebviewTargetRegistry entry point used by configureManagedWebviewHost. */
   registerManagedGuest(input: {
+    documentReady?: boolean
     guest: WebContents
     host: WebContents
     partition: string
@@ -277,6 +315,13 @@ export class BrowserSurfaceManager {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
     const handleDestroyed = (): void => this.handleTargetClosed(surfaceId, generation, input.guest)
+    let resolveInitialDocumentReady = (): void => undefined
+    const initialDocumentReady = input.documentReady !== false
+    const initialDocumentReadyPromise = initialDocumentReady
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          resolveInitialDocumentReady = resolve
+        })
     const handleDidStartNavigation = (
       _event: Event,
       _url: string,
@@ -301,6 +346,24 @@ export class BrowserSurfaceManager {
     ): void => {
       if (isMainFrame) finishMainFrameNavigation()
     }
+    const handleInitialDocumentReady = (): void => {
+      const current = this.surfaces.get(surfaceId)
+      if (
+        !current ||
+        current.generation !== generation ||
+        current.guest !== input.guest ||
+        current.initialDocumentReady
+      ) {
+        return
+      }
+      current.initialDocumentReady = true
+      if (current.initialDocumentReadyTimer) clearTimeout(current.initialDocumentReadyTimer)
+      current.initialDocumentReadyTimer = undefined
+      resolveInitialDocumentReady()
+      input.guest.removeListener('dom-ready', handleInitialDocumentReady)
+      input.guest.removeListener('did-finish-load', handleInitialDocumentReady)
+      this.completePendingSurfaceRequests()
+    }
     const surface: ManagedSurface = {
       createdSequence: ++this.createSequence,
       generation,
@@ -310,10 +373,15 @@ export class BrowserSurfaceManager {
       handleDidStartNavigation,
       handleDidStopLoading: finishMainFrameNavigation,
       handleDestroyed,
+      handleInitialDocumentReady,
       host: input.host,
+      initialDocumentReady,
+      initialDocumentReadyPromise,
       navigationEpoch: 1,
       navigationInProgress:
         typeof input.guest.isLoadingMainFrame === 'function' && input.guest.isLoadingMainFrame(),
+      releaseInitialDocumentReady: resolveInitialDocumentReady,
+      surfaceInstanceId: randomUUID(),
       surfaceId
     }
     this.surfaces.set(surfaceId, surface)
@@ -322,6 +390,22 @@ export class BrowserSurfaceManager {
     input.guest.on('did-navigate', surface.handleDidNavigate)
     input.guest.on('did-fail-load', handleDidFailLoad)
     input.guest.on('did-stop-loading', surface.handleDidStopLoading)
+    if (!surface.initialDocumentReady) {
+      input.guest.on('dom-ready', handleInitialDocumentReady)
+      input.guest.on('did-finish-load', handleInitialDocumentReady)
+      surface.initialDocumentReadyTimer = setTimeout(
+        () => {
+          if (
+            this.surfaces.get(surfaceId) === surface &&
+            !surface.initialDocumentReady &&
+            !input.guest.isDestroyed()
+          ) {
+            input.guest.close()
+          }
+        },
+        Math.min(this.attachTimeoutMs, MAX_INITIAL_DOCUMENT_READY_MS)
+      )
+    }
     try {
       this.networkGuard?.registerGuest({ generation, guest: input.guest, surfaceId })
     } catch {
@@ -331,7 +415,22 @@ export class BrowserSurfaceManager {
       this.broker.unregisterManagedGuest({ guest: input.guest, host: input.host })
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    this.completePendingSurfaceRequests()
+    this.cancelPendingSurfaceHandoff(surfaceId, input.host)
+    // Electron can publish did-attach-webview after the inert about:blank bootstrap has already
+    // crossed dom-ready. The listeners above close the ordinary race; this post-registration
+    // state check closes the missed-event edge without allowing completion before NetworkGuard
+    // has accepted this exact generation. Renderer readiness is independently gated on its exact
+    // webview's document-ready event.
+    if (
+      !surface.initialDocumentReady &&
+      !input.guest.isDestroyed() &&
+      typeof input.guest.isLoadingMainFrame === 'function' &&
+      !input.guest.isLoadingMainFrame()
+    ) {
+      handleInitialDocumentReady()
+    } else {
+      this.completePendingSurfaceRequests()
+    }
     if (this.isActiveAttachmentUsable(this.active)) {
       if (this.suppressAutomaticGroupAdmission.has(surfaceId)) {
         // Target.createTarget must finish loading its Host-owned URL before Playwright sees the
@@ -420,8 +519,8 @@ export class BrowserSurfaceManager {
   attach(host: WebContents, input: BrowserSurfaceReadyInput): BrowserSurfaceReadyOutput {
     this.assertUsable()
     const pending = this.pendingSurfaceRequests.get(input.requestId)
+    if (!pending) return this.settledSurfaceReadyOutput(host, input)
     if (
-      !pending ||
       pending.settled ||
       pending.host !== host ||
       pending.requestId !== input.requestId ||
@@ -429,27 +528,65 @@ export class BrowserSurfaceManager {
     ) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    const resizeMatches =
-      pending.kind === 'resizeSurface' &&
-      pending.dimensions?.height === input.viewport?.height &&
-      pending.dimensions?.width === input.viewport?.width
-    if (
-      (pending.kind === 'resizeSurface' && !resizeMatches) ||
-      (pending.kind !== 'resizeSurface' && input.viewport !== undefined)
-    ) {
-      this.rejectPendingSurfaceRequest(input.requestId, 'browser.surface_unavailable')
+    if (!this.readyViewportMatches(pending, input)) {
+      this.rejectPendingSurfaceRequest(
+        input.requestId,
+        'browser.surface_unavailable',
+        'request_cancelled'
+      )
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
 
     const surface = this.surfaces.get(input.surfaceId)
-    if (surface && surface.host !== host) {
+    if (!surface || surface.guest.isDestroyed()) {
+      return {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        accepted: false,
+        status: 'noop',
+        reason: 'not_registered',
+        retryable: true,
+        requestId: input.requestId,
+        ...(input.surfaceInstanceId ? { surfaceInstanceId: input.surfaceInstanceId } : {}),
+        surfaceId: input.surfaceId
+      }
+    }
+    if (surface.host !== host) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    pending.rendererReady = true
+    if (input.surfaceInstanceId !== surface.surfaceInstanceId) {
+      return {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        accepted: false,
+        status: 'stale',
+        reason: 'instance_mismatch',
+        retryable: true,
+        requestId: input.requestId,
+        surfaceInstanceId: surface.surfaceInstanceId,
+        surfaceId: input.surfaceId
+      }
+    }
+    pending.rendererReadySurfaceInstanceId = surface.surfaceInstanceId
+    if (!surface.initialDocumentReady) {
+      return {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        accepted: false,
+        status: 'noop',
+        reason: 'not_registered',
+        retryable: true,
+        requestId: input.requestId,
+        surfaceInstanceId: surface.surfaceInstanceId,
+        surfaceId: input.surfaceId
+      }
+    }
     this.completePendingSurfaceRequests()
     return {
       schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
       accepted: true,
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: input.requestId,
+      surfaceInstanceId: surface.surfaceInstanceId,
       surfaceId: input.surfaceId
     }
   }
@@ -459,20 +596,130 @@ export class BrowserSurfaceManager {
     input: BrowserSurfaceSelectedInput
   ): BrowserSurfaceSelectedOutput {
     this.assertUsable()
+    if (input.surfaceId === null) {
+      const active = this.activeSurfaceId ? this.surfaces.get(this.activeSurfaceId) : undefined
+      if (active && active.host !== host) {
+        // A trusted but different Renderer must never clear another host's selection.
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+      if (input.selectionRevision < this.rendererSelectionRevision) {
+        return this.staleSelectionOutput(input, 'stale_revision', false, null)
+      }
+      if (input.selectionRevision === this.rendererSelectionRevision) {
+        return !this.activeSurfaceId
+          ? this.noopSelectionOutput(input, 'selection_unchanged', false, null)
+          : this.staleSelectionOutput(input, 'stale_revision', false, null)
+      }
+
+      this.rendererSelectionRevision = input.selectionRevision
+      if (!this.activeSurfaceId) {
+        return this.noopSelectionOutput(input, 'selection_unchanged', false, null)
+      }
+      this.activeSurfaceId = undefined
+      this.manualSelectionRevision += 1
+      return this.appliedSelectionOutput(input, null)
+    }
+
     const surface = this.surfaces.get(input.surfaceId)
-    if (!surface || surface.host !== host || surface.guest.isDestroyed()) {
+    if (!surface || surface.guest.isDestroyed()) {
+      return this.noopSelectionOutput(input, 'not_registered', true, null)
+    }
+    if (surface.host !== host) {
+      // Host ownership is a security boundary, not a retryable lifecycle condition.
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
+    if (this.closingSurfaceIds.has(surface.surfaceId)) {
+      return this.staleSelectionOutput(input, 'surface_closing', false, surface.surfaceInstanceId)
+    }
+    if (input.surfaceInstanceId === null) {
+      if (input.selectionRevision <= this.rendererSelectionRevision) {
+        return this.staleSelectionOutput(input, 'stale_revision', false, surface.surfaceInstanceId)
+      }
+      // The probe is deliberately side-effect free. Renderer must prove it is still presenting
+      // this exact webview before it echoes the Main-generated incarnation back.
+      return this.noopSelectionOutput(input, 'instance_required', true, surface.surfaceInstanceId)
+    }
+    if (input.surfaceInstanceId !== surface.surfaceInstanceId) {
+      return this.staleSelectionOutput(input, 'instance_mismatch', false, surface.surfaceInstanceId)
+    }
+    if (input.selectionRevision < this.rendererSelectionRevision) {
+      return this.staleSelectionOutput(input, 'stale_revision', false, surface.surfaceInstanceId)
+    }
+    if (input.selectionRevision === this.rendererSelectionRevision) {
+      return this.activeSurfaceId === surface.surfaceId
+        ? this.noopSelectionOutput(input, 'selection_unchanged', false, surface.surfaceInstanceId)
+        : this.staleSelectionOutput(input, 'stale_revision', false, surface.surfaceInstanceId)
+    }
+
+    // Advance the Renderer ordering watermark even for a duplicate target. This prevents a
+    // delayed lower-revision A -> B intent from overtaking a newer A duplicate, while the separate
+    // Main mutation epoch below remains unchanged for idempotent reports and Tool leases.
+    this.rendererSelectionRevision = input.selectionRevision
+    if (this.activeSurfaceId === surface.surfaceId) {
+      return this.noopSelectionOutput(
+        input,
+        'selection_unchanged',
+        false,
+        surface.surfaceInstanceId
+      )
+    }
+
     // Record the trusted UI choice immediately. An in-flight Playwright operation retains its
-    // already-resolved Page object; its sensitive dispatch fence fails closed if this identity
-    // changes. The next serialized Tool synchronizes the fixed MCP Context currentTab to this
-    // desired surface.
+    // exact generation and mutation epoch; the next serialized Tool synchronizes currentTab.
     this.manualSelectionRevision += 1
     this.activeSurfaceId = surface.surfaceId
+    return this.appliedSelectionOutput(input, surface.surfaceInstanceId)
+  }
+
+  private appliedSelectionOutput(
+    input: BrowserSurfaceSelectedInput,
+    surfaceInstanceId: string | null
+  ): BrowserSurfaceSelectedOutput {
     return {
       schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
-      accepted: true,
-      surfaceId: surface.surfaceId
+      status: 'applied',
+      reason: 'selection_applied',
+      retryable: false,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId,
+      selectionRevision: input.selectionRevision,
+      authoritativeRevision: this.rendererSelectionRevision
+    }
+  }
+
+  private noopSelectionOutput(
+    input: BrowserSurfaceSelectedInput,
+    reason: 'selection_unchanged' | 'instance_required' | 'not_registered',
+    retryable: boolean,
+    surfaceInstanceId: string | null
+  ): BrowserSurfaceSelectedOutput {
+    return {
+      schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+      status: 'noop',
+      reason,
+      retryable,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId,
+      selectionRevision: input.selectionRevision,
+      authoritativeRevision: this.rendererSelectionRevision
+    }
+  }
+
+  private staleSelectionOutput(
+    input: BrowserSurfaceSelectedInput,
+    reason: 'stale_revision' | 'instance_mismatch' | 'surface_closing',
+    retryable: boolean,
+    surfaceInstanceId: string | null
+  ): BrowserSurfaceSelectedOutput {
+    return {
+      schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+      status: 'stale',
+      reason,
+      retryable,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId,
+      selectionRevision: input.selectionRevision,
+      authoritativeRevision: this.rendererSelectionRevision
     }
   }
 
@@ -985,6 +1232,7 @@ export class BrowserSurfaceManager {
       }
       const requestId = randomUUID()
       this.closingSurfaceIds.add(targetSurfaceId)
+      this.clearActiveSelectionForRetiredSurface(targetSurfaceId)
       const closed = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           const waiter = this.closeWaiters.get(targetSurfaceId)
@@ -1005,6 +1253,7 @@ export class BrowserSurfaceManager {
           schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
           kind: 'closeSurface',
           requestId,
+          surfaceInstanceId: surface.surfaceInstanceId,
           surfaceId: targetSurfaceId
         })
         await closed
@@ -1030,8 +1279,6 @@ export class BrowserSurfaceManager {
       return
     }
 
-    const orderedBeforeClose = this.allOrderedSurfaces()
-    const closedIndex = orderedBeforeClose.findIndex((candidate) => candidate === surface)
     surface.dispatchFence?.finishSilently()
     surface.guest.removeListener('destroyed', surface.handleDestroyed)
     this.removeNavigationListeners(surface)
@@ -1049,22 +1296,38 @@ export class BrowserSurfaceManager {
       this.closeWaiters.delete(surfaceId)
       closeWaiter.resolve()
     }
-    this.rejectPendingSurfaceRequestsForSurface(surfaceId, 'browser.target_closed')
-    if (this.activeSurfaceId === surfaceId) {
-      const remaining = orderedBeforeClose.filter((candidate) => candidate !== surface)
-      this.activeSurfaceId =
-        remaining[Math.min(Math.max(closedIndex, 0), remaining.length - 1)]?.surfaceId
-    }
-    if (this.automationSurfaceId === surfaceId) {
-      this.automationSurfaceId = this.activeSurfaceId
-    }
     const wasExplicitlyClosing = this.closingSurfaceIds.delete(surfaceId)
-    if (!this.disposed && !wasExplicitlyClosing && !surface.host.isDestroyed()) {
+    const awaitingReplacement =
+      !this.disposed &&
+      !wasExplicitlyClosing &&
+      !surface.host.isDestroyed() &&
+      this.schedulePendingSurfaceHandoff(surface)
+    if (!awaitingReplacement) {
+      this.rejectPendingSurfaceRequestsForSurface(
+        surfaceId,
+        'browser.target_closed',
+        'target_closed'
+      )
+    }
+    // Renderer owns tab ordering and fallback choice. Main clears the retired exact identity and
+    // waits for a bound Renderer selection instead of guessing from a potentially stale snapshot.
+    this.clearActiveSelectionForRetiredSurface(surfaceId)
+    if (
+      !awaitingReplacement &&
+      !this.disposed &&
+      !wasExplicitlyClosing &&
+      !surface.host.isDestroyed()
+    ) {
       void this.enqueueRendererCommand(async () => {
+        // A StrictMode remount can register a new generation with the same Renderer page identity
+        // on the next turn. Never let an old generation close its replacement.
+        await nextEventLoopTurn()
+        if (this.disposed || surface.host.isDestroyed() || this.surfaces.has(surfaceId)) return
         this.sendCommand(surface.host, {
           schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
           kind: 'closeSurface',
           requestId: randomUUID(),
+          surfaceInstanceId: surface.surfaceInstanceId,
           surfaceId
         })
         // There is no guest left to acknowledge unexpected-target cleanup. Keep the FIFO busy
@@ -1158,7 +1421,10 @@ export class BrowserSurfaceManager {
   async shutdown(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    this.rejectPendingSurfaceRequests('browser.manager_shutdown')
+    for (const handoff of this.pendingSurfaceHandoffs.values()) clearTimeout(handoff.timer)
+    this.pendingSurfaceHandoffs.clear()
+    this.rejectPendingSurfaceRequests('browser.manager_shutdown', 'request_cancelled')
+    this.settledSurfaceRequests.clear()
     let detachError: unknown
     try {
       await this.detachAutomation()
@@ -1524,6 +1790,7 @@ export class BrowserSurfaceManager {
     }
     const attempt = this.groupAdmissionTail.then(async () => {
       await ready
+      await waitForInitialDocumentReady(surface, this.attachTimeoutMs)
       if (this.active !== attachment || !this.isActiveAttachmentUsable(attachment)) {
         throw new BrowserSurfaceManagerError('browser.surface_unavailable')
       }
@@ -1684,6 +1951,20 @@ export class BrowserSurfaceManager {
     )
     if (duplicate) return duplicate.promise
 
+    // Renderer holds one scalar command. If a different command for the same logical surface is
+    // ever issued before an older one settles, the newer command is authoritative; retain a
+    // bounded tombstone so a queued acknowledgement for the displaced request receives a typed
+    // stale result instead of reviving work the Renderer can no longer be presenting.
+    for (const superseded of [...this.pendingSurfaceRequests.values()]) {
+      if (!superseded.settled && superseded.host === host && superseded.surfaceId === surfaceId) {
+        this.rejectPendingSurfaceRequest(
+          superseded.requestId,
+          'browser.surface_unavailable',
+          'request_superseded'
+        )
+      }
+    }
+
     const requestId = randomUUID()
     let resolve!: (surface: ManagedSurface) => void
     let reject!: (error: BrowserSurfaceManagerError) => void
@@ -1692,7 +1973,7 @@ export class BrowserSurfaceManager {
       reject = promiseReject
     })
     const timer = setTimeout(() => {
-      this.rejectPendingSurfaceRequest(requestId, 'browser.surface_unavailable')
+      this.rejectPendingSurfaceRequest(requestId, 'browser.surface_unavailable', 'request_expired')
     }, this.attachTimeoutMs)
     const pending: PendingEnsure = {
       ...(kind === 'createSurface' ? { activate } : {}),
@@ -1702,7 +1983,6 @@ export class BrowserSurfaceManager {
       promise,
       reject,
       requestId,
-      rendererReady: false,
       resolve,
       settled: false,
       surfaceId,
@@ -1737,7 +2017,11 @@ export class BrowserSurfaceManager {
               }
       )
     } catch {
-      this.rejectPendingSurfaceRequest(requestId, 'browser.surface_unavailable')
+      this.rejectPendingSurfaceRequest(
+        requestId,
+        'browser.surface_unavailable',
+        'request_cancelled'
+      )
     }
     return promise
   }
@@ -1764,12 +2048,25 @@ export class BrowserSurfaceManager {
 
   private completePendingSurfaceRequests(): void {
     for (const pending of this.pendingSurfaceRequests.values()) {
-      if (pending.settled || !pending.rendererReady) continue
+      if (pending.settled) continue
       const surface = this.surfaces.get(pending.surfaceId)
-      if (!surface || surface.host !== pending.host || surface.guest.isDestroyed()) continue
+      if (
+        !surface ||
+        !surface.initialDocumentReady ||
+        pending.rendererReadySurfaceInstanceId === undefined ||
+        surface.surfaceInstanceId !== pending.rendererReadySurfaceInstanceId ||
+        surface.host !== pending.host ||
+        surface.guest.isDestroyed()
+      ) {
+        continue
+      }
 
+      // Main document readiness proves that the guest can be automated; the Renderer binding
+      // proves that this exact incarnation is still the webview presented by the right sidebar.
+      // Both are required so a StrictMode probe generation can never receive the first navigation.
       pending.settled = true
       clearTimeout(pending.timer)
+      this.rememberSettledSurfaceRequest(pending, 'already_ready')
       this.pendingSurfaceRequests.delete(pending.requestId)
       pending.resolve(surface)
     }
@@ -1777,31 +2074,234 @@ export class BrowserSurfaceManager {
 
   private rejectPendingSurfaceRequest(
     requestId: string,
-    code: BrowserSurfaceManagerErrorCode
+    code: BrowserSurfaceManagerErrorCode,
+    readyReason: Exclude<SettledSurfaceReadyReason, 'already_ready'> = 'request_cancelled'
   ): void {
     const pending = this.pendingSurfaceRequests.get(requestId)
     if (!pending || pending.settled) return
     pending.settled = true
     clearTimeout(pending.timer)
+    this.rememberSettledSurfaceRequest(pending, readyReason)
     this.pendingSurfaceRequests.delete(requestId)
     pending.reject(new BrowserSurfaceManagerError(code))
   }
 
-  private rejectPendingSurfaceRequests(code: BrowserSurfaceManagerErrorCode): void {
+  private rejectPendingSurfaceRequests(
+    code: BrowserSurfaceManagerErrorCode,
+    readyReason: Exclude<SettledSurfaceReadyReason, 'already_ready'> = 'request_cancelled'
+  ): void {
     for (const requestId of [...this.pendingSurfaceRequests.keys()]) {
-      this.rejectPendingSurfaceRequest(requestId, code)
+      this.rejectPendingSurfaceRequest(requestId, code, readyReason)
     }
   }
 
   private rejectPendingSurfaceRequestsForSurface(
     surfaceId: string,
-    code: BrowserSurfaceManagerErrorCode
+    code: BrowserSurfaceManagerErrorCode,
+    readyReason: Exclude<SettledSurfaceReadyReason, 'already_ready'> = 'request_cancelled'
   ): void {
     for (const pending of [...this.pendingSurfaceRequests.values()]) {
       if (pending.surfaceId === surfaceId) {
-        this.rejectPendingSurfaceRequest(pending.requestId, code)
+        this.rejectPendingSurfaceRequest(pending.requestId, code, readyReason)
       }
     }
+  }
+
+  private rememberSettledSurfaceRequest(
+    pending: PendingEnsure,
+    reason: SettledSurfaceReadyReason
+  ): void {
+    this.settledSurfaceRequests.delete(pending.requestId)
+    this.settledSurfaceRequests.set(pending.requestId, {
+      ...(pending.dimensions ? { dimensions: pending.dimensions } : {}),
+      host: pending.host,
+      kind: pending.kind,
+      reason,
+      requestId: pending.requestId,
+      ...(pending.rendererReadySurfaceInstanceId
+        ? { surfaceInstanceId: pending.rendererReadySurfaceInstanceId }
+        : {}),
+      surfaceId: pending.surfaceId
+    })
+    while (this.settledSurfaceRequests.size > MAX_SETTLED_SURFACE_REQUESTS) {
+      const oldest = this.settledSurfaceRequests.keys().next().value
+      if (typeof oldest !== 'string') break
+      this.settledSurfaceRequests.delete(oldest)
+    }
+  }
+
+  private settledSurfaceReadyOutput(
+    host: WebContents,
+    input: BrowserSurfaceReadyInput
+  ): BrowserSurfaceReadyOutput {
+    const settled = this.settledSurfaceRequests.get(input.requestId)
+    if (
+      !settled ||
+      settled.host !== host ||
+      settled.requestId !== input.requestId ||
+      settled.surfaceId !== input.surfaceId ||
+      !this.readyViewportMatches(settled, input)
+    ) {
+      // Unknown identities, cross-host acknowledgements, and payloads that do not match the
+      // command Main originally issued remain hard boundary violations.
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    if (settled.reason === 'already_ready') {
+      if (
+        input.surfaceInstanceId !== undefined &&
+        settled.surfaceInstanceId !== input.surfaceInstanceId
+      ) {
+        return {
+          schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+          accepted: false,
+          status: 'stale',
+          reason: 'instance_mismatch',
+          retryable: true,
+          requestId: input.requestId,
+          ...(settled.surfaceInstanceId
+            ? { surfaceInstanceId: settled.surfaceInstanceId }
+            : input.surfaceInstanceId
+              ? { surfaceInstanceId: input.surfaceInstanceId }
+              : {}),
+          surfaceId: input.surfaceId
+        }
+      }
+      return {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        accepted: false,
+        status: 'noop',
+        reason: 'already_ready',
+        retryable: false,
+        requestId: input.requestId,
+        ...(settled.surfaceInstanceId
+          ? { surfaceInstanceId: settled.surfaceInstanceId }
+          : input.surfaceInstanceId
+            ? { surfaceInstanceId: input.surfaceInstanceId }
+            : {}),
+        surfaceId: input.surfaceId
+      }
+    }
+    return {
+      schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+      accepted: false,
+      status: 'stale',
+      reason: settled.reason,
+      retryable: false,
+      requestId: input.requestId,
+      ...(input.surfaceInstanceId ? { surfaceInstanceId: input.surfaceInstanceId } : {}),
+      surfaceId: input.surfaceId
+    }
+  }
+
+  private readyViewportMatches(
+    expected: Pick<PendingEnsure, 'dimensions' | 'kind'>,
+    input: BrowserSurfaceReadyInput
+  ): boolean {
+    if (expected.kind !== 'resizeSurface') return input.viewport === undefined
+    return (
+      expected.dimensions?.height === input.viewport?.height &&
+      expected.dimensions?.width === input.viewport?.width
+    )
+  }
+
+  private schedulePendingSurfaceHandoff(surface: ManagedSurface): boolean {
+    const requestIds = new Set(
+      [...this.pendingSurfaceRequests.values()]
+        .filter(
+          (pending) =>
+            !pending.settled &&
+            pending.host === surface.host &&
+            pending.surfaceId === surface.surfaceId
+        )
+        .map((pending) => pending.requestId)
+    )
+    if (requestIds.size === 0) return false
+
+    const previous = this.pendingSurfaceHandoffs.get(surface.surfaceId)
+    if (previous) clearTimeout(previous.timer)
+    const timer = setTimeout(
+      () => {
+        const current = this.pendingSurfaceHandoffs.get(surface.surfaceId)
+        if (
+          !current ||
+          current.generation !== surface.generation ||
+          current.host !== surface.host ||
+          current.phase !== 'waiting'
+        ) {
+          return
+        }
+        const replacement = this.surfaces.get(surface.surfaceId)
+        if (replacement && replacement.host === surface.host && !replacement.guest.isDestroyed()) {
+          this.pendingSurfaceHandoffs.delete(surface.surfaceId)
+          return
+        }
+        const validRequestIds = [...current.requestIds].filter((requestId) => {
+          const pending = this.pendingSurfaceRequests.get(requestId)
+          return (
+            pending !== undefined &&
+            !pending.settled &&
+            pending.host === current.host &&
+            pending.surfaceId === surface.surfaceId
+          )
+        })
+        if (validRequestIds.length === 0) {
+          this.pendingSurfaceHandoffs.delete(surface.surfaceId)
+          return
+        }
+        // Keep the exact handoff record authoritative while rejecting its request releases the
+        // Renderer FIFO. A replacement registering between this timer and actual command delivery
+        // cancels the record, so the queued generationless close cannot act on that replacement.
+        current.phase = 'expired'
+        for (const requestId of validRequestIds) {
+          this.rejectPendingSurfaceRequest(requestId, 'browser.target_closed', 'target_closed')
+        }
+        void this.enqueueRendererCommand(async () => {
+          const authoritative = this.pendingSurfaceHandoffs.get(surface.surfaceId)
+          if (
+            authoritative !== current ||
+            authoritative.phase !== 'expired' ||
+            authoritative.generation !== surface.generation ||
+            authoritative.host !== surface.host
+          ) {
+            return
+          }
+          if (this.disposed || surface.host.isDestroyed() || this.surfaces.has(surface.surfaceId)) {
+            this.pendingSurfaceHandoffs.delete(surface.surfaceId)
+            return
+          }
+          try {
+            this.sendCommand(surface.host, {
+              schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+              kind: 'closeSurface',
+              requestId: randomUUID(),
+              surfaceInstanceId: surface.surfaceInstanceId,
+              surfaceId: surface.surfaceId
+            })
+            await nextEventLoopTurn()
+          } finally {
+            if (this.pendingSurfaceHandoffs.get(surface.surfaceId) === current) {
+              this.pendingSurfaceHandoffs.delete(surface.surfaceId)
+            }
+          }
+        }).catch(() => undefined)
+      },
+      Math.min(STRICT_MODE_SURFACE_HANDOFF_MS, this.attachTimeoutMs)
+    )
+    this.pendingSurfaceHandoffs.set(surface.surfaceId, {
+      generation: surface.generation,
+      host: surface.host,
+      phase: 'waiting',
+      requestIds,
+      timer
+    })
+    return true
+  }
+
+  private cancelPendingSurfaceHandoff(surfaceId: string, host: WebContents): void {
+    const handoff = this.pendingSurfaceHandoffs.get(surfaceId)
+    if (!handoff || handoff.host !== host) return
+    clearTimeout(handoff.timer)
+    this.pendingSurfaceHandoffs.delete(surfaceId)
   }
 
   private pendingCreatedSurfaceCount(): number {
@@ -1822,6 +2322,14 @@ export class BrowserSurfaceManager {
     )
   }
 
+  private clearActiveSelectionForRetiredSurface(surfaceId: string): void {
+    if (this.activeSurfaceId === surfaceId) {
+      this.activeSurfaceId = undefined
+      this.manualSelectionRevision += 1
+    }
+    if (this.automationSurfaceId === surfaceId) this.automationSurfaceId = undefined
+  }
+
   private allocateSurfaceId(): string {
     for (let attempt = 0; attempt < 16; attempt += 1) {
       const candidate = parseBrowserSurfaceId(this.createSurfaceId())
@@ -1840,7 +2348,13 @@ export class BrowserSurfaceManager {
   private resolveSurfaceSelection(input: { index?: number; surfaceId?: string }): ManagedSurface {
     if (input.surfaceId !== undefined) {
       const surface = this.surfaces.get(input.surfaceId)
-      if (surface && !surface.guest.isDestroyed()) return surface
+      if (
+        surface &&
+        !surface.guest.isDestroyed() &&
+        !this.closingSurfaceIds.has(surface.surfaceId)
+      ) {
+        return surface
+      }
       throw new BrowserSurfaceManagerError('browser.target_closed')
     }
     if (input.index === undefined) {
@@ -1911,6 +2425,11 @@ export class BrowserSurfaceManager {
   }
 
   private removeNavigationListeners(surface: ManagedSurface): void {
+    if (surface.initialDocumentReadyTimer) clearTimeout(surface.initialDocumentReadyTimer)
+    surface.initialDocumentReadyTimer = undefined
+    surface.releaseInitialDocumentReady()
+    surface.guest.removeListener('dom-ready', surface.handleInitialDocumentReady)
+    surface.guest.removeListener('did-finish-load', surface.handleInitialDocumentReady)
     surface.guest.removeListener('did-start-navigation', surface.handleDidStartNavigation)
     surface.guest.removeListener('did-navigate', surface.handleDidNavigate)
     surface.guest.removeListener('did-fail-load', surface.handleDidFailLoad)
@@ -2045,6 +2564,8 @@ async function loadExactManagedSurfaceUrl(
   url: string,
   timeoutMs: number
 ): Promise<void> {
+  await waitForInitialDocumentReady(surface, timeoutMs)
+  await waitForInitialNavigationToSettle(surface, timeoutMs)
   if (surface.guest.isDestroyed()) {
     throw new BrowserSurfaceManagerError('browser.surface_unavailable')
   }
@@ -2067,6 +2588,46 @@ async function loadExactManagedSurfaceUrl(
     throw new BrowserSurfaceManagerError('browser.surface_unavailable')
   } finally {
     if (timer) clearTimeout(timer)
+  }
+}
+
+async function waitForInitialNavigationToSettle(
+  surface: ManagedSurface,
+  timeoutMs: number
+): Promise<void> {
+  const settled = await boundedWaitFor(() => {
+    if (surface.guest.isDestroyed()) return true
+    const nativeMainFrameLoading =
+      typeof surface.guest.isLoadingMainFrame === 'function' && surface.guest.isLoadingMainFrame()
+    return !surface.navigationInProgress && !nativeMainFrameLoading
+  }, timeoutMs)
+  if (surface.guest.isDestroyed()) {
+    throw new BrowserSurfaceManagerError('browser.target_closed')
+  }
+  if (!settled) throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+}
+
+async function waitForInitialDocumentReady(
+  surface: ManagedSurface,
+  timeoutMs: number
+): Promise<void> {
+  if (surface.initialDocumentReady) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      surface.initialDocumentReadyPromise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new BrowserSurfaceManagerError('browser.surface_unavailable')),
+          timeoutMs
+        )
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+  if (surface.guest.isDestroyed()) {
+    throw new BrowserSurfaceManagerError('browser.target_closed')
   }
 }
 

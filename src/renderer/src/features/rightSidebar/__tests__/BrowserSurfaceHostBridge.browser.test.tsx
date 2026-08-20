@@ -57,12 +57,21 @@ describe('browser surface Host bridge availability', () => {
       surfaceReady: vi.fn(async () => ({
         schemaVersion: 1 as const,
         accepted: true as const,
+        status: 'applied' as const,
+        reason: 'surface_ready' as const,
+        retryable: false as const,
+        requestId: '22222222-2222-4222-8222-222222222222',
         surfaceId: 'right-sidebar-browser-test'
       })),
       surfaceSelected: vi.fn(async (input) => ({
         schemaVersion: 1 as const,
-        accepted: true as const,
-        surfaceId: input.surfaceId
+        status: 'noop' as const,
+        reason: 'not_registered' as const,
+        retryable: true as const,
+        surfaceId: input.surfaceId,
+        surfaceInstanceId: null,
+        selectionRevision: input.selectionRevision,
+        authoritativeRevision: 0
       }))
     }
     exposeHost({ browser })

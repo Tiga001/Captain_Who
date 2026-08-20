@@ -2,7 +2,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize, Plus, X } from 'lucide-react'
-import type { BrowserSurfaceCommand, BrowserSurfaceReadyInput } from '@mycopilot/protocol'
+import type {
+  BrowserSurfaceCommand,
+  BrowserSurfaceReadyInput,
+  BrowserSurfaceReadyOutput
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { WorkspaceFileTreeSessionsProvider } from '../files/WorkspaceFileTreeSessions'
 import { RightSidebarHome } from './RightSidebarHome'
@@ -21,7 +25,11 @@ import type {
   RightSidebarReviewNavigationRequest
 } from './rightSidebarTypes'
 import { useRightSidebarPlatform } from './useRightSidebarPlatform'
-import { browserSurfaceIdForPage } from '../browser/browserSurface'
+import {
+  browserSurfaceIdForPage,
+  clearBrowserSurfaceSelection,
+  resolveBrowserSurfaceHostApi
+} from '../browser/browserSurface'
 import './RightSidebar.css'
 
 interface RightSidebarProps {
@@ -35,7 +43,7 @@ interface RightSidebarProps {
   isWorkspaceVisible?: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
-  onBrowserSurfaceReady?: (input: BrowserSurfaceReadyInput) => Promise<void>
+  onBrowserSurfaceReady?: (input: BrowserSurfaceReadyInput) => Promise<BrowserSurfaceReadyOutput>
   onOpenAgentTemplates?: () => void
   onToggleMaximized: () => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
@@ -44,6 +52,21 @@ interface RightSidebarProps {
   workspaceKeys?: readonly string[]
   workspaceName?: string | null
   workspacePath?: string
+}
+
+const MAX_SURFACE_READY_ATTEMPTS = 32
+
+async function submitBrowserSurfaceReadyUntilSettled(input: {
+  input: BrowserSurfaceReadyInput
+  isCurrent: () => boolean
+  submit: (value: BrowserSurfaceReadyInput) => Promise<BrowserSurfaceReadyOutput>
+}): Promise<void> {
+  for (let attempt = 0; attempt < MAX_SURFACE_READY_ATTEMPTS && input.isCurrent(); attempt += 1) {
+    const output = await input.submit(input.input)
+    if (!output.retryable) return
+    const delayMs = Math.min(500, 20 * 2 ** attempt)
+    await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+  }
 }
 
 function RestoreFromMaximizedIcon(): ReactNode {
@@ -90,7 +113,10 @@ export const RightSidebar = memo(function RightSidebar({
   const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
   const handledAgentNavigationRequestIdRef = useRef<number | null>(null)
   const handledBrowserSurfaceRequestIdRef = useRef<string | null>(null)
-  const submittedBrowserSurfaceRequestIdRef = useRef<string | null>(null)
+  const submittedBrowserSurfaceRequestRef = useRef<{
+    requestId: string
+    surfaceInstanceId: string
+  } | null>(null)
   const moduleMenuRef = useRef<HTMLDivElement>(null)
   const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [isModuleMenuOpen, setIsModuleMenuOpen] = useState(false)
@@ -98,6 +124,11 @@ export const RightSidebar = memo(function RightSidebar({
     pageId: string
     requestId: string
   } | null>(null)
+  const browserSurfaceRequestRef = useRef(browserSurfaceRequest)
+  const [browserSurfaceInstances, setBrowserSurfaceInstances] = useState<
+    ReadonlyMap<string, string>
+  >(() => new Map())
+  const browserSurfaceInstancesRef = useRef(browserSurfaceInstances)
   const [moduleMenuPosition, setModuleMenuPosition] = useState({ top: 0, left: 0 })
   const childAgents = useMemo(() => {
     const tree = collaborationSnapshot?.tree
@@ -145,8 +176,6 @@ export const RightSidebar = memo(function RightSidebar({
     ) {
       return
     }
-    handledBrowserSurfaceRequestIdRef.current = browserSurfaceCommand.requestId
-
     const surfaceForPage = (page: (typeof pages)[number]): string | null =>
       page.moduleId === 'browser'
         ? page.moduleState?.kind === 'browser-surface'
@@ -158,13 +187,37 @@ export const RightSidebar = memo(function RightSidebar({
       const page = pages.find(
         (candidate) => surfaceForPage(candidate) === browserSurfaceCommand.surfaceId
       )
+      const expectedInstanceId = browserSurfaceCommand.surfaceInstanceId
+      const currentInstanceId = browserSurfaceInstances.get(browserSurfaceCommand.surfaceId)
+      if (expectedInstanceId === undefined) {
+        // Parsing stays backward compatible, but a generationless close is never authoritative.
+        handledBrowserSurfaceRequestIdRef.current = browserSurfaceCommand.requestId
+        return
+      }
+      if (currentInstanceId === undefined) return
+
+      handledBrowserSurfaceRequestIdRef.current = browserSurfaceCommand.requestId
+      if (currentInstanceId !== expectedInstanceId) return
       if (page) closePage(page.id)
+      setBrowserSurfaceInstances((current) => {
+        if (current.get(browserSurfaceCommand.surfaceId) !== expectedInstanceId) return current
+        const next = new Map(current)
+        next.delete(browserSurfaceCommand.surfaceId)
+        browserSurfaceInstancesRef.current = next
+        return next
+      })
       setAgentBrowserSurfaceId((current) =>
         current === browserSurfaceCommand.surfaceId ? null : current
       )
-      setBrowserSurfaceRequest((current) => (current?.pageId === page?.id ? null : current))
+      setBrowserSurfaceRequest((current) => {
+        const next = current?.pageId === page?.id ? null : current
+        browserSurfaceRequestRef.current = next
+        return next
+      })
       return
     }
+
+    handledBrowserSurfaceRequestIdRef.current = browserSurfaceCommand.requestId
 
     const existing = pages.find(
       (candidate) => surfaceForPage(candidate) === browserSurfaceCommand.surfaceId
@@ -200,15 +253,47 @@ export const RightSidebar = memo(function RightSidebar({
       activatePage(pageId)
       setAgentBrowserSurfaceId(browserSurfaceCommand.surfaceId)
     }
-    submittedBrowserSurfaceRequestIdRef.current = null
-    setBrowserSurfaceRequest({ pageId, requestId: browserSurfaceCommand.requestId })
-  }, [activatePage, browserSurfaceCommand, closePage, openModulePage, pages, updatePage])
+    submittedBrowserSurfaceRequestRef.current = null
+    const nextRequest = { pageId, requestId: browserSurfaceCommand.requestId }
+    browserSurfaceRequestRef.current = nextRequest
+    setBrowserSurfaceRequest(nextRequest)
+  }, [
+    activatePage,
+    browserSurfaceCommand,
+    browserSurfaceInstances,
+    closePage,
+    openModulePage,
+    pages,
+    updatePage
+  ])
+
+  const handleBrowserSurfaceInstance = useCallback(
+    (pageId: string, surfaceId: string, surfaceInstanceId: string, isCurrent: boolean): void => {
+      const page = pages.find((candidate) => candidate.id === pageId)
+      const expectedSurfaceId =
+        page?.moduleState?.kind === 'browser-surface'
+          ? page.moduleState.surfaceId
+          : browserSurfaceIdForPage(pageId)
+      if (expectedSurfaceId !== surfaceId) return
+
+      const current = browserSurfaceInstancesRef.current
+      if (isCurrent && current.get(surfaceId) === surfaceInstanceId) return
+      if (!isCurrent && current.get(surfaceId) !== surfaceInstanceId) return
+      const next = new Map(current)
+      if (isCurrent) next.set(surfaceId, surfaceInstanceId)
+      else next.delete(surfaceId)
+      browserSurfaceInstancesRef.current = next
+      setBrowserSurfaceInstances(next)
+    },
+    [pages]
+  )
 
   const handleBrowserSurfaceReady = useCallback(
     (
       pageId: string,
       surfaceId: string,
       requestId: string,
+      surfaceInstanceId: string,
       viewport?: { height: number; width: number }
     ): void => {
       const page = pages.find((candidate) => candidate.id === pageId)
@@ -220,18 +305,43 @@ export const RightSidebar = memo(function RightSidebar({
         browserSurfaceRequest?.pageId !== pageId ||
         browserSurfaceRequest.requestId !== requestId ||
         expectedSurfaceId !== surfaceId ||
-        submittedBrowserSurfaceRequestIdRef.current === requestId
+        browserSurfaceInstancesRef.current.get(surfaceId) !== surfaceInstanceId ||
+        (submittedBrowserSurfaceRequestRef.current?.requestId === requestId &&
+          submittedBrowserSurfaceRequestRef.current.surfaceInstanceId === surfaceInstanceId)
       ) {
         return
       }
-      submittedBrowserSurfaceRequestIdRef.current = requestId
+      submittedBrowserSurfaceRequestRef.current = { requestId, surfaceInstanceId }
       if (!onBrowserSurfaceReady) return
-      void onBrowserSurfaceReady({
+      const input: BrowserSurfaceReadyInput = {
         schemaVersion: 1,
         requestId,
         surfaceId,
+        surfaceInstanceId,
         ...(viewport ? { viewport } : {})
+      }
+      void submitBrowserSurfaceReadyUntilSettled({
+        input,
+        isCurrent: () =>
+          browserSurfaceRequestRef.current?.pageId === pageId &&
+          browserSurfaceRequestRef.current.requestId === requestId &&
+          browserSurfaceInstancesRef.current.get(surfaceId) === surfaceInstanceId,
+        submit: onBrowserSurfaceReady
       }).finally(() => {
+        const submitted = submittedBrowserSurfaceRequestRef.current
+        if (
+          submitted?.requestId === requestId &&
+          submitted.surfaceInstanceId === surfaceInstanceId
+        ) {
+          submittedBrowserSurfaceRequestRef.current = null
+        }
+        if (
+          browserSurfaceRequestRef.current?.requestId !== requestId ||
+          browserSurfaceInstancesRef.current.get(surfaceId) !== surfaceInstanceId
+        ) {
+          return
+        }
+        browserSurfaceRequestRef.current = null
         setBrowserSurfaceRequest((current) => (current?.requestId === requestId ? null : current))
       })
     },
@@ -251,6 +361,10 @@ export const RightSidebar = memo(function RightSidebar({
   // `data-right-open=false` is the layout's final visibility authority, including while the
   // maximize preference remains set for a later reopen.
   const sidebarVisible = isOpen && isWorkspaceVisible
+  const hasForegroundBrowser =
+    sidebarVisible &&
+    documentVisible &&
+    pages.some((page) => page.id === activePageId && page.moduleId === 'browser')
   const maximizeLabel = isMaximized ? t('rightSidebar.restore') : t('rightSidebar.maximize')
   const runtimeContext = useMemo(
     () => ({
@@ -258,6 +372,7 @@ export const RightSidebar = memo(function RightSidebar({
       activeWorkspaceKey: workspaceKey ?? null,
       collaborationSnapshot,
       browserSurfaceRequest: browserSurfaceRequest ?? undefined,
+      onBrowserSurfaceInstance: handleBrowserSurfaceInstance,
       onBrowserSurfaceReady: handleBrowserSurfaceReady,
       onOpenAgentTemplates,
       renderAgentObserver
@@ -266,6 +381,7 @@ export const RightSidebar = memo(function RightSidebar({
       activeConversationId,
       browserSurfaceRequest,
       collaborationSnapshot,
+      handleBrowserSurfaceInstance,
       handleBrowserSurfaceReady,
       onOpenAgentTemplates,
       renderAgentObserver,
@@ -276,10 +392,22 @@ export const RightSidebar = memo(function RightSidebar({
   const closeTransientUi = useCallback(() => {
     setIsModuleMenuOpen(false)
   }, [])
+  const clearCurrentBrowserSelection = useCallback((): void => {
+    const browser = resolveBrowserSurfaceHostApi()
+    if (!browser) return
+    void clearBrowserSurfaceSelection(browser).catch((error: unknown) => {
+      console.error('Failed to clear the active Browser surface', error)
+    })
+  }, [])
 
   useEffect(() => {
     if (!sidebarVisible) closeTransientUi()
   }, [closeTransientUi, sidebarVisible])
+
+  useEffect(() => {
+    if (hasForegroundBrowser) return
+    clearCurrentBrowserSelection()
+  }, [clearCurrentBrowserSelection, hasForegroundBrowser])
 
   useEffect(() => {
     if (!isModuleMenuOpen) return
@@ -434,7 +562,12 @@ export const RightSidebar = memo(function RightSidebar({
                       role="tab"
                       aria-selected={isSelected}
                       data-active={isSelected ? 'true' : undefined}
-                      onClick={() => activatePage(page.id)}
+                      onClick={() => {
+                        if (page.id !== activePageId && hasForegroundBrowser) {
+                          clearCurrentBrowserSelection()
+                        }
+                        activatePage(page.id)
+                      }}
                     >
                       {iconUrl ? (
                         <img
@@ -458,6 +591,9 @@ export const RightSidebar = memo(function RightSidebar({
                       title={t('rightSidebar.closeTab')}
                       onClick={(event) => {
                         event.stopPropagation()
+                        if (page.id === activePageId && hasForegroundBrowser) {
+                          clearCurrentBrowserSelection()
+                        }
                         closePage(page.id)
                       }}
                     >

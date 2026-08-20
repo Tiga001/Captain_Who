@@ -5,7 +5,9 @@ import {
   parseBrowserRiskAuthorizeInput,
   parseBrowserRiskAuthorizeOutput,
   parseManagedPlaywrightCommandNotification,
-  parseManagedPlaywrightCompletionInput
+  parseManagedPlaywrightCompletionInput,
+  parseManagedPlaywrightDispatchPhaseInput,
+  parseManagedPlaywrightDispatchPhaseOutput
 } from './managedPlaywrightBridge'
 
 const REQUEST_ID = '4d0dd175-0a92-4bd0-8ec4-653058561d04'
@@ -24,6 +26,34 @@ const AUTHORIZATION_CONTEXT = {
 }
 
 describe('managed Playwright bridge wire contract', () => {
+  it('strictly validates monotonic dispatch phase acknowledgements', () => {
+    expect(MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION).toBe(4)
+    const input = {
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+      requestId: REQUEST_ID,
+      phase: 'possibly_dispatched' as const
+    }
+    expect(parseManagedPlaywrightDispatchPhaseInput(input)).toEqual(input)
+    expect(
+      parseManagedPlaywrightDispatchPhaseOutput({
+        schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+        accepted: true
+      })
+    ).toEqual({
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+      accepted: true
+    })
+    expect(() =>
+      parseManagedPlaywrightDispatchPhaseInput({ ...input, phase: 'request_queued' })
+    ).toThrow()
+    expect(() =>
+      parseManagedPlaywrightDispatchPhaseInput({
+        ...input,
+        dispatchCertainty: 'possibly_dispatched'
+      })
+    ).toThrow()
+  })
+
   it('accepts only the Rust call_tool camelCase field projection', () => {
     const notification = {
       schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,

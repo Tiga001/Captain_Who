@@ -31,12 +31,14 @@ interface FixtureResult {
     tabsAfterPopup: number
   }
   noRemoteDebuggingPort: boolean
+  newRendererReadyAcks: number
   oldTargetRejected: boolean
   pageCount: number
   pressKeyObserved: boolean
   replacementIsInert: boolean
   retainedAfterDetach: boolean
   retainedText: string
+  rendererReadyAcks: number
   richText: string
   snapshot: {
     activeConnections: number
@@ -110,12 +112,14 @@ describe.runIf(process.platform === 'darwin')('BrowserSurfaceManager Electron fi
           tabsAfterPopup: 2
         },
         noRemoteDebuggingPort: true,
+        newRendererReadyAcks: 4,
         oldTargetRejected: true,
         pageCount: 1,
         pressKeyObserved: true,
         replacementIsInert: true,
         retainedAfterDetach: true,
         retainedText: 'applied:hidden',
+        rendererReadyAcks: 4,
         richText: 'rich text',
         snapshot: {
           activeConnections: 0,

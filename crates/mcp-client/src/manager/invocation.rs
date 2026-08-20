@@ -310,15 +310,11 @@ impl McpConnectionManager {
         {
             return Err(McpError::cancelled("MCP tools/call"));
         }
-        // Cross the dispatch uncertainty boundary only after every Host-owned
-        // Registry/Catalog identity and cancellation check has passed. A
-        // mutation committed after this point races a possibly-dispatched call
-        // and is conservatively settled by the Registry watcher.
+        // Enter peer dispatch only after every Host-owned Registry/Catalog
+        // identity and cancellation check has passed. The concrete peer owns
+        // the later uncertainty boundary because only it knows whether its
+        // outbound request was actually queued.
         control.dispatch.mark_dispatching();
-        // An SDK request handle only proves local queuing, not whether bytes
-        // reached the server, so cross the uncertainty boundary immediately
-        // before entering the peer.
-        control.dispatch.mark_request_queued();
         control.set_state(McpInvocationState::Running);
         let mut protocol_call =
             peer.call_tool_tracked(call, control.cancellation.clone(), control.dispatch.clone());
@@ -502,10 +498,33 @@ pub(super) async fn settle_interrupted_call(
     control.cancel(reason);
     match tokio::time::timeout(grace, call).await {
         Ok(result) => normalize_dispatched_result(control, result),
-        Err(_) => Err(McpError::outcome_unknown(
-            "MCP tools/call",
-            reason,
-            control.dispatch.certainty(),
-        )),
+        Err(_) => Err(unsettled_interruption_error(control, reason)),
     }
+}
+
+fn unsettled_interruption_error(
+    control: &ActiveCallControl,
+    reason: McpOutcomeUnknownReason,
+) -> McpError {
+    let certainty = control.dispatch.certainty();
+    if certainty != McpDispatchCertainty::DefinitelyNotDispatched {
+        return McpError::outcome_unknown("MCP tools/call", reason, certainty);
+    }
+
+    let error = match reason {
+        McpOutcomeUnknownReason::TimedOut => {
+            McpError::timeout("MCP tools/call", control.timeout_ms)
+        }
+        McpOutcomeUnknownReason::Shutdown
+        | McpOutcomeUnknownReason::ServerStopped
+        | McpOutcomeUnknownReason::ServerRestarted
+        | McpOutcomeUnknownReason::ServerRemoved
+        | McpOutcomeUnknownReason::ServerExited => {
+            McpError::shutdown("MCP tools/call stopped before dispatch")
+        }
+        McpOutcomeUnknownReason::Cancelled
+        | McpOutcomeUnknownReason::TransportClosed
+        | McpOutcomeUnknownReason::ProtocolFailure => McpError::cancelled("MCP tools/call"),
+    };
+    error.with_authoritative_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
 }

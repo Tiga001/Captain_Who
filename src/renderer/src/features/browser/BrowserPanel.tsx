@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -13,13 +13,17 @@ import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 import { createBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
 import type { WebviewTag } from 'electron'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
-import { hostClient } from '../../host/hostClient'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
 import { WebviewSurface } from '../rightSidebar/surfaces/WebviewSurface'
 import type { BrowserPageMetadata } from './browserTypes'
 import { getFallbackPageTitle, normalizeBrowserUrl } from './browserUrl'
 import { useBrowserWebview } from './useBrowserWebview'
-import { browserSurfaceIdForPage } from './browserSurface'
+import {
+  browserSurfaceIdForPage,
+  resolveBrowserSurfaceHostApi,
+  synchronizeBrowserSurfaceInstance,
+  synchronizeBrowserSurfaceSelection
+} from './browserSurface'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
@@ -28,9 +32,15 @@ interface BrowserPanelProps {
   onAutomationSurfaceReady?: (
     surfaceId: string,
     requestId: string,
+    surfaceInstanceId: string,
     viewport?: { height: number; width: number }
   ) => void
   onPageMetadataChange?: (metadata: BrowserPageMetadata) => void
+  onSurfaceInstanceChange?: (
+    surfaceId: string,
+    surfaceInstanceId: string,
+    isCurrent: boolean
+  ) => void
   onSurfaceFocus?: () => void
   pageId: string
   surfaceId?: string
@@ -48,6 +58,7 @@ export function BrowserPanel({
   isActive,
   onAutomationSurfaceReady,
   onPageMetadataChange,
+  onSurfaceInstanceChange,
   onSurfaceFocus,
   pageId,
   surfaceId,
@@ -56,7 +67,21 @@ export function BrowserPanel({
   const { t } = useFrontendConfig()
   const menuAnchorRef = useRef<HTMLDivElement>(null)
   const webviewRef = useRef<WebviewTag | null>(null)
-  const submittedAutomationRequestRef = useRef<string | null>(null)
+  const documentReadyWebviewRef = useRef<WebviewTag | null>(null)
+  const isActiveRef = useRef(isActive)
+  const cancelSurfaceInstanceRef = useRef<(() => void) | null>(null)
+  const cancelSurfaceSelectionRef = useRef<(() => void) | null>(null)
+  const surfaceInstanceWebviewRef = useRef<{
+    surfaceId: string
+    surfaceInstanceId: string
+    webview: WebviewTag
+  } | null>(null)
+  const onSurfaceInstanceChangeRef = useRef(onSurfaceInstanceChange)
+  const submittedAutomationRequestRef = useRef<{
+    requestId: string
+    surfaceInstanceId: string
+    webview: WebviewTag
+  } | null>(null)
   const [addressValue, setAddressValue] = useState('')
   const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
@@ -76,6 +101,11 @@ export function BrowserPanel({
     setZoom
   } = useBrowserWebview({ isActive })
 
+  useLayoutEffect(() => {
+    isActiveRef.current = isActive
+    onSurfaceInstanceChangeRef.current = onSurfaceInstanceChange
+  }, [isActive, onSurfaceInstanceChange])
+
   const closeMenu = useCallback(() => setIsMenuOpen(false), [])
   const handleSurfaceFocus = useCallback(() => {
     closeMenu()
@@ -88,39 +118,108 @@ export function BrowserPanel({
       if (
         !webview ||
         !automationRequestId ||
-        submittedAutomationRequestRef.current === automationRequestId
+        documentReadyWebviewRef.current !== webview ||
+        surfaceInstanceWebviewRef.current?.webview !== webview ||
+        surfaceInstanceWebviewRef.current.surfaceId !== viewId ||
+        (submittedAutomationRequestRef.current?.requestId === automationRequestId &&
+          submittedAutomationRequestRef.current.surfaceInstanceId ===
+            surfaceInstanceWebviewRef.current.surfaceInstanceId &&
+          submittedAutomationRequestRef.current.webview === webview)
       ) {
         return
       }
-      submittedAutomationRequestRef.current = automationRequestId
+      const surfaceInstanceId = surfaceInstanceWebviewRef.current.surfaceInstanceId
+      submittedAutomationRequestRef.current = {
+        requestId: automationRequestId,
+        surfaceInstanceId,
+        webview
+      }
       const appliedViewport = viewport ? measureVisibleWebviewViewport(webview) : undefined
-      onAutomationSurfaceReady?.(viewId, automationRequestId, appliedViewport)
+      onAutomationSurfaceReady?.(viewId, automationRequestId, surfaceInstanceId, appliedViewport)
     },
     [automationRequestId, onAutomationSurfaceReady, viewport, viewId]
   )
 
   const reportManualSurfaceSelection = useCallback(
     (webview: WebviewTag | null): void => {
-      if (!isActive || !webview) return
-      try {
-        void hostClient.browser
-          .surfaceSelected({ schemaVersion: 1, surfaceId: viewId })
-          .catch(() => undefined)
-      } catch {
-        // Browser previews without an Electron Host intentionally have no selection channel.
-      }
+      cancelSurfaceSelectionRef.current?.()
+      cancelSurfaceSelectionRef.current = null
+      if (!isActiveRef.current || !webview) return
+      const browser = resolveBrowserSurfaceHostApi()
+      if (!browser) return
+      const exactWebview = webview
+      cancelSurfaceSelectionRef.current = synchronizeBrowserSurfaceSelection(browser, {
+        surfaceId: viewId,
+        isCurrent: () =>
+          isActiveRef.current && webviewRef.current === exactWebview && exactWebview.isConnected
+      })
     },
-    [isActive, viewId]
+    [viewId]
   )
 
   const handleWebviewReady = useCallback(
     (webview: WebviewTag | null): void => {
+      cancelSurfaceInstanceRef.current?.()
+      cancelSurfaceInstanceRef.current = null
+      const previousInstance = surfaceInstanceWebviewRef.current
+      if (previousInstance) {
+        onSurfaceInstanceChange?.(
+          previousInstance.surfaceId,
+          previousInstance.surfaceInstanceId,
+          false
+        )
+        surfaceInstanceWebviewRef.current = null
+      }
       webviewRef.current = webview
+      if (!webview) {
+        documentReadyWebviewRef.current = null
+        submittedAutomationRequestRef.current = null
+      }
       setWebview(webview)
-      reportAutomationSurfaceReady(webview)
       reportManualSurfaceSelection(webview)
+      if (!webview) return
+
+      const browser = resolveBrowserSurfaceHostApi()
+      if (!browser) return
+      const exactWebview = webview
+      cancelSurfaceInstanceRef.current = synchronizeBrowserSurfaceInstance(browser, {
+        surfaceId: viewId,
+        isCurrent: () => webviewRef.current === exactWebview && exactWebview.isConnected,
+        onInstance: (surfaceInstanceId) => {
+          if (webviewRef.current !== exactWebview || !exactWebview.isConnected) return
+          const current = surfaceInstanceWebviewRef.current
+          if (current && current.webview !== exactWebview) {
+            onSurfaceInstanceChange?.(current.surfaceId, current.surfaceInstanceId, false)
+          }
+          surfaceInstanceWebviewRef.current = {
+            surfaceId: viewId,
+            surfaceInstanceId,
+            webview: exactWebview
+          }
+          onSurfaceInstanceChange?.(viewId, surfaceInstanceId, true)
+          reportAutomationSurfaceReady(exactWebview)
+        }
+      })
     },
-    [reportAutomationSurfaceReady, reportManualSurfaceSelection, setWebview]
+    [
+      onSurfaceInstanceChange,
+      reportAutomationSurfaceReady,
+      reportManualSurfaceSelection,
+      setWebview,
+      viewId
+    ]
+  )
+
+  const handleWebviewDocumentReady = useCallback(
+    (webview: WebviewTag): void => {
+      // did-attach and dom-ready are separate lifecycle boundaries. React StrictMode can dispose
+      // generation 1 between them; never acknowledge a request for a webview that is no longer the
+      // exact DOM surface presented by this panel.
+      if (webviewRef.current !== webview || !webview.isConnected) return
+      documentReadyWebviewRef.current = webview
+      reportAutomationSurfaceReady(webview)
+    },
+    [reportAutomationSurfaceReady]
   )
 
   useEffect(() => {
@@ -128,13 +227,28 @@ export function BrowserPanel({
       submittedAutomationRequestRef.current = null
       return
     }
-    reportAutomationSurfaceReady(webviewRef.current)
+    reportAutomationSurfaceReady(documentReadyWebviewRef.current)
   }, [automationRequestId, reportAutomationSurfaceReady])
 
   useEffect(() => {
     if (!isActive) setIsMenuOpen(false)
     reportManualSurfaceSelection(webviewRef.current)
   }, [isActive, reportManualSurfaceSelection])
+
+  useEffect(
+    () => () => {
+      cancelSurfaceInstanceRef.current?.()
+      cancelSurfaceInstanceRef.current = null
+      const current = surfaceInstanceWebviewRef.current
+      if (current) {
+        onSurfaceInstanceChangeRef.current?.(current.surfaceId, current.surfaceInstanceId, false)
+        surfaceInstanceWebviewRef.current = null
+      }
+      cancelSurfaceSelectionRef.current?.()
+      cancelSurfaceSelectionRef.current = null
+    },
+    []
+  )
 
   useEffect(() => {
     if (!isAddressEditing) {
@@ -317,6 +431,7 @@ export function BrowserPanel({
           isActive={isActive}
           isVisible={Boolean(currentUrl)}
           openLinksInSameSurface
+          onDocumentReady={handleWebviewDocumentReady}
           onFocus={handleSurfaceFocus}
           onReady={handleWebviewReady}
           partition={BROWSER_WEBVIEW_PARTITION}

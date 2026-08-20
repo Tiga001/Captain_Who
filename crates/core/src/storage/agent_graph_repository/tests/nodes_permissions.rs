@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn markdown_link_conversation_title_produces_a_valid_root_task_name() {
+    let title =
+        "使用内置浏览器打开 [http://127.0.0.1:18765/](http://127.0.0.1:18765/)，读取页面标题";
+    let task_name = crate::bounded_root_agent_task_name(title);
+
+    assert!(!task_name.contains('/'));
+    assert!(!task_name.chars().any(char::is_control));
+    assert_eq!(task_name.trim(), task_name);
+    assert!(task_name.len() <= 256);
+
+    let mut connection = connection();
+    insert_conversation(&connection, "conversation-link-title", None);
+    let root = ensure_root_agent(
+        &mut connection,
+        &EnsureRootAgentInput {
+            agent_id: "agent-link-title".to_string(),
+            conversation_id: "conversation-link-title".to_string(),
+            creation_request_id: "ensure-link-title".to_string(),
+            task_name: task_name.clone(),
+        },
+        10,
+    )
+    .expect("a display title containing a Markdown URL should bind a root Agent");
+
+    assert_eq!(root.record().task_name, task_name);
+}
+
+#[test]
 fn root_and_multilevel_tree_are_idempotent_and_tree_scoped() {
     let mut connection = setup_tree();
     let root_retry = ensure_root_agent(

@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION: u32 = 3;
+pub const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION: u32 = 4;
 pub const MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD: &str = "mcp.builtinPlaywright.command";
 pub const MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD: &str = "mcp.builtinPlaywright.cancel";
 pub const MANAGED_PLAYWRIGHT_COMPLETE_METHOD: &str = "mcp.builtinPlaywright.complete";
+pub const MANAGED_PLAYWRIGHT_DISPATCH_PHASE_METHOD: &str = "mcp.builtinPlaywright.dispatchPhase";
 pub const BROWSER_RISK_AUTHORIZE_METHOD: &str = "mcp.browserRisk.authorize";
 pub const BROWSER_RISK_CANCEL_METHOD: &str = "mcp.browserRisk.cancel";
 pub const BROWSER_RISK_PROTOCOL_SCHEMA_VERSION: u32 = 1;
@@ -283,6 +284,31 @@ pub enum ManagedPlaywrightCancelReason {
     Shutdown,
 }
 
+/// Main-owned monotonic evidence for a single admitted `call_tool` request. Main must obtain an
+/// accepted `PossiblyDispatched` acknowledgement before invoking the fixed official handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedPlaywrightDispatchPhase {
+    PreDispatch,
+    PossiblyDispatched,
+    ResponseReceived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedPlaywrightDispatchPhaseInput {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub phase: ManagedPlaywrightDispatchPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedPlaywrightDispatchPhaseOutput {
+    pub schema_version: u32,
+    pub accepted: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedPlaywrightCompletionInput {
@@ -367,6 +393,45 @@ pub struct ManagedPlaywrightCompletionOutput {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dispatch_phase_wire_is_strict_and_monotonic_by_construction() {
+        assert_eq!(MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION, 4);
+        let input = ManagedPlaywrightDispatchPhaseInput {
+            schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+            request_id: "4d0dd175-0a92-4bd0-8ec4-653058561d04".to_string(),
+            phase: ManagedPlaywrightDispatchPhase::PossiblyDispatched,
+        };
+        let value = serde_json::to_value(&input).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "schemaVersion": 4,
+                "requestId": "4d0dd175-0a92-4bd0-8ec4-653058561d04",
+                "phase": "possibly_dispatched"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ManagedPlaywrightDispatchPhaseInput>(value).unwrap(),
+            input
+        );
+        assert!(
+            serde_json::from_value::<ManagedPlaywrightDispatchPhaseInput>(json!({
+                "schemaVersion": 4,
+                "requestId": "4d0dd175-0a92-4bd0-8ec4-653058561d04",
+                "phase": "request_queued"
+            }))
+            .is_err()
+        );
+        assert!(
+            ManagedPlaywrightDispatchPhase::PreDispatch
+                < ManagedPlaywrightDispatchPhase::PossiblyDispatched
+        );
+        assert!(
+            ManagedPlaywrightDispatchPhase::PossiblyDispatched
+                < ManagedPlaywrightDispatchPhase::ResponseReceived
+        );
+    }
 
     #[test]
     fn call_tool_wire_uses_the_exact_typescript_casing() {

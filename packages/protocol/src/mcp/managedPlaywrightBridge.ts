@@ -1,8 +1,10 @@
-export const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION = 3 as const
+export const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION = 4 as const
 export const MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD =
   'mcp.builtinPlaywright.command' as const
 export const MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD = 'mcp.builtinPlaywright.cancel' as const
 export const MANAGED_PLAYWRIGHT_COMPLETE_METHOD = 'mcp.builtinPlaywright.complete' as const
+export const MANAGED_PLAYWRIGHT_DISPATCH_PHASE_METHOD =
+  'mcp.builtinPlaywright.dispatchPhase' as const
 export const BROWSER_RISK_AUTHORIZE_METHOD = 'mcp.browserRisk.authorize' as const
 export const BROWSER_RISK_CANCEL_METHOD = 'mcp.browserRisk.cancel' as const
 export const BROWSER_RISK_PROTOCOL_SCHEMA_VERSION = 1 as const
@@ -71,9 +73,7 @@ export interface ManagedPlaywrightPrepareSensitiveToolInput {
   filePreparation: ManagedPlaywrightSensitiveFilePreparation | null
 }
 
-export type ManagedPlaywrightSensitiveBindingScope =
-  | 'managed_surface'
-  | 'managed_browser_profile'
+export type ManagedPlaywrightSensitiveBindingScope = 'managed_surface' | 'managed_browser_profile'
 
 export type ManagedPlaywrightSensitiveFilePreparation = {
   mode: 'resolved_paths'
@@ -125,6 +125,25 @@ export interface ManagedPlaywrightCancelNotification {
   schemaVersion: typeof MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION
   requestId: string
   reason: ManagedPlaywrightCancelReason
+}
+
+/**
+ * Main-owned monotonic evidence for one admitted call_tool request. Main must acknowledge
+ * `possibly_dispatched` before invoking the fixed official handler. A failed acknowledgement is a
+ * fail-closed pre-dispatch rejection.
+ */
+export type ManagedPlaywrightDispatchPhase =
+  'pre_dispatch' | 'possibly_dispatched' | 'response_received'
+
+export interface ManagedPlaywrightDispatchPhaseInput {
+  schemaVersion: typeof MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION
+  requestId: string
+  phase: ManagedPlaywrightDispatchPhase
+}
+
+export interface ManagedPlaywrightDispatchPhaseOutput {
+  schemaVersion: typeof MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION
+  accepted: boolean
 }
 
 export type ManagedPlaywrightDispatchCertainty =
@@ -370,6 +389,36 @@ export function parseManagedPlaywrightCancelNotification(
     schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
     requestId: expectMatchingString(record.requestId, REQUEST_ID),
     reason
+  }
+}
+
+export function parseManagedPlaywrightDispatchPhaseInput(
+  value: unknown
+): ManagedPlaywrightDispatchPhaseInput {
+  const record = exactRecord(value, ['schemaVersion', 'requestId', 'phase'])
+  expectSchemaVersion(record.schemaVersion)
+  return {
+    schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+    requestId: expectMatchingString(record.requestId, REQUEST_ID),
+    phase: expectEnum(record.phase, [
+      'pre_dispatch',
+      'possibly_dispatched',
+      'response_received'
+    ] as const)
+  }
+}
+
+export function parseManagedPlaywrightDispatchPhaseOutput(
+  value: unknown
+): ManagedPlaywrightDispatchPhaseOutput {
+  const record = exactRecord(value, ['schemaVersion', 'accepted'])
+  expectSchemaVersion(record.schemaVersion)
+  if (typeof record.accepted !== 'boolean') {
+    throw new Error('Invalid managed Playwright dispatch phase acknowledgement')
+  }
+  return {
+    schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+    accepted: record.accepted
   }
 }
 
@@ -717,10 +766,7 @@ function parsePrepareSensitiveToolInput(
   }
   return {
     bindingRequestId: expectMatchingString(record.bindingRequestId, REQUEST_ID),
-    bindingScope: expectEnum(record.bindingScope, [
-      'managed_surface',
-      'managed_browser_profile'
-    ]),
+    bindingScope: expectEnum(record.bindingScope, ['managed_surface', 'managed_browser_profile']),
     runId: expectSafeString(record.runId, 1, 256),
     capabilityId: 'browser_automation',
     activationId: expectMatchingString(record.activationId, REQUEST_ID),
@@ -749,10 +795,7 @@ function parseSensitiveFilePreparation(
       record.paths.length > 16 ||
       record.paths.some(
         (path) =>
-          typeof path !== 'string' ||
-          path.length < 1 ||
-          path.length > 8_192 ||
-          path.includes('\0')
+          typeof path !== 'string' || path.length < 1 || path.length > 8_192 || path.includes('\0')
       )
     ) {
       throw new Error('Invalid managed Playwright resolved file preparation')
@@ -801,7 +844,10 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
             name.length > 255 ||
             name.includes('/') ||
             name.includes('\\') ||
-            /[\u0000-\u001f\u007f]/u.test(name)
+            Array.from(name).some((character) => {
+              const codePoint = character.codePointAt(0)
+              return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)
+            })
         )
       ) {
         throw new Error('Invalid managed Playwright prepared file basenames')
