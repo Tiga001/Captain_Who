@@ -3098,7 +3098,9 @@ fn validate_manual_file_effect_settlement_request(
         || expected_pending_status == "approved"
         || (expected_action_type == "skill_materialization"
             && expected_pending_status == "executing")
-        || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing");
+        || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing")
+        || (expected_action_type == "builtin_mcp_tool_approval"
+            && expected_pending_status == "executing");
     if !pending_status_is_valid {
         return Err(format!(
             "manual file-effect settlement has invalid pending status `{expected_pending_status}` for `{expected_action_type}`"

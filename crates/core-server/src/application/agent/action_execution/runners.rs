@@ -53,6 +53,81 @@ fn persisted_builtin_mcp_tool_result(result: &AgentToolResult) -> AgentToolResul
     mycopilot_core::builtin_capability_tool_result_persistence_projection(result)
 }
 
+const BUILTIN_MCP_APPROVED_INVOCATION_WATCHDOG: Duration = Duration::from_secs(65);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application::agent) enum BuiltinMcpToolResultCommitDisposition {
+    Committed,
+    CommittedAndAdvanced,
+    Terminalized,
+}
+
+async fn supervised_builtin_mcp_tool_result<F>(
+    approval: &mycopilot_core::AgentBuiltinMcpToolApproval,
+    timeout: Duration,
+    invocation: F,
+) -> AgentToolResult
+where
+    F: Future<Output = AgentResult<Value>> + Send + 'static,
+{
+    let mut task = tokio::spawn(invocation);
+    let invocation_result = match tokio::time::timeout(timeout, &mut task).await {
+        Ok(Ok(result)) => Some(result),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            None
+        }
+    };
+    match invocation_result {
+        Some(Ok(value)) => AgentToolResult {
+            exact_archive_file: None,
+            call_id: approval.identity.call_id.clone(),
+            tool: approval.identity.model_name.clone(),
+            ok: true,
+            result: Some(value),
+            error: None,
+        },
+        Some(Err(error))
+            if error
+                .details()
+                .and_then(|value| value.get("dispatchCertainty"))
+                .and_then(Value::as_str)
+                == Some("possibly_dispatched") =>
+        {
+            mycopilot_core::builtin_mcp_tool_outcome_unknown_result(approval)
+        }
+        Some(Err(error))
+            if error.is_cancelled()
+                && mcp_agent_error_dispatch_certainty(&error)
+                    == AgentMcpDispatchCertainty::DefinitelyNotDispatched =>
+        {
+            mycopilot_core::builtin_mcp_tool_cancelled_result(approval)
+        }
+        Some(Err(error)) if error.is_cancelled() => {
+            mycopilot_core::builtin_mcp_tool_outcome_unknown_result(approval)
+        }
+        Some(Err(error)) => AgentToolResult {
+            exact_archive_file: None,
+            call_id: approval.identity.call_id.clone(),
+            tool: approval.identity.model_name.clone(),
+            ok: false,
+            result: error.details().cloned().or_else(|| {
+                Some(serde_json::json!({
+                    "schemaVersion": 1,
+                    "type": "builtin_mcp_tool_approval",
+                    "status": "failed",
+                    "dispatchCertainty": "definitely_not_dispatched",
+                    "contentOmitted": true,
+                }))
+            }),
+            error: Some(error.to_string()),
+        },
+        None => mycopilot_core::builtin_mcp_tool_outcome_unknown_result(approval),
+    }
+}
+
 fn mcp_tool_result_output_truncated(result: &AgentToolResult) -> bool {
     result
         .result
@@ -857,54 +932,23 @@ impl AgentService {
                 return;
             }
             record.snapshot.status = PendingActionStatus::Executing;
-            match runtime
-                .invoke_approved_builtin_mcp_tool((*approval).clone(), grant, cancellation.clone())
-                .await
-            {
-                Ok(value) => AgentToolResult {
-                    exact_archive_file: None,
-                    call_id: approval.identity.call_id.clone(),
-                    tool: approval.identity.model_name.clone(),
-                    ok: true,
-                    result: Some(value),
-                    error: None,
+            let invocation_runtime = runtime.clone();
+            let invocation_approval = (*approval).clone();
+            let invocation_cancellation = cancellation.clone();
+            supervised_builtin_mcp_tool_result(
+                &approval,
+                BUILTIN_MCP_APPROVED_INVOCATION_WATCHDOG,
+                async move {
+                    invocation_runtime
+                        .invoke_approved_builtin_mcp_tool(
+                            invocation_approval,
+                            grant,
+                            invocation_cancellation,
+                        )
+                        .await
                 },
-                Err(error)
-                    if error
-                        .details()
-                        .and_then(|value| value.get("dispatchCertainty"))
-                        .and_then(Value::as_str)
-                        == Some("possibly_dispatched") =>
-                {
-                    mycopilot_core::builtin_mcp_tool_outcome_unknown_result(&approval)
-                }
-                Err(error)
-                    if error.is_cancelled()
-                        && mcp_agent_error_dispatch_certainty(&error)
-                            == AgentMcpDispatchCertainty::DefinitelyNotDispatched =>
-                {
-                    mycopilot_core::builtin_mcp_tool_cancelled_result(&approval)
-                }
-                Err(error) if error.is_cancelled() => {
-                    mycopilot_core::builtin_mcp_tool_outcome_unknown_result(&approval)
-                }
-                Err(error) => AgentToolResult {
-                    exact_archive_file: None,
-                    call_id: approval.identity.call_id.clone(),
-                    tool: approval.identity.model_name.clone(),
-                    ok: false,
-                    result: error.details().cloned().or_else(|| {
-                        Some(serde_json::json!({
-                            "schemaVersion": 1,
-                            "type": "builtin_mcp_tool_approval",
-                            "status": "failed",
-                            "dispatchCertainty": "definitely_not_dispatched",
-                            "contentOmitted": true,
-                        }))
-                    }),
-                    error: Some(error.to_string()),
-                },
-            }
+            )
+            .await
         };
         let final_pending_status = if result.ok {
             PendingActionStatus::Completed
@@ -933,20 +977,21 @@ impl AgentService {
         if let Some(continuation) = persisted_agent_input.tool_continuation.as_mut() {
             continuation.result = persisted_builtin_mcp_tool_result(&continuation.result);
         }
-        if self
-            .commit_audited_result_trace_with_continuation(
-                &record,
-                &persisted_agent_input,
-                final_pending_status,
-                None,
-                now_ms(),
-                &notifications,
-            )
-            .is_err()
-        {
-            self.unregister_cancellation_if_current(&run_id, &cancellation);
-            return;
+        match self.commit_builtin_mcp_tool_result_or_terminalize(
+            &record,
+            &persisted_agent_input,
+            final_pending_status,
+            &notifications,
+            &cancellation,
+        ) {
+            BuiltinMcpToolResultCommitDisposition::Committed => {}
+            BuiltinMcpToolResultCommitDisposition::CommittedAndAdvanced
+            | BuiltinMcpToolResultCommitDisposition::Terminalized => {
+                self.unregister_cancellation_if_current(&run_id, &cancellation);
+                return;
+            }
         }
+        self.emit_safe_builtin_mcp_tool_result(&notifications, &run_id, &result);
         self.run_action_continuation(
             record,
             agent_input,
@@ -956,6 +1001,162 @@ impl AgentService {
         )
         .await;
         self.unregister_cancellation_if_current(&run_id, &cancellation);
+    }
+
+    pub(in crate::application::agent) fn commit_builtin_mcp_tool_result_or_terminalize(
+        &self,
+        record: &PendingActionRecord,
+        persisted_agent_input: &AgentChatInput,
+        final_pending_status: PendingActionStatus,
+        notifications: &CoreServerNotificationSender,
+        cancellation: &AgentCancellationToken,
+    ) -> BuiltinMcpToolResultCommitDisposition {
+        let completed_at = now_ms();
+        match self.commit_audited_result_trace_with_continuation(
+            record,
+            persisted_agent_input,
+            final_pending_status,
+            None,
+            completed_at,
+            notifications,
+        ) {
+            Ok(()) => BuiltinMcpToolResultCommitDisposition::Committed,
+            Err(_) => {
+                let inspection = self.inspect_audited_result_trace_with_continuation(
+                    record,
+                    persisted_agent_input,
+                    final_pending_status,
+                    None,
+                    completed_at,
+                );
+                match inspection {
+                    Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                        BuiltinMcpToolResultCommitDisposition::Committed
+                    }
+                    Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                        BuiltinMcpToolResultCommitDisposition::CommittedAndAdvanced
+                    }
+                    Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted)
+                    | Ok(AgentPendingActionSettlementInspection::Diverged { .. })
+                    | Err(_) => {
+                        self.terminalize_builtin_mcp_tool_without_receipt(
+                            record,
+                            notifications,
+                            cancellation,
+                        );
+                        BuiltinMcpToolResultCommitDisposition::Terminalized
+                    }
+                }
+            }
+        }
+    }
+
+    pub(in crate::application::agent) fn emit_safe_builtin_mcp_tool_result(
+        &self,
+        notifications: &CoreServerNotificationSender,
+        run_id: &str,
+        result: &AgentToolResult,
+    ) {
+        let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+            run_id: run_id.to_string(),
+            result: persisted_builtin_mcp_tool_result(result),
+        }));
+    }
+
+    fn terminalize_builtin_mcp_tool_without_receipt(
+        &self,
+        record: &PendingActionRecord,
+        notifications: &CoreServerNotificationSender,
+        cancellation: &AgentCancellationToken,
+    ) {
+        const FAILURE_CODE: &str = "builtin_mcp_result_persistence_failed";
+        const FAILURE_MESSAGE: &str = "The sensitive built-in MCP Tool did not produce a durable terminal receipt. It will not be replayed; its external outcome is unknown.";
+        let run_id = &record.snapshot.run_id;
+        let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action
+        else {
+            self.unregister_cancellation_if_current(run_id, cancellation);
+            return;
+        };
+        let (outcome, result) = if record.snapshot.status == PendingActionStatus::Executing {
+            (
+                McpStartupActionTerminalOutcome::OutcomeUnknown,
+                mycopilot_core::builtin_mcp_tool_outcome_unknown_result(approval),
+            )
+        } else {
+            (
+                McpStartupActionTerminalOutcome::PayloadUnavailable,
+                mycopilot_core::builtin_mcp_tool_payload_unavailable_result(approval),
+            )
+        };
+        let mut terminalized = false;
+        let mut lost_terminal_fence = false;
+        for _ in 0..2 {
+            match self
+                .storage
+                .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                    &record.storage_id,
+                    pending_status_label(record.snapshot.status),
+                    outcome,
+                    now_ms(),
+                ) {
+                Ok(true) => {
+                    terminalized = true;
+                    break;
+                }
+                Ok(false) => {
+                    lost_terminal_fence = true;
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        if lost_terminal_fence {
+            self.unregister_cancellation_if_current(run_id, cancellation);
+            return;
+        }
+
+        self.invalidate_mcp_pending_payload(&record.snapshot.action);
+        self.pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&record.storage_id);
+        self.startup_recoverable_mcp_approvals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&record.storage_id);
+        self.finish_persisted_run_usage(run_id, AgentRunStatus::Failed);
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.invalidate_conversation_context_state(conversation_id);
+            self.release_conversation_turn_if_current(conversation_id, run_id);
+        }
+        self.release_turn_concurrency_permit(run_id);
+        if terminalized {
+            if let Some(assistant_message_id) = record.snapshot.assistant_message_id.as_deref() {
+                self.notify_durable_turn_observers(assistant_message_id);
+            }
+        }
+        self.discard_trace_snapshot(run_id);
+        self.discard_exact_running_context_window_snapshot(run_id);
+        self.unregister_cancellation_if_current(run_id, cancellation);
+
+        self.emit_safe_builtin_mcp_tool_result(notifications, run_id, &result);
+        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+            run_id: Some(run_id.clone()),
+            trace_sequence: None,
+            message: FAILURE_MESSAGE.to_string(),
+            recoverable: false,
+            code: Some(FAILURE_CODE.to_string()),
+            details: None,
+        }));
+        let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+            run_id: run_id.clone(),
+            success: false,
+            status: Some(AgentRunStatus::Failed),
+            content: Some(FAILURE_MESSAGE.to_string()),
+            usage: self.preview_cumulative_run_usage(run_id, None),
+            finish_reason: None,
+            proposed_actions: Vec::new(),
+        }));
     }
 
     pub(in crate::application::agent) fn queue_claimed_mcp_tool_execution(
@@ -3643,6 +3844,50 @@ impl AgentService {
 mod mcp_lifecycle_tests {
     use super::*;
 
+    fn builtin_mcp_approval() -> mycopilot_core::AgentBuiltinMcpToolApproval {
+        mycopilot_core::AgentBuiltinMcpToolApproval {
+            schema_version: mycopilot_core::BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION,
+            identity: mycopilot_core::BuiltinMcpToolApprovalIdentity {
+                action_id: "action".to_string(),
+                approval_id: "approval".to_string(),
+                run_id: "run".to_string(),
+                call_id: "call".to_string(),
+                capability_id: "browser_automation".to_string(),
+                capability_activation_id: "activation".to_string(),
+                managed_mcp_id: "builtin.browser_automation.mcp".to_string(),
+                package_name: "@playwright/mcp".to_string(),
+                package_version: "0.0.79".to_string(),
+                upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)),
+                manifest_digest: format!("sha256:{}", "2".repeat(64)),
+                policy_digest: format!("sha256:{}", "3".repeat(64)),
+                policy_revision: 1,
+                tool_id: "browser_evaluate".to_string(),
+                raw_name: "browser_evaluate".to_string(),
+                model_name: "browser_evaluate".to_string(),
+                upstream_schema_digest: format!("sha256:{}", "4".repeat(64)),
+                host_overlay_digest: format!("sha256:{}", "5".repeat(64)),
+                host_input_schema_digest: format!("sha256:{}", "6".repeat(64)),
+                arguments_digest: format!("sha256:{}", "7".repeat(64)),
+                resource_scope_digest: format!("sha256:{}", "8".repeat(64)),
+                origin: Some("https://fixture.invalid".to_string()),
+            },
+            capability_display_name: "Browser automation".to_string(),
+            tool_display_name: "Evaluate page script".to_string(),
+            call_reason: "Run the reviewed page script.".to_string(),
+            operation_category: "page_script_execution".to_string(),
+            resource_summary: mycopilot_core::BuiltinMcpToolResourceSummary {
+                scope: "page_script_execution".to_string(),
+                display_name: "Current managed page".to_string(),
+                file_basenames: Vec::new(),
+                origin: Some("https://fixture.invalid".to_string()),
+            },
+            risk_kinds: vec![mycopilot_core::BuiltinMcpToolRiskKind::PageScriptExecution],
+            created_at: 1,
+            expires_at: 901,
+            approval_status: AgentApprovalStatus::Approved,
+        }
+    }
+
     #[test]
     fn maps_mcp_outcomes_to_protocol_is_error_semantics() {
         for outcome in [
@@ -3698,6 +3943,65 @@ mod mcp_lifecycle_tests {
         assert_eq!(
             mcp_invocation_failure_stage(true, AgentMcpDispatchCertainty::PossiblyDispatched),
             AgentMcpInvocationFailureStage::Preflight
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_builtin_mcp_invocation_returns_authoritative_success() {
+        let approval = builtin_mcp_approval();
+        let result = supervised_builtin_mcp_tool_result(&approval, Duration::from_secs(1), async {
+            Ok(serde_json::json!({ "value": "fixture" }))
+        })
+        .await;
+
+        assert!(result.ok);
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("value"))
+                .and_then(Value::as_str),
+            Some("fixture")
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_builtin_mcp_invocation_timeout_is_outcome_unknown() {
+        let approval = builtin_mcp_approval();
+        let result = supervised_builtin_mcp_tool_result(
+            &approval,
+            Duration::from_millis(1),
+            std::future::pending::<AgentResult<Value>>(),
+        )
+        .await;
+
+        assert!(!result.ok);
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("outcome_unknown")
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_builtin_mcp_invocation_panic_is_outcome_unknown() {
+        let approval = builtin_mcp_approval();
+        let result = supervised_builtin_mcp_tool_result(&approval, Duration::from_secs(1), async {
+            panic!("fixture provider panic")
+        })
+        .await;
+
+        assert!(!result.ok);
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("dispatchCertainty"))
+                .and_then(Value::as_str),
+            Some("possibly_dispatched")
         );
     }
 }

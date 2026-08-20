@@ -63,7 +63,8 @@ const riskKeys: Readonly<Record<AgentBuiltinMcpToolRiskKind, TranslationKey>> = 
 }
 
 const resourceScopeKeys: Readonly<Record<string, TranslationKey>> = {
-  managed_browser_profile: 'agent.builtinMcpApproval.resource.managedBrowserProfile'
+  managed_browser_profile: 'agent.builtinMcpApproval.resource.managedBrowserProfile',
+  managed_surface: 'agent.builtinMcpApproval.resource.managedSurface'
 }
 
 function currentUnixSeconds(): number {

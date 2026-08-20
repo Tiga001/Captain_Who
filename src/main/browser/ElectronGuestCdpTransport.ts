@@ -21,6 +21,17 @@ interface CdpTargetInfo {
   url: string
 }
 
+/**
+ * Main-only identity used by the private SurfaceGroup compositor. The values are synthetic to
+ * this one admitted guest transport and must never cross Renderer IPC.
+ */
+export interface ElectronGuestCdpIdentity {
+  browserContextId: string
+  sessionId: string
+  targetId: string
+  targetInfo: Readonly<CdpTargetInfo>
+}
+
 interface ChildReadiness {
   readonly promise: Promise<boolean>
   settle(ready: boolean): void
@@ -42,16 +53,26 @@ const MAX_CDP_CONTAINER_ITEMS = 4_096
 const MAX_CDP_OBJECT_PROPERTIES = 512
 const MAX_CDP_PROPERTY_NAME_BYTES = 256
 const MAX_CDP_VALUE_STRING_BYTES = 1 * 1_024 * 1_024
+const MAX_ARTIFACT_BINARY_BYTES = 64 * 1_024 * 1_024
+const MAX_ARTIFACT_BASE64_BYTES = Math.ceil(MAX_ARTIFACT_BINARY_BYTES / 3) * 4
+const MAX_ARTIFACT_CDP_PAYLOAD_BYTES = MAX_ARTIFACT_BASE64_BYTES + 1 * 1_024 * 1_024
 const MAX_CDP_EVENT_QUEUE = 1_024
 const MAX_CDP_EVENTS_PER_SECOND = 4_096
 const MAX_CHILD_SESSIONS = 64
 const FOCUS_PROBE_TIMEOUT_MS = 500
+const MAX_MANAGED_COOKIES = 512
+const MAX_MANAGED_COOKIE_BYTES = 1024 * 1024
+const MAX_MANAGED_COOKIE_FIELD_BYTES = 64 * 1024
+const MAX_MANAGED_COOKIE_URL_BYTES = 8 * 1024
 
 export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private readonly childSessionIds = new Set<string>()
   private readonly childReadiness = new Map<string, ChildReadiness>()
   private readonly childFrameIds = new Map<string, string>()
+  private readonly childOwnerFrameIds = new Map<string, string>()
+  private readonly childParentSessions = new Map<string, string>()
   private readonly childTargetIds = new Map<string, string>()
+  private readonly childTargetTypes = new Map<string, 'iframe' | 'worker'>()
   private readonly debuggerClient: Debugger
   private readonly focusWorldName = `mycopilot-focus-${randomUUID()}`
   private readonly syntheticSessionId = `mycopilot-page-${randomUUID()}`
@@ -139,6 +160,15 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     // The broker performs the asynchronous debugger attach before returning this transport.
   }
 
+  managedIdentity(): ElectronGuestCdpIdentity {
+    return {
+      browserContextId: this.targetInfo.browserContextId,
+      sessionId: this.syntheticSessionId,
+      targetId: this.targetInfo.targetId,
+      targetInfo: { ...this.targetInfo }
+    }
+  }
+
   send(message: object): void {
     if (this.closed) return
     const request = parseRequest(message)
@@ -163,7 +193,9 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
 
     let safeParams: CdpParams
     try {
-      safeParams = isRecord(params) ? cloneBoundedCdpRecord(params) : {}
+      safeParams = isRecord(params)
+        ? cloneBoundedCdpRecord(params, cdpPayloadBudget(method, 'event'))
+        : {}
     } catch {
       this.terminate('cdp_event_budget_exceeded')
       return
@@ -177,9 +209,16 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       }
       this.childSessionIds.add(attached.sessionId)
       this.childTargetIds.set(attached.sessionId, attached.targetId)
+      this.childTargetTypes.set(attached.sessionId, attached.type)
+      this.childParentSessions.set(attached.sessionId, sessionId)
+      if (attached.ownerFrameId) {
+        this.childOwnerFrameIds.set(attached.sessionId, attached.ownerFrameId)
+      }
       this.childReadiness.set(
         attached.sessionId,
-        attached.waitingForDebugger ? createChildReadiness() : resolvedChildReadiness()
+        attached.type === 'worker' || !attached.waitingForDebugger
+          ? resolvedChildReadiness()
+          : createChildReadiness()
       )
     }
 
@@ -208,11 +247,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     if (method === 'Target.detachedFromTarget') {
       const childSessionId = safeParams.sessionId
       if (typeof childSessionId === 'string') {
-        this.childSessionIds.delete(childSessionId)
-        this.childFrameIds.delete(childSessionId)
-        this.childTargetIds.delete(childSessionId)
-        this.childReadiness.get(childSessionId)?.settle(false)
-        this.childReadiness.delete(childSessionId)
+        this.retireChildSession(childSessionId)
       }
     }
   }
@@ -220,7 +255,13 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private validateAttachedChild(
     params: CdpParams,
     parentSessionId: string
-  ): { sessionId: string; targetId: string; waitingForDebugger: boolean } | null {
+  ): {
+    ownerFrameId?: string
+    sessionId: string
+    targetId: string
+    type: 'iframe' | 'worker'
+    waitingForDebugger: boolean
+  } | null {
     const childSessionId = params.sessionId
     const targetInfo = params.targetInfo
     if (
@@ -228,7 +269,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       childSessionId.length === 0 ||
       childSessionId.length > MAX_SESSION_ID_LENGTH ||
       !isRecord(targetInfo) ||
-      targetInfo.type !== 'iframe' ||
+      (targetInfo.type !== 'iframe' && targetInfo.type !== 'worker') ||
       targetInfo.attached !== true ||
       typeof targetInfo.targetId !== 'string' ||
       targetInfo.targetId.length === 0 ||
@@ -241,7 +282,21 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     const expectedParentTarget = parentSessionId
       ? this.childTargetIds.get(parentSessionId)
       : this.targetInfo.targetId
-    if (!expectedParentTarget || targetInfo.parentFrameId !== expectedParentTarget) return null
+    const expectedOwnerFrame = parentSessionId
+      ? this.childTargetTypes.get(parentSessionId) === 'iframe'
+        ? this.childTargetIds.get(parentSessionId)
+        : this.childOwnerFrameIds.get(parentSessionId)
+      : this.targetInfo.targetId
+    if (!expectedParentTarget) return null
+    if (
+      (targetInfo.type === 'iframe' && targetInfo.parentFrameId !== expectedParentTarget) ||
+      (targetInfo.type === 'worker' &&
+        (!expectedOwnerFrame ||
+          (targetInfo.parentFrameId !== undefined &&
+            targetInfo.parentFrameId !== expectedOwnerFrame)))
+    ) {
+      return null
+    }
     if (
       this.childSessionIds.has(childSessionId) ||
       [...this.childTargetIds.values()].includes(targetInfo.targetId)
@@ -249,8 +304,11 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       return null
     }
     return {
+      ownerFrameId:
+        targetInfo.type === 'iframe' ? targetInfo.targetId : (expectedOwnerFrame as string),
       sessionId: childSessionId,
       targetId: targetInfo.targetId,
+      type: targetInfo.type,
       waitingForDebugger: params.waitingForDebugger
     }
   }
@@ -268,7 +326,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private async dispatch(request: CdpRequest): Promise<void> {
     try {
       const rawResult = await this.dispatchCommand(request)
-      const result = cloneBoundedCdpPayload(rawResult === undefined ? {} : rawResult)
+      const result = cloneBoundedCdpPayload(
+        rawResult === undefined ? {} : rawResult,
+        cdpPayloadBudget(request.method, 'response')
+      )
       this.respond(request, { result })
     } catch (error) {
       this.respond(request, {
@@ -291,6 +352,21 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     ) {
       throw new CdpPolicyError('Unknown target session')
     }
+    const childSessionId =
+      request.sessionId === this.syntheticSessionId ? undefined : request.sessionId
+    if (request.method === 'Target.detachFromTarget') {
+      const detachedSessionId = request.params?.sessionId
+      if (
+        !request.params ||
+        !hasExactOwnKeys(request.params, ['sessionId']) ||
+        typeof detachedSessionId !== 'string' ||
+        !this.childSessionIds.has(detachedSessionId) ||
+        this.childParentSessions.get(detachedSessionId) !== (childSessionId ?? '')
+      ) {
+        throw new CdpPolicyError('Unknown target session')
+      }
+      return await this.debuggerClient.sendCommand(request.method, request.params, childSessionId)
+    }
     if (isForbiddenTargetCommand(request.method)) {
       throw new CdpPolicyError('Target enumeration or creation is not permitted')
     }
@@ -308,9 +384,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     if (request.method.startsWith('Browser.')) {
       throw new CdpPolicyError('Browser-wide commands are not permitted')
     }
+    if (request.method.startsWith('Storage.')) {
+      throw new CdpPolicyError('Storage commands require the managed BrowserContext session')
+    }
 
-    const childSessionId =
-      request.sessionId === this.syntheticSessionId ? undefined : request.sessionId
     if (request.method === 'Target.setAutoAttach') {
       return await this.debuggerClient.sendCommand(
         request.method,
@@ -350,6 +427,13 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
         }
         return await this.insertText({ text: request.params.text }, childSessionId)
       }
+    }
+    if (request.method === 'Page.printToPDF') {
+      // Electron 39 does not expose Page.printToPDF on an admitted webview debugger target, and
+      // its native WebContents.printToPDF pipeline hangs on a real page containing an OOPIF.
+      // Fail deterministically instead of dispatching a command that cannot complete or faking a
+      // screenshot-based PDF with materially different print/CSS semantics.
+      throw new CdpPolicyError('browser.pdf_unavailable')
     }
     const result = await this.debuggerClient.sendCommand(
       request.method,
@@ -407,10 +491,12 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   }
 
   private async findFocusedChildSession(): Promise<string | undefined> {
-    const probes = [...this.childSessionIds].map((sessionId): ChildFocusProbe | null => {
-      const frameId = this.childFrameIds.get(sessionId)
-      return frameId ? { sessionId, frameId } : null
-    })
+    const probes = [...this.childSessionIds]
+      .filter((sessionId) => this.childTargetTypes.get(sessionId) === 'iframe')
+      .map((sessionId): ChildFocusProbe | null => {
+        const frameId = this.childFrameIds.get(sessionId)
+        return frameId ? { sessionId, frameId } : null
+      })
     if (probes.some((probe) => probe === null)) {
       // A live child without an exact navigated frame identity may own focus. Falling back to the
       // top document in that state could deliver text to the wrong renderer.
@@ -427,8 +513,43 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
         }))
       )
     ).filter((probe) => probe.focused)
-    if (focused.length > 1) throw new CdpPolicyError('frame_input_delivery_failed')
-    return focused[0]?.sessionId
+    if (focused.length <= 1) return focused[0]?.sessionId
+    const deepest = focused.filter(
+      (candidate) =>
+        !focused.some(
+          (other) =>
+            other.sessionId !== candidate.sessionId &&
+            this.isChildSessionAncestor(candidate.sessionId, other.sessionId)
+        )
+    )
+    if (deepest.length !== 1) throw new CdpPolicyError('frame_input_delivery_failed')
+    return deepest[0]?.sessionId
+  }
+
+  private isChildSessionAncestor(ancestor: string, descendant: string): boolean {
+    let current = this.childParentSessions.get(descendant)
+    const visited = new Set<string>()
+    while (current) {
+      if (current === ancestor) return true
+      if (visited.has(current)) return false
+      visited.add(current)
+      current = this.childParentSessions.get(current)
+    }
+    return false
+  }
+
+  private retireChildSession(sessionId: string): void {
+    for (const [childSessionId, parentSessionId] of [...this.childParentSessions]) {
+      if (parentSessionId === sessionId) this.retireChildSession(childSessionId)
+    }
+    this.childSessionIds.delete(sessionId)
+    this.childFrameIds.delete(sessionId)
+    this.childOwnerFrameIds.delete(sessionId)
+    this.childParentSessions.delete(sessionId)
+    this.childTargetIds.delete(sessionId)
+    this.childTargetTypes.delete(sessionId)
+    this.childReadiness.get(sessionId)?.settle(false)
+    this.childReadiness.delete(sessionId)
   }
 
   private async probeChildFocusInIsolatedWorld(probe: ChildFocusProbe): Promise<boolean> {
@@ -482,6 +603,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
           throw new CdpPolicyError('Downloads are not permitted')
         }
         return {}
+      case 'Storage.getCookies':
+      case 'Storage.setCookies':
+      case 'Storage.clearCookies':
+        return await this.dispatchManagedCookieCommand(method, params)
       case 'Target.setAutoAttach':
         if (params?.autoAttach !== true || params.flatten !== true) {
           throw new CdpPolicyError('Only flattened automatic attachment is permitted')
@@ -501,6 +626,43 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
         }
         throw new CdpPolicyError('Unsupported browser-level command')
     }
+  }
+
+  private async dispatchManagedCookieCommand(
+    method: 'Storage.getCookies' | 'Storage.setCookies' | 'Storage.clearCookies',
+    params: CdpParams | undefined
+  ): Promise<unknown> {
+    const contextProvided = params?.browserContextId !== undefined
+    const expectedKeys = method === 'Storage.setCookies' ? ['cookies'] : []
+    const expectedKeysWithContext = [...expectedKeys, 'browserContextId']
+    if (
+      !params ||
+      (!hasExactOwnKeys(params, expectedKeys) &&
+        !hasExactOwnKeys(params, expectedKeysWithContext)) ||
+      (contextProvided && params.browserContextId !== this.targetInfo.browserContextId)
+    ) {
+      throw new CdpPolicyError('Cookie command is not bound to the managed BrowserContext')
+    }
+    if (method === 'Storage.setCookies') validateManagedCookieParams(params.cookies)
+    // Playwright knows only the Host-owned synthetic BrowserContext identity. Chromium does not:
+    // omitting its optional browserContextId makes the command act on this exact debugger guest's
+    // isolated Electron partition, while the equality check above prevents a caller from widening
+    // the synthetic authority presented by this transport.
+    // Electron's WebContents debugger is a page session rather than Chromium's browser session;
+    // Storage.* is rejected there. Network's cookie trio has the same CookieParam/Cookie result
+    // shape and operates on this exact admitted guest's isolated partition.
+    const networkMethod =
+      method === 'Storage.getCookies'
+        ? 'Network.getAllCookies'
+        : method === 'Storage.setCookies'
+          ? 'Network.setCookies'
+          : 'Network.clearBrowserCookies'
+    const result = await this.debuggerClient.sendCommand(
+      networkMethod,
+      method === 'Storage.setCookies' ? { cookies: params.cookies } : {}
+    )
+    if (method === 'Storage.getCookies') validateManagedCookieResult(result)
+    return result
   }
 
   private assertSelectedTarget(params?: CdpParams): void {
@@ -606,7 +768,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     this.childReadiness.clear()
     this.childSessionIds.clear()
     this.childFrameIds.clear()
+    this.childOwnerFrameIds.clear()
+    this.childParentSessions.clear()
     this.childTargetIds.clear()
+    this.childTargetTypes.clear()
     this.eventQueue = []
     this.handleClosed(this)
     this.closeReason = reason
@@ -658,6 +823,116 @@ function isForbiddenTargetCommand(method: string): boolean {
   )
 }
 
+const MANAGED_COOKIE_PARAM_KEYS = new Set([
+  'domain',
+  'expires',
+  'httpOnly',
+  'name',
+  'partitionKey',
+  'path',
+  'priority',
+  'sameSite',
+  'secure',
+  'sourcePort',
+  'sourceScheme',
+  'url',
+  'value'
+])
+
+function validateManagedCookieParams(value: unknown): void {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_MANAGED_COOKIES ||
+    encodedJsonBytes(value) > MAX_MANAGED_COOKIE_BYTES
+  ) {
+    throw new CdpPolicyError('Managed cookie payload exceeds its limit')
+  }
+  for (const cookie of value) validateManagedCookieParam(cookie)
+}
+
+function validateManagedCookieParam(value: unknown): void {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((key) => !MANAGED_COOKIE_PARAM_KEYS.has(key)) ||
+    !boundedCookieString(value.name, MAX_MANAGED_COOKIE_FIELD_BYTES) ||
+    !boundedCookieString(value.value, MAX_MANAGED_COOKIE_FIELD_BYTES) ||
+    !optionalBoundedCookieString(value.url, MAX_MANAGED_COOKIE_URL_BYTES) ||
+    !optionalBoundedCookieString(value.domain, MAX_MANAGED_COOKIE_URL_BYTES) ||
+    !optionalBoundedCookieString(value.path, MAX_MANAGED_COOKIE_URL_BYTES) ||
+    (value.secure !== undefined && typeof value.secure !== 'boolean') ||
+    (value.httpOnly !== undefined && typeof value.httpOnly !== 'boolean') ||
+    (value.sameSite !== undefined &&
+      value.sameSite !== 'Strict' &&
+      value.sameSite !== 'Lax' &&
+      value.sameSite !== 'None') ||
+    (value.expires !== undefined &&
+      (typeof value.expires !== 'number' || !Number.isFinite(value.expires))) ||
+    (value.priority !== undefined &&
+      value.priority !== 'Low' &&
+      value.priority !== 'Medium' &&
+      value.priority !== 'High') ||
+    (value.sourceScheme !== undefined &&
+      value.sourceScheme !== 'Unset' &&
+      value.sourceScheme !== 'NonSecure' &&
+      value.sourceScheme !== 'Secure') ||
+    (value.sourcePort !== undefined &&
+      (!Number.isSafeInteger(value.sourcePort) ||
+        (Number(value.sourcePort) !== -1 &&
+          (Number(value.sourcePort) < 1 || Number(value.sourcePort) > 65_535)))) ||
+    !validManagedCookiePartitionKey(value.partitionKey)
+  ) {
+    throw new CdpPolicyError('Invalid managed cookie payload')
+  }
+}
+
+function validManagedCookiePartitionKey(value: unknown): boolean {
+  if (value === undefined) return true
+  return (
+    isRecord(value) &&
+    hasExactOwnKeys(value, ['hasCrossSiteAncestor', 'topLevelSite']) &&
+    boundedCookieString(value.topLevelSite, MAX_MANAGED_COOKIE_URL_BYTES) &&
+    typeof value.hasCrossSiteAncestor === 'boolean'
+  )
+}
+
+function validateManagedCookieResult(value: unknown): void {
+  if (!isRecord(value) || !hasExactOwnKeys(value, ['cookies']) || !Array.isArray(value.cookies)) {
+    throw new CdpPolicyError('Invalid managed cookie response')
+  }
+  if (
+    value.cookies.length > MAX_MANAGED_COOKIES ||
+    value.cookies.some((cookie) => !isRecord(cookie)) ||
+    encodedJsonBytes(value.cookies) > MAX_MANAGED_COOKIE_BYTES
+  ) {
+    throw new CdpPolicyError('Managed cookie response exceeds its limit')
+  }
+}
+
+function boundedCookieString(value: unknown, maxBytes: number): value is string {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes
+}
+
+function optionalBoundedCookieString(value: unknown, maxBytes: number): boolean {
+  return value === undefined || boundedCookieString(value, maxBytes)
+}
+
+function encodedJsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8')
+  } catch {
+    throw new CdpPolicyError('Invalid managed cookie payload')
+  }
+}
+
+function hasExactOwnKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const sortedExpected = [...expected].sort()
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  )
+}
+
 function parseRequest(value: object): CdpRequest | null {
   if (!isRecord(value)) return null
   if (!Number.isSafeInteger(value.id) || (value.id as number) < 0) return null
@@ -706,32 +981,82 @@ function withoutTextInsertion(params: CdpParams): CdpParams {
   return forwarded
 }
 
-function cloneBoundedCdpRecord(value: Record<string, unknown>): CdpParams {
-  const cloned = cloneBoundedCdpPayload(value)
+interface CdpPayloadBudget {
+  maxContainerItems?: number
+  maxNodes?: number
+  maxPayloadBytes: number
+  maxStringBytes: number
+  tooLargeMessage: string
+}
+
+function cdpPayloadBudget(
+  method: string,
+  direction: 'event' | 'response'
+): CdpPayloadBudget | undefined {
+  const artifactBearing =
+    (direction === 'response' &&
+      (method === 'Page.captureScreenshot' ||
+        method === 'Network.getResponseBody' ||
+        method === 'IO.read')) ||
+    (direction === 'event' && method === 'Page.screencastFrame')
+  if (artifactBearing) {
+    return {
+      maxPayloadBytes: MAX_ARTIFACT_CDP_PAYLOAD_BYTES,
+      maxStringBytes: MAX_ARTIFACT_BASE64_BYTES,
+      tooLargeMessage: 'artifact_too_large'
+    }
+  }
+  if (
+    direction === 'response' &&
+    (method === 'Accessibility.getFullAXTree' ||
+      method === 'Accessibility.getPartialAXTree' ||
+      method === 'Accessibility.queryAXTree')
+  ) {
+    return {
+      maxContainerItems: 65_536,
+      maxNodes: 262_144,
+      maxPayloadBytes: MAX_CDP_PAYLOAD_BYTES,
+      maxStringBytes: MAX_CDP_VALUE_STRING_BYTES,
+      tooLargeMessage: 'output_too_large'
+    }
+  }
+  return undefined
+}
+
+function cloneBoundedCdpRecord(
+  value: Record<string, unknown>,
+  budget?: CdpPayloadBudget
+): CdpParams {
+  const cloned = cloneBoundedCdpPayload(value, budget)
   if (!isRecord(cloned)) throw new CdpPolicyError('Invalid CDP payload')
   return cloned
 }
 
-function cloneBoundedCdpPayload(value: unknown): unknown {
+function cloneBoundedCdpPayload(value: unknown, budget?: CdpPayloadBudget): unknown {
   let nodes = 0
   let encodedBytes = 0
+  const maxPayloadBytes = budget?.maxPayloadBytes ?? MAX_CDP_PAYLOAD_BYTES
+  const maxStringBytes = budget?.maxStringBytes ?? MAX_CDP_VALUE_STRING_BYTES
+  const maxNodes = budget?.maxNodes ?? MAX_CDP_PAYLOAD_NODES
+  const maxContainerItems = budget?.maxContainerItems ?? MAX_CDP_CONTAINER_ITEMS
+  const tooLargeMessage = budget?.tooLargeMessage ?? 'CDP payload exceeds managed limits'
   const ancestors = new WeakSet<object>()
   const addBytes = (amount: number): void => {
     encodedBytes += amount
-    if (encodedBytes > MAX_CDP_PAYLOAD_BYTES) {
-      throw new CdpPolicyError('CDP payload exceeds managed limits')
+    if (encodedBytes > maxPayloadBytes) {
+      throw new CdpPolicyError(tooLargeMessage)
     }
   }
-  const addString = (current: string, fieldLimit = MAX_CDP_VALUE_STRING_BYTES): void => {
+  const addString = (current: string, fieldLimit = maxStringBytes): void => {
     if (Buffer.byteLength(current, 'utf8') > fieldLimit) {
-      throw new CdpPolicyError('CDP payload exceeds managed limits')
+      throw new CdpPolicyError(tooLargeMessage)
     }
     addBytes(jsonEncodedStringBytes(current))
   }
   const clone = (current: unknown, depth: number): unknown => {
     nodes += 1
-    if (depth > MAX_CDP_PAYLOAD_DEPTH || nodes > MAX_CDP_PAYLOAD_NODES) {
-      throw new CdpPolicyError('CDP payload exceeds managed limits')
+    if (depth > MAX_CDP_PAYLOAD_DEPTH || nodes > maxNodes) {
+      throw new CdpPolicyError(tooLargeMessage)
     }
     if (current === null) {
       addBytes(4)
@@ -755,16 +1080,16 @@ function cloneBoundedCdpPayload(value: unknown): unknown {
     ancestors.add(current)
     try {
       if (Array.isArray(current)) {
-        if (current.length > MAX_CDP_CONTAINER_ITEMS) {
-          throw new CdpPolicyError('CDP payload exceeds managed limits')
+        if (current.length > maxContainerItems) {
+          throw new CdpPolicyError(tooLargeMessage)
         }
         addBytes(2 + Math.max(0, current.length - 1))
         const copy: unknown[] = []
         for (const child of current) {
           if (child === undefined) {
             nodes += 1
-            if (nodes > MAX_CDP_PAYLOAD_NODES) {
-              throw new CdpPolicyError('CDP payload exceeds managed limits')
+            if (nodes > maxNodes) {
+              throw new CdpPolicyError(tooLargeMessage)
             }
             addBytes(4)
             copy.push(null)
@@ -786,7 +1111,7 @@ function cloneBoundedCdpPayload(value: unknown): unknown {
         if (!Object.hasOwn(current, key)) continue
         properties += 1
         if (properties > MAX_CDP_OBJECT_PROPERTIES) {
-          throw new CdpPolicyError('CDP payload exceeds managed limits')
+          throw new CdpPolicyError(tooLargeMessage)
         }
         const descriptor = Object.getOwnPropertyDescriptor(current, key)
         if (!descriptor || descriptor.get || descriptor.set) {

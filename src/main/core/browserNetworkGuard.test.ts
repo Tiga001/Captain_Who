@@ -188,6 +188,226 @@ function begin(harness: ReturnType<typeof createHarness>, signal?: AbortSignal) 
 }
 
 describe('BrowserNetworkGuard', () => {
+  it('binds a zero-tab tabs-new authority to one exact created guest before load', async () => {
+    const claimCreatedGuest = vi.fn(async () => undefined)
+    const downloadLease: BrowserDownloadToolLease = {
+      artifacts: vi.fn(() => []),
+      claimCreatedGuest,
+      expectTargetClose: vi.fn(),
+      finish: vi.fn(),
+      markDispatched: vi.fn(),
+      ready: vi.fn(async () => undefined),
+      settle: vi.fn(async () => [])
+    }
+    const downloadBroker = {
+      beginTargetCreationTool: vi.fn(() => downloadLease),
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 })),
+      unregisterGuest: vi.fn()
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+    const context = { ...CONTEXT, callId: 'tabs-new-call', triggerToolName: 'browser_tabs' }
+    const lease = harness.guard.beginTargetCreationOperation({
+      authorizationContext: context,
+      parentRequestId: 'tabs-new-parent'
+    })
+    await lease.ready()
+    const authority = await lease.beginTargetCreationAuthority({
+      action: 'new',
+      activationId: context.activationId,
+      capabilityId: context.capabilityId,
+      runId: context.runId,
+      toolCallId: context.callId,
+      toolId: context.triggerToolName,
+      url: 'https://public.test/new'
+    })
+    lease.markDispatched()
+    const created = createGuest(harness.guest.session, 71)
+    harness.guard.registerGuest({ generation: 2, guest: created, surfaceId: 'created-surface' })
+    await authority.claim({ generation: 2, guest: created, surfaceId: 'created-surface' })
+    expect(claimCreatedGuest).toHaveBeenCalledWith({
+      action: 'new',
+      generation: 2,
+      guest: created,
+      surfaceId: 'created-surface'
+    })
+    await expect(
+      lease.beginTargetCreationAuthority({
+        action: 'new',
+        activationId: context.activationId,
+        capabilityId: context.capabilityId,
+        runId: context.runId,
+        toolCallId: context.callId,
+        toolId: context.triggerToolName,
+        url: 'https://public.test/second'
+      })
+    ).rejects.toThrow('browser.network_guard.target_creation_capacity')
+    lease.finish()
+    expect(harness.guard.snapshot().activeOperations).toBe(0)
+    await harness.guard.shutdown()
+  })
+
+  it('admits only the exact about:blank target bootstrap without URL risk preflight', async () => {
+    const harness = createHarness(undefined, ['93.184.216.34'])
+    const context = { ...CONTEXT, callId: 'tabs-blank-call', triggerToolName: 'browser_tabs' }
+    const lease = harness.guard.beginTargetCreationOperation({
+      authorizationContext: context,
+      parentRequestId: 'tabs-blank-parent'
+    })
+    const authority = await lease.beginTargetCreationAuthority({
+      action: 'new',
+      activationId: context.activationId,
+      capabilityId: context.capabilityId,
+      runId: context.runId,
+      toolCallId: context.callId,
+      toolId: context.triggerToolName,
+      url: 'about:blank'
+    })
+
+    expect(harness.resolver.calls).toBe(0)
+    expect(harness.authorizer.requests).toEqual([])
+    lease.markDispatched()
+    const created = createGuest(harness.guest.session, 73)
+    harness.guard.registerGuest({ generation: 1, guest: created, surfaceId: 'blank-created' })
+    await expect(
+      authority.claim({ generation: 1, guest: created, surfaceId: 'blank-created' })
+    ).resolves.toBeUndefined()
+    authority.finish()
+    lease.finish()
+    await harness.guard.shutdown()
+  })
+
+  it('revokes a targetless creation authority on caller cancellation before any guest claim', async () => {
+    const downloadLease: BrowserDownloadToolLease = {
+      artifacts: vi.fn(() => []),
+      claimCreatedGuest: vi.fn(async () => undefined),
+      expectTargetClose: vi.fn(),
+      finish: vi.fn(),
+      markDispatched: vi.fn(),
+      ready: vi.fn(async () => undefined),
+      settle: vi.fn(async () => [])
+    }
+    const downloadBroker = {
+      beginTargetCreationTool: vi.fn(() => downloadLease),
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 })),
+      unregisterGuest: vi.fn()
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+    const controller = new AbortController()
+    const context = { ...CONTEXT, callId: 'cancelled-new', triggerToolName: 'browser_tabs' }
+    const lease = harness.guard.beginTargetCreationOperation({
+      authorizationContext: context,
+      parentRequestId: 'cancelled-parent',
+      signal: controller.signal
+    })
+    const authority = await lease.beginTargetCreationAuthority({
+      action: 'new',
+      activationId: context.activationId,
+      capabilityId: context.capabilityId,
+      runId: context.runId,
+      toolCallId: context.callId,
+      toolId: context.triggerToolName,
+      url: 'https://public.test/cancelled'
+    })
+    lease.markDispatched()
+    controller.abort('task_cancelled')
+    expect(harness.guard.snapshot().activeOperations).toBe(0)
+    expect(downloadLease.finish).toHaveBeenCalledOnce()
+
+    const created = createGuest(harness.guest.session, 72)
+    harness.guard.registerGuest({ generation: 1, guest: created, surfaceId: 'late-created' })
+    await expect(
+      authority.claim({ generation: 1, guest: created, surfaceId: 'late-created' })
+    ).rejects.toThrow('browser.network_guard.target_creation_unavailable')
+    await harness.guard.shutdown()
+  })
+
+  it('grants bounded exact popup children but gives manual popup callbacks no authority', async () => {
+    const claimCreatedGuest = vi.fn(async () => undefined)
+    const downloadLease: BrowserDownloadToolLease = {
+      artifacts: vi.fn(() => []),
+      claimCreatedGuest,
+      expectTargetClose: vi.fn(),
+      finish: vi.fn(),
+      markDispatched: vi.fn(),
+      ready: vi.fn(async () => undefined),
+      settle: vi.fn(async () => [])
+    }
+    const downloadBroker = {
+      beginTool: vi.fn(() => downloadLease),
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 })),
+      unregisterGuest: vi.fn()
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+    const context = { ...CONTEXT, triggerToolName: 'browser_click' }
+    const lease = harness.guard.beginOperation(harness.guest, {
+      authorizationContext: context,
+      parentRequestId: 'popup-parent'
+    })
+    await lease.ready()
+    lease.markDispatched()
+    const claimedSurfaces: string[] = []
+    const popupSurfaces = ['popup-one', 'popup-two', 'popup-three', 'popup-four', 'popup-five']
+    for (const [index, surfaceId] of popupSurfaces.entries()) {
+      harness.guard.handleWindowOpen(
+        harness.guest,
+        `https://public.test/${surfaceId}`,
+        async (authority) => {
+          expect(authority?.action).toBe('popup')
+          const popup = createGuest(harness.guest.session, 80 + index)
+          harness.guard.registerGuest({ generation: 1, guest: popup, surfaceId })
+          await authority?.claim({ generation: 1, guest: popup, surfaceId })
+          claimedSurfaces.push(surfaceId)
+        }
+      )
+    }
+    await vi.waitFor(() => expect(claimedSurfaces).toHaveLength(4))
+    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
+    expect([...claimedSurfaces].sort()).toEqual([...popupSurfaces.slice(0, 4)].sort())
+    expect(claimCreatedGuest).toHaveBeenCalledTimes(4)
+    lease.finish()
+
+    const manualCallback = vi.fn(async (authority?: unknown) => {
+      expect(authority).toBeUndefined()
+    })
+    harness.guard.handleWindowOpen(
+      harness.guest,
+      'https://public.test/manual-popup',
+      manualCallback
+    )
+    await vi.waitFor(() => expect(manualCallback).toHaveBeenCalledOnce())
+    await harness.guard.shutdown()
+  })
+
   it('cancels exact-guest main-frame requests while a sensitive document fence is active', async () => {
     const harness = createHarness(undefined, ['127.0.0.1'], {}, 'host_boundaries_only')
     const fence = harness.guard.beginMainFrameNavigationFence(harness.guest, 1)
@@ -232,6 +452,8 @@ describe('BrowserNetworkGuard', () => {
 
   it('records an OutcomeUnknown when a managed download fails after dispatch', async () => {
     const downloadLease: BrowserDownloadToolLease = {
+      claimCreatedGuest: vi.fn(async () => undefined),
+      expectTargetClose: vi.fn(),
       markDispatched: vi.fn(),
       settle: vi.fn(async () => {
         throw new BrowserDownloadBrokerError('browser.download.too_large', 'possibly_dispatched')
@@ -270,10 +492,52 @@ describe('BrowserNetworkGuard', () => {
     expect(downloadLease.finish).toHaveBeenCalledOnce()
   })
 
+  it('treats one exact planned tab close as normal completion while crashes remain fail-closed', async () => {
+    const expectTargetClose = vi.fn()
+    const downloadLease: BrowserDownloadToolLease = {
+      artifacts: vi.fn(() => []),
+      claimCreatedGuest: vi.fn(async () => undefined),
+      expectTargetClose,
+      finish: vi.fn(),
+      markDispatched: vi.fn(),
+      ready: vi.fn(async () => undefined),
+      settle: vi.fn(async () => [])
+    }
+    const downloadBroker = {
+      beginTool: vi.fn(() => downloadLease),
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 })),
+      unregisterGuest: vi.fn()
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+    const lease = begin(harness)
+    lease.expectTargetClose({ surfaceId: 'surface-1', generation: 1 })
+    lease.markDispatched()
+    harness.guest.emit('destroyed')
+
+    expect(expectTargetClose).toHaveBeenCalledWith({ surfaceId: 'surface-1', generation: 1 })
+    expect(lease.failure()).toBeNull()
+    await expect(lease.settle()).resolves.toBeUndefined()
+    lease.finish()
+    expect(harness.guard.snapshot().activeOperations).toBe(0)
+    await harness.guard.shutdown()
+  })
+
   it('releases operation ownership when download staging cannot become ready', async () => {
     const failedFinish = vi.fn()
     const healthyFinish = vi.fn()
     const failedLease: BrowserDownloadToolLease = {
+      claimCreatedGuest: vi.fn(async () => undefined),
+      expectTargetClose: vi.fn(),
       ready: vi.fn(async () => {
         throw new BrowserDownloadBrokerError(
           'browser.download.artifact_failed',
@@ -286,6 +550,8 @@ describe('BrowserNetworkGuard', () => {
       finish: failedFinish
     }
     const healthyLease: BrowserDownloadToolLease = {
+      claimCreatedGuest: vi.fn(async () => undefined),
+      expectTargetClose: vi.fn(),
       ready: vi.fn(async () => undefined),
       markDispatched: vi.fn(),
       settle: vi.fn(async () => []),

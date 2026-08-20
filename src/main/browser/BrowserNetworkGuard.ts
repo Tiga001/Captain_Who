@@ -24,6 +24,7 @@ const MAX_REDIRECT_MARKERS = 1_024
 const MAX_ACTIVE_DOWNLOADS = 4
 const MAX_SINGLE_DOWNLOAD_BYTES = 64 * 1024 * 1024
 const MAX_TOTAL_ACTIVE_DOWNLOAD_BYTES = 128 * 1024 * 1024
+const MAX_TOOL_POPUP_AUTHORITIES = 4
 
 /** Host-owned policy; Renderer and model cannot select or weaken it. */
 export type BrowserNetworkAccessPolicy = 'host_boundaries_only' | 'risk_approval'
@@ -47,10 +48,35 @@ export interface BrowserMainFrameNavigationFence {
 }
 
 interface ActiveOperation {
+  authorizationContext: BrowserRiskOperationInput['authorizationContext']
+  closed: boolean
   controller: AbortController
+  creationAuthoritiesIssued: Record<BrowserTargetCreationAction, number>
+  creationClaimsStarted: Record<BrowserTargetCreationAction, number>
   dispatched: boolean
+  downloadLease?: BrowserDownloadToolLease
+  expectedTargetCloses: Set<string>
   operation: BrowserRiskOperation
+  records: Set<GuestRecord>
   unlinkCaller: () => void
+}
+
+export type BrowserTargetCreationAction = 'new' | 'popup'
+
+export interface BrowserTargetCreationAuthorityInput {
+  action: BrowserTargetCreationAction
+  activationId: string
+  capabilityId: 'browser_automation'
+  runId: string
+  toolCallId: string
+  toolId: string
+  url: string
+}
+
+export interface BrowserTargetCreationAuthority {
+  readonly action: BrowserTargetCreationAction
+  claim(input: { generation: number; guest: WebContents; surfaceId: string }): Promise<void>
+  finish(): void
 }
 
 interface ActiveDownload {
@@ -84,7 +110,14 @@ export class BrowserNetworkOperationLease {
     private readonly preflightNavigation: (url: string) => Promise<void>,
     private readonly markLeaseDispatched: () => void,
     private readonly finishLease: () => void,
-    private readonly downloadLease?: BrowserDownloadToolLease
+    private readonly downloadLease?: BrowserDownloadToolLease,
+    private readonly createTargetAuthority?: (
+      input: BrowserTargetCreationAuthorityInput
+    ) => Promise<BrowserTargetCreationAuthority>,
+    private readonly expectLeaseTargetClose?: (input: {
+      generation: number
+      surfaceId: string
+    }) => void
   ) {}
 
   async preflight(url: string): Promise<void> {
@@ -114,6 +147,22 @@ export class BrowserNetworkOperationLease {
     }
   }
 
+  async beginTargetCreationAuthority(
+    input: BrowserTargetCreationAuthorityInput
+  ): Promise<BrowserTargetCreationAuthority> {
+    if (this.finished || !this.createTargetAuthority) {
+      throw new Error('browser.network_guard.target_creation_unavailable')
+    }
+    return await this.createTargetAuthority(input)
+  }
+
+  expectTargetClose(input: { generation: number; surfaceId: string }): void {
+    if (this.finished || !this.expectLeaseTargetClose) {
+      throw new Error('browser.network_guard.target_closed')
+    }
+    this.expectLeaseTargetClose(input)
+  }
+
   failure(): BrowserRiskFailure | null {
     return this.operation.failure()
   }
@@ -141,7 +190,6 @@ export class BrowserNetworkOperationLease {
   finish(): void {
     if (this.finished) return
     this.finished = true
-    this.downloadLease?.finish()
     this.finishLease()
   }
 }
@@ -153,6 +201,7 @@ export class BrowserNetworkGuard {
   private readonly downloads = new Set<ActiveDownload>()
   private readonly expectedSession: Session
   private readonly guests = new Map<number, GuestRecord>()
+  private readonly activeOperations = new Set<ActiveOperation>()
   private readonly policy: BrowserNetworkPolicy
   private readonly passiveDownloads = new Set<PassiveDownload>()
   private readonly redirectTargets = new Map<number, string>()
@@ -357,12 +406,7 @@ export class BrowserNetworkGuard {
     }
     if (record.active) throw new Error('browser.network_guard.target_busy')
 
-    const controller = new AbortController()
-    const abortFromCaller = (): void => controller.abort(input.signal?.reason)
-    input.signal?.addEventListener('abort', abortFromCaller, { once: true })
-    if (input.signal?.aborted) controller.abort(input.signal.reason)
-    const operationInput = { ...input, signal: controller.signal }
-    const operation = this.coordinator.beginOperation(operationInput)
+    const active = this.createActiveOperation(input)
     let downloadLease: BrowserDownloadToolLease | undefined
     try {
       downloadLease = this.downloadBroker
@@ -376,50 +420,242 @@ export class BrowserNetworkGuard {
               generation: record.generation,
               toolCallId: input.authorizationContext.callId
             },
-            signal: controller.signal
+            signal: active.controller.signal
           })
         : undefined
     } catch (error) {
-      operation.close()
-      input.signal?.removeEventListener('abort', abortFromCaller)
+      this.finishActiveOperation(active, 'download_setup_failed')
       throw error
     }
+    if (active.closed) {
+      downloadLease?.finish()
+      throw new BrowserRiskError({
+        code: 'browser.risk_cancelled',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+    }
+    active.downloadLease = downloadLease
+    active.records.add(record)
+    record.active = active
+    return this.operationLease(active)
+  }
+
+  /**
+   * Creates a Tool owner before `Target.createTarget` has produced any guest. This is the only
+   * zero-tab path for `browser_tabs new`; it grants no existing page or partition-wide authority.
+   */
+  beginTargetCreationOperation(input: BrowserRiskOperationInput): BrowserNetworkOperationLease {
+    this.assertUsable()
+    if (input.authorizationContext.triggerToolName !== 'browser_tabs') {
+      throw new Error('browser.network_guard.target_creation_unavailable')
+    }
+    const active = this.createActiveOperation(input)
+    try {
+      active.downloadLease = this.downloadBroker?.beginTargetCreationTool({
+        owner: {
+          runId: input.authorizationContext.runId,
+          activationId: input.authorizationContext.activationId,
+          capabilityId: input.authorizationContext.capabilityId,
+          toolCallId: input.authorizationContext.callId
+        },
+        signal: active.controller.signal
+      })
+    } catch (error) {
+      this.finishActiveOperation(active, 'download_setup_failed')
+      throw error
+    }
+    if (active.closed) {
+      active.downloadLease?.finish()
+      throw new BrowserRiskError({
+        code: 'browser.risk_cancelled',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+    }
+    return this.operationLease(active)
+  }
+
+  private createActiveOperation(input: BrowserRiskOperationInput): ActiveOperation {
+    const controller = new AbortController()
+    const abortFromCaller = (): void => controller.abort(input.signal?.reason)
+    input.signal?.addEventListener('abort', abortFromCaller, { once: true })
+    const operation = this.coordinator.beginOperation({ ...input, signal: controller.signal })
     const active: ActiveOperation = {
+      authorizationContext: input.authorizationContext,
+      closed: false,
       controller,
+      creationAuthoritiesIssued: { new: 0, popup: 0 },
+      creationClaimsStarted: { new: 0, popup: 0 },
       dispatched: false,
+      expectedTargetCloses: new Set<string>(),
       operation,
+      records: new Set(),
       unlinkCaller: () => input.signal?.removeEventListener('abort', abortFromCaller)
     }
-    record.active = active
-    return new BrowserNetworkOperationLease(
-      operation,
-      async (url) => {
-        if (this.accessPolicy === 'risk_approval') {
-          await operation.check({
-            url,
-            trigger: 'tool_argument',
-            dispatchCertainty: 'definitely_not_dispatched'
-          })
-          return
-        }
-        await this.authorizeHostBoundary(url, {
-          dispatchCertainty: 'definitely_not_dispatched',
-          finish: () => undefined,
-          operation
-        })
-      },
-      () => {
-        if (record.active === active) active.dispatched = true
-      },
-      () => {
-        if (record.active === active) record.active = undefined
-        this.cancelDownloadsFor(record, true)
-        active.controller.abort('operation_finished')
-        active.unlinkCaller()
-        operation.close()
-      },
-      downloadLease
+    this.activeOperations.add(active)
+    controller.signal.addEventListener(
+      'abort',
+      () => this.finishActiveOperation(active, 'operation_cancelled'),
+      { once: true }
     )
+    if (input.signal?.aborted) controller.abort(input.signal.reason)
+    if (active.closed) {
+      throw new BrowserRiskError({
+        code: 'browser.risk_cancelled',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+    }
+    return active
+  }
+
+  private operationLease(active: ActiveOperation): BrowserNetworkOperationLease {
+    return new BrowserNetworkOperationLease(
+      active.operation,
+      async (url) => await this.preflightActiveOperation(active, url, 'tool_argument'),
+      () => {
+        if (!active.closed) active.dispatched = true
+      },
+      () => this.finishActiveOperation(active, 'operation_finished'),
+      active.downloadLease,
+      async (input) => await this.createTargetCreationAuthority(active, input, false),
+      (input) => this.expectTargetClose(active, input)
+    )
+  }
+
+  private expectTargetClose(
+    active: ActiveOperation,
+    input: { generation: number; surfaceId: string }
+  ): void {
+    if (active.closed) throw new Error('browser.network_guard.target_closed')
+    const record = [...active.records].find(
+      (candidate) =>
+        candidate.surfaceId === input.surfaceId && candidate.generation === input.generation
+    )
+    if (!record || active.expectedTargetCloses.size > 0) {
+      throw new Error('browser.network_guard.target_closed')
+    }
+    const key = surfaceKey(input.surfaceId, input.generation)
+    active.expectedTargetCloses.add(key)
+    try {
+      active.downloadLease?.expectTargetClose(input)
+    } catch (error) {
+      active.expectedTargetCloses.delete(key)
+      throw error
+    }
+  }
+
+  private async preflightActiveOperation(
+    active: ActiveOperation,
+    url: string,
+    trigger: 'new_window' | 'tool_argument'
+  ): Promise<void> {
+    if (active.closed) {
+      throw new BrowserRiskError({
+        code: 'browser.risk_cancelled',
+        dispatchCertainty: active.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+      })
+    }
+    if (this.accessPolicy === 'risk_approval') {
+      await active.operation.check({
+        url,
+        trigger,
+        ...(trigger === 'new_window' ? { contextualRisks: ['new_window'] as const } : {}),
+        dispatchCertainty: active.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+      })
+      return
+    }
+    await this.authorizeHostBoundary(url, {
+      dispatchCertainty: active.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched',
+      finish: () => undefined,
+      operation: active.operation
+    })
+  }
+
+  private async createTargetCreationAuthority(
+    active: ActiveOperation,
+    input: BrowserTargetCreationAuthorityInput,
+    alreadyPreflighted: boolean
+  ): Promise<BrowserTargetCreationAuthority> {
+    this.assertUsable()
+    const context = active.authorizationContext
+    if (
+      active.closed ||
+      input.runId !== context.runId ||
+      input.activationId !== context.activationId ||
+      input.capabilityId !== context.capabilityId ||
+      input.toolCallId !== context.callId ||
+      input.toolId !== context.triggerToolName ||
+      (input.action === 'new' && input.toolId !== 'browser_tabs')
+    ) {
+      throw new Error('browser.network_guard.target_creation_unavailable')
+    }
+    const maximum = input.action === 'new' ? 1 : MAX_TOOL_POPUP_AUTHORITIES
+    if (active.creationAuthoritiesIssued[input.action] >= maximum) {
+      throw new Error('browser.network_guard.target_creation_capacity')
+    }
+    // Reserve the single authority before async preflight so racing callers cannot both pass.
+    active.creationAuthoritiesIssued[input.action] += 1
+    if (!alreadyPreflighted && input.url !== 'about:blank') {
+      await this.preflightActiveOperation(
+        active,
+        input.url,
+        input.action === 'popup' ? 'new_window' : 'tool_argument'
+      )
+    }
+    let finished = false
+    let claimStarted = false
+    return {
+      action: input.action,
+      claim: async (claim) => {
+        if (finished || claimStarted || active.closed || !active.dispatched) {
+          throw new Error('browser.network_guard.target_creation_unavailable')
+        }
+        claimStarted = true
+        const record = this.guests.get(claim.guest.id)
+        if (
+          !record ||
+          record.guest !== claim.guest ||
+          record.surfaceId !== claim.surfaceId ||
+          record.generation !== claim.generation ||
+          claim.guest.isDestroyed() ||
+          record.active ||
+          active.creationClaimsStarted[input.action] >= maximum
+        ) {
+          throw new Error('browser.target_closed')
+        }
+        active.creationClaimsStarted[input.action] += 1
+        await active.downloadLease?.claimCreatedGuest({ ...claim, action: input.action })
+        if (
+          finished ||
+          active.closed ||
+          active.controller.signal.aborted ||
+          this.guests.get(claim.guest.id) !== record ||
+          claim.guest.isDestroyed() ||
+          record.active
+        ) {
+          throw new Error('browser.target_closed')
+        }
+        active.records.add(record)
+        record.active = active
+      },
+      finish: () => {
+        finished = true
+      }
+    }
+  }
+
+  private finishActiveOperation(active: ActiveOperation, reason: string): void {
+    if (active.closed) return
+    active.closed = true
+    this.activeOperations.delete(active)
+    for (const record of active.records) {
+      if (record.active === active) record.active = undefined
+      this.cancelDownloadsFor(record, true)
+    }
+    active.records.clear()
+    active.controller.abort(reason)
+    active.unlinkCaller()
+    active.operation.close()
+    active.downloadLease?.finish()
   }
 
   /**
@@ -458,26 +694,44 @@ export class BrowserNetworkGuard {
   }
 
   deactivateAutomation(surfaceId?: string): void {
+    for (const active of [...this.activeOperations]) {
+      if (surfaceId && ![...active.records].some((record) => record.surfaceId === surfaceId)) {
+        continue
+      }
+      this.finishActiveOperation(active, 'automation_detached')
+    }
     for (const record of this.guests.values()) {
-      if (surfaceId && record.surfaceId !== surfaceId) continue
-      record.active?.controller.abort('automation_detached')
-      record.active?.unlinkCaller()
-      record.active?.operation.close()
-      record.active = undefined
-      this.cancelDownloadsFor(record, true)
-      this.cancelPassiveDownloadsFor(record)
+      if (!surfaceId || record.surfaceId === surfaceId) this.cancelPassiveDownloadsFor(record)
     }
   }
 
   async finalizeRun(runId: string): Promise<void> {
+    for (const active of [...this.activeOperations]) {
+      if (active.authorizationContext.runId === runId) {
+        this.finishActiveOperation(active, 'run_finalized')
+      }
+    }
     await this.downloadBroker?.finalizeRun(runId)
   }
 
   async releaseCapability(activationId: string): Promise<void> {
+    for (const active of [...this.activeOperations]) {
+      if (active.authorizationContext.activationId === activationId) {
+        this.finishActiveOperation(active, 'capability_revoked')
+      }
+    }
     await this.downloadBroker?.releaseCapability(activationId)
   }
 
   async releaseToolCall(input: { runId: string; toolCallId: string }): Promise<void> {
+    for (const active of [...this.activeOperations]) {
+      if (
+        active.authorizationContext.runId === input.runId &&
+        active.authorizationContext.callId === input.toolCallId
+      ) {
+        this.finishActiveOperation(active, 'tool_call_released')
+      }
+    }
     await this.downloadBroker?.releaseToolCall(input)
   }
 
@@ -485,22 +739,59 @@ export class BrowserNetworkGuard {
     await lease.preflight(url)
   }
 
-  handleWindowOpen(guest: WebContents, url: string, createPopup?: () => Promise<void>): void {
+  handleWindowOpen(
+    guest: WebContents,
+    url: string,
+    createPopup?: (authority?: BrowserTargetCreationAuthority) => Promise<void>
+  ): void {
     const record = this.guests.get(guest.id)
     if (!record || record.guest !== guest) return
     const view = this.operationFor(record)
     if (!view) {
       if (createPopup) {
         void this.authorizeManualRequest(url)
-          .then(createPopup, () => undefined)
+          .then(
+            () => createPopup(),
+            () => undefined
+          )
           .catch(() => undefined)
         return
       }
       this.navigateManualGuest(guest, url)
       return
     }
+    if (createPopup) {
+      const active = record.active
+      if (!active) return
+      const popupCreation = this.preflightActiveOperation(active, url, 'new_window')
+        .then(async () => {
+          if (guest.isDestroyed() || active.closed) return
+          const context = active.authorizationContext
+          const authority = await this.createTargetCreationAuthority(
+            active,
+            {
+              action: 'popup',
+              activationId: context.activationId,
+              capabilityId: context.capabilityId,
+              runId: context.runId,
+              toolCallId: context.callId,
+              toolId: context.triggerToolName,
+              url
+            },
+            true
+          )
+          try {
+            await createPopup(authority)
+          } finally {
+            authority.finish()
+          }
+        })
+        .catch(() => undefined)
+      void active.operation.track(popupCreation).catch(() => undefined)
+      return
+    }
     if (this.accessPolicy === 'host_boundaries_only') {
-      this.navigateAutomatedGuest(guest, url, view, createPopup)
+      this.navigateAutomatedGuest(guest, url, view)
       return
     }
     const approvalAndNavigation = view.operation
@@ -513,8 +804,7 @@ export class BrowserNetworkGuard {
       .then(async () => {
         if (guest.isDestroyed()) return
         try {
-          if (createPopup) await createPopup()
-          else await guest.loadURL(url)
+          await guest.loadURL(url)
         } catch {
           view.operation.recordFailure({
             code: 'browser.risk_outcome_unknown',
@@ -542,6 +832,9 @@ export class BrowserNetworkGuard {
   async shutdown(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    for (const active of [...this.activeOperations]) {
+      this.finishActiveOperation(active, 'shutdown')
+    }
     for (const record of [...this.guests.values()]) this.unregisterGuest(record, true)
     this.redirectTargets.clear()
     if (this.installed) {
@@ -564,13 +857,9 @@ export class BrowserNetworkGuard {
     redirectMarkers: number
     stickyContexts: number
   } {
-    let activeOperations = 0
     const stickyContexts = 0
-    for (const record of this.guests.values()) {
-      if (record.active) activeOperations += 1
-    }
     return {
-      activeOperations,
+      activeOperations: this.activeOperations.size,
       downloads:
         this.downloadBroker?.snapshot().downloads ??
         this.downloads.size + this.passiveDownloads.size,
@@ -659,10 +948,7 @@ export class BrowserNetworkGuard {
   }
 
   private hasActiveOperation(): boolean {
-    for (const record of this.guests.values()) {
-      if (record.active) return true
-    }
-    return false
+    return this.activeOperations.size > 0
   }
 
   private navigateManualGuest(guest: WebContents, url: string): void {
@@ -758,10 +1044,19 @@ export class BrowserNetworkGuard {
   private unregisterGuest(record: GuestRecord, abort: boolean): void {
     if (this.guests.get(record.guest.id) !== record) return
     record.guest.removeListener('destroyed', record.handleDestroyed)
-    if (abort) record.active?.controller.abort('target_closed')
-    record.active?.unlinkCaller()
-    record.active?.operation.close()
-    record.active = undefined
+    let plannedClose = false
+    if (record.active) {
+      const active = record.active
+      plannedClose = active.expectedTargetCloses.delete(
+        surfaceKey(record.surfaceId, record.generation)
+      )
+      if (plannedClose || !abort) {
+        active.records.delete(record)
+        record.active = undefined
+      } else {
+        this.finishActiveOperation(active, 'target_closed')
+      }
+    }
     if (record.navigationFence) {
       record.navigationFence.blocked = true
       record.navigationFence = undefined
@@ -770,7 +1065,7 @@ export class BrowserNetworkGuard {
     void this.downloadBroker
       ?.releaseSurface({ surfaceId: record.surfaceId, generation: record.generation })
       .catch(() => undefined)
-    this.cancelDownloadsFor(record, true)
+    this.cancelDownloadsFor(record, !plannedClose)
     this.cancelPassiveDownloadsFor(record)
     this.guests.delete(record.guest.id)
   }
@@ -963,6 +1258,10 @@ function safeDownloadBytes(
   } catch {
     return 0
   }
+}
+
+function surfaceKey(surfaceId: string, generation: number): string {
+  return `${surfaceId}\u0000${generation}`
 }
 
 export function mapBrowserRiskError(error: unknown): BrowserRiskFailure | null {

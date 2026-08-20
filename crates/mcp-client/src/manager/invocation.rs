@@ -454,6 +454,12 @@ pub(super) fn normalize_dispatched_result(
             control.dispatch.mark_response_received();
             Ok(result)
         }
+        Err(error) if error.dispatch_certainty_is_authoritative() => {
+            if error.dispatch_certainty == Some(McpDispatchCertainty::ResponseReceived) {
+                control.dispatch.mark_response_received();
+            }
+            Err(error)
+        }
         Err(error) if error.kind == McpErrorKind::OutcomeUnknown => Err(error),
         Err(error) if error.dispatch_certainty == Some(McpDispatchCertainty::ResponseReceived) => {
             if control.dispatch.certainty() == McpDispatchCertainty::ResponseReceived {

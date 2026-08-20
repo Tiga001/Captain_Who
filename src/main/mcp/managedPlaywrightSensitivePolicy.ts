@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import type {
   BuiltinMcpToolRiskKind,
   ManagedPlaywrightAuthorizationContext,
-  ManagedPlaywrightBuiltinToolGrantContext
+  ManagedPlaywrightBuiltinToolGrantContext,
+  ManagedPlaywrightSensitiveBindingScope
 } from '@mycopilot/protocol'
 
 import type { ManagedPlaywrightToolManifestEntry } from './managedPlaywrightManifest'
@@ -14,23 +15,24 @@ export interface ManagedPlaywrightSensitiveToolPolicy {
 }
 
 const POLICY = Object.freeze({
-  // The official cookie tools operate on the whole managed BrowserContext. They are intentionally
-  // not described as current-origin scoped even though approval still binds the active origin as
-  // an execution-time TOCTOU fence.
+  // The official cookie tools operate on the whole managed BrowserContext. Their approval binds
+  // the managed profile generation and exact arguments, not an arbitrary active page origin.
   browser_cookie_clear: sensitive('managed_browser_profile', ['cookie_write']),
   browser_cookie_delete: sensitive('managed_browser_profile', ['cookie_write']),
   browser_cookie_get: sensitive('managed_browser_profile', ['cookie_read']),
   browser_cookie_list: sensitive('managed_browser_profile', ['cookie_read']),
   browser_cookie_set: sensitive('managed_browser_profile', ['cookie_write']),
-  browser_drop: dynamic('file_upload', ['file_read', 'file_upload']),
-  browser_evaluate: sensitive('page_script_execution', ['page_script_execution']),
-  browser_file_upload: dynamic('file_upload', ['file_read', 'file_upload']),
+  // These operations may address child Frames, a pending chooser, or the official request ledger.
+  // Their authority is the active Host-owned Surface binding, not the top-frame origin alone.
+  browser_drop: dynamic('managed_surface', ['file_read', 'file_upload']),
+  browser_evaluate: sensitive('managed_surface', ['page_script_execution']),
+  browser_file_upload: dynamic('managed_surface', ['file_read', 'file_upload']),
   browser_localstorage_clear: sensitive('local_storage_write', ['local_storage_write']),
   browser_localstorage_delete: sensitive('local_storage_write', ['local_storage_write']),
   browser_localstorage_get: sensitive('local_storage_read', ['local_storage_read']),
   browser_localstorage_list: sensitive('local_storage_read', ['local_storage_read']),
   browser_localstorage_set: sensitive('local_storage_write', ['local_storage_write']),
-  browser_network_request: sensitive('network_sensitive_read', ['network_sensitive_read']),
+  browser_network_request: sensitive('managed_surface', ['network_sensitive_read']),
   browser_sessionstorage_clear: sensitive('session_storage_write', ['session_storage_write']),
   browser_sessionstorage_delete: sensitive('session_storage_write', ['session_storage_write']),
   browser_sessionstorage_get: sensitive('session_storage_read', ['session_storage_read']),
@@ -69,6 +71,26 @@ export function sensitivePolicyForTool(
   return POLICY[toolName as keyof typeof POLICY]
 }
 
+/**
+ * Main/Core agree on the authority that must be frozen before approval. Cookie mutation is
+ * normally BrowserContext-wide, but the pinned official `browser_cookie_set` derives an omitted
+ * domain from the current Tab. That argument shape is therefore page-bound even though the user
+ * facing approval continues to describe the managed browser profile mutation honestly.
+ */
+export function sensitiveBindingScopeForInvocation(
+  toolName: string,
+  argumentsValue: Readonly<Record<string, unknown>>
+): ManagedPlaywrightSensitiveBindingScope {
+  if (toolName === 'browser_cookie_set') {
+    return typeof argumentsValue.domain === 'string' && argumentsValue.domain.length > 0
+      ? 'managed_browser_profile'
+      : 'managed_surface'
+  }
+  return sensitivePolicyForTool(toolName)?.scope === 'managed_browser_profile'
+    ? 'managed_browser_profile'
+    : 'managed_surface'
+}
+
 export function sensitiveToolNeedsGrant(
   toolName: string,
   argumentsValue: Readonly<Record<string, unknown>>
@@ -89,7 +111,7 @@ export function validateSensitiveToolGrant(input: {
   reviewed: ManagedPlaywrightToolManifestEntry
   modelArguments: Readonly<Record<string, unknown>>
   authorizationContext: ManagedPlaywrightAuthorizationContext | undefined
-  activeOrigin: string
+  activeOrigin: string | null
   consumedGrantIds: Set<string>
   now?: number
 }): ManagedPlaywrightSensitiveGrantLease | undefined {
@@ -111,24 +133,22 @@ export function validateSensitiveToolGrant(input: {
     throw new ManagedPlaywrightSensitiveGrantError('reused')
   }
   const expectedArgumentsDigest = canonicalSha256(input.modelArguments)
-  const approvalOrigin = expectApprovalOrigin(input.modelArguments.approval_origin)
   if (
     grant.argumentsDigest !== expectedArgumentsDigest ||
-    grant.origin !== approvalOrigin ||
-    approvalOrigin !== input.activeOrigin ||
     !sameStringArray(grant.riskKinds, policy.riskKinds)
   ) {
-    throw new ManagedPlaywrightSensitiveGrantError(
-      approvalOrigin !== input.activeOrigin ? 'origin_drifted' : 'drifted'
-    )
+    throw new ManagedPlaywrightSensitiveGrantError('drifted')
+  }
+  if (grant.origin !== input.activeOrigin) {
+    throw new ManagedPlaywrightSensitiveGrantError('origin_drifted')
   }
   const expectedScopeDigest = canonicalSha256({
     schemaVersion: 2,
     toolId: input.reviewed.rawName,
     argumentsDigest: expectedArgumentsDigest,
-    origin: approvalOrigin,
+    origin: grant.origin,
     riskKinds: [...policy.riskKinds],
-    scope: policy.scope,
+    scope: sensitiveBindingScopeForInvocation(input.reviewed.rawName, input.modelArguments),
     targetBindingDigest: grant.targetBindingDigest
   })
   if (grant.resourceScopeDigest !== expectedScopeDigest) {
@@ -175,30 +195,6 @@ function canonicalJson(value: unknown): unknown {
         .sort()
         .map((key) => [key, canonicalJson(record[key])])
     )
-  }
-  return value
-}
-
-function expectApprovalOrigin(value: unknown): string {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 2_048) {
-    throw new ManagedPlaywrightSensitiveGrantError('drifted')
-  }
-  let parsed: URL
-  try {
-    parsed = new URL(value)
-  } catch {
-    throw new ManagedPlaywrightSensitiveGrantError('drifted')
-  }
-  if (
-    !['http:', 'https:'].includes(parsed.protocol) ||
-    parsed.origin !== value ||
-    parsed.username !== '' ||
-    parsed.password !== '' ||
-    parsed.pathname !== '/' ||
-    parsed.search !== '' ||
-    parsed.hash !== ''
-  ) {
-    throw new ManagedPlaywrightSensitiveGrantError('drifted')
   }
   return value
 }

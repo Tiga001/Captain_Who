@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
@@ -17,6 +20,7 @@ import {
 } from './ManagedPlaywrightMcpHost'
 import { MANAGED_PLAYWRIGHT_CATALOG_LOCK } from './managedPlaywrightCatalog'
 import { MANAGED_PLAYWRIGHT_SERVER_ID } from './managedPlaywrightManifest'
+import { BrowserFileBroker } from '../browser/BrowserFileBroker'
 
 const AUTHORIZATION_CONTEXT = {
   runId: 'run-1',
@@ -164,7 +168,47 @@ describe('ManagedPlaywrightBridgeHost', () => {
     await host.close()
   })
 
-  it('preserves the stable surface-capacity error before any page action is dispatched', async () => {
+  it('preserves a sensitive Host rejection as definitely not dispatched', async () => {
+    const core = new FakeCore()
+    const callTool = vi.fn<ManagedMcpClient['callTool']>()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: targetBindingBroker(),
+      createHost: () =>
+        hostWith({
+          callTool,
+          surfaceGroup: singleSurfaceGroupAdapter()
+        })
+    })
+    const request = command({
+      type: 'call_tool',
+      name: 'browser_evaluate',
+      arguments: {
+        function: '() => document.title',
+        call_reason: 'Exercise a missing sensitive grant.'
+      },
+      timeoutMs: 1_000,
+      authorizationContext: {
+        ...AUTHORIZATION_CONTEXT,
+        triggerToolName: 'browser_evaluate'
+      }
+    })
+    core.emitCommand(request)
+
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(core.completions[0]).toMatchObject({
+      requestId: request.requestId,
+      outcome: {
+        type: 'error',
+        code: 'invalid_arguments',
+        dispatchCertainty: 'definitely_not_dispatched'
+      }
+    })
+    expect(callTool).not.toHaveBeenCalled()
+    await bridge.close()
+  })
+
+  it('delegates tab creation to the fixed official group transport', async () => {
     const core = new FakeCore()
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
       getSensitiveTargetIdentity: () => ({
@@ -183,10 +227,14 @@ describe('ManagedPlaywrightBridgeHost', () => {
       selectSurface: vi.fn(async () => surfaceView()),
       closeSurfaceByIndex: vi.fn(async () => undefined)
     }
+    const callTool = vi.fn<ManagedMcpClient['callTool']>().mockResolvedValue({
+      content: [{ type: 'text', text: 'official managed tab created' }],
+      isError: false
+    })
     const host = new ManagedPlaywrightBridgeHost({
       core,
       sensitiveTargetBindings: targetBindingBroker(),
-      createHost: () => hostWith({ surfaceGroup })
+      createHost: () => hostWith({ callTool, surfaceGroup })
     })
     const request = command({
       type: 'call_tool',
@@ -202,11 +250,16 @@ describe('ManagedPlaywrightBridgeHost', () => {
     core.emitCommand(request)
 
     await vi.waitFor(() => expect(core.completions).toHaveLength(1))
-    expect(core.completions[0].outcome).toEqual({
-      type: 'error',
-      code: 'surface_capacity_exceeded',
-      dispatchCertainty: 'definitely_not_dispatched'
+    expect(core.completions[0].outcome).toMatchObject({
+      type: 'tool_called',
+      result: { isError: false }
     })
+    expect(callTool).toHaveBeenCalledWith(
+      { name: 'browser_tabs', arguments: { action: 'new' } },
+      undefined,
+      expect.any(Object)
+    )
+    expect(surfaceGroup.createSurface).not.toHaveBeenCalled()
     await host.close()
   })
 
@@ -269,6 +322,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
       type: 'prepare_sensitive_tool',
       input: {
         bindingRequestId: randomUUID(),
+        bindingScope: 'managed_surface',
         runId: 'run-1',
         capabilityId: 'browser_automation',
         activationId: AUTHORIZATION_CONTEXT.activationId,
@@ -279,7 +333,8 @@ describe('ManagedPlaywrightBridgeHost', () => {
         toolName: 'browser_evaluate',
         argumentsDigest: `sha256:${'b'.repeat(64)}`,
         createdAtMs: now,
-        expiresAtMs: now + 60_000
+        expiresAtMs: now + 60_000,
+        filePreparation: null
       }
     })
     core.emitCommand(request)
@@ -311,6 +366,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
         type: 'prepare_sensitive_tool',
         input: {
           bindingRequestId: randomUUID(),
+          bindingScope: 'managed_surface',
           runId: 'run-1',
           capabilityId: 'browser_automation',
           activationId: AUTHORIZATION_CONTEXT.activationId,
@@ -321,7 +377,8 @@ describe('ManagedPlaywrightBridgeHost', () => {
           toolName: 'browser_evaluate',
           argumentsDigest: `sha256:${'c'.repeat(64)}`,
           createdAtMs: now,
-          expiresAtMs: now + 60_000
+          expiresAtMs: now + 60_000,
+          filePreparation: null
         }
       })
     )
@@ -329,6 +386,191 @@ describe('ManagedPlaywrightBridgeHost', () => {
     expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
     await vi.waitFor(() => expect(bindings.snapshot()).toEqual({ bindings: 0, requests: 0 }))
     await bridge.close()
+  })
+
+  it('prepares a managed-profile approval with no active browser surface', async () => {
+    const core = new FakeCore()
+    const beginDispatchFence = vi.fn(() => ({ finish: () => undefined }))
+    const bindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
+      beginDispatchFence,
+      getActiveTarget: () => null
+    })
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: bindings,
+      createHost: () => hostWith({})
+    })
+    const now = Date.now()
+    core.emitCommand(
+      command({
+        type: 'prepare_sensitive_tool',
+        input: {
+          bindingRequestId: randomUUID(),
+          bindingScope: 'managed_browser_profile',
+          runId: 'run-1',
+          capabilityId: 'browser_automation',
+          activationId: AUTHORIZATION_CONTEXT.activationId,
+          manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+          policyRevision: 1,
+          grantExpiresAtMs: now + 120_000,
+          callId: 'call-zero-tab-cookie-list',
+          toolName: 'browser_cookie_list',
+          argumentsDigest: `sha256:${'f'.repeat(64)}`,
+          createdAtMs: now,
+          expiresAtMs: now + 60_000,
+          filePreparation: null
+        }
+      })
+    )
+
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(core.completions[0].outcome).toMatchObject({
+      type: 'sensitive_tool_prepared',
+      origin: null
+    })
+    expect(beginDispatchFence).not.toHaveBeenCalled()
+    await bridge.close()
+  })
+
+  it('rejects static binding-scope drift while allowing both reviewed cookie-set shapes', async () => {
+    const core = new FakeCore()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: targetBindingBroker(),
+      createHost: () => hostWith({})
+    })
+    const now = Date.now()
+    const prepare = (
+      toolName: string,
+      bindingScope: 'managed_surface' | 'managed_browser_profile',
+      suffix: string
+    ): ManagedPlaywrightCommandNotification =>
+      command({
+        type: 'prepare_sensitive_tool',
+        input: {
+          bindingRequestId: randomUUID(),
+          bindingScope,
+          runId: 'run-1',
+          capabilityId: 'browser_automation',
+          activationId: AUTHORIZATION_CONTEXT.activationId,
+          manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+          policyRevision: 1,
+          grantExpiresAtMs: now + 120_000,
+          callId: `call-binding-${suffix}`,
+          toolName,
+          argumentsDigest: `sha256:${suffix.repeat(64).slice(0, 64)}`,
+          createdAtMs: now,
+          expiresAtMs: now + 60_000,
+          filePreparation: null
+        }
+      })
+    const requests = [
+      prepare('browser_cookie_list', 'managed_surface', 'a'),
+      prepare('browser_evaluate', 'managed_browser_profile', 'b'),
+      prepare('browser_cookie_set', 'managed_surface', 'c'),
+      prepare('browser_cookie_set', 'managed_browser_profile', 'd')
+    ]
+    for (const request of requests) core.emitCommand(request)
+
+    await vi.waitFor(() => expect(core.completions).toHaveLength(requests.length))
+    const outcomes = new Map(
+      core.completions.map((completion) => [completion.requestId, completion.outcome])
+    )
+    expect(outcomes.get(requests[0].requestId)).toEqual({
+      type: 'error',
+      code: 'tool_not_reviewed',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(outcomes.get(requests[1].requestId)).toEqual({
+      type: 'error',
+      code: 'tool_not_reviewed',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(outcomes.get(requests[2].requestId)).toMatchObject({
+      type: 'sensitive_tool_prepared',
+      origin: 'http://127.0.0.1'
+    })
+    expect(outcomes.get(requests[3].requestId)).toMatchObject({
+      type: 'sensitive_tool_prepared',
+      origin: null
+    })
+    await bridge.close()
+  })
+
+  it('freezes an authorized workspace path before approval and publishes only a safe basename', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mycopilot-bridge-file-preflight-'))
+    const source = join(root, '浙江大学2026年招生资料汇编.pptx')
+    await writeFile(source, 'fixture-presentation')
+    const selectFiles = vi.fn(async () => [source])
+    const fileBroker = new BrowserFileBroker({
+      rootDirectory: join(root, 'browser-automation-files'),
+      selectionProvider: { selectFiles }
+    })
+    const bindings = targetBindingBroker(({ runId, callId }) => {
+      void fileBroker.releaseToolCall({ runId, toolCallId: callId })
+    })
+    const core = new FakeCore()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      fileBroker,
+      sensitiveTargetBindings: bindings,
+      createHost: () => hostWith({})
+    })
+    const now = Date.now()
+    const request = command({
+      type: 'prepare_sensitive_tool',
+      input: {
+        bindingRequestId: randomUUID(),
+        bindingScope: 'managed_surface',
+        runId: 'run-1',
+        capabilityId: 'browser_automation',
+        activationId: AUTHORIZATION_CONTEXT.activationId,
+        manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+        policyRevision: 1,
+        grantExpiresAtMs: now + 120_000,
+        callId: 'call-file-preflight',
+        toolName: 'browser_file_upload',
+        argumentsDigest: `sha256:${'e'.repeat(64)}`,
+        createdAtMs: now,
+        expiresAtMs: now + 60_000,
+        filePreparation: { mode: 'resolved_paths', paths: [source] }
+      }
+    })
+    if (request.command.type !== 'prepare_sensitive_tool') {
+      throw new Error('invalid prepare fixture')
+    }
+    const preparedInput = request.command.input
+
+    try {
+      core.emitCommand(request)
+      await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+      const outcome = core.completions[0].outcome
+      expect(outcome).toMatchObject({
+        type: 'sensitive_tool_prepared',
+        fileBasenames: ['浙江大学2026年招生资料汇编.pptx'],
+        fileRevisionDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
+      })
+      expect(JSON.stringify(outcome)).not.toContain(source)
+      expect(JSON.stringify(outcome)).not.toContain('browser-file:')
+      expect(fileBroker.snapshot().handles).toBe(1)
+      expect(selectFiles).not.toHaveBeenCalled()
+      if (outcome.type !== 'sensitive_tool_prepared') throw new Error('invalid fixture outcome')
+      core.emitCommand(
+        command({
+          type: 'release_sensitive_tool_binding',
+          bindingId: outcome.bindingId,
+          runId: preparedInput.runId,
+          activationId: preparedInput.activationId,
+          callId: preparedInput.callId,
+          reason: 'rejected'
+        })
+      )
+      await vi.waitFor(() => expect(fileBroker.snapshot().handles).toBe(0))
+    } finally {
+      await bridge.close()
+      await fileBroker.shutdown()
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
 
@@ -344,7 +586,9 @@ function command(
   }
 }
 
-function targetBindingBroker(): ManagedPlaywrightSensitiveTargetBindingBroker {
+function targetBindingBroker(
+  releasePreparedFiles?: (owner: { runId: string; callId: string }) => void
+): ManagedPlaywrightSensitiveTargetBindingBroker {
   return new ManagedPlaywrightSensitiveTargetBindingBroker({
     beginDispatchFence: () => ({ finish: () => undefined }),
     getActiveTarget: () => ({
@@ -352,7 +596,8 @@ function targetBindingBroker(): ManagedPlaywrightSensitiveTargetBindingBroker {
       generation: 1,
       navigationEpoch: 1,
       origin: 'http://127.0.0.1'
-    })
+    }),
+    releasePreparedFiles
   })
 }
 
@@ -400,5 +645,22 @@ function surfaceView(): Awaited<ReturnType<ManagedPlaywrightSurfaceGroupAdapter[
     url: 'about:blank',
     isActive: true,
     generation: 1
+  }
+}
+
+function singleSurfaceGroupAdapter(): ManagedPlaywrightSurfaceGroupAdapter {
+  const surface = surfaceView()
+  return {
+    getSensitiveTargetIdentity: () => ({
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      navigationEpoch: 1,
+      origin: 'http://127.0.0.1'
+    }),
+    ensureActiveSurface: vi.fn(async () => surface),
+    listSurfaces: () => [surface],
+    createSurface: vi.fn(async () => surface),
+    selectSurface: vi.fn(async () => surface),
+    closeSurfaceByIndex: vi.fn(async () => undefined)
   }
 }

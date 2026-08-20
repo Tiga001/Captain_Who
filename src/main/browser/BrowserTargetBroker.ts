@@ -1,5 +1,9 @@
 import type { Session, WebContents } from 'electron'
 import { ElectronGuestCdpTransport } from './ElectronGuestCdpTransport'
+import {
+  ElectronSurfaceGroupCdpTransport,
+  type ElectronSurfaceGroupCdpTransportOptions
+} from './ElectronSurfaceGroupCdpTransport'
 
 const MAX_SURFACE_ID_LENGTH = 256
 
@@ -31,6 +35,11 @@ export interface ManagedBrowserSurfaceClaim {
   generation: number
   guestWebContentsId: number
   host: WebContents
+  surfaceId: string
+}
+
+export interface ManagedBrowserSurfaceIdentity {
+  generation: number
   surfaceId: string
 }
 
@@ -123,6 +132,12 @@ export class BrowserTargetBroker {
     })
   }
 
+  unregisterManagedGuest(input: { guest: WebContents; host: WebContents }): void {
+    const record = this.guests.get(input.guest.id)
+    if (!record || record.guest !== input.guest || record.host !== input.host) return
+    this.unregisterGuest(input.guest.id, input.guest, true)
+  }
+
   async connect(surfaceId: string, generation?: number): Promise<ElectronGuestCdpTransport> {
     this.assertUsable()
     const record = this.getClaimedGuest(surfaceId, generation)
@@ -161,6 +176,43 @@ export class BrowserTargetBroker {
       throw new BrowserTargetBrokerError('target_closed')
     } finally {
       record.connecting = false
+    }
+  }
+
+  /**
+   * Composes only exact claimed surfaces into one private BrowserContext transport. No Electron
+   * target discovery occurs here; every delegate still passes the existing guest/host/partition
+   * admission checks independently.
+   */
+  async connectSurfaceGroup(
+    surfaces: readonly ManagedBrowserSurfaceIdentity[],
+    options: ElectronSurfaceGroupCdpTransportOptions
+  ): Promise<ElectronSurfaceGroupCdpTransport> {
+    this.assertUsable()
+    const group = new ElectronSurfaceGroupCdpTransport(options)
+    try {
+      for (const surface of surfaces) {
+        await this.addSurfaceToGroup(group, surface)
+      }
+      return group
+    } catch (error) {
+      group.close()
+      throw error
+    }
+  }
+
+  async addSurfaceToGroup(
+    group: ElectronSurfaceGroupCdpTransport,
+    surface: ManagedBrowserSurfaceIdentity
+  ): Promise<void> {
+    this.assertUsable()
+    if (group.hasSurface(surface.surfaceId, surface.generation)) return
+    const transport = await this.connect(surface.surfaceId, surface.generation)
+    try {
+      await group.addSurface({ ...surface, transport })
+    } catch (error) {
+      transport.close()
+      throw error
     }
   }
 

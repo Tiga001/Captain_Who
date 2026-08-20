@@ -16,7 +16,8 @@ use mycopilot_core::{
     BrowserRiskAuthorizationRequest, BrowserRiskGrant, BuiltinCapabilityFuture,
     BuiltinCapabilityId, BuiltinCapabilityInvocation, BuiltinCapabilityManifest,
     BuiltinCapabilityPolicy, BuiltinCapabilityProvider, BuiltinCapabilityRuntime,
-    BuiltinMcpToolApprovalRequest, BuiltinMcpToolGrant, BuiltinMcpToolTargetBindingReleaseReason,
+    BuiltinMcpToolApprovalRequest, BuiltinMcpToolBindingScope, BuiltinMcpToolFilePreparation,
+    BuiltinMcpToolGrant, BuiltinMcpToolTargetBindingReleaseReason,
     BuiltinMcpToolTargetBindingRequest, CapabilityActivationId, CapabilityGrant,
     McpOmittedContentKind, McpRuntimeProjectionLimits, McpToolContentBlock,
     PreparedBuiltinMcpToolTargetBinding, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
@@ -27,6 +28,7 @@ use mycopilot_protocol_rs::{
     BuiltinMcpToolRiskKindDto, ManagedPlaywrightAuthorizationContext,
     ManagedPlaywrightBuiltinToolGrantContext, ManagedPlaywrightCompletionOutcome,
     ManagedPlaywrightPrepareSensitiveToolInput, ManagedPlaywrightSensitiveBindingReleaseReason,
+    ManagedPlaywrightSensitiveBindingScopeDto, ManagedPlaywrightSensitiveFilePreparation,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -726,6 +728,14 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
             let prepare =
                 bridge.prepare_sensitive_tool(ManagedPlaywrightPrepareSensitiveToolInput {
                     binding_request_id: request.binding_request_id,
+                    binding_scope: match request.binding_scope {
+                        BuiltinMcpToolBindingScope::ManagedSurface => {
+                            ManagedPlaywrightSensitiveBindingScopeDto::ManagedSurface
+                        }
+                        BuiltinMcpToolBindingScope::ManagedBrowserProfile => {
+                            ManagedPlaywrightSensitiveBindingScopeDto::ManagedBrowserProfile
+                        }
+                    },
                     run_id: request.invocation.run_id,
                     capability_id: request.invocation.capability_id.as_str().to_string(),
                     activation_id: request.invocation.activation_id.as_str().to_string(),
@@ -737,6 +747,13 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                     arguments_digest: request.arguments_digest,
                     created_at_ms: request.created_at.saturating_mul(1_000),
                     expires_at_ms: request.expires_at.saturating_mul(1_000),
+                    file_preparation: request.file_preparation.map(
+                        |preparation| match preparation {
+                            BuiltinMcpToolFilePreparation::ResolvedPaths(paths) => {
+                                ManagedPlaywrightSensitiveFilePreparation::ResolvedPaths { paths }
+                            }
+                        },
+                    ),
                 });
             tokio::pin!(prepare);
             let outcome = tokio::select! {
@@ -768,6 +785,8 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 origin,
                 created_at_ms,
                 expires_at_ms,
+                file_basenames,
+                file_revision_digest,
             } = outcome
             else {
                 return Err(AgentError::new("Main 返回了无效的敏感页面绑定结果。"));
@@ -790,6 +809,8 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 origin,
                 created_at: request.created_at,
                 expires_at: request.expires_at,
+                file_basenames,
+                file_revision_digest,
             })
         })
     }
@@ -1860,28 +1881,45 @@ mod tests {
         call_id: &str,
         risks: Vec<BuiltinMcpToolRiskKind>,
     ) -> AgentResult<AgentBuiltinMcpToolApproval> {
-        let origin = "https://mail.example.test".to_string();
-        let invocation = sensitive_invocation(
-            harness,
-            grant,
-            tool_id,
-            call_id,
-            json!({
-                "call_reason": "Perform the exact reviewed sensitive browser operation.",
-                "approval_origin": origin,
+        let profile_scoped = tool_id == "browser_set_storage_state";
+        let origin = (!profile_scoped).then(|| "https://mail.example.test".to_string());
+        let arguments = match tool_id {
+            "browser_set_storage_state" => json!({
+                "call_reason": "Import the exact reviewed storage state.",
                 "filename": "browser-file:123e4567-e89b-42d3-a456-426614174000",
             }),
-        );
+            "browser_network_request" => json!({
+                "call_reason": "Read the exact reviewed network request.",
+                "index": 0,
+            }),
+            _ => json!({
+                "call_reason": "Perform the exact reviewed sensitive browser operation.",
+                "function": "() => document.title",
+            }),
+        };
+        let invocation = sensitive_invocation(harness, grant, tool_id, call_id, arguments);
+        let file_basenames = if profile_scoped {
+            vec!["storage-state.json".to_string()]
+        } else {
+            Vec::new()
+        };
         let resource_summary = BuiltinMcpToolResourceSummary {
             scope: match tool_id {
                 "browser_set_storage_state" => "storage_state_import",
-                "browser_evaluate" => "page_script_execution",
+                "browser_drop"
+                | "browser_evaluate"
+                | "browser_file_upload"
+                | "browser_network_request" => "managed_surface",
                 _ => "sensitive_browser_operation",
             }
             .to_string(),
-            display_name: "Current managed page storage".to_string(),
-            file_basenames: vec!["storage-state.json".to_string()],
-            origin: Some(origin.clone()),
+            display_name: if profile_scoped {
+                "Managed browser profile storage".to_string()
+            } else {
+                "Current managed browser surface".to_string()
+            },
+            file_basenames,
+            origin: origin.clone(),
         };
         let request = sensitive_approval_request(
             harness,
@@ -1898,7 +1936,7 @@ mod tests {
     fn sensitive_approval_request(
         harness: &Harness,
         invocation: BuiltinCapabilityInvocation,
-        origin: String,
+        origin: Option<String>,
         call_reason: &str,
         operation_category: &str,
         resource_summary: BuiltinMcpToolResourceSummary,
@@ -1927,11 +1965,14 @@ mod tests {
                 .load(Ordering::SeqCst)
                 .saturating_add(mycopilot_core::BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS)
                 .min(capability_grant.expires_at),
+            file_basenames: resource_summary.file_basenames.clone(),
+            file_revision_digest: (!resource_summary.file_basenames.is_empty())
+                .then(|| format!("sha256:{}", "5".repeat(64))),
         };
         let resource_scope_digest = mycopilot_core::builtin_mcp_tool_resource_scope_digest_v2(
             &invocation.tool_id,
             &arguments_digest,
-            Some(&origin),
+            origin.as_deref(),
             &risks,
             &resource_summary.scope,
             &target_binding.target_binding_digest,
@@ -1945,7 +1986,7 @@ mod tests {
             operation_category: operation_category.to_string(),
             resource_summary,
             resource_scope_digest,
-            origin: Some(origin),
+            origin,
             risk_kinds: risks,
             target_binding: Some(target_binding),
         })
@@ -2095,7 +2136,6 @@ mod tests {
             "call-concurrent-prepare",
             json!({
                 "function": "() => document.title",
-                "approval_origin": "https://mail.example.test",
                 "call_reason": "Read the reviewed page title.",
             }),
         );
@@ -2104,12 +2144,12 @@ mod tests {
                 sensitive_approval_request(
                     &harness,
                     invocation.clone(),
-                    "https://mail.example.test".to_string(),
+                    Some("https://mail.example.test".to_string()),
                     "Read the reviewed page title.",
                     "page_script_execution",
                     BuiltinMcpToolResourceSummary {
-                        scope: "page_script_execution".to_string(),
-                        display_name: "Current managed page".to_string(),
+                        scope: "managed_surface".to_string(),
+                        display_name: "Current managed browser surface".to_string(),
                         file_basenames: Vec::new(),
                         origin: Some("https://mail.example.test".to_string()),
                     },
@@ -2159,27 +2199,31 @@ mod tests {
     }
 
     #[test]
-    fn mutable_network_request_index_is_rejected_before_pending_authority() {
+    fn network_request_index_is_approved_within_the_frozen_managed_surface() {
         let harness = harness();
         let grant = activate_browser(&harness);
-        let error = prepare_sensitive(
+        let approval = prepare_sensitive(
             &harness,
             &grant,
             "browser_network_request",
             "call-network-ledger-index",
             vec![BuiltinMcpToolRiskKind::NetworkSensitiveRead],
         )
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(approval.resource_summary.scope, "managed_surface");
         assert_eq!(
-            error.code(),
-            Some("builtin_mcp_tool.sensitive_request_identity_unavailable")
+            harness
+                .provider
+                .lock_grants()
+                .unwrap()
+                .pending_builtin_tools
+                .len(),
+            1
         );
-        assert!(harness
-            .provider
-            .lock_grants()
-            .unwrap()
-            .pending_builtin_tools
-            .is_empty());
+        harness
+            .runtime
+            .dismiss_builtin_mcp_tool_approval(&approval)
+            .unwrap();
     }
 
     #[test]
@@ -2483,6 +2527,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn main_frozen_origin_replaces_the_model_claim_in_approval_and_scope() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let managed_runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
+        harness
+            .provider
+            .attach_managed_runtime(Arc::clone(&managed_runtime))
+            .unwrap();
+        let (outbound, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        managed_runtime.bridge().attach_outbound(outbound).unwrap();
+
+        let claimed_origin = "https://model-claim.example.test";
+        let frozen_origin = "https://mail.example.test";
+        let invocation = sensitive_invocation(
+            &harness,
+            &grant,
+            "browser_evaluate",
+            "call-main-origin-authority",
+            json!({
+                "function": "() => document.title",
+                "call_reason": "Read the reviewed fixture title."
+            }),
+        );
+        let expected_arguments_digest =
+            mycopilot_core::builtin_mcp_tool_arguments_digest(&invocation.arguments).unwrap();
+        let runtime = harness.runtime.clone();
+        let proposal = tokio::spawn(async move {
+            runtime
+                .prepare_builtin_mcp_tool_approval_async(
+                    invocation,
+                    "The model requests running a reviewed script in the managed page.".to_string(),
+                    "page_script_execution".to_string(),
+                    BuiltinMcpToolResourceSummary {
+                        scope: "managed_surface".to_string(),
+                        display_name: "Current managed browser surface".to_string(),
+                        file_basenames: Vec::new(),
+                        origin: Some(claimed_origin.to_string()),
+                    },
+                    None,
+                    vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+                    AgentCancellationToken::new(),
+                )
+                .await
+        });
+
+        let prepare: ManagedPlaywrightCommandNotification = serde_json::from_value(
+            commands.recv().await.expect("prepare command missing")["params"].clone(),
+        )
+        .unwrap();
+        let ManagedPlaywrightCommand::PrepareSensitiveTool { input } = &prepare.command else {
+            panic!("expected proposal-time target prepare command");
+        };
+        let binding_id = Uuid::new_v4().to_string();
+        let target_binding_digest = format!("sha256:{}", "8".repeat(64));
+        assert!(managed_runtime
+            .bridge()
+            .complete(ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: prepare.request_id,
+                outcome: ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
+                    binding_id,
+                    target_binding_digest,
+                    origin: Some(frozen_origin.to_string()),
+                    created_at_ms: input.created_at_ms,
+                    expires_at_ms: input.expires_at_ms,
+                    file_basenames: Vec::new(),
+                    file_revision_digest: None,
+                },
+            })
+            .unwrap());
+
+        let approval = proposal.await.unwrap().unwrap();
+        assert_eq!(
+            approval.identity.arguments_digest,
+            expected_arguments_digest
+        );
+        assert_eq!(approval.identity.origin.as_deref(), Some(frozen_origin));
+        assert_eq!(approval.resource_summary.scope, "managed_surface");
+        assert_eq!(
+            approval.resource_summary.origin.as_deref(),
+            Some(frozen_origin)
+        );
+        assert_ne!(
+            approval.resource_summary.origin.as_deref(),
+            Some(claimed_origin)
+        );
+        harness
+            .runtime
+            .dismiss_builtin_mcp_tool_approval(&approval)
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn cancelled_target_prepare_drains_late_success_and_releases_exact_binding() {
         let harness = harness();
         let grant = activate_browser(&harness);
@@ -2501,7 +2638,6 @@ mod tests {
             "call-cancelled-prepare",
             json!({
                 "function": "() => document.title",
-                "approval_origin": "https://mail.example.test",
                 "call_reason": "Read the reviewed fixture title."
             }),
         );
@@ -2515,12 +2651,12 @@ mod tests {
                     "The model requests running a reviewed script in the managed page.".to_string(),
                     "page_script_execution".to_string(),
                     BuiltinMcpToolResourceSummary {
-                        scope: "page_script_execution".to_string(),
-                        display_name: "page script execution".to_string(),
+                        scope: "managed_surface".to_string(),
+                        display_name: "Current managed browser surface".to_string(),
                         file_basenames: Vec::new(),
                         origin: Some("https://mail.example.test".to_string()),
                     },
-                    "https://mail.example.test".to_string(),
+                    None,
                     vec![BuiltinMcpToolRiskKind::PageScriptExecution],
                     invoke_cancellation,
                 )
@@ -2547,9 +2683,11 @@ mod tests {
                 outcome: ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
                     binding_id: binding_id.clone(),
                     target_binding_digest: format!("sha256:{}", "8".repeat(64)),
-                    origin: "https://mail.example.test".to_string(),
+                    origin: Some("https://mail.example.test".to_string()),
                     created_at_ms: input.created_at_ms,
                     expires_at_ms: input.expires_at_ms,
+                    file_basenames: Vec::new(),
+                    file_revision_digest: None,
                 },
             })
             .unwrap());
@@ -2596,19 +2734,18 @@ mod tests {
                 "authorization": format!("Bearer {secret}"),
                 "storageValue": secret,
                 "path": format!("browser-file:{secret}"),
-                "approval_origin": "https://mail.example.test",
                 "call_reason": "Read the reviewed page state.",
             }),
         );
         let request = sensitive_approval_request(
             &harness,
             invocation,
-            "https://mail.example.test".to_string(),
+            Some("https://mail.example.test".to_string()),
             "Read the reviewed page state.",
             "page_script_execution",
             BuiltinMcpToolResourceSummary {
-                scope: "page_script_execution".to_string(),
-                display_name: "Current managed page".to_string(),
+                scope: "managed_surface".to_string(),
+                display_name: "Current managed browser surface".to_string(),
                 file_basenames: Vec::new(),
                 origin: Some("https://mail.example.test".to_string()),
             },

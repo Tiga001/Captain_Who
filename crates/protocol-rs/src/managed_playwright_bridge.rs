@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION: u32 = 2;
+pub const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION: u32 = 3;
 pub const MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD: &str = "mcp.builtinPlaywright.command";
 pub const MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD: &str = "mcp.builtinPlaywright.cancel";
 pub const MANAGED_PLAYWRIGHT_COMPLETE_METHOD: &str = "mcp.builtinPlaywright.complete";
@@ -103,12 +103,14 @@ pub struct ManagedPlaywrightBuiltinToolGrantContext {
     pub expires_at_ms: u64,
 }
 
-/// Value-free proposal-time request. Main freezes the exact currently selected managed Surface;
-/// no CDP, WebContents, selector, argument value, or page content crosses this wire.
+/// Process-only proposal-time request. Main freezes the exact currently selected managed Surface
+/// and, when present, file paths already authorized by Core's workspace/attachment resolver.
+/// Nothing in this request may enter Renderer, activity, logs, or a checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedPlaywrightPrepareSensitiveToolInput {
     pub binding_request_id: String,
+    pub binding_scope: ManagedPlaywrightSensitiveBindingScopeDto,
     pub run_id: String,
     pub capability_id: String,
     pub activation_id: String,
@@ -120,6 +122,20 @@ pub struct ManagedPlaywrightPrepareSensitiveToolInput {
     pub arguments_digest: String,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
+    pub file_preparation: Option<ManagedPlaywrightSensitiveFilePreparation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedPlaywrightSensitiveBindingScopeDto {
+    ManagedSurface,
+    ManagedBrowserProfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManagedPlaywrightSensitiveFilePreparation {
+    ResolvedPaths { paths: Vec<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,11 +308,15 @@ pub enum ManagedPlaywrightCompletionOutcome {
         binding_id: String,
         #[serde(rename = "targetBindingDigest")]
         target_binding_digest: String,
-        origin: String,
+        origin: Option<String>,
         #[serde(rename = "createdAtMs")]
         created_at_ms: u64,
         #[serde(rename = "expiresAtMs")]
         expires_at_ms: u64,
+        #[serde(rename = "fileBasenames")]
+        file_basenames: Vec<String>,
+        #[serde(rename = "fileRevisionDigest")]
+        file_revision_digest: Option<String>,
     },
     SensitiveToolBindingReleased {
         released: bool,
@@ -486,6 +506,7 @@ mod tests {
     fn sensitive_target_prepare_release_and_grant_wire_are_exact() {
         let input = ManagedPlaywrightPrepareSensitiveToolInput {
             binding_request_id: "7c71eead-3b07-4700-8378-c61d7ea7ac68".to_string(),
+            binding_scope: ManagedPlaywrightSensitiveBindingScopeDto::ManagedSurface,
             run_id: "run-1".to_string(),
             capability_id: "browser_automation".to_string(),
             activation_id: "42e7ec2d-03f1-49f3-aa0a-e73ca0f88d91".to_string(),
@@ -497,6 +518,7 @@ mod tests {
             arguments_digest: format!("sha256:{}", "b".repeat(64)),
             created_at_ms: 1_750_000_000_000,
             expires_at_ms: 1_750_000_600_000,
+            file_preparation: None,
         };
         let prepare = serde_json::to_value(ManagedPlaywrightCommand::PrepareSensitiveTool {
             input: Box::new(input.clone()),
@@ -508,6 +530,7 @@ mod tests {
                 "type": "prepare_sensitive_tool",
                 "input": {
                     "bindingRequestId": "7c71eead-3b07-4700-8378-c61d7ea7ac68",
+                    "bindingScope": "managed_surface",
                     "runId": "run-1",
                     "capabilityId": "browser_automation",
                     "activationId": "42e7ec2d-03f1-49f3-aa0a-e73ca0f88d91",
@@ -518,7 +541,8 @@ mod tests {
                     "toolName": "browser_evaluate",
                     "argumentsDigest": format!("sha256:{}", "b".repeat(64)),
                     "createdAtMs": 1_750_000_000_000_u64,
-                    "expiresAtMs": 1_750_000_600_000_u64
+                    "expiresAtMs": 1_750_000_600_000_u64,
+                    "filePreparation": null
                 }
             })
         );

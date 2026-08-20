@@ -6,7 +6,10 @@ import type {
   WebPreferences
 } from 'electron'
 import { BROWSER_WEBVIEW_PARTITION, parseBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
-import type { BrowserNetworkGuard } from '../browser/BrowserNetworkGuard'
+import type {
+  BrowserNetworkGuard,
+  BrowserTargetCreationAuthority
+} from '../browser/BrowserNetworkGuard'
 
 interface ManagedWebviewPolicy {
   allowedProtocols: ReadonlySet<string>
@@ -21,7 +24,11 @@ export interface ManagedWebviewTargetRegistry {
     partition: string
     surfaceId?: string
   }): void
-  handlePopup?(input: { guest: WebContents; url: string }): Promise<void> | void
+  handlePopup?(input: {
+    authority?: BrowserTargetCreationAuthority
+    guest: WebContents
+    url: string
+  }): Promise<void> | void
 }
 
 export interface ManagedWebviewHostOptions {
@@ -223,8 +230,8 @@ function configureManagedGuest(
     ) {
       if (networkGuard) {
         if (targetRegistry?.handlePopup) {
-          networkGuard.handleWindowOpen(guest, url, () =>
-            Promise.resolve(targetRegistry.handlePopup?.({ guest, url }))
+          networkGuard.handleWindowOpen(guest, url, (authority) =>
+            Promise.resolve(targetRegistry.handlePopup?.({ authority, guest, url }))
           )
         } else {
           networkGuard.handleWindowOpen(guest, url)

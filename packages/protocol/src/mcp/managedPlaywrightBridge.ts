@@ -1,4 +1,4 @@
-export const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION = 2 as const
+export const MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION = 3 as const
 export const MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD =
   'mcp.builtinPlaywright.command' as const
 export const MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD = 'mcp.builtinPlaywright.cancel' as const
@@ -55,6 +55,7 @@ export interface ManagedPlaywrightBuiltinToolGrantContext {
 
 export interface ManagedPlaywrightPrepareSensitiveToolInput {
   bindingRequestId: string
+  bindingScope: ManagedPlaywrightSensitiveBindingScope
   runId: string
   capabilityId: 'browser_automation'
   activationId: string
@@ -66,6 +67,17 @@ export interface ManagedPlaywrightPrepareSensitiveToolInput {
   argumentsDigest: string
   createdAtMs: number
   expiresAtMs: number
+  /** Process-only file authority prepared before the approval is published. */
+  filePreparation: ManagedPlaywrightSensitiveFilePreparation | null
+}
+
+export type ManagedPlaywrightSensitiveBindingScope =
+  | 'managed_surface'
+  | 'managed_browser_profile'
+
+export type ManagedPlaywrightSensitiveFilePreparation = {
+  mode: 'resolved_paths'
+  paths: string[]
 }
 
 export type ManagedPlaywrightSensitiveBindingReleaseReason =
@@ -142,9 +154,11 @@ export type ManagedPlaywrightCompletionOutcome =
       type: 'sensitive_tool_prepared'
       bindingId: string
       targetBindingDigest: string
-      origin: string
+      origin: string | null
       createdAtMs: number
       expiresAtMs: number
+      fileBasenames: string[]
+      fileRevisionDigest: string | null
     }
   | { type: 'sensitive_tool_binding_released'; released: boolean }
   | { type: 'closed' }
@@ -674,6 +688,7 @@ function parsePrepareSensitiveToolInput(
 ): ManagedPlaywrightPrepareSensitiveToolInput {
   const record = exactRecord(value, [
     'bindingRequestId',
+    'bindingScope',
     'runId',
     'capabilityId',
     'activationId',
@@ -684,7 +699,8 @@ function parsePrepareSensitiveToolInput(
     'toolName',
     'argumentsDigest',
     'createdAtMs',
-    'expiresAtMs'
+    'expiresAtMs',
+    'filePreparation'
   ])
   if (record.capabilityId !== 'browser_automation') {
     throw new Error('Invalid managed Playwright capability identity')
@@ -701,6 +717,10 @@ function parsePrepareSensitiveToolInput(
   }
   return {
     bindingRequestId: expectMatchingString(record.bindingRequestId, REQUEST_ID),
+    bindingScope: expectEnum(record.bindingScope, [
+      'managed_surface',
+      'managed_browser_profile'
+    ]),
     runId: expectSafeString(record.runId, 1, 256),
     capabilityId: 'browser_automation',
     activationId: expectMatchingString(record.activationId, REQUEST_ID),
@@ -711,8 +731,35 @@ function parsePrepareSensitiveToolInput(
     toolName: expectMatchingString(record.toolName, BROWSER_TOOL_NAME),
     argumentsDigest: expectMatchingString(record.argumentsDigest, SHA256_DIGEST),
     createdAtMs,
-    expiresAtMs
+    expiresAtMs,
+    filePreparation: parseSensitiveFilePreparation(record.filePreparation)
   }
+}
+
+function parseSensitiveFilePreparation(
+  value: unknown
+): ManagedPlaywrightSensitiveFilePreparation | null {
+  if (value === null) return null
+  const record = expectRecord(value)
+  if (record.mode === 'resolved_paths') {
+    exactKeys(record, ['mode', 'paths'])
+    if (
+      !Array.isArray(record.paths) ||
+      record.paths.length < 1 ||
+      record.paths.length > 16 ||
+      record.paths.some(
+        (path) =>
+          typeof path !== 'string' ||
+          path.length < 1 ||
+          path.length > 8_192 ||
+          path.includes('\0')
+      )
+    ) {
+      throw new Error('Invalid managed Playwright resolved file preparation')
+    }
+    return { mode: 'resolved_paths', paths: [...record.paths] }
+  }
+  throw new Error('Invalid managed Playwright file preparation mode')
 }
 
 function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutcome {
@@ -734,7 +781,9 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
         'targetBindingDigest',
         'origin',
         'createdAtMs',
-        'expiresAtMs'
+        'expiresAtMs',
+        'fileBasenames',
+        'fileRevisionDigest'
       ])
       const createdAtMs = expectSafeInteger(base.createdAtMs, 1, Number.MAX_SAFE_INTEGER)
       const expiresAtMs = expectSafeInteger(
@@ -742,13 +791,37 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
         createdAtMs + 1,
         Number.MAX_SAFE_INTEGER
       )
+      if (
+        !Array.isArray(base.fileBasenames) ||
+        base.fileBasenames.length > 16 ||
+        base.fileBasenames.some(
+          (name) =>
+            typeof name !== 'string' ||
+            name.length < 1 ||
+            name.length > 255 ||
+            name.includes('/') ||
+            name.includes('\\') ||
+            /[\u0000-\u001f\u007f]/u.test(name)
+        )
+      ) {
+        throw new Error('Invalid managed Playwright prepared file basenames')
+      }
+      const fileRevisionDigest =
+        base.fileRevisionDigest === null
+          ? null
+          : expectMatchingString(base.fileRevisionDigest, SHA256_DIGEST)
+      if ((base.fileBasenames.length === 0) !== (fileRevisionDigest === null)) {
+        throw new Error('Invalid managed Playwright prepared file identity')
+      }
       return {
         type: 'sensitive_tool_prepared',
         bindingId: expectMatchingString(base.bindingId, REQUEST_ID),
         targetBindingDigest: expectMatchingString(base.targetBindingDigest, SHA256_DIGEST),
-        origin: expectHttpOrigin(base.origin),
+        origin: base.origin === null ? null : expectHttpOrigin(base.origin),
         createdAtMs,
-        expiresAtMs
+        expiresAtMs,
+        fileBasenames: [...base.fileBasenames],
+        fileRevisionDigest
       }
     }
     case 'sensitive_tool_binding_released': {

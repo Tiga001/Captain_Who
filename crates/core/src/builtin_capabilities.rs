@@ -274,7 +274,7 @@ pub fn builtin_tool_requires_approval(
         BuiltinMcpToolApprovalMode::Never => false,
         BuiltinMcpToolApprovalMode::Always => true,
         BuiltinMcpToolApprovalMode::Dynamic => match descriptor.tool_id.as_str() {
-            "browser_drop" | "browser_file_upload" => arguments
+            "browser_file_upload" | "browser_drop" => arguments
                 .get("paths")
                 .and_then(Value::as_array)
                 .is_some_and(|paths| !paths.is_empty()),
@@ -285,55 +285,39 @@ pub fn builtin_tool_requires_approval(
 }
 
 pub fn validate_builtin_sensitive_target_scope(
-    invocation: &BuiltinCapabilityInvocation,
+    _invocation: &BuiltinCapabilityInvocation,
 ) -> AgentResult<()> {
-    let target = invocation.arguments.get("target").and_then(Value::as_str);
-    let supported = match invocation.tool_id.as_str() {
-        "browser_evaluate" => target.is_none_or(is_top_frame_snapshot_ref),
-        "browser_drop" => target.is_some_and(is_top_frame_snapshot_ref),
-        // The official upload Tool consumes an earlier modal file chooser but does not expose
-        // the chooser's owner Frame. Until Main freezes that exact Frame identity, applying a
-        // top-level origin approval to a subframe chooser would disclose files across origins.
-        "browser_file_upload" => false,
-        // The upstream index addresses a mutable, connection-local request ledger. A top-level
-        // Surface binding cannot prove which cross-frame request is being approved.
-        "browser_network_request" => false,
-        _ => true,
-    };
-    if supported {
-        return Ok(());
-    }
-    let request_identity_unavailable = invocation.tool_id == "browser_network_request";
-    Err(AgentError::structured(
-        if request_identity_unavailable {
-            "builtin_mcp_tool.sensitive_request_identity_unavailable"
-        } else {
-            "builtin_mcp_tool.sensitive_target_scope_unsupported"
-        },
-        if request_identity_unavailable {
-            "The sensitive network request cannot be bound to an exact immutable request identity; request detail access is unavailable."
-        } else {
-            "The sensitive browser request cannot be bound to the reviewed top-level document. Use a fresh top-frame snapshot reference; embedded-frame file disclosure is unavailable."
-        },
-        json!({
-            "schemaVersion": 1,
-            "type": "builtin_mcp_tool_approval",
-            "status": if request_identity_unavailable {
-                "request_identity_unavailable"
-            } else {
-                "unsupported_target_scope"
-            },
-            "retryable": false,
-            "dispatchCertainty": "definitely_not_dispatched",
-            "contentOmitted": true,
-        }),
-    ))
+    // Sensitive page targets are resources within the Host-owned active managed Surface, not
+    // independent authorities. Main separately freezes surface/generation/navigation epoch and
+    // origin, while the approval binds the exact official arguments (including target/index).
+    // The official connection can enumerate only that Surface, so iframe refs, the pending file
+    // chooser and the connection-local request ledger cannot escape into another guest.
+    Ok(())
 }
 
-fn is_top_frame_snapshot_ref(value: &str) -> bool {
-    value.strip_prefix('e').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-    })
+fn builtin_mcp_tool_binding_scope(
+    invocation: &BuiltinCapabilityInvocation,
+) -> BuiltinMcpToolBindingScope {
+    match invocation.tool_id.as_str() {
+        "browser_cookie_clear"
+        | "browser_cookie_delete"
+        | "browser_cookie_get"
+        | "browser_cookie_list"
+        | "browser_set_storage_state"
+        | "browser_storage_state" => BuiltinMcpToolBindingScope::ManagedBrowserProfile,
+        // Fixed 0.0.79 derives an omitted cookie domain from currentTabOrDie(). The broader
+        // profile approval therefore still freezes one exact Surface for that parameter shape.
+        "browser_cookie_set"
+            if invocation
+                .arguments
+                .get("domain")
+                .and_then(Value::as_str)
+                .is_some_and(|domain| !domain.trim().is_empty()) =>
+        {
+            BuiltinMcpToolBindingScope::ManagedBrowserProfile
+        }
+        _ => BuiltinMcpToolBindingScope::ManagedSurface,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,21 +614,38 @@ pub struct BuiltinMcpToolApprovalRequest {
 #[derive(Debug, Clone)]
 pub struct BuiltinMcpToolTargetBindingRequest {
     pub binding_request_id: String,
+    pub binding_scope: BuiltinMcpToolBindingScope,
     pub invocation: BuiltinCapabilityInvocation,
     pub capability_grant: CapabilityGrant,
     pub arguments_digest: String,
     pub created_at: u64,
     pub expires_at: u64,
     pub cancellation: AgentCancellationToken,
+    /// Process-only file authority. Resolved paths were already constrained by the Tool context;
+    /// native picker requests contain no path at all.
+    pub file_preparation: Option<BuiltinMcpToolFilePreparation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinMcpToolBindingScope {
+    ManagedSurface,
+    ManagedBrowserProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuiltinMcpToolFilePreparation {
+    ResolvedPaths(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedBuiltinMcpToolTargetBinding {
     pub binding_id: String,
     pub target_binding_digest: String,
-    pub origin: String,
+    pub origin: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
+    pub file_basenames: Vec<String>,
+    pub file_revision_digest: Option<String>,
 }
 
 impl BuiltinMcpToolApprovalRequest {
@@ -687,10 +688,16 @@ impl BuiltinMcpToolApprovalRequest {
                 .map_err(|_| AgentError::new("内置 MCP 敏感 Tool 页面绑定 identity 无效。"))?;
             if binding_id.get_version() != Some(uuid::Version::Random)
                 || !valid_sha256_digest(&binding.target_binding_digest)
-                || binding.origin != self.origin.as_deref().unwrap_or_default()
+                || binding.origin != self.origin
                 || binding.created_at >= binding.expires_at
                 || binding.expires_at - binding.created_at > BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS
                 || binding.expires_at > self.capability_grant.expires_at
+                || binding.file_basenames != self.resource_summary.file_basenames
+                || (binding.file_basenames.is_empty() != binding.file_revision_digest.is_none())
+                || binding
+                    .file_revision_digest
+                    .as_deref()
+                    .is_some_and(|digest| !valid_sha256_digest(digest))
             {
                 return Err(AgentError::new(
                     "内置 MCP 敏感 Tool 页面绑定 identity 无效。",
@@ -1375,8 +1382,8 @@ impl BuiltinCapabilityRuntime {
         invocation: BuiltinCapabilityInvocation,
         call_reason: String,
         operation_category: String,
-        resource_summary: BuiltinMcpToolResourceSummary,
-        claimed_origin: String,
+        mut resource_summary: BuiltinMcpToolResourceSummary,
+        file_preparation: Option<BuiltinMcpToolFilePreparation>,
         mut risk_kinds: Vec<BuiltinMcpToolRiskKind>,
         cancellation: AgentCancellationToken,
     ) -> AgentResult<AgentBuiltinMcpToolApproval> {
@@ -1385,7 +1392,6 @@ impl BuiltinCapabilityRuntime {
         if invocation.builtin_tool_grant.is_some() {
             return Err(AgentError::new("未批准的内置 MCP Tool 请求携带了 grant。"));
         }
-        validate_optional_origin(Some(&claimed_origin))?;
         let manifest = self
             .manifest(&invocation.capability_id)
             .ok_or_else(|| AgentError::new("内置 MCP Tool 所属能力已不存在。"))?;
@@ -1427,12 +1433,14 @@ impl BuiltinCapabilityRuntime {
             .provider
             .prepare_builtin_mcp_tool_target_binding(BuiltinMcpToolTargetBindingRequest {
                 binding_request_id: Uuid::new_v4().to_string(),
+                binding_scope: builtin_mcp_tool_binding_scope(&invocation),
                 invocation: invocation.clone(),
                 capability_grant: capability_grant.clone(),
                 arguments_digest: arguments_digest.clone(),
                 created_at,
                 expires_at,
                 cancellation: cancellation.clone(),
+                file_preparation,
             })
             .await?;
         let target_binding_id = Uuid::parse_str(&target_binding.binding_id);
@@ -1451,7 +1459,6 @@ impl BuiltinCapabilityRuntime {
         }
         if target_binding_id.ok().and_then(|id| id.get_version()) != Some(uuid::Version::Random)
             || !valid_sha256_digest(&target_binding.target_binding_digest)
-            || target_binding.origin != claimed_origin
             || target_binding.created_at != created_at
             || target_binding.expires_at != expires_at
         {
@@ -1466,10 +1473,22 @@ impl BuiltinCapabilityRuntime {
                 "Main 返回的敏感 Tool 页面绑定 identity 无效或 origin 已漂移。",
             ));
         }
+        if let Err(error) = validate_optional_origin(target_binding.origin.as_deref()) {
+            let _ = self.provider.release_builtin_mcp_tool_target_binding(
+                &target_binding,
+                &invocation.run_id,
+                &invocation.activation_id,
+                &invocation.call_id,
+                BuiltinMcpToolTargetBindingReleaseReason::ProposalFailed,
+            );
+            return Err(error);
+        }
+        resource_summary.origin = target_binding.origin.clone();
+        resource_summary.file_basenames = target_binding.file_basenames.clone();
         let resource_scope_digest = match builtin_mcp_tool_resource_scope_digest_v2(
             &invocation.tool_id,
             &arguments_digest,
-            Some(&target_binding.origin),
+            target_binding.origin.as_deref(),
             &risk_kinds,
             &resource_summary.scope,
             &target_binding.target_binding_digest,
@@ -1499,7 +1518,7 @@ impl BuiltinCapabilityRuntime {
             operation_category,
             resource_summary,
             resource_scope_digest,
-            origin: Some(target_binding.origin.clone()),
+            origin: target_binding.origin.clone(),
             risk_kinds,
             target_binding: Some(target_binding),
         };
@@ -1880,9 +1899,9 @@ pub fn build_builtin_mcp_tool_approval(
 
 /// Deterministic safe resource binding shared with Main.
 ///
-/// `arguments_digest` is computed over the complete model/Host input object *before* stripping
-/// `call_reason` or `approval_origin`. Opaque FileBroker handles are therefore bound without
-/// revealing either a path or file content. Main recomputes this digest before applying overlays.
+/// `arguments_digest` is computed over the complete model/Host input object before stripping
+/// `call_reason`. Opaque FileBroker handles are bound separately without revealing a path or file
+/// content. Main recomputes this digest before applying overlays.
 pub fn builtin_mcp_tool_resource_scope_digest(
     tool_id: &str,
     arguments_digest: &str,
@@ -2155,7 +2174,7 @@ fn validate_optional_origin(origin: Option<&str>) -> AgentResult<()> {
         || origin.chars().any(char::is_control)
     {
         return Err(AgentError::new(
-            "内置 MCP Tool approval_origin 必须是无凭据、无路径的 HTTP(S) origin。",
+            "内置 MCP Tool Host origin 必须是无凭据、无路径的 HTTP(S) origin。",
         ));
     }
     Ok(())
@@ -2571,56 +2590,122 @@ fn canonical_json(value: &Value) -> Value {
 mod tests {
     use super::*;
 
+    fn binding_scope_invocation(tool_id: &str, arguments: Value) -> BuiltinCapabilityInvocation {
+        BuiltinCapabilityInvocation {
+            run_id: "run-binding-scope".to_string(),
+            capability_id: BuiltinCapabilityId::parse("browser.automation").unwrap(),
+            managed_mcp_id: "builtin.browser_automation.mcp".to_string(),
+            package_name: "@playwright/mcp".to_string(),
+            package_version: "0.0.79".to_string(),
+            upstream_catalog_digest: format!("sha256:{}", "a".repeat(64)),
+            policy_digest: format!("sha256:{}", "b".repeat(64)),
+            activation_id: CapabilityActivationId::generate(),
+            manifest_digest: format!("sha256:{}", "c".repeat(64)),
+            policy_revision: 1,
+            tool_id: tool_id.to_string(),
+            raw_name: tool_id.to_string(),
+            model_name: tool_id.to_string(),
+            upstream_schema_digest: format!("sha256:{}", "d".repeat(64)),
+            host_overlay_digest: format!("sha256:{}", "e".repeat(64)),
+            host_input_schema_digest: format!("sha256:{}", "f".repeat(64)),
+            call_id: "call-binding-scope".to_string(),
+            arguments,
+            builtin_tool_grant: None,
+        }
+    }
+
+    #[test]
+    fn sensitive_binding_scope_distinguishes_profile_and_page_authority() {
+        assert_eq!(
+            builtin_mcp_tool_binding_scope(&binding_scope_invocation(
+                "browser_cookie_set",
+                json!({"name":"session", "value":"reviewed"}),
+            )),
+            BuiltinMcpToolBindingScope::ManagedSurface,
+            "an omitted cookie domain is derived from the frozen current page"
+        );
+        assert_eq!(
+            builtin_mcp_tool_binding_scope(&binding_scope_invocation(
+                "browser_cookie_set",
+                json!({
+                    "name":"session",
+                    "value":"reviewed",
+                    "domain":"fixture.invalid"
+                }),
+            )),
+            BuiltinMcpToolBindingScope::ManagedBrowserProfile
+        );
+        assert_eq!(
+            builtin_mcp_tool_binding_scope(&binding_scope_invocation(
+                "browser_cookie_list",
+                json!({}),
+            )),
+            BuiltinMcpToolBindingScope::ManagedBrowserProfile
+        );
+        assert_eq!(
+            builtin_mcp_tool_binding_scope(&binding_scope_invocation(
+                "browser_storage_state",
+                json!({}),
+            )),
+            BuiltinMcpToolBindingScope::ManagedBrowserProfile
+        );
+        assert_eq!(
+            builtin_mcp_tool_binding_scope(&binding_scope_invocation(
+                "browser_evaluate",
+                json!({"function":"() => 1"}),
+            )),
+            BuiltinMcpToolBindingScope::ManagedSurface
+        );
+    }
+
     #[test]
     fn builtin_sensitive_argument_digest_matches_the_main_canonical_vector() {
         let arguments = json!({
             "function": "() => document.title",
-            "approval_origin": "https://mail.example.test",
             "call_reason": "Read the current page title.",
         });
         assert_eq!(
             builtin_mcp_tool_arguments_digest(&arguments).unwrap(),
-            "sha256:fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694"
+            "sha256:44679ad41b476dfb14d002b9d22a010f72f3c60ae4d060868c9ceacab2aabcd1"
         );
         assert_eq!(
             crate::tools::mcp_tool_arguments_digest(&arguments).unwrap(),
-            "fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694",
+            "44679ad41b476dfb14d002b9d22a010f72f3c60ae4d060868c9ceacab2aabcd1",
             "external MCP keeps its historical bare digest"
         );
         assert_eq!(
             builtin_mcp_tool_resource_scope_digest(
                 "browser_evaluate",
-                "sha256:fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694",
+                "sha256:44679ad41b476dfb14d002b9d22a010f72f3c60ae4d060868c9ceacab2aabcd1",
                 Some("https://mail.example.test"),
                 &[BuiltinMcpToolRiskKind::PageScriptExecution],
-                "page_script_execution",
+                "managed_surface",
             )
             .unwrap(),
-            "sha256:c2e7c64206076f6d422b1526c49b2870c601106dc88bcea59102dc39d36556d1"
+            "sha256:7a94511d5d3fa315c32237ca09c5bc7510fbe7cec14a40456b578f8e55181c7a"
         );
     }
 
     #[test]
     fn managed_profile_scope_digest_matches_the_main_canonical_vector() {
         let arguments = json!({
-            "approval_origin": "https://mail.example.test",
             "call_reason": "List reviewed managed browser cookies.",
         });
         let arguments_digest = builtin_mcp_tool_arguments_digest(&arguments).unwrap();
         assert_eq!(
             arguments_digest,
-            "sha256:85a6b62bc42b5e8f095052224a1d4f40b4366029e5e212c8b07b8679c22fa281"
+            "sha256:7eedba5a990eb2faeeb27bebfccd4ac2b5fa1b6237b308ccaf402fc5772c72b7"
         );
         assert_eq!(
             builtin_mcp_tool_resource_scope_digest(
                 "browser_cookie_list",
                 &arguments_digest,
-                Some("https://mail.example.test"),
+                None,
                 &[BuiltinMcpToolRiskKind::CookieRead],
                 "managed_browser_profile",
             )
             .unwrap(),
-            "sha256:867eef1812ae00959599b4cbc376c1608b217e1072552286b9f581e48f0f7ed7"
+            "sha256:e94817429ef8eba75b2b368825326e524b43f524c5dc38d9961f69e2d32f5bb2"
         );
     }
 

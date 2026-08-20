@@ -22,6 +22,7 @@ const translations = vi.hoisted(
         'agent.builtinMcpApproval.resource.generic': 'Restricted data in the current page',
         'agent.builtinMcpApproval.resource.managedBrowserProfile':
           'The entire MyCopilot managed browser profile',
+        'agent.builtinMcpApproval.resource.managedSurface': 'The current managed browser tab',
         'agent.builtinMcpApproval.origin': 'Page origin',
         'agent.builtinMcpApproval.files': 'Files',
         'agent.builtinMcpApproval.risks': 'Sensitive access',
@@ -45,6 +46,7 @@ const translations = vi.hoisted(
         'agent.builtinMcpApproval.resource': '资源范围',
         'agent.builtinMcpApproval.resource.generic': '当前网页中的受限资源',
         'agent.builtinMcpApproval.resource.managedBrowserProfile': '整个 MyCopilot 受管浏览器配置',
+        'agent.builtinMcpApproval.resource.managedSurface': '当前 MyCopilot 受管浏览器标签页',
         'agent.builtinMcpApproval.origin': '网页来源',
         'agent.builtinMcpApproval.files': '文件',
         'agent.builtinMcpApproval.risks': '敏感权限',
@@ -104,7 +106,7 @@ function action(overrides: Partial<ApprovalAction['approval']> = {}): ApprovalAc
       callReason: '<img src=x onerror=alert(1)>Update the empty fixture editor.',
       operationCategory: 'SESSION_STORAGE_VALUE_CANARY',
       resourceSummary: {
-        scope: 'page_script_execution',
+        scope: 'managed_surface',
         displayName: 'SCRIPT_SOURCE_CANARY browser-file:opaque-handle /Users/private/secret.txt',
         fileBasenames: ['fixture.txt'],
         origin: 'https://fixture.example'
@@ -141,6 +143,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
     expect(english.container.textContent).toContain(
       'Allow “Browser automation” to “run a script in the page”?'
     )
+    expect(english.container.textContent).toContain('The current managed browser tab')
     expect(english.container.textContent).toContain('Run a script in the current page')
     await english.unmount()
 
@@ -149,6 +152,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
       <AgentApprovalDialog target={{ action: proposed, messageId: 'assistant-sensitive' }} />
     )
     expect(chinese.container.textContent).toContain('允许“浏览器自动化”执行“在网页中执行脚本”吗？')
+    expect(chinese.container.textContent).toContain('当前 MyCopilot 受管浏览器标签页')
     expect(chinese.container.textContent).toContain('在当前网页执行脚本')
     await chinese.unmount()
   })

@@ -38,6 +38,13 @@ export class BrowserDownloadBrokerError extends Error {
 }
 
 export interface BrowserDownloadToolLease {
+  claimCreatedGuest(input: {
+    action: 'new' | 'popup'
+    generation: number
+    guest: WebContents
+    surfaceId: string
+  }): Promise<void>
+  expectTargetClose(input: { generation: number; surfaceId: string }): void
   ready?(): Promise<void>
   markDispatched(): void
   settle(): Promise<readonly BrowserArtifactReference[]>
@@ -63,21 +70,25 @@ interface ActiveTool {
   accepting: boolean
   artifacts: BrowserArtifactReference[]
   callerSignal?: AbortSignal
+  createdGuestClaimsStarted: Record<'new' | 'popup', number>
   cleanup?: Promise<void>
   dispatched: boolean
   downloads: Set<ActiveDownload>
+  expectedTargetCloses: Set<string>
   failure?: BrowserDownloadBrokerError
   finished: boolean
-  guest: GuestRecord
+  guests: Set<GuestRecord>
   handleCallerAbort: () => void
-  owner: BrowserArtifactOwner
+  maxCreatedGuests: Record<'new' | 'popup', number>
+  owner: Omit<BrowserArtifactOwner, 'generation' | 'surfaceId'>
   outputSession?: BrowserArtifactOutputSession
   ready: Promise<void>
-  reservations: BrowserArtifactReservation[]
+  reservationsByGuest: Map<GuestRecord, BrowserArtifactReservation[]>
   settled: boolean
 }
 
 interface ActiveDownload {
+  guest: GuestRecord
   item: DownloadItem
   reservation: BrowserArtifactReservation
   settle: () => void
@@ -120,7 +131,7 @@ export class BrowserDownloadBroker {
       return
     }
     const tool = [...this.tools].find(
-      (candidate) => candidate.guest === guest && candidate.accepting && !candidate.finished
+      (candidate) => candidate.guests.has(guest) && candidate.accepting && !candidate.finished
     )
     // Without an exact active Agent owner there is no safe run/capability binding and no approved
     // user export path in this round. Cancelling prevents Electron from falling back to the real
@@ -129,7 +140,7 @@ export class BrowserDownloadBroker {
       safeCancel(item)
       return
     }
-    this.admitDownload(tool, item)
+    this.admitDownload(tool, guest, item)
   }
 
   constructor(options: BrowserDownloadBrokerOptions) {
@@ -187,7 +198,17 @@ export class BrowserDownloadBroker {
       return
     this.guests.delete(guest.id)
     for (const tool of [...this.tools]) {
-      if (tool.guest === record) void this.abortTool(tool, 'browser.download.target_closed')
+      if (!tool.guests.has(record)) continue
+      const key = surfaceKey(record.surfaceId, record.generation)
+      if (tool.expectedTargetCloses.delete(key)) {
+        tool.guests.delete(record)
+        void this.releaseGuestReservations(tool, record)
+        for (const download of [...tool.downloads]) {
+          if (download.guest === record) void this.cancelDownload(download)
+        }
+      } else {
+        void this.abortTool(tool, 'browser.download.target_closed')
+      }
     }
   }
 
@@ -223,7 +244,7 @@ export class BrowserDownloadBroker {
         'definitely_not_dispatched'
       )
     }
-    if ([...this.tools].some((tool) => tool.guest === guest && !tool.finished)) {
+    if ([...this.tools].some((tool) => tool.guests.has(guest) && !tool.finished)) {
       throw new BrowserDownloadBrokerError('browser.download.busy', 'definitely_not_dispatched')
     }
     const tool = {} as ActiveTool
@@ -234,19 +255,85 @@ export class BrowserDownloadBroker {
       accepting: false,
       artifacts: [],
       callerSignal: input.signal,
+      createdGuestClaimsStarted: { new: 0, popup: 0 },
       dispatched: false,
       downloads: new Set<ActiveDownload>(),
+      expectedTargetCloses: new Set<string>(),
       finished: false,
-      guest,
+      guests: new Set([guest]),
       handleCallerAbort,
-      owner: { ...input.owner },
-      reservations: [],
+      maxCreatedGuests: { new: 0, popup: 4 },
+      owner: ownerBase(input.owner),
+      reservationsByGuest: new Map(),
       settled: false
     })
     this.tools.add(tool)
     input.signal?.addEventListener('abort', handleCallerAbort, { once: true })
     tool.ready = this.prepareTool(tool, input)
+    return this.toolLease(tool)
+  }
+
+  /** Prepares a run/call owner before Target.createTarget has produced a guest. */
+  beginTargetCreationTool(input: {
+    owner: Omit<BrowserArtifactOwner, 'generation' | 'surfaceId'>
+    signal?: AbortSignal
+  }): BrowserDownloadToolLease {
+    this.assertUsable()
+    if (
+      this.finalizedRuns.has(input.owner.runId) ||
+      this.revokedActivations.has(input.owner.activationId) ||
+      this.closedToolCalls.has(toolCallKey(input.owner.runId, input.owner.toolCallId))
+    ) {
+      throw new BrowserDownloadBrokerError('browser.download.closed', 'definitely_not_dispatched')
+    }
+    const tool = {} as ActiveTool
+    const handleCallerAbort = (): void => {
+      void this.abortTool(tool, 'browser.download.cancelled')
+    }
+    Object.assign(tool, {
+      accepting: false,
+      artifacts: [],
+      callerSignal: input.signal,
+      createdGuestClaimsStarted: { new: 0, popup: 0 },
+      dispatched: false,
+      downloads: new Set<ActiveDownload>(),
+      expectedTargetCloses: new Set<string>(),
+      finished: false,
+      guests: new Set<GuestRecord>(),
+      handleCallerAbort,
+      maxCreatedGuests: { new: 1, popup: 4 },
+      owner: { ...input.owner },
+      reservationsByGuest: new Map<GuestRecord, BrowserArtifactReservation[]>(),
+      settled: false
+    })
+    this.tools.add(tool)
+    input.signal?.addEventListener('abort', handleCallerAbort, { once: true })
+    tool.ready = this.prepareTargetCreationTool(tool)
+    return this.toolLease(tool)
+  }
+
+  private toolLease(tool: ActiveTool): BrowserDownloadToolLease {
     return {
+      claimCreatedGuest: async (input) => await this.claimCreatedGuest(tool, input),
+      expectTargetClose: (input) => {
+        if (tool.finished) {
+          throw new BrowserDownloadBrokerError(
+            'browser.download.target_closed',
+            tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+          )
+        }
+        const guest = [...tool.guests].find(
+          (candidate) =>
+            candidate.surfaceId === input.surfaceId && candidate.generation === input.generation
+        )
+        if (!guest) {
+          throw new BrowserDownloadBrokerError(
+            'browser.download.target_closed',
+            tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+          )
+        }
+        tool.expectedTargetCloses.add(surfaceKey(input.surfaceId, input.generation))
+      },
       ready: () => tool.ready,
       markDispatched: () => {
         if (!tool.finished) {
@@ -287,7 +374,8 @@ export class BrowserDownloadBroker {
       if (
         tool.finished ||
         input.signal?.aborted ||
-        currentGuest !== tool.guest ||
+        !currentGuest ||
+        !tool.guests.has(currentGuest) ||
         input.guest.isDestroyed() ||
         this.finalizedRuns.has(input.owner.runId) ||
         this.revokedActivations.has(input.owner.activationId) ||
@@ -295,14 +383,14 @@ export class BrowserDownloadBroker {
         this.closedSurfaces.has(surfaceKey(input.owner.surfaceId, input.owner.generation))
       ) {
         throw new BrowserDownloadBrokerError(
-          currentGuest === tool.guest
+          currentGuest && tool.guests.has(currentGuest)
             ? 'browser.download.cancelled'
             : 'browser.download.target_closed',
           'definitely_not_dispatched'
         )
       }
       tool.outputSession = outputSession
-      tool.reservations.push(...reservations)
+      tool.reservationsByGuest.set(currentGuest, reservations)
       if (input.signal?.aborted) {
         await this.abortTool(tool, 'browser.download.cancelled')
         throw new BrowserDownloadBrokerError(
@@ -321,6 +409,114 @@ export class BrowserDownloadBroker {
       throw new BrowserDownloadBrokerError(
         'browser.download.artifact_failed',
         'definitely_not_dispatched'
+      )
+    }
+  }
+
+  private async prepareTargetCreationTool(tool: ActiveTool): Promise<void> {
+    try {
+      tool.outputSession = await this.artifactsBroker.openSession()
+      this.assertUsable()
+      if (
+        tool.finished ||
+        tool.callerSignal?.aborted ||
+        this.finalizedRuns.has(tool.owner.runId) ||
+        this.revokedActivations.has(tool.owner.activationId) ||
+        this.closedToolCalls.has(toolCallKey(tool.owner.runId, tool.owner.toolCallId))
+      ) {
+        throw new BrowserDownloadBrokerError(
+          'browser.download.cancelled',
+          'definitely_not_dispatched'
+        )
+      }
+    } catch (error) {
+      await tool.outputSession?.close().catch(() => undefined)
+      tool.finished = true
+      tool.accepting = false
+      tool.callerSignal?.removeEventListener('abort', tool.handleCallerAbort)
+      this.tools.delete(tool)
+      if (error instanceof BrowserDownloadBrokerError) throw error
+      throw new BrowserDownloadBrokerError(
+        'browser.download.artifact_failed',
+        'definitely_not_dispatched'
+      )
+    }
+  }
+
+  private async claimCreatedGuest(
+    tool: ActiveTool,
+    input: {
+      action: 'new' | 'popup'
+      generation: number
+      guest: WebContents
+      surfaceId: string
+    }
+  ): Promise<void> {
+    await tool.ready
+    this.assertUsable()
+    const guest = this.guests.get(input.guest.id)
+    if (
+      tool.finished ||
+      !tool.dispatched ||
+      tool.createdGuestClaimsStarted[input.action] >= tool.maxCreatedGuests[input.action] ||
+      !guest ||
+      guest.guest !== input.guest ||
+      guest.generation !== input.generation ||
+      guest.surfaceId !== input.surfaceId ||
+      input.guest.isDestroyed() ||
+      tool.guests.has(guest) ||
+      [...this.tools].some(
+        (candidate) => candidate !== tool && candidate.guests.has(guest) && !candidate.finished
+      ) ||
+      this.closedSurfaces.has(surfaceKey(input.surfaceId, input.generation)) ||
+      this.finalizedRuns.has(tool.owner.runId) ||
+      this.revokedActivations.has(tool.owner.activationId) ||
+      this.closedToolCalls.has(toolCallKey(tool.owner.runId, tool.owner.toolCallId)) ||
+      !tool.outputSession
+    ) {
+      throw new BrowserDownloadBrokerError(
+        'browser.download.target_closed',
+        tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+      )
+    }
+    tool.createdGuestClaimsStarted[input.action] += 1
+    const reservations: BrowserArtifactReservation[] = []
+    const owner: BrowserArtifactOwner = {
+      ...tool.owner,
+      generation: input.generation,
+      surfaceId: input.surfaceId
+    }
+    try {
+      for (let index = 0; index < this.maxActiveDownloads; index += 1) {
+        reservations.push(
+          await tool.outputSession.reserveFile({
+            owner,
+            kind: 'download',
+            mimeType: 'application/octet-stream',
+            suggestedFileName: `download-${index + 1}.bin`
+          })
+        )
+      }
+      const current = this.guests.get(input.guest.id)
+      if (
+        tool.finished ||
+        current !== guest ||
+        input.guest.isDestroyed() ||
+        this.closedSurfaces.has(surfaceKey(input.surfaceId, input.generation))
+      ) {
+        throw new BrowserDownloadBrokerError(
+          'browser.download.target_closed',
+          tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+        )
+      }
+      tool.guests.add(guest)
+      tool.reservationsByGuest.set(guest, reservations)
+    } catch (error) {
+      await Promise.allSettled(reservations.map((reservation) => reservation.discard()))
+      if (error instanceof BrowserDownloadBrokerError) throw error
+      throw new BrowserDownloadBrokerError(
+        'browser.download.artifact_failed',
+        tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
       )
     }
   }
@@ -369,14 +565,25 @@ export class BrowserDownloadBroker {
 
   async releaseSurface(input: { surfaceId: string; generation: number }): Promise<void> {
     this.closedSurfaces.add(surfaceKey(input.surfaceId, input.generation))
-    await Promise.allSettled(
-      [...this.tools]
-        .filter(
-          (tool) =>
-            tool.owner.surfaceId === input.surfaceId && tool.owner.generation === input.generation
-        )
-        .map((tool) => this.abortTool(tool, 'browser.download.target_closed'))
-    )
+    const cleanups: Promise<unknown>[] = []
+    for (const tool of [...this.tools]) {
+      const guest = [...tool.guests].find(
+        (candidate) =>
+          candidate.surfaceId === input.surfaceId && candidate.generation === input.generation
+      )
+      if (!guest) continue
+      const key = surfaceKey(input.surfaceId, input.generation)
+      if (tool.expectedTargetCloses.delete(key)) {
+        tool.guests.delete(guest)
+        cleanups.push(this.releaseGuestReservations(tool, guest))
+        for (const download of [...tool.downloads]) {
+          if (download.guest === guest) cleanups.push(this.cancelDownload(download))
+        }
+      } else {
+        cleanups.push(this.abortTool(tool, 'browser.download.target_closed'))
+      }
+    }
+    await Promise.allSettled(cleanups)
     await this.artifactsBroker.releaseSurface(input)
   }
 
@@ -411,18 +618,20 @@ export class BrowserDownloadBroker {
     this.tools.clear()
   }
 
-  private admitDownload(tool: ActiveTool, item: DownloadItem): void {
+  private admitDownload(tool: ActiveTool, guest: GuestRecord, item: DownloadItem): void {
+    const reservations = tool.reservationsByGuest.get(guest)
     if (
       this.disposed ||
       this.activeDownloads.size >= this.maxActiveDownloads ||
       this.downloadExceedsBudget(item) ||
-      tool.reservations.length === 0
+      !reservations ||
+      reservations.length === 0
     ) {
       this.failTool(tool, 'browser.download.too_large')
       safeCancel(item)
       return
     }
-    const reservation = tool.reservations.shift()
+    const reservation = reservations.shift()
     if (!reservation) {
       this.failTool(tool, 'browser.download.too_large')
       safeCancel(item)
@@ -430,6 +639,7 @@ export class BrowserDownloadBroker {
     }
     const download = createActiveDownload(
       tool,
+      guest,
       item,
       reservation,
       (active, state) => this.finishDownload(active, state),
@@ -567,11 +777,21 @@ export class BrowserDownloadBroker {
 
   private cleanupTool(tool: ActiveTool): Promise<void> {
     tool.cleanup ??= (async () => {
-      const unused = tool.reservations.splice(0)
+      const unused = [...tool.reservationsByGuest.values()].flatMap((reservations) =>
+        reservations.splice(0)
+      )
+      tool.reservationsByGuest.clear()
       await Promise.allSettled(unused.map((reservation) => reservation.discard()))
       await tool.outputSession?.close().catch(() => undefined)
     })()
     return tool.cleanup
+  }
+
+  private async releaseGuestReservations(tool: ActiveTool, guest: GuestRecord): Promise<void> {
+    const reservations = tool.reservationsByGuest.get(guest)
+    if (!reservations) return
+    tool.reservationsByGuest.delete(guest)
+    await Promise.allSettled(reservations.splice(0).map((reservation) => reservation.discard()))
   }
 
   private failTool(tool: ActiveTool, code: BrowserDownloadBrokerErrorCode): void {
@@ -613,6 +833,7 @@ export class BrowserDownloadBroker {
 
 function createActiveDownload(
   tool: ActiveTool,
+  guest: GuestRecord,
   item: DownloadItem,
   reservation: BrowserArtifactReservation,
   finish: (
@@ -628,6 +849,7 @@ function createActiveDownload(
   const download = {} as ActiveDownload
   Object.assign(download, {
     item,
+    guest,
     reservation,
     settle,
     lifetime,
@@ -760,6 +982,17 @@ async function settleDownloadsWithin(
 
 function positiveBound(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && (value ?? 0) > 0 ? (value as number) : fallback
+}
+
+function ownerBase(
+  owner: BrowserArtifactOwner
+): Omit<BrowserArtifactOwner, 'generation' | 'surfaceId'> {
+  return {
+    activationId: owner.activationId,
+    capabilityId: owner.capabilityId,
+    runId: owner.runId,
+    toolCallId: owner.toolCallId
+  }
 }
 
 function surfaceKey(surfaceId: string, generation: number): string {

@@ -41,13 +41,6 @@ const HOST_CALL_REASON_SCHEMA = Object.freeze({
   minLength: 1,
   maxLength: 512
 })
-const HOST_APPROVAL_ORIGIN_SCHEMA = Object.freeze({
-  type: 'string',
-  description:
-    'Exact HTTP(S) origin of the active managed page for sensitive-tool approval. Do not include credentials, path, query, or fragment.',
-  minLength: 8,
-  maxLength: 512
-})
 
 const SCHEMA_PARITY_KEYWORDS = Object.freeze([
   'type',
@@ -235,20 +228,27 @@ export async function buildPlaywrightConformanceReport(options = {}) {
   const policyByName = new Map(manifest.tools.map((tool) => [tool.rawName, tool]))
   const tools = catalog.tools.map((upstreamTool) => {
     const policy = policyByName.get(upstreamTool.rawName)
+    const typedPlatformUnavailable = policy.constraints.includes('typed_platform_unavailable')
     return {
       rawName: upstreamTool.rawName,
       modelName: policy.modelName,
       capability: upstreamTool.capability,
       handlingMode: policy.handlingMode,
       exposed: policy.exposed,
-      availability: policy.exposed ? 'model_visible' : 'model_hidden',
+      availability: policy.exposed
+        ? typedPlatformUnavailable
+          ? 'model_visible_typed_unavailable'
+          : 'model_visible'
+        : 'model_hidden',
       upstreamSchemaDigest: upstreamTool.schemaDigest,
       hostOverlayDigest: policy.hostOverlayDigest,
       hostInputSchemaDigest: policy.hostInputSchemaDigest,
       hostOverlay: policy.hostOverlay,
       reasonCode: policy.reasonCode,
       constraints: policy.constraints,
-      behaviorContract: behaviorContractFor(policy.handlingMode)
+      behaviorContract: typedPlatformUnavailable
+        ? 'typed_platform_unavailable'
+        : behaviorContractFor(policy.handlingMode)
     }
   })
 
@@ -294,7 +294,7 @@ export async function buildPlaywrightConformanceReport(options = {}) {
       status: 'contract',
       upstreamSchemas: 'digest_locked_without_mutation',
       hostSchemas: 'upstream_schema_plus_digest_locked_host_overlay',
-      overlayOnlyFields: ['call_reason', 'approval_origin'],
+      overlayOnlyFields: ['call_reason'],
       recursiveKeywords: SCHEMA_PARITY_KEYWORDS,
       unknownFields: 'rejected_by_additionalProperties_false',
       providerPayloadEvidence: {
@@ -308,46 +308,136 @@ export async function buildPlaywrightConformanceReport(options = {}) {
       }
     },
     behaviorDifferences: behaviorDifferences(tools),
+    ownershipDifferences: {
+      browser_close: {
+        externalOwnedBrowser:
+          'closes_the_owned_browser_and_the_next_call_may_lazily_start_a_new_browser',
+        externalSharedContext: 'disposes_the_automation_context_wrapper_without_closing_pages',
+        builtinManagedElectron:
+          'retires_the_current_automation_generation_and_overlay_state_while_preserving_user_owned_visible_surfaces',
+        singleTabCloseTool: 'browser_tabs_close'
+      }
+    },
+    platformCapabilityDifferences: {
+      browser_pdf_save: {
+        platform: 'darwin-arm64',
+        runtime: 'electron39_managed_guest',
+        status: 'typed_unavailable',
+        modelVisibility: 'visible',
+        fixedUpstreamContract: 'page_pdf_via_page_print_to_pdf_return_as_stream',
+        builtinEvidence:
+          'managed_guest_debugger_rejects_page_print_to_pdf_before_cdp_dispatch_and_web_contents_print_to_pdf_does_not_settle',
+        toolResult: {
+          isError: true,
+          status: 'unavailable',
+          code: 'browser.pdf_unavailable',
+          dispatchCertainty: 'response_received'
+        },
+        fallback: 'none',
+        artifactPublished: false,
+        evidence: [
+          'src/main/core/browserTargetBroker.test.ts',
+          'src/main/core/managedPlaywrightBridge.electron.test.ts',
+          'src/main/browser/fixtures/managedPlaywrightBridge.electron.ts'
+        ]
+      }
+    },
+    knownBehaviorGaps: {
+      popupOpenerSemantics: {
+        status: 'not_native_parity',
+        builtinBehavior: 'host_owned_independent_managed_webview_surface',
+        targetAdmission: 'current_surface_group_only',
+        nativeWindowProxy: false,
+        openerReference: false,
+        openerPostMessage: false,
+        popupCloseLinkage: false,
+        evidence: [
+          'src/main/core/browserSurfaceManager.test.ts',
+          'src/main/core/browserTargetBroker.test.ts'
+        ]
+      },
+      workerTargets: {
+        serviceWorker: { status: 'not_admitted', electronE2e: false },
+        sharedWorker: { status: 'not_admitted', electronE2e: false },
+        boundary: 'managed_page_frame_and_dedicated_worker_targets_only',
+        evidence: ['src/main/core/browserTargetBroker.test.ts']
+      }
+    },
     sensitiveResourceScope: {
-      status: 'contract',
+      status: 'evidence',
+      execution: 'observed_on_2026-08-20',
       principle:
-        'A sensitive approval is published only when Main can freeze and later revalidate the exact managed resource identity.',
+        'Main owns the active managed Surface or managed-profile authority. Approval binds exact arguments and a one-shot opaque Host binding; page-scoped tools additionally bind surface generation, navigation epoch, and the Host-observed origin.',
+      observedEvidence: {
+        platform: 'darwin-arm64',
+        command:
+          'pnpm exec vitest run --project unit src/main/core/managedPlaywrightBridge.electron.test.ts',
+        result: 'passed',
+        fixture: 'repository_local_loopback_only',
+        externalWebsites: false,
+        realUserBrowser: false
+      },
       tools: [
         {
           tool: 'browser_evaluate',
-          available: ['top_page_without_target', 'top_frame_snapshot_ref_eN'],
-          unavailable: ['child_frame_ref', 'frame_locator', 'arbitrary_selector'],
-          failureCode: 'sensitive_target_scope_unsupported',
-          reason:
-            'The fixed server evaluates a targeted locator in its owning frame; a top-page origin alone cannot authorize a child-frame execution.'
+          scope: 'managed_surface',
+          available: [
+            'page_context',
+            'snapshot_ref_in_managed_child_frame',
+            'frame_locator_in_managed_surface',
+            'unique_selector_in_managed_surface'
+          ],
+          exactEffectEvidence:
+            'fixed_official_0_0_79_mutates_and_reads_a_localhost_oopif_element_inside_the_selected_managed_guest',
+          excluded: ['other_surface', 'main_renderer', 'unmanaged_guest']
         },
         {
           tool: 'browser_drop',
-          available: ['pure_mime_data', 'approved_paths_to_top_frame_snapshot_ref_eN'],
-          unavailable: ['approved_paths_to_child_frame_or_unverifiable_target'],
-          failureCode: 'sensitive_target_scope_unsupported',
-          reason:
-            'Approved local files are disclosed only to a target proven to belong to the frozen top-frame document.'
+          scope: 'managed_surface',
+          available: [
+            'pure_mime_data_without_file_approval',
+            'one_call_workspace_path_preflight_to_opaque_file_authority',
+            'all_approved_paths_use_exact_frame_host_adapter',
+            'oopif_dragenter_dragover_drop_order_and_effect',
+            'large_file_host_adapter_without_base64'
+          ],
+          exactEffectEvidence:
+            'host_adapter_preserves_the_fixed_target_grammar_and_drop_event_contract_while_the_localhost_oopif_observes_the_brokered_fixture_basename_bytes_and_event_order',
+          fileBoundary: 'one_time_filebroker_lease_only'
         },
         {
           tool: 'browser_file_upload',
-          available: [],
-          unavailable: ['modal_file_chooser_without_immutable_owner_frame_identity'],
-          failureCode: 'sensitive_target_scope_unsupported',
-          reason:
-            'The fixed server modal state does not expose a proposal-time immutable FileChooser identity to the Host approval boundary.'
+          scope: 'managed_surface',
+          available: [
+            'one_call_workspace_path_preflight_to_pending_managed_guest_file_chooser',
+            'omitted_paths_preserves_official_cancel_chooser_semantics'
+          ],
+          exactEffectEvidence:
+            'fixed_official_0_0_79_file_chooser_change_event_observes_the_brokered_fixture_basename_and_bytes',
+          fileBoundary: 'one_time_filebroker_lease_only'
         },
         {
           tool: 'browser_network_request',
-          available: [],
-          unavailable: ['mutable_connection_local_request_index'],
-          failureCode: 'sensitive_request_identity_unavailable',
-          reason:
-            'A request index can be rebuilt or refer to a cross-origin frame request; it is not an immutable request authority.'
+          scope: 'managed_surface',
+          available: ['fixed_current_tab_request_index', 'headers_or_body_live_result'],
+          exactEffectEvidence:
+            'fixed_official_0_0_79_returns_the_exact_repository_fixture_ping_response_body_selected_from_the_safe_request_ledger',
+          durableProjection: 'content_omitted',
+          generationChange: 'resolved_by_the_rebuilt_fixed_current_tab_ledger'
+        },
+        {
+          tool: 'browser_cookie_*',
+          scope: 'managed_browser_profile',
+          available: ['zero_tab_context_approval', 'no_active_origin_requirement'],
+          durableProjection: 'content_omitted'
+        },
+        {
+          tool: 'browser_storage_state/browser_set_storage_state',
+          scope: 'managed_browser_profile',
+          available: ['zero_tab_context_approval', 'background_target_intent_when_required'],
+          fileBoundary: 'artifactbroker_export_and_one_time_filebroker_import'
         }
-      ],
-      futureClosure:
-        'Use Host-owned FileChooser and request ledgers with opaque frame/request identities included in the approval scope digest.'
+      ]
     },
     iframeParity: {
       status: 'evidence',
@@ -779,8 +869,7 @@ function validateFrozenInputs(catalog, manifest) {
       digestJson(policy.hostOverlay) !== policy.hostOverlayDigest ||
       digestJson(applyHostOverlay(upstream.inputSchema, policy.hostOverlay)) !==
         policy.hostInputSchemaDigest ||
-      (policy.handlingMode === 'approval_required') !==
-        (policy.hostOverlay?.addApprovalOrigin === true)
+      Object.hasOwn(policy.hostOverlay ?? {}, 'addApprovalOrigin')
     ) {
       throw new Error('policy_catalog_drift')
     }
@@ -799,12 +888,8 @@ function applyHostOverlay(upstreamSchema, overlay) {
     !isRecord(upstreamSchema.properties) ||
     !isRecord(overlay) ||
     overlay.addCallReason !== true ||
-    (overlay.addApprovalOrigin !== undefined && overlay.addApprovalOrigin !== true) ||
     Object.keys(overlay).some(
-      (key) =>
-        !['addCallReason', 'addApprovalOrigin', 'removeProperties', 'propertyOverrides'].includes(
-          key
-        )
+      (key) => !['addCallReason', 'removeProperties', 'propertyOverrides'].includes(key)
     )
   ) {
     throw new Error('invalid_host_overlay')
@@ -841,17 +926,7 @@ function applyHostOverlay(upstreamSchema, overlay) {
     properties[name] = deepMerge(properties[name], override)
   }
   properties.call_reason = structuredClone(HOST_CALL_REASON_SCHEMA)
-  if (overlay.addApprovalOrigin === true) {
-    if (Object.hasOwn(properties, 'approval_origin')) throw new Error('invalid_host_overlay')
-    properties.approval_origin = structuredClone(HOST_APPROVAL_ORIGIN_SCHEMA)
-  }
-  schema.required = [
-    ...new Set([
-      ...required,
-      'call_reason',
-      ...(overlay.addApprovalOrigin === true ? ['approval_origin'] : [])
-    ])
-  ]
+  schema.required = [...new Set([...required, 'call_reason'])]
   return schema
 }
 

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Event, WebContents } from 'electron'
-import type { Browser, BrowserContext } from 'playwright'
+import type { Browser, BrowserContext, ConnectOverCDPTransport } from 'playwright'
 import { chromium } from 'playwright'
 import {
   BROWSER_SURFACE_SCHEMA_VERSION,
@@ -14,11 +14,13 @@ import {
   type BrowserSurfaceSelectedOutput
 } from '@mycopilot/protocol'
 import { BrowserTargetBroker } from './BrowserTargetBroker'
-import type { ElectronGuestCdpTransport } from './ElectronGuestCdpTransport'
+import type { ManagedTargetCreationIntent } from './ElectronSurfaceGroupCdpTransport'
+import type { ElectronSurfaceGroupCdpTransport } from './ElectronSurfaceGroupCdpTransport'
 import {
   BrowserNetworkGuard,
   type BrowserMainFrameNavigationFence,
-  type BrowserNetworkOperationLease
+  type BrowserNetworkOperationLease,
+  type BrowserTargetCreationAuthority
 } from './BrowserNetworkGuard'
 import type { BrowserRiskOperationInput } from './BrowserRiskCoordinator'
 
@@ -48,8 +50,9 @@ export interface BrowserSurfaceManagerOptions {
   broker: BrowserTargetBroker
   networkGuard?: BrowserNetworkGuard
   closeTimeoutMs?: number
-  connectOverCdp?: (transport: ElectronGuestCdpTransport) => Promise<Browser>
+  connectOverCdp?: (transport: ConnectOverCDPTransport) => Promise<Browser>
   createSurfaceId?: () => string
+  releaseSurfaceResources?: (input: { surfaceId: string; generation: number }) => Promise<void>
   resolveHost: () => WebContents | null
   sendCommand: (host: WebContents, command: BrowserSurfaceCommand) => void
   maxSurfaces?: number
@@ -74,6 +77,21 @@ export interface BrowserSensitiveTargetIdentity {
 
 export interface BrowserSensitiveDispatchFence {
   finish(): void
+}
+
+export interface BrowserToolSurfaceLease {
+  closeSurface(): Promise<void>
+  finish(): void
+  generation: number
+  index: number
+  printToPdf(): Promise<Uint8Array>
+  resolveIndex(): Promise<number>
+  resizeSurface(input: { height: number; width: number }): Promise<{
+    height: number
+    width: number
+  }>
+  selectionRevision: number
+  surfaceId: string
 }
 
 interface ActiveSensitiveDispatchFence {
@@ -110,9 +128,7 @@ interface ManagedSurface {
 interface ActiveAttachment {
   browser: Browser
   context: BrowserContext
-  generation: number
-  surfaceId: string
-  transport: ElectronGuestCdpTransport
+  transport: ElectronSurfaceGroupCdpTransport
 }
 
 interface PendingEnsure {
@@ -137,6 +153,21 @@ interface PendingClose {
   timer: ReturnType<typeof setTimeout>
 }
 
+interface PendingSurfaceGroupAdmission {
+  attachment: ActiveAttachment
+  attempt: Promise<void>
+  deferred: boolean
+  release(): void
+  released: boolean
+}
+
+interface ActiveTargetCreationIntent {
+  authority?: BrowserTargetCreationAuthority
+  finished: boolean
+  intent: ManagedTargetCreationIntent
+  transportFinish?: () => void
+}
+
 /**
  * Main-owned coordinator for the one browser guest exposed to managed automation.
  *
@@ -147,18 +178,24 @@ export class BrowserSurfaceManager {
   private readonly attachTimeoutMs: number
   private readonly broker: BrowserTargetBroker
   private readonly closeTimeoutMs: number
-  private readonly connectOverCdp: (transport: ElectronGuestCdpTransport) => Promise<Browser>
+  private readonly connectOverCdp: (transport: ConnectOverCDPTransport) => Promise<Browser>
   private readonly createSurfaceId: () => string
   private readonly closingSurfaceIds = new Set<string>()
   private readonly closeWaiters = new Map<string, PendingClose>()
   private readonly generationBySurface = new Map<string, number>()
   private readonly maxSurfaces: number
   private readonly networkGuard?: BrowserNetworkGuard
+  private readonly releaseSurfaceResources?: BrowserSurfaceManagerOptions['releaseSurfaceResources']
   private readonly resolveHost: () => WebContents | null
   private readonly sendCommand: (host: WebContents, command: BrowserSurfaceCommand) => void
   private readonly surfaces = new Map<string, ManagedSurface>()
+  private readonly surfaceGroupAdmissions = new Map<string, PendingSurfaceGroupAdmission>()
+  private readonly suppressAutomaticGroupAdmission = new Set<string>()
+  private readonly suppressDeferredGroupAdmissionReservation = new Set<string>()
+  private groupAdmissionTail: Promise<void> = Promise.resolve()
 
   private active?: ActiveAttachment
+  private automationSurfaceId?: string
   private activeSurfaceId?: string
   private automationEpoch = 0
   private connecting?: Promise<BrowserContext>
@@ -171,11 +208,19 @@ export class BrowserSurfaceManager {
   private ensuringSurface?: Promise<ManagedSurface>
   private rendererCommandBusy = false
   private readonly rendererCommandQueue: Array<() => void> = []
+  private targetCreation?: ActiveTargetCreationIntent
+  private manualSelectionRevision = 0
+  private toolSurfaceLease?: {
+    generation: number
+    selectionRevision: number
+    surfaceId: string
+  }
 
   constructor(options: BrowserSurfaceManagerOptions) {
     this.attachTimeoutMs = normalizeTimeout(options.attachTimeoutMs, DEFAULT_ATTACH_TIMEOUT_MS)
     this.broker = options.broker
     this.networkGuard = options.networkGuard
+    this.releaseSurfaceResources = options.releaseSurfaceResources
     this.closeTimeoutMs = normalizeTimeout(options.closeTimeoutMs, DEFAULT_CLOSE_TIMEOUT_MS)
     this.maxSurfaces = normalizeSurfaceCapacity(options.maxSurfaces)
     this.resolveHost = options.resolveHost
@@ -220,6 +265,17 @@ export class BrowserSurfaceManager {
     this.broker.registerManagedGuest(input)
     const generation = (this.generationBySurface.get(surfaceId) ?? 0) + 1
     this.generationBySurface.set(surfaceId, generation)
+    try {
+      this.broker.claimSurface({
+        generation,
+        guestWebContentsId: input.guest.id,
+        host: input.host,
+        surfaceId
+      })
+    } catch {
+      this.broker.unregisterManagedGuest({ guest: input.guest, host: input.host })
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
     const handleDestroyed = (): void => this.handleTargetClosed(surfaceId, generation, input.guest)
     const handleDidStartNavigation = (
       _event: Event,
@@ -272,22 +328,44 @@ export class BrowserSurfaceManager {
       input.guest.removeListener('destroyed', handleDestroyed)
       this.removeNavigationListeners(surface)
       this.surfaces.delete(surfaceId)
-      this.broker.releaseSurface(surfaceId)
+      this.broker.unregisterManagedGuest({ guest: input.guest, host: input.host })
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
     this.completePendingSurfaceRequests()
+    if (this.isActiveAttachmentUsable(this.active)) {
+      if (this.suppressAutomaticGroupAdmission.has(surfaceId)) {
+        // Target.createTarget must finish loading its Host-owned URL before Playwright sees the
+        // page, but it still reserves its createdSequence position immediately. Later manual or
+        // popup tabs therefore cannot overtake it in Context._tabs.
+        if (!this.suppressDeferredGroupAdmissionReservation.has(surfaceId)) {
+          this.reserveSurfaceGroupAdmission(surface, true)
+        }
+      } else {
+        const attachment = this.active
+        void this.addSurfaceToActiveGroup(surface).catch(() => {
+          // Detach/reconnect invalidates an admission attempt without invalidating the user's
+          // healthy manual page. Only retire a surface for a failure on the same live attachment.
+          if (this.active === attachment && this.isActiveAttachmentUsable(attachment)) {
+            this.handleTargetClosed(surface.surfaceId, surface.generation, surface.guest)
+          }
+        })
+      }
+    }
   }
 
   /**
    * Returns the exact BrowserContext backed by the selected right-sidebar webview. Discovery and
    * listTools do not call this method; a managed browser tool does so on first dispatch.
    */
-  async getBrowserContext(): Promise<BrowserContext> {
+  async getBrowserContext(options: { createVisiblePage?: boolean } = {}): Promise<BrowserContext> {
     this.assertUsable()
     if (this.isActiveAttachmentUsable(this.active)) return this.active.context
     if (this.connecting) return this.connecting
 
-    const attempt = this.connectBrowserContext(this.automationEpoch)
+    const attempt = this.connectBrowserContext(
+      this.automationEpoch,
+      options.createVisiblePage !== false
+    )
     this.connecting = attempt
     try {
       return await attempt
@@ -317,7 +395,11 @@ export class BrowserSurfaceManager {
     if (!this.networkGuard) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    const surface = await this.ensureSurface()
+    const leased = this.toolSurfaceLease
+    const surface = leased ? this.surfaces.get(leased.surfaceId) : await this.ensureSurface()
+    if (!surface || (leased && surface.generation !== leased.generation)) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
     if (surface.guest.isDestroyed()) {
       throw new BrowserSurfaceManagerError('browser.target_closed')
     }
@@ -381,9 +463,12 @@ export class BrowserSurfaceManager {
     if (!surface || surface.host !== host || surface.guest.isDestroyed()) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    // Manual visibility never retargets an in-flight Agent operation. Before automation attaches,
-    // it provides the trusted UI selection that ensureActiveSurface should preferentially reuse.
-    if (!this.active && !this.connecting) this.activeSurfaceId = surface.surfaceId
+    // Record the trusted UI choice immediately. An in-flight Playwright operation retains its
+    // already-resolved Page object; its sensitive dispatch fence fails closed if this identity
+    // changes. The next serialized Tool synchronizes the fixed MCP Context currentTab to this
+    // desired surface.
+    this.manualSelectionRevision += 1
+    this.activeSurfaceId = surface.surfaceId
     return {
       schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
       accepted: true,
@@ -394,12 +479,17 @@ export class BrowserSurfaceManager {
   /** Disconnects automation while keeping the user's page and browser partition alive. */
   async detachAutomation(): Promise<void> {
     this.automationEpoch += 1
+    const targetCreation = this.targetCreation
+    if (targetCreation) this.finishTargetCreationIntent(targetCreation)
     this.needsReveal = true
     this.networkGuard?.deactivateAutomation()
     this.rejectPendingSurfaceRequests('browser.surface_unavailable')
+    for (const admission of this.surfaceGroupAdmissions.values()) admission.release()
     const connecting = this.connecting
     const active = this.active
     this.active = undefined
+    this.automationSurfaceId = undefined
+    this.toolSurfaceLease = undefined
 
     active?.transport.close()
     const [connectionSettled, disconnected] = await Promise.all([
@@ -411,9 +501,8 @@ export class BrowserSurfaceManager {
     if (!connectionSettled || !disconnected) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    for (const surface of this.surfaces.values()) {
-      this.broker.releaseSurface(surface.surfaceId, surface.generation)
-    }
+    // The group transport already detached each per-guest debugger. Keep Broker claims bound to
+    // their live surface generations so a later task can reconnect without widening admission.
   }
 
   /** Alias used by the managed Playwright host lifecycle. It never closes the manual page. */
@@ -422,17 +511,21 @@ export class BrowserSurfaceManager {
   }
 
   getActiveSurfaceIdentity(): { generation: number; surfaceId: string } | null {
-    return this.isActiveAttachmentUsable(this.active)
-      ? { generation: this.active.generation, surfaceId: this.active.surfaceId }
+    const surfaceId = this.currentAutomationSurfaceId()
+    if (!this.isActiveAttachmentUsable(this.active) || !surfaceId) return null
+    const surface = this.surfaces.get(surfaceId)
+    return surface && !surface.guest.isDestroyed()
+      ? { generation: surface.generation, surfaceId: surface.surfaceId }
       : null
   }
 
   /** Returns a stable, non-navigating Main-only document identity without attaching automation. */
   getSensitiveTargetIdentity(): BrowserSensitiveTargetIdentity | null {
     if (this.disposed) return null
-    const surfaceId = this.isActiveAttachmentUsable(this.active)
-      ? this.active.surfaceId
-      : this.activeSurfaceId
+    // Approval proposals are created before a Tool lease exists and therefore bind the user's
+    // latest trusted UI choice. Once dispatch owns a lease, the identity stays locked even if the
+    // user selects another tab for the next call.
+    const surfaceId = this.toolSurfaceLease?.surfaceId ?? this.activeSurfaceId
     if (!surfaceId) return null
     const surface = this.surfaces.get(surfaceId)
     if (!surface || surface.guest.isDestroyed() || surface.navigationInProgress) return null
@@ -531,6 +624,120 @@ export class BrowserSurfaceManager {
     }
   }
 
+  beginTargetCreationIntent(
+    intent: ManagedTargetCreationIntent,
+    authority?: BrowserTargetCreationAuthority
+  ): () => void {
+    this.assertUsable()
+    if (this.targetCreation !== undefined || (intent === 'interactive' && !authority)) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const targetCreation: ActiveTargetCreationIntent = {
+      authority,
+      finished: false,
+      intent
+    }
+    this.targetCreation = targetCreation
+    if (this.isActiveAttachmentUsable(this.active)) {
+      targetCreation.transportFinish = this.active.transport.setTargetCreationIntent(intent)
+    }
+    return () => this.finishTargetCreationIntent(targetCreation)
+  }
+
+  private finishTargetCreationIntent(targetCreation: ActiveTargetCreationIntent): void {
+    if (targetCreation.finished) return
+    targetCreation.finished = true
+    targetCreation.transportFinish?.()
+    targetCreation.transportFinish = undefined
+    targetCreation.authority?.finish()
+    if (this.targetCreation === targetCreation) this.targetCreation = undefined
+  }
+
+  async beginToolSurfaceLease(): Promise<BrowserToolSurfaceLease> {
+    this.assertUsable()
+    if (this.toolSurfaceLease) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const surface = await this.ensureSurface()
+    return await this.acquireToolSurfaceLease(surface)
+  }
+
+  /**
+   * Locks an already-visible tab without creating, revealing, or selecting a page. Context-only
+   * tools and browser_tabs use this to preserve the fixed Playwright zero-tab semantics.
+   */
+  async beginExistingToolSurfaceLease(): Promise<BrowserToolSurfaceLease | null> {
+    this.assertUsable()
+    if (this.toolSurfaceLease) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const surfaceId = this.activeSurfaceId
+    if (!surfaceId) return null
+    const surface = this.surfaces.get(surfaceId)
+    if (!surface || surface.guest.isDestroyed()) return null
+    await this.addSurfaceToActiveGroup(surface)
+    return await this.acquireToolSurfaceLease(surface)
+  }
+
+  /** Locks the exact current index without creating, selecting, or revealing a page. */
+  async beginToolSurfaceLeaseByIndex(index: number): Promise<BrowserToolSurfaceLease> {
+    this.assertUsable()
+    if (this.toolSurfaceLease) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const surface = this.resolveSurfaceSelection({ index })
+    await this.addSurfaceToActiveGroup(surface)
+    return await this.acquireToolSurfaceLease(surface)
+  }
+
+  private async acquireToolSurfaceLease(surface: ManagedSurface): Promise<BrowserToolSurfaceLease> {
+    await this.reconcileActiveGroup()
+    const index = this.orderedSurfaces().indexOf(surface)
+    if (index < 0 || surface.guest.isDestroyed()) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
+    const record = {
+      generation: surface.generation,
+      selectionRevision: this.manualSelectionRevision,
+      surfaceId: surface.surfaceId
+    }
+    this.toolSurfaceLease = record
+    this.automationSurfaceId = surface.surfaceId
+    let finished = false
+    return {
+      ...record,
+      index,
+      closeSurface: async () => {
+        if (finished || this.toolSurfaceLease !== record) {
+          throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+        }
+        const current = this.surfaces.get(record.surfaceId)
+        if (!current || current.generation !== record.generation || current.guest.isDestroyed()) {
+          throw new BrowserSurfaceManagerError('browser.target_closed')
+        }
+        await this.closeSurface(record.surfaceId)
+      },
+      finish: () => {
+        if (finished) return
+        finished = true
+        if (this.toolSurfaceLease === record) this.toolSurfaceLease = undefined
+      },
+      printToPdf: async () => {
+        if (finished || this.toolSurfaceLease !== record) {
+          throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+        }
+        return await this.printExactSurfaceToPdf(record)
+      },
+      resolveIndex: async () => await this.resolveToolSurfaceIndex(record),
+      resizeSurface: async (input) => {
+        if (finished || this.toolSurfaceLease !== record) {
+          throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+        }
+        return await this.resizeExactSurface(record, input)
+      }
+    }
+  }
+
   async ensureActiveSurface(): Promise<BrowserSurfaceView> {
     return this.toSurfaceView(await this.ensureSurface())
   }
@@ -543,6 +750,54 @@ export class BrowserSurfaceManager {
   async createSurface(
     input: { activate?: boolean; url?: string } = {}
   ): Promise<BrowserSurfaceView> {
+    return this.toSurfaceView(await this.createSurfaceRecord(input, true))
+  }
+
+  /**
+   * Materializes the single user-visible page that represents a zero-tab `browser_tabs new`.
+   * The exact run/call authority is claimed while the guest is blank. Host must connect the fixed
+   * MCP Context before navigating this Page so dialogs, popups, routes, downloads, and currentTab
+   * all observe the same official lifecycle. It must not issue a second Target.createTarget.
+   */
+  async createInitialTargetSurface(input: {
+    authority: BrowserTargetCreationAuthority
+  }): Promise<BrowserSurfaceView> {
+    this.assertUsable()
+    if (
+      input.authority.action !== 'new' ||
+      this.surfaces.size > 0 ||
+      this.pendingCreatedSurfaceCount() > 0
+    ) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    let surface: ManagedSurface | undefined
+    try {
+      surface = await this.createSurfaceRecord({ activate: true }, false)
+      await loadManagedBlankSurface(surface, this.attachTimeoutMs)
+      await input.authority.claim({
+        generation: surface.generation,
+        guest: surface.guest,
+        surfaceId: surface.surfaceId
+      })
+      await this.addSurfaceToActiveGroup(surface, true)
+      return this.toSurfaceView(surface)
+    } catch (error) {
+      if (surface && this.surfaces.get(surface.surfaceId) === surface) {
+        try {
+          await this.closeSurface(surface.surfaceId)
+        } catch {
+          this.handleTargetClosed(surface.surfaceId, surface.generation, surface.guest)
+        }
+      }
+      throw error
+    }
+  }
+
+  private async createSurfaceRecord(
+    input: { activate?: boolean; url?: string },
+    attachToActiveGroup: boolean,
+    reserveDeferredAdmission = true
+  ): Promise<ManagedSurface> {
     this.assertUsable()
     this.ensureGroup()
     if (this.surfaces.size + this.pendingCreatedSurfaceCount() >= this.maxSurfaces) {
@@ -555,16 +810,55 @@ export class BrowserSurfaceManager {
     }
     const surfaceId = this.allocateSurfaceId()
     const shouldActivate = input.activate !== false
-    const surface = await this.requestSurface(
-      host,
-      'createSurface',
-      surfaceId,
-      undefined,
-      shouldActivate
-    )
-    if (input.url !== undefined) await loadManagedSurface(surface, input.url, this.attachTimeoutMs)
-    if (input.activate !== false) await this.switchActiveSurface(surface)
-    return this.toSurfaceView(surface)
+    const deferInitialAdmission = !attachToActiveGroup || input.url !== undefined
+    if (deferInitialAdmission) this.suppressAutomaticGroupAdmission.add(surfaceId)
+    if (deferInitialAdmission && !reserveDeferredAdmission) {
+      this.suppressDeferredGroupAdmissionReservation.add(surfaceId)
+    }
+    let surface: ManagedSurface | undefined
+    try {
+      surface = await this.requestSurface(
+        host,
+        'createSurface',
+        surfaceId,
+        undefined,
+        shouldActivate
+      )
+      let admittedBeforeNavigation = false
+      if (
+        input.url !== undefined &&
+        attachToActiveGroup &&
+        this.isActiveAttachmentUsable(this.active)
+      ) {
+        // Attach the inert blank page first so group-scoped route/offline/trace state observes the
+        // very first requested URL. The bootstrap marker never enters the Playwright Context.
+        await loadManagedBlankSurface(surface, this.attachTimeoutMs)
+        await this.addSurfaceToActiveGroup(surface, true)
+        admittedBeforeNavigation = true
+      }
+      if (input.url === 'about:blank' && !admittedBeforeNavigation) {
+        await loadManagedBlankSurface(surface, this.attachTimeoutMs)
+      } else if (input.url !== undefined && input.url !== 'about:blank') {
+        await loadManagedSurface(surface, input.url, this.attachTimeoutMs)
+      }
+      if (input.activate !== false) await this.switchActiveSurface(surface)
+      if (attachToActiveGroup && !admittedBeforeNavigation) {
+        await this.addSurfaceToActiveGroup(surface)
+      }
+      return surface
+    } catch (error) {
+      if (surface && this.surfaces.get(surface.surfaceId) === surface) {
+        try {
+          await this.closeSurface(surface.surfaceId)
+        } catch {
+          this.handleTargetClosed(surface.surfaceId, surface.generation, surface.guest)
+        }
+      }
+      throw error
+    } finally {
+      this.suppressAutomaticGroupAdmission.delete(surfaceId)
+      this.suppressDeferredGroupAdmissionReservation.delete(surfaceId)
+    }
   }
 
   async selectSurface(input: { index?: number; surfaceId?: string }): Promise<BrowserSurfaceView> {
@@ -596,9 +890,22 @@ export class BrowserSurfaceManager {
   }): Promise<{ height: number; width: number }> {
     const identity = this.getActiveSurfaceIdentity()
     if (!identity) throw new BrowserSurfaceManagerError('browser.target_closed')
+    return await this.resizeExactSurface(identity, input)
+  }
+
+  private async resizeExactSurface(
+    identity: { generation: number; surfaceId: string },
+    input: { height: number; width: number }
+  ): Promise<{ height: number; width: number }> {
     const surface = this.surfaces.get(identity.surfaceId)
     const host = this.resolveHost()
-    if (!surface || !host || host.isDestroyed() || surface.host !== host) {
+    if (
+      !surface ||
+      surface.generation !== identity.generation ||
+      !host ||
+      host.isDestroyed() ||
+      surface.host !== host
+    ) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
     const dimensions = normalizeViewportSize(input)
@@ -609,14 +916,20 @@ export class BrowserSurfaceManager {
   /**
    * Renders the selected managed guest through Electron's native print pipeline.
    *
-   * Playwright's `page.pdf()` is not implemented for a BrowserContext connected to an Electron
-   * webview target. Keeping this operation on the exact registered guest preserves the Surface
-   * Group boundary and returns bytes only to Main; no path or target identity crosses IPC.
+   * This compatibility method remains available to legacy/unit adapters. Production managed
+   * Playwright routes browser_pdf_save through fixed page.pdf() and the private group transport.
    */
   async printActiveSurfaceToPdf(): Promise<Uint8Array> {
     this.assertUsable()
     const identity = this.getActiveSurfaceIdentity()
     if (!identity) throw new BrowserSurfaceManagerError('browser.target_closed')
+    return await this.printExactSurfaceToPdf(identity)
+  }
+
+  private async printExactSurfaceToPdf(identity: {
+    generation: number
+    surfaceId: string
+  }): Promise<Uint8Array> {
     const surface = this.surfaces.get(identity.surfaceId)
     if (!surface || surface.generation !== identity.generation || surface.guest.isDestroyed()) {
       throw new BrowserSurfaceManagerError('browser.target_closed')
@@ -625,7 +938,9 @@ export class BrowserSurfaceManager {
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       const bytes = await Promise.race([
-        surface.guest.printToPDF({ printBackground: true }),
+        // Fixed @playwright/mcp 0.0.79 delegates to `page.pdf()` without options, whose
+        // `printBackground` default is false. Preserve that visible output semantic here.
+        surface.guest.printToPDF({ printBackground: false }),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new BrowserSurfaceManagerError('browser.surface_unavailable')),
@@ -721,6 +1036,13 @@ export class BrowserSurfaceManager {
     surface.guest.removeListener('destroyed', surface.handleDestroyed)
     this.removeNavigationListeners(surface)
     this.surfaces.delete(surfaceId)
+    const admission = this.surfaceGroupAdmissions.get(
+      `${surface.surfaceId}\u0000${surface.generation}`
+    )
+    admission?.release()
+    this.active?.transport.removeSurface(surfaceId, generation, false)
+    this.broker.releaseSurface(surfaceId, generation)
+    void this.releaseSurfaceResources?.({ surfaceId, generation }).catch(() => undefined)
     const closeWaiter = this.closeWaiters.get(surfaceId)
     if (closeWaiter?.generation === generation) {
       clearTimeout(closeWaiter.timer)
@@ -728,13 +1050,13 @@ export class BrowserSurfaceManager {
       closeWaiter.resolve()
     }
     this.rejectPendingSurfaceRequestsForSurface(surfaceId, 'browser.target_closed')
-    if (this.active?.surfaceId === surfaceId && this.active.generation === generation) {
-      this.active = undefined
-    }
     if (this.activeSurfaceId === surfaceId) {
       const remaining = orderedBeforeClose.filter((candidate) => candidate !== surface)
       this.activeSurfaceId =
         remaining[Math.min(Math.max(closedIndex, 0), remaining.length - 1)]?.surfaceId
+    }
+    if (this.automationSurfaceId === surfaceId) {
+      this.automationSurfaceId = this.activeSurfaceId
     }
     const wasExplicitlyClosing = this.closingSurfaceIds.delete(surfaceId)
     if (!this.disposed && !wasExplicitlyClosing && !surface.host.isDestroyed()) {
@@ -753,8 +1075,32 @@ export class BrowserSurfaceManager {
     }
   }
 
+  private forceRetireSurface(input: { generation: number; surfaceId: string }): void {
+    const surface = this.surfaces.get(input.surfaceId)
+    if (!surface || surface.generation !== input.generation) return
+    this.handleTargetClosed(surface.surfaceId, surface.generation, surface.guest)
+    // Unlike the ordinary destroyed event, this path can retire a still-live guest after a lost
+    // Renderer close acknowledgement. Remove its Broker registration/listeners immediately, then
+    // destroy the exact hidden control guest so NetworkGuard/DownloadBroker destroyed listeners
+    // cannot retain an untracked WebContents. This fallback is intentionally limited to the exact
+    // context-control generation supplied by the private group transport.
+    this.broker.unregisterManagedGuest({ guest: surface.guest, host: surface.host })
+    if (!surface.guest.isDestroyed()) {
+      try {
+        surface.guest.close({ waitForBeforeUnload: false })
+      } catch {
+        // Logical retirement already removed every Main-owned capability route. Electron may
+        // throw while a renderer crash is concurrently destroying the same WebContents.
+      }
+    }
+  }
+
   /** Creates a denied Electron popup without disrupting the still-running opener tool call. */
-  async handlePopup(input: { guest: WebContents; url: string }): Promise<void> {
+  async handlePopup(input: {
+    authority?: BrowserTargetCreationAuthority
+    guest: WebContents
+    url: string
+  }): Promise<void> {
     this.assertUsable()
     if (input.guest.isDestroyed() || !isSafeManagedPageUrl(input.url)) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
@@ -762,10 +1108,6 @@ export class BrowserSurfaceManager {
     const source = [...this.surfaces.values()].find((surface) => surface.guest === input.guest)
     if (!source) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-    }
-    if (!this.isActiveAttachmentUsable(this.active)) {
-      await loadManagedSurface(source, input.url, this.attachTimeoutMs)
-      return
     }
 
     const now = Date.now()
@@ -777,9 +1119,39 @@ export class BrowserSurfaceManager {
     if (this.popupCount > MAX_POPUPS_PER_SECOND) {
       throw new BrowserSurfaceManagerError('browser.surface_capacity_exceeded')
     }
-    const popup = await this.createSurface({ activate: false, url: input.url })
-    if (popup.isActive) {
-      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    if (!input.authority && !this.isActiveAttachmentUsable(this.active)) {
+      const popup = await this.createSurface({ activate: false, url: input.url })
+      if (popup.isActive) {
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+      return
+    }
+    let popup: ManagedSurface | undefined
+    try {
+      popup = await this.createSurfaceRecord({ activate: false }, false)
+      await loadManagedBlankSurface(popup, this.attachTimeoutMs)
+      await input.authority?.claim({
+        generation: popup.generation,
+        guest: popup.guest,
+        surfaceId: popup.surfaceId
+      })
+      // When a connection already exists, group-wide route/offline/trace state is installed before
+      // the first popup navigation. During a zero-tab bootstrap the exact guest is still claimed
+      // before load and the subsequent Context connection reconciles it into the same private group.
+      await this.addSurfaceToActiveGroup(popup, true)
+      await loadManagedSurface(popup, input.url, this.attachTimeoutMs)
+      if (this.activeSurfaceId === popup.surfaceId) {
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+    } catch (error) {
+      if (popup && this.surfaces.get(popup.surfaceId) === popup) {
+        try {
+          await this.closeSurface(popup.surfaceId)
+        } catch {
+          this.handleTargetClosed(popup.surfaceId, popup.generation, popup.guest)
+        }
+      }
+      throw error
     }
   }
 
@@ -793,7 +1165,14 @@ export class BrowserSurfaceManager {
     } catch (error) {
       detachError = error
     }
-    for (const surface of this.surfaces.values()) {
+    const remainingSurfaces = [...this.surfaces.values()]
+    const releaseSurfaceResources = remainingSurfaces.map((surface) =>
+      this.releaseSurfaceResources?.({
+        surfaceId: surface.surfaceId,
+        generation: surface.generation
+      })
+    )
+    for (const surface of remainingSurfaces) {
       surface.dispatchFence?.finishSilently()
       surface.guest.removeListener('destroyed', surface.handleDestroyed)
       this.removeNavigationListeners(surface)
@@ -806,7 +1185,19 @@ export class BrowserSurfaceManager {
     }
     this.closeWaiters.clear()
     this.broker.dispose()
-    await this.networkGuard?.shutdown()
+    // Revocation/detach intentionally preserves manual pages. Full manager shutdown is the app
+    // lifecycle boundary: close every exact remaining guest so webviews, renderer processes, and
+    // their non-Manager listeners cannot survive after the host has discarded its surface map.
+    for (const surface of remainingSurfaces) {
+      if (surface.guest.isDestroyed()) continue
+      try {
+        surface.guest.close({ waitForBeforeUnload: false })
+      } catch {
+        // Electron will also destroy these guests with their owning BrowserWindow. All logical
+        // admission and debugger state has already been retired above, so shutdown remains safe.
+      }
+    }
+    await Promise.allSettled([this.networkGuard?.shutdown(), ...releaseSurfaceResources])
     if (detachError) throw detachError
   }
 
@@ -824,24 +1215,165 @@ export class BrowserSurfaceManager {
     }
   }
 
-  private async connectBrowserContext(expectedEpoch: number): Promise<BrowserContext> {
-    const surface = await this.ensureSurface()
+  private async connectBrowserContext(
+    expectedEpoch: number,
+    createVisiblePage: boolean
+  ): Promise<BrowserContext> {
+    const surface = createVisiblePage ? await this.ensureSurface() : undefined
     this.assertAttachmentEpoch(expectedEpoch)
-    const current = this.surfaces.get(surface.surfaceId)
-    if (current !== surface || surface.guest.isDestroyed()) {
+    if (
+      surface &&
+      (this.surfaces.get(surface.surfaceId) !== surface || surface.guest.isDestroyed())
+    ) {
       throw new BrowserSurfaceManagerError('browser.target_closed')
     }
 
-    let transport: ElectronGuestCdpTransport | undefined
+    let transport: ElectronSurfaceGroupCdpTransport | undefined
     let browser: Browser | undefined
     try {
-      this.broker.claimSurface({
-        generation: surface.generation,
-        guestWebContentsId: surface.guest.id,
-        host: surface.host,
-        surfaceId: surface.surfaceId
-      })
-      transport = await this.broker.connect(surface.surfaceId, surface.generation)
+      // Preserve stable UI tab indexes. The fixed MCP Context records pages in attached event
+      // order; selecting the current UI tab is synchronized separately through bringToFront.
+      const ordered = this.orderedSurfaces()
+      for (const candidate of ordered) {
+        if (parseBrowserSurfaceBootstrapUrl(candidate.guest.getURL()) === candidate.surfaceId) {
+          await loadManagedBlankSurface(candidate, this.attachTimeoutMs)
+        }
+      }
+      transport = await this.broker.connectSurfaceGroup(
+        ordered.map((candidate) => ({
+          generation: candidate.generation,
+          surfaceId: candidate.surfaceId
+        })),
+        {
+          activateSurface: async (identity) => {
+            const candidate = this.surfaces.get(identity.surfaceId)
+            if (
+              !candidate ||
+              candidate.generation !== identity.generation ||
+              candidate.guest.isDestroyed()
+            ) {
+              throw new BrowserSurfaceManagerError('browser.target_closed')
+            }
+            await this.activateSurfaceFromAutomation(candidate)
+          },
+          closeSurface: async (identity) => {
+            const candidate = this.surfaces.get(identity.surfaceId)
+            const lease = this.toolSurfaceLease
+            if (
+              !candidate ||
+              candidate.generation !== identity.generation ||
+              (lease !== undefined &&
+                (lease.surfaceId !== identity.surfaceId ||
+                  lease.generation !== identity.generation))
+            ) {
+              throw new BrowserSurfaceManagerError('browser.target_closed')
+            }
+            await this.closeSurface(identity.surfaceId)
+          },
+          createSurface: async ({ intent, purpose, url }) => {
+            // Renderer creates the guest in the background. The group transport performs the
+            // single authoritative activation only for an interactive Target-creation intent.
+            // Capture one exact record before any Renderer await. A cancelled old call cannot
+            // silently skip its claim or borrow a later call's authority (ABA).
+            const targetCreation = purpose === 'target' ? this.targetCreation : undefined
+            if (
+              purpose === 'target' &&
+              (!targetCreation ||
+                targetCreation.finished ||
+                targetCreation.intent !== intent ||
+                (intent === 'interactive' && !targetCreation.authority))
+            ) {
+              throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+            }
+            const authority = targetCreation?.authority
+            let candidate: ManagedSurface | undefined
+            try {
+              if (
+                purpose === 'context-control' &&
+                (intent !== 'background' || url !== 'about:blank')
+              ) {
+                throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+              }
+              candidate = await this.createSurfaceRecord(
+                { activate: false },
+                false,
+                purpose !== 'context-control'
+              )
+              // Claim run/call/capability ownership while the new guest is still inert. Download
+              // destinations and exact network ownership must exist before its first real URL.
+              await loadManagedBlankSurface(candidate, this.attachTimeoutMs)
+              if (purpose === 'context-control') {
+                const transport = await this.broker.connect(
+                  candidate.surfaceId,
+                  candidate.generation
+                )
+                return {
+                  generation: candidate.generation,
+                  surfaceId: candidate.surfaceId,
+                  transport
+                }
+              }
+              if (
+                targetCreation &&
+                (targetCreation.finished || this.targetCreation !== targetCreation)
+              ) {
+                throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+              }
+              await authority?.claim({
+                generation: candidate.generation,
+                guest: candidate.guest,
+                surfaceId: candidate.surfaceId
+              })
+              if (
+                targetCreation &&
+                (targetCreation.finished || this.targetCreation !== targetCreation)
+              ) {
+                throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+              }
+              // Registration reserved this surface's createdSequence slot. Releasing it only
+              // after ownership is ready admits B before any later manual/popup C.
+              await this.addSurfaceToActiveGroup(candidate, true)
+              if (
+                targetCreation &&
+                (targetCreation.finished || this.targetCreation !== targetCreation)
+              ) {
+                throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+              }
+              if (url !== 'about:blank') {
+                await loadManagedSurface(candidate, url, this.attachTimeoutMs)
+              }
+              return {
+                generation: candidate.generation,
+                surfaceId: candidate.surfaceId
+              }
+            } catch (error) {
+              if (candidate && this.surfaces.get(candidate.surfaceId) === candidate) {
+                try {
+                  await this.closeSurface(candidate.surfaceId)
+                } catch {
+                  this.handleTargetClosed(
+                    candidate.surfaceId,
+                    candidate.generation,
+                    candidate.guest
+                  )
+                }
+              }
+              throw error
+            }
+          },
+          forceRetireSurface: (identity) => {
+            this.forceRetireSurface(identity)
+          },
+          getActiveSurfaceId: () => this.automationSurfaceId ?? this.activeSurfaceId,
+          handleSurfaceTransportClosed: (identity) => {
+            this.handleTargetClosed(identity.surfaceId, identity.generation)
+          }
+        }
+      )
+      const targetCreation = this.targetCreation
+      if (targetCreation && !targetCreation.finished) {
+        targetCreation.transportFinish = transport.setTargetCreationIntent(targetCreation.intent)
+      }
       this.assertAttachmentEpoch(expectedEpoch)
       browser = await this.connectOverCdp(transport)
       this.assertAttachmentEpoch(expectedEpoch)
@@ -849,27 +1381,32 @@ export class BrowserSurfaceManager {
       if (contexts.length !== 1 || !contexts[0]) {
         throw new BrowserSurfaceManagerError('browser.surface_unavailable')
       }
-      if (this.surfaces.get(surface.surfaceId) !== surface || surface.guest.isDestroyed()) {
+      if (
+        surface &&
+        (this.surfaces.get(surface.surfaceId) !== surface || surface.guest.isDestroyed())
+      ) {
         throw new BrowserSurfaceManagerError('browser.target_closed')
       }
-
       const attachment: ActiveAttachment = {
         browser,
         context: contexts[0],
-        generation: surface.generation,
-        surfaceId: surface.surfaceId,
         transport
       }
       this.active = attachment
+      this.automationSurfaceId = ordered[0]?.surfaceId
       browser.once('disconnected', () => {
         if (this.active === attachment) this.active = undefined
       })
+      // A guest may register after the initial ordered snapshot but before the Browser connection
+      // is published. Reconcile under the same serialized admission gate so Context._tabs remains
+      // in stable createdSequence order and no managed tab is omitted.
+      await this.reconcileActiveGroup(attachment)
       return attachment.context
     } catch (error) {
       transport?.close()
       if (error instanceof BrowserSurfaceManagerError) throw error
       throw new BrowserSurfaceManagerError(
-        surface.guest.isDestroyed() ? 'browser.target_closed' : 'browser.surface_unavailable'
+        surface?.guest.isDestroyed() ? 'browser.target_closed' : 'browser.surface_unavailable'
       )
     }
   }
@@ -891,12 +1428,20 @@ export class BrowserSurfaceManager {
 
   private async ensureSurfaceOnce(): Promise<ManagedSurface> {
     this.assertUsable()
-    const activeSurface = this.active ? this.surfaces.get(this.active.surfaceId) : undefined
+    const leasedSurface = this.toolSurfaceLease
+      ? this.surfaces.get(this.toolSurfaceLease.surfaceId)
+      : undefined
     if (
-      activeSurface &&
-      activeSurface.generation === this.active?.generation &&
-      !activeSurface.guest.isDestroyed()
+      leasedSurface &&
+      leasedSurface.generation === this.toolSurfaceLease?.generation &&
+      !leasedSurface.guest.isDestroyed()
     ) {
+      await this.addSurfaceToActiveGroup(leasedSurface)
+      return leasedSurface
+    }
+    const activeSurface = this.activeSurfaceId ? this.surfaces.get(this.activeSurfaceId) : undefined
+    if (activeSurface && !activeSurface.guest.isDestroyed()) {
+      await this.addSurfaceToActiveGroup(activeSurface)
       return activeSurface
     }
 
@@ -911,10 +1456,14 @@ export class BrowserSurfaceManager {
         ? selected
         : this.uniqueReusableSurface()
     if (reusable) {
-      if (reusable.surfaceId === this.activeSurfaceId && !this.needsReveal) return reusable
+      if (reusable.surfaceId === this.activeSurfaceId && !this.needsReveal) {
+        await this.addSurfaceToActiveGroup(reusable)
+        return reusable
+      }
       const revealed = await this.requestSurface(host, 'selectSurface', reusable.surfaceId)
       this.activeSurfaceId = revealed.surfaceId
       this.needsReveal = false
+      await this.addSurfaceToActiveGroup(revealed)
       return revealed
     }
 
@@ -925,7 +1474,138 @@ export class BrowserSurfaceManager {
     const created = await this.requestSurface(host, 'ensureAttached', surfaceId)
     this.activeSurfaceId = created.surfaceId
     this.needsReveal = false
+    await this.addSurfaceToActiveGroup(created)
     return created
+  }
+
+  private addSurfaceToActiveGroup(surface: ManagedSurface, releaseDeferred = false): Promise<void> {
+    const attachment = this.active
+    if (!this.isActiveAttachmentUsable(attachment)) return Promise.resolve()
+    if (attachment.transport.hasSurface(surface.surfaceId, surface.generation)) {
+      return Promise.resolve()
+    }
+    const key = `${surface.surfaceId}\u0000${surface.generation}`
+    const pending = this.surfaceGroupAdmissions.get(key)
+    if (pending) {
+      if (pending.attachment !== attachment) {
+        pending.release()
+        return pending.attempt
+          .catch(() => undefined)
+          .then(() => this.addSurfaceToActiveGroup(surface, releaseDeferred))
+      }
+      if (releaseDeferred) pending.release()
+      return pending.attempt
+    }
+    const admission = this.reserveSurfaceGroupAdmission(surface, false)
+    return admission?.attempt ?? Promise.resolve()
+  }
+
+  private reserveSurfaceGroupAdmission(
+    surface: ManagedSurface,
+    deferred: boolean
+  ): PendingSurfaceGroupAdmission | undefined {
+    const attachment = this.active
+    if (!this.isActiveAttachmentUsable(attachment)) return undefined
+    if (attachment.transport.hasSurface(surface.surfaceId, surface.generation)) return undefined
+    const key = `${surface.surfaceId}\u0000${surface.generation}`
+    const existing = this.surfaceGroupAdmissions.get(key)
+    if (existing) return existing
+    let released = !deferred
+    let releaseReady = (): void => undefined
+    const ready = deferred
+      ? new Promise<void>((resolve) => {
+          releaseReady = resolve
+        })
+      : Promise.resolve()
+    const release = (): void => {
+      if (released) return
+      released = true
+      releaseReady()
+    }
+    const attempt = this.groupAdmissionTail.then(async () => {
+      await ready
+      if (this.active !== attachment || !this.isActiveAttachmentUsable(attachment)) {
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+      const current = this.surfaces.get(surface.surfaceId)
+      if (
+        current !== surface ||
+        current.generation !== surface.generation ||
+        current.guest.isDestroyed()
+      ) {
+        throw new BrowserSurfaceManagerError('browser.target_closed')
+      }
+      if (attachment.transport.hasSurface(surface.surfaceId, surface.generation)) return
+      await this.broker.addSurfaceToGroup(attachment.transport, {
+        generation: surface.generation,
+        surfaceId: surface.surfaceId
+      })
+    })
+    const admission: PendingSurfaceGroupAdmission = {
+      attachment,
+      attempt,
+      deferred,
+      get released() {
+        return released
+      },
+      release
+    }
+    this.groupAdmissionTail = attempt.then(
+      () => undefined,
+      () => undefined
+    )
+    this.surfaceGroupAdmissions.set(key, admission)
+    const cleanup = (): void => {
+      if (this.surfaceGroupAdmissions.get(key) === admission) {
+        this.surfaceGroupAdmissions.delete(key)
+      }
+    }
+    // Unlike Promise.finally(), this creates no rejected derived Promise when admission fails.
+    void attempt.then(cleanup, cleanup)
+    return admission
+  }
+
+  private async reconcileActiveGroup(expected = this.active): Promise<void> {
+    if (!this.isActiveAttachmentUsable(expected) || this.active !== expected) return
+    for (let pass = 0; pass <= this.maxSurfaces; pass += 1) {
+      for (const surface of this.orderedSurfaces()) {
+        await this.addSurfaceToActiveGroup(surface)
+      }
+      const current = this.orderedSurfaces()
+      if (
+        this.active === expected &&
+        current.every((surface) =>
+          expected.transport.hasSurface(surface.surfaceId, surface.generation)
+        )
+      ) {
+        return
+      }
+    }
+    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+  }
+
+  private async resolveToolSurfaceIndex(record: {
+    generation: number
+    selectionRevision: number
+    surfaceId: string
+  }): Promise<number> {
+    if (this.toolSurfaceLease !== record) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const surface = this.surfaces.get(record.surfaceId)
+    if (!surface || surface.generation !== record.generation || surface.guest.isDestroyed()) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
+    await this.reconcileActiveGroup()
+    const index = this.orderedSurfaces().indexOf(surface)
+    if (index < 0) throw new BrowserSurfaceManagerError('browser.target_closed')
+    if (
+      this.isActiveAttachmentUsable(this.active) &&
+      !this.active.transport.hasSurface(record.surfaceId, record.generation)
+    ) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    return index
   }
 
   private requestSurface(
@@ -1183,34 +1863,51 @@ export class BrowserSurfaceManager {
   }
 
   private async switchActiveSurface(surface: ManagedSurface): Promise<void> {
-    const active = this.active
-    if (
-      active &&
-      (active.surfaceId !== surface.surfaceId || active.generation !== surface.generation)
-    ) {
-      this.automationEpoch += 1
-      this.active = undefined
-      active.transport.close()
-      const disconnected = await boundedWaitFor(
-        () => !active.browser.isConnected(),
-        this.closeTimeoutMs
-      )
-      if (!disconnected) {
-        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-      }
+    if (surface.guest.isDestroyed() || this.surfaces.get(surface.surfaceId) !== surface) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
     }
     this.activeSurfaceId = surface.surfaceId
+    this.automationSurfaceId = surface.surfaceId
+    this.needsReveal = false
+  }
+
+  private async activateSurfaceFromAutomation(surface: ManagedSurface): Promise<void> {
+    if (surface.guest.isDestroyed() || this.surfaces.get(surface.surfaceId) !== surface) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
+    const lease = this.toolSurfaceLease
+    if (
+      lease &&
+      (lease.surfaceId !== surface.surfaceId || lease.generation !== surface.generation)
+    ) {
+      // A stale numeric tab index must not redirect an already-bound Tool to another admitted
+      // page after a preceding tab closes/reorders. Playwright observes this rejection before it
+      // commits Context._currentTab.
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    this.automationSurfaceId = surface.surfaceId
+    const revision = this.toolSurfaceLease?.selectionRevision ?? this.manualSelectionRevision
+    if (this.manualSelectionRevision !== revision) return
+    if (this.activeSurfaceId !== surface.surfaceId) {
+      const host = this.resolveHost()
+      if (!host || host.isDestroyed() || surface.host !== host) {
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+      await this.requestSurface(host, 'selectSurface', surface.surfaceId)
+      if (this.manualSelectionRevision !== revision) return
+      this.activeSurfaceId = surface.surfaceId
+    }
     this.needsReveal = false
   }
 
   private isActiveAttachmentUsable(
     attachment: ActiveAttachment | undefined
   ): attachment is ActiveAttachment {
-    if (!attachment || !attachment.browser.isConnected()) return false
-    const surface = this.surfaces.get(attachment.surfaceId)
-    return Boolean(
-      surface && surface.generation === attachment.generation && !surface.guest.isDestroyed()
-    )
+    return Boolean(attachment?.browser.isConnected())
+  }
+
+  private currentAutomationSurfaceId(): string | undefined {
+    return this.toolSurfaceLease?.surfaceId ?? this.automationSurfaceId ?? this.activeSurfaceId
   }
 
   private removeNavigationListeners(surface: ManagedSurface): void {
@@ -1333,7 +2030,22 @@ async function loadManagedSurface(
   url: string,
   timeoutMs: number
 ): Promise<void> {
-  if (!isSafeManagedPageUrl(url) || surface.guest.isDestroyed()) {
+  if (!isSafeManagedPageUrl(url)) {
+    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+  }
+  await loadExactManagedSurfaceUrl(surface, url, timeoutMs)
+}
+
+async function loadManagedBlankSurface(surface: ManagedSurface, timeoutMs: number): Promise<void> {
+  await loadExactManagedSurfaceUrl(surface, 'about:blank', timeoutMs)
+}
+
+async function loadExactManagedSurfaceUrl(
+  surface: ManagedSurface,
+  url: string,
+  timeoutMs: number
+): Promise<void> {
+  if (surface.guest.isDestroyed()) {
     throw new BrowserSurfaceManagerError('browser.surface_unavailable')
   }
   let timer: ReturnType<typeof setTimeout> | undefined

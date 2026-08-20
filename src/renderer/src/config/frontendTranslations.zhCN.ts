@@ -1433,6 +1433,8 @@ export const zhCNTranslations = {
   'agent.builtinMcpApproval.resource.generic': '当前网页中的受限资源',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
     '整个 MyCopilot 受管浏览器配置（可能包含其他网站的登录数据）',
+  'agent.builtinMcpApproval.resource.managedSurface':
+    '当前 MyCopilot 受管浏览器标签页（包括其内嵌网页）',
   'agent.builtinMcpApproval.origin': '网页来源',
   'agent.builtinMcpApproval.files': '文件',
   'agent.builtinMcpApproval.risks': '敏感权限',

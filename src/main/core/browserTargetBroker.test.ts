@@ -14,6 +14,7 @@ class FakeDebugger extends EventEmitter {
   readonly mainWorldFocusSpoofs = new Set<string>()
   readonly frameSessions = new Map<string, string>()
   readonly focusContextSessions = new Map<number, string>()
+  private readonly methodResponses = new Map<string, unknown[]>()
   private attached = false
   private nextFocusContextId = 7
   private targetInfoGate?: Promise<void>
@@ -32,6 +33,8 @@ class FakeDebugger extends EventEmitter {
   sendCommand = vi.fn(
     async (method: string, params?: unknown, sessionId?: string): Promise<unknown> => {
       this.commands.push({ method, params, sessionId })
+      const queuedResponses = this.methodResponses.get(method)
+      if (queuedResponses?.length) return queuedResponses.shift()
       if (method === 'Target.getTargetInfo') await this.targetInfoGate
       if (method === 'Browser.getVersion') {
         return {
@@ -42,6 +45,7 @@ class FakeDebugger extends EventEmitter {
           userAgent: 'fixture'
         }
       }
+      if (method === 'Network.getAllCookies') return { cookies: [] }
       if (
         method === 'Runtime.evaluate' &&
         typeof sessionId === 'string' &&
@@ -80,6 +84,12 @@ class FakeDebugger extends EventEmitter {
       return {}
     }
   )
+
+  respondOnce(method: string, response: unknown): void {
+    const queuedResponses = this.methodResponses.get(method) ?? []
+    queuedResponses.push(response)
+    this.methodResponses.set(method, queuedResponses)
+  }
 
   holdTargetInfo(): () => void {
     let resume!: () => void
@@ -272,6 +282,39 @@ function emitIframeAttached(
   }
 }
 
+function emitWorkerAttached(
+  guest: FakeWebContents,
+  identity: { browserContextId: string; targetId: string },
+  options: {
+    childSessionId: string
+    childTargetId: string
+    includeOwnerFrameId?: boolean
+    ownerFrameId?: string
+    parentSessionId?: string
+  }
+): void {
+  ;(guest.debugger as unknown as FakeDebugger).emit(
+    'message',
+    {},
+    'Target.attachedToTarget',
+    {
+      sessionId: options.childSessionId,
+      targetInfo: {
+        attached: true,
+        browserContextId: identity.browserContextId,
+        ...(options.includeOwnerFrameId === false
+          ? {}
+          : { parentFrameId: options.ownerFrameId ?? identity.targetId }),
+        targetId: options.childTargetId,
+        type: 'worker',
+        url: 'http://localhost/worker.js'
+      },
+      waitingForDebugger: false
+    },
+    options.parentSessionId ?? ''
+  )
+}
+
 describe('BrowserTargetBroker', () => {
   it('only registers a managed webview owned by the expected host and partition', () => {
     const broker = createBroker()
@@ -399,6 +442,96 @@ describe('BrowserTargetBroker', () => {
     expect((second.guest.debugger as unknown as FakeDebugger).commands).toEqual([])
   })
 
+  it('bridges only bounded cookie commands for the exact managed BrowserContext', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const identity = syntheticTargetIdentity(harness)
+    const cookie = {
+      name: 'fixture',
+      value: 'managed-cookie-value',
+      url: 'http://127.0.0.1/fixture',
+      httpOnly: true,
+      secure: false,
+      sameSite: 'Lax'
+    }
+
+    await expect(
+      harness.send('Storage.setCookies', {
+        params: { browserContextId: identity.browserContextId, cookies: [cookie] }
+      })
+    ).resolves.toMatchObject({ result: {} })
+    await expect(
+      harness.send('Storage.getCookies', {
+        params: { browserContextId: identity.browserContextId }
+      })
+    ).resolves.toMatchObject({ result: { cookies: [] } })
+    await expect(
+      harness.send('Storage.clearCookies', {
+        params: { browserContextId: identity.browserContextId }
+      })
+    ).resolves.toMatchObject({ result: {} })
+
+    const commands = (guest.debugger as unknown as FakeDebugger).commands
+    expect(commands).toContainEqual({
+      method: 'Network.setCookies',
+      params: { cookies: [cookie] },
+      sessionId: undefined
+    })
+    expect(commands).toContainEqual({
+      method: 'Network.getAllCookies',
+      params: {},
+      sessionId: undefined
+    })
+    expect(commands).toContainEqual({
+      method: 'Network.clearBrowserCookies',
+      params: {},
+      sessionId: undefined
+    })
+
+    const wrongContext = await harness.send('Storage.getCookies', {
+      params: { browserContextId: `${identity.browserContextId}-other` }
+    })
+    expect(wrongContext.error).toEqual(
+      expect.objectContaining({
+        message: 'Cookie command is not bound to the managed BrowserContext'
+      })
+    )
+    const targetSession = await harness.send('Storage.getCookies', {
+      params: { browserContextId: identity.browserContextId },
+      sessionId
+    })
+    expect(targetSession.error).toEqual(
+      expect.objectContaining({
+        message: 'Storage commands require the managed BrowserContext session'
+      })
+    )
+    const unrelatedStorage = await harness.send('Storage.clearDataForOrigin', {
+      params: { origin: 'http://127.0.0.1', storageTypes: 'all' }
+    })
+    expect(unrelatedStorage.error).toEqual(
+      expect.objectContaining({ message: 'Unsupported browser-level command' })
+    )
+    const oversized = await harness.send('Storage.setCookies', {
+      params: {
+        browserContextId: identity.browserContextId,
+        cookies: Array.from({ length: 513 }, (_value, index) => ({
+          name: `fixture-${index}`,
+          value: 'value',
+          url: 'http://127.0.0.1/fixture'
+        }))
+      }
+    })
+    expect(oversized.error).toEqual(
+      expect.objectContaining({ message: 'Managed cookie payload exceeds its limit' })
+    )
+    expect(
+      commands.filter(
+        (command) =>
+          command.method.startsWith('Network.') && command.method !== 'Network.getAllCookies'
+      )
+    ).toHaveLength(2)
+    transport.close()
+  })
+
   it('safely adapts bounded Input.insertText for the exact guest selection', async () => {
     const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
     const text = `safe'); globalThis.__mcp_injected = true; //\u2028next`
@@ -479,6 +612,7 @@ describe('BrowserTargetBroker', () => {
     })
 
     fakeDebugger.focusedSessions.add('child-one')
+    fakeDebugger.focusedSessions.add('child-nested')
     const inserted = await harness.send('Input.insertText', {
       params: { text: '你好' },
       sessionId
@@ -488,7 +622,7 @@ describe('BrowserTargetBroker', () => {
     expect(fakeDebugger.commands).toContainEqual({
       method: 'Input.insertText',
       params: { text: '你好' },
-      sessionId: 'child-one'
+      sessionId: 'child-nested'
     })
 
     const world = await harness.send('Page.createIsolatedWorld', {
@@ -501,6 +635,75 @@ describe('BrowserTargetBroker', () => {
       params: { frameId: 'frame-child-one', worldName: 'fixture-world' },
       sessionId: undefined
     })
+    transport.close()
+  })
+
+  it('admits pre-existing dedicated workers without breaking top-frame text input', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const identity = syntheticTargetIdentity(harness)
+    emitWorkerAttached(guest, identity, {
+      childSessionId: 'worker-one',
+      childTargetId: 'worker-target-one',
+      // Real TargetInfo may omit this optional field. The exact admitted parent-session envelope
+      // and BrowserContext still prove ownership.
+      includeOwnerFrameId: false
+    })
+    emitWorkerAttached(guest, identity, {
+      childSessionId: 'worker-nested',
+      childTargetId: 'worker-target-nested',
+      parentSessionId: 'worker-one'
+    })
+
+    expect(
+      harness.events.filter((event) => event.method === 'Target.attachedToTarget')
+    ).toHaveLength(3)
+    await expect(
+      harness.send('Input.insertText', { params: { text: '你好' }, sessionId })
+    ).resolves.toMatchObject({ result: {} })
+    expect(guest.insertedTexts).toEqual(['你好'])
+    transport.close()
+  })
+
+  it('recursively retires nested worker ownership when its parent OOPIF detaches', async () => {
+    const { guest, harness, transport } = await createConnectedTransportHarness()
+    const identity = syntheticTargetIdentity(harness)
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+
+    for (let index = 0; index < 25; index += 1) {
+      emitIframeAttached(guest, identity, {
+        childSessionId: 'reused-frame',
+        childTargetId: 'reused-frame-target'
+      })
+      emitWorkerAttached(guest, identity, {
+        childSessionId: 'reused-worker',
+        childTargetId: 'reused-worker-target',
+        ownerFrameId: 'reused-frame-target',
+        parentSessionId: 'reused-frame'
+      })
+      fakeDebugger.emit(
+        'message',
+        {},
+        'Target.detachedFromTarget',
+        { sessionId: 'reused-frame', targetId: 'reused-frame-target' },
+        ''
+      )
+    }
+    const beforeFinal = harness.events.filter(
+      (event) => event.method === 'Target.attachedToTarget'
+    ).length
+    emitIframeAttached(guest, identity, {
+      childSessionId: 'reused-frame',
+      childTargetId: 'reused-frame-target'
+    })
+    emitWorkerAttached(guest, identity, {
+      childSessionId: 'reused-worker',
+      childTargetId: 'reused-worker-target',
+      ownerFrameId: 'reused-frame-target',
+      parentSessionId: 'reused-frame'
+    })
+    expect(
+      harness.events.filter((event) => event.method === 'Target.attachedToTarget')
+    ).toHaveLength(beforeFinal + 2)
     transport.close()
   })
 
@@ -657,19 +860,115 @@ describe('BrowserTargetBroker', () => {
     expect(harness.events.some((event) => event.id === 99)).toBe(false)
   })
 
-  it('rejects oversized CDP command results before they enter Playwright', async () => {
+  it('allows byte-bounded large AX trees and rejects them at the explicit output limit', async () => {
     const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
     const fakeDebugger = guest.debugger as unknown as FakeDebugger
     fakeDebugger.sendCommand.mockResolvedValueOnce({
-      nodes: Array.from({ length: 4_097 }, (_, index) => ({ nodeId: index }))
+      nodes: Array.from({ length: 5_000 }, (_, index) => ({ nodeId: index }))
     })
 
     const response = await harness.send('Accessibility.getFullAXTree', { sessionId })
+    expect((response.result as { nodes: unknown[] }).nodes).toHaveLength(5_000)
 
-    expect(response.error).toEqual(
-      expect.objectContaining({ message: 'CDP payload exceeds managed limits' })
+    fakeDebugger.sendCommand.mockResolvedValueOnce({ nodes: Array(65_537).fill(0) })
+    const tooManyNodes = await harness.send('Accessibility.getFullAXTree', { sessionId })
+    expect(tooManyNodes.error).toEqual(expect.objectContaining({ message: 'output_too_large' }))
+
+    fakeDebugger.sendCommand.mockResolvedValueOnce({
+      nodes: Array.from({ length: 5_000 }, (_, index) => ({
+        nodeId: index,
+        value: 'x'.repeat(1_000)
+      }))
+    })
+    const oversized = await harness.send('Accessibility.getFullAXTree', { sessionId })
+
+    expect(oversized.error).toEqual(expect.objectContaining({ message: 'output_too_large' }))
+    expect(harness.events.some((event) => JSON.stringify(event).includes('x'.repeat(1_000)))).toBe(
+      false
     )
-    expect(harness.events.some((event) => JSON.stringify(event).includes('nodeId'))).toBe(false)
+    transport.close()
+  })
+
+  it('reports PDF unavailable and applies the artifact budget to IO.read responses', async () => {
+    const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
+    const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    const pdfParams = {
+      displayHeaderFooter: false,
+      footerTemplate: '',
+      generateDocumentOutline: false,
+      generateTaggedPDF: false,
+      headerTemplate: '',
+      landscape: false,
+      marginBottom: 0,
+      marginLeft: 0,
+      marginRight: 0,
+      marginTop: 0,
+      pageRanges: '',
+      paperHeight: 11,
+      paperWidth: 8.5,
+      preferCSSPageSize: false,
+      printBackground: false,
+      scale: 1,
+      transferMode: 'ReturnAsStream'
+    }
+
+    await expect(
+      harness.send('Page.printToPDF', { params: pdfParams, sessionId })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        error: expect.objectContaining({ message: 'browser.pdf_unavailable' })
+      })
+    )
+    expect(fakeDebugger.commands.some((command) => command.method === 'Page.printToPDF')).toBe(
+      false
+    )
+
+    const chunk = 'A'.repeat(1 * 1_024 * 1_024 + 1)
+    fakeDebugger.respondOnce('IO.read', { base64Encoded: true, data: chunk, eof: false })
+    const read = await harness.send('IO.read', {
+      params: { handle: 'pdf-stream', size: 1 * 1_024 * 1_024 },
+      sessionId
+    })
+    expect((read.result as { data: string }).data).toHaveLength(chunk.length)
+
+    const artifactBase64Limit = Math.ceil((64 * 1_024 * 1_024) / 3) * 4
+    const oversizedMarker = 'oversized-artifact-fixture'
+    const originalByteLength = Buffer.byteLength.bind(Buffer)
+    const byteLength = vi
+      .spyOn(Buffer, 'byteLength')
+      .mockImplementation(((
+        value: Parameters<typeof Buffer.byteLength>[0],
+        encoding?: BufferEncoding
+      ) =>
+        value === oversizedMarker
+          ? artifactBase64Limit + 1
+          : originalByteLength(value, encoding)) as typeof Buffer.byteLength)
+    try {
+      fakeDebugger.respondOnce('IO.read', {
+        base64Encoded: true,
+        data: oversizedMarker,
+        eof: false
+      })
+      await expect(
+        harness.send('IO.read', { params: { handle: 'pdf-stream' }, sessionId })
+      ).resolves.toEqual(
+        expect.objectContaining({
+          error: expect.objectContaining({ message: 'artifact_too_large' })
+        })
+      )
+    } finally {
+      byteLength.mockRestore()
+    }
+
+    fakeDebugger.respondOnce('IO.close', {})
+    await expect(
+      harness.send('IO.close', { params: { handle: 'pdf-stream' }, sessionId })
+    ).resolves.toEqual(expect.objectContaining({ result: {} }))
+    expect(fakeDebugger.commands.findLast((command) => command.method === 'IO.close')).toEqual({
+      method: 'IO.close',
+      params: { handle: 'pdf-stream' },
+      sessionId: undefined
+    })
     transport.close()
   })
 

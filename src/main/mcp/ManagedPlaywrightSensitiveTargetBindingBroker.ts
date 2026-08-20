@@ -2,7 +2,8 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 
 import type {
   ManagedPlaywrightAuthorizationContext,
-  ManagedPlaywrightPrepareSensitiveToolInput
+  ManagedPlaywrightPrepareSensitiveToolInput,
+  ManagedPlaywrightSensitiveBindingScope
 } from '@mycopilot/protocol'
 
 const DEFAULT_MAX_BINDINGS = 128
@@ -24,15 +25,24 @@ export interface ManagedPlaywrightSensitiveDispatchFence {
 export interface ManagedPlaywrightPreparedSensitiveTargetBinding {
   readonly bindingId: string
   readonly targetBindingDigest: string
-  readonly origin: string
+  readonly origin: string | null
   readonly createdAtMs: number
   readonly expiresAtMs: number
+  readonly fileBasenames: readonly string[]
+  readonly fileRevisionDigest: string | null
 }
 
 export interface ManagedPlaywrightSensitiveTargetBindingLease {
-  readonly target: ManagedPlaywrightSensitiveTargetIdentity
+  readonly target?: ManagedPlaywrightSensitiveTargetIdentity
+  readonly preparedFileHandles?: readonly string[]
   markDispatched(): void
   finish(): void
+}
+
+export interface ManagedPlaywrightPreparedFileAuthority {
+  readonly handles: readonly string[]
+  readonly basenames: readonly string[]
+  readonly fileRevisionDigest: string
 }
 
 export interface ManagedPlaywrightSensitiveTargetBindingStore {
@@ -61,6 +71,7 @@ export interface ManagedPlaywrightSensitiveTargetBindingBrokerOptions {
   getActiveTarget: () => ManagedPlaywrightSensitiveTargetIdentity | null
   maxBindings?: number
   now?: () => number
+  releasePreparedFiles?: (owner: { runId: string; callId: string }) => void
   secret?: Uint8Array
   sweepIntervalMs?: number
 }
@@ -75,8 +86,10 @@ interface BindingRecord extends ManagedPlaywrightPreparedSensitiveTargetBinding 
   readonly manifestDigest: string
   readonly policyRevision: number
   readonly runId: string
-  readonly target: ManagedPlaywrightSensitiveTargetIdentity
+  readonly bindingScope: ManagedPlaywrightSensitiveBindingScope
+  readonly target?: ManagedPlaywrightSensitiveTargetIdentity
   readonly toolName: string
+  readonly preparedFileHandles: readonly string[]
 }
 
 interface ActiveBindingLease {
@@ -100,6 +113,9 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
   private readonly getActiveTarget: () => ManagedPlaywrightSensitiveTargetIdentity | null
   private readonly maxBindings: number
   private readonly now: () => number
+  private readonly releasePreparedFiles: NonNullable<
+    ManagedPlaywrightSensitiveTargetBindingBrokerOptions['releasePreparedFiles']
+  >
   private readonly records = new Map<string, BindingRecord>()
   private readonly secret: Uint8Array
   private readonly sweepIntervalMs: number
@@ -111,6 +127,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
     this.getActiveTarget = options.getActiveTarget
     this.maxBindings = normalizeCapacity(options.maxBindings)
     this.now = options.now ?? Date.now
+    this.releasePreparedFiles = options.releasePreparedFiles ?? (() => undefined)
     this.sweepIntervalMs = normalizeSweepInterval(options.sweepIntervalMs)
     this.secret = options.secret ? Uint8Array.from(options.secret) : randomBytes(32)
     if (this.secret.byteLength < 32) {
@@ -119,17 +136,23 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
   }
 
   prepare(
-    input: ManagedPlaywrightPrepareSensitiveToolInput
+    input: ManagedPlaywrightPrepareSensitiveToolInput,
+    preparedFiles?: ManagedPlaywrightPreparedFileAuthority
   ): ManagedPlaywrightPreparedSensitiveTargetBinding {
+    const bindingScope = input.bindingScope
     this.assertOpen()
     const now = this.now()
     this.pruneExpired(now)
     const duplicateId = this.byRequestId.get(input.bindingRequestId)
     if (duplicateId) {
       const duplicate = this.records.get(duplicateId)
-      if (duplicate && this.matchesPrepareInput(duplicate, input)) return project(duplicate)
+      if (duplicate && this.matchesPrepareInput(duplicate, input, preparedFiles, bindingScope)) {
+        return project(duplicate)
+      }
+      if (duplicate) this.deleteRecord(duplicate)
       throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
     }
+    validatePreparedFiles(input, preparedFiles)
     if (this.records.size >= this.maxBindings) {
       throw new ManagedPlaywrightSensitiveTargetBindingError('busy')
     }
@@ -141,13 +164,15 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
     ) {
       throw new ManagedPlaywrightSensitiveTargetBindingError('expired')
     }
-    const target = normalizeTarget(this.getActiveTarget())
-    if (!target) {
+    const target =
+      bindingScope === 'managed_surface' ? normalizeTarget(this.getActiveTarget()) : undefined
+    if (bindingScope === 'managed_surface' && !target) {
       throw new ManagedPlaywrightSensitiveTargetBindingError('surface_unavailable')
     }
     const bindingId = randomUUID()
     const material = {
-      schemaVersion: 2,
+      schemaVersion: 4,
+      bindingScope,
       bindingId,
       bindingRequestId: input.bindingRequestId,
       runId: input.runId,
@@ -159,20 +184,24 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
       toolName: input.toolName,
       argumentsDigest: input.argumentsDigest,
       grantExpiresAtMs: input.grantExpiresAtMs,
-      surfaceId: target.surfaceId,
-      generation: target.generation,
-      navigationEpoch: target.navigationEpoch,
-      origin: target.origin,
+      surfaceId: target?.surfaceId ?? null,
+      generation: target?.generation ?? null,
+      navigationEpoch: target?.navigationEpoch ?? null,
+      origin: target?.origin ?? null,
       createdAtMs: input.createdAtMs,
-      expiresAtMs: input.expiresAtMs
+      expiresAtMs: input.expiresAtMs,
+      fileRevisionDigest: preparedFiles?.fileRevisionDigest ?? null,
+      fileCount: preparedFiles?.handles.length ?? 0
     }
     const targetBindingDigest = `sha256:${createHmac('sha256', this.secret)
       .update(JSON.stringify(material))
       .digest('hex')}`
     const record: BindingRecord = {
       ...material,
-      target: Object.freeze({ ...target }),
-      targetBindingDigest
+      ...(target ? { target: Object.freeze({ ...target }) } : {}),
+      targetBindingDigest,
+      fileBasenames: Object.freeze([...(preparedFiles?.basenames ?? [])]),
+      preparedFileHandles: Object.freeze([...(preparedFiles?.handles ?? [])])
     }
     this.records.set(bindingId, record)
     this.byRequestId.set(input.bindingRequestId, bindingId)
@@ -218,7 +247,10 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
     const lease: ActiveBindingLease = { dispatched: false, finished: false, record }
     this.activeLeases.add(lease)
     return {
-      target: record.target,
+      ...(record.target ? { target: record.target } : {}),
+      ...(record.preparedFileHandles.length > 0
+        ? { preparedFileHandles: record.preparedFileHandles }
+        : {}),
       markDispatched: () => {
         if (lease.finished || lease.dispatched || this.records.get(record.bindingId) !== record) {
           throw new ManagedPlaywrightSensitiveTargetBindingError('reused')
@@ -230,7 +262,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
         this.assertCurrentTarget(record)
         let fence: ManagedPlaywrightSensitiveDispatchFence | undefined
         try {
-          fence = this.beginDispatchFence(record.target)
+          if (record.target) fence = this.beginDispatchFence(record.target)
           // Fence installation and this second exact read are synchronous. A navigation that
           // started before the lock changes the epoch/in-progress state and fails closed here;
           // requests that begin afterwards are cancelled by the fence until Tool terminal.
@@ -247,7 +279,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
         }
         lease.fence = fence
         lease.dispatched = true
-        this.deleteRecord(record)
+        this.deleteRecord(record, false)
       },
       finish: () => this.finishLease(lease, true)
     }
@@ -307,7 +339,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
     if (this.sweepTimer) clearTimeout(this.sweepTimer)
     this.sweepTimer = undefined
     for (const lease of [...this.activeLeases]) this.finishLease(lease, false)
-    this.records.clear()
+    for (const record of [...this.records.values()]) this.deleteRecord(record)
     this.byRequestId.clear()
     this.secret.fill(0)
   }
@@ -318,6 +350,17 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
   }
 
   private assertCurrentTarget(record: BindingRecord): void {
+    if (record.bindingScope === 'managed_browser_profile') {
+      if (record.target || record.origin !== null) {
+        this.deleteRecord(record)
+        throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
+      }
+      return
+    }
+    if (!record.target) {
+      this.deleteRecord(record)
+      throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
+    }
     const current = normalizeTarget(this.getActiveTarget())
     if (
       !current ||
@@ -333,9 +376,12 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
 
   private matchesPrepareInput(
     record: BindingRecord,
-    input: ManagedPlaywrightPrepareSensitiveToolInput
+    input: ManagedPlaywrightPrepareSensitiveToolInput,
+    preparedFiles: ManagedPlaywrightPreparedFileAuthority | undefined,
+    bindingScope: ManagedPlaywrightSensitiveBindingScope
   ): boolean {
     return (
+      record.bindingScope === bindingScope &&
       record.runId === input.runId &&
       record.capabilityId === input.capabilityId &&
       record.activationId === input.activationId &&
@@ -346,7 +392,10 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
       record.toolName === input.toolName &&
       record.argumentsDigest === input.argumentsDigest &&
       record.createdAtMs === input.createdAtMs &&
-      record.expiresAtMs === input.expiresAtMs
+      record.expiresAtMs === input.expiresAtMs &&
+      record.fileRevisionDigest === (preparedFiles?.fileRevisionDigest ?? null) &&
+      sameStrings(record.fileBasenames, preparedFiles?.basenames ?? []) &&
+      sameStrings(record.preparedFileHandles, preparedFiles?.handles ?? [])
     )
   }
 
@@ -385,11 +434,14 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
     }
   }
 
-  private deleteRecord(record: BindingRecord): void {
+  private deleteRecord(record: BindingRecord, releasePreparedFiles = true): void {
     if (this.records.get(record.bindingId) !== record) return
     this.records.delete(record.bindingId)
     if (this.byRequestId.get(record.bindingRequestId) === record.bindingId) {
       this.byRequestId.delete(record.bindingRequestId)
+    }
+    if (releasePreparedFiles && record.preparedFileHandles.length > 0) {
+      this.releasePreparedFiles({ runId: record.runId, callId: record.callId })
     }
     if (this.records.size === 0 && this.sweepTimer) {
       clearTimeout(this.sweepTimer)
@@ -450,8 +502,49 @@ function project(record: BindingRecord): ManagedPlaywrightPreparedSensitiveTarge
     targetBindingDigest: record.targetBindingDigest,
     origin: record.origin,
     createdAtMs: record.createdAtMs,
-    expiresAtMs: record.expiresAtMs
+    expiresAtMs: record.expiresAtMs,
+    fileBasenames: [...record.fileBasenames],
+    fileRevisionDigest: record.fileRevisionDigest
   }
+}
+
+function validatePreparedFiles(
+  input: ManagedPlaywrightPrepareSensitiveToolInput,
+  preparedFiles: ManagedPlaywrightPreparedFileAuthority | undefined
+): void {
+  if (input.filePreparation === null) {
+    if (preparedFiles) throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
+    return
+  }
+  if (
+    !preparedFiles ||
+    preparedFiles.handles.length < 1 ||
+    preparedFiles.handles.length > 16 ||
+    preparedFiles.handles.length !== preparedFiles.basenames.length ||
+    !/^sha256:[0-9a-f]{64}$/u.test(preparedFiles.fileRevisionDigest) ||
+    preparedFiles.handles.some(
+      (handle) =>
+        typeof handle !== 'string' ||
+        !/^browser-file:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+          handle
+        )
+    ) ||
+    preparedFiles.basenames.some(
+      (name) =>
+        typeof name !== 'string' ||
+        name.length < 1 ||
+        name.length > 255 ||
+        name.includes('/') ||
+        name.includes('\\') ||
+        /[\u0000-\u001f\u007f]/u.test(name)
+    )
+  ) {
+    throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
+  }
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function normalizeCapacity(value: number | undefined): number {

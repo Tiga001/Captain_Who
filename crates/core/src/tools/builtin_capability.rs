@@ -5,7 +5,8 @@ use super::{
 use crate::builtin_capabilities::{
     build_activation_approval, builtin_tool_requires_approval, BuiltinCapabilityDispatchRequest,
     BuiltinCapabilityId, BuiltinCapabilityInvocation, BuiltinCapabilityManifest,
-    BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor, CapabilityActivationState,
+    BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor, BuiltinMcpToolFilePreparation,
+    CapabilityActivationState,
 };
 use crate::protocol::{
     AgentError, AgentProposedAction, AgentResult, AgentToolApprovalMode, AgentToolCall,
@@ -308,12 +309,10 @@ impl BuiltinCapabilityAgentTool {
 
 fn sensitive_tool_scope(tool_id: &str) -> (&'static str, &'static str) {
     match tool_id {
-        "browser_drop" | "browser_file_upload" => ("file_upload", "file_upload"),
-        "browser_network_request" => ("network_sensitive_read", "network_sensitive_read"),
-        // Playwright cookie APIs and storage-state operate on the managed browser context, not
-        // solely on the currently visible origin. `approval_origin` remains a TOCTOU anchor for
-        // the active Surface, while the durable resource summary truthfully names the broader
-        // profile scope.
+        "browser_drop" | "browser_file_upload" => ("file_upload", "managed_surface"),
+        "browser_network_request" => ("network_sensitive_read", "managed_surface"),
+        // Playwright cookie APIs and storage-state operate on the managed browser context. Main
+        // freezes profile authority without requiring a visible page or model-provided origin.
         "browser_cookie_get" | "browser_cookie_list" => ("cookie_read", "managed_browser_profile"),
         "browser_cookie_clear" | "browser_cookie_delete" | "browser_cookie_set" => {
             ("cookie_write", "managed_browser_profile")
@@ -332,7 +331,7 @@ fn sensitive_tool_scope(tool_id: &str) -> (&'static str, &'static str) {
         | "browser_sessionstorage_set" => ("session_storage_write", "session_storage_write"),
         "browser_set_storage_state" => ("storage_state_import", "managed_browser_profile"),
         "browser_storage_state" => ("storage_state_export", "managed_browser_profile"),
-        "browser_evaluate" => ("page_script_execution", "page_script_execution"),
+        "browser_evaluate" => ("page_script_execution", "managed_surface"),
         _ => ("sensitive_browser_operation", "sensitive_browser_operation"),
     }
 }
@@ -422,24 +421,20 @@ impl AgentTool for BuiltinCapabilityAgentTool {
             if !builtin_tool_requires_approval(&self.descriptor, &call.args) {
                 return Err(AgentError::new("该内置 MCP Tool 调用不需要敏感审批。"));
             }
-            let claimed_origin = call
-                .args
-                .get("approval_origin")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .ok_or_else(|| AgentError::new("敏感内置 MCP Tool 缺少 approval_origin。"))?;
             let (operation_category, resource_scope) = self.sensitive_scope();
             let call_reason = value_free_sensitive_approval_reason(operation_category).to_string();
             let resource_summary = BuiltinMcpToolResourceSummary {
                 scope: resource_scope.to_string(),
-                display_name: if resource_scope == "managed_browser_profile" {
-                    "Managed browser profile".to_string()
-                } else {
-                    operation_category.replace('_', " ")
+                display_name: match resource_scope {
+                    "managed_browser_profile" => "Managed browser profile".to_string(),
+                    "managed_surface" => "Current managed browser surface".to_string(),
+                    _ => operation_category.replace('_', " "),
                 },
                 file_basenames: Vec::new(),
-                origin: Some(claimed_origin.clone()),
+                origin: None,
             };
+            let file_preparation =
+                sensitive_file_preparation(context, &self.descriptor.tool_id, &call.args)?;
             let invocation = self.frozen_invocation(context, call.args.clone())?;
             let approval = self
                 .runtime
@@ -448,7 +443,7 @@ impl AgentTool for BuiltinCapabilityAgentTool {
                     call_reason,
                     operation_category.to_string(),
                     resource_summary,
-                    claimed_origin,
+                    file_preparation,
                     self.descriptor.builtin_risk_kinds.clone(),
                     context.cancellation_token(),
                 )
@@ -468,6 +463,83 @@ impl AgentTool for BuiltinCapabilityAgentTool {
 
     fn requires_approval_for_call(&self, args: &Value) -> bool {
         builtin_tool_requires_approval(&self.descriptor, args)
+    }
+}
+
+fn sensitive_file_preparation(
+    context: &ToolExecutionContext,
+    tool_id: &str,
+    arguments: &Value,
+) -> AgentResult<Option<BuiltinMcpToolFilePreparation>> {
+    let resolve_paths = |values: &[Value]| -> AgentResult<Vec<String>> {
+        if values.is_empty() || values.len() > 16 {
+            return Err(AgentError::new("浏览器文件预检数量无效。"));
+        }
+        values
+            .iter()
+            .map(|value| {
+                let model_path = value
+                    .as_str()
+                    .ok_or_else(|| AgentError::new("浏览器文件路径必须是字符串。"))?;
+                // Models commonly repeat the absolute path returned by a workspace search. That
+                // must not require global filesystem permission when the canonical file is still
+                // inside the already-authorized workspace. Canonical containment also rejects an
+                // in-workspace symlink that escapes the workspace. Absolute paths elsewhere keep
+                // using the normal All/attachment authority checks below.
+                let resolved = if std::path::Path::new(model_path.trim()).is_absolute() {
+                    let canonical = std::path::Path::new(model_path.trim())
+                        .canonicalize()
+                        .map_err(|_| AgentError::new("browser.file.invalid_file"))?;
+                    if context
+                        .workspace_root_optional()?
+                        .is_some_and(|root| canonical.starts_with(root))
+                    {
+                        canonical
+                    } else {
+                        context
+                            .resolve_existing_path(model_path)
+                            .map_err(|_| AgentError::new("browser.file.invalid_file"))?
+                    }
+                } else {
+                    context
+                        .resolve_existing_path(model_path)
+                        .map_err(|_| AgentError::new("browser.file.invalid_file"))?
+                };
+                if !resolved.is_file() {
+                    return Err(AgentError::new("browser.file.invalid_file"));
+                }
+                resolved
+                    .to_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| AgentError::new("browser.file.invalid_file"))
+            })
+            .collect()
+    };
+
+    match tool_id {
+        "browser_file_upload" => match arguments.get("paths") {
+            Some(Value::Array(paths)) if !paths.is_empty() => Ok(Some(
+                BuiltinMcpToolFilePreparation::ResolvedPaths(resolve_paths(paths)?),
+            )),
+            Some(Value::Array(_)) | None => Ok(None),
+            Some(_) => Err(AgentError::new("浏览器文件路径列表无效。")),
+        },
+        "browser_drop" => match arguments.get("paths") {
+            Some(Value::Array(paths)) if !paths.is_empty() => Ok(Some(
+                BuiltinMcpToolFilePreparation::ResolvedPaths(resolve_paths(paths)?),
+            )),
+            _ => Ok(None),
+        },
+        "browser_set_storage_state" => {
+            let filename = arguments
+                .get("filename")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("storage-state 文件路径无效。"))?;
+            Ok(Some(BuiltinMcpToolFilePreparation::ResolvedPaths(
+                resolve_paths(&[Value::String(filename.to_string())])?,
+            )))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -770,7 +842,10 @@ mod tests {
         BuiltinCapabilityPolicy, BuiltinCapabilityProvider, BuiltinMcpToolApprovalMode,
         BuiltinMcpToolApprovalRequest, CapabilityActivationId, CapabilityGrant,
     };
-    use crate::protocol::{AgentApprovalStatus, AgentToolIdentity, BuiltinMcpToolRiskKind};
+    use crate::protocol::{
+        AgentApprovalStatus, AgentRunContext, AgentToolIdentity, AgentWorkspaceContext,
+        BuiltinMcpToolRiskKind,
+    };
     use crate::tools::ToolRegistry;
     use crate::AgentCancellationToken;
     use std::collections::BTreeSet;
@@ -838,19 +913,15 @@ mod tests {
             crate::builtin_capabilities::PreparedBuiltinMcpToolTargetBinding,
         > {
             Box::pin(async move {
-                let origin = request
-                    .invocation
-                    .arguments
-                    .get("approval_origin")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| AgentError::new("test approval origin missing"))?;
                 Ok(
                     crate::builtin_capabilities::PreparedBuiltinMcpToolTargetBinding {
                         binding_id: Uuid::new_v4().to_string(),
                         target_binding_digest: format!("sha256:{}", "7".repeat(64)),
-                        origin: origin.to_string(),
+                        origin: Some("https://mail.example.test".to_string()),
                         created_at: request.created_at,
                         expires_at: request.expires_at,
+                        file_basenames: Vec::new(),
+                        file_revision_digest: None,
                     },
                 )
             })
@@ -921,10 +992,9 @@ mod tests {
                     "function": {"type": "string"},
                     "element": {"type": "string"},
                     "target": {"type": "string"},
-                    "approval_origin": {"type": "string"},
                     "call_reason": {"type": "string"}
                 },
-                "required": ["function", "approval_origin", "call_reason"],
+                "required": ["function", "call_reason"],
                 "additionalProperties": false
             }),
             AgentToolSafety::RequiresApproval,
@@ -983,6 +1053,23 @@ mod tests {
         ToolExecutionContext::from_run_context(None)
             .with_runtime_services(run_id.to_string(), None)
             .with_tool_call_id("call-1".to_string())
+    }
+
+    fn workspace_context(root: &std::path::Path) -> ToolExecutionContext {
+        ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("browser file preflight fixture".to_string()),
+                root_path: Some(root.to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: Default::default(),
+        }))
+        .with_runtime_services("run-1".to_string(), None)
+        .with_tool_call_id("call-1".to_string())
     }
 
     fn activation_call() -> AgentToolCall {
@@ -1390,7 +1477,6 @@ mod tests {
             tool: "browser_evaluate".to_string(),
             args: json!({
                 "function": "() => ({password: 'UNLABELLED_PASSWORD_CANARY_7Yp9', cookie: 'COOKIE_VALUE_CANARY', storage: 'STORAGE_VALUE_CANARY'})",
-                "approval_origin": "https://mail.example.test",
                 "call_reason": "使用密码 UNLABELLED_PASSWORD_CANARY_7Yp9 登录；Use UNLABELLED_PASSWORD_CANARY_7Yp9；读取 COOKIE_VALUE_CANARY、STORAGE_VALUE_CANARY 和 browser-file:123e4567-e89b-42d3-a456-426614174000"
             }),
             approval_status: AgentApprovalStatus::Required,
@@ -1449,7 +1535,6 @@ mod tests {
                     "function": "(element) => element.textContent",
                     "element": "Embedded editor",
                     "target": target,
-                    "approval_origin": "https://mail.example.test",
                     "call_reason": "Read the embedded editor."
                 }),
                 approval_status: AgentApprovalStatus::Required,
@@ -1464,6 +1549,70 @@ mod tests {
                 Some("builtin_mcp_tool.sensitive_target_scope_unsupported")
             );
         }
+    }
+
+    #[test]
+    fn sensitive_file_preflight_accepts_absolute_paths_only_inside_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("浙江大学2026年招生资料汇编.pptx");
+        std::fs::write(&fixture, b"fixture-presentation").unwrap();
+        let context = workspace_context(root.path());
+
+        let prepared = sensitive_file_preparation(
+            &context,
+            "browser_file_upload",
+            &json!({"paths": [fixture.to_string_lossy()]}),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared,
+            Some(BuiltinMcpToolFilePreparation::ResolvedPaths(vec![fixture
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]))
+        );
+
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let error = sensitive_file_preparation(
+            &context,
+            "browser_file_upload",
+            &json!({"paths": [outside.path().to_string_lossy()]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "browser.file.invalid_file");
+
+        let secret_path = root.path().join("PRIVATE_ABSOLUTE_PATH_CANARY");
+        let error = sensitive_file_preparation(
+            &context,
+            "browser_file_upload",
+            &json!({"paths": [secret_path.to_string_lossy()]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "browser.file.invalid_file");
+        assert!(!error.to_string().contains("PRIVATE_ABSOLUTE_PATH_CANARY"));
+    }
+
+    #[test]
+    fn sensitive_file_preflight_preserves_official_upload_cancel_semantics_without_paths() {
+        assert_eq!(
+            sensitive_file_preparation(&context(), "browser_file_upload", &json!({})).unwrap(),
+            None
+        );
+        assert_eq!(
+            sensitive_file_preparation(&context(), "browser_file_upload", &json!({"paths": []}))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            sensitive_file_preparation(
+                &context(),
+                "browser_drop",
+                &json!({"target": "Drop zone", "data": [{"mimeType": "text/plain", "data": "hello"}]})
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1490,5 +1639,16 @@ mod tests {
             sensitive_tool_scope("browser_sessionstorage_set"),
             ("session_storage_write", "session_storage_write")
         );
+        for (tool_id, operation) in [
+            ("browser_drop", "file_upload"),
+            ("browser_evaluate", "page_script_execution"),
+            ("browser_file_upload", "file_upload"),
+            ("browser_network_request", "network_sensitive_read"),
+        ] {
+            assert_eq!(
+                sensitive_tool_scope(tool_id),
+                (operation, "managed_surface")
+            );
+        }
     }
 }

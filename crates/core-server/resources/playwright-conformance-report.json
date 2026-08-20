@@ -14,9 +14,9 @@
   "identity": {
     "managedMcpId": "builtin.browser_automation.mcp",
     "capabilityId": "browser_automation",
-    "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v5",
+    "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v7",
     "upstreamCatalogDigest": "sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf",
-    "policyDigest": "sha256:522934676363be5d6c113fc373cfa1c47309da4b8a101e4619d0c815f9d80ade"
+    "policyDigest": "sha256:4f36ae204ff1990f1cec45c8054062406b7a02186b7bd39620a30f128505f268"
   },
   "classification": {
     "status": "contract",
@@ -95,17 +95,11 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:d503685c2c343d3f67d58e4e72ecd680e5b452d1e7905f3aa40dd0f5e6093853",
-      "hostOverlayDigest": "sha256:aa92578c35a642be2f288addb3018ccfaaa716b55a134fe3cedf398de6b80a82",
-      "hostInputSchemaDigest": "sha256:aa4087122695b196536301d0c716fca23c097b85474ed07fabfef9e1f6b4015a",
+      "hostOverlayDigest": "sha256:4cd893125268cefde35deab2bcdc72eda2e23cef6553ed3b34bc153d3a3d559d",
+      "hostInputSchemaDigest": "sha256:eaf283ae6e2c2dc8701244dd81dcd7de171804bd30d9387b14fc71d3904e854c",
       "hostOverlay": {
         "addCallReason": true,
-        "removeProperties": ["all"],
         "propertyOverrides": {
-          "level": {
-            "enum": ["error", "warning"],
-            "default": "warning",
-            "description": "Return only warning or error console messages; defaults to warning."
-          },
           "filename": {
             "description": "Optional safe display-name suggestion for a managed console Artifact; paths are ignored."
           }
@@ -128,9 +122,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -147,9 +141,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:76dd26a4e8f1ee5d0be920c5c3364720a806bd28cdbdd0ac33ce677948850e16",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:72d5d786fe27fee3fc748c1ed6bf04d02bdc404d1baa9f7cb3c7fef3dfc466df",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:3caedecc01fc70594ab15a9edf5f5fb305a38dfe55f988b9a997fa5023c1e803",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -166,9 +160,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:4a732a67e10ddccec52e7c605633dcfaef2f219315e7ebcea534fd8cd370e4dc",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:e6e1d5fa1eac6ffd8170839953adb25739c4e7c88e4bd6b3107a0abe9c6b7ab6",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:6f609f005aaba3e779a385044767888808f88f028e800ba467d94a351ca995e8",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -185,9 +179,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:fc1e5fb88b5616ee72970df7bde7c108d78e3c5c18d5643526f8005c68e2dc84",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:765465b351590e2b333651458cd06ced442df5d5cc5a919f4974f2da5ca6c68c",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:dd9d8fa526a40b7e254dbd0eb4ea463081363a205d3961b652fe95a68b3572ab",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -204,9 +198,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:df26a270900cdc1b989b4f444ee50f4efd9777d7b6644c7223f93f864a9950a0",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:47ae6943605d00ba534f0f2692af22d6be97e9ebfdfcb0b9dc43d593f468ba59",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:3826b143ebd40b0981d732f08e05975af2e096506505549f9559b86a5a45e395",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -238,14 +232,15 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:2f2a2c904744c935fc66547031c43b43466e86043f6c306624b536867b18d8e8",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:c1efdc47b1a2c1421a1341d6327aac7bbf1c749ce3fd3d2db88a763dc826764d",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:604263e421f88763ead1e67d13f914f84e6a16a4304e96eee3932a186c0dc2d4",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
         "task_scoped_tool_approval",
         "approval_when_paths_present",
+        "approved_paths_host_adapter",
         "mime_data_may_use_conditional_fast_path"
       ],
       "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
@@ -258,9 +253,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:323e6acbb66440dd71d398d4f2acdbddc8af0714ed36da0e01eb35fede62e5eb",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:aa639ded6e7da2c86598e7eea030fcbdb1a39b71641159602c35850c6a566c82",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:6af9e278e7cf2b42316a52363c2df2db420271e0c63bd83fe31de8c92a6ab5b5",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": ["requires_call_reason", "task_scoped_tool_approval"],
       "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
@@ -273,9 +268,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:c76aede191ef1e3bdd09ff177419a1e77a0e1f3f676bdd7c8053ac78e6a80086",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:f4585c795fcdca6247df64e1a1525278c1ac3126cfc0b93f1a607e613679a59b",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:692ecaa3f41402f927528579cb131699608989ef02a161723a7a93b6480cc559",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": ["requires_call_reason", "task_scoped_tool_approval"],
       "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
@@ -412,9 +407,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -431,9 +426,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:577641519a1b38db5cee07f45e70da5966aa108f2ded9cf59ef26af6f035e370",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:eb5281c5e52d97c8b0d90cb096822270ffcd6c19ee0a8fe76a264b881db6ea0f",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:dcc89c806023ffd99a1de2b6daab2796ff50dd583c80cb56aa0015bb49929fa4",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -450,9 +445,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:1c2f2a11388b56205807e349d00a8c47fbfbebaeb26d71347a0f68a0adac21c0",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:232a0ad5ab7ed9d2f49a3ba7e9ab5f7436fe541f143881d2da5a409698e19cef",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:56762b22de16b0ed2847b111db03207f873558825413439a3de8c59d8c6a996a",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -469,9 +464,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -488,9 +483,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:f6fd7358e05c0f02f2ec398bd727eee449bdd978255c66e7427ce3762a313b8e",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:9e62523806c094d4b3d5c2820bfee62cab96ff8ff91401ca8947400979097919",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:313e42250d387c90cdc9ecb9e08e0d621dafe56ebd52203422153de2ca25b45e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -627,14 +622,16 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:d041ab91391ddbdb960c9a5b10f741af3baabdad5137a41c5f3111cce14b2872",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:78950a21bc2325a8aafba1df59be47592b9838a80ffe7d03931e4248cb2d5719",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:73cabe274c3b5aa265e598acd96648bbca608a601a4e10d1b03dfccb0236fc83",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
         "task_scoped_tool_approval",
-        "redact_credentials_and_bodies"
+        "task_surface_group_scoped",
+        "live_result_only",
+        "durable_content_omitted"
       ],
       "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
     },
@@ -690,7 +687,7 @@
       "capability": "pdf",
       "handlingMode": "artifact_managed",
       "exposed": true,
-      "availability": "model_visible",
+      "availability": "model_visible_typed_unavailable",
       "upstreamSchemaDigest": "sha256:9ef6269f3a795e2f49cc03b9478671ee10e0cc2bd3a78fb2fc3d9fa48907d6e3",
       "hostOverlayDigest": "sha256:9143a7cc349609a500915141dc319c7d2a322d631bfaf57a4872dd0b7eca8d48",
       "hostInputSchemaDigest": "sha256:9a10b2606be8a84e813887629e4bb7486227beec471f7122e53585f0b1d580d2",
@@ -702,14 +699,16 @@
           }
         }
       },
-      "reasonCode": "host_artifact_lifecycle",
+      "reasonCode": "electron39_pdf_transport_unavailable",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
         "no_arbitrary_output_path",
-        "host_owned_output_only"
+        "host_owned_output_only",
+        "typed_platform_unavailable",
+        "electron39_print_to_pdf_unavailable"
       ],
-      "behaviorContract": "host_owned_artifact_reference"
+      "behaviorContract": "typed_platform_unavailable"
     },
     {
       "rawName": "browser_press_key",
@@ -768,18 +767,14 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:51f39167e639a0b6b559ec6a263e3a0aa97ffe7bb9beb0c5249ef6bc2be7f3c3",
-      "hostOverlayDigest": "sha256:7c0e7c3a3f08cc771c6f2c29de82e2a11d403568ba82dce0b25cfdd3a6f4079d",
-      "hostInputSchemaDigest": "sha256:b0d6b1f163f4576e9662b0d042da00f10a1777e0f4d43b44535731c04558c675",
-      "hostOverlay": {
-        "addCallReason": true,
-        "removeProperties": ["body", "contentType", "headers", "removeHeaders"]
-      },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:7778c2e32357073eeafe0cf4d179cc92e0a696cf6dfeab64f0e88b59b9979485",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "host_browser_surface_semantics",
       "constraints": [
         "requires_call_reason",
         "host_lifecycle_adapter_required",
-        "task_surface_group_scoped",
-        "no_header_or_body_capture"
+        "task_surface_group_scoped"
       ],
       "behaviorContract": "typed_host_lifecycle_adapter"
     },
@@ -845,9 +840,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -864,9 +859,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:577641519a1b38db5cee07f45e70da5966aa108f2ded9cf59ef26af6f035e370",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:eb5281c5e52d97c8b0d90cb096822270ffcd6c19ee0a8fe76a264b881db6ea0f",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:dcc89c806023ffd99a1de2b6daab2796ff50dd583c80cb56aa0015bb49929fa4",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -883,9 +878,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:1c2f2a11388b56205807e349d00a8c47fbfbebaeb26d71347a0f68a0adac21c0",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:232a0ad5ab7ed9d2f49a3ba7e9ab5f7436fe541f143881d2da5a409698e19cef",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:56762b22de16b0ed2847b111db03207f873558825413439a3de8c59d8c6a996a",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -902,9 +897,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:71fc596a20f27da3dec80050e5d1f553eba34aea24c2853b853488a811e6b892",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:912b39b714d1ee8635a807b8984e9e7bbbe35329c110626cca00217428b76025",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:ed438bbe2ab0c501b41bcd1bfc367e81ae52bc088bcde64aac8c494c2d51170e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -921,9 +916,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:f6fd7358e05c0f02f2ec398bd727eee449bdd978255c66e7427ce3762a313b8e",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:9e62523806c094d4b3d5c2820bfee62cab96ff8ff91401ca8947400979097919",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:313e42250d387c90cdc9ecb9e08e0d621dafe56ebd52203422153de2ca25b45e",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -940,9 +935,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:ebc1ab1135769a1a5e9485d2fb781b1372fc2e1faef66645f5c98b76db508920",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:d72618aefd88263f08a608c154d4111fa7aaa15f4e20d962ca7e3458252ab259",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:376450ef7a8ac65dd99cd076ee03c2dca8b5f645745a733786a21a6eb70cd1ff",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -1064,9 +1059,9 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:5209cc8085a45707965f4d4a7d088131941d8413e698eb59047e500cfe2e54aa",
-      "hostOverlayDigest": "sha256:5f8bac5402348fe983d1855fc56857a2079b41cde27b48c702e7cc9c540d12b9",
-      "hostInputSchemaDigest": "sha256:942cdf3acf33035c25ab63b8a73ac9cc768eca653d1c4faf23f4aed0a23f6114",
-      "hostOverlay": { "addCallReason": true, "addApprovalOrigin": true },
+      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
+      "hostInputSchemaDigest": "sha256:6bdaa878f5c1a3ad4eeb7a601bb394aa2265df5104913987fe5ba230eaa3dd94",
+      "hostOverlay": { "addCallReason": true },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -1293,7 +1288,7 @@
     "status": "contract",
     "upstreamSchemas": "digest_locked_without_mutation",
     "hostSchemas": "upstream_schema_plus_digest_locked_host_overlay",
-    "overlayOnlyFields": ["call_reason", "approval_origin"],
+    "overlayOnlyFields": ["call_reason"],
     "recursiveKeywords": [
       "type",
       "required",
@@ -1361,40 +1356,127 @@
       "expectedDifference": "tool_is_not_model_visible"
     }
   ],
+  "ownershipDifferences": {
+    "browser_close": {
+      "externalOwnedBrowser": "closes_the_owned_browser_and_the_next_call_may_lazily_start_a_new_browser",
+      "externalSharedContext": "disposes_the_automation_context_wrapper_without_closing_pages",
+      "builtinManagedElectron": "retires_the_current_automation_generation_and_overlay_state_while_preserving_user_owned_visible_surfaces",
+      "singleTabCloseTool": "browser_tabs_close"
+    }
+  },
+  "platformCapabilityDifferences": {
+    "browser_pdf_save": {
+      "platform": "darwin-arm64",
+      "runtime": "electron39_managed_guest",
+      "status": "typed_unavailable",
+      "modelVisibility": "visible",
+      "fixedUpstreamContract": "page_pdf_via_page_print_to_pdf_return_as_stream",
+      "builtinEvidence": "managed_guest_debugger_rejects_page_print_to_pdf_before_cdp_dispatch_and_web_contents_print_to_pdf_does_not_settle",
+      "toolResult": {
+        "isError": true,
+        "status": "unavailable",
+        "code": "browser.pdf_unavailable",
+        "dispatchCertainty": "response_received"
+      },
+      "fallback": "none",
+      "artifactPublished": false,
+      "evidence": [
+        "src/main/core/browserTargetBroker.test.ts",
+        "src/main/core/managedPlaywrightBridge.electron.test.ts",
+        "src/main/browser/fixtures/managedPlaywrightBridge.electron.ts"
+      ]
+    }
+  },
+  "knownBehaviorGaps": {
+    "popupOpenerSemantics": {
+      "status": "not_native_parity",
+      "builtinBehavior": "host_owned_independent_managed_webview_surface",
+      "targetAdmission": "current_surface_group_only",
+      "nativeWindowProxy": false,
+      "openerReference": false,
+      "openerPostMessage": false,
+      "popupCloseLinkage": false,
+      "evidence": [
+        "src/main/core/browserSurfaceManager.test.ts",
+        "src/main/core/browserTargetBroker.test.ts"
+      ]
+    },
+    "workerTargets": {
+      "serviceWorker": { "status": "not_admitted", "electronE2e": false },
+      "sharedWorker": { "status": "not_admitted", "electronE2e": false },
+      "boundary": "managed_page_frame_and_dedicated_worker_targets_only",
+      "evidence": ["src/main/core/browserTargetBroker.test.ts"]
+    }
+  },
   "sensitiveResourceScope": {
-    "status": "contract",
-    "principle": "A sensitive approval is published only when Main can freeze and later revalidate the exact managed resource identity.",
+    "status": "evidence",
+    "execution": "observed_on_2026-08-20",
+    "principle": "Main owns the active managed Surface or managed-profile authority. Approval binds exact arguments and a one-shot opaque Host binding; page-scoped tools additionally bind surface generation, navigation epoch, and the Host-observed origin.",
+    "observedEvidence": {
+      "platform": "darwin-arm64",
+      "command": "pnpm exec vitest run --project unit src/main/core/managedPlaywrightBridge.electron.test.ts",
+      "result": "passed",
+      "fixture": "repository_local_loopback_only",
+      "externalWebsites": false,
+      "realUserBrowser": false
+    },
     "tools": [
       {
         "tool": "browser_evaluate",
-        "available": ["top_page_without_target", "top_frame_snapshot_ref_eN"],
-        "unavailable": ["child_frame_ref", "frame_locator", "arbitrary_selector"],
-        "failureCode": "sensitive_target_scope_unsupported",
-        "reason": "The fixed server evaluates a targeted locator in its owning frame; a top-page origin alone cannot authorize a child-frame execution."
+        "scope": "managed_surface",
+        "available": [
+          "page_context",
+          "snapshot_ref_in_managed_child_frame",
+          "frame_locator_in_managed_surface",
+          "unique_selector_in_managed_surface"
+        ],
+        "exactEffectEvidence": "fixed_official_0_0_79_mutates_and_reads_a_localhost_oopif_element_inside_the_selected_managed_guest",
+        "excluded": ["other_surface", "main_renderer", "unmanaged_guest"]
       },
       {
         "tool": "browser_drop",
-        "available": ["pure_mime_data", "approved_paths_to_top_frame_snapshot_ref_eN"],
-        "unavailable": ["approved_paths_to_child_frame_or_unverifiable_target"],
-        "failureCode": "sensitive_target_scope_unsupported",
-        "reason": "Approved local files are disclosed only to a target proven to belong to the frozen top-frame document."
+        "scope": "managed_surface",
+        "available": [
+          "pure_mime_data_without_file_approval",
+          "one_call_workspace_path_preflight_to_opaque_file_authority",
+          "all_approved_paths_use_exact_frame_host_adapter",
+          "oopif_dragenter_dragover_drop_order_and_effect",
+          "large_file_host_adapter_without_base64"
+        ],
+        "exactEffectEvidence": "host_adapter_preserves_the_fixed_target_grammar_and_drop_event_contract_while_the_localhost_oopif_observes_the_brokered_fixture_basename_bytes_and_event_order",
+        "fileBoundary": "one_time_filebroker_lease_only"
       },
       {
         "tool": "browser_file_upload",
-        "available": [],
-        "unavailable": ["modal_file_chooser_without_immutable_owner_frame_identity"],
-        "failureCode": "sensitive_target_scope_unsupported",
-        "reason": "The fixed server modal state does not expose a proposal-time immutable FileChooser identity to the Host approval boundary."
+        "scope": "managed_surface",
+        "available": [
+          "one_call_workspace_path_preflight_to_pending_managed_guest_file_chooser",
+          "omitted_paths_preserves_official_cancel_chooser_semantics"
+        ],
+        "exactEffectEvidence": "fixed_official_0_0_79_file_chooser_change_event_observes_the_brokered_fixture_basename_and_bytes",
+        "fileBoundary": "one_time_filebroker_lease_only"
       },
       {
         "tool": "browser_network_request",
-        "available": [],
-        "unavailable": ["mutable_connection_local_request_index"],
-        "failureCode": "sensitive_request_identity_unavailable",
-        "reason": "A request index can be rebuilt or refer to a cross-origin frame request; it is not an immutable request authority."
+        "scope": "managed_surface",
+        "available": ["fixed_current_tab_request_index", "headers_or_body_live_result"],
+        "exactEffectEvidence": "fixed_official_0_0_79_returns_the_exact_repository_fixture_ping_response_body_selected_from_the_safe_request_ledger",
+        "durableProjection": "content_omitted",
+        "generationChange": "resolved_by_the_rebuilt_fixed_current_tab_ledger"
+      },
+      {
+        "tool": "browser_cookie_*",
+        "scope": "managed_browser_profile",
+        "available": ["zero_tab_context_approval", "no_active_origin_requirement"],
+        "durableProjection": "content_omitted"
+      },
+      {
+        "tool": "browser_storage_state/browser_set_storage_state",
+        "scope": "managed_browser_profile",
+        "available": ["zero_tab_context_approval", "background_target_intent_when_required"],
+        "fileBoundary": "artifactbroker_export_and_one_time_filebroker_import"
       }
-    ],
-    "futureClosure": "Use Host-owned FileChooser and request ledgers with opaque frame/request identities included in the approval scope digest."
+    ]
   },
   "iframeParity": {
     "status": "evidence",

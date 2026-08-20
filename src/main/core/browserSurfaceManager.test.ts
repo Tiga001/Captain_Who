@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { Browser, BrowserContext } from 'playwright'
+import type { Browser, BrowserContext, ConnectOverCDPTransport } from 'playwright'
 import type { Debugger, Session, WebContents } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -10,14 +10,14 @@ import {
 import { BrowserTargetBroker } from '../browser/BrowserTargetBroker'
 import {
   BrowserNetworkGuard,
-  type BrowserNetworkOperationLease
+  type BrowserNetworkOperationLease,
+  type BrowserTargetCreationAuthority
 } from '../browser/BrowserNetworkGuard'
 import type { BrowserRiskOperationInput } from '../browser/BrowserRiskCoordinator'
 import {
   BrowserSurfaceManager,
   type BrowserSurfaceManagerOptions
 } from '../browser/BrowserSurfaceManager'
-import type { ElectronGuestCdpTransport } from '../browser/ElectronGuestCdpTransport'
 
 const EXPECTED_SESSION = {} as Session
 const SURFACE_ID = 'right-sidebar-browser-browser-fixture'
@@ -58,6 +58,7 @@ class FakeDebugger extends EventEmitter {
         userAgent: 'fixture'
       }
     }
+    if (method === 'Network.getAllCookies') return { cookies: [] }
     return {}
   })
 }
@@ -91,6 +92,7 @@ class FakeWebContents extends EventEmitter {
   async loadURL(url: string): Promise<void> {
     this.url = url
   }
+  close = vi.fn(() => this.destroy())
   printToPDF = vi.fn(async () => Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
   destroy(): void {
     if (this.destroyed) return
@@ -107,7 +109,7 @@ interface FakeBrowserHarness {
   context: BrowserContext
 }
 
-function createFakeBrowser(transport: ElectronGuestCdpTransport): FakeBrowserHarness {
+function createFakeBrowser(transport: ConnectOverCDPTransport): FakeBrowserHarness {
   const emitter = new EventEmitter()
   const context = {} as BrowserContext
   let connected = true
@@ -120,6 +122,35 @@ function createFakeBrowser(transport: ElectronGuestCdpTransport): FakeBrowserHar
     emitter.emit('disconnected')
   }
   return { browser, context }
+}
+
+function createCdpHarness(transport: ConnectOverCDPTransport) {
+  let nextId = 1
+  const pending = new Map<number, (message: Record<string, unknown>) => void>()
+  const events: Record<string, unknown>[] = []
+  transport.onmessage = (message) => {
+    const record = message as Record<string, unknown>
+    events.push(record)
+    if (typeof record.id !== 'number') return
+    const resolve = pending.get(record.id)
+    pending.delete(record.id)
+    resolve?.(record)
+  }
+  return {
+    events,
+    send(method: string, params?: Record<string, unknown>, sessionId?: string) {
+      const id = nextId++
+      return new Promise<Record<string, unknown>>((resolve) => {
+        pending.set(id, resolve)
+        transport.send({
+          id,
+          method,
+          ...(params ? { params } : {}),
+          ...(sessionId ? { sessionId } : {})
+        })
+      })
+    }
+  }
 }
 
 function createHarness(overrides: Partial<BrowserSurfaceManagerOptions> = {}) {
@@ -275,20 +306,20 @@ describe('BrowserSurfaceManager', () => {
 
   it('creates, lists, selects, resizes, and closes a bounded managed surface group', async () => {
     const surfaceIds = ['browser-one', 'browser-two']
-    const { commands, host, manager } = createHarness({
+    const { browsers, commands, host, manager } = createHarness({
       createSurfaceId: () => surfaceIds.shift() ?? 'browser-over-capacity',
       maxSurfaces: 2
     })
     const firstContext = manager.getBrowserContext()
     const ensure = commands.at(-1)
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
-    attachGuest(manager, host, 2, ensure.surfaceId)
+    const firstGuest = attachGuest(manager, host, 2, ensure.surfaceId)
     manager.attach(host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
       surfaceId: ensure.surfaceId
     })
-    await firstContext
+    const initialContext = await firstContext
 
     const create = manager.createSurface({ url: 'http://127.0.0.1/second' })
     const createCommand = commands.at(-1)
@@ -326,8 +357,9 @@ describe('BrowserSurfaceManager', () => {
       expect.objectContaining({ code: 'browser.surface_capacity_exceeded' })
     )
 
-    const reconnected = manager.getBrowserContext()
-    await reconnected
+    const sameContext = manager.getBrowserContext()
+    await expect(sameContext).resolves.toBe(initialContext)
+    expect(browsers).toHaveLength(1)
     const resized = manager.resizeActiveSurface({ height: 720, width: 1280 })
     const resizeCommand = commands.at(-1)
     if (!resizeCommand || resizeCommand.kind !== 'resizeSurface') {
@@ -343,6 +375,7 @@ describe('BrowserSurfaceManager', () => {
     await expect(manager.printActiveSurfaceToPdf()).resolves.toEqual(
       Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
     )
+    expect(firstGuest.printToPDF).toHaveBeenCalledWith({ printBackground: false })
 
     const clipped = manager.resizeActiveSurface({ height: 720, width: 1280 })
     const clippedAssertion = expect(clipped).rejects.toEqual(
@@ -372,6 +405,327 @@ describe('BrowserSurfaceManager', () => {
     manager.handleTargetClosed(closeCommand.surfaceId, secondGuest.generation)
     await close
     expect(manager.listSurfaces()).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it('keeps a profile context at zero visible tabs then materializes exactly one claimed blank tab', async () => {
+    const { browsers, commands, host, manager } = createHarness({
+      createSurfaceId: () => 'zero-tab-created'
+    })
+    const profileContext = await manager.getBrowserContext({ createVisiblePage: false })
+    expect(commands).toEqual([])
+    expect(manager.listSurfaces()).toEqual([])
+    expect(manager.snapshot()).toMatchObject({ attached: true, surfaces: 0 })
+
+    const events: string[] = []
+    const authority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async ({ guest }) => {
+        events.push('claim')
+        expect(guest.getURL()).toBe('about:blank')
+      }),
+      finish: vi.fn()
+    }
+    const creation = manager.createInitialTargetSurface({ authority })
+    const command = commands.at(-1)
+    if (!command || command.kind !== 'createSurface') throw new Error('create command missing')
+    const guest = attachGuest(manager, host, 2, command.surfaceId)
+    vi.spyOn(guest, 'loadURL').mockImplementation(async (url) => {
+      events.push(`load:${url}`)
+      guest.url = url
+    })
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+
+    await expect(creation).resolves.toEqual(
+      expect.objectContaining({ index: 0, isActive: true, surfaceId: 'zero-tab-created' })
+    )
+    expect(events).toEqual(['load:about:blank', 'claim'])
+    expect(manager.listSurfaces()).toHaveLength(1)
+    expect(await manager.getBrowserContext({ createVisiblePage: false })).toBe(profileContext)
+    expect(browsers).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it('uses one background control surface for zero-tab Storage and leaves no Renderer surface', async () => {
+    let groupTransport!: ConnectOverCDPTransport
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => 'zero-tab-storage-control',
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      }
+    })
+    await manager.getBrowserContext({ createVisiblePage: false })
+    expect(manager.listSurfaces()).toEqual([])
+
+    const cdp = createCdpHarness(groupTransport)
+    const storage = cdp.send('Storage.getCookies', {})
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({
+          activate: false,
+          kind: 'createSurface',
+          surfaceId: 'zero-tab-storage-control'
+        })
+      )
+    )
+    const create = commands.find(
+      (command) =>
+        command.kind === 'createSurface' && command.surfaceId === 'zero-tab-storage-control'
+    )
+    if (!create || create.kind !== 'createSurface') throw new Error('control create missing')
+    const control = attachGuest(manager, host, 2, create.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({
+          kind: 'closeSurface',
+          surfaceId: 'zero-tab-storage-control'
+        })
+      )
+    )
+    control.destroy()
+
+    await expect(storage).resolves.toEqual(expect.objectContaining({ result: { cookies: [] } }))
+    expect(manager.listSurfaces()).toEqual([])
+    expect(manager.snapshot()).toMatchObject({ attached: true, surfaces: 0 })
+    await manager.shutdown()
+  })
+
+  it('force-retires a zero-tab Storage control when Renderer loses its close acknowledgement', async () => {
+    let groupTransport!: ConnectOverCDPTransport
+    let networkGuests = 0
+    let downloadGuests = 0
+    const networkGuard = {
+      deactivateAutomation: vi.fn(),
+      registerGuest: vi.fn(({ guest }: { guest: WebContents }) => {
+        networkGuests += 1
+        downloadGuests += 1
+        guest.once('destroyed', () => {
+          networkGuests -= 1
+          downloadGuests -= 1
+        })
+      }),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserNetworkGuard
+    const { broker, commands, host, manager } = createHarness({
+      closeTimeoutMs: 10,
+      createSurfaceId: () => 'zero-tab-storage-timeout',
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      },
+      networkGuard
+    })
+    await manager.getBrowserContext({ createVisiblePage: false })
+    const cdp = createCdpHarness(groupTransport)
+    const storage = cdp.send('Storage.getCookies', {})
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({
+          kind: 'createSurface',
+          surfaceId: 'zero-tab-storage-timeout'
+        })
+      )
+    )
+    const create = commands.find(
+      (command) =>
+        command.kind === 'createSurface' && command.surfaceId === 'zero-tab-storage-timeout'
+    )
+    if (!create || create.kind !== 'createSurface') throw new Error('control create missing')
+    const control = attachGuest(manager, host, 2, create.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+
+    await expect(storage).resolves.toEqual(expect.objectContaining({ result: { cookies: [] } }))
+    expect(control.close).toHaveBeenCalledWith({ waitForBeforeUnload: false })
+    expect(control.isDestroyed()).toBe(true)
+    expect(manager.listSurfaces()).toEqual([])
+    expect(broker.snapshot()).toEqual({
+      activeConnections: 0,
+      claimedSurfaces: 0,
+      registeredGuests: 0
+    })
+    expect(networkGuests).toBe(0)
+    expect(downloadGuests).toBe(0)
+    expect(
+      commands.filter(
+        (command) =>
+          command.kind === 'closeSurface' && command.surfaceId === 'zero-tab-storage-timeout'
+      ).length
+    ).toBeGreaterThanOrEqual(2)
+    await manager.shutdown()
+  })
+
+  it('removes the zero-tab creation guest when authority claim fails', async () => {
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => 'zero-tab-rejected'
+    })
+    const authority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async () => {
+        throw new Error('fixture authority rejected')
+      }),
+      finish: vi.fn()
+    }
+    const creation = manager.createInitialTargetSurface({ authority })
+    const rejection = expect(creation).rejects.toThrow('fixture authority rejected')
+    const command = commands.at(-1)
+    if (!command || command.kind !== 'createSurface') throw new Error('create command missing')
+    const guest = attachGuest(manager, host, 2, command.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'closeSurface', surfaceId: 'zero-tab-rejected' })
+      )
+    )
+    guest.destroy()
+    await rejection
+    expect(manager.listSurfaces()).toHaveLength(0)
+    await manager.shutdown()
+  })
+
+  it('claims a popup from a targetless initial tab before Context connection and first URL', async () => {
+    const surfaceIds = ['preconnect-opener', 'preconnect-popup']
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-preconnect-surface'
+    })
+    const initialAuthority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const initial = manager.createInitialTargetSurface({ authority: initialAuthority })
+    const initialCommand = commands.at(-1)
+    if (!initialCommand || initialCommand.kind !== 'createSurface') {
+      throw new Error('initial create command missing')
+    }
+    const opener = attachGuest(manager, host, 2, initialCommand.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: initialCommand.requestId,
+      surfaceId: initialCommand.surfaceId
+    })
+    await initial
+    expect(manager.snapshot().attached).toBe(false)
+
+    const events: string[] = []
+    const popupAuthority: BrowserTargetCreationAuthority = {
+      action: 'popup',
+      claim: vi.fn(async ({ guest }) => {
+        events.push('claim')
+        expect(guest.getURL()).toBe('about:blank')
+      }),
+      finish: vi.fn()
+    }
+    const popupCreation = manager.handlePopup({
+      authority: popupAuthority,
+      guest: opener.asWebContents(),
+      url: 'https://fixture.example.test/preconnect-popup'
+    })
+    const popupCommand = commands.at(-1)
+    if (!popupCommand || popupCommand.kind !== 'createSurface') {
+      throw new Error('popup create command missing')
+    }
+    const popup = attachGuest(manager, host, 3, popupCommand.surfaceId)
+    vi.spyOn(popup, 'loadURL').mockImplementation(async (url) => {
+      events.push(`load:${url}`)
+      popup.url = url
+    })
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: popupCommand.requestId,
+      surfaceId: popupCommand.surfaceId
+    })
+    await popupCreation
+
+    expect(events).toEqual([
+      'load:about:blank',
+      'claim',
+      'load:https://fixture.example.test/preconnect-popup'
+    ])
+    expect(popupAuthority.claim).toHaveBeenCalledOnce()
+    expect(manager.listSurfaces()).toHaveLength(2)
+    await manager.shutdown()
+  })
+
+  it('removes a pre-connect popup when its exact authority was cancelled', async () => {
+    const surfaceIds = ['cancel-popup-opener', 'cancel-popup-child']
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-cancel-popup-surface'
+    })
+    const initial = manager.createInitialTargetSurface({
+      authority: {
+        action: 'new',
+        claim: vi.fn(async () => undefined),
+        finish: vi.fn()
+      }
+    })
+    const initialCommand = commands.at(-1)
+    if (!initialCommand || initialCommand.kind !== 'createSurface') {
+      throw new Error('initial create command missing')
+    }
+    const opener = attachGuest(manager, host, 2, initialCommand.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: initialCommand.requestId,
+      surfaceId: initialCommand.surfaceId
+    })
+    await initial
+
+    const events: string[] = []
+    const popupCreation = manager.handlePopup({
+      authority: {
+        action: 'popup',
+        claim: vi.fn(async () => {
+          events.push('claim-cancelled')
+          throw new Error('fixture popup authority cancelled')
+        }),
+        finish: vi.fn()
+      },
+      guest: opener.asWebContents(),
+      url: 'https://fixture.example.test/must-not-load'
+    })
+    const popupCommand = commands.at(-1)
+    if (!popupCommand || popupCommand.kind !== 'createSurface') {
+      throw new Error('popup create command missing')
+    }
+    const popup = attachGuest(manager, host, 3, popupCommand.surfaceId)
+    vi.spyOn(popup, 'loadURL').mockImplementation(async (url) => {
+      events.push(`load:${url}`)
+      popup.url = url
+    })
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: popupCommand.requestId,
+      surfaceId: popupCommand.surfaceId
+    })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'closeSurface', surfaceId: 'cancel-popup-child' })
+      )
+    )
+    popup.destroy()
+    await expect(popupCreation).rejects.toThrow('fixture popup authority cancelled')
+    expect(events).toEqual(['load:about:blank', 'claim-cancelled'])
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual([
+      'cancel-popup-opener'
+    ])
     await manager.shutdown()
   })
 
@@ -415,10 +769,12 @@ describe('BrowserSurfaceManager', () => {
     await manager.shutdown()
   })
 
-  it('reuses the trusted manually selected tab without granting unselected targets', async () => {
+  it('reuses the trusted manually selected tab while admitting only its managed SurfaceGroup', async () => {
     const { broker, host, manager } = createHarness()
-    attachGuest(manager, host, 2, 'manual-one')
-    attachGuest(manager, host, 3, 'manual-two')
+    const manualOne = attachGuest(manager, host, 2, 'manual-one')
+    const manualTwo = attachGuest(manager, host, 3, 'manual-two')
+    manualOne.url = 'https://one.example.test/inbox'
+    manualTwo.url = 'https://two.example.test/inbox'
 
     expect(
       manager.selectManualSurface(host.asWebContents(), {
@@ -430,22 +786,612 @@ describe('BrowserSurfaceManager', () => {
       expect.objectContaining({ isActive: true, surfaceId: 'manual-two' })
     )
     await manager.getBrowserContext()
-    expect(broker.snapshot().claimedSurfaces).toBe(1)
+    const firstLease = await manager.beginToolSurfaceLease()
+    expect(firstLease).toEqual(
+      expect.objectContaining({ index: 1, surfaceId: 'manual-two', selectionRevision: 1 })
+    )
+    expect(broker.snapshot().claimedSurfaces).toBe(2)
     expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'manual-two' })
 
     manager.selectManualSurface(host.asWebContents(), {
       schemaVersion: 1,
       surfaceId: 'manual-one'
     })
+    expect(manager.getSensitiveTargetIdentity()).toEqual(
+      expect.objectContaining({ origin: 'https://two.example.test', surfaceId: 'manual-two' })
+    )
     expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'manual-two' })
     expect(manager.listSurfaces()).toEqual([
-      expect.objectContaining({ isActive: false, surfaceId: 'manual-one' }),
-      expect.objectContaining({ isActive: true, surfaceId: 'manual-two' })
+      expect.objectContaining({ isActive: true, surfaceId: 'manual-one' }),
+      expect.objectContaining({ isActive: false, surfaceId: 'manual-two' })
     ])
+    firstLease.finish()
+    // Approval preparation happens before the next Tool lease. It must bind the latest trusted UI
+    // selection, not the previous Playwright current tab.
+    expect(manager.getSensitiveTargetIdentity()).toEqual(
+      expect.objectContaining({ origin: 'https://one.example.test', surfaceId: 'manual-one' })
+    )
+    const secondLease = await manager.beginToolSurfaceLease()
+    expect(secondLease).toEqual(
+      expect.objectContaining({ index: 0, surfaceId: 'manual-one', selectionRevision: 2 })
+    )
+    expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'manual-one' })
+    await expect(secondLease.resolveIndex()).resolves.toBe(0)
+    secondLease.finish()
 
     await manager.detachAutomation()
-    expect(broker.snapshot().claimedSurfaces).toBe(0)
+    expect(broker.snapshot().claimedSurfaces).toBe(2)
     expect(manager.snapshot().surfaces).toBe(2)
+    await manager.shutdown()
+  })
+
+  it('keeps network preflight on the leased tab when the user selects another tab mid-call', async () => {
+    const lease = {
+      failure: vi.fn(() => null),
+      finish: vi.fn(),
+      markDispatched: vi.fn(),
+      operation: {},
+      settle: vi.fn(async () => undefined)
+    } as unknown as BrowserNetworkOperationLease
+    const networkGuard = {
+      beginOperation: vi.fn(() => lease),
+      deactivateAutomation: vi.fn(),
+      registerGuest: vi.fn(),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserNetworkGuard
+    const { commands, host, manager } = createHarness({ networkGuard })
+    const first = attachGuest(manager, host, 2, 'lease-one')
+    const second = attachGuest(manager, host, 3, 'lease-two')
+    manager.selectManualSurface(host.asWebContents(), {
+      schemaVersion: 1,
+      surfaceId: 'lease-one'
+    })
+    await manager.getBrowserContext()
+    const toolLease = await manager.beginToolSurfaceLease()
+    manager.selectManualSurface(host.asWebContents(), {
+      schemaVersion: 1,
+      surfaceId: 'lease-two'
+    })
+
+    await expect(manager.beginNetworkOperation(RISK_OPERATION_INPUT)).resolves.toBe(lease)
+    expect(networkGuard.beginOperation).toHaveBeenCalledWith(
+      first.asWebContents(),
+      RISK_OPERATION_INPUT
+    )
+    const resize = toolLease.resizeSurface({ height: 640, width: 960 })
+    const resizeCommand = commands.at(-1)
+    if (!resizeCommand || resizeCommand.kind !== 'resizeSurface') {
+      throw new Error('resize request missing')
+    }
+    expect(resizeCommand.surfaceId).toBe('lease-one')
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: resizeCommand.requestId,
+      surfaceId: 'lease-one',
+      viewport: { height: 640, width: 960 }
+    })
+    await expect(resize).resolves.toEqual({ height: 640, width: 960 })
+    await expect(toolLease.printToPdf()).resolves.toEqual(
+      Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
+    )
+    expect(first.printToPDF).toHaveBeenCalledWith({ printBackground: false })
+    expect(second.printToPDF).not.toHaveBeenCalled()
+    expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'lease-one' })
+    toolLease.finish()
+    await manager.shutdown()
+  })
+
+  it('rejects stale-index bringToFront when a preceding tab closes after index resolution', async () => {
+    let groupTransport!: ConnectOverCDPTransport
+    const { host, manager } = createHarness({
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      }
+    })
+    const first = attachGuest(manager, host, 2, 'index-first')
+    attachGuest(manager, host, 3, 'index-leased')
+    attachGuest(manager, host, 4, 'index-wrong-after-close')
+    manager.selectManualSurface(host.asWebContents(), {
+      schemaVersion: 1,
+      surfaceId: 'index-leased'
+    })
+    await manager.getBrowserContext()
+    const cdp = createCdpHarness(groupTransport)
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false
+    })
+    const rootSessions = cdp.events
+      .filter(
+        (event) => event.method === 'Target.attachedToTarget' && event.sessionId === undefined
+      )
+      .map((event) => (event.params as { sessionId: string }).sessionId)
+    expect(rootSessions).toHaveLength(3)
+
+    const lease = await manager.beginToolSurfaceLeaseByIndex(1)
+    await expect(lease.resolveIndex()).resolves.toBe(1)
+    first.destroy()
+    await vi.waitFor(() => expect(manager.listSurfaces()).toHaveLength(2))
+
+    // The previously resolved numeric index 1 now names the third page. The exact lease guard
+    // rejects its bringToFront instead of silently committing Playwright's current tab to it.
+    const wrongPage = await cdp.send('Page.bringToFront', undefined, rootSessions[2])
+    expect(wrongPage.error).toEqual(expect.objectContaining({ code: -32_000 }))
+    expect(manager.getActiveSurfaceIdentity()).toEqual({
+      generation: 1,
+      surfaceId: 'index-leased'
+    })
+    await expect(lease.resolveIndex()).resolves.toBe(0)
+    lease.finish()
+    await manager.shutdown()
+  })
+
+  it('does not create a visible tab for an existing-only Tool lease', async () => {
+    const { commands, manager } = createHarness()
+    await expect(manager.beginExistingToolSurfaceLease()).resolves.toBeNull()
+    expect(commands).toHaveLength(0)
+    await manager.shutdown()
+  })
+
+  it('rolls Broker registration back when the network guard rejects a guest', async () => {
+    const networkGuard = {
+      deactivateAutomation: vi.fn(),
+      registerGuest: vi.fn(() => {
+        throw new Error('fixture registration failure')
+      }),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserNetworkGuard
+    const { broker, host, manager } = createHarness({ networkGuard })
+    expect(() => attachGuest(manager, host)).toThrow(
+      expect.objectContaining({ code: 'browser.surface_unavailable' })
+    )
+    expect(broker.snapshot()).toEqual({
+      activeConnections: 0,
+      claimedSurfaces: 0,
+      registeredGuests: 0
+    })
+    await manager.shutdown()
+  })
+
+  it('reconciles a guest registered while the group connection is still being published', async () => {
+    let releaseConnect!: () => void
+    const connectBarrier = new Promise<void>((resolve) => {
+      releaseConnect = resolve
+    })
+    const { broker, commands, host, manager } = createHarness({
+      connectOverCdp: async (transport) => {
+        await connectBarrier
+        return createFakeBrowser(transport).browser
+      }
+    })
+    const context = manager.getBrowserContext()
+    const ensure = commands[0]
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await vi.waitFor(() => expect(broker.snapshot().activeConnections).toBe(1))
+    attachGuest(manager, host, 3, 'registered-during-connect')
+    releaseConnect()
+
+    await context
+    await vi.waitFor(() => expect(broker.snapshot().activeConnections).toBe(2))
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual([
+      ensure.surfaceId,
+      'registered-during-connect'
+    ])
+    await manager.shutdown()
+  })
+
+  it('serializes dynamic group admissions in stable surface creation order', async () => {
+    const { broker, commands, host, manager } = createHarness()
+    const context = manager.getBrowserContext()
+    const ensure = commands[0]
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await context
+
+    const originalAdd = broker.addSurfaceToGroup.bind(broker)
+    const starts: string[] = []
+    let releaseFirst!: () => void
+    const firstBarrier = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    vi.spyOn(broker, 'addSurfaceToGroup').mockImplementation(async (group, identity) => {
+      starts.push(identity.surfaceId)
+      if (identity.surfaceId === 'dynamic-one') await firstBarrier
+      await originalAdd(group, identity)
+    })
+    attachGuest(manager, host, 3, 'dynamic-one')
+    attachGuest(manager, host, 4, 'dynamic-two')
+    await vi.waitFor(() => expect(starts).toEqual(['dynamic-one']))
+    releaseFirst()
+    await vi.waitFor(() => expect(starts).toEqual(['dynamic-one', 'dynamic-two']))
+    await vi.waitFor(() => expect(broker.snapshot().activeConnections).toBe(3))
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual([
+      ensure.surfaceId,
+      'dynamic-one',
+      'dynamic-two'
+    ])
+    await manager.shutdown()
+  })
+
+  it('reserves Target.createTarget order before a later manual surface can attach', async () => {
+    const surfaceIds = ['ordered-initial', 'ordered-target']
+    let groupTransport!: ConnectOverCDPTransport
+    const { broker, commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-ordered-surface',
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      }
+    })
+    const context = manager.getBrowserContext()
+    const ensure = commands[0]
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await context
+    const cdp = createCdpHarness(groupTransport)
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false
+    })
+
+    const creationEvents: string[] = []
+    const authority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async ({ guest }) => {
+        creationEvents.push('claim')
+        expect(guest.getURL()).toBe('about:blank')
+      }),
+      finish: vi.fn()
+    }
+    const finishIntent = manager.beginTargetCreationIntent('interactive', authority)
+
+    const originalAdd = broker.addSurfaceToGroup.bind(broker)
+    const starts: string[] = []
+    vi.spyOn(broker, 'addSurfaceToGroup').mockImplementation(async (group, identity) => {
+      starts.push(identity.surfaceId)
+      creationEvents.push(`attach:${identity.surfaceId}`)
+      await originalAdd(group, identity)
+    })
+    const target = cdp.send('Target.createTarget', { url: 'https://fixture.example.test/new' })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'createSurface', surfaceId: 'ordered-target' })
+      )
+    )
+    const create = commands.find(
+      (command) => command.kind === 'createSurface' && command.surfaceId === 'ordered-target'
+    )
+    if (!create || create.kind !== 'createSurface') throw new Error('create command missing')
+    const targetGuest = attachGuest(manager, host, 3, create.surfaceId)
+    let releaseLoad!: () => void
+    let markLoadStarted!: () => void
+    const loadStarted = new Promise<void>((resolve) => {
+      markLoadStarted = resolve
+    })
+    const loadBarrier = new Promise<void>((resolve) => {
+      releaseLoad = resolve
+    })
+    vi.spyOn(targetGuest, 'loadURL').mockImplementation(async (url) => {
+      markLoadStarted()
+      await loadBarrier
+      targetGuest.url = url
+    })
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await loadStarted
+
+    attachGuest(manager, host, 4, 'ordered-manual-later')
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(starts).toEqual([])
+    releaseLoad()
+    await vi.waitFor(() => expect(starts).toEqual(['ordered-target', 'ordered-manual-later']))
+    expect(creationEvents.indexOf('claim')).toBeLessThan(
+      creationEvents.indexOf('attach:ordered-target')
+    )
+    expect(authority.claim).toHaveBeenCalledOnce()
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'selectSurface', surfaceId: 'ordered-target' })
+      )
+    )
+    const select = commands.find(
+      (command) => command.kind === 'selectSurface' && command.surfaceId === 'ordered-target'
+    )
+    if (!select || select.kind !== 'selectSurface') throw new Error('select command missing')
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: select.requestId,
+      surfaceId: select.surfaceId
+    })
+    await expect(target).resolves.toEqual(
+      expect.objectContaining({ result: expect.objectContaining({ targetId: expect.any(String) }) })
+    )
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual([
+      'ordered-initial',
+      'ordered-target',
+      'ordered-manual-later'
+    ])
+    finishIntent()
+    expect(authority.finish).toHaveBeenCalledOnce()
+    await manager.shutdown()
+  })
+
+  it('rolls back a hidden Target.createTarget surface when its second-stage load fails', async () => {
+    const surfaceIds = ['rollback-initial', 'rollback-hidden']
+    let groupTransport!: ConnectOverCDPTransport
+    const { broker, commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-rollback-surface',
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      }
+    })
+    const context = manager.getBrowserContext()
+    const ensure = commands[0]
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await context
+    const cdp = createCdpHarness(groupTransport)
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false
+    })
+
+    const finishIntent = manager.beginTargetCreationIntent('interactive', {
+      action: 'new',
+      claim: vi.fn(async () => undefined),
+      finish: vi.fn()
+    })
+    const target = cdp.send('Target.createTarget', { url: 'https://fixture.example.test/fail' })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'createSurface', surfaceId: 'rollback-hidden' })
+      )
+    )
+    const create = commands.find(
+      (command) => command.kind === 'createSurface' && command.surfaceId === 'rollback-hidden'
+    )
+    if (!create || create.kind !== 'createSurface') throw new Error('create command missing')
+    const hidden = attachGuest(manager, host, 3, create.surfaceId)
+    vi.spyOn(hidden, 'loadURL').mockRejectedValueOnce(new Error('fixture second-stage failure'))
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'closeSurface', surfaceId: 'rollback-hidden' })
+      )
+    )
+    hidden.destroy()
+    await expect(target).resolves.toEqual(
+      expect.objectContaining({ error: expect.objectContaining({ code: -32_000 }) })
+    )
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual(['rollback-initial'])
+    expect(broker.snapshot()).toEqual({
+      activeConnections: 1,
+      claimedSurfaces: 1,
+      registeredGuests: 1
+    })
+    finishIntent()
+    await manager.shutdown()
+  })
+
+  it('does not let an old target-creation finish clear a newer intent record', async () => {
+    const { manager } = createHarness()
+    const oldAuthority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const finishOld = manager.beginTargetCreationIntent('interactive', oldAuthority)
+    await manager.detachAutomation()
+    expect(oldAuthority.finish).toHaveBeenCalledOnce()
+
+    const newAuthority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const finishNew = manager.beginTargetCreationIntent('interactive', newAuthority)
+    finishOld()
+    expect(newAuthority.finish).not.toHaveBeenCalled()
+    expect(() =>
+      manager.beginTargetCreationIntent('interactive', {
+        action: 'new',
+        claim: vi.fn(async () => undefined),
+        finish: vi.fn()
+      })
+    ).toThrow(expect.objectContaining({ code: 'browser.surface_unavailable' }))
+
+    finishNew()
+    expect(newAuthority.finish).toHaveBeenCalledOnce()
+    await manager.shutdown()
+  })
+
+  it('rolls back a pending Target.createTarget when its exact intent is cancelled', async () => {
+    const surfaceIds = ['cancel-intent-initial', 'cancel-intent-created']
+    let groupTransport!: ConnectOverCDPTransport
+    const { broker, commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-cancel-intent-surface',
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      }
+    })
+    const context = manager.getBrowserContext()
+    const ensure = commands[0]
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await context
+    const cdp = createCdpHarness(groupTransport)
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false
+    })
+    const events: string[] = []
+    const authority: BrowserTargetCreationAuthority = {
+      action: 'new',
+      claim: vi.fn(async () => {
+        events.push('claim')
+      }),
+      finish: vi.fn()
+    }
+    const finishIntent = manager.beginTargetCreationIntent('interactive', authority)
+    const target = cdp.send('Target.createTarget', { url: 'https://fixture.example.test/cancel' })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'createSurface', surfaceId: 'cancel-intent-created' })
+      )
+    )
+    finishIntent()
+    const create = commands.find(
+      (command) => command.kind === 'createSurface' && command.surfaceId === 'cancel-intent-created'
+    )
+    if (!create || create.kind !== 'createSurface') throw new Error('create command missing')
+    const hidden = attachGuest(manager, host, 3, create.surfaceId)
+    vi.spyOn(hidden, 'loadURL').mockImplementation(async (url) => {
+      events.push(`load:${url}`)
+      hidden.url = url
+    })
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'closeSurface', surfaceId: 'cancel-intent-created' })
+      )
+    )
+    hidden.destroy()
+
+    await expect(target).resolves.toEqual(
+      expect.objectContaining({ error: expect.objectContaining({ code: -32_000 }) })
+    )
+    expect(events).toEqual(['load:about:blank'])
+    expect(authority.claim).not.toHaveBeenCalled()
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toEqual([
+      'cancel-intent-initial'
+    ])
+    expect(broker.snapshot()).toEqual({
+      activeConnections: 1,
+      claimedSurfaces: 1,
+      registeredGuests: 1
+    })
+    await manager.shutdown()
+  })
+
+  it('keeps a healthy manual surface when detach invalidates its queued admission', async () => {
+    const { broker, commands, host, manager } = createHarness()
+    const context = manager.getBrowserContext()
+    const ensure = commands[0]
+    if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    attachGuest(manager, host, 2, ensure.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensure.requestId,
+      surfaceId: ensure.surfaceId
+    })
+    await context
+    const originalAdd = broker.addSurfaceToGroup.bind(broker)
+    let releaseAdmission!: () => void
+    let markAdmissionStarted!: () => void
+    const admissionStarted = new Promise<void>((resolve) => {
+      markAdmissionStarted = resolve
+    })
+    const admissionBarrier = new Promise<void>((resolve) => {
+      releaseAdmission = resolve
+    })
+    vi.spyOn(broker, 'addSurfaceToGroup').mockImplementation(async (group, identity) => {
+      if (identity.surfaceId === 'detach-manual') {
+        markAdmissionStarted()
+        await admissionBarrier
+      }
+      await originalAdd(group, identity)
+    })
+    const manual = attachGuest(manager, host, 3, 'detach-manual')
+    await admissionStarted
+    const detach = manager.detachAutomation()
+    releaseAdmission()
+    await detach
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(manual.destroyed).toBe(false)
+    expect(manager.listSurfaces().map((surface) => surface.surfaceId)).toContain('detach-manual')
+    expect(
+      commands.some(
+        (command) => command.kind === 'closeSurface' && command.surfaceId === 'detach-manual'
+      )
+    ).toBe(false)
+    await manager.shutdown()
+  })
+
+  it('closes the exact newly created surface when its initial URL load fails', async () => {
+    const { broker, commands, host, manager } = createHarness({
+      createSurfaceId: () => 'failed-load-surface'
+    })
+    const creation = manager.createSurface({ url: 'https://fixture.example.test/fail' })
+    const create = commands[0]
+    if (!create || create.kind !== 'createSurface') throw new Error('create command missing')
+    const guest = attachGuest(manager, host, 2, create.surfaceId)
+    vi.spyOn(guest, 'loadURL').mockRejectedValueOnce(new Error('fixture load failure'))
+    const rejection = expect(creation).rejects.toEqual(
+      expect.objectContaining({ code: 'browser.surface_unavailable' })
+    )
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await vi.waitFor(() =>
+      expect(commands).toContainEqual(
+        expect.objectContaining({ kind: 'closeSurface', surfaceId: create.surfaceId })
+      )
+    )
+    guest.destroy()
+    await rejection
+    expect(manager.listSurfaces()).toHaveLength(0)
+    expect(broker.snapshot()).toEqual({
+      activeConnections: 0,
+      claimedSurfaces: 0,
+      registeredGuests: 0
+    })
     await manager.shutdown()
   })
 
@@ -465,20 +1411,40 @@ describe('BrowserSurfaceManager', () => {
     })
     await context
 
+    const events: string[] = []
+    const authority: BrowserTargetCreationAuthority = {
+      action: 'popup',
+      claim: vi.fn(async () => {
+        events.push('claim')
+      }),
+      finish: vi.fn()
+    }
     const popup = manager.handlePopup({
+      authority,
       guest: opener.asWebContents(),
       url: 'http://127.0.0.1/popup'
     })
     const create = commands.at(-1)
     if (!create || create.kind !== 'createSurface') throw new Error('popup command missing')
     expect(create.activate).toBe(false)
-    attachGuest(manager, host, 3, create.surfaceId)
+    const child = attachGuest(manager, host, 3, create.surfaceId)
+    vi.spyOn(child, 'loadURL').mockImplementation(async (url) => {
+      events.push(`load:${url}`)
+      child.url = url
+    })
     manager.attach(host.asWebContents(), {
       schemaVersion: 1,
       requestId: create.requestId,
       surfaceId: create.surfaceId
     })
     await popup
+
+    expect(events).toEqual(['load:about:blank', 'claim', 'load:http://127.0.0.1/popup'])
+    expect(authority.claim).toHaveBeenCalledWith({
+      generation: 1,
+      guest: child.asWebContents(),
+      surfaceId: 'popup-child'
+    })
 
     expect(browsers[0]?.browser.isConnected()).toBe(true)
     expect(manager.getActiveSurfaceIdentity()).toEqual({
@@ -488,6 +1454,51 @@ describe('BrowserSurfaceManager', () => {
     expect(manager.listSurfaces()).toEqual([
       expect.objectContaining({ isActive: true, surfaceId: 'popup-opener' }),
       expect.objectContaining({ isActive: false, surfaceId: 'popup-child' })
+    ])
+    await manager.shutdown()
+  })
+
+  it('keeps a manual popup as a new background tab before automation is attached', async () => {
+    const surfaceIds = ['manual-popup-opener', 'manual-popup-child']
+    const { commands, host, manager } = createHarness({
+      createSurfaceId: () => surfaceIds.shift() ?? 'unexpected-manual-popup'
+    })
+    const ensure = manager.ensureActiveSurface()
+    const ensureCommand = commands.at(-1)
+    if (!ensureCommand || ensureCommand.kind !== 'ensureAttached') {
+      throw new Error('ensure command missing')
+    }
+    const opener = attachGuest(manager, host, 2, ensureCommand.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: ensureCommand.requestId,
+      surfaceId: ensureCommand.surfaceId
+    })
+    await ensure
+    opener.url = 'https://fixture.example.test/opener'
+    const openerLoad = vi.spyOn(opener, 'loadURL')
+
+    const popup = manager.handlePopup({
+      guest: opener.asWebContents(),
+      url: 'https://fixture.example.test/popup'
+    })
+    const create = commands.at(-1)
+    if (!create || create.kind !== 'createSurface') throw new Error('popup command missing')
+    expect(create.activate).toBe(false)
+    const child = attachGuest(manager, host, 3, create.surfaceId)
+    manager.attach(host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: create.requestId,
+      surfaceId: create.surfaceId
+    })
+    await popup
+
+    expect(openerLoad).not.toHaveBeenCalled()
+    expect(opener.getURL()).toBe('https://fixture.example.test/opener')
+    expect(child.getURL()).toBe('https://fixture.example.test/popup')
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ isActive: true, surfaceId: 'manual-popup-opener' }),
+      expect.objectContaining({ isActive: false, surfaceId: 'manual-popup-child' })
     ])
     await manager.shutdown()
   })
@@ -527,7 +1538,8 @@ describe('BrowserSurfaceManager', () => {
   })
 
   it('fails closed for stale requests, another host, and target closure', async () => {
-    const { commands, host, manager } = createHarness()
+    const releaseSurfaceResources = vi.fn(async () => undefined)
+    const { commands, host, manager } = createHarness({ releaseSurfaceResources })
     const context = manager.getBrowserContext()
     const command = commands[0]
     if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
@@ -554,6 +1566,12 @@ describe('BrowserSurfaceManager', () => {
     expect(commands.at(-1)).toEqual(
       expect.objectContaining({ kind: 'closeSurface', surfaceId: SURFACE_ID })
     )
+    await vi.waitFor(() =>
+      expect(releaseSurfaceResources).toHaveBeenCalledWith({
+        surfaceId: SURFACE_ID,
+        generation: 1
+      })
+    )
     await manager.shutdown()
   })
 
@@ -576,7 +1594,7 @@ describe('BrowserSurfaceManager', () => {
     expect(browsers[0]?.browser.isConnected()).toBe(false)
     expect(manager.getActiveSurfaceIdentity()).toBeNull()
     expect(manager.snapshot().surfaces).toBe(1)
-    expect(broker.snapshot().claimedSurfaces).toBe(0)
+    expect(broker.snapshot().claimedSurfaces).toBe(1)
     await manager.shutdown()
   })
 
@@ -611,7 +1629,7 @@ describe('BrowserSurfaceManager', () => {
 
   it('revokes an in-flight CDP connection before it can become active', async () => {
     let finishConnect!: (browser: Browser) => void
-    let transport: ElectronGuestCdpTransport | undefined
+    let transport: ConnectOverCDPTransport | undefined
     const browserPromise = new Promise<Browser>((resolve) => {
       finishConnect = resolve
     })
@@ -666,7 +1684,7 @@ describe('BrowserSurfaceManager', () => {
 
   it('does not publish a late CDP connection after shutdown', async () => {
     let finishConnect!: (browser: Browser) => void
-    let transport: ElectronGuestCdpTransport | undefined
+    let transport: ConnectOverCDPTransport | undefined
     const browserPromise = new Promise<Browser>((resolve) => {
       finishConnect = resolve
     })
@@ -697,7 +1715,8 @@ describe('BrowserSurfaceManager', () => {
     await Promise.all([shutdown, rejection])
 
     expect(connected.browser.isConnected()).toBe(false)
-    expect(guest.isDestroyed()).toBe(false)
+    expect(guest.isDestroyed()).toBe(true)
+    expect(guest.close).toHaveBeenCalledWith({ waitForBeforeUnload: false })
     expect(manager.getActiveSurfaceIdentity()).toBeNull()
     expect(manager.snapshot()).toEqual({
       attached: false,

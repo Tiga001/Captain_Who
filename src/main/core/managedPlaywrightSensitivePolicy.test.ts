@@ -5,6 +5,7 @@ import type { ManagedPlaywrightToolManifestEntry } from '../mcp/managedPlaywrigh
 import {
   canonicalSha256,
   ManagedPlaywrightSensitiveGrantError,
+  sensitiveBindingScopeForInvocation,
   sensitivePolicyForTool,
   sensitiveToolNeedsGrant,
   validateSensitiveToolGrant
@@ -13,7 +14,6 @@ import {
 const ORIGIN = 'https://mail.example.test'
 const ARGS = {
   function: '() => document.title',
-  approval_origin: ORIGIN,
   call_reason: 'Read the current page title.'
 }
 const REVIEWED = {
@@ -28,6 +28,13 @@ const REVIEWED = {
   upstreamSchemaDigest: `sha256:${'b'.repeat(64)}`,
   reasonCode: 'sensitive_data_or_file_boundary',
   constraints: []
+} satisfies ManagedPlaywrightToolManifestEntry
+
+const COOKIE_SET_REVIEWED = {
+  ...REVIEWED,
+  rawName: 'browser_cookie_set',
+  modelName: 'browser_cookie_set',
+  description: 'Set a managed browser cookie'
 } satisfies ManagedPlaywrightToolManifestEntry
 
 function authorization(
@@ -66,6 +73,37 @@ function authorization(
       riskKinds: ['page_script_execution'],
       expiresAtMs: 1_900_000,
       ...overrides
+    }
+  }
+}
+
+function scopedAuthorization(
+  toolName: string,
+  argumentsValue: Readonly<Record<string, unknown>>,
+  origin: string | null,
+  scope: 'managed_surface' | 'managed_browser_profile'
+): ManagedPlaywrightAuthorizationContext {
+  const policy = sensitivePolicyForTool(toolName)!
+  const argumentsDigest = canonicalSha256(argumentsValue)
+  const targetBindingDigest = `sha256:${'9'.repeat(64)}`
+  return {
+    ...authorization(),
+    triggerToolName: toolName,
+    builtinToolGrant: {
+      ...authorization().builtinToolGrant!,
+      argumentsDigest,
+      targetBindingDigest,
+      origin,
+      riskKinds: [...policy.riskKinds],
+      resourceScopeDigest: canonicalSha256({
+        schemaVersion: 2,
+        toolId: toolName,
+        argumentsDigest,
+        origin,
+        riskKinds: [...policy.riskKinds],
+        scope,
+        targetBindingDigest
+      })
     }
   }
 }
@@ -122,6 +160,22 @@ describe('managed Playwright sensitive Tool policy', () => {
     ]) {
       expect(sensitivePolicyForTool(name)?.scope).toBe('managed_browser_profile')
     }
+    for (const name of [
+      'browser_drop',
+      'browser_evaluate',
+      'browser_file_upload',
+      'browser_network_request'
+    ]) {
+      expect(sensitivePolicyForTool(name)?.scope).toBe('managed_surface')
+    }
+    expect(sensitiveBindingScopeForInvocation('browser_cookie_list', {})).toBe(
+      'managed_browser_profile'
+    )
+    expect(
+      sensitiveBindingScopeForInvocation('browser_cookie_set', { domain: 'example.test' })
+    ).toBe('managed_browser_profile')
+    expect(sensitiveBindingScopeForInvocation('browser_cookie_set', {})).toBe('managed_surface')
+    expect(sensitiveBindingScopeForInvocation('browser_evaluate', ARGS)).toBe('managed_surface')
   })
 
   it('uses the same recursively canonical argument digest regardless of object key order', () => {
@@ -129,7 +183,7 @@ describe('managed Playwright sensitive Tool policy', () => {
     expect(canonicalSha256({ a: 1 })).not.toBe(canonicalSha256({ a: 2 }))
     const argumentsDigest = canonicalSha256(ARGS)
     expect(argumentsDigest).toBe(
-      'sha256:fe743397c82b02191460880e6714fb89675cf1e8148dbac7e4aa14e1ea969694'
+      'sha256:44679ad41b476dfb14d002b9d22a010f72f3c60ae4d060868c9ceacab2aabcd1'
     )
     expect(
       canonicalSha256({
@@ -138,28 +192,27 @@ describe('managed Playwright sensitive Tool policy', () => {
         argumentsDigest,
         origin: ORIGIN,
         riskKinds: ['page_script_execution'],
-        scope: 'page_script_execution'
+        scope: 'managed_surface'
       })
-    ).toBe('sha256:c2e7c64206076f6d422b1526c49b2870c601106dc88bcea59102dc39d36556d1')
+    ).toBe('sha256:7a94511d5d3fa315c32237ca09c5bc7510fbe7cec14a40456b578f8e55181c7a')
 
     const cookieArguments = {
-      approval_origin: ORIGIN,
       call_reason: 'List reviewed managed browser cookies.'
     }
     const cookieArgumentsDigest = canonicalSha256(cookieArguments)
     expect(cookieArgumentsDigest).toBe(
-      'sha256:85a6b62bc42b5e8f095052224a1d4f40b4366029e5e212c8b07b8679c22fa281'
+      'sha256:7eedba5a990eb2faeeb27bebfccd4ac2b5fa1b6237b308ccaf402fc5772c72b7'
     )
     expect(
       canonicalSha256({
         schemaVersion: 1,
         toolId: 'browser_cookie_list',
         argumentsDigest: cookieArgumentsDigest,
-        origin: ORIGIN,
+        origin: null,
         riskKinds: ['cookie_read'],
         scope: 'managed_browser_profile'
       })
-    ).toBe('sha256:867eef1812ae00959599b4cbc376c1608b217e1072552286b9f581e48f0f7ed7')
+    ).toBe('sha256:e94817429ef8eba75b2b368825326e524b43f524c5dc38d9961f69e2d32f5bb2')
   })
 
   it('requires approval dynamically only for file-bearing drop and upload dispatches', () => {
@@ -231,6 +284,69 @@ describe('managed Playwright sensitive Tool policy', () => {
     ).toThrow('mcp.builtin_playwright.sensitive_grant_expired')
   })
 
+  it('binds cookie_set scope to whether fixed Playwright derives the domain from currentTab', () => {
+    const pageArguments = {
+      name: 'fixture',
+      value: 'reviewed',
+      call_reason: 'Set a cookie using the frozen current page domain.'
+    }
+    const profileArguments = {
+      ...pageArguments,
+      domain: 'fixture.invalid'
+    }
+    expect(
+      validateSensitiveToolGrant({
+        reviewed: COOKIE_SET_REVIEWED,
+        modelArguments: pageArguments,
+        authorizationContext: scopedAuthorization(
+          'browser_cookie_set',
+          pageArguments,
+          ORIGIN,
+          'managed_surface'
+        ),
+        activeOrigin: ORIGIN,
+        consumedGrantIds: new Set(),
+        now: 1_800_000
+      })
+    ).toBeDefined()
+    expect(
+      validateSensitiveToolGrant({
+        reviewed: COOKIE_SET_REVIEWED,
+        modelArguments: profileArguments,
+        authorizationContext: scopedAuthorization(
+          'browser_cookie_set',
+          profileArguments,
+          null,
+          'managed_browser_profile'
+        ),
+        activeOrigin: null,
+        consumedGrantIds: new Set(),
+        now: 1_800_000
+      })
+    ).toBeDefined()
+
+    for (const [argumentsValue, activeOrigin, wrongScope] of [
+      [pageArguments, ORIGIN, 'managed_browser_profile'],
+      [profileArguments, null, 'managed_surface']
+    ] as const) {
+      expect(() =>
+        validateSensitiveToolGrant({
+          reviewed: COOKIE_SET_REVIEWED,
+          modelArguments: argumentsValue,
+          authorizationContext: scopedAuthorization(
+            'browser_cookie_set',
+            argumentsValue,
+            activeOrigin,
+            wrongScope
+          ),
+          activeOrigin,
+          consumedGrantIds: new Set(),
+          now: 1_800_000
+        })
+      ).toThrow('mcp.builtin_playwright.sensitive_grant_drifted')
+    }
+  })
+
   it('fails closed when a required grant is missing or attached to an automatic MIME drop', () => {
     expect(() =>
       validateSensitiveToolGrant({
@@ -250,7 +366,6 @@ describe('managed Playwright sensitive Tool policy', () => {
         modelArguments: {
           target: 'editor',
           data: { 'text/plain': 'hello' },
-          approval_origin: ORIGIN,
           call_reason: 'Drop text.'
         },
         authorizationContext: authorization(),

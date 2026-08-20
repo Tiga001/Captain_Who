@@ -1202,7 +1202,10 @@ fn error_from_outcome(
         | ManagedPlaywrightBridgeErrorCode::OutcomeUnknown
         | ManagedPlaywrightBridgeErrorCode::InternalSafeError => McpError::protocol(message),
     };
-    error.with_dispatch_certainty(certainty)
+    // This is a trusted Main completion, not an untrusted MCP wire error. Main's Tool lifecycle
+    // knows whether it dispatched the fixed official handler, so Manager must preserve this
+    // evidence instead of widening an acknowledged pre-dispatch rejection to OutcomeUnknown.
+    error.with_authoritative_dispatch_certainty(certainty)
 }
 
 fn interrupted_error(operation: PendingOperation, reason: McpOutcomeUnknownReason) -> McpError {
@@ -1296,11 +1299,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     use mycopilot_core::{
         AgentApprovalStatus, AgentBuiltinCapabilityActivationApproval, AgentProposedAction,
-        CapabilityGrant, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
+        BuiltinMcpToolRiskKind, CapabilityGrant, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
     };
     #[cfg(target_os = "macos")]
     use mycopilot_protocol_rs::{
-        BrowserRiskAuthorizeInput, BrowserRiskCancelInput, BROWSER_RISK_PROTOCOL_SCHEMA_VERSION,
+        BrowserRiskAuthorizeInput, BrowserRiskCancelInput, BuiltinMcpToolRiskKindDto,
+        ManagedPlaywrightBuiltinToolGrantContext, ManagedPlaywrightSensitiveBindingScopeDto,
+        ManagedPlaywrightSensitiveFilePreparation, BROWSER_RISK_PROTOCOL_SCHEMA_VERSION,
     };
     #[cfg(target_os = "macos")]
     use std::process::Stdio;
@@ -1400,6 +1405,16 @@ mod tests {
     fn attach_reviewed_runtime_responder(
         runtime: &Arc<ManagedPlaywrightMcpRuntime>,
     ) -> tokio::task::JoinHandle<()> {
+        attach_reviewed_runtime_responder_with_call_error(runtime, None)
+    }
+
+    fn attach_reviewed_runtime_responder_with_call_error(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        call_error: Option<(
+            ManagedPlaywrightBridgeErrorCode,
+            ManagedPlaywrightDispatchCertainty,
+        )>,
+    ) -> tokio::task::JoinHandle<()> {
         let (outbound, mut commands) = mpsc::unbounded_channel();
         runtime.bridge.attach_outbound(outbound).unwrap();
         let bridge = Arc::clone(&runtime.bridge);
@@ -1443,18 +1458,27 @@ mod tests {
                         }
                     }
                     ManagedPlaywrightCommand::CallTool { .. } => {
-                        ManagedPlaywrightCompletionOutcome::ToolCalled {
-                            result: json!({"content":[{"type":"text","text":"ok"}],
-                              "structuredContent":null,"isError":false}),
+                        if let Some((code, dispatch_certainty)) = call_error {
+                            ManagedPlaywrightCompletionOutcome::Error {
+                                code,
+                                dispatch_certainty,
+                            }
+                        } else {
+                            ManagedPlaywrightCompletionOutcome::ToolCalled {
+                                result: json!({"content":[{"type":"text","text":"ok"}],
+                                  "structuredContent":null,"isError":false}),
+                            }
                         }
                     }
                     ManagedPlaywrightCommand::PrepareSensitiveTool { input } => {
                         ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
                             binding_id: Uuid::new_v4().to_string(),
                             target_binding_digest: format!("sha256:{}", "7".repeat(64)),
-                            origin: "https://mail.example.test".to_string(),
+                            origin: Some("https://mail.example.test".to_string()),
                             created_at_ms: input.created_at_ms,
                             expires_at_ms: input.expires_at_ms,
+                            file_basenames: Vec::new(),
+                            file_revision_digest: None,
                         }
                     }
                     ManagedPlaywrightCommand::ReleaseSensitiveToolBinding { .. } => {
@@ -1569,6 +1593,52 @@ mod tests {
         );
         runtime.shutdown().await;
         responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trusted_main_pre_dispatch_rejection_stays_definite_through_runtime_manager() {
+        let runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
+        let responder = attach_reviewed_runtime_responder_with_call_error(
+            &runtime,
+            Some((
+                ManagedPlaywrightBridgeErrorCode::InvalidArguments,
+                ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+            )),
+        );
+        runtime.request_start().unwrap();
+        join_owned_lifecycle_tasks(&runtime).await;
+
+        let error = invoke_browser_tool_result(
+            &runtime,
+            "browser_snapshot",
+            json!({"call_reason": "Exercise an authoritative pre-dispatch rejection."}),
+        )
+        .await
+        .expect_err("trusted Main rejection must remain an error");
+        assert!(
+            matches!(error.kind, mycopilot_mcp_client::McpErrorKind::Protocol),
+            "unexpected trusted Main rejection: {error:?}"
+        );
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(mycopilot_mcp_client::McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+
+        runtime.shutdown().await;
+        responder.await.unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_tab_count_accepts_the_fixed_official_text_result() {
+        let result = McpToolResult {
+            content: vec![McpContentBlock::Text {
+                text: "### Open tabs\n- 0: Fixture (current)\n- 1: Secondary Fixture".to_string(),
+            }],
+            structured_content: None,
+            is_error: false,
+        };
+        assert_eq!(managed_tab_count(&result), 2);
     }
 
     #[tokio::test]
@@ -1951,18 +2021,136 @@ mod tests {
         let forbidden = "browser_run_code_unsafe";
         assert!(!catalog_names.contains(forbidden), "{forbidden}");
 
-        let navigate = invoke_browser_tool_with_grant(
+        let fixture_origin = fixture_url
+            .strip_suffix("/interactive")
+            .expect("fixture origin");
+        let zero_tab_cookies = invoke_approved_browser_sensitive_tool(
             &runtime,
             &capability_grant,
-            "browser_navigate",
-            json!({"url": fixture_url, "call_reason": "Open the local fixture."}),
+            fixture_origin,
+            "browser_cookie_list",
+            json!({
+                "path": "/",
+                "call_reason": "Verify the managed browser profile before any visible tab exists."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieRead],
+            vec![BuiltinMcpToolRiskKindDto::CookieRead],
         )
         .await;
         assert!(
-            !navigate.is_error,
-            "managed fixture navigate failed: {}",
-            tool_result_text(&navigate)
+            !zero_tab_cookies.is_error,
+            "zero-tab managed cookie list failed: {}",
+            tool_result_text(&zero_tab_cookies)
         );
+        let first_tab = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({
+                "action": "new",
+                "url": fixture_url,
+                "call_reason": "Open exactly one first local fixture tab from the empty group."
+            }),
+        )
+        .await;
+        assert!(
+            !first_tab.is_error,
+            "managed first browser_tabs new failed: {}",
+            tool_result_text(&first_tab)
+        );
+        let first_tab_list = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_tabs",
+            json!({
+                "action": "list",
+                "call_reason": "Verify the empty group became exactly one managed tab."
+            }),
+        )
+        .await;
+        let first_tab_list_text = tool_result_text(&first_tab_list);
+        assert!(
+            !first_tab_list.is_error && first_tab_list_text.contains("0:"),
+            "first managed tab was not listed: {first_tab_list_text}"
+        );
+        assert!(
+            !first_tab_list_text.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("1:") || line.starts_with("- 1:")
+            }),
+            "zero-group browser_tabs new created more than one tab: {first_tab_list_text}"
+        );
+        let workspace_fixture_directory = tempfile::Builder::new()
+            .prefix(".mycopilot-managed-playwright-files-")
+            .tempdir_in(workspace)
+            .expect("create repository-local managed file fixture directory");
+        let admissions_fixture = workspace_fixture_directory
+            .path()
+            .join("浙江大学2026年招生资料汇编.pptx");
+        let admissions_fixture_content =
+            b"repository-owned synthetic admissions presentation fixture";
+        std::fs::write(&admissions_fixture, admissions_fixture_content)
+            .expect("write synthetic admissions presentation fixture");
+        let admissions_fixture = admissions_fixture
+            .canonicalize()
+            .expect("canonicalize admissions presentation fixture")
+            .to_string_lossy()
+            .into_owned();
+        let large_drop_fixture = workspace_fixture_directory
+            .path()
+            .join("fixture-large-drop.bin");
+        std::fs::write(&large_drop_fixture, vec![b'L'; 1_100_000])
+            .expect("write large managed drop fixture");
+        let large_drop_fixture = large_drop_fixture
+            .canonicalize()
+            .expect("canonicalize large managed drop fixture")
+            .to_string_lossy()
+            .into_owned();
+        let storage_state_fixture = workspace_fixture_directory
+            .path()
+            .join("fixture-storage-state.json");
+        std::fs::write(
+            &storage_state_fixture,
+            serde_json::to_vec(&json!({
+                "cookies": [{
+                    "name": "restored-cookie",
+                    "value": "repository-owned-storage-cookie",
+                    "domain": "127.0.0.1",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": false,
+                    "secure": false,
+                    "sameSite": "Lax"
+                }],
+                "origins": [{
+                    "origin": fixture_origin,
+                    "localStorage": [{
+                        "name": "restored-local",
+                        "value": "repository-owned-storage-local-value"
+                    }]
+                }]
+            }))
+            .expect("serialize storage-state fixture"),
+        )
+        .expect("write storage-state fixture");
+        let storage_state_fixture = storage_state_fixture
+            .canonicalize()
+            .expect("canonicalize storage-state fixture")
+            .to_string_lossy()
+            .into_owned();
+        let evaluate_started = tokio::time::Instant::now();
+        let evaluated =
+            invoke_approved_browser_evaluate(&runtime, &capability_grant, fixture_origin).await;
+        assert!(
+            evaluate_started.elapsed() < Duration::from_secs(5),
+            "synchronous fixed-official browser_evaluate did not complete promptly"
+        );
+        assert!(
+            !evaluated.is_error,
+            "managed browser_evaluate failed: {}",
+            tool_result_text(&evaluated)
+        );
+        assert!(tool_result_text(&evaluated).contains("builtin-evaluate-ok"));
 
         let snapshot = invoke_browser_tool_with_grant(
             &runtime,
@@ -1973,16 +2161,552 @@ mod tests {
         .await;
         let snapshot_text = tool_result_text(&snapshot);
         assert!(snapshot_text.contains("Managed Playwright Bridge Fixture"));
-        let input_ref = snapshot_ref(&snapshot_text, "Message");
-        let button_ref = snapshot_ref(&snapshot_text, "Apply");
-        let dialog_button_ref = snapshot_ref(&snapshot_text, "Show dialog");
-        let select_ref = snapshot_ref(&snapshot_text, "Plan");
-        let drag_source_ref = snapshot_ref(&snapshot_text, "Drag source");
-        let drop_target_ref = snapshot_ref(&snapshot_text, "Drop target");
-        let list_ref = snapshot_ref(&snapshot_text, "Visible items");
-        let download_ref = snapshot_ref(&snapshot_text, "Download fixture");
-        let frame_subject_ref = snapshot_ref(&snapshot_text, "Frame Subject");
-        let mail_body_target = frame_editor_target(&snapshot_text, 2);
+        assert!(snapshot_text.contains("evaluated:你好"));
+        let cross_frame_subject_ref = snapshot_ref(&snapshot_text, "Cross Frame Subject");
+        let cross_frame_evaluate = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_evaluate",
+            json!({
+                "element": "Cross-origin local fixture subject",
+                "target": cross_frame_subject_ref,
+                "function": r#"(element) => {
+                    element.value = 'cross-frame-evaluated';
+                    element.dispatchEvent(new Event('input', { bubbles: true }));
+                    element.ownerDocument.querySelector('#evaluate-value').textContent =
+                        'evaluate:' + element.value;
+                    return element.value;
+                }"#,
+                "call_reason": "Evaluate the exact OOPIF fixture element in the managed surface."
+            }),
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+            vec![BuiltinMcpToolRiskKindDto::PageScriptExecution],
+        )
+        .await;
+        assert!(
+            !cross_frame_evaluate.is_error,
+            "managed OOPIF browser_evaluate failed: {}",
+            tool_result_text(&cross_frame_evaluate)
+        );
+        assert!(tool_result_text(&cross_frame_evaluate).contains("cross-frame-evaluated"));
+
+        let upload_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Locate the repository-owned file chooser fixture."}),
+        )
+        .await;
+        let upload_snapshot_text = tool_result_text(&upload_snapshot);
+        assert!(upload_snapshot_text.contains("evaluate:cross-frame-evaluated"));
+        let upload_ref = snapshot_ref(&upload_snapshot_text, "Fixture upload");
+        let chooser = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_click",
+            json!({
+                "target": upload_ref.clone(),
+                "call_reason": "Open the repository-owned fixture file chooser."
+            }),
+        )
+        .await;
+        assert!(
+            !chooser.is_error,
+            "managed fixture chooser click failed: {}",
+            tool_result_text(&chooser)
+        );
+        let cancelled_chooser = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_file_upload",
+            json!({
+                "call_reason": "Cancel the pending fixture chooser using fixed official semantics."
+            }),
+        )
+        .await;
+        assert!(
+            !cancelled_chooser.is_error,
+            "fixed official chooser cancel failed: {}",
+            tool_result_text(&cancelled_chooser)
+        );
+        assert!(!tool_result_text(&cancelled_chooser).contains("browser-file:"));
+        let reopened_chooser = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_click",
+            json!({
+                "target": upload_ref,
+                "call_reason": "Reopen the chooser for the one-call workspace attachment."
+            }),
+        )
+        .await;
+        assert!(
+            !reopened_chooser.is_error,
+            "managed fixture chooser reopen failed: {}",
+            tool_result_text(&reopened_chooser)
+        );
+        let uploaded = invoke_approved_browser_sensitive_tool_with_resolved_files(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_file_upload",
+            json!({
+                "paths": [admissions_fixture.clone()],
+                "call_reason": "Upload the exact workspace admissions presentation in one original call."
+            }),
+            vec![
+                BuiltinMcpToolRiskKind::FileRead,
+                BuiltinMcpToolRiskKind::FileUpload,
+            ],
+            vec![
+                BuiltinMcpToolRiskKindDto::FileRead,
+                BuiltinMcpToolRiskKindDto::FileUpload,
+            ],
+            vec![admissions_fixture.clone()],
+        )
+        .await;
+        assert!(
+            !uploaded.is_error,
+            "managed browser_file_upload failed: {}",
+            tool_result_text(&uploaded)
+        );
+        assert!(!tool_result_text(&uploaded).contains(&admissions_fixture));
+        let admissions_basename = "浙江大学2026年招生资料汇编.pptx";
+        let upload_selection = format!(
+            "upload-selection:{admissions_basename}:{}",
+            admissions_fixture_content.len()
+        );
+        let upload_effect = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_wait_for",
+            json!({
+                "text": upload_selection,
+                "call_reason": "Wait for the exact fixture file chooser selection effect."
+            }),
+        )
+        .await;
+        assert!(
+            !upload_effect.is_error,
+            "managed fixture upload effect missing: {}",
+            tool_result_text(&upload_effect)
+        );
+        let upload_text = format!(
+            "upload:{admissions_basename}:{}",
+            std::str::from_utf8(admissions_fixture_content).expect("fixture UTF-8")
+        );
+        let upload_content = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_wait_for",
+            json!({
+                "text": upload_text,
+                "call_reason": "Wait for delayed File.text() after the upload tool returned."
+            }),
+        )
+        .await;
+        assert!(
+            !upload_content.is_error,
+            "managed fixture delayed file read failed: {}",
+            tool_result_text(&upload_content)
+        );
+        let submit_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Locate the delayed fixture upload submit action."}),
+        )
+        .await;
+        let submit_ref = snapshot_ref(&tool_result_text(&submit_snapshot), "Submit fixture upload");
+        let submitted = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_click",
+            json!({
+                "target": submit_ref,
+                "call_reason": "Submit the selected fixture after browser_file_upload returned."
+            }),
+        )
+        .await;
+        assert!(
+            !submitted.is_error,
+            "managed fixture delayed upload submit failed: {}",
+            tool_result_text(&submitted)
+        );
+        let submit_effect = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_wait_for",
+            json!({
+                "text": format!("upload-submit:{admissions_basename}:content-ok"),
+                "call_reason": "Verify the local fixture received the delayed file submission."
+            }),
+        )
+        .await;
+        assert!(
+            !submit_effect.is_error,
+            "managed fixture delayed upload receipt missing: {}",
+            tool_result_text(&submit_effect)
+        );
+
+        let drop_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Locate the repository-owned cross-frame drop fixture."}),
+        )
+        .await;
+        let drop_snapshot_text = tool_result_text(&drop_snapshot);
+        assert!(drop_snapshot_text.contains(&upload_selection));
+        let cross_frame_drop_ref = snapshot_ref(&drop_snapshot_text, "Cross file drop target");
+        let dropped = invoke_approved_browser_sensitive_tool_with_resolved_files(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_drop",
+            json!({
+                "element": "Cross-origin local fixture file drop target",
+                "target": cross_frame_drop_ref,
+                "paths": [admissions_fixture.clone()],
+                "call_reason": "Drop the exact workspace admissions presentation in the managed OOPIF."
+            }),
+            vec![
+                BuiltinMcpToolRiskKind::FileRead,
+                BuiltinMcpToolRiskKind::FileUpload,
+            ],
+            vec![
+                BuiltinMcpToolRiskKindDto::FileRead,
+                BuiltinMcpToolRiskKindDto::FileUpload,
+            ],
+            vec![admissions_fixture.clone()],
+        )
+        .await;
+        assert!(
+            !dropped.is_error,
+            "managed browser_drop(paths) failed: {}",
+            tool_result_text(&dropped)
+        );
+        let drop_diagnostic = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Inspect the exact OOPIF drop event effect."}),
+        )
+        .await;
+        let dropped_text = tool_result_text(&drop_diagnostic);
+        assert!(
+            dropped_text.contains(&format!(
+                "drop-selection:{admissions_basename}:{}",
+                admissions_fixture_content.len()
+            )),
+            "managed browser_drop returned success without its exact drop effect: {dropped_text}"
+        );
+        assert!(
+            dropped_text.contains("drop-events:dragenter,dragover,drop"),
+            "managed browser_drop event order drifted: {dropped_text}"
+        );
+        assert!(
+            dropped_text.contains(&format!(
+                "drop:{admissions_basename}:{}",
+                std::str::from_utf8(admissions_fixture_content).expect("fixture UTF-8")
+            )),
+            "managed browser_drop file bytes were not readable: {dropped_text}"
+        );
+
+        let large_drop_ref = snapshot_ref(&dropped_text, "Cross file drop target");
+        let large_dropped = invoke_approved_browser_sensitive_tool_with_resolved_files(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_drop",
+            json!({
+                "element": "Cross-origin local large-file drop target",
+                "target": large_drop_ref,
+                "paths": [large_drop_fixture.clone()],
+                "call_reason": "Drop a brokered file larger than the managed CDP string limit."
+            }),
+            vec![
+                BuiltinMcpToolRiskKind::FileRead,
+                BuiltinMcpToolRiskKind::FileUpload,
+            ],
+            vec![
+                BuiltinMcpToolRiskKindDto::FileRead,
+                BuiltinMcpToolRiskKindDto::FileUpload,
+            ],
+            vec![large_drop_fixture.clone()],
+        )
+        .await;
+        assert!(
+            !large_dropped.is_error,
+            "managed large browser_drop(paths) failed: {}",
+            tool_result_text(&large_dropped)
+        );
+        let large_drop_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Inspect the exact large OOPIF drop effect."}),
+        )
+        .await;
+        let large_drop_text = tool_result_text(&large_drop_snapshot);
+        assert!(large_drop_text.contains("drop-selection:fixture-large-drop.bin:1100000"));
+        assert!(
+            large_drop_text.contains("drop-events:dragenter,dragover,drop,dragenter,dragover,drop")
+        );
+        assert!(large_drop_text.contains("drop:fixture-large-drop.bin:1100000:L:L"));
+
+        let network_ready = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_wait_for",
+            json!({
+                "text": "network-ready",
+                "call_reason": "Wait for the local fixture request ledger."
+            }),
+        )
+        .await;
+        assert!(!network_ready.is_error);
+        let request_list = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_network_requests",
+            json!({
+                "static": false,
+                "call_reason": "Locate the repository-owned ping request."
+            }),
+        )
+        .await;
+        let ping_index = network_request_index(&request_list, "/api/ping");
+        let request_detail = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_network_request",
+            json!({
+                "index": ping_index,
+                "part": "response-body",
+                "call_reason": "Read the exact repository-owned ping response body."
+            }),
+            vec![BuiltinMcpToolRiskKind::NetworkSensitiveRead],
+            vec![BuiltinMcpToolRiskKindDto::NetworkSensitiveRead],
+        )
+        .await;
+        assert!(
+            !request_detail.is_error,
+            "managed browser_network_request failed: {}",
+            tool_result_text(&request_detail)
+        );
+        assert!(tool_result_text(&request_detail).contains(r#"{"ok":true}"#));
+
+        let cookie_set = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_cookie_set",
+            json!({
+                "name": "managed-cookie",
+                "value": "repository-owned-cookie-value",
+                "call_reason": "Set a repository-owned cookie in the managed BrowserContext."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieWrite],
+            vec![BuiltinMcpToolRiskKindDto::CookieWrite],
+        )
+        .await;
+        assert!(
+            !cookie_set.is_error,
+            "managed browser_cookie_set failed: {}",
+            tool_result_text(&cookie_set)
+        );
+        let cookie_get = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_cookie_get",
+            json!({
+                "name": "managed-cookie",
+                "call_reason": "Read the repository-owned managed cookie."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieRead],
+            vec![BuiltinMcpToolRiskKindDto::CookieRead],
+        )
+        .await;
+        assert!(
+            !cookie_get.is_error,
+            "managed browser_cookie_get failed: {}",
+            tool_result_text(&cookie_get)
+        );
+        assert!(tool_result_text(&cookie_get).contains("repository-owned-cookie-value"));
+        let cookie_list = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_cookie_list",
+            json!({
+                "domain": "127.0.0.1",
+                "path": "/",
+                "call_reason": "List repository-owned cookies in the managed BrowserContext."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieRead],
+            vec![BuiltinMcpToolRiskKindDto::CookieRead],
+        )
+        .await;
+        assert!(
+            !cookie_list.is_error,
+            "managed browser_cookie_list failed: {}",
+            tool_result_text(&cookie_list)
+        );
+        assert!(tool_result_text(&cookie_list).contains("repository-owned-cookie-value"));
+
+        let storage_export = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_storage_state",
+            json!({
+                "filename": "fixture-storage-export.json",
+                "call_reason": "Export repository-owned managed storage state."
+            }),
+            vec![
+                BuiltinMcpToolRiskKind::FileWrite,
+                BuiltinMcpToolRiskKind::CookieRead,
+                BuiltinMcpToolRiskKind::LocalStorageRead,
+                BuiltinMcpToolRiskKind::StorageStateExport,
+            ],
+            vec![
+                BuiltinMcpToolRiskKindDto::FileWrite,
+                BuiltinMcpToolRiskKindDto::CookieRead,
+                BuiltinMcpToolRiskKindDto::LocalStorageRead,
+                BuiltinMcpToolRiskKindDto::StorageStateExport,
+            ],
+        )
+        .await;
+        assert!(
+            !storage_export.is_error,
+            "managed browser_storage_state failed: {}",
+            tool_result_text(&storage_export)
+        );
+        assert_safe_browser_artifact(&storage_export, "json");
+
+        let storage_import = invoke_approved_browser_sensitive_tool_with_resolved_files(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_set_storage_state",
+            json!({
+                "filename": storage_state_fixture.clone(),
+                "call_reason": "Restore the exact workspace storage state in one original call."
+            }),
+            vec![
+                BuiltinMcpToolRiskKind::FileRead,
+                BuiltinMcpToolRiskKind::CookieWrite,
+                BuiltinMcpToolRiskKind::LocalStorageWrite,
+                BuiltinMcpToolRiskKind::StorageStateImport,
+            ],
+            vec![
+                BuiltinMcpToolRiskKindDto::FileRead,
+                BuiltinMcpToolRiskKindDto::CookieWrite,
+                BuiltinMcpToolRiskKindDto::LocalStorageWrite,
+                BuiltinMcpToolRiskKindDto::StorageStateImport,
+            ],
+            vec![storage_state_fixture.clone()],
+        )
+        .await;
+        assert!(
+            !storage_import.is_error,
+            "managed browser_set_storage_state failed: {}",
+            tool_result_text(&storage_import)
+        );
+        let restored_cookie = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_cookie_get",
+            json!({
+                "name": "restored-cookie",
+                "call_reason": "Verify the repository-owned restored cookie."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieRead],
+            vec![BuiltinMcpToolRiskKindDto::CookieRead],
+        )
+        .await;
+        assert!(tool_result_text(&restored_cookie).contains("repository-owned-storage-cookie"));
+        let restored_local_storage = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_localstorage_get",
+            json!({
+                "key": "restored-local",
+                "call_reason": "Verify repository-owned restored local storage."
+            }),
+            vec![BuiltinMcpToolRiskKind::LocalStorageRead],
+            vec![BuiltinMcpToolRiskKindDto::LocalStorageRead],
+        )
+        .await;
+        assert!(tool_result_text(&restored_local_storage)
+            .contains("repository-owned-storage-local-value"));
+        let cookie_delete = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_cookie_delete",
+            json!({
+                "name": "restored-cookie",
+                "call_reason": "Delete the repository-owned restored cookie."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieWrite],
+            vec![BuiltinMcpToolRiskKindDto::CookieWrite],
+        )
+        .await;
+        assert!(
+            !cookie_delete.is_error,
+            "managed browser_cookie_delete failed: {}",
+            tool_result_text(&cookie_delete)
+        );
+        let cookie_clear = invoke_approved_browser_sensitive_tool(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            "browser_cookie_clear",
+            json!({
+                "call_reason": "Clear repository-owned cookies from the managed BrowserContext."
+            }),
+            vec![BuiltinMcpToolRiskKind::CookieWrite],
+            vec![BuiltinMcpToolRiskKindDto::CookieWrite],
+        )
+        .await;
+        assert!(
+            !cookie_clear.is_error,
+            "managed browser_cookie_clear failed: {}",
+            tool_result_text(&cookie_clear)
+        );
+
+        let parity_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Verify sensitive managed-surface parity effects."}),
+        )
+        .await;
+        let parity_snapshot_text = tool_result_text(&parity_snapshot);
+        assert!(parity_snapshot_text.contains("evaluate:cross-frame-evaluated"));
+        assert!(parity_snapshot_text.contains(&upload_selection));
+        assert!(parity_snapshot_text.contains(&upload_text));
+        assert!(parity_snapshot_text
+            .contains(&format!("upload-submit:{admissions_basename}:content-ok")));
+        assert!(parity_snapshot_text.contains("drop-selection:fixture-large-drop.bin:1100000"));
+        assert!(parity_snapshot_text.contains("drop:fixture-large-drop.bin:1100000:L:L"));
+        let input_ref = snapshot_ref(&parity_snapshot_text, "Message");
+        let button_ref = snapshot_ref(&parity_snapshot_text, "Apply");
+        let dialog_button_ref = snapshot_ref(&parity_snapshot_text, "Show dialog");
+        let select_ref = snapshot_ref(&parity_snapshot_text, "Plan");
+        let drag_source_ref = snapshot_ref(&parity_snapshot_text, "Drag source");
+        let drop_target_ref = snapshot_ref(&parity_snapshot_text, "Drop target");
+        let list_ref = snapshot_ref(&parity_snapshot_text, "Visible items");
+        let download_ref = snapshot_ref(&parity_snapshot_text, "Download fixture");
+        let frame_subject_ref = snapshot_ref(&parity_snapshot_text, "Frame Subject");
+        let mail_body_target = frame_editor_target(&parity_snapshot_text, 2);
 
         let frame_form = invoke_browser_tool_with_grant(
             &runtime,
@@ -2099,14 +2823,6 @@ mod tests {
                 }),
                 "snapshot",
             ),
-            (
-                "browser_pdf_save",
-                json!({
-                    "filename": "fixture-page.pdf",
-                    "call_reason": "Export the repository-owned fixture PDF."
-                }),
-                "pdf",
-            ),
         ] {
             let result =
                 invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
@@ -2117,6 +2833,33 @@ mod tests {
             );
             assert_safe_browser_artifact(&result, kind);
         }
+        let pdf = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_pdf_save",
+            json!({
+                "filename": "fixture-page.pdf",
+                "call_reason": "Verify the current managed Electron PDF capability gate."
+            }),
+        )
+        .await;
+        assert!(pdf.is_error, "managed Electron PDF must fail closed");
+        assert_eq!(
+            pdf.structured_content
+                .as_ref()
+                .and_then(|value| value["status"].as_str()),
+            Some("unavailable")
+        );
+        assert_eq!(
+            pdf.structured_content
+                .as_ref()
+                .and_then(|value| value["code"].as_str()),
+            Some("browser.pdf_unavailable")
+        );
+        assert_eq!(
+            tool_result_text(&pdf),
+            "PDF export is unavailable in the current managed Electron browser."
+        );
         let trace_start = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
@@ -2511,10 +3254,9 @@ mod tests {
         )
         .await;
         assert!(!console.is_error);
-        let console_summary = tool_result_text(&console);
-        assert!(console_summary.contains("Managed browser console summary"));
-        assert!(console_summary.contains("Message text was omitted"));
-        assert!(!console_summary.contains("managed fixture warning"));
+        let console_text = tool_result_text(&console);
+        assert!(console_text.contains("### Result"));
+        assert!(console_text.contains("managed fixture warning"));
         let requests = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
@@ -2526,7 +3268,9 @@ mod tests {
         )
         .await;
         assert!(!requests.is_error);
-        assert!(!tool_result_text(&requests).contains("fixture-query-canary"));
+        let requests_text = tool_result_text(&requests);
+        assert!(requests_text.contains("### Result"));
+        assert!(requests_text.contains("fixture-query-canary"));
         for (tool, arguments, kind) in [
             (
                 "browser_console_messages",
@@ -2551,6 +3295,7 @@ mod tests {
                 invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
             assert!(!result.is_error, "{tool}: {}", tool_result_text(&result));
             assert_safe_browser_artifact(&result, kind);
+            assert_browser_artifact_preview(&result, "none");
         }
 
         let secondary = invoke_browser_tool_with_grant(
@@ -2612,14 +3357,19 @@ mod tests {
             .await
             .expect("fixture writer shutdown timeout")
             .expect("fixture writer task");
-        let result = tokio::time::timeout(Duration::from_secs(15), result_receiver)
-            .await
-            .expect("fixture result timeout")
-            .expect("fixture result channel");
-        let exit = tokio::time::timeout(Duration::from_secs(15), child.wait())
-            .await
-            .expect("fixture exit timeout")
-            .expect("wait for fixture");
+        let result_outcome = tokio::time::timeout(Duration::from_secs(15), result_receiver).await;
+        let (exit, child_timed_out) =
+            match tokio::time::timeout(Duration::from_secs(15), child.wait()).await {
+                Ok(exit) => (exit.expect("wait for fixture"), false),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    let exit = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                        .await
+                        .expect("fixture kill timeout")
+                        .expect("wait for killed fixture");
+                    (exit, true)
+                }
+            };
         let stderr = stderr_reader.await.expect("fixture stderr task");
         reader.await.expect("fixture reader task");
         risk_approver.abort();
@@ -2627,14 +3377,34 @@ mod tests {
         assert!(risk_coordinator.list_pending().is_empty());
         assert_eq!(approval_count.load(Ordering::Acquire), 0);
         assert_eq!(risk_authorize_count.load(Ordering::Acquire), 0);
+        let result = match result_outcome {
+            Ok(Ok(result)) if !child_timed_out => result,
+            Ok(Ok(_)) => panic!("fixture timed out after RESULT: exit={exit}; stderr={stderr}"),
+            Ok(Err(_)) => {
+                panic!("fixture closed without RESULT: exit={exit}; stderr={stderr}")
+            }
+            Err(_) => panic!("fixture RESULT timed out: exit={exit}; stderr={stderr}"),
+        };
         assert!(exit.success(), "fixture failed: {stderr}");
-        assert_eq!(result["ensureCommands"], 2);
-        assert_eq!(result["closeCommands"], 2);
+        let ensure_commands = result["ensureCommands"]
+            .as_u64()
+            .expect("fixture ensure command count");
+        let close_commands = result["closeCommands"]
+            .as_u64()
+            .expect("fixture close command count");
+        assert!(ensure_commands >= 2);
+        assert!(close_commands >= 1);
+        assert!(close_commands <= ensure_commands);
+        assert_eq!(result["surfaceCount"], 0);
+        assert_eq!(result["guestCount"], 0);
         assert_eq!(result["targetClosed"], true);
         assert_eq!(result["mainWindowAlive"], true);
         assert_eq!(result["broker"]["activeConnections"], 0);
         assert_eq!(result["broker"]["claimedSurfaces"], 0);
         assert_eq!(result["broker"]["registeredGuests"], 0);
+        assert_eq!(result["fileSelectionCount"], 0);
+        assert_eq!(result["fileBroker"]["handles"], 0);
+        assert_eq!(result["fileBroker"]["bytes"], 0);
         assert_eq!(result["riskGuard"]["activeOperations"], 0);
         assert_eq!(result["riskGuard"]["downloads"], 0);
         assert_eq!(result["riskGuard"]["guests"], 0);
@@ -2700,6 +3470,16 @@ mod tests {
         raw_name: &str,
         arguments: Value,
     ) -> McpToolResult {
+        invoke_browser_tool_result(runtime, raw_name, arguments)
+            .await
+            .unwrap_or_else(|error| panic!("{raw_name} failed: {error:?}"))
+    }
+
+    async fn invoke_browser_tool_result(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        raw_name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
         let invocation_id = Uuid::new_v4().to_string();
         runtime
             .invoke(
@@ -2722,7 +3502,6 @@ mod tests {
                 McpCancellationToken::new(),
             )
             .await
-            .unwrap_or_else(|error| panic!("{raw_name} failed: {error:?}"))
     }
 
     async fn invoke_browser_tool_with_grant(
@@ -2767,6 +3546,249 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    async fn invoke_approved_browser_evaluate(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        capability_grant: &CapabilityGrant,
+        origin: &str,
+    ) -> McpToolResult {
+        let raw_name = "browser_evaluate";
+        let call_reason = "Run one synchronous script in the repository-owned fixture.";
+        let arguments = json!({
+            "function": r#"() => {
+                document.querySelector('#output').textContent = 'evaluated:你好';
+                return 'builtin-evaluate-ok';
+            }"#,
+            "call_reason": call_reason,
+        });
+        invoke_approved_browser_sensitive_tool(
+            runtime,
+            capability_grant,
+            origin,
+            raw_name,
+            arguments,
+            vec![BuiltinMcpToolRiskKind::PageScriptExecution],
+            vec![BuiltinMcpToolRiskKindDto::PageScriptExecution],
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_approved_browser_sensitive_tool(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        capability_grant: &CapabilityGrant,
+        origin: &str,
+        raw_name: &str,
+        arguments: Value,
+        risks: Vec<BuiltinMcpToolRiskKind>,
+        risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
+    ) -> McpToolResult {
+        invoke_approved_browser_sensitive_tool_with_file_preparation(
+            runtime,
+            capability_grant,
+            origin,
+            raw_name,
+            arguments,
+            risks,
+            risk_dtos,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_approved_browser_sensitive_tool_with_resolved_files(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        capability_grant: &CapabilityGrant,
+        origin: &str,
+        raw_name: &str,
+        arguments: Value,
+        risks: Vec<BuiltinMcpToolRiskKind>,
+        risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
+        paths: Vec<String>,
+    ) -> McpToolResult {
+        invoke_approved_browser_sensitive_tool_with_file_preparation(
+            runtime,
+            capability_grant,
+            origin,
+            raw_name,
+            arguments,
+            risks,
+            risk_dtos,
+            Some(ManagedPlaywrightSensitiveFilePreparation::ResolvedPaths { paths }),
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_approved_browser_sensitive_tool_with_file_preparation(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        capability_grant: &CapabilityGrant,
+        origin: &str,
+        raw_name: &str,
+        arguments: Value,
+        risks: Vec<BuiltinMcpToolRiskKind>,
+        risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
+        file_preparation: Option<ManagedPlaywrightSensitiveFilePreparation>,
+    ) -> McpToolResult {
+        let call_reason = arguments["call_reason"]
+            .as_str()
+            .expect("sensitive fixture call reason")
+            .to_string();
+        let arguments_digest =
+            mycopilot_core::builtin_mcp_tool_arguments_digest(&arguments).unwrap();
+        let now_ms = unix_millis();
+        let grant_expires_at_ms = capability_grant.expires_at.saturating_mul(1_000);
+        let expires_at_ms = now_ms.saturating_add(60_000).min(grant_expires_at_ms);
+        let call_id = Uuid::new_v4().to_string();
+        let profile_scoped = matches!(
+            raw_name,
+            "browser_cookie_clear"
+                | "browser_cookie_delete"
+                | "browser_cookie_get"
+                | "browser_cookie_list"
+                | "browser_set_storage_state"
+                | "browser_storage_state"
+        ) || (raw_name == "browser_cookie_set"
+            && arguments
+                .get("domain")
+                .and_then(Value::as_str)
+                .is_some_and(|domain| !domain.trim().is_empty()));
+        let (binding_scope, resource_scope, expected_origin) = if profile_scoped {
+            (
+                ManagedPlaywrightSensitiveBindingScopeDto::ManagedBrowserProfile,
+                "managed_browser_profile",
+                None,
+            )
+        } else {
+            (
+                ManagedPlaywrightSensitiveBindingScopeDto::ManagedSurface,
+                "managed_surface",
+                Some(origin),
+            )
+        };
+        let expected_file_basenames = file_preparation
+            .as_ref()
+            .map(|preparation| match preparation {
+                ManagedPlaywrightSensitiveFilePreparation::ResolvedPaths { paths } => paths
+                    .iter()
+                    .map(|path| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .expect("resolved fixture basename")
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>(),
+            })
+            .unwrap_or_default();
+        let prepared = runtime
+            .bridge()
+            .prepare_sensitive_tool(ManagedPlaywrightPrepareSensitiveToolInput {
+                binding_request_id: Uuid::new_v4().to_string(),
+                binding_scope,
+                run_id: capability_grant.run_id.clone(),
+                capability_id: capability_grant.capability_id.as_str().to_string(),
+                activation_id: capability_grant.activation_id.as_str().to_string(),
+                manifest_digest: capability_grant.manifest_digest.clone(),
+                policy_revision: capability_grant.policy_revision,
+                grant_expires_at_ms,
+                call_id: call_id.clone(),
+                tool_name: raw_name.to_string(),
+                arguments_digest: arguments_digest.clone(),
+                created_at_ms: now_ms,
+                expires_at_ms,
+                file_preparation,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("prepare exact {raw_name} target binding: {error:?}"));
+        let ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared {
+            binding_id,
+            target_binding_digest,
+            origin: prepared_origin,
+            created_at_ms,
+            expires_at_ms: prepared_expires_at_ms,
+            file_basenames,
+            file_revision_digest,
+            ..
+        } = prepared
+        else {
+            panic!("Main returned an invalid {raw_name} target binding");
+        };
+        assert_eq!(prepared_origin.as_deref(), expected_origin);
+        assert_eq!(file_basenames, expected_file_basenames);
+        assert_eq!(file_revision_digest.is_some(), !file_basenames.is_empty());
+        assert!(file_basenames
+            .iter()
+            .all(|basename| !basename.contains('/') && !basename.contains('\\')));
+        assert_eq!(created_at_ms, now_ms);
+        assert_eq!(prepared_expires_at_ms, expires_at_ms);
+        let resource_scope_digest = mycopilot_core::builtin_mcp_tool_resource_scope_digest_v2(
+            raw_name,
+            &arguments_digest,
+            expected_origin,
+            &risks,
+            resource_scope,
+            &target_binding_digest,
+        )
+        .unwrap();
+        runtime
+            .invoke(
+                raw_name,
+                &Uuid::new_v4().to_string(),
+                arguments,
+                ManagedPlaywrightAuthorizationContext {
+                    run_id: capability_grant.run_id.clone(),
+                    capability_id: capability_grant.capability_id.as_str().to_string(),
+                    activation_id: capability_grant.activation_id.as_str().to_string(),
+                    manifest_digest: capability_grant.manifest_digest.clone(),
+                    policy_revision: capability_grant.policy_revision,
+                    grant_expires_at_ms,
+                    invocation_id: Uuid::new_v4().to_string(),
+                    call_id,
+                    trigger_tool_name: raw_name.to_string(),
+                    call_reason,
+                    builtin_tool_grant: Some(Box::new(ManagedPlaywrightBuiltinToolGrantContext {
+                        grant_id: Uuid::new_v4().to_string(),
+                        approval_id: Uuid::new_v4().to_string(),
+                        arguments_digest,
+                        resource_scope_digest,
+                        target_binding_id: binding_id,
+                        target_binding_digest,
+                        origin: prepared_origin,
+                        risk_kinds: risk_dtos,
+                        expires_at_ms: prepared_expires_at_ms,
+                    })),
+                },
+                McpCancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{raw_name} failed: {error:?}"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn network_request_index(result: &McpToolResult, expected_path: &str) -> u64 {
+        assert!(
+            !result.is_error,
+            "managed network list failed: {}",
+            tool_result_text(result)
+        );
+        tool_result_text(result)
+            .lines()
+            .find(|line| line.contains(expected_path) && line.contains(" => ["))
+            .and_then(|line| line.split_once(". ["))
+            .and_then(|(index, _)| index.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "managed network list omitted {expected_path}: {}",
+                    tool_result_text(result)
+                )
+            })
+    }
+
+    #[cfg(target_os = "macos")]
     fn tool_result_text(result: &McpToolResult) -> String {
         result
             .content
@@ -2803,13 +3825,46 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn assert_browser_artifact_preview(result: &McpToolResult, expected_preview: &str) {
+        let artifact = result
+            .structured_content
+            .as_ref()
+            .and_then(|structured| structured["artifacts"].as_array())
+            .and_then(|artifacts| artifacts.first())
+            .unwrap_or_else(|| {
+                panic!(
+                    "managed Artifact reference missing: {}",
+                    tool_result_text(result)
+                )
+            });
+        assert_eq!(artifact["preview"], expected_preview);
+    }
+
+    #[cfg(target_os = "macos")]
     fn managed_tab_count(result: &McpToolResult) -> usize {
-        result
+        if let Some(count) = result
             .structured_content
             .as_ref()
             .and_then(|structured| structured["tabs"].as_array())
             .map(Vec::len)
-            .expect("managed tabs structured content")
+        {
+            return count;
+        }
+        let count = tool_result_text(result)
+            .lines()
+            .filter(|line| {
+                line.trim()
+                    .strip_prefix("- ")
+                    .and_then(|line| line.split_once(": "))
+                    .is_some_and(|(index, description)| {
+                        !index.is_empty()
+                            && index.bytes().all(|byte| byte.is_ascii_digit())
+                            && !description.is_empty()
+                    })
+            })
+            .count();
+        assert!(count > 0, "managed tabs result omitted official tab rows");
+        count
     }
 
     #[cfg(target_os = "macos")]

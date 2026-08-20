@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -25,6 +25,7 @@ import { app, BrowserWindow, session, type WebContents } from 'electron'
 import { BrowserSurfaceManager } from '../BrowserSurfaceManager'
 import { BrowserArtifactBroker } from '../BrowserArtifactBroker'
 import { BrowserDownloadBroker } from '../BrowserDownloadBroker'
+import { BrowserFileBroker } from '../BrowserFileBroker'
 import { BrowserTargetBroker } from '../BrowserTargetBroker'
 import { BrowserNetworkGuard } from '../BrowserNetworkGuard'
 import { BrowserNetworkPolicy, ElectronSessionDnsResolver } from '../BrowserNetworkPolicy'
@@ -175,6 +176,27 @@ async function main(): Promise<void> {
   const artifactBroker = new BrowserArtifactBroker({
     rootDirectory: join(PROFILE_DIRECTORY, 'browser-automation-artifacts')
   })
+  const selectedFixturePath = join(PROFILE_DIRECTORY, 'fixture-upload.txt')
+  const largeDropFixturePath = join(PROFILE_DIRECTORY, 'fixture-large-drop.bin')
+  const storageStateFixturePath = join(PROFILE_DIRECTORY, 'fixture-storage-state.json')
+  let fileSelectionCount = 0
+  writeFileSync(selectedFixturePath, 'repository-owned upload fixture', { mode: 0o600 })
+  writeFileSync(largeDropFixturePath, Buffer.alloc(1_100_000, 'L'), { mode: 0o600 })
+  const selectedFixturePaths = [
+    selectedFixturePath,
+    selectedFixturePath,
+    largeDropFixturePath,
+    storageStateFixturePath
+  ]
+  const fileBroker = new BrowserFileBroker({
+    rootDirectory: join(PROFILE_DIRECTORY, 'browser-automation-files'),
+    selectionProvider: {
+      selectFiles: async () => [
+        selectedFixturePaths[Math.min(fileSelectionCount++, selectedFixturePaths.length - 1)]
+      ]
+    }
+  })
+  await fileBroker.initialize()
   const downloadBroker = new BrowserDownloadBroker({
     artifacts: artifactBroker,
     expectedSession: managedSession
@@ -199,6 +221,34 @@ async function main(): Promise<void> {
       response.end(JSON.stringify({ ok: true }))
       return
     }
+    if (request.method === 'POST' && request.url === '/api/upload') {
+      const chunks: Buffer[] = []
+      let sizeBytes = 0
+      request.on('data', (chunk: Buffer) => {
+        sizeBytes += chunk.byteLength
+        if (sizeBytes > 1024 * 1024) {
+          response.statusCode = 413
+          response.end()
+          request.destroy()
+          return
+        }
+        chunks.push(chunk)
+      })
+      request.on('end', () => {
+        if (response.writableEnded) return
+        const multipart = Buffer.concat(chunks).toString('utf8')
+        response.setHeader('content-type', 'application/json; charset=utf-8')
+        response.end(
+          JSON.stringify({
+            contentMatched: multipart.includes(
+              'repository-owned synthetic admissions presentation fixture'
+            ),
+            filenameMatched: multipart.includes('2026') && multipart.includes('.pptx')
+          })
+        )
+      })
+      return
+    }
     if (request.url === '/download') {
       response.setHeader('content-type', 'text/plain; charset=utf-8')
       response.setHeader('content-disposition', 'attachment; filename="fixture-download.txt"')
@@ -211,16 +261,24 @@ async function main(): Promise<void> {
         <html><body><main><h1>Secondary Fixture Page</h1></main></body></html>`)
       return
     }
-    if (request.url === '/mail-frame') {
+    if (request.url?.startsWith('/mail-frame')) {
+      const crossFrame = request.url.includes('scope=cross')
+      const subjectLabel = crossFrame ? 'Cross Frame Subject' : 'Frame Subject'
+      const dropLabel = crossFrame ? 'Cross file drop target' : 'Frame file drop target'
       response.end(`<!doctype html>
         <html><body>
-          <label for="frame-subject">Frame Subject</label>
+          <label for="frame-subject">${subjectLabel}</label>
           <input id="frame-subject" />
           <div id="slow-editor" contenteditable></div>
           <div id="mail-body" contenteditable></div>
+          <div id="file-drop" role="region" aria-label="${dropLabel}">Drop fixture file here</div>
           <output id="frame-status">frame-idle</output>
           <output id="subject-value">subject:</output>
           <output id="body-value">body:</output>
+          <output id="evaluate-value">evaluate:</output>
+          <output id="drop-events">drop-events:</output>
+          <output id="drop-selection">drop-selection:</output>
+          <output id="drop-value">drop:</output>
           <output id="body-events">body-events:</output>
           <output id="slow-events">slow-events:</output>
           <script>
@@ -247,6 +305,42 @@ async function main(): Promise<void> {
               document.querySelector('#frame-status').textContent =
                 'focused:' + (document.activeElement.id || 'unknown')
             })
+            document.querySelector('#file-drop').addEventListener('dragover', event => {
+              event.preventDefault()
+            })
+            const dropEvents = []
+            for (const eventName of ['dragenter', 'dragover', 'drop']) {
+              document.querySelector('#file-drop').addEventListener(eventName, event => {
+                dropEvents.push(event.type)
+                document.querySelector('#drop-events').textContent =
+                  'drop-events:' + dropEvents.join(',')
+              })
+            }
+            document.querySelector('#file-drop').addEventListener('drop', async event => {
+              event.preventDefault()
+              const file = event.dataTransfer.files[0]
+              document.querySelector('#drop-selection').textContent = file
+                ? 'drop-selection:' + file.name + ':' + file.size
+                : 'drop-selection:no-file'
+              try {
+                if (!file) {
+                  document.querySelector('#drop-value').textContent = 'drop:no-file'
+                } else if (file.size > 1024 * 1024) {
+                  const bytes = new Uint8Array(await file.arrayBuffer())
+                  document.querySelector('#drop-value').textContent =
+                    'drop:' + file.name + ':' + file.size + ':' +
+                    String.fromCharCode(bytes[0]) + ':' +
+                    String.fromCharCode(bytes[bytes.length - 1])
+                } else {
+                  document.querySelector('#drop-value').textContent =
+                    'drop:' + file.name + ':' + await file.text()
+                }
+              } catch {
+                document.querySelector('#drop-value').textContent = file
+                  ? 'drop:' + file.name + ':read-failed'
+                  : 'drop:no-file'
+              }
+            })
             const bodyEvents = []
             for (const eventName of ['keydown', 'beforeinput', 'input', 'keyup']) {
               document.querySelector('#mail-body').addEventListener(eventName, event => {
@@ -259,6 +353,11 @@ async function main(): Promise<void> {
         </body></html>`)
       return
     }
+    const listeningAddress = server.address()
+    if (!listeningAddress || typeof listeningAddress === 'string') {
+      throw new Error('local fixture address unavailable')
+    }
+    const crossFrameUrl = `http://localhost:${listeningAddress.port}/mail-frame?scope=cross`
     response.end(`<!doctype html>
       <html><body>
         <main>
@@ -273,21 +372,65 @@ async function main(): Promise<void> {
           <button id="apply">Apply</button>
           <button id="dialog">Show dialog</button>
           <a href="/download" download="fixture-download.txt">Download fixture</a>
+          <label for="fixture-upload">Fixture upload</label>
+          <input id="fixture-upload" type="file" />
+          <button id="submit-upload" type="button">Submit fixture upload</button>
           <div id="drag-source" role="button" tabindex="0" draggable="true">Drag source</div>
           <div id="drop-target" role="region" aria-label="Drop target">Drop target</div>
           <ul aria-label="Visible items"><li>Alpha</li><li>Beta</li></ul>
           <output id="output">idle</output>
+          <output id="upload-selection">upload-selection:</output>
+          <output id="upload-output">upload:</output>
+          <output id="upload-submit">upload-submit:</output>
+          <output id="network-status">network-pending</output>
           <iframe id="mail-frame" src="/mail-frame"></iframe>
+          <iframe id="cross-mail-frame" src="${crossFrameUrl}"></iframe>
         </main>
         <script>
           console.warn('managed fixture warning')
-          fetch('/api/ping?token=fixture-query-canary').catch(() => undefined)
+          fetch('/api/ping?token=fixture-query-canary')
+            .then(() => { document.querySelector('#network-status').textContent = 'network-ready' })
+            .catch(() => undefined)
           document.querySelector('#apply').addEventListener('click', () => {
             document.querySelector('#output').textContent =
               'applied:' + document.querySelector('#message').value
           })
           document.querySelector('#dialog').addEventListener('click', () => {
             alert('managed fixture dialog')
+          })
+          document.querySelector('#fixture-upload').addEventListener('change', async event => {
+            const file = event.target.files[0]
+            document.querySelector('#upload-selection').textContent = file
+              ? 'upload-selection:' + file.name + ':' + file.size
+              : 'upload-selection:no-file'
+            try {
+              document.querySelector('#upload-output').textContent = file
+                ? 'upload:' + file.name + ':' + await file.text()
+                : 'upload:no-file'
+            } catch {
+              document.querySelector('#upload-output').textContent = file
+                ? 'upload:' + file.name + ':read-failed'
+                : 'upload:no-file'
+            }
+          })
+          document.querySelector('#submit-upload').addEventListener('click', async () => {
+            const file = document.querySelector('#fixture-upload').files[0]
+            if (!file) {
+              document.querySelector('#upload-submit').textContent = 'upload-submit:no-file'
+              return
+            }
+            try {
+              const form = new FormData()
+              form.append('fixture', file)
+              const result = await fetch('/api/upload', { method: 'POST', body: form })
+              const receipt = await result.json()
+              document.querySelector('#upload-submit').textContent =
+                receipt.filenameMatched && receipt.contentMatched
+                  ? 'upload-submit:' + file.name + ':content-ok'
+                  : 'upload-submit:mismatch'
+            } catch {
+              document.querySelector('#upload-submit').textContent = 'upload-submit:read-failed'
+            }
           })
           document.querySelector('#drag-source').addEventListener('dragstart', event => {
             event.dataTransfer.setData('text/plain', 'fixture-drag')
@@ -308,6 +451,30 @@ async function main(): Promise<void> {
   if (!address || typeof address === 'string') throw new Error('local fixture did not bind')
   const fixtureUrl = `http://127.0.0.1:${address.port}/interactive`
   const secondaryUrl = `http://127.0.0.1:${address.port}/secondary`
+  writeFileSync(
+    storageStateFixturePath,
+    JSON.stringify({
+      cookies: [
+        {
+          name: 'restored-cookie',
+          value: 'repository-owned-storage-cookie',
+          domain: '127.0.0.1',
+          path: '/',
+          expires: -1,
+          httpOnly: false,
+          secure: false,
+          sameSite: 'Lax'
+        }
+      ],
+      origins: [
+        {
+          origin: `http://127.0.0.1:${address.port}`,
+          localStorage: [{ name: 'restored-local', value: 'repository-owned-storage-local-value' }]
+        }
+      ]
+    }),
+    { mode: 0o600 }
+  )
 
   const window = new BrowserWindow({
     height: 320,
@@ -338,6 +505,7 @@ async function main(): Promise<void> {
     attachTimeoutMs: 10_000,
     broker,
     networkGuard,
+    releaseSurfaceResources: (input) => fileBroker.releaseSurface(input),
     closeTimeoutMs: 5_000,
     createSurfaceId: () =>
       surfaceSequence++ === 0 ? SURFACE_ID : `right-sidebar-managed-playwright-${surfaceSequence}`,
@@ -401,17 +569,27 @@ async function main(): Promise<void> {
 
   const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
     beginDispatchFence: (target) => manager.beginSensitiveDispatchFence(target),
-    getActiveTarget: () => manager.getSensitiveTargetIdentity()
+    getActiveTarget: () => manager.getSensitiveTargetIdentity(),
+    releasePreparedFiles: ({ runId, callId }) => {
+      void fileBroker.releaseToolCall({ runId, toolCallId: callId })
+    }
   })
   const bridgeHost = new ManagedPlaywrightBridgeHost({
     core,
+    fileBroker,
     sensitiveTargetBindings,
     createHost: createManagedPlaywrightHostFactory({
-      getBrowserContext: () => manager.getBrowserContext(),
+      getBrowserContext: () => manager.getBrowserContext({ createVisiblePage: false }),
       closeSurface: () => manager.closeSurface(),
       detachAutomation: () => manager.detachAutomation(),
       beginNetworkOperation: (input) => manager.beginNetworkOperation(input),
+      beginTargetCreationOperation: async (input) => {
+        const lease = networkGuard.beginTargetCreationOperation(input)
+        await lease.ready()
+        return lease
+      },
       artifactBroker,
+      fileBroker,
       finalizeBrowserRun: (runId) => networkGuard.finalizeRun(runId),
       getActiveSurfaceIdentity: () => manager.getActiveSurfaceIdentity(),
       sensitiveTargetBindings,
@@ -445,17 +623,26 @@ async function main(): Promise<void> {
   } finally {
     await bridgeHost.close().catch(() => undefined)
     await manager.shutdown().catch(() => undefined)
+    await fileBroker.shutdown().catch(() => undefined)
     await artifactBroker.shutdown().catch(() => undefined)
     await writeProtocolLine(
       `${RESULT_MARKER}${JSON.stringify({
         broker: broker.snapshot(),
         closeCommands,
         ensureCommands,
+        fileSelectionCount,
+        fileBroker: fileBroker.snapshot(),
+        guestCount: guests.size,
         mainWindowAlive: !window.isDestroyed(),
         riskGuard: networkGuard.snapshot(),
+        surfaceCount: manager.snapshot().surfaces,
         targetClosed: !guest || guest.isDestroyed()
       })}`
-    ).catch(() => undefined)
+    ).catch((error: unknown) => {
+      console.error(
+        `managed Playwright RESULT write failed: ${error instanceof Error ? error.name : 'Error'}`
+      )
+    })
     if (!window.isDestroyed()) window.destroy()
     await closeServer(server)
     app.quit()

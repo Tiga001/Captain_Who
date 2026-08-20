@@ -25,6 +25,7 @@ function prepareInput(
 ): ManagedPlaywrightPrepareSensitiveToolInput {
   return {
     bindingRequestId: randomUUID(),
+    bindingScope: 'managed_surface',
     runId: 'run-1',
     capabilityId: 'browser_automation',
     activationId: '4af35bbd-cb1e-4b20-a021-92cd6b160829',
@@ -36,6 +37,7 @@ function prepareInput(
     argumentsDigest: `sha256:${'b'.repeat(64)}`,
     createdAtMs: NOW,
     expiresAtMs: NOW + 60_000,
+    filePreparation: null,
     ...overrides
   }
 }
@@ -69,7 +71,12 @@ function authorization(
   }
 }
 
-function harness(options: { maxBindings?: number } = {}) {
+function harness(
+  options: {
+    maxBindings?: number
+    releasePreparedFiles?: (owner: { runId: string; callId: string }) => void
+  } = {}
+) {
   let now = NOW
   let target: ManagedPlaywrightSensitiveTargetIdentity | null = { ...TARGET }
   let blockAtFinish = false
@@ -82,6 +89,7 @@ function harness(options: { maxBindings?: number } = {}) {
     getActiveTarget: () => target,
     maxBindings: options.maxBindings,
     now: () => now,
+    releasePreparedFiles: options.releasePreparedFiles,
     secret: new Uint8Array(32).fill(7)
   })
   return {
@@ -124,6 +132,97 @@ describe('ManagedPlaywrightSensitiveTargetBindingBroker', () => {
     expect(() => fixture.broker.acquire(authorization(prepared, input))).toThrow(
       expect.objectContaining({ code: 'reused' })
     )
+  })
+
+  it('binds profile-scoped cookie/storage authority without an active surface or navigation fence', () => {
+    const fixture = harness()
+    fixture.setTarget(null)
+    const input = prepareInput({
+      bindingScope: 'managed_browser_profile',
+      toolName: 'browser_cookie_list',
+      callId: 'call-profile',
+      argumentsDigest: `sha256:${'e'.repeat(64)}`
+    })
+    const prepared = fixture.broker.prepare(input)
+
+    expect(prepared.origin).toBeNull()
+    expect(JSON.stringify(prepared)).not.toMatch(/surface|generation|navigationEpoch/)
+    const lease = fixture.broker.acquire(authorization(prepared, input))
+    expect(lease.target).toBeUndefined()
+    lease.markDispatched()
+    lease.finish()
+    expect(fixture.beginDispatchFence).not.toHaveBeenCalled()
+    expect(fixture.broker.snapshot()).toEqual({ bindings: 0, requests: 0 })
+  })
+
+  it('projects only safe file identity and releases proposal files unless dispatch consumed them', () => {
+    const releasePreparedFiles = vi.fn()
+    const fixture = harness({ releasePreparedFiles })
+    const input = prepareInput({
+      filePreparation: { mode: 'resolved_paths', paths: ['/process-only/workspace/deck.pptx'] }
+    })
+    const fileAuthority = {
+      handles: ['browser-file:123e4567-e89b-42d3-a456-426614174000'],
+      basenames: ['deck.pptx'],
+      fileRevisionDigest: `sha256:${'d'.repeat(64)}`
+    }
+    const prepared = fixture.broker.prepare(input, fileAuthority)
+
+    expect(prepared).toMatchObject({
+      fileBasenames: ['deck.pptx'],
+      fileRevisionDigest: fileAuthority.fileRevisionDigest
+    })
+    expect(JSON.stringify(prepared)).not.toContain('/process-only')
+    expect(JSON.stringify(prepared)).not.toContain('browser-file:')
+    const lease = fixture.broker.acquire(authorization(prepared, input))
+    expect(lease.preparedFileHandles).toEqual(fileAuthority.handles)
+    lease.finish()
+    expect(releasePreparedFiles).toHaveBeenCalledExactlyOnceWith({
+      runId: input.runId,
+      callId: input.callId
+    })
+
+    releasePreparedFiles.mockClear()
+    const dispatchedInput = prepareInput({
+      bindingRequestId: randomUUID(),
+      callId: 'call-dispatched',
+      filePreparation: { mode: 'resolved_paths', paths: ['/process-only/workspace/deck-2.pptx'] }
+    })
+    const dispatchedAuthority = {
+      ...fileAuthority,
+      handles: ['browser-file:223e4567-e89b-42d3-a456-426614174000']
+    }
+    const dispatched = fixture.broker.prepare(dispatchedInput, dispatchedAuthority)
+    const dispatchedLease = fixture.broker.acquire(authorization(dispatched, dispatchedInput))
+    dispatchedLease.markDispatched()
+    dispatchedLease.finish()
+    expect(releasePreparedFiles).not.toHaveBeenCalled()
+  })
+
+  it('invalidates a duplicate preparation whose opaque file authority drifted', () => {
+    const releasePreparedFiles = vi.fn()
+    const fixture = harness({ releasePreparedFiles })
+    const input = prepareInput({
+      filePreparation: { mode: 'resolved_paths', paths: ['/process-only/workspace/deck.pptx'] }
+    })
+    const first = {
+      handles: ['browser-file:123e4567-e89b-42d3-a456-426614174000'],
+      basenames: ['deck.pptx'],
+      fileRevisionDigest: `sha256:${'d'.repeat(64)}`
+    }
+    fixture.broker.prepare(input, first)
+
+    expect(() =>
+      fixture.broker.prepare(input, {
+        ...first,
+        handles: ['browser-file:223e4567-e89b-42d3-a456-426614174000']
+      })
+    ).toThrow(expect.objectContaining({ code: 'drifted' }))
+    expect(fixture.broker.snapshot()).toEqual({ bindings: 0, requests: 0 })
+    expect(releasePreparedFiles).toHaveBeenCalledExactlyOnceWith({
+      runId: input.runId,
+      callId: input.callId
+    })
   })
 
   it.each([

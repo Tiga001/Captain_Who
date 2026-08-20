@@ -1514,6 +1514,8 @@ export const enUSTranslations = {
   'agent.builtinMcpApproval.resource.generic': 'Restricted data in the current page',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
     'The entire MyCopilot managed browser profile (which may include sign-in data from other sites)',
+  'agent.builtinMcpApproval.resource.managedSurface':
+    'The current MyCopilot managed browser tab, including its embedded pages',
   'agent.builtinMcpApproval.origin': 'Page origin',
   'agent.builtinMcpApproval.files': 'Files',
   'agent.builtinMcpApproval.risks': 'Sensitive access',

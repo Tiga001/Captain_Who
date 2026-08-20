@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, open, realpath, rename, rm, stat, unlink } from 'node:fs/promises'
-import { basename, dirname, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { parseBrowserSurfaceId } from '@mycopilot/protocol'
 
 const DEFAULT_TTL_MS = 15 * 60 * 1_000
 const MAX_TTL_MS = 24 * 60 * 60 * 1_000
@@ -96,6 +97,18 @@ interface BrowserFileRecord {
   claimedByToolCallId?: string
 }
 
+interface BrowserFileRetainedRecord {
+  dispatched: boolean
+  dispose: () => Promise<void>
+  expiresAt: number
+  fileCount: number
+  generation: number
+  id: string
+  owner: BrowserFileOwner
+  sizeBytes: number
+  surfaceId: string
+}
+
 interface BrowserFileSelectionFence {
   owner: BrowserFileOwner
   lifecycleEpoch: number
@@ -114,6 +127,13 @@ export interface BrowserFileResolution {
 
 export interface BrowserFileReadLease extends BrowserFileResolution {
   /** Idempotently destroys the one-time private copies. */
+  finish(): Promise<void>
+}
+
+export interface BrowserFileRetainedLease {
+  /** Marks that Chromium may now hold the file path; later Tool cancellation cannot revoke it. */
+  markDispatched(): void
+  /** Releases only a definitely-not-dispatched retention. Dispatched files remain Broker-owned. */
   finish(): Promise<void>
 }
 
@@ -137,6 +157,7 @@ export class BrowserFileBroker {
   private readonly selectionProvider: BrowserFileSelectionProvider
   private readonly ttlMs: number
   private readonly records = new Map<string, BrowserFileRecord>()
+  private readonly retained = new Map<string, BrowserFileRetainedRecord>()
   private readonly activeFreezes = new Set<Promise<BrowserFileRecord>>()
   private readonly activationEpochs = new Map<string, number>()
   private readonly runEpochs = new Map<string, number>()
@@ -191,7 +212,7 @@ export class BrowserFileBroker {
     this.assertSelectionFence(fence)
     await this.purgeExpired()
     this.assertSelectionFence(fence)
-    if (this.records.size >= this.maxHandles) {
+    if (this.records.size + this.retainedFileCount() >= this.maxHandles) {
       throw new BrowserFileBrokerError('browser.file.capacity')
     }
     const selected = await this.selectionProvider.selectFiles({
@@ -201,13 +222,62 @@ export class BrowserFileBroker {
     })
     this.assertSelectionFence(fence)
     if (!selected || selected.length === 0) return []
+    return this.freezeReadPaths(
+      owner,
+      fence,
+      selected,
+      input.multiple ? this.maxFilesPerSelection : 1
+    )
+  }
+
+  /**
+   * Freezes paths already authorized by Core's workspace/attachment resolver.
+   *
+   * This entrypoint is process-internal: raw paths must never come from Renderer or model input
+   * directly. Main still independently applies the same O_NOFOLLOW, revision, size and capacity
+   * checks as the native picker path and publishes only opaque references.
+   */
+  async freezeResolvedForRead(input: {
+    owner: BrowserFileOwner
+    paths: readonly string[]
+  }): Promise<readonly BrowserFileReference[]> {
+    this.assertOpen()
+    const owner = validateOwner(input.owner)
     if (
-      selected.length > (input.multiple ? this.maxFilesPerSelection : 1) ||
-      selected.length + this.records.size > this.maxHandles
+      !Array.isArray(input.paths) ||
+      input.paths.length < 1 ||
+      input.paths.length > this.maxFilesPerSelection ||
+      input.paths.some(
+        (path) =>
+          typeof path !== 'string' ||
+          path.length < 1 ||
+          path.length > 8_192 ||
+          !isAbsolute(path)
+      )
+    ) {
+      throw new BrowserFileBrokerError('browser.file.invalid_file')
+    }
+    const fence = this.captureSelectionFence(owner)
+    await this.initialize()
+    this.assertSelectionFence(fence)
+    await this.purgeExpired()
+    this.assertSelectionFence(fence)
+    return this.freezeReadPaths(owner, fence, input.paths, this.maxFilesPerSelection)
+  }
+
+  private async freezeReadPaths(
+    owner: BrowserFileOwner,
+    fence: BrowserFileSelectionFence,
+    selected: readonly string[],
+    maxFiles: number
+  ): Promise<readonly BrowserFileReference[]> {
+    if (
+      selected.length < 1 ||
+      selected.length > maxFiles ||
+      selected.length + this.records.size + this.retainedFileCount() > this.maxHandles
     ) {
       throw new BrowserFileBrokerError('browser.file.capacity')
     }
-
     const created: BrowserFileRecord[] = []
     try {
       for (const selectedPath of selected) {
@@ -396,35 +466,148 @@ export class BrowserFileBroker {
     }
   }
 
+  /**
+   * Transfers a Host-staged copy into task/surface lifetime after an opaque handle was consumed.
+   * No path is retained here: the Host supplies one bounded idempotent disposer, and this Broker
+   * owns when that disposer may run.
+   */
+  async retainConsumedFiles(input: {
+    owner: BrowserFileOwner
+    surfaceId: string
+    generation: number
+    references: readonly BrowserFileReference[]
+    dispose: () => Promise<void>
+  }): Promise<BrowserFileRetainedLease> {
+    this.assertOpen()
+    const owner = validateOwner(input.owner)
+    const fence = this.captureSelectionFence(owner)
+    let surfaceId: string
+    try {
+      surfaceId = parseBrowserSurfaceId(input.surfaceId)
+    } catch {
+      throw new BrowserFileBrokerError('browser.file.identity_mismatch')
+    }
+    if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
+      throw new BrowserFileBrokerError('browser.file.identity_mismatch')
+    }
+    if (
+      !Array.isArray(input.references) ||
+      input.references.length < 1 ||
+      input.references.length > this.maxFilesPerSelection ||
+      typeof input.dispose !== 'function'
+    ) {
+      throw new BrowserFileBrokerError('browser.file.invalid_file')
+    }
+    const references = input.references.map(validateRetainedReference)
+    if (new Set(references.map((reference) => reference.handle)).size !== references.length) {
+      throw new BrowserFileBrokerError('browser.file.invalid_file')
+    }
+    await this.purgeExpired()
+    this.assertSelectionFence(fence)
+    const fileCount = references.length
+    const sizeBytes = references.reduce((sum, reference) => sum + reference.sizeBytes, 0)
+    if (this.retainedFileCount() + this.records.size + fileCount > this.maxHandles) {
+      throw new BrowserFileBrokerError('browser.file.capacity')
+    }
+    this.assertRunCapacity(owner.runId, sizeBytes)
+    const record: BrowserFileRetainedRecord = {
+      dispatched: false,
+      dispose: onceAsync(input.dispose),
+      expiresAt: Math.min(...references.map((reference) => reference.expiresAt)),
+      fileCount,
+      generation: input.generation,
+      id: randomUUID(),
+      owner,
+      sizeBytes,
+      surfaceId
+    }
+    this.retained.set(record.id, record)
+    return {
+      markDispatched: () => {
+        if (this.retained.get(record.id) === record) record.dispatched = true
+      },
+      finish: async () => {
+        if (this.retained.get(record.id) === record && !record.dispatched) {
+          await this.releaseRetainedRecord(record)
+        }
+      }
+    }
+  }
+
   async releaseRun(runId: string): Promise<void> {
     incrementEpoch(this.runEpochs, runId)
-    await this.releaseMatching((record) => record.owner.runId === runId)
+    await Promise.all([
+      this.releaseMatching((record) => record.owner.runId === runId),
+      this.releaseRetainedMatching((record) => record.owner.runId === runId)
+    ])
   }
 
   async releaseCapability(activationId: string): Promise<void> {
     incrementEpoch(this.activationEpochs, activationId)
-    await this.releaseMatching((record) => record.owner.activationId === activationId)
+    await Promise.all([
+      this.releaseMatching((record) => record.owner.activationId === activationId),
+      this.releaseRetainedMatching((record) => record.owner.activationId === activationId)
+    ])
   }
 
   async releaseToolCall(owner: Pick<BrowserFileOwner, 'runId' | 'toolCallId'>): Promise<void> {
     incrementEpoch(this.toolCallEpochs, toolCallFenceKey(owner.runId, owner.toolCallId))
-    await this.releaseMatching(
-      (record) =>
-        record.owner.runId === owner.runId &&
-        (record.owner.toolCallId === owner.toolCallId ||
-          record.claimedByToolCallId === owner.toolCallId)
+    await Promise.all([
+      this.releaseMatching(
+        (record) =>
+          record.owner.runId === owner.runId &&
+          (record.owner.toolCallId === owner.toolCallId ||
+            record.claimedByToolCallId === owner.toolCallId)
+      ),
+      this.releaseRetainedMatching(
+        (record) =>
+          !record.dispatched &&
+          record.owner.runId === owner.runId &&
+          record.owner.toolCallId === owner.toolCallId
+      )
+    ])
+  }
+
+  async releaseSurface(input: { surfaceId: string; generation: number }): Promise<void> {
+    let surfaceId: string
+    try {
+      surfaceId = parseBrowserSurfaceId(input.surfaceId)
+    } catch {
+      return
+    }
+    if (!Number.isSafeInteger(input.generation) || input.generation < 1) return
+    await this.releaseRetainedMatching(
+      (record) => record.surfaceId === surfaceId && record.generation === input.generation
     )
   }
 
   async purgeExpired(): Promise<void> {
     const now = this.clock.now()
-    await this.releaseMatching((record) => record.reference.expiresAt <= now)
+    await Promise.all([
+      this.releaseMatching((record) => record.reference.expiresAt <= now),
+      this.releaseRetainedMatching((record) => !record.dispatched && record.expiresAt <= now)
+    ])
   }
 
-  snapshot(): { handles: number; bytes: number } {
+  snapshot(): {
+    handles: number
+    bytes: number
+    retained: { leases: number; files: number; bytes: number }
+  } {
+    const retainedBytes = [...this.retained.values()].reduce(
+      (sum, record) => sum + record.sizeBytes,
+      0
+    )
     return {
       handles: this.records.size,
-      bytes: [...this.records.values()].reduce((sum, record) => sum + record.reference.sizeBytes, 0)
+      bytes:
+        [...this.records.values()].reduce((sum, record) => sum + record.reference.sizeBytes, 0) +
+        retainedBytes,
+      retained: {
+        leases: this.retained.size,
+        files: this.retainedFileCount(),
+        bytes: retainedBytes
+      }
     }
   }
 
@@ -456,12 +639,17 @@ export class BrowserFileBroker {
     this.closed = true
     this.lifecycleEpoch += 1
     this.records.clear()
+    const retained = [...this.retained.values()]
+    this.retained.clear()
     const shutdownOperation = (async () => {
       await this.initializing?.catch(() => undefined)
       while (this.activeFreezes.size > 0) {
         await Promise.allSettled([...this.activeFreezes])
       }
-      await rm(this.rootDirectory, { recursive: true, force: true }).catch(() => undefined)
+      await Promise.allSettled([
+        ...retained.map((record) => record.dispose()),
+        rm(this.rootDirectory, { recursive: true, force: true })
+      ])
     })()
     this.shutdownOperation = shutdownOperation
     return shutdownOperation
@@ -595,9 +783,13 @@ export class BrowserFileBroker {
   }
 
   private assertRunCapacity(runId: string, additionalBytes: number): void {
-    const current = [...this.records.values()]
-      .filter((record) => record.owner.runId === runId)
-      .reduce((sum, record) => sum + record.reference.sizeBytes, 0)
+    const current =
+      [...this.records.values()]
+        .filter((record) => record.owner.runId === runId)
+        .reduce((sum, record) => sum + record.reference.sizeBytes, 0) +
+      [...this.retained.values()]
+        .filter((record) => record.owner.runId === runId)
+        .reduce((sum, record) => sum + record.sizeBytes, 0)
     if (current + additionalBytes > this.maxRunBytes) {
       throw new BrowserFileBrokerError('browser.file.capacity')
     }
@@ -642,6 +834,24 @@ export class BrowserFileBroker {
     await Promise.allSettled(matching.map((record) => rm(record.privatePath, { force: true })))
   }
 
+  private async releaseRetainedMatching(
+    predicate: (record: BrowserFileRetainedRecord) => boolean
+  ): Promise<void> {
+    const matching = [...this.retained.values()].filter(predicate)
+    for (const record of matching) this.retained.delete(record.id)
+    await Promise.allSettled(matching.map((record) => record.dispose()))
+  }
+
+  private async releaseRetainedRecord(record: BrowserFileRetainedRecord): Promise<void> {
+    if (this.retained.get(record.id) !== record) return
+    this.retained.delete(record.id)
+    await record.dispose().catch(() => undefined)
+  }
+
+  private retainedFileCount(): number {
+    return [...this.retained.values()].reduce((sum, record) => sum + record.fileCount, 0)
+  }
+
   private async deleteRecord(record: BrowserFileRecord): Promise<void> {
     this.records.delete(record.reference.handle)
     await rm(record.privatePath, { force: true }).catch(() => undefined)
@@ -669,6 +879,35 @@ function validateOwner(value: BrowserFileOwner): BrowserFileOwner {
     throw new BrowserFileBrokerError('browser.file.identity_mismatch')
   }
   return { ...value }
+}
+
+function validateRetainedReference(value: BrowserFileReference): BrowserFileReference {
+  if (
+    !value ||
+    value.schemaVersion !== 1 ||
+    typeof value.handle !== 'string' ||
+    !FILE_HANDLE.test(value.handle) ||
+    typeof value.displayName !== 'string' ||
+    value.displayName.length < 1 ||
+    value.displayName.length > 240 ||
+    typeof value.mimeType !== 'string' ||
+    value.mimeType.length < 1 ||
+    value.mimeType.length > 256 ||
+    !Number.isSafeInteger(value.sizeBytes) ||
+    value.sizeBytes < 0 ||
+    value.sizeBytes > DEFAULT_MAX_FILE_BYTES ||
+    !Number.isSafeInteger(value.createdAt) ||
+    !Number.isSafeInteger(value.expiresAt) ||
+    value.expiresAt <= value.createdAt
+  ) {
+    throw new BrowserFileBrokerError('browser.file.invalid_file')
+  }
+  return structuredClone(value)
+}
+
+function onceAsync(operation: () => Promise<void>): () => Promise<void> {
+  let pending: Promise<void> | undefined
+  return () => (pending ??= Promise.resolve().then(operation))
 }
 
 function sameOwner(left: BrowserFileOwner, right: BrowserFileOwner): boolean {

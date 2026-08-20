@@ -11,7 +11,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   BrowserFileBroker,
@@ -26,6 +26,11 @@ const owner: BrowserFileOwner = {
   activationId: 'activation-1',
   capabilityId: 'browser_automation',
   toolCallId: 'call-1'
+}
+const EMPTY_SNAPSHOT = {
+  handles: 0,
+  bytes: 0,
+  retained: { leases: 0, files: 0, bytes: 0 }
 }
 
 interface Deferred<T> {
@@ -62,7 +67,7 @@ async function fixture(
 }
 
 async function expectNoBrokerResidue(broker: BrowserFileBroker, root: string): Promise<void> {
-  expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+  expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   const privateRoot = join(root, 'browser-automation-files')
   const entries = await readdir(privateRoot).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return []
@@ -106,6 +111,47 @@ describe('BrowserFileBroker', () => {
     expect(resolution.fileRevisionDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
   })
 
+  it('freezes an already-authorized absolute workspace path without invoking the picker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mycopilot-browser-file-source-'))
+    roots.push(root)
+    const source = join(root, '浙江大学2026年招生资料汇编.pptx')
+    await writeFile(source, 'fixture-presentation')
+    const selectFiles = vi.fn(async () => null)
+    const { broker } = await fixture([], {
+      selectionProvider: { selectFiles }
+    })
+
+    const [reference] = await broker.freezeResolvedForRead({ owner, paths: [source] })
+    expect(selectFiles).not.toHaveBeenCalled()
+    expect(reference).toMatchObject({
+      displayName: '浙江大学2026年招生资料汇编.pptx',
+      sizeBytes: 20
+    })
+    expect(JSON.stringify(reference)).not.toContain(source)
+    const lease = await broker.consumeForRead({ owner, handles: [reference.handle] })
+    expect(await readFile(lease.paths[0], 'utf8')).toBe('fixture-presentation')
+    await lease.finish()
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
+  })
+
+  it('rejects relative and symbolic-link paths at the resolved-path Main boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mycopilot-browser-file-source-'))
+    roots.push(root)
+    const source = join(root, 'source.txt')
+    const link = join(root, 'link.txt')
+    await writeFile(source, 'payload')
+    await symlink(source, link)
+    const { broker } = await fixture([])
+
+    await expect(
+      broker.freezeResolvedForRead({ owner, paths: ['relative.txt'] })
+    ).rejects.toMatchObject({ code: 'browser.file.invalid_file' })
+    await expect(broker.freezeResolvedForRead({ owner, paths: [link] })).rejects.toMatchObject({
+      code: 'browser.file.symlink_forbidden'
+    })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
+  })
+
   it('rejects symlinks without reading their target', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mycopilot-browser-file-source-'))
     roots.push(root)
@@ -118,7 +164,7 @@ describe('BrowserFileBroker', () => {
     await expect(broker.selectForRead({ owner, multiple: false })).rejects.toMatchObject({
       code: 'browser.file.symlink_forbidden'
     })
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   })
 
   it('invalidates the handle if the selected source revision drifts', async () => {
@@ -133,7 +179,7 @@ describe('BrowserFileBroker', () => {
     await expect(
       broker.resolveForRead({ owner, handles: [reference.handle] })
     ).rejects.toMatchObject({ code: 'browser.file.changed' })
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   })
 
   it('binds handles to the task activation while allowing a later approved tool call to consume it', async () => {
@@ -191,7 +237,96 @@ describe('BrowserFileBroker', () => {
         result.status === 'fulfilled'
     )
     await fulfilled?.value.finish()
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
+  })
+
+  it('retains a dispatched upload across Tool cancellation and releases it on exact target close', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mycopilot-browser-file-source-'))
+    roots.push(root)
+    const source = join(root, 'lazy-upload.txt')
+    const stagedDirectory = join(root, 'upstream-output', '.file-input-retained')
+    const stagedPath = join(stagedDirectory, '0.txt')
+    await writeFile(source, 'payload')
+    await mkdir(stagedDirectory, { recursive: true })
+    await writeFile(stagedPath, 'payload')
+    let now = 50_000
+    const { broker } = await fixture([source], {
+      clock: { now: () => now },
+      maxFileBytes: 16,
+      maxHandles: 2,
+      maxRunBytes: 16,
+      ttlMs: 1_000
+    })
+    const [reference] = await broker.selectForRead({ owner, multiple: false })
+    const consumingOwner = { ...owner, toolCallId: 'upload-retained' }
+    const sourceLease = await broker.consumeForRead({
+      owner: consumingOwner,
+      handles: [reference.handle]
+    })
+    const dispose = vi.fn(async () => rm(stagedDirectory, { force: true, recursive: true }))
+    await sourceLease.finish()
+    const retained = await broker.retainConsumedFiles({
+      owner: consumingOwner,
+      surfaceId: 'managed-browser-retained',
+      generation: 7,
+      references: sourceLease.references,
+      dispose
+    })
+
+    retained.markDispatched()
+    now += 1_001
+    await broker.purgeExpired()
+    await retained.finish()
+    await broker.releaseToolCall({ runId: owner.runId, toolCallId: consumingOwner.toolCallId })
+    expect(dispose).not.toHaveBeenCalled()
+    expect(await readFile(stagedPath, 'utf8')).toBe('payload')
+    expect(broker.snapshot()).toEqual({
+      handles: 0,
+      bytes: 7,
+      retained: { leases: 1, files: 1, bytes: 7 }
+    })
+
+    await broker.releaseSurface({ surfaceId: 'managed-browser-retained', generation: 6 })
+    expect(dispose).not.toHaveBeenCalled()
+    await broker.releaseSurface({ surfaceId: 'managed-browser-retained', generation: 7 })
+    expect(dispose).toHaveBeenCalledOnce()
+    await expect(stat(stagedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
+  })
+
+  it('cleans a definitely-not-dispatched retention and keeps retained bytes inside capacity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mycopilot-browser-file-source-'))
+    roots.push(root)
+    const source = join(root, 'capacity.txt')
+    await writeFile(source, '12345')
+    const { broker } = await fixture([source], {
+      maxFileBytes: 5,
+      maxHandles: 1,
+      maxRunBytes: 5
+    })
+    const [reference] = await broker.selectForRead({ owner, multiple: false })
+    const sourceLease = await broker.consumeForRead({ owner, handles: [reference.handle] })
+    await sourceLease.finish()
+    const dispose = vi.fn(async () => undefined)
+    const retained = await broker.retainConsumedFiles({
+      owner,
+      surfaceId: 'managed-browser-capacity',
+      generation: 1,
+      references: sourceLease.references,
+      dispose
+    })
+    expect(broker.snapshot()).toEqual({
+      handles: 0,
+      bytes: 5,
+      retained: { leases: 1, files: 1, bytes: 5 }
+    })
+    await expect(broker.selectForRead({ owner, multiple: false })).rejects.toMatchObject({
+      code: 'browser.file.capacity'
+    })
+
+    await retained.finish()
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   })
 
   it('enforces item, selection, and run capacity before retaining authority', async () => {
@@ -210,7 +345,7 @@ describe('BrowserFileBroker', () => {
     await expect(broker.selectForRead({ owner, multiple: true })).rejects.toMatchObject({
       code: 'browser.file.capacity'
     })
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   })
 
   it('expires, revokes, and cleans private copies without preserving paths', async () => {
@@ -237,7 +372,7 @@ describe('BrowserFileBroker', () => {
     await expect(broker.resolveForRead({ owner, handles: [second.handle] })).rejects.toBeInstanceOf(
       BrowserFileBrokerError
     )
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
     expect(await readdir(join(brokerRoot, 'browser-automation-files'))).toEqual([])
   })
 
@@ -388,7 +523,7 @@ describe('BrowserFileBroker', () => {
       })
       await lease.finish()
     }
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   })
 
   it('rejects an oversized file before creating any private copy', async () => {
@@ -400,6 +535,6 @@ describe('BrowserFileBroker', () => {
     await expect(broker.selectForRead({ owner, multiple: false })).rejects.toMatchObject({
       code: 'browser.file.too_large'
     })
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual(EMPTY_SNAPSHOT)
   })
 })

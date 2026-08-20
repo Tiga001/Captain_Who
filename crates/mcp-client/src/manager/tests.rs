@@ -387,3 +387,42 @@ fn every_error_after_request_queue_is_outcome_unknown_without_response_evidence(
         );
     }
 }
+
+#[test]
+fn trusted_host_completion_preserves_authoritative_pre_dispatch_rejection() {
+    let server_id = McpServerId::new();
+    let control = ActiveCallControl::new(
+        McpActiveCallId::new(
+            server_id,
+            McpInvocationId::new(),
+            McpModelCallId::new("trusted-host-rejection").unwrap(),
+        ),
+        McpActiveCallProvenance {
+            tool_id: McpToolId {
+                server_id,
+                raw_name: "managed_tool".to_string(),
+            },
+            model_name: "mcp__managed__tool".to_string(),
+            config_epoch: McpConfigEpoch::new(),
+            registry_revision: 1,
+            config_digest: "a".repeat(64).parse().unwrap(),
+            catalog_generation: 1,
+            catalog_digest: "b".repeat(64).parse().unwrap(),
+            schema_digest: "c".repeat(64).parse().unwrap(),
+        },
+        60_000,
+    );
+    control.dispatch.mark_request_queued();
+
+    let normalized = normalize_dispatched_result(
+        &control,
+        Err(McpError::protocol("trusted Host rejected before dispatch")
+            .with_authoritative_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)),
+    )
+    .unwrap_err();
+    assert_eq!(normalized.kind, McpErrorKind::Protocol);
+    assert_eq!(
+        normalized.dispatch_certainty,
+        Some(McpDispatchCertainty::DefinitelyNotDispatched)
+    );
+}

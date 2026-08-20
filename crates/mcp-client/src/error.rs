@@ -36,6 +36,10 @@ pub struct McpError {
     pub dispatch_certainty: Option<McpDispatchCertainty>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_unknown_reason: Option<McpOutcomeUnknownReason>,
+    /// Process-local evidence from a trusted Host adapter that authoritatively knows whether its
+    /// downstream operation crossed the side-effect boundary. Never accepted from MCP wire data.
+    #[serde(skip)]
+    authoritative_dispatch_certainty: bool,
 }
 
 impl McpError {
@@ -79,6 +83,7 @@ impl McpError {
             exit_code: None,
             dispatch_certainty: Some(McpDispatchCertainty::DefinitelyNotDispatched),
             outcome_unknown_reason: None,
+            authoritative_dispatch_certainty: false,
         }
     }
 
@@ -92,6 +97,7 @@ impl McpError {
             exit_code: None,
             dispatch_certainty: Some(McpDispatchCertainty::DefinitelyNotDispatched),
             outcome_unknown_reason: None,
+            authoritative_dispatch_certainty: false,
         }
     }
 
@@ -111,6 +117,7 @@ impl McpError {
             exit_code: None,
             dispatch_certainty: Some(certainty),
             outcome_unknown_reason: Some(reason),
+            authoritative_dispatch_certainty: false,
         }
     }
 
@@ -123,6 +130,7 @@ impl McpError {
             exit_code,
             dispatch_certainty: Some(McpDispatchCertainty::DefinitelyNotDispatched),
             outcome_unknown_reason: None,
+            authoritative_dispatch_certainty: false,
         }
     }
 
@@ -136,6 +144,22 @@ impl McpError {
         self
     }
 
+    /// Marks dispatch certainty supplied by a trusted in-process Host completion as authoritative.
+    /// Ordinary MCP/transport errors must continue to use `with_dispatch_certainty` so a queued
+    /// call remains OutcomeUnknown when the peer cannot prove whether it ran.
+    pub fn with_authoritative_dispatch_certainty(
+        mut self,
+        certainty: McpDispatchCertainty,
+    ) -> Self {
+        self.dispatch_certainty = Some(certainty);
+        self.authoritative_dispatch_certainty = true;
+        self
+    }
+
+    pub(crate) fn dispatch_certainty_is_authoritative(&self) -> bool {
+        self.authoritative_dispatch_certainty
+    }
+
     fn new(kind: McpErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -145,6 +169,7 @@ impl McpError {
             exit_code: None,
             dispatch_certainty: None,
             outcome_unknown_reason: None,
+            authoritative_dispatch_certainty: false,
         }
     }
 }

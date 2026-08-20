@@ -38,6 +38,25 @@ test('derives every tool row from the frozen inputs and keeps all policy states 
   assert.equal(unsafe.exposed, false)
   assert.equal(unsafe.availability, 'model_hidden')
   assert.equal(unsafe.behaviorContract, 'unavailable_until_real_process_sandbox')
+  const pdf = report.tools.find((tool) => tool.rawName === 'browser_pdf_save')
+  assert.equal(pdf.exposed, true)
+  assert.equal(pdf.availability, 'model_visible_typed_unavailable')
+  assert.equal(pdf.behaviorContract, 'typed_platform_unavailable')
+  assert.equal(report.platformCapabilityDifferences.browser_pdf_save.status, 'typed_unavailable')
+  assert.equal(
+    report.platformCapabilityDifferences.browser_pdf_save.toolResult.code,
+    'browser.pdf_unavailable'
+  )
+  assert.equal(report.platformCapabilityDifferences.browser_pdf_save.artifactPublished, false)
+  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.status, 'not_native_parity')
+  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.nativeWindowProxy, false)
+  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.openerPostMessage, false)
+  assert.equal(report.knownBehaviorGaps.workerTargets.serviceWorker.status, 'not_admitted')
+  assert.equal(report.knownBehaviorGaps.workerTargets.sharedWorker.electronE2e, false)
+  assert.equal(
+    report.knownBehaviorGaps.workerTargets.boundary,
+    'managed_page_frame_and_dedicated_worker_targets_only'
+  )
   assert.equal(report.security.persistenceLeakBudget.cookieValues, 0)
   assert.equal(report.platforms.find((entry) => entry.platform === 'darwin').status, 'evidence')
   assert.equal(
@@ -97,14 +116,17 @@ test('derives every tool row from the frozen inputs and keeps all policy states 
   assert.deepEqual(
     report.sensitiveResourceScope.tools.map((entry) => [
       entry.tool,
+      entry.scope,
       entry.available.length,
-      entry.failureCode
+      Boolean(entry.exactEffectEvidence)
     ]),
     [
-      ['browser_evaluate', 2, 'sensitive_target_scope_unsupported'],
-      ['browser_drop', 2, 'sensitive_target_scope_unsupported'],
-      ['browser_file_upload', 0, 'sensitive_target_scope_unsupported'],
-      ['browser_network_request', 0, 'sensitive_request_identity_unavailable']
+      ['browser_evaluate', 'managed_surface', 4, true],
+      ['browser_drop', 'managed_surface', 5, true],
+      ['browser_file_upload', 'managed_surface', 2, true],
+      ['browser_network_request', 'managed_surface', 2, true],
+      ['browser_cookie_*', 'managed_browser_profile', 2, false],
+      ['browser_storage_state/browser_set_storage_state', 'managed_browser_profile', 2, false]
     ]
   )
 })

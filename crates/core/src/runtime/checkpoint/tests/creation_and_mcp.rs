@@ -714,7 +714,6 @@ fn builtin_sensitive_approval_defers_private_siblings_without_persisting_any_arg
             "function": format!("() => localStorage.getItem('{secret}')"),
             "password": secret,
             "cookie": secret,
-            "approval_origin": "https://mail.example.test",
             "call_reason": "Read the reviewed page state.",
         }),
     };
@@ -734,7 +733,6 @@ fn builtin_sensitive_approval_defers_private_siblings_without_persisting_any_arg
                 name: "browser_file_upload".to_string(),
                 args: json!({
                     "paths": [format!("browser-file:{secret}")],
-                    "approval_origin": "https://mail.example.test",
                     "call_reason": "Upload the reviewed file.",
                 }),
             },

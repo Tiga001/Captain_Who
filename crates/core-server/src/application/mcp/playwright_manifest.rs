@@ -23,7 +23,6 @@ const REVIEWED_POLICY_JSON: &str =
 const FIXED_UPSTREAM_TOOL_COUNT: usize = 69;
 const MAX_REVIEWED_EXPOSED_TOOLS: usize = 128;
 const CALL_REASON_PROPERTY: &str = "call_reason";
-const APPROVAL_ORIGIN_PROPERTY: &str = "approval_origin";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PlaywrightToolIdentity(String);
@@ -187,16 +186,10 @@ struct ReviewedToolPolicy {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostSchemaOverlay {
     add_call_reason: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    add_approval_origin: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remove_properties: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     property_overrides: BTreeMap<String, Value>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 pub(crate) fn load_playwright_browser_manifest() -> AgentResult<BuiltinCapabilityManifest> {
@@ -418,12 +411,6 @@ fn validate_policy_reason_and_constraints(policy: &ReviewedToolPolicy) -> AgentR
             "内置 Playwright Tool policy 缺少 handling 约束。",
         ));
     }
-    let expects_origin = policy.handling_mode == PlaywrightToolHandlingMode::ApprovalRequired;
-    if policy.host_overlay.add_approval_origin != expects_origin {
-        return Err(AgentError::new(
-            "内置 Playwright Tool approval_origin overlay 与 handling policy 不一致。",
-        ));
-    }
     Ok(())
 }
 
@@ -620,23 +607,6 @@ fn apply_host_schema_overlay(
         }),
     );
     required.push(Value::String(CALL_REASON_PROPERTY.to_string()));
-    if overlay.add_approval_origin {
-        if properties.contains_key(APPROVAL_ORIGIN_PROPERTY) {
-            return Err(AgentError::new(
-                "upstream schema 意外占用了 Host approval_origin 字段。",
-            ));
-        }
-        properties.insert(
-            APPROVAL_ORIGIN_PROPERTY.to_string(),
-            serde_json::json!({
-                "type": "string",
-                "description": "Exact HTTP(S) origin of the active managed page for sensitive-tool approval. Do not include credentials, path, query, or fragment.",
-                "minLength": 8,
-                "maxLength": 512
-            }),
-        );
-        required.push(Value::String(APPROVAL_ORIGIN_PROPERTY.to_string()));
-    }
     host_object.insert("required".to_string(), Value::Array(required));
 
     verify_structural_schema_preserved(upstream_schema, &host_schema, &removed)?;
@@ -743,8 +713,6 @@ fn verify_structural_schema_preserved(
         .iter()
         .any(|required| !host_required.contains(required))
         || !host_required.contains(&Value::String(CALL_REASON_PROPERTY.to_string()))
-        || (host_properties.contains_key(APPROVAL_ORIGIN_PROPERTY)
-            != host_required.contains(&Value::String(APPROVAL_ORIGIN_PROPERTY.to_string())))
     {
         return Err(AgentError::new(
             "Host overlay 丢失了 upstream required 字段。",
@@ -853,7 +821,7 @@ mod tests {
         );
         assert_eq!(
             contract.policy_digest,
-            "sha256:522934676363be5d6c113fc373cfa1c47309da4b8a101e4619d0c815f9d80ade"
+            "sha256:4f36ae204ff1990f1cec45c8054062406b7a02186b7bd39620a30f128505f268"
         );
 
         let counts = contract.tools.values().fold(
@@ -969,15 +937,8 @@ mod tests {
             let required = tool.host_input_schema["required"].as_array().unwrap();
             assert!(properties.contains_key(CALL_REASON_PROPERTY));
             assert!(required.contains(&serde_json::json!(CALL_REASON_PROPERTY)));
-            let is_sensitive = tool.handling_mode == PlaywrightToolHandlingMode::ApprovalRequired;
-            assert_eq!(
-                properties.contains_key(APPROVAL_ORIGIN_PROPERTY),
-                is_sensitive
-            );
-            assert_eq!(
-                required.contains(&serde_json::json!(APPROVAL_ORIGIN_PROPERTY)),
-                is_sensitive
-            );
+            assert!(!properties.contains_key("approval_origin"));
+            assert!(!required.contains(&serde_json::json!("approval_origin")));
             assert_eq!(
                 schema_digest(&tool.host_input_schema).unwrap(),
                 tool.host_schema_digest
@@ -1010,14 +971,17 @@ mod tests {
             );
         }
         let console = contract.tool("browser_console_messages").unwrap();
-        assert!(console.host_input_schema["properties"]["all"].is_null());
+        assert_eq!(
+            console.host_input_schema["properties"]["all"]["type"],
+            "boolean"
+        );
         assert_eq!(
             console.host_input_schema["properties"]["level"]["enum"],
-            serde_json::json!(["error", "warning"])
+            serde_json::json!(["error", "warning", "info", "debug"])
         );
         assert_eq!(
             console.host_input_schema["properties"]["level"]["default"],
-            "warning"
+            "info"
         );
         let tabs = contract.tool("browser_tabs").unwrap();
         assert_eq!(
@@ -1046,7 +1010,6 @@ mod tests {
         });
         let overlay = HostSchemaOverlay {
             add_call_reason: true,
-            add_approval_origin: false,
             remove_properties: Vec::new(),
             property_overrides: BTreeMap::from([(
                 "fields".to_string(),
@@ -1093,7 +1056,6 @@ mod tests {
         ] {
             let overlay = HostSchemaOverlay {
                 add_call_reason: true,
-                add_approval_origin: false,
                 remove_properties: Vec::new(),
                 property_overrides: BTreeMap::from([(
                     "action".to_string(),
@@ -1113,7 +1075,6 @@ mod tests {
         ] {
             let overlay = HostSchemaOverlay {
                 add_call_reason: true,
-                add_approval_origin: false,
                 remove_properties: Vec::new(),
                 property_overrides: BTreeMap::from([(
                     "action".to_string(),

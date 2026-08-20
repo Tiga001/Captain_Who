@@ -85,7 +85,9 @@ afterEach(async () => {
   temporaryRoots.clear()
 })
 
-async function createHarness(options: { maxSingleDownloadBytes?: number } = {}) {
+async function createHarness(
+  options: { maxActiveDownloads?: number; maxSingleDownloadBytes?: number } = {}
+) {
   const parent = await mkdtemp(join(tmpdir(), 'mycopilot-download-test-'))
   temporaryRoots.add(parent)
   const artifacts = new BrowserArtifactBroker({
@@ -112,6 +114,25 @@ function dispatchDownload(session: FakeSession, guest: WebContents, item: FakeDo
   session.emit('will-download', {}, item as unknown as DownloadItem, guest)
 }
 
+function createRegisteredGuest(
+  broker: BrowserDownloadBroker,
+  session: FakeSession,
+  input: { generation: number; id: number; surfaceId: string }
+): WebContents {
+  const guest = {
+    id: input.id,
+    session,
+    getType: () => 'webview',
+    isDestroyed: () => false
+  } as unknown as WebContents
+  broker.registerGuest({
+    generation: input.generation,
+    guest,
+    surfaceId: input.surfaceId
+  })
+  return guest
+}
+
 async function waitForManagedPath(item: FakeDownloadItem): Promise<string> {
   for (let turn = 0; turn < 200; turn += 1) {
     if (item.savePath) return item.savePath
@@ -121,6 +142,164 @@ async function waitForManagedPath(item: FakeDownloadItem): Promise<string> {
 }
 
 describe('BrowserDownloadBroker', () => {
+  it('claims one exact targetless created guest before admitting its immediate download', async () => {
+    const { artifacts, broker, session } = await createHarness()
+    const lease = broker.beginTargetCreationTool({
+      owner: {
+        activationId: OWNER.activationId,
+        capabilityId: OWNER.capabilityId,
+        runId: OWNER.runId,
+        toolCallId: 'tabs-new-call'
+      }
+    })
+    await lease.ready?.()
+    lease.markDispatched()
+    const created = createRegisteredGuest(broker, session, {
+      generation: 2,
+      id: 52,
+      surfaceId: 'created-surface'
+    })
+    await lease.claimCreatedGuest({
+      action: 'new',
+      generation: 2,
+      guest: created,
+      surfaceId: 'created-surface'
+    })
+
+    const item = new FakeDownloadItem('created.txt')
+    dispatchDownload(session, created, item)
+    await waitForManagedPath(item)
+    await item.complete()
+    await expect(lease.settle()).resolves.toEqual([
+      expect.objectContaining({ displayName: 'created.txt', kind: 'download' })
+    ])
+
+    const second = createRegisteredGuest(broker, session, {
+      generation: 1,
+      id: 53,
+      surfaceId: 'second-created-surface'
+    })
+    await expect(
+      lease.claimCreatedGuest({
+        action: 'new',
+        generation: 1,
+        guest: second,
+        surfaceId: 'second-created-surface'
+      })
+    ).rejects.toMatchObject({ code: 'browser.download.target_closed' })
+    lease.finish()
+    await broker.shutdown()
+    await artifacts.shutdown()
+  })
+
+  it('keeps separate one-primary and four-popup budgets for a targetless tabs-new tool', async () => {
+    const { artifacts, broker, session } = await createHarness({ maxActiveDownloads: 1 })
+    const lease = broker.beginTargetCreationTool({
+      owner: {
+        activationId: OWNER.activationId,
+        capabilityId: OWNER.capabilityId,
+        runId: OWNER.runId,
+        toolCallId: 'tabs-new-with-popups'
+      }
+    })
+    await lease.ready?.()
+    lease.markDispatched()
+
+    const primary = createRegisteredGuest(broker, session, {
+      generation: 1,
+      id: 60,
+      surfaceId: 'targetless-primary'
+    })
+    await lease.claimCreatedGuest({
+      action: 'new',
+      generation: 1,
+      guest: primary,
+      surfaceId: 'targetless-primary'
+    })
+
+    for (let index = 0; index < 4; index += 1) {
+      const popup = createRegisteredGuest(broker, session, {
+        generation: 1,
+        id: 61 + index,
+        surfaceId: `targetless-popup-${index + 1}`
+      })
+      await lease.claimCreatedGuest({
+        action: 'popup',
+        generation: 1,
+        guest: popup,
+        surfaceId: `targetless-popup-${index + 1}`
+      })
+    }
+
+    const fifthPopup = createRegisteredGuest(broker, session, {
+      generation: 1,
+      id: 65,
+      surfaceId: 'targetless-popup-5'
+    })
+    await expect(
+      lease.claimCreatedGuest({
+        action: 'popup',
+        generation: 1,
+        guest: fifthPopup,
+        surfaceId: 'targetless-popup-5'
+      })
+    ).rejects.toMatchObject({ code: 'browser.download.target_closed' })
+
+    const secondPrimary = createRegisteredGuest(broker, session, {
+      generation: 1,
+      id: 66,
+      surfaceId: 'targetless-primary-2'
+    })
+    await expect(
+      lease.claimCreatedGuest({
+        action: 'new',
+        generation: 1,
+        guest: secondPrimary,
+        surfaceId: 'targetless-primary-2'
+      })
+    ).rejects.toMatchObject({ code: 'browser.download.target_closed' })
+
+    lease.finish()
+    await broker.shutdown()
+    await artifacts.shutdown()
+  })
+
+  it('admits bounded popup children but never an unclaimed manual guest', async () => {
+    const { artifacts, broker, guest, session } = await createHarness()
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    await lease.ready?.()
+    lease.markDispatched()
+    const popup = createRegisteredGuest(broker, session, {
+      generation: 1,
+      id: 54,
+      surfaceId: 'popup-surface'
+    })
+    await lease.claimCreatedGuest({
+      action: 'popup',
+      generation: 1,
+      guest: popup,
+      surfaceId: 'popup-surface'
+    })
+
+    const popupItem = new FakeDownloadItem('popup.txt')
+    dispatchDownload(session, popup, popupItem)
+    await waitForManagedPath(popupItem)
+    const manual = createRegisteredGuest(broker, session, {
+      generation: 1,
+      id: 55,
+      surfaceId: 'manual-surface'
+    })
+    const manualItem = new FakeDownloadItem('manual.txt')
+    dispatchDownload(session, manual, manualItem)
+    expect(manualItem.cancelled).toBe(true)
+
+    await popupItem.complete()
+    await expect(lease.settle()).resolves.toHaveLength(1)
+    lease.finish()
+    await broker.shutdown()
+    await artifacts.shutdown()
+  })
+
   it('binds a download to the exact tool and waits for Artifact publication', async () => {
     const { artifacts, broker, guest, session } = await createHarness()
     const lease = broker.beginTool({ guest, owner: OWNER })
@@ -246,6 +425,21 @@ describe('BrowserDownloadBroker', () => {
     expect(targetItem.cancelled).toBe(true)
     expect(artifacts.snapshot().artifacts).toBe(0)
     targetLease.finish()
+    await broker.shutdown()
+    await artifacts.shutdown()
+  })
+
+  it('settles an explicitly planned exact target close without reporting target_closed', async () => {
+    const { artifacts, broker, guest } = await createHarness()
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    await lease.ready?.()
+    lease.expectTargetClose({ surfaceId: OWNER.surfaceId, generation: OWNER.generation })
+    lease.markDispatched()
+
+    broker.unregisterGuest(guest, OWNER.generation)
+    await expect(lease.settle()).resolves.toEqual([])
+    lease.finish()
+    expect(broker.snapshot()).toMatchObject({ downloads: 0, tools: 0 })
     await broker.shutdown()
     await artifacts.shutdown()
   })

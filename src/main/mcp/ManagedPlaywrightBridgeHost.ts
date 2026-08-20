@@ -16,6 +16,11 @@ import {
   ManagedPlaywrightMcpHostError,
   type ManagedPlaywrightMcpHostOptions
 } from './ManagedPlaywrightMcpHost'
+import {
+  BrowserFileBrokerError,
+  type BrowserFileBroker,
+  type BrowserFileOwner
+} from '../browser/BrowserFileBroker'
 import { MANAGED_PLAYWRIGHT_SERVER_ID } from './managedPlaywrightManifest'
 import { managedPlaywrightTool } from './managedPlaywrightManifest'
 import {
@@ -42,6 +47,7 @@ export interface ManagedPlaywrightBridgeHostOptions {
   completionSettleMs?: number
   core: ManagedPlaywrightBridgeCore
   createHost: () => ManagedPlaywrightMcpHost
+  fileBroker?: BrowserFileBroker
   sensitiveTargetBindings: ManagedPlaywrightSensitiveTargetBindingBroker
   now?: () => number
 }
@@ -64,6 +70,7 @@ export class ManagedPlaywrightBridgeHost {
   private readonly core: ManagedPlaywrightBridgeCore
   private readonly completionSettleMs: number
   private readonly createHost: () => ManagedPlaywrightMcpHost
+  private readonly fileBroker?: BrowserFileBroker
   private readonly now: () => number
   private readonly sensitiveTargetBindings: ManagedPlaywrightSensitiveTargetBindingBroker
   private readonly unsubscribeCancel: () => void
@@ -77,6 +84,7 @@ export class ManagedPlaywrightBridgeHost {
     this.core = options.core
     this.completionSettleMs = normalizeCompletionSettleMs(options.completionSettleMs)
     this.createHost = options.createHost
+    this.fileBroker = options.fileBroker
     this.sensitiveTargetBindings = options.sensitiveTargetBindings
     this.now = options.now ?? Date.now
     this.unsubscribeCommand = this.core.onManagedPlaywrightCommand((input) =>
@@ -89,6 +97,7 @@ export class ManagedPlaywrightBridgeHost {
       this.core.onAgentEvent?.((event) => {
         if (event.type === 'done') {
           this.sensitiveTargetBindings.releaseRun(event.runId)
+          void this.fileBroker?.releaseRun(event.runId)
           void this.host?.releaseRun(event.runId)
         }
       }) ?? (() => undefined)
@@ -187,16 +196,76 @@ export class ManagedPlaywrightBridgeHost {
         }
         case 'prepare_sensitive_tool': {
           const reviewed = managedPlaywrightTool(input.command.input.toolName)
+          const sensitivePolicy = reviewed && sensitivePolicyForTool(reviewed.rawName)
           if (
             !reviewed ||
             reviewed.handlingMode !== 'approval_required' ||
-            !sensitivePolicyForTool(reviewed.rawName)
+            !sensitivePolicy ||
+            (reviewed.rawName !== 'browser_cookie_set' &&
+              input.command.input.bindingScope !==
+                (sensitivePolicy.scope === 'managed_browser_profile'
+                  ? 'managed_browser_profile'
+                  : 'managed_surface'))
           ) {
             throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.tool_not_reviewed')
           }
-          const prepared = this.sensitiveTargetBindings.prepare(input.command.input)
-          preparedBindingRequestId = input.command.input.bindingRequestId
-          outcome = { type: 'sensitive_tool_prepared', ...prepared }
+          const fileOwner: BrowserFileOwner = {
+            runId: input.command.input.runId,
+            activationId: input.command.input.activationId,
+            capabilityId: 'browser_automation',
+            toolCallId: input.command.input.callId
+          }
+          let preparedFiles:
+            | {
+                handles: readonly string[]
+                basenames: readonly string[]
+                fileRevisionDigest: string
+              }
+            | undefined
+          try {
+            if (input.command.input.filePreparation) {
+              if (!this.fileBroker) {
+                throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+              }
+              const references = await raceWithSignal(
+                this.fileBroker.freezeResolvedForRead({
+                  owner: fileOwner,
+                  paths: input.command.input.filePreparation.paths
+                }),
+                controller.signal
+              )
+              if (references.length === 0) {
+                throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
+              }
+              const resolution = await raceWithSignal(
+                this.fileBroker.resolveForRead({
+                  owner: fileOwner,
+                  handles: references.map((reference) => reference.handle)
+                }),
+                controller.signal
+              )
+              preparedFiles = {
+                handles: references.map((reference) => reference.handle),
+                basenames: references.map((reference) => reference.displayName),
+                fileRevisionDigest: resolution.fileRevisionDigest
+              }
+            }
+            const prepared = this.sensitiveTargetBindings.prepare(
+              input.command.input,
+              preparedFiles
+            )
+            preparedBindingRequestId = input.command.input.bindingRequestId
+            outcome = {
+              type: 'sensitive_tool_prepared',
+              ...prepared,
+              fileBasenames: [...prepared.fileBasenames]
+            }
+          } catch (error) {
+            if (input.command.input.filePreparation) {
+              await this.fileBroker?.releaseToolCall(fileOwner)
+            }
+            throw error
+          }
           break
         }
         case 'release_sensitive_tool_binding': {
@@ -205,6 +274,10 @@ export class ManagedPlaywrightBridgeHost {
             runId: input.command.runId,
             activationId: input.command.activationId,
             callId: input.command.callId
+          })
+          await this.fileBroker?.releaseToolCall({
+            runId: input.command.runId,
+            toolCallId: input.command.callId
           })
           outcome = { type: 'sensitive_tool_binding_released', released }
           break
@@ -254,6 +327,12 @@ export class ManagedPlaywrightBridgeHost {
     )
     if (preparedBindingRequestId && (!accepted || outcome.type !== 'sensitive_tool_prepared')) {
       this.sensitiveTargetBindings.releaseByRequestId(preparedBindingRequestId)
+      if (input.command.type === 'prepare_sensitive_tool' && input.command.input.filePreparation) {
+        await this.fileBroker?.releaseToolCall({
+          runId: input.command.input.runId,
+          toolCallId: input.command.input.callId
+        })
+      }
     }
   }
 
@@ -341,6 +420,12 @@ function mapError(
             ? 'surface_unavailable'
             : 'invalid_arguments'
       return errorOutcome(code, 'definitely_not_dispatched')
+    }
+    if (error instanceof BrowserFileBrokerError) {
+      return errorOutcome(
+        error.code === 'browser.file.capacity' ? 'busy' : 'invalid_arguments',
+        'definitely_not_dispatched'
+      )
     }
     return errorOutcome('internal_safe_error', certainty)
   }

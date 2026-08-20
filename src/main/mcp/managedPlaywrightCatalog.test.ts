@@ -99,16 +99,8 @@ describe('managed Playwright fixed Catalog', () => {
     )
     expect(approvalTools).toHaveLength(21)
     for (const tool of approvalTools) {
-      expect(tool.inputSchema.required).toEqual(
-        expect.arrayContaining(['call_reason', 'approval_origin'])
-      )
-      expect(tool.inputSchema).toHaveProperty('properties.approval_origin', {
-        type: 'string',
-        description:
-          'Exact HTTP(S) origin of the active managed page for sensitive-tool approval. Do not include credentials, path, query, or fragment.',
-        minLength: 8,
-        maxLength: 512
-      })
+      expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['call_reason']))
+      expect(tool.inputSchema).not.toHaveProperty('properties.approval_origin')
     }
     expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.map((tool) => tool.rawName)).not.toContain(
       'browser_run_code_unsafe'
@@ -137,11 +129,13 @@ describe('managed Playwright fixed Catalog', () => {
       (tool) => tool.rawName === 'browser_console_messages'
     )
     expect(consoleMessages?.inputSchema).toMatchObject({
-      properties: { level: { enum: ['error', 'warning'], default: 'warning' } },
+      properties: {
+        level: { enum: ['error', 'warning', 'info', 'debug'], default: 'info' },
+        all: { type: 'boolean' }
+      },
       required: ['level', 'call_reason']
     })
     expect(consoleMessages?.inputSchema).toHaveProperty('properties.filename')
-    expect(consoleMessages?.inputSchema).not.toHaveProperty('properties.all')
   })
 
   it('records machine-readable evidence for tools that cannot be safely equivalent in a guest', () => {
@@ -290,7 +284,7 @@ describe('managed Playwright fixed Catalog', () => {
       exposedToolCount: 61,
       upstreamCatalogDigest:
         'sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf',
-      policyDigest: 'sha256:522934676363be5d6c113fc373cfa1c47309da4b8a101e4619d0c815f9d80ade'
+      policyDigest: 'sha256:4f36ae204ff1990f1cec45c8054062406b7a02186b7bd39620a30f128505f268'
     })
 
     const titleDrift = structuredClone(live)

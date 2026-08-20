@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
   parseBrowserRiskAuthorizeInput,
   parseBrowserRiskAuthorizeOutput,
   parseManagedPlaywrightCommandNotification,
@@ -25,7 +26,7 @@ const AUTHORIZATION_CONTEXT = {
 describe('managed Playwright bridge wire contract', () => {
   it('accepts only the Rust call_tool camelCase field projection', () => {
     const notification = {
-      schemaVersion: 2,
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       serverId: SERVER_ID,
       deadlineMs: 2_000_000_000_000,
@@ -71,7 +72,7 @@ describe('managed Playwright bridge wire contract', () => {
       expiresAtMs: 1_999_999_000_000
     }
     const notification = {
-      schemaVersion: 2,
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       serverId: SERVER_ID,
       deadlineMs: 2_000_000_000_000,
@@ -80,7 +81,6 @@ describe('managed Playwright bridge wire contract', () => {
         name: 'browser_evaluate',
         arguments: {
           function: '() => document.title',
-          approval_origin: 'https://mail.example.test',
           call_reason: 'Read the current page title.'
         },
         timeoutMs: 60_000,
@@ -173,7 +173,7 @@ describe('managed Playwright bridge wire contract', () => {
 
   it('accepts only the TypeScript error completion camelCase field projection', () => {
     const completion = {
-      schemaVersion: 2,
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       outcome: {
         type: 'error',
@@ -216,7 +216,7 @@ describe('managed Playwright bridge wire contract', () => {
 
   it('strictly validates proposal-time sensitive target prepare and release commands', () => {
     const prepare = {
-      schemaVersion: 2,
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       serverId: SERVER_ID,
       deadlineMs: 2_000_000_000_000,
@@ -224,6 +224,7 @@ describe('managed Playwright bridge wire contract', () => {
         type: 'prepare_sensitive_tool',
         input: {
           bindingRequestId: '7c71eead-3b07-4700-8378-c61d7ea7ac68',
+          bindingScope: 'managed_surface',
           runId: 'run-1',
           capabilityId: 'browser_automation',
           activationId: AUTHORIZATION_CONTEXT.activationId,
@@ -234,11 +235,39 @@ describe('managed Playwright bridge wire contract', () => {
           toolName: 'browser_evaluate',
           argumentsDigest: `sha256:${'b'.repeat(64)}`,
           createdAtMs: 1_999_999_000_000,
-          expiresAtMs: 1_999_999_600_000
+          expiresAtMs: 1_999_999_600_000,
+          filePreparation: null
         }
       }
     }
     expect(parseManagedPlaywrightCommandNotification(prepare)).toEqual(prepare)
+    const filePrepare = {
+      ...prepare,
+      command: {
+        ...prepare.command,
+        input: {
+          ...prepare.command.input,
+          toolName: 'browser_file_upload',
+          filePreparation: {
+            mode: 'resolved_paths',
+            paths: ['/process-only/workspace/浙江大学2026年招生资料汇编.pptx']
+          }
+        }
+      }
+    }
+    expect(parseManagedPlaywrightCommandNotification(filePrepare)).toEqual(filePrepare)
+    expect(() =>
+      parseManagedPlaywrightCommandNotification({
+        ...filePrepare,
+        command: {
+          ...filePrepare.command,
+          input: {
+            ...filePrepare.command.input,
+            filePreparation: { mode: 'native_picker', multiple: true }
+          }
+        }
+      })
+    ).toThrow()
     expect(() =>
       parseManagedPlaywrightCommandNotification({
         ...prepare,
@@ -271,7 +300,7 @@ describe('managed Playwright bridge wire contract', () => {
 
   it('strictly validates sensitive target completion outcomes', () => {
     const prepared = {
-      schemaVersion: 2,
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       outcome: {
         type: 'sensitive_tool_prepared',
@@ -279,10 +308,18 @@ describe('managed Playwright bridge wire contract', () => {
         targetBindingDigest: `sha256:${'d'.repeat(64)}`,
         origin: 'https://mail.example.test',
         createdAtMs: 1_999_999_000_000,
-        expiresAtMs: 1_999_999_600_000
+        expiresAtMs: 1_999_999_600_000,
+        fileBasenames: [],
+        fileRevisionDigest: null
       }
     }
     expect(parseManagedPlaywrightCompletionInput(prepared)).toEqual(prepared)
+    expect(
+      parseManagedPlaywrightCompletionInput({
+        ...prepared,
+        outcome: { ...prepared.outcome, origin: null }
+      })
+    ).toEqual({ ...prepared, outcome: { ...prepared.outcome, origin: null } })
     expect(() =>
       parseManagedPlaywrightCompletionInput({
         ...prepared,
@@ -291,7 +328,7 @@ describe('managed Playwright bridge wire contract', () => {
     ).toThrow()
 
     const released = {
-      schemaVersion: 2,
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       outcome: { type: 'sensitive_tool_binding_released', released: true }
     }

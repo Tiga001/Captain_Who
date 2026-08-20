@@ -286,7 +286,9 @@ app.whenReady().then(async () => {
     sendCommand: (host, command) => {
       if (!host.isDestroyed()) host.send(HOST_CHANNELS.browser.surfaceCommand, command)
     },
-    networkGuard: browserNetworkGuard
+    networkGuard: browserNetworkGuard,
+    releaseSurfaceResources: (input) =>
+      browserFileBroker?.releaseSurface(input) ?? Promise.resolve()
   })
   const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
     beginDispatchFence: (target) => {
@@ -294,13 +296,18 @@ app.whenReady().then(async () => {
       if (!manager) throw new Error('browser.surface_unavailable')
       return manager.beginSensitiveDispatchFence(target)
     },
-    getActiveTarget: () => browserSurfaceManager?.getSensitiveTargetIdentity() ?? null
+    getActiveTarget: () => browserSurfaceManager?.getSensitiveTargetIdentity() ?? null,
+    releasePreparedFiles: ({ runId, callId }) => {
+      void browserFileBroker?.releaseToolCall({ runId, toolCallId: callId })
+    }
   })
   managedPlaywrightBridgeHost = new ManagedPlaywrightBridgeHost({
     core: coreServer,
+    fileBroker: browserFileBroker,
     sensitiveTargetBindings,
     createHost: createManagedPlaywrightHostFactory({
-      getBrowserContext: () => getBrowserSurfaceManager().getBrowserContext(),
+      getBrowserContext: () =>
+        getBrowserSurfaceManager().getBrowserContext({ createVisiblePage: false }),
       getActiveSurfaceIdentity: () => getBrowserSurfaceManager().getActiveSurfaceIdentity(),
       sensitiveTargetBindings,
       artifactBroker: browserArtifactBroker,
@@ -324,7 +331,14 @@ app.whenReady().then(async () => {
       surfaceGroup: browserSurfaceManager,
       closeSurface: () => getBrowserSurfaceManager().closeSurface(),
       detachAutomation: () => getBrowserSurfaceManager().detachAutomation(),
-      beginNetworkOperation: (input) => getBrowserSurfaceManager().beginNetworkOperation(input)
+      beginNetworkOperation: (input) => getBrowserSurfaceManager().beginNetworkOperation(input),
+      beginTargetCreationOperation: async (input) => {
+        const guard = browserNetworkGuard
+        if (!guard) throw new Error('browser.surface_unavailable')
+        const lease = guard.beginTargetCreationOperation(input)
+        await lease.ready()
+        return lease
+      }
     })
   })
 

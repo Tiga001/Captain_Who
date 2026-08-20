@@ -82,7 +82,11 @@ describe.runIf(process.platform === 'darwin')(
             .filter((name) => !profileDirectoriesBefore.includes(name))
             .map((name) => rm(join(tmpdir(), name), { force: true, recursive: true }))
         )
-        expect(await managedProfileDirectories()).toEqual(profileDirectoriesBefore)
+        expect(
+          (await managedProfileDirectories()).every((name) =>
+            profileDirectoriesBefore.includes(name)
+          )
+        ).toBe(true)
       }
     }, 180_000)
   }

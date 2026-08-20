@@ -40,7 +40,11 @@ import {
 } from './ManagedPlaywrightMcpHost'
 import { MANAGED_PLAYWRIGHT_CATALOG_LOCK } from './managedPlaywrightCatalog'
 import { MANAGED_PLAYWRIGHT_SERVER_ID } from './managedPlaywrightManifest'
-import { canonicalSha256, sensitivePolicyForTool } from './managedPlaywrightSensitivePolicy'
+import {
+  canonicalSha256,
+  sensitiveBindingScopeForInvocation,
+  sensitivePolicyForTool
+} from './managedPlaywrightSensitivePolicy'
 
 const PARTITION = 'persist:mycopilot-browser'
 const EXPECTED_SESSION = {} as Session
@@ -243,7 +247,10 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
             )
           }
         )
-      ).resolves.toMatchObject({ structuredContent: { routes: [] }, isError: false })
+      ).resolves.toEqual({
+        content: [{ type: 'text', text: 'No active routes' }],
+        isError: false
+      })
     } finally {
       await harness.host.close()
     }
@@ -282,13 +289,21 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
           handles: [reference.handle]
         })
         await lease.finish()
-        expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+        expect(broker.snapshot()).toEqual({
+          handles: 0,
+          bytes: 0,
+          retained: { leases: 0, files: 0, bytes: 0 }
+        })
       }
       expect(await readdir(privateRoot)).toEqual([])
     } finally {
       await broker.shutdown()
     }
-    expect(broker.snapshot()).toEqual({ handles: 0, bytes: 0 })
+    expect(broker.snapshot()).toEqual({
+      handles: 0,
+      bytes: 0,
+      retained: { leases: 0, files: 0, bytes: 0 }
+    })
     await expect(access(privateRoot)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 
@@ -341,7 +356,6 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
       for (let index = 0; index < 100; index += 1) {
         const runId = `storage-run-${index}`
         const argumentsValue = {
-          approval_origin: 'http://127.0.0.1',
           call_reason: `Export bounded storage state ${index}.`
         }
         const result = await harness.host.callTool('browser_storage_state', argumentsValue, {
@@ -727,7 +741,10 @@ function sensitiveAuthorization(
 ): BrowserRiskAuthorizationContext {
   const policy = sensitivePolicyForTool(toolName)
   if (!policy) throw new Error(`fixture sensitive policy missing for ${toolName}`)
-  const origin = String(argumentsValue.approval_origin)
+  const origin =
+    sensitiveBindingScopeForInvocation(toolName, argumentsValue) === 'managed_browser_profile'
+      ? null
+      : 'http://127.0.0.1'
   const argumentsDigest = canonicalSha256(argumentsValue)
   const base = authorization(runId, callId, toolName)
   const targetBindingId = fixtureUuid(index * 2 + 3)
