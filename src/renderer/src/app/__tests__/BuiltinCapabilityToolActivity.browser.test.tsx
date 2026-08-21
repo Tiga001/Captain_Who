@@ -62,7 +62,12 @@ const translations: Record<string, string> = {
   'agent.builtinCapability.browser.upload.completed': 'Uploaded file to page',
   'agent.builtinCapability.browser.upload.outcomeUnknown':
     'File upload outcome uncertain; the upload may have occurred',
+  'agent.builtinCapability.browser.script.running': 'Running browser script',
   'agent.builtinCapability.browser.script.completed': 'Ran browser script',
+  'agent.builtinCapability.browser.script.failed': 'Failed to run browser script',
+  'agent.builtinCapability.browser.script.cancelled': 'Cancelled browser script',
+  'agent.builtinCapability.browser.script.outcomeUnknown':
+    'Browser script outcome uncertain; effects may have occurred',
   'agent.builtinCapability.browser.config.completed': 'Read browser configuration',
   'agent.builtinCapability.browser.console.completed': 'Read page console',
   'agent.builtinCapability.browser.networkRead.completed': 'Read page network activity',
@@ -80,6 +85,8 @@ const translations: Record<string, string> = {
   'agent.builtinCapability.browser.verify.completed': 'Checked page state',
   'agent.builtinCapability.browser.fallback.running': 'Running browser action',
   'agent.builtinCapability.browser.fallback.completed': 'Completed browser action',
+  'agent.builtinCapability.browser.fallback.failed': 'Browser action failed',
+  'agent.builtinCapability.browser.fallback.cancelled': 'Cancelled browser action',
   'agent.builtinCapability.browser.fallback.outcomeUnknown':
     'Browser action outcome uncertain; the action may have occurred',
   'agent.detail.args': 'Arguments',
@@ -217,6 +224,44 @@ describe('BuiltinCapabilityToolActivity', () => {
     await completed.unmount()
   })
 
+  it('localizes activate_capability while its runtime identity is still missing', async () => {
+    const activationCall: AgentToolCall = {
+      id: 'call-browser-capability',
+      tool: 'activate_capability',
+      args: { capability: 'browser_automation', reason: CANARY },
+      approvalStatus: 'required',
+      reason: CANARY
+    }
+    const waiting = await render(
+      <AgentToolActivity call={activationCall} run={run()} showImageGenerationPreview={false} />
+    )
+
+    expect(waiting.container.textContent).toContain(
+      'Waiting for approval to use Browser automation'
+    )
+    expect(waiting.container.textContent).not.toContain('activate_capability')
+    expect(waiting.container.textContent).not.toContain(CANARY)
+    await waiting.unmount()
+
+    const completed = await render(
+      <AgentToolActivity
+        call={activationCall}
+        result={{
+          callId: activationCall.id,
+          tool: activationCall.tool,
+          ok: true,
+          result: { status: 'active', capability: 'browser_automation' }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+      />
+    )
+
+    expect(completed.container.textContent).toContain('Enabled Browser automation')
+    expect(completed.container.textContent).not.toContain('activate_capability')
+    expect(completed.container.textContent).not.toContain(CANARY)
+  })
+
   it('routes only from typed identity and exposes only the bounded display reason', async () => {
     const result: AgentToolResult = {
       callId: 'call-browser-capability',
@@ -258,6 +303,36 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.textContent).not.toContain(CANARY)
   })
 
+  it('uses the canonical raw name when the durable builtin toolId is namespaced', async () => {
+    const toolIdentity = {
+      ...identity('browser_evaluate', 'browser.evaluate'),
+      rawName: 'browser_evaluate'
+    } satisfies AgentToolIdentity
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_evaluate')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'browser_evaluate',
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'completed',
+            contentOmitted: true
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={toolIdentity}
+      />
+    )
+
+    expect(screen.container.textContent).toContain('Ran browser script')
+    expect(screen.container.textContent).not.toContain('browser_evaluate')
+    expect(screen.container.textContent).not.toContain('browser.evaluate')
+  })
+
   it('lets typed built-in identity win over stale external MCP lifecycle data', async () => {
     const screen = await render(
       <AgentToolActivity
@@ -274,19 +349,106 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.querySelector('details')).toBeNull()
   })
 
-  it('does not infer built-in capability identity from a browser-prefixed Tool name', async () => {
+  it('keeps external MCP lifecycle authoritative over the browser_* presentation fallback', async () => {
     const screen = await render(
       <AgentToolActivity
-        call={call('browser_spoofed_tool')}
+        call={call('browser_evaluate')}
+        mcpInvocation={staleExternalInvocation()}
         run={run()}
         showImageGenerationPreview={false}
-        toolIdentity={{ type: 'unregistered', toolName: 'browser_spoofed_tool' }}
       />
     )
 
-    expect(screen.container.textContent).not.toContain('Browser automation')
-    expect(screen.container.textContent).toContain(CANARY)
+    expect(screen.container.querySelector('.mcp-tool-activity')).not.toBeNull()
+    expect(screen.container.querySelector('.builtin-capability-tool-activity')).toBeNull()
   })
+
+  it.each([
+    ['running', undefined, undefined, 'Running browser script'],
+    ['completed', { ok: true, status: 'completed' }, undefined, 'Ran browser script'],
+    ['failed', { ok: false, status: 'failed' }, undefined, 'Failed to run browser script'],
+    ['cancelled', undefined, 'cancelled', 'Cancelled browser script'],
+    [
+      'outcomeUnknown',
+      { ok: false, status: 'outcome_unknown' },
+      undefined,
+      'Browser script outcome uncertain; effects may have occurred'
+    ]
+  ] as const)(
+    'uses specific browser script copy for unregistered browser_evaluate in the %s state',
+    async (_statusName, projected, settledStatus, expected) => {
+      const toolId = 'browser_evaluate'
+      const result = projected
+        ? ({
+            callId: 'call-browser-capability',
+            tool: toolId,
+            ok: projected.ok,
+            result: {
+              schemaVersion: 1,
+              type: 'builtin_capability_tool',
+              status: projected.status,
+              contentOmitted: true
+            }
+          } satisfies AgentToolResult)
+        : undefined
+      const screen = await render(
+        <AgentToolActivity
+          call={call(toolId)}
+          result={result}
+          run={run()}
+          settledStatus={settledStatus}
+          showImageGenerationPreview={false}
+          toolIdentity={{ type: 'unregistered', toolName: toolId }}
+        />
+      )
+
+      expect(screen.container.textContent).toContain(expected)
+      expect(screen.container.textContent).not.toContain(toolId)
+    }
+  )
+
+  it.each([
+    ['running', undefined, undefined, 'Running browser action'],
+    ['completed', { ok: true, status: 'completed' }, undefined, 'Completed browser action'],
+    ['failed', { ok: false, status: 'failed' }, undefined, 'Browser action failed'],
+    ['cancelled', undefined, 'cancelled', 'Cancelled browser action'],
+    [
+      'outcomeUnknown',
+      { ok: false, status: 'outcome_unknown' },
+      undefined,
+      'Browser action outcome uncertain; the action may have occurred'
+    ]
+  ] as const)(
+    'uses generic browser copy for identity-less future browser Tool in the %s state',
+    async (_statusName, projected, settledStatus, expected) => {
+      const toolId = 'browser_future_tool'
+      const result = projected
+        ? ({
+            callId: 'call-browser-capability',
+            tool: toolId,
+            ok: projected.ok,
+            result: {
+              schemaVersion: 1,
+              type: 'builtin_capability_tool',
+              status: projected.status,
+              contentOmitted: true
+            }
+          } satisfies AgentToolResult)
+        : undefined
+      const screen = await render(
+        <AgentToolActivity
+          call={call(toolId)}
+          result={result}
+          run={run()}
+          settledStatus={settledStatus}
+          showImageGenerationPreview={false}
+        />
+      )
+
+      expect(screen.container.textContent).toContain(expected)
+      expect(screen.container.textContent).not.toContain(toolId)
+    }
+  )
 
   it('renders an uncertain browser failure without exposing a retry control or raw result', async () => {
     const result: AgentToolResult = {
@@ -873,7 +1035,80 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.querySelector('pre')).toBeNull()
   })
 
-  it('uses a safe fallback for a future reviewed Tool without exposing its raw name', async () => {
+  it.each([
+    ['running', undefined, undefined, 'Running browser action'],
+    ['completed', { ok: true, status: 'completed' }, undefined, 'Completed browser action'],
+    ['failed', { ok: false, status: 'failed' }, undefined, 'Browser action failed'],
+    ['cancelled', undefined, 'cancelled', 'Cancelled browser action'],
+    [
+      'outcomeUnknown',
+      { ok: false, status: 'outcome_unknown' },
+      undefined,
+      'Browser action outcome uncertain; the action may have occurred'
+    ]
+  ] as const)(
+    'uses a safe fallback for an unknown browser_* Tool in the %s state',
+    async (_statusName, projected, settledStatus, expected) => {
+      const toolId = 'browser_future_reviewed_tool'
+      const result = projected
+        ? ({
+            callId: 'call-browser-capability',
+            tool: 'opaque-model-name',
+            ok: projected.ok,
+            result: {
+              schemaVersion: 1,
+              type: 'builtin_capability_tool',
+              status: projected.status,
+              contentOmitted: true
+            }
+          } satisfies AgentToolResult)
+        : undefined
+      const internalIdentity = {
+        ...identity('opaque-model-name', toolId),
+        packageName: '@private/cdp-canary',
+        rawName: 'private_cdp_canary'
+      } satisfies AgentToolIdentity
+      const screen = await render(
+        <AgentToolActivity
+          call={call('opaque-model-name')}
+          result={result}
+          run={run()}
+          settledStatus={settledStatus}
+          showImageGenerationPreview={false}
+          toolIdentity={internalIdentity}
+        />
+      )
+
+      expect(screen.container.textContent).toContain(expected)
+      expect(screen.container.textContent).not.toContain('opaque-model-name')
+      expect(screen.container.textContent).not.toContain(toolId)
+      expect(screen.container.textContent).not.toContain('private_cdp_canary')
+      expect(screen.container.textContent).not.toContain('@private/cdp-canary')
+    }
+  )
+
+  it('ships the generic browser fallback copy in every locale for every state', () => {
+    const fallbackKeys = [
+      'agent.builtinCapability.browser.fallback.running',
+      'agent.builtinCapability.browser.fallback.completed',
+      'agent.builtinCapability.browser.fallback.failed',
+      'agent.builtinCapability.browser.fallback.cancelled',
+      'agent.builtinCapability.browser.fallback.outcomeUnknown'
+    ] as const
+
+    for (const translations of [zhCNTranslations, enUSTranslations]) {
+      for (const key of fallbackKeys) {
+        expect(translations[key]).toBeTruthy()
+        expect(translations[key]).not.toBe(key)
+        expect(translations[key]).not.toContain('browser_')
+      }
+    }
+    expect(zhCNTranslations['agent.builtinCapability.browser.fallback.completed']).toBe(
+      '已执行浏览器操作'
+    )
+  })
+
+  it('uses a safe fallback for a future reviewed non-browser Tool without exposing its raw name', async () => {
     const internalIdentity = {
       ...identity('opaque-model-name', 'future.reviewed.tool'),
       packageName: '@private/cdp-canary',

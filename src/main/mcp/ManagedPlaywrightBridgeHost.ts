@@ -99,7 +99,12 @@ export class ManagedPlaywrightBridgeHost {
     )
     this.unsubscribeAgentEvent =
       this.core.onAgentEvent?.((event) => {
-        if (event.type === 'done') {
+        if (
+          event.type === 'done' &&
+          (event.status === 'completed' ||
+            event.status === 'failed' ||
+            event.status === 'cancelled')
+        ) {
           this.sensitiveTargetBindings.releaseRun(event.runId)
           void this.fileBroker?.releaseRun(event.runId)
           void this.host?.releaseRun(event.runId)

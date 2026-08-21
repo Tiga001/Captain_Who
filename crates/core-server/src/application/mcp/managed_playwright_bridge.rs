@@ -1642,8 +1642,9 @@ mod tests {
     use crate::application::mcp::playwright_manifest::BROWSER_AUTOMATION_CAPABILITY_ID;
     #[cfg(target_os = "macos")]
     use mycopilot_core::{
-        AgentApprovalStatus, AgentBuiltinCapabilityActivationApproval, AgentProposedAction,
-        BuiltinMcpToolRiskKind, CapabilityGrant, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
+        AgentApprovalStatus, AgentBuiltinCapabilityActivationApproval, AgentEvent,
+        AgentProposedAction, AgentRunStatus, BuiltinCapabilityRuntime, BuiltinMcpToolRiskKind,
+        CapabilityGrant, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
     };
     #[cfg(target_os = "macos")]
     use mycopilot_protocol_rs::{
@@ -1657,6 +1658,9 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     #[cfg(target_os = "macos")]
     use tokio::process::Command;
+
+    #[cfg(target_os = "macos")]
+    const FIXTURE_AGENT_EVENT_METHOD: &str = "fixture.agentEvent";
 
     fn test_authorization_context() -> ManagedPlaywrightAuthorizationContext {
         ManagedPlaywrightAuthorizationContext {
@@ -2761,14 +2765,20 @@ mod tests {
         let runtime = ManagedPlaywrightMcpRuntime::new().unwrap();
         let bridge = runtime.bridge();
         let (outbound, mut outbound_commands) = mpsc::unbounded_channel::<Value>();
+        let fixture_events = outbound.clone();
         // The reader must be able to answer Main's reverse Browser-risk request on the same
         // newline-framed stdin without retaining a Sender forever (which would deadlock fixture
         // shutdown). The slot is explicitly cleared after managed runtime shutdown.
         let fixture_input = Arc::new(StdMutex::new(Some(outbound.clone())));
         bridge.attach_outbound(outbound).unwrap();
 
-        let (_risk_directory, _risk_storage, risk_coordinator, capability_grant) =
-            managed_playwright_e2e_risk_authority();
+        let (
+            _risk_directory,
+            _risk_storage,
+            capability_runtime,
+            risk_coordinator,
+            capability_grant,
+        ) = managed_playwright_e2e_risk_authority();
         let (risk_notifications, mut risk_approval_events) = mpsc::unbounded_channel::<Value>();
         let approval_coordinator = Arc::clone(&risk_coordinator);
         let approval_count = Arc::new(AtomicUsize::new(0));
@@ -2988,7 +2998,7 @@ mod tests {
         let fixture_origin = fixture_url
             .strip_suffix("/interactive")
             .expect("fixture origin");
-        let zero_tab_cookies = invoke_approved_browser_sensitive_tool(
+        let zero_tab_cookies = invoke_approved_browser_sensitive_tool_after_waiting_event(
             &runtime,
             &capability_grant,
             fixture_origin,
@@ -2999,6 +3009,7 @@ mod tests {
             }),
             vec![BuiltinMcpToolRiskKind::CookieRead],
             vec![BuiltinMcpToolRiskKindDto::CookieRead],
+            &fixture_events,
         )
         .await;
         assert!(
@@ -3011,7 +3022,7 @@ mod tests {
             &capability_grant,
             "browser_navigate",
             json!({
-                "url": fixture_url,
+                "url": fixture_url.clone(),
                 "call_reason": "Navigate the empty managed context directly to the first local fixture."
             }),
         )
@@ -3042,6 +3053,30 @@ mod tests {
                 line.starts_with("1:") || line.starts_with("- 1:")
             }),
             "zero-group browser_tabs new created more than one tab: {first_tab_list_text}"
+        );
+        let approval_sequence_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Locate the local approval-lifecycle smoke button."}),
+        )
+        .await;
+        let approval_sequence_snapshot_text = tool_result_text(&approval_sequence_snapshot);
+        let approval_sequence_button_ref = snapshot_ref(&approval_sequence_snapshot_text, "Apply");
+        let approval_sequence_click = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_click",
+            json!({
+                "target": approval_sequence_button_ref,
+                "call_reason": "Click before the approved local script lifecycle check."
+            }),
+        )
+        .await;
+        assert!(
+            !approval_sequence_click.is_error,
+            "managed pre-approval browser_click failed: {}",
+            tool_result_text(&approval_sequence_click)
         );
         let workspace_fixture_directory = tempfile::Builder::new()
             .prefix(".mycopilot-managed-playwright-files-")
@@ -3102,8 +3137,13 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let evaluate_started = tokio::time::Instant::now();
-        let evaluated =
-            invoke_approved_browser_evaluate(&runtime, &capability_grant, fixture_origin).await;
+        let evaluated = invoke_approved_browser_evaluate(
+            &runtime,
+            &capability_grant,
+            fixture_origin,
+            &fixture_events,
+        )
+        .await;
         assert!(
             evaluate_started.elapsed() < Duration::from_secs(5),
             "synchronous fixed-official browser_evaluate did not complete promptly"
@@ -3125,6 +3165,22 @@ mod tests {
         let snapshot_text = tool_result_text(&snapshot);
         assert!(snapshot_text.contains("Managed Playwright Bridge Fixture"));
         assert!(snapshot_text.contains("evaluated:你好"));
+        let evaluated_wait = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_wait_for",
+            json!({
+                "text": "evaluated:你好",
+                "call_reason": "Verify ordinary page tools remain usable after approved evaluation."
+            }),
+        )
+        .await;
+        assert!(
+            !evaluated_wait.is_error
+                && tool_result_text(&evaluated_wait).contains("evaluated:你好"),
+            "managed post-approval browser_wait_for failed: {}",
+            tool_result_text(&evaluated_wait)
+        );
         let cross_frame_subject_ref = snapshot_ref(&snapshot_text, "Cross Frame Subject");
         let cross_frame_evaluate = invoke_approved_browser_sensitive_tool(
             &runtime,
@@ -4266,7 +4322,7 @@ mod tests {
             &capability_grant,
             "browser_navigate",
             json!({
-                "url": secondary_url,
+                "url": secondary_url.clone(),
                 "call_reason": "Open the secondary local fixture page."
             }),
         )
@@ -4305,6 +4361,22 @@ mod tests {
         .await;
         assert!(tool_result_text(&back_snapshot).contains("Managed Playwright Bridge Fixture"));
 
+        let retained_run_one = invoke_browser_tool_with_grant(
+            &runtime,
+            &capability_grant,
+            "browser_navigate",
+            json!({
+                "url": secondary_url.clone(),
+                "call_reason": "Leave one local page alive for the fresh Host reconnect regression."
+            }),
+        )
+        .await;
+        assert!(
+            !retained_run_one.is_error,
+            "managed retained-page setup navigate failed: {}",
+            tool_result_text(&retained_run_one)
+        );
+
         let closed = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
@@ -4313,6 +4385,98 @@ mod tests {
         )
         .await;
         assert!(!closed.is_error);
+
+        runtime
+            .stop()
+            .await
+            .expect("stop the first managed Host generation");
+        let reconnect_capability_grant = approve_managed_playwright_e2e_activation(
+            &capability_runtime,
+            "run_managed_playwright_e2e_reconnect",
+            "managed-playwright-e2e-reconnect-activation",
+        );
+        runtime.request_start().unwrap();
+        join_owned_lifecycle_tasks(&runtime).await;
+        assert_eq!(
+            runtime
+                .manager
+                .get_status(runtime.server_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            mycopilot_mcp_client::McpServerState::Ready
+        );
+
+        // This is the fresh Host's first Tool call. Electron still owns the run-one Page, while
+        // fixed official Playwright starts with an unhydrated Context._tabs array. The Host must
+        // import retained pages before exact selection instead of failing with `Tab 0 not found`
+        // or creating a replacement Surface.
+        let fresh_host_navigate = invoke_browser_tool_with_grant(
+            &runtime,
+            &reconnect_capability_grant,
+            "browser_navigate",
+            json!({
+                "url": fixture_url.clone(),
+                "call_reason": "Navigate the retained page from a fresh managed Host generation."
+            }),
+        )
+        .await;
+        assert!(
+            !fresh_host_navigate.is_error,
+            "fresh Host retained-page navigate failed: {}",
+            tool_result_text(&fresh_host_navigate)
+        );
+        let fresh_host_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &reconnect_capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Inspect the retained page after fresh Host navigation."}),
+        )
+        .await;
+        assert!(
+            !fresh_host_snapshot.is_error
+                && tool_result_text(&fresh_host_snapshot)
+                    .contains("Managed Playwright Bridge Fixture"),
+            "fresh Host retained-page snapshot failed: {}",
+            tool_result_text(&fresh_host_snapshot)
+        );
+        let fresh_host_evaluate = invoke_approved_browser_evaluate(
+            &runtime,
+            &reconnect_capability_grant,
+            fixture_origin,
+            &fixture_events,
+        )
+        .await;
+        assert!(
+            !fresh_host_evaluate.is_error
+                && tool_result_text(&fresh_host_evaluate).contains("builtin-evaluate-ok"),
+            "fresh Host retained-page evaluate failed: {}",
+            tool_result_text(&fresh_host_evaluate)
+        );
+        let fresh_host_evaluated_snapshot = invoke_browser_tool_with_grant(
+            &runtime,
+            &reconnect_capability_grant,
+            "browser_snapshot",
+            json!({"call_reason": "Confirm the fresh Host script result on the retained page."}),
+        )
+        .await;
+        assert!(
+            tool_result_text(&fresh_host_evaluated_snapshot).contains("evaluated:你好"),
+            "fresh Host evaluated snapshot missed the script result: {}",
+            tool_result_text(&fresh_host_evaluated_snapshot)
+        );
+
+        prepare_unconsumed_profile_binding_for_terminal_event(
+            &runtime,
+            &reconnect_capability_grant,
+        )
+        .await;
+        send_fixture_agent_done(
+            &fixture_events,
+            &reconnect_capability_grant.run_id,
+            AgentRunStatus::Completed,
+        );
+        drop(fixture_events);
 
         runtime.shutdown().await;
         fixture_input.lock().expect("fixture input lock").take();
@@ -4349,6 +4513,18 @@ mod tests {
             Err(_) => panic!("fixture RESULT timed out: exit={exit}; stderr={stderr}"),
         };
         assert!(exit.success(), "fixture failed: {stderr}");
+        let lifecycle_snapshots = result["agentLifecycleSnapshots"]
+            .as_array()
+            .expect("fixture Agent lifecycle snapshots");
+        assert_eq!(lifecycle_snapshots.len(), 4);
+        for snapshot in &lifecycle_snapshots[..3] {
+            assert_eq!(snapshot["status"], "waiting_for_approval");
+            assert_eq!(snapshot["sensitiveBindings"], 1);
+            assert_eq!(snapshot["sensitiveRequests"], 1);
+        }
+        assert_eq!(lifecycle_snapshots[3]["status"], "completed");
+        assert_eq!(lifecycle_snapshots[3]["sensitiveBindings"], 0);
+        assert_eq!(lifecycle_snapshots[3]["sensitiveRequests"], 0);
         let ensure_commands = result["ensureCommands"]
             .as_u64()
             .expect("fixture ensure command count");
@@ -4358,6 +4534,37 @@ mod tests {
         assert!(ensure_commands >= 2);
         assert!(close_commands >= 1);
         assert!(close_commands <= ensure_commands);
+        let detach_snapshots = result["automationDetachSnapshots"]
+            .as_array()
+            .expect("fixture automation detach snapshots");
+        assert!(
+            detach_snapshots.len() >= 2,
+            "browser_close and final fresh-Host shutdown must both detach automation"
+        );
+        let first_detach = &detach_snapshots[0];
+        assert_eq!(
+            first_detach["surfaces"]
+                .as_array()
+                .expect("first detach retained surfaces")
+                .len(),
+            1
+        );
+        assert_eq!(
+            first_detach["ensureCommands"], result["preShutdownEnsureCommands"],
+            "fresh Host reconnect must not issue a new ensure/create Surface command"
+        );
+        assert_eq!(
+            first_detach["surfaces"], result["preShutdownSurfaces"],
+            "fresh Host reconnect must retain the exact Surface generation"
+        );
+        assert_eq!(result["preShutdownEnsureCommands"], ensure_commands);
+        assert_eq!(
+            result["preShutdownSurfaces"]
+                .as_array()
+                .expect("pre-shutdown retained surfaces")
+                .len(),
+            1
+        );
         assert_eq!(result["surfaceCount"], 0);
         assert_eq!(result["guestCount"], 0);
         assert_eq!(result["targetClosed"], true);
@@ -4379,6 +4586,7 @@ mod tests {
     fn managed_playwright_e2e_risk_authority() -> (
         tempfile::TempDir,
         mycopilot_core::storage::service::StorageService,
+        BuiltinCapabilityRuntime,
         Arc<BrowserRiskCoordinator>,
         CapabilityGrant,
     ) {
@@ -4396,6 +4604,21 @@ mod tests {
         let (capability_runtime, _provider) =
             HostBuiltinCapabilityProvider::runtime_and_provider(policies)
                 .expect("create managed Browser capability runtime");
+        let grant = approve_managed_playwright_e2e_activation(
+            &capability_runtime,
+            "run_managed_playwright_e2e",
+            "managed-playwright-e2e-activation",
+        );
+        let coordinator = BrowserRiskCoordinator::new(capability_runtime.clone());
+        (directory, storage, capability_runtime, coordinator, grant)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn approve_managed_playwright_e2e_activation(
+        capability_runtime: &BuiltinCapabilityRuntime,
+        run_id: &str,
+        call_id: &str,
+    ) -> CapabilityGrant {
         let manifest = capability_runtime
             .manifests()
             .iter()
@@ -4405,8 +4628,8 @@ mod tests {
         let mut approval = AgentBuiltinCapabilityActivationApproval {
             action_id: Uuid::new_v4().to_string(),
             activation_id: Uuid::new_v4().to_string(),
-            run_id: "run_managed_playwright_e2e".to_string(),
-            call_id: "managed-playwright-e2e-activation".to_string(),
+            run_id: run_id.to_string(),
+            call_id: call_id.to_string(),
             capability_id: BROWSER_AUTOMATION_CAPABILITY_ID.to_string(),
             display_name: manifest.descriptor.display_name.clone(),
             reason: "Exercise the repository-owned local Browser fixture.".to_string(),
@@ -4417,15 +4640,9 @@ mod tests {
             approval_status: AgentApprovalStatus::Required,
         };
         approval.approval_status = AgentApprovalStatus::Approved;
-        let grant = capability_runtime
+        capability_runtime
             .approve_activation(&approval)
-            .expect("approve managed Browser capability in fixture");
-        (
-            directory,
-            storage,
-            BrowserRiskCoordinator::new(capability_runtime),
-            grant,
-        )
+            .expect("approve managed Browser capability in fixture")
     }
 
     async fn invoke_browser_tool(
@@ -4513,6 +4730,7 @@ mod tests {
         runtime: &Arc<ManagedPlaywrightMcpRuntime>,
         capability_grant: &CapabilityGrant,
         origin: &str,
+        fixture_events: &mpsc::UnboundedSender<Value>,
     ) -> McpToolResult {
         let raw_name = "browser_evaluate";
         let call_reason = "Run one synchronous script in the repository-owned fixture.";
@@ -4523,7 +4741,7 @@ mod tests {
             }"#,
             "call_reason": call_reason,
         });
-        invoke_approved_browser_sensitive_tool(
+        invoke_approved_browser_sensitive_tool_after_waiting_event(
             runtime,
             capability_grant,
             origin,
@@ -4531,6 +4749,73 @@ mod tests {
             arguments,
             vec![BuiltinMcpToolRiskKind::PageScriptExecution],
             vec![BuiltinMcpToolRiskKindDto::PageScriptExecution],
+            fixture_events,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn prepare_unconsumed_profile_binding_for_terminal_event(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        capability_grant: &CapabilityGrant,
+    ) {
+        let arguments = json!({
+            "path": "/",
+            "call_reason": "Freeze one profile-scoped binding for terminal lifecycle cleanup."
+        });
+        let now_ms = unix_millis();
+        let expires_at_ms = now_ms
+            .saturating_add(60_000)
+            .min(capability_grant.expires_at.saturating_mul(1_000));
+        let prepared = runtime
+            .bridge()
+            .prepare_sensitive_tool(ManagedPlaywrightPrepareSensitiveToolInput {
+                binding_request_id: Uuid::new_v4().to_string(),
+                binding_scope: ManagedPlaywrightSensitiveBindingScopeDto::ManagedBrowserProfile,
+                run_id: capability_grant.run_id.clone(),
+                capability_id: capability_grant.capability_id.as_str().to_string(),
+                activation_id: capability_grant.activation_id.as_str().to_string(),
+                manifest_digest: capability_grant.manifest_digest.clone(),
+                policy_revision: capability_grant.policy_revision,
+                grant_expires_at_ms: capability_grant.expires_at.saturating_mul(1_000),
+                call_id: Uuid::new_v4().to_string(),
+                tool_name: "browser_cookie_list".to_string(),
+                arguments_digest: mycopilot_core::builtin_mcp_tool_arguments_digest(&arguments)
+                    .expect("digest terminal profile binding arguments"),
+                created_at_ms: now_ms,
+                expires_at_ms,
+                file_preparation: None,
+            })
+            .await
+            .expect("prepare terminal profile binding");
+        assert!(matches!(
+            prepared,
+            ManagedPlaywrightCompletionOutcome::SensitiveToolPrepared { origin: None, .. }
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_approved_browser_sensitive_tool_after_waiting_event(
+        runtime: &Arc<ManagedPlaywrightMcpRuntime>,
+        capability_grant: &CapabilityGrant,
+        origin: &str,
+        raw_name: &str,
+        arguments: Value,
+        risks: Vec<BuiltinMcpToolRiskKind>,
+        risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
+        fixture_events: &mpsc::UnboundedSender<Value>,
+    ) -> McpToolResult {
+        invoke_approved_browser_sensitive_tool_with_file_preparation(
+            runtime,
+            capability_grant,
+            origin,
+            raw_name,
+            arguments,
+            risks,
+            risk_dtos,
+            None,
+            Some(fixture_events),
         )
         .await
     }
@@ -4554,6 +4839,7 @@ mod tests {
             arguments,
             risks,
             risk_dtos,
+            None,
             None,
         )
         .await
@@ -4580,6 +4866,7 @@ mod tests {
             risks,
             risk_dtos,
             Some(ManagedPlaywrightSensitiveFilePreparation::ResolvedPaths { paths }),
+            None,
         )
         .await
     }
@@ -4595,6 +4882,7 @@ mod tests {
         risks: Vec<BuiltinMcpToolRiskKind>,
         risk_dtos: Vec<BuiltinMcpToolRiskKindDto>,
         file_preparation: Option<ManagedPlaywrightSensitiveFilePreparation>,
+        waiting_event: Option<&mpsc::UnboundedSender<Value>>,
     ) -> McpToolResult {
         let call_reason = arguments["call_reason"]
             .as_str()
@@ -4688,6 +4976,13 @@ mod tests {
             .all(|basename| !basename.contains('/') && !basename.contains('\\')));
         assert_eq!(created_at_ms, now_ms);
         assert_eq!(prepared_expires_at_ms, expires_at_ms);
+        if let Some(fixture_events) = waiting_event {
+            send_fixture_agent_done(
+                fixture_events,
+                &capability_grant.run_id,
+                AgentRunStatus::WaitingForApproval,
+            );
+        }
         let resource_scope_digest = mycopilot_core::builtin_mcp_tool_resource_scope_digest_v2(
             raw_name,
             &arguments_digest,
@@ -4729,6 +5024,33 @@ mod tests {
             )
             .await
             .unwrap_or_else(|error| panic!("{raw_name} failed: {error:?}"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn send_fixture_agent_done(
+        fixture_events: &mpsc::UnboundedSender<Value>,
+        run_id: &str,
+        status: AgentRunStatus,
+    ) {
+        let success = matches!(
+            status,
+            AgentRunStatus::WaitingForApproval | AgentRunStatus::Completed
+        );
+        fixture_events
+            .send(json!({
+                "jsonrpc": "2.0",
+                "method": FIXTURE_AGENT_EVENT_METHOD,
+                "params": AgentEvent::Done {
+                    run_id: run_id.to_string(),
+                    success,
+                    status: Some(status),
+                    content: None,
+                    usage: None,
+                    finish_reason: None,
+                    proposed_actions: Vec::new(),
+                },
+            }))
+            .expect("send fixture Agent done event");
     }
 
     #[cfg(target_os = "macos")]

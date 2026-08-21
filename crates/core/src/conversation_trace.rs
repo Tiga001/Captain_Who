@@ -1043,7 +1043,10 @@ impl ConversationTurnTrace {
     }
 }
 
-fn validate_tool_identity(trace_tool: &str, identity: &AgentToolIdentity) -> Result<(), String> {
+pub(crate) fn validate_tool_identity(
+    trace_tool: &str,
+    identity: &AgentToolIdentity,
+) -> Result<(), String> {
     match identity {
         AgentToolIdentity::Builtin { tool_name } => {
             if tool_name != trace_tool || tool_name.chars().any(char::is_control) {

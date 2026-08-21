@@ -1,5 +1,27 @@
 use super::*;
 
+fn browser_tool_identity(
+    tool_id: &str,
+    raw_name: &str,
+    model_name: &str,
+) -> crate::AgentToolIdentity {
+    crate::AgentToolIdentity::BuiltinCapability {
+        capability_id: "browser_automation".into(),
+        managed_mcp_id: "builtin.browser_automation.mcp".into(),
+        package_name: "@playwright/mcp".into(),
+        package_version: "0.0.79".into(),
+        upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)).into_boxed_str(),
+        policy_digest: format!("sha256:{}", "2".repeat(64)).into_boxed_str(),
+        manifest_digest: format!("sha256:{}", "3".repeat(64)).into_boxed_str(),
+        tool_id: tool_id.into(),
+        raw_name: raw_name.to_string().into_boxed_str(),
+        model_name: model_name.to_string().into_boxed_str(),
+        upstream_schema_digest: format!("sha256:{}", "4".repeat(64)).into_boxed_str(),
+        host_overlay_digest: format!("sha256:{}", "5".repeat(64)).into_boxed_str(),
+        host_input_schema_digest: format!("sha256:{}", "6".repeat(64)).into_boxed_str(),
+    }
+}
+
 #[test]
 fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_writes() {
     let fixture = StorageFixture::new();
@@ -81,6 +103,52 @@ fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_
                 truncated: false,
                 archive: Default::default(),
             },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 4,
+                call_id: "call-browser-evaluate".to_string(),
+                tool: "browser_evaluate".to_string(),
+                provenance: browser_tool_identity(
+                    "browser.evaluate",
+                    "browser_evaluate",
+                    "browser_evaluate",
+                ),
+                operation: serde_json::json!({ "script": "() => document.title" }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 5,
+                call_id: "call-browser-evaluate".to_string(),
+                tool: "browser_evaluate".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({ "value": "Browser smoke" }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 6,
+                call_id: "call-browser-tabs".to_string(),
+                tool: "browser_tabs".to_string(),
+                provenance: browser_tool_identity("browser.tabs", "browser_tabs", "browser_tabs"),
+                operation: serde_json::json!({ "action": "list" }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 7,
+                call_id: "call-browser-tabs".to_string(),
+                tool: "browser_tabs".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Failed,
+                success: false,
+                observation: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                error: Some("transport closed".to_string()),
+                truncated: false,
+                archive: Default::default(),
+            },
         ],
     };
     service
@@ -110,6 +178,27 @@ fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_
         run["skillActivationRevision"],
         "activation-sha256-v1:observer"
     );
+    for (call_id, tool_id, tool_name, sequence) in [
+        (
+            "call-browser-evaluate",
+            "browser.evaluate",
+            "browser_evaluate",
+            4,
+        ),
+        ("call-browser-tabs", "browser.tabs", "browser_tabs", 6),
+    ] {
+        let timeline_item = run["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["callId"] == call_id)
+            .unwrap();
+        assert_eq!(timeline_item["identity"]["type"], "builtin_capability");
+        assert_eq!(timeline_item["identity"]["modelName"], tool_name);
+        assert_eq!(timeline_item["identity"]["rawName"], tool_name);
+        assert_eq!(timeline_item["identity"]["toolId"], tool_id);
+        assert_eq!(timeline_item["traceSequence"], sequence);
+    }
 }
 
 #[test]

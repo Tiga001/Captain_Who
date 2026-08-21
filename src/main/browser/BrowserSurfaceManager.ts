@@ -30,7 +30,6 @@ const DEFAULT_MAX_MANAGED_SURFACES = 8
 const MAX_CONFIGURED_MANAGED_SURFACES = 16
 const MAX_POPUPS_PER_SECOND = 4
 const MAX_PENDING_RENDERER_COMMANDS = 64
-const MAX_INITIAL_DOCUMENT_READY_MS = 2_000
 const STRICT_MODE_SURFACE_HANDOFF_MS = 100
 const MAX_SETTLED_SURFACE_REQUESTS = 256
 
@@ -393,18 +392,15 @@ export class BrowserSurfaceManager {
     if (!surface.initialDocumentReady) {
       input.guest.on('dom-ready', handleInitialDocumentReady)
       input.guest.on('did-finish-load', handleInitialDocumentReady)
-      surface.initialDocumentReadyTimer = setTimeout(
-        () => {
-          if (
-            this.surfaces.get(surfaceId) === surface &&
-            !surface.initialDocumentReady &&
-            !input.guest.isDestroyed()
-          ) {
-            input.guest.close()
-          }
-        },
-        Math.min(this.attachTimeoutMs, MAX_INITIAL_DOCUMENT_READY_MS)
-      )
+      surface.initialDocumentReadyTimer = setTimeout(() => {
+        if (
+          this.surfaces.get(surfaceId) === surface &&
+          !surface.initialDocumentReady &&
+          !input.guest.isDestroyed()
+        ) {
+          input.guest.close()
+        }
+      }, this.attachTimeoutMs)
     }
     try {
       this.networkGuard?.registerGuest({ generation, guest: input.guest, surfaceId })

@@ -355,6 +355,73 @@ describe('BrowserSurfaceManager', () => {
     await manager.shutdown()
   })
 
+  it('keeps an initially loading surface alive throughout the configured readiness budget', async () => {
+    vi.useFakeTimers()
+    const { commands, host, manager } = createHarness({ attachTimeoutMs: 10_000 })
+    const pending = manager.ensureActiveSurface()
+    const command = commands[0]
+    if (!command || command.kind !== 'ensureAttached') throw new Error('ensure command missing')
+    const guest = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(command.surfaceId),
+      host.asWebContents()
+    )
+    guest.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: guest.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: command.surfaceId
+    })
+    attachSurface(manager, host.asWebContents(), {
+      schemaVersion: 1,
+      requestId: command.requestId,
+      surfaceId: command.surfaceId
+    })
+
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(guest.close).not.toHaveBeenCalled()
+    expect(guest.isDestroyed()).toBe(false)
+
+    guest.emit('dom-ready')
+    await expect(pending).resolves.toEqual(
+      expect.objectContaining({ generation: 1, surfaceId: command.surfaceId })
+    )
+    expect(guest.close).not.toHaveBeenCalled()
+    await manager.shutdown()
+  })
+
+  it('fails closed when initial document readiness exceeds the configured attach timeout', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness({ attachTimeoutMs: 10_000 })
+    const guest = new FakeWebContents(
+      2,
+      'webview',
+      createBrowserSurfaceBootstrapUrl(SURFACE_ID),
+      host.asWebContents()
+    )
+    guest.loadingMainFrame = true
+    manager.registerManagedGuest({
+      documentReady: false,
+      guest: guest.asWebContents(),
+      host: host.asWebContents(),
+      partition: BROWSER_WEBVIEW_PARTITION,
+      surfaceId: SURFACE_ID
+    })
+
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(guest.close).not.toHaveBeenCalled()
+    expect(guest.isDestroyed()).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(guest.close).toHaveBeenCalledTimes(1)
+    expect(guest.isDestroyed()).toBe(true)
+    expect(manager.listSurfaces()).toHaveLength(0)
+    await manager.shutdown()
+  })
+
   it('hands a startup ready acknowledgement to the exact StrictMode replacement generation', async () => {
     vi.useFakeTimers()
     const { commands, host, manager } = createHarness()

@@ -380,6 +380,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(surfaces).toHaveLength(1)
     expect(callTool.mock.calls.map(([request]) => request.name)).toEqual([
       'browser_tabs',
+      'browser_tabs',
       'browser_cookie_set'
     ])
     expect(callTool).toHaveBeenLastCalledWith(
@@ -1695,6 +1696,266 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(finishIntent).toHaveBeenCalledOnce()
   })
 
+  it('rebinds a retained page before browser_navigate when trusted selection is temporarily empty', async () => {
+    const url = 'http://127.0.0.1/fixture-retained-navigation'
+    const retained = { ...surfaceView(0, false), url: 'http://127.0.0.1/retained' }
+    const exactLease = {
+      surfaceId: retained.surfaceId,
+      generation: retained.generation,
+      selectionRevision: 2,
+      index: 0,
+      resolveIndex: vi.fn(async () => 0),
+      closeSurface: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const beginExistingToolSurfaceLease = vi.fn(async () => null)
+    const beginToolSurfaceLease = vi.fn(async () => {
+      throw new Error('retained navigation must not call ensureSurface')
+    })
+    const beginToolSurfaceLeaseByIndex = vi.fn(async () => exactLease)
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      getSensitiveTargetIdentity: () => null,
+      ensureActiveSurface: vi.fn(async () => retained),
+      listSurfaces: () => [retained],
+      createSurface: vi.fn(async () => retained),
+      selectSurface: vi.fn(async () => retained),
+      closeSurfaceByIndex: vi.fn(async () => undefined),
+      beginToolSurfaceLease,
+      beginToolSurfaceLeaseByIndex,
+      beginExistingToolSurfaceLease,
+      beginTargetCreationIntent: vi.fn(() => {
+        throw new Error('retained navigation must not use zero-page target creation')
+      })
+    }
+    const risk = {
+      preflight: vi.fn(async () => undefined),
+      markDispatched: vi.fn(),
+      settle: vi.fn(async () => undefined),
+      failure: () => null,
+      artifacts: () => [],
+      finish: vi.fn()
+    } as unknown as BrowserNetworkOperationLease
+    const beginNetworkOperation = vi.fn(async () => risk)
+    const beginTargetCreationOperation = vi.fn(async () => {
+      throw new Error('retained navigation must use the exact guest risk lease')
+    })
+    const context = fakeBrowserContext()
+    let contextGetter: (() => Promise<BrowserContext>) | undefined
+    const createOfficialConnection = vi.fn(async (_config, getter) => {
+      contextGetter = getter
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+      if (name === 'browser_tabs' && args.action === 'list') await contextGetter!()
+      return {
+        content: [{ type: 'text', text: `Navigated to ${url}` }],
+        isError: false
+      }
+    })
+    const host = fakeHost({
+      beginNetworkOperation,
+      beginTargetCreationOperation,
+      callTool: upstream,
+      createOfficialConnection,
+      getBrowserContext: async () => context,
+      surfaceGroup
+    })
+    const authorizationContext = {
+      ...RISK_CONTEXT,
+      callId: 'call-navigate-retained',
+      triggerToolName: 'browser_navigate'
+    }
+
+    await expect(
+      host.callTool(
+        'browser_navigate',
+        { url, call_reason: 'Navigate the retained visible fixture page.' },
+        { authorizationContext, parentRequestId: PARENT_REQUEST_ID }
+      )
+    ).resolves.toMatchObject({ isError: false })
+
+    expect(beginExistingToolSurfaceLease).toHaveBeenCalledOnce()
+    expect(beginToolSurfaceLease).not.toHaveBeenCalled()
+    expect(beginToolSurfaceLeaseByIndex).toHaveBeenCalledWith(0)
+    expect(beginTargetCreationOperation).not.toHaveBeenCalled()
+    expect(beginNetworkOperation).toHaveBeenCalledOnce()
+    expect(risk.preflight).toHaveBeenCalledWith(url)
+    expect(upstream.mock.calls.map(([request]) => request)).toEqual([
+      { name: 'browser_tabs', arguments: { action: 'list' } },
+      { name: 'browser_tabs', arguments: { action: 'select', index: 0 } },
+      { name: 'browser_navigate', arguments: { url } }
+    ])
+    expect(exactLease.finish).toHaveBeenCalledOnce()
+  })
+
+  it.each(['select', 'close'] as const)(
+    'hydrates a fresh official retained-page context before browser_tabs %s',
+    async (action) => {
+      const retained = surfaceView(0, true)
+      const exactLease = {
+        surfaceId: retained.surfaceId,
+        generation: retained.generation,
+        selectionRevision: 1,
+        index: 0,
+        resolveIndex: vi.fn(async () => 0),
+        closeSurface: vi.fn(async () => undefined),
+        finish: vi.fn()
+      }
+      const createSurface = vi.fn(async () => {
+        throw new Error('retained tab action must not create a Surface')
+      })
+      const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+        ...singleSurfaceGroup([retained]),
+        createSurface,
+        beginToolSurfaceLeaseByIndex: vi.fn(async () => exactLease)
+      }
+      const context = fakeBrowserContext()
+      let contextGetter: (() => Promise<BrowserContext>) | undefined
+      const createOfficialConnection = vi.fn(async (_config, getter) => {
+        contextGetter = getter
+        return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+      })
+      const upstream = vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+        if (name === 'browser_tabs' && args.action === 'list') await contextGetter!()
+        return { content: [{ type: 'text', text: String(args.action) }], isError: false }
+      })
+      const host = fakeHost({
+        callTool: upstream,
+        createOfficialConnection,
+        getBrowserContext: async () => context,
+        surfaceGroup
+      })
+
+      await expect(
+        host.callTool('browser_tabs', {
+          action,
+          index: 0,
+          call_reason: `${action} the retained local fixture tab.`
+        })
+      ).resolves.toMatchObject({ isError: false })
+
+      expect(upstream.mock.calls.map(([request]) => request)).toEqual([
+        { name: 'browser_tabs', arguments: { action: 'list' } },
+        { name: 'browser_tabs', arguments: { action, index: 0 } }
+      ])
+      expect(createSurface).not.toHaveBeenCalled()
+      expect(exactLease.finish).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('maps a resolved retained-context hydration error to response_received', async () => {
+    const surface = surfaceView(0, true)
+    const exactLease = {
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      selectionRevision: 1,
+      index: 0,
+      resolveIndex: vi.fn(async () => 0),
+      closeSurface: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...singleSurfaceGroup([surface]),
+      beginToolSurfaceLease: vi.fn(async () => exactLease)
+    }
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async () => ({
+      content: [{ type: 'text', text: 'Tab 0 not found' }],
+      isError: true
+    }))
+    const phases: string[] = []
+    const host = fakeHost({ callTool: upstream, surfaceGroup })
+
+    await expect(
+      host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Hydrate the retained fixture page.' },
+        {
+          onDispatchPhase: vi.fn(async (phase) => {
+            phases.push(phase)
+            return true
+          })
+        }
+      )
+    ).rejects.toMatchObject({
+      code: 'browser.target_closed',
+      dispatchCertainty: 'response_received'
+    })
+    expect(phases).toEqual(['possibly_dispatched', 'response_received'])
+    expect(upstream).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a rejected retained-context hydration call possibly dispatched', async () => {
+    const surface = surfaceView(0, true)
+    const exactLease = {
+      surfaceId: surface.surfaceId,
+      generation: surface.generation,
+      selectionRevision: 1,
+      index: 0,
+      resolveIndex: vi.fn(async () => 0),
+      closeSurface: vi.fn(async () => undefined),
+      finish: vi.fn()
+    }
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...singleSurfaceGroup([surface]),
+      beginToolSurfaceLease: vi.fn(async () => exactLease)
+    }
+    const detachAutomation = vi.fn(async () => undefined)
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async () => {
+      throw new Error('fixture hydration transport rejected')
+    })
+    const phases: string[] = []
+    const host = fakeHost({ callTool: upstream, detachAutomation, surfaceGroup })
+
+    await expect(
+      host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Exercise rejected retained hydration.' },
+        {
+          onDispatchPhase: vi.fn(async (phase) => {
+            phases.push(phase)
+            return true
+          })
+        }
+      )
+    ).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
+    expect(phases).toEqual(['possibly_dispatched'])
+    expect(detachAutomation).toHaveBeenCalledOnce()
+  })
+
+  it('fails closed without creating or guessing when retained pages have no trusted selection', async () => {
+    const retained = [surfaceView(0, false), surfaceView(1, false)]
+    const beginToolSurfaceLeaseByIndex = vi.fn(async () => {
+      throw new Error('ambiguous retained pages must not be leased by guess')
+    })
+    const beginTargetCreationIntent = vi.fn(() => {
+      throw new Error('ambiguous retained pages are not a zero-page context')
+    })
+    const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...singleSurfaceGroup(retained),
+      beginExistingToolSurfaceLease: vi.fn(async () => null),
+      beginToolSurfaceLeaseByIndex,
+      beginTargetCreationIntent
+    }
+    const createOfficialConnection = vi.fn(async () => ({
+      connect: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    }))
+    const host = fakeHost({ createOfficialConnection, surfaceGroup })
+
+    await expect(
+      host.callTool('browser_navigate', {
+        url: 'http://127.0.0.1/ambiguous-retained',
+        call_reason: 'Do not guess among retained local pages.'
+      })
+    ).rejects.toMatchObject({
+      code: 'browser.surface_unavailable',
+      dispatchCertainty: 'definitely_not_dispatched'
+    })
+    expect(beginToolSurfaceLeaseByIndex).not.toHaveBeenCalled()
+    expect(beginTargetCreationIntent).not.toHaveBeenCalled()
+    expect(createOfficialConnection).not.toHaveBeenCalled()
+  })
+
   it('creates one authorized blank target when the last tab closes during list lease admission', async () => {
     const surfaces: ReturnType<typeof surfaceView>[] = [surfaceView(0, true)]
     const claimAuthority = vi.fn<(binding: unknown) => Promise<void>>(async () => undefined)
@@ -1986,8 +2247,8 @@ describe('ManagedPlaywrightMcpHost', () => {
       artifacts: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
-    const upstream = vi.fn<ManagedMcpClient['callTool']>(async () => {
-      order.push('upstream-close')
+    const upstream = vi.fn<ManagedMcpClient['callTool']>(async ({ arguments: args }) => {
+      order.push(`upstream-${String(args.action)}`)
       return { content: [{ type: 'text', text: '- 0: Fixture (current)' }], isError: false }
     })
     const host = fakeHost({
@@ -2015,7 +2276,9 @@ describe('ManagedPlaywrightMcpHost', () => {
       surfaceId: surface.surfaceId,
       generation: surface.generation
     })
-    expect(order).toEqual(['expect-close', 'risk-dispatched', 'upstream-close'])
+    expect(order.indexOf('expect-close')).toBeLessThan(order.indexOf('risk-dispatched'))
+    expect(order.indexOf('risk-dispatched')).toBeLessThan(order.indexOf('upstream-list'))
+    expect(order.indexOf('upstream-list')).toBeLessThan(order.indexOf('upstream-close'))
     expect(upstream).toHaveBeenCalledWith(
       { name: 'browser_tabs', arguments: { action: 'close', index: 1 } },
       undefined,
@@ -2080,7 +2343,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       )
     ).resolves.toMatchObject({ isError: false })
 
-    expect(order).toEqual(['risk-dispatched', 'upstream:select', 'upstream:list'])
+    expect(order).toEqual(['risk-dispatched', 'upstream:list', 'upstream:select', 'upstream:list'])
     expect(risk.markDispatched).toHaveBeenCalledOnce()
     expect(exactLease.finish).toHaveBeenCalledOnce()
   })
@@ -2471,6 +2734,7 @@ describe('ManagedPlaywrightMcpHost', () => {
         { authorizationContext: { ...RISK_CONTEXT, callId: 'call-pdf-success' } }
       )
       expect(upstreamCall.mock.calls.map(([request]) => request.name)).toEqual([
+        'browser_tabs',
         'browser_tabs',
         'browser_pdf_save'
       ])
@@ -3438,15 +3702,17 @@ describe('ManagedPlaywrightMcpHost', () => {
       }
       return { content: [{ type: 'text', text: 'fresh snapshot' }], isError: false }
     })
-    const createOfficialConnection = vi.fn(async () => ({
-      connect: vi.fn(async () => undefined),
-      close: vi.fn(async () => undefined)
-    }))
+    const context = fakeBrowserContext()
+    const createOfficialConnection = vi.fn(async (_config, contextGetter) => {
+      await contextGetter()
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
     const detachAutomation = vi.fn(async () => undefined)
     const host = fakeHost({
       callTool,
       createOfficialConnection,
       detachAutomation,
+      getBrowserContext: async () => context,
       surfaceGroup
     })
 
@@ -3732,15 +3998,17 @@ describe('ManagedPlaywrightMcpHost', () => {
         content: [{ type: 'text', text: 'fresh snapshot' }],
         isError: false
       })
-    const createOfficialConnection = vi.fn(async () => ({
-      connect: vi.fn(async () => undefined),
-      close: vi.fn(async () => undefined)
-    }))
+    const context = fakeBrowserContext()
+    const createOfficialConnection = vi.fn(async (_config, contextGetter) => {
+      await contextGetter()
+      return { connect: vi.fn(async () => undefined), close: vi.fn(async () => undefined) }
+    })
     const detachAutomation = vi.fn(async () => undefined)
     const host = fakeHost({
       callTool,
       createOfficialConnection,
       detachAutomation,
+      getBrowserContext: async () => context,
       surfaceGroup
     })
 
@@ -3748,7 +4016,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       host.callTool('browser_snapshot', { call_reason: 'Exercise a terminal select response.' })
     ).rejects.toMatchObject({
       code: 'browser.target_closed',
-      dispatchCertainty: 'possibly_dispatched'
+      dispatchCertainty: 'response_received'
     })
     expect(callTool).toHaveBeenCalledOnce()
     expect(detachAutomation).toHaveBeenCalledOnce()

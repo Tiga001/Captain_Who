@@ -749,6 +749,13 @@ export class ManagedPlaywrightMcpHost {
               }
               const connection = await this.ensureConnected()
               await this.ensureOfficialCatalog(connection, operationSignal)
+              if (surfaceLease && shouldSynchronizeOfficialSurface(name, modelArguments)) {
+                // Pure pre-dispatch CAS: reject an already-closed/replaced lease before lazy
+                // Context hydration crosses the official dispatch boundary. Re-resolve again
+                // immediately before exact selection because hydration itself can observe close /
+                // reorder events from the retained Electron group.
+                await surfaceLease.resolveIndex()
+              }
               if (
                 surfaceLease &&
                 name === 'browser_tabs' &&
@@ -834,21 +841,62 @@ export class ManagedPlaywrightMcpHost {
                 }
 
                 if (name === 'browser_tabs' && modelArguments.action === 'close' && surfaceLease) {
+                  // Hydration is the first official dispatch for a retained page. Install close
+                  // intent before it so a target close racing Context import is attributed to the
+                  // reviewed close operation rather than reported as an unrelated risk failure.
                   riskLease?.expectTargetClose({
                     surfaceId: surfaceLease.surfaceId,
                     generation: surfaceLease.generation
                   })
                 }
 
+                if (surfaceLease && !connection.context) {
+                  // A fresh official MCP connection starts with an empty in-memory tab registry,
+                  // even when Electron kept the user's Page alive across browser_close / task
+                  // release. Official browser_tabs list is the lazy Context hydration boundary:
+                  // with an exact retained lease it imports browserContext.pages() and cannot
+                  // create a target. Do this before select/close/list or any Page Tool touches the
+                  // official currentTab. A true zero-page call has no lease and deliberately skips
+                  // this path so fixed Playwright retains its reviewed first-target semantics.
+                  await this.hydrateOfficialRetainedContext(
+                    connection,
+                    operationSignal,
+                    markOperationDispatched,
+                    async () => {
+                      responseReceived = true
+                      await acknowledgeDispatchPhase('response_received')
+                    }
+                  )
+                }
+
+                if (
+                  surfaceLease &&
+                  name === 'browser_tabs' &&
+                  (modelArguments.action === 'select' || modelArguments.action === 'close')
+                ) {
+                  serverArguments = {
+                    ...serverArguments,
+                    index: await surfaceLease.resolveIndex()
+                  }
+                }
+
                 if (surfaceLease && shouldSynchronizeOfficialSurface(name, modelArguments)) {
                   // Bringing the exact managed guest to the front can synchronously run a page
                   // focus handler that navigates or downloads. Install the exact guest's risk /
                   // download authority and conservatively cross the dispatch boundary first. The
-                  // lease index itself is a pure generation/group CAS and must settle before that
-                  // boundary: a drift rejection has not reached any official handler.
+                  // early CAS above kept pre-existing drift definite; this second resolution keeps
+                  // retained-context hydration from redirecting selection after a close/reorder.
                   const exactSurfaceIndex = await surfaceLease.resolveIndex()
                   await markOperationDispatched()
-                  await this.selectOfficialSurface(connection, exactSurfaceIndex, operationSignal)
+                  await this.selectOfficialSurface(
+                    connection,
+                    exactSurfaceIndex,
+                    operationSignal,
+                    async () => {
+                      responseReceived = true
+                      await acknowledgeDispatchPhase('response_received')
+                    }
+                  )
                 }
 
                 let hostAdapted: ManagedPlaywrightCallResult | undefined
@@ -1130,6 +1178,21 @@ export class ManagedPlaywrightMcpHost {
     }
     if (!this.surfaceGroup.beginExistingToolSurfaceLease) return undefined
     const lease = await this.surfaceGroup.beginExistingToolSurfaceLease()
+    if (!lease && mode === 'optional_existing') {
+      const retainedSurfaces = this.surfaceGroup.listSurfaces()
+      if (retainedSurfaces.length === 0) return undefined
+      // A retained user-visible page can temporarily have no trusted active selection while the
+      // Renderer switches tasks or remounts the Browser panel. That is not the zero-page case:
+      // fixed Playwright will reuse the retained Page instead of issuing Target.createTarget, so
+      // a targetless creation lease would never acquire network authority for the actual guest.
+      // Rebind only when one live page is uniquely identifiable. With multiple pages and no
+      // trusted selection, fail closed instead of guessing a target or calling ensureSurface(),
+      // which could reveal or create a page while trying to recover selection.
+      if (retainedSurfaces.length !== 1 || !this.surfaceGroup.beginToolSurfaceLeaseByIndex) {
+        throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+      }
+      return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(retainedSurfaces[0]!.index)
+    }
     if (!lease && mode === 'existing') {
       throw new ManagedPlaywrightMcpHostError('browser.target_closed')
     }
@@ -1297,18 +1360,67 @@ export class ManagedPlaywrightMcpHost {
   private async selectOfficialSurface(
     connection: ActiveConnection,
     index: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    markAuthoritativeFailure: () => Promise<void>
   ): Promise<void> {
     if (!Number.isSafeInteger(index) || index < 0) {
       throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
     }
-    const selected = await this.callOfficialTool(
-      connection,
-      { name: 'browser_tabs', arguments: { action: 'select', index } },
-      signal
-    )
+    let rawResponseReceived = false
+    let selected: ManagedPlaywrightCallResult
+    try {
+      selected = await this.callOfficialTool(
+        connection,
+        { name: 'browser_tabs', arguments: { action: 'select', index } },
+        signal,
+        this.toolTimeoutMs,
+        () => {
+          rawResponseReceived = true
+        }
+      )
+    } catch (error) {
+      if (!rawResponseReceived) throw error
+      await markAuthoritativeFailure()
+      const mapped = mapSafeHostError(error)
+      throw new ManagedPlaywrightMcpHostError(mapped.code, 'response_received')
+    }
     if (selected.isError) {
-      throw new ManagedPlaywrightMcpHostError('browser.target_closed')
+      await markAuthoritativeFailure()
+      throw new ManagedPlaywrightMcpHostError('browser.target_closed', 'response_received')
+    }
+  }
+
+  private async hydrateOfficialRetainedContext(
+    connection: ActiveConnection,
+    signal: AbortSignal,
+    markDispatched: () => Promise<void>,
+    markAuthoritativeFailure: () => Promise<void>
+  ): Promise<void> {
+    if (connection.context) return
+    await markDispatched()
+    let rawResponseReceived = false
+    let listed: ManagedPlaywrightCallResult
+    try {
+      listed = await this.callOfficialTool(
+        connection,
+        { name: 'browser_tabs', arguments: { action: 'list' } },
+        signal,
+        this.toolTimeoutMs,
+        () => {
+          rawResponseReceived = true
+        }
+      )
+    } catch (error) {
+      // A rejected SDK request has no authoritative Tool response and remains replay-unsafe /
+      // possibly dispatched. Parsing failure after a resolved raw response is authoritative.
+      if (!rawResponseReceived) throw error
+      await markAuthoritativeFailure()
+      const mapped = mapSafeHostError(error)
+      throw new ManagedPlaywrightMcpHostError(mapped.code, 'response_received')
+    }
+    if (listed.isError) {
+      await markAuthoritativeFailure()
+      throw new ManagedPlaywrightMcpHostError('browser.target_closed', 'response_received')
     }
   }
 

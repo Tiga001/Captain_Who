@@ -2162,6 +2162,7 @@ fn project_guidance_timeline(
                     sequence,
                     call_id,
                     tool,
+                    provenance,
                     operation,
                     approval_status,
                     ..
@@ -2189,6 +2190,7 @@ fn project_guidance_timeline(
                             "id": format!("tool-call-{call_id}"),
                             "type": "tool_call",
                             "callId": call_id,
+                            "identity": provenance,
                             "traceSequence": sequence,
                         }));
                     }

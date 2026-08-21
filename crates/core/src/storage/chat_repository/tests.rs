@@ -12,6 +12,82 @@ fn approval_is_safe(value: &serde_json::Value) -> bool {
         .is_some_and(current_persisted_approval_is_safe)
 }
 
+fn current_browser_tool_identity(
+    tool_id: &str,
+    raw_name: &str,
+    model_name: &str,
+) -> serde_json::Value {
+    serde_json::to_value(crate::AgentToolIdentity::BuiltinCapability {
+        capability_id: "browser_automation".into(),
+        managed_mcp_id: "builtin.browser_automation.mcp".into(),
+        package_name: "@playwright/mcp".into(),
+        package_version: "0.0.79".into(),
+        upstream_catalog_digest: format!("sha256:{}", "1".repeat(64)).into_boxed_str(),
+        policy_digest: format!("sha256:{}", "2".repeat(64)).into_boxed_str(),
+        manifest_digest: format!("sha256:{}", "3".repeat(64)).into_boxed_str(),
+        tool_id: tool_id.into(),
+        raw_name: raw_name.to_string().into_boxed_str(),
+        model_name: model_name.to_string().into_boxed_str(),
+        upstream_schema_digest: format!("sha256:{}", "4".repeat(64)).into_boxed_str(),
+        host_overlay_digest: format!("sha256:{}", "5".repeat(64)).into_boxed_str(),
+        host_input_schema_digest: format!("sha256:{}", "6".repeat(64)).into_boxed_str(),
+    })
+    .unwrap()
+}
+
+fn current_browser_agent_run() -> serde_json::Value {
+    let evaluate_identity =
+        current_browser_tool_identity("browser.evaluate", "browser_evaluate", "browser_evaluate");
+    let tabs_identity =
+        current_browser_tool_identity("browser.tabs", "browser_tabs", "browser_tabs");
+    serde_json::json!({
+        "runId": "run-1",
+        "status": "running",
+        "startedAt": 2,
+        "toolDefinitions": [],
+        "toolCalls": [
+            {
+                "id": "call-evaluate",
+                "tool": "browser_evaluate",
+                "args": {},
+                "approvalStatus": "approved",
+                "reason": null
+            },
+            {
+                "id": "call-tabs",
+                "tool": "browser_tabs",
+                "args": {},
+                "approvalStatus": "not_required",
+                "reason": null
+            }
+        ],
+        "toolResults": [],
+        "approvals": [],
+        "diffs": [],
+        "fileDrafts": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "mcpInvocations": [],
+        "messageStreamCheckpoints": {},
+        "timeline": [
+            {
+                "id": "tool-call-call-evaluate",
+                "type": "tool_call",
+                "callId": "call-evaluate",
+                "identity": evaluate_identity,
+                "traceSequence": 4
+            },
+            {
+                "id": "tool-call-call-tabs",
+                "type": "tool_call",
+                "callId": "call-tabs",
+                "identity": tabs_identity,
+                "traceSequence": 6
+            }
+        ]
+    })
+}
+
 fn current_office_approval() -> serde_json::Value {
     serde_json::json!({
         "type": "office_operation",
@@ -692,6 +768,89 @@ fn startup_recovery_writes_complete_current_agent_run_from_missing_or_malformed_
         None,
     );
     assert_eq!(waiting["state"]["updatedAt"], 200);
+}
+
+#[test]
+fn live_save_and_lifecycle_load_preserve_browser_tool_timeline_identity() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    save_conversation(&mut connection, conversation()).unwrap();
+
+    update_message_state(
+        &connection,
+        "conversation-1",
+        &ChatMessageStateRecord {
+            id: "assistant-1".to_string(),
+            content: "working".to_string(),
+            status: Some("pending".to_string()),
+            agent_run_json: Some(current_browser_agent_run().to_string()),
+            ui_state_json: None,
+        },
+    )
+    .unwrap();
+    update_message_run_waiting_state(&connection, "conversation-1", "assistant-1", "run-1", 10)
+        .unwrap();
+
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(loaded.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "waiting_for_approval");
+    for (index, (call_id, tool_id, tool_name, sequence)) in [
+        ("call-evaluate", "browser.evaluate", "browser_evaluate", 4),
+        ("call-tabs", "browser.tabs", "browser_tabs", 6),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(run["timeline"][index]["callId"], call_id);
+        assert_eq!(
+            run["timeline"][index]["identity"]["type"],
+            "builtin_capability"
+        );
+        assert_eq!(run["timeline"][index]["identity"]["modelName"], tool_name);
+        assert_eq!(run["timeline"][index]["identity"]["rawName"], tool_name);
+        assert_eq!(run["timeline"][index]["identity"]["toolId"], tool_id);
+        assert_eq!(run["timeline"][index]["traceSequence"], sequence);
+    }
+}
+
+#[test]
+fn lifecycle_projection_rejects_hidden_mismatched_or_malformed_browser_identity_fields() {
+    let valid = current_browser_agent_run();
+    let invalid_projections = [
+        {
+            let mut invalid = valid.clone();
+            invalid["timeline"][0]["identity"]["cdpEndpoint"] = "must-not-survive".into();
+            invalid
+        },
+        {
+            let mut invalid = valid.clone();
+            invalid["timeline"][0]["identity"]["modelName"] = "browser_tabs".into();
+            invalid
+        },
+        {
+            let mut invalid = valid;
+            invalid["timeline"][0]["traceSequence"] = (-1).into();
+            invalid
+        },
+    ];
+
+    for invalid in invalid_projections {
+        let recovered = canonical_agent_run_lifecycle_projection(
+            Some(&invalid.to_string()),
+            "run-1",
+            "waiting_for_approval",
+            2,
+            20,
+            None,
+        )
+        .unwrap();
+        let recovered: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(recovered["toolCalls"], serde_json::json!([]));
+        assert_eq!(recovered["timeline"], serde_json::json!([]));
+    }
 }
 
 #[test]

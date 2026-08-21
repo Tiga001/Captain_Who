@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+  type AgentEvent,
   type ManagedPlaywrightCancelNotification,
   type ManagedPlaywrightCommandNotification,
   type ManagedPlaywrightCompletionInput,
@@ -39,6 +40,7 @@ const AUTHORIZATION_CONTEXT = {
 class FakeCore {
   readonly completions: ManagedPlaywrightCompletionInput[] = []
   readonly dispatchPhases: ManagedPlaywrightDispatchPhaseInput[] = []
+  private agentEvent?: (input: AgentEvent) => void
   private cancel?: (input: ManagedPlaywrightCancelNotification) => void
   private command?: (input: ManagedPlaywrightCommandNotification) => void
 
@@ -58,6 +60,13 @@ class FakeCore {
   ): Promise<boolean> {
     this.dispatchPhases.push(input)
     return true
+  }
+
+  onAgentEvent(handler: (input: AgentEvent) => void): () => void {
+    this.agentEvent = handler
+    return () => {
+      if (this.agentEvent === handler) this.agentEvent = undefined
+    }
   }
 
   onManagedPlaywrightCancel(
@@ -80,6 +89,10 @@ class FakeCore {
 
   emitCommand(input: ManagedPlaywrightCommandNotification): void {
     this.command?.(input)
+  }
+
+  emitAgentEvent(input: AgentEvent): void {
+    this.agentEvent?.(input)
   }
 
   emitCancel(input: ManagedPlaywrightCancelNotification): void {
@@ -253,6 +266,143 @@ describe('ManagedPlaywrightBridgeHost', () => {
       }
     })
     expect(callTool).not.toHaveBeenCalled()
+    await bridge.close()
+  })
+
+  it.each([
+    ['completed', 'managed_surface', 'browser_evaluate'],
+    ['failed', 'managed_browser_profile', 'browser_cookie_list'],
+    ['cancelled', 'managed_surface', 'browser_evaluate']
+  ] as const)(
+    'keeps a prepared sensitive binding while approval waits and releases it on %s',
+    async (terminalStatus, bindingScope, toolName) => {
+      const root = await mkdtemp(join(tmpdir(), 'mycopilot-bridge-run-release-'))
+      const core = new FakeCore()
+      const bindings = targetBindingBroker()
+      const fileBroker = new BrowserFileBroker({
+        rootDirectory: join(root, 'browser-automation-files'),
+        selectionProvider: { selectFiles: vi.fn(async () => null) }
+      })
+      const managedHost = hostWith({})
+      const releaseFileRun = vi.spyOn(fileBroker, 'releaseRun')
+      const releaseHostRun = vi.spyOn(managedHost, 'releaseRun')
+      const bridge = new ManagedPlaywrightBridgeHost({
+        core,
+        fileBroker,
+        sensitiveTargetBindings: bindings,
+        createHost: () => managedHost
+      })
+      const now = Date.now()
+      const prepareRequest = command({
+        type: 'prepare_sensitive_tool',
+        input: {
+          bindingRequestId: randomUUID(),
+          bindingScope,
+          runId: 'run-approval-lifecycle',
+          capabilityId: 'browser_automation',
+          activationId: AUTHORIZATION_CONTEXT.activationId,
+          manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+          policyRevision: 1,
+          grantExpiresAtMs: now + 120_000,
+          callId: `call-${terminalStatus}`,
+          toolName,
+          argumentsDigest: `sha256:${'d'.repeat(64)}`,
+          createdAtMs: now,
+          expiresAtMs: now + 60_000,
+          filePreparation: null
+        }
+      })
+
+      try {
+        core.emitCommand(command({ type: 'connect' }))
+        await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+        core.emitCommand(prepareRequest)
+        await vi.waitFor(() => expect(core.completions).toHaveLength(2))
+        expect(
+          core.completions.find((completion) => completion.requestId === prepareRequest.requestId)
+            ?.outcome
+        ).toMatchObject({
+          type: 'sensitive_tool_prepared',
+          origin: bindingScope === 'managed_browser_profile' ? null : 'http://127.0.0.1'
+        })
+        expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+
+        core.emitAgentEvent({
+          type: 'done',
+          runId: 'run-approval-lifecycle',
+          success: false,
+          status: 'waiting_for_approval'
+        })
+        expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+        expect(releaseFileRun).not.toHaveBeenCalled()
+        expect(releaseHostRun).not.toHaveBeenCalled()
+
+        core.emitAgentEvent({
+          type: 'done',
+          runId: 'run-approval-lifecycle',
+          success: terminalStatus === 'completed',
+          status: terminalStatus
+        })
+        expect(bindings.snapshot()).toEqual({ bindings: 0, requests: 0 })
+        expect(releaseFileRun).toHaveBeenCalledOnce()
+        expect(releaseFileRun).toHaveBeenCalledWith('run-approval-lifecycle')
+        expect(releaseHostRun).toHaveBeenCalledOnce()
+        expect(releaseHostRun).toHaveBeenCalledWith('run-approval-lifecycle')
+      } finally {
+        await bridge.close()
+        await fileBroker.shutdown()
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it('keeps a prepared sensitive binding when a Done event has no status', async () => {
+    const core = new FakeCore()
+    const bindings = targetBindingBroker()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: bindings,
+      createHost: () => hostWith({})
+    })
+    const now = Date.now()
+    core.emitCommand(
+      command({
+        type: 'prepare_sensitive_tool',
+        input: {
+          bindingRequestId: randomUUID(),
+          bindingScope: 'managed_surface',
+          runId: 'run-status-missing',
+          capabilityId: 'browser_automation',
+          activationId: AUTHORIZATION_CONTEXT.activationId,
+          manifestDigest: AUTHORIZATION_CONTEXT.manifestDigest,
+          policyRevision: 1,
+          grantExpiresAtMs: now + 120_000,
+          callId: 'call-status-missing',
+          toolName: 'browser_evaluate',
+          argumentsDigest: `sha256:${'e'.repeat(64)}`,
+          createdAtMs: now,
+          expiresAtMs: now + 60_000,
+          filePreparation: null
+        }
+      })
+    )
+
+    await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+    expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+    core.emitAgentEvent({
+      type: 'done',
+      runId: 'run-status-missing',
+      success: true
+    })
+    expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+
+    core.emitAgentEvent({
+      type: 'done',
+      runId: 'run-status-missing',
+      success: false,
+      status: 'cancelled'
+    })
+    expect(bindings.snapshot()).toEqual({ bindings: 0, requests: 0 })
     await bridge.close()
   })
 
@@ -558,11 +708,14 @@ describe('ManagedPlaywrightBridgeHost', () => {
       void fileBroker.releaseToolCall({ runId, toolCallId: callId })
     })
     const core = new FakeCore()
+    const managedHost = hostWith({})
+    const releaseFileRun = vi.spyOn(fileBroker, 'releaseRun')
+    const releaseHostRun = vi.spyOn(managedHost, 'releaseRun')
     const bridge = new ManagedPlaywrightBridgeHost({
       core,
       fileBroker,
       sensitiveTargetBindings: bindings,
-      createHost: () => hostWith({})
+      createHost: () => managedHost
     })
     const now = Date.now()
     const request = command({
@@ -584,15 +737,14 @@ describe('ManagedPlaywrightBridgeHost', () => {
         filePreparation: { mode: 'resolved_paths', paths: [source] }
       }
     })
-    if (request.command.type !== 'prepare_sensitive_tool') {
-      throw new Error('invalid prepare fixture')
-    }
-    const preparedInput = request.command.input
-
     try {
-      core.emitCommand(request)
+      core.emitCommand(command({ type: 'connect' }))
       await vi.waitFor(() => expect(core.completions).toHaveLength(1))
-      const outcome = core.completions[0].outcome
+      core.emitCommand(request)
+      await vi.waitFor(() => expect(core.completions).toHaveLength(2))
+      const outcome = core.completions.find(
+        (completion) => completion.requestId === request.requestId
+      )?.outcome
       expect(outcome).toMatchObject({
         type: 'sensitive_tool_prepared',
         fileBasenames: ['浙江大学2026年招生资料汇编.pptx'],
@@ -602,18 +754,29 @@ describe('ManagedPlaywrightBridgeHost', () => {
       expect(JSON.stringify(outcome)).not.toContain('browser-file:')
       expect(fileBroker.snapshot().handles).toBe(1)
       expect(selectFiles).not.toHaveBeenCalled()
-      if (outcome.type !== 'sensitive_tool_prepared') throw new Error('invalid fixture outcome')
-      core.emitCommand(
-        command({
-          type: 'release_sensitive_tool_binding',
-          bindingId: outcome.bindingId,
-          runId: preparedInput.runId,
-          activationId: preparedInput.activationId,
-          callId: preparedInput.callId,
-          reason: 'rejected'
-        })
-      )
+      core.emitAgentEvent({
+        type: 'done',
+        runId: 'run-1',
+        success: false,
+        status: 'waiting_for_approval'
+      })
+      expect(bindings.snapshot()).toEqual({ bindings: 1, requests: 1 })
+      expect(fileBroker.snapshot().handles).toBe(1)
+      expect(releaseFileRun).not.toHaveBeenCalled()
+      expect(releaseHostRun).not.toHaveBeenCalled()
+
+      core.emitAgentEvent({
+        type: 'done',
+        runId: 'run-1',
+        success: true,
+        status: 'completed'
+      })
+      expect(bindings.snapshot()).toEqual({ bindings: 0, requests: 0 })
       await vi.waitFor(() => expect(fileBroker.snapshot().handles).toBe(0))
+      expect(releaseFileRun).toHaveBeenCalledOnce()
+      expect(releaseFileRun).toHaveBeenCalledWith('run-1')
+      expect(releaseHostRun).toHaveBeenCalledOnce()
+      expect(releaseHostRun).toHaveBeenCalledWith('run-1')
     } finally {
       await bridge.close()
       await fileBroker.shutdown()

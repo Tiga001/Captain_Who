@@ -1405,8 +1405,15 @@ fn current_timeline_item_is_safe(item: &serde_json::Map<String, serde_json::Valu
                 && optional_bounded_string(item, "streamId", 1_024, false)
         }
         Some("tool_call") => {
-            exact_keys(item, &["id", "type", "callId"])
-                && bounded_string(&item["callId"], 1_024, false)
+            exact_required_optional_keys(
+                item,
+                &["id", "type", "callId"],
+                &["identity", "traceSequence"],
+            ) && bounded_string(&item["callId"], 1_024, false)
+                && optional_safe_integer(item, "traceSequence")
+                && item.get("identity").is_none_or(|identity| {
+                    serde_json::from_value::<crate::AgentToolIdentity>(identity.clone()).is_ok()
+                })
         }
         Some("mcp_tool_call") => {
             exact_keys(item, &["id", "type", "invocationId"])
@@ -1912,6 +1919,17 @@ pub(super) fn current_agent_run_projection_is_safe(
                 .expect("validated Timeline MCP invocation id")
         })
         .collect::<Vec<_>>();
+    let tool_calls_by_id = run["toolCalls"]
+        .as_array()
+        .expect("validated ToolCall array")
+        .iter()
+        .map(|call| {
+            (
+                call["id"].as_str().expect("validated ToolCall id"),
+                call["tool"].as_str().expect("validated ToolCall name"),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let unique =
         |values: &[&str]| values.iter().copied().collect::<HashSet<_>>().len() == values.len();
     if !unique(&tool_call_ids)
@@ -1928,6 +1946,27 @@ pub(super) fn current_agent_run_projection_is_safe(
                 && item["callId"]
                     .as_str()
                     .is_some_and(|id| mcp_call_ids.contains(&id))
+        })
+        || timeline.iter().any(|item| {
+            if item["type"] != "tool_call" {
+                return false;
+            }
+            let Some(identity) = item.get("identity") else {
+                return false;
+            };
+            let Some(call_id) = item["callId"].as_str() else {
+                return true;
+            };
+            let Some(tool_name) = tool_calls_by_id.get(call_id) else {
+                return true;
+            };
+            serde_json::from_value::<crate::AgentToolIdentity>(identity.clone())
+                .map_err(|_| ())
+                .and_then(|identity| {
+                    crate::conversation_trace::validate_tool_identity(tool_name, &identity)
+                        .map_err(|_| ())
+                })
+                .is_err()
         })
         || timeline_mcp_ids
             .iter()

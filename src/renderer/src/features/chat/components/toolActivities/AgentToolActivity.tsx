@@ -88,15 +88,41 @@ export function AgentToolActivity({
       <BuiltinCapabilityToolActivity
         cancelled={cancelled && !result}
         displayReason={call.reason}
-        identity={toolIdentity}
         result={result}
         settledStatus={settledStatus}
+        toolName={toolIdentity.rawName}
       />
     )
   }
 
   if (mcpInvocation) {
     return <McpToolActivity invocation={mcpInvocation} />
+  }
+
+  // Presentation fallback for live or hydrated Host-owned calls whose durable identity has not
+  // reached the Renderer yet. This branch grants no execution authority; it only prevents raw
+  // internal Tool names, arguments and results from leaking into the activity label/details.
+  // External MCP lifecycle remains authoritative above and is never claimed by this fallback.
+  if (call.tool === 'activate_capability') {
+    return (
+      <ActivateCapabilityToolActivity
+        call={call}
+        cancelled={cancelled && !result}
+        result={result}
+        settledStatus={settledStatus}
+      />
+    )
+  }
+
+  if (call.tool.startsWith('browser_')) {
+    return (
+      <BuiltinCapabilityToolActivity
+        cancelled={cancelled && !result}
+        result={result}
+        settledStatus={settledStatus}
+        toolName={call.tool}
+      />
+    )
   }
 
   if (call.tool === 'attachments_list' || call.tool === 'attachments_list_project') {

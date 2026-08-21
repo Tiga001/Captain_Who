@@ -1414,7 +1414,7 @@ export const zhCNTranslations = {
   'agent.builtinCapability.browser.verify.cancelled': '已取消检查网页状态',
   'agent.builtinCapability.browser.verify.outcomeUnknown': '网页状态检查结果待确认',
   'agent.builtinCapability.browser.fallback.running': '正在执行浏览器操作',
-  'agent.builtinCapability.browser.fallback.completed': '已完成浏览器操作',
+  'agent.builtinCapability.browser.fallback.completed': '已执行浏览器操作',
   'agent.builtinCapability.browser.fallback.failed': '浏览器操作失败',
   'agent.builtinCapability.browser.fallback.cancelled': '已取消浏览器操作',
   'agent.builtinCapability.browser.fallback.outcomeUnknown': '浏览器操作结果待确认，操作可能已发生',

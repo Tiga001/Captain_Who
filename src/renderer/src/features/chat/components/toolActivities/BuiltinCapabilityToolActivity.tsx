@@ -1,6 +1,5 @@
 import {
   parseBrowserArtifactToolProjection,
-  type AgentToolIdentity,
   type AgentToolResult,
   type BrowserArtifactReference
 } from '@mycopilot/protocol'
@@ -12,7 +11,6 @@ import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 import { BrowserArtifactCards } from './BrowserArtifactCards'
 
-type BuiltinCapabilityIdentity = Extract<AgentToolIdentity, { type: 'builtin_capability' }>
 type BrowserToolStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'outcomeUnknown'
 
 const browserToolFamilyById = {
@@ -92,9 +90,9 @@ type BrowserToolFamily = (typeof browserToolFamilyById)[keyof typeof browserTool
 interface BuiltinCapabilityToolActivityProps {
   cancelled?: boolean
   displayReason?: string | null
-  identity: BuiltinCapabilityIdentity
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
+  toolName: string
 }
 
 const browserToolStatusKeys = {
@@ -407,9 +405,9 @@ function getStatusKey(toolId: string, status: BrowserToolStatus): TranslationKey
 export function BuiltinCapabilityToolActivity({
   cancelled = false,
   displayReason,
-  identity,
   result,
-  settledStatus
+  settledStatus,
+  toolName
 }: BuiltinCapabilityToolActivityProps) {
   const { t } = useFrontendConfig()
   const reason = displayReason ? toSafeMcpDisplayText(displayReason, 512).trim() : ''
@@ -432,7 +430,7 @@ export function BuiltinCapabilityToolActivity({
       hasDetails={Boolean(reason) || artifacts.length > 0}
       icon={Icon}
       isPending={status === 'running'}
-      label={t(getStatusKey(identity.toolId, status))}
+      label={t(getStatusKey(toolName, status))}
     >
       {reason ? (
         <div className="agent-activity__details">

@@ -9,9 +9,11 @@ import {
   createBrowserSurfaceBootstrapUrl,
   MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD,
   MANAGED_PLAYWRIGHT_COMMAND_NOTIFICATION_METHOD,
+  parseAgentEventForHost,
   parseBrowserRiskAuthorizeOutput,
   parseManagedPlaywrightCancelNotification,
   parseManagedPlaywrightCommandNotification,
+  type AgentEvent,
   type BrowserRiskAuthorizeInput,
   type BrowserRiskAuthorizeOutput,
   type BrowserRiskCancelInput,
@@ -54,6 +56,7 @@ const RISK_AUTHORIZE_MARKER = 'MYCOPILOT_BROWSER_RISK_AUTHORIZE='
 const RISK_CANCEL_MARKER = 'MYCOPILOT_BROWSER_RISK_CANCEL='
 const RISK_DECISION_METHOD = 'fixture.browserRisk.decision'
 const DISPATCH_PHASE_ACK_METHOD = 'fixture.managedPlaywright.dispatchPhaseAck'
+const AGENT_EVENT_METHOD = 'fixture.agentEvent'
 const MAX_INPUT_LINE_BYTES = 8 * 1024 * 1024
 const PROFILE_DIRECTORY = mkdtempSync(join(tmpdir(), 'mycopilot-managed-playwright-profile-'))
 const SURFACE_ID = 'right-sidebar-managed-playwright-fixture'
@@ -78,6 +81,7 @@ function removeFixtureProfileDirectory(): void {
  * Manager, broker, transport and Electron guest remain unchanged.
  */
 class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuthorizationCore {
+  private readonly agentEventHandlers = new Set<(event: AgentEvent) => void>()
   private readonly cancelHandlers = new Set<(input: ManagedPlaywrightCancelNotification) => void>()
   private readonly commandHandlers = new Set<
     (input: ManagedPlaywrightCommandNotification) => void
@@ -138,6 +142,11 @@ class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuth
     return pending !== undefined
   }
 
+  onAgentEvent(handler: (event: AgentEvent) => void): () => void {
+    this.agentEventHandlers.add(handler)
+    return () => this.agentEventHandlers.delete(handler)
+  }
+
   onManagedPlaywrightCancel(
     handler: (input: ManagedPlaywrightCancelNotification) => void
   ): () => void {
@@ -168,6 +177,11 @@ class JsonLineBridgeCore implements ManagedPlaywrightBridgeCore, BrowserRiskAuth
     if (envelope.method === MANAGED_PLAYWRIGHT_CANCEL_NOTIFICATION_METHOD) {
       const input = parseManagedPlaywrightCancelNotification(envelope.params)
       for (const handler of this.cancelHandlers) handler(input)
+      return
+    }
+    if (envelope.method === AGENT_EVENT_METHOD) {
+      const event = parseAgentEventForHost(envelope.params)
+      for (const handler of this.agentEventHandlers) handler(event)
       return
     }
     if (envelope.method === RISK_DECISION_METHOD) {
@@ -544,6 +558,10 @@ async function main(): Promise<void> {
   let rendererSelectionRevision = Math.max(1, Date.now())
   let ensureCommands = 0
   let closeCommands = 0
+  const automationDetachSnapshots: Array<{
+    ensureCommands: number
+    surfaces: Array<{ generation: number; surfaceId: string }>
+  }> = []
   const probeExactSurfaceInstance = async (
     surfaceId: string,
     exactGuest: WebContents
@@ -692,7 +710,15 @@ async function main(): Promise<void> {
     createHost: createManagedPlaywrightHostFactory({
       getBrowserContext: () => manager.getBrowserContext({ createVisiblePage: false }),
       closeSurface: () => manager.closeSurface(),
-      detachAutomation: () => manager.detachAutomation(),
+      detachAutomation: async () => {
+        await manager.detachAutomation()
+        automationDetachSnapshots.push({
+          ensureCommands,
+          surfaces: manager
+            .listSurfaces()
+            .map(({ generation, surfaceId }) => ({ generation, surfaceId }))
+        })
+      },
       beginNetworkOperation: (input) => manager.beginNetworkOperation(input),
       beginTargetCreationOperation: async (input) => {
         const lease = networkGuard.beginTargetCreationOperation(input)
@@ -707,6 +733,21 @@ async function main(): Promise<void> {
       releaseBrowserCapability: (activationId) => networkGuard.releaseCapability(activationId),
       releaseBrowserToolCall: (input) => networkGuard.releaseToolCall(input),
       surfaceGroup: manager
+    })
+  })
+  const agentLifecycleSnapshots: Array<{
+    sensitiveBindings: number
+    sensitiveRequests: number
+    status: string | null
+  }> = []
+  // BridgeHost registered first, so this observer records the authoritative post-handler state.
+  const unsubscribeAgentLifecycleObserver = core.onAgentEvent((event) => {
+    if (event.type !== 'done') return
+    const snapshot = sensitiveTargetBindings.snapshot()
+    agentLifecycleSnapshots.push({
+      sensitiveBindings: snapshot.bindings,
+      sensitiveRequests: snapshot.requests,
+      status: event.status ?? null
     })
   })
   const input = createInterface({ input: process.stdin })
@@ -732,12 +773,19 @@ async function main(): Promise<void> {
     await inputClosed
     if (inputFailure) throw inputFailure
   } finally {
+    const preShutdownEnsureCommands = ensureCommands
+    const preShutdownSurfaces = manager
+      .listSurfaces()
+      .map(({ generation, surfaceId }) => ({ generation, surfaceId }))
+    unsubscribeAgentLifecycleObserver()
     await bridgeHost.close().catch(() => undefined)
     await manager.shutdown().catch(() => undefined)
     await fileBroker.shutdown().catch(() => undefined)
     await artifactBroker.shutdown().catch(() => undefined)
     await writeProtocolLine(
       `${RESULT_MARKER}${JSON.stringify({
+        agentLifecycleSnapshots,
+        automationDetachSnapshots,
         broker: broker.snapshot(),
         closeCommands,
         ensureCommands,
@@ -745,6 +793,8 @@ async function main(): Promise<void> {
         fileBroker: fileBroker.snapshot(),
         guestCount: guests.size,
         mainWindowAlive: !window.isDestroyed(),
+        preShutdownEnsureCommands,
+        preShutdownSurfaces,
         riskGuard: networkGuard.snapshot(),
         surfaceCount: manager.snapshot().surfaces,
         targetClosed: !guest || guest.isDestroyed()
