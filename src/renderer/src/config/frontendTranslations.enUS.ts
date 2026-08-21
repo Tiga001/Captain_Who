@@ -305,14 +305,14 @@ export const enUSTranslations = {
   'settings.page.personalization': 'Personalization',
   'settings.page.usageBilling': 'Usage & cost estimates',
   'settings.page.skills': 'Skills',
-  'settings.page.agentTemplates': 'Agent templates',
+  'settings.page.agentTemplates': 'Subagents',
   'settings.nav.mcp': 'MCP',
   'settings.page.mcp': 'MCP servers',
   'settings.page.environment': 'Environment',
   'settings.page.archivedConversations': 'Archived chats',
 
   'agentTemplates.descriptionText':
-    'Create reusable subagent instructions for each project. Provider credentials stay in model settings.',
+    'Subagent templates the main agent can call',
   'agentTemplates.project': 'Project',
   'agentTemplates.create': 'New template',
   'agentTemplates.createTitle': 'New Agent template',

@@ -314,13 +314,13 @@ export function AgentTemplatesSettingsPage({
 
   return (
     <article className="settings-list-page agent-templates-page">
-      <div className="agent-templates-page__heading">
+      <header className="agent-templates-page__heading">
         <div>
           <h1>{t('settings.page.agentTemplates')}</h1>
-          <p className="agent-templates-page__intro">{t('agentTemplates.descriptionText')}</p>
+          <p className="settings-list-page__description">{t('agentTemplates.descriptionText')}</p>
         </div>
         <button
-          className="primary-settings-button"
+          className="agent-templates-create-button"
           disabled={!projectId || enabledModels.length === 0}
           onClick={startCreate}
           type="button"
@@ -328,7 +328,7 @@ export function AgentTemplatesSettingsPage({
           <Plus aria-hidden="true" />
           <span>{t('agentTemplates.create')}</span>
         </button>
-      </div>
+      </header>
 
       {projects.length > 0 && projectId ? (
         <label className="agent-templates-page__project">

@@ -302,14 +302,13 @@ export const zhCNTranslations = {
   'settings.page.personalization': '个性化',
   'settings.page.usageBilling': '用量与费用估算',
   'settings.page.skills': '技能',
-  'settings.page.agentTemplates': '智能体模板',
+  'settings.page.agentTemplates': '子智能体',
   'settings.nav.mcp': 'MCP',
   'settings.page.mcp': 'MCP 服务器',
   'settings.page.environment': '环境',
   'settings.page.archivedConversations': '已归档对话',
 
-  'agentTemplates.descriptionText':
-    '为每个项目创建可复用的子智能体指令；Provider 凭据仍只在模型设置中管理。',
+  'agentTemplates.descriptionText': '可供主智能体调用的子智能体模板',
   'agentTemplates.project': '项目',
   'agentTemplates.create': '新建模板',
   'agentTemplates.createTitle': '新建智能体模板',
