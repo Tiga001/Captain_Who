@@ -3,7 +3,48 @@ import {
   type AgentToolResult,
   type BrowserArtifactReference
 } from '@mycopilot/protocol'
-import { Ban, CheckCircle2, CircleAlert, LoaderCircle, XCircle } from 'lucide-react'
+import {
+  AppWindow,
+  ArrowLeft,
+  Ban,
+  Bug,
+  Camera,
+  ChevronsUpDown,
+  CircleAlert,
+  CircleDot,
+  Clapperboard,
+  ClipboardList,
+  CodeXml,
+  Command,
+  Crosshair,
+  Database,
+  FileText,
+  Globe,
+  HardDrive,
+  Hourglass,
+  Keyboard,
+  ListTree,
+  LoaderCircle,
+  Maximize2,
+  MessageSquare,
+  MousePointer,
+  MousePointerClick,
+  Move,
+  PanelTopClose,
+  Play,
+  Pointer,
+  Radio,
+  ScanSearch,
+  Search,
+  Settings2,
+  ShieldCheck,
+  SlidersHorizontal,
+  Square,
+  SquareTerminal,
+  Upload,
+  type LucideIcon
+} from 'lucide-react'
+import type { ReactNode } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { toSafeMcpDisplayText } from '../../../mcp/mcpSafeDisplay'
@@ -86,6 +127,44 @@ const browserToolFamilyById = {
 } as const
 
 type BrowserToolFamily = (typeof browserToolFamilyById)[keyof typeof browserToolFamilyById]
+
+const browserToolFamilyIcons = {
+  click: MousePointerClick,
+  close: PanelTopClose,
+  config: Settings2,
+  console: SquareTerminal,
+  devtools: Bug,
+  dialog: MessageSquare,
+  drag: Move,
+  fillForm: ClipboardList,
+  find: Search,
+  hover: MousePointer,
+  locator: Crosshair,
+  navigate: Globe,
+  navigateBack: ArrowLeft,
+  networkConfigure: SlidersHorizontal,
+  networkRead: Radio,
+  networkRules: ListTree,
+  pageInteraction: Pointer,
+  pdf: FileText,
+  pressKey: Command,
+  recordEdit: Clapperboard,
+  recordStart: CircleDot,
+  recordStop: Square,
+  resize: Maximize2,
+  resume: Play,
+  screenshot: Camera,
+  script: CodeXml,
+  selectOption: ChevronsUpDown,
+  snapshot: ScanSearch,
+  storageRead: Database,
+  storageWrite: HardDrive,
+  tabs: AppWindow,
+  type: Keyboard,
+  upload: Upload,
+  verify: ShieldCheck,
+  waitFor: Hourglass
+} as const satisfies Record<BrowserToolFamily, LucideIcon>
 
 interface BuiltinCapabilityToolActivityProps {
   cancelled?: boolean
@@ -393,12 +472,35 @@ function getStatus(
   return settledStatus ?? (cancelled ? 'cancelled' : 'running')
 }
 
-function getStatusKey(toolId: string, status: BrowserToolStatus): TranslationKey {
-  const family = Object.hasOwn(browserToolFamilyById, toolId)
+function getBrowserToolFamily(toolId: string): BrowserToolFamily | null {
+  return Object.hasOwn(browserToolFamilyById, toolId)
     ? browserToolFamilyById[toolId as keyof typeof browserToolFamilyById]
     : null
+}
+
+function getStatusKey(toolId: string, status: BrowserToolStatus): TranslationKey {
+  const family = getBrowserToolFamily(toolId)
   const toolKeys = family ? browserToolStatusKeys[family] : fallbackStatusKeys
   return toolKeys[status]
+}
+
+function getBrowserToolIcon(toolId: string, status: BrowserToolStatus): LucideIcon {
+  if (status === 'running') return LoaderCircle
+  const family = getBrowserToolFamily(toolId)
+  return family ? browserToolFamilyIcons[family] : Globe
+}
+
+function getBrowserToolStatusBadge(status: BrowserToolStatus): {
+  iconBadge?: ReactNode
+  iconBadgeTone?: 'danger' | 'blocked'
+} {
+  if (status === 'failed' || status === 'outcomeUnknown') {
+    return { iconBadge: <CircleAlert aria-hidden="true" />, iconBadgeTone: 'danger' }
+  }
+  if (status === 'cancelled') {
+    return { iconBadge: <Ban aria-hidden="true" />, iconBadgeTone: 'blocked' }
+  }
+  return {}
 }
 
 /** Product-safe activity for a Host-reviewed managed browser Tool. */
@@ -413,22 +515,15 @@ export function BuiltinCapabilityToolActivity({
   const reason = displayReason ? toSafeMcpDisplayText(displayReason, 512).trim() : ''
   const artifacts = safeProjectedArtifacts(result)
   const status = getStatus(result, settledStatus, cancelled)
-  const Icon =
-    status === 'outcomeUnknown'
-      ? CircleAlert
-      : status === 'failed'
-        ? XCircle
-        : status === 'completed'
-          ? CheckCircle2
-          : status === 'cancelled'
-            ? Ban
-            : LoaderCircle
+  const { iconBadge, iconBadgeTone } = getBrowserToolStatusBadge(status)
 
   return (
     <AgentActivityDisclosure
       className="builtin-capability-tool-activity"
       hasDetails={Boolean(reason) || artifacts.length > 0}
-      icon={Icon}
+      icon={getBrowserToolIcon(toolName, status)}
+      iconBadge={iconBadge}
+      iconBadgeTone={iconBadgeTone}
       isPending={status === 'running'}
       label={t(getStatusKey(toolName, status))}
     >

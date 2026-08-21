@@ -801,6 +801,87 @@ describe('BuiltinCapabilityToolActivity', () => {
   })
 
   it.each([
+    ['browser_navigate', 'lucide-globe'],
+    ['browser_snapshot', 'lucide-scan-search'],
+    ['browser_wait_for', 'lucide-hourglass'],
+    ['browser_console_messages', 'lucide-square-terminal'],
+    ['browser_click', 'lucide-mouse-pointer-click'],
+    ['browser_type', 'lucide-keyboard'],
+    ['browser_take_screenshot', 'lucide-camera'],
+    ['browser_tabs', 'lucide-app-window'],
+    ['browser_evaluate', 'lucide-code-xml']
+  ])('uses the family action icon for completed %s', async (toolId, iconClass) => {
+    const screen = await render(
+      <AgentToolActivity
+        call={call(toolId)}
+        result={{
+          callId: 'call-browser-capability',
+          tool: toolId,
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'completed',
+            contentOmitted: true
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity(toolId, toolId)}
+      />
+    )
+
+    const icon = screen.container.querySelector('.agent-activity__icon > svg')
+    expect(icon?.classList.contains(iconClass)).toBe(true)
+    expect(screen.container.querySelector('.lucide-check-circle-2')).toBeNull()
+    expect(screen.container.querySelector('.agent-activity__icon-badge')).toBeNull()
+  })
+
+  it('keeps a spinner while a browser tool is running', async () => {
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_navigate')}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('browser_navigate', 'browser_navigate')}
+      />
+    )
+
+    const icon = screen.container.querySelector('.agent-activity__icon > svg')
+    expect(icon?.classList.contains('lucide-loader-circle')).toBe(true)
+    expect(screen.container.querySelector('.lucide-globe')).toBeNull()
+  })
+
+  it('shows a circle-alert badge on failed browser tools without replacing the action icon', async () => {
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_click')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'browser_click',
+          ok: false,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'failed',
+            contentOmitted: true
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('browser_click', 'browser_click')}
+      />
+    )
+
+    const icon = screen.container.querySelector('.agent-activity__icon > svg')
+    expect(icon?.classList.contains('lucide-mouse-pointer-click')).toBe(true)
+    expect(
+      screen.container.querySelector('.agent-activity__icon-badge .lucide-circle-alert')
+    ).not.toBeNull()
+    expect(screen.container.querySelector('.lucide-x-circle')).toBeNull()
+  })
+
+  it.each([
     ['browser_annotate', 'Updated browser diagnostics'],
     ['browser_console_messages', 'Read page console'],
     ['browser_cookie_clear', 'Updated browser storage'],

@@ -151,7 +151,8 @@
 
   .agent-activity--skill-resource .agent-activity__icon > svg,
   .agent-activity--skill-script .agent-activity__icon > svg,
-  .agent-activity--office .agent-activity__icon > svg {
+  .agent-activity--office .agent-activity__icon > svg,
+  .builtin-capability-tool-activity .agent-activity__icon > svg {
     animation: none;
   }
 }
@@ -430,6 +431,22 @@
   color: var(--mc-color-text-danger);
 }
 
+.builtin-capability-tool-activity .agent-activity__icon-badge {
+  inset: auto -2px -2px auto;
+  width: 11px;
+  height: 11px;
+  color: var(--mc-color-text-muted);
+  background: var(--mc-color-surface-card);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1.5px var(--mc-color-surface-card);
+}
+
+.builtin-capability-tool-activity .agent-activity__icon-badge svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.75;
+}
+
 .agent-activity__icon-mark {
   display: block;
 }
@@ -598,7 +615,8 @@
 
 .agent-activity--skill-resource:has(.agent-running-text) .agent-activity__icon > svg,
 .agent-activity--skill-script:has(.agent-running-text) .agent-activity__icon > svg,
-.agent-activity--office:has(.agent-running-text) .agent-activity__icon > svg {
+.agent-activity--office:has(.agent-running-text) .agent-activity__icon > svg,
+.builtin-capability-tool-activity:has(.agent-running-text) .agent-activity__icon > svg:first-child {
   animation: mc-agent-tool-spin 0.9s linear infinite;
 }
 
