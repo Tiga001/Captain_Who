@@ -36,6 +36,15 @@ const BUNDLED_SKILL_KEY_BY_SOURCE_ID: Readonly<Record<string, BundledSkillPresen
   'application:spreadsheets': 'spreadsheets'
 }
 
+const BUNDLED_SKILL_DISPLAY_ORDER: Readonly<Record<BundledSkillPresentationKey, number>> = {
+  skillInstaller: 0,
+  imageGeneration: 1,
+  documents: 2,
+  presentations: 3,
+  spreadsheets: 4,
+  pdf: 5
+}
+
 const BUNDLED_SKILL_TRANSLATIONS: Readonly<
   Record<BundledSkillPresentationKey, { description: TranslationKey; name: TranslationKey }>
 > = {
@@ -73,6 +82,21 @@ export function getBundledSkillPresentationKey(
     BUNDLED_SKILL_KEY_BY_ID[skillId] ??
     (source?.kind === 'bundled' ? BUNDLED_SKILL_KEY_BY_SOURCE_ID[source.id] : undefined)
   )
+}
+
+export function sortSkillsForDisplay<T extends SkillPresentationInput>(skills: readonly T[]): T[] {
+  return skills
+    .map((skill, index) => ({ index, rank: bundledSkillDisplayRank(skill), skill }))
+    .sort((left, right) => {
+      if (left.rank !== right.rank) return left.rank - right.rank
+      return left.index - right.index
+    })
+    .map((entry) => entry.skill)
+}
+
+function bundledSkillDisplayRank(skill: SkillPresentationInput): number {
+  const key = getBundledSkillPresentationKey(skill.id, skill.source)
+  return key === undefined ? Number.POSITIVE_INFINITY : BUNDLED_SKILL_DISPLAY_ORDER[key]
 }
 
 export function getSkillPresentation(

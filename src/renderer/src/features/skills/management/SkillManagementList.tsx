@@ -3,7 +3,7 @@ import { AlertTriangle, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
 import type { SkillManagementEntry } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { SkillIcon } from '../SkillIcon'
-import { getSkillPresentation } from '../skillPresentation'
+import { getSkillPresentation, sortSkillsForDisplay } from '../skillPresentation'
 import type { SkillRowPendingOperation } from './useSkillManagement'
 
 interface SkillManagementListProps {
@@ -22,10 +22,11 @@ export function SkillManagementList({
   pendingOperations
 }: SkillManagementListProps) {
   const { t } = useFrontendConfig()
+  const orderedEntries = sortSkillsForDisplay(entries)
 
   return (
     <div className="skill-management-list">
-      {entries.map((entry) => {
+      {orderedEntries.map((entry) => {
         const pendingOperation = pendingOperations.get(entry.id)
         const missingUpdateRevision = entry.actions.canUpdate && !entry.installationRevision
         const missingUninstallRevision = entry.actions.canUninstall && !entry.installationRevision

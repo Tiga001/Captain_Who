@@ -2,7 +2,7 @@
 import type { SkillSourceDescriptor } from '@mycopilot/protocol'
 import { describe, expect, it } from 'vitest'
 import { getTranslation } from '../../../config/languageRegistry'
-import { getSkillPresentation } from '../skillPresentation'
+import { getSkillPresentation, sortSkillsForDisplay } from '../skillPresentation'
 
 const bundledCases = [
   {
@@ -103,5 +103,57 @@ describe('bundled Skill presentation', () => {
       description: installed.description,
       name: installed.name
     })
+  })
+})
+
+describe('bundled Skill display order', () => {
+  it('lists installer, image generation, Word, PPT, Excel, then PDF before other skills', () => {
+    const ordered = sortSkillsForDisplay([
+      {
+        id: 'bundled:application:documents',
+        name: 'Documents',
+        source: { id: 'application:documents', kind: 'bundled' }
+      },
+      {
+        id: 'bundled:application:image-generation',
+        name: 'Image Generation',
+        source: { id: 'application:image-generation', kind: 'bundled' }
+      },
+      {
+        id: 'bundled:application:pdf',
+        name: 'PDF',
+        source: { id: 'application:pdf', kind: 'bundled' }
+      },
+      {
+        id: 'bundled:application:presentations',
+        name: 'Presentations',
+        source: { id: 'application:presentations', kind: 'bundled' }
+      },
+      {
+        id: 'bundled:application:skill-installer',
+        name: 'Skill Installer',
+        source: { id: 'application:skill-installer', kind: 'bundled' }
+      },
+      {
+        id: 'installed:user:custom-skill',
+        name: 'Custom skill',
+        source: { id: 'installed:user', kind: 'installed' }
+      },
+      {
+        id: 'bundled:application:spreadsheets',
+        name: 'Spreadsheets',
+        source: { id: 'application:spreadsheets', kind: 'bundled' }
+      }
+    ] as const)
+
+    expect(ordered.map((skill) => skill.id)).toEqual([
+      'bundled:application:skill-installer',
+      'bundled:application:image-generation',
+      'bundled:application:documents',
+      'bundled:application:presentations',
+      'bundled:application:spreadsheets',
+      'bundled:application:pdf',
+      'installed:user:custom-skill'
+    ])
   })
 })

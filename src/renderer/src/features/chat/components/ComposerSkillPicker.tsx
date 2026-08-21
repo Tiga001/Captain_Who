@@ -3,7 +3,7 @@ import { AlertTriangle, LoaderCircle, RefreshCw, Search, Sparkles, X } from 'luc
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { SkillIcon } from '../../skills/SkillIcon'
-import { getSkillPresentation } from '../../skills/skillPresentation'
+import { getSkillPresentation, sortSkillsForDisplay } from '../../skills/skillPresentation'
 import {
   filterSkillDescriptors,
   getSkillFallbackName,
@@ -176,7 +176,10 @@ export function ComposerSkillPicker({
       ? catalogState.output
       : undefined
   const presentedSkills = readyOutput
-    ? readyOutput.skills.map((skill) => ({ ...skill, ...getSkillPresentation(skill, t) }))
+    ? sortSkillsForDisplay(readyOutput.skills).map((skill) => ({
+        ...skill,
+        ...getSkillPresentation(skill, t)
+      }))
     : []
   const visibleSkills = filterSkillDescriptors(presentedSkills, search)
   const allSkills = filterSkillDescriptors(presentedSkills, '')

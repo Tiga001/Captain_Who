@@ -479,6 +479,42 @@ describe('Skills settings navigation and management inventory', () => {
     }
   })
 
+  it('shows bundled skills in installer, image, Word, PPT, Excel, PDF order', async () => {
+    service.listManagement.mockResolvedValueOnce(
+      managementOutput([
+        ...bundledOfficeSkills,
+        bundledImageGenerationSkill,
+        {
+          ...bundledSkill,
+          id: 'bundled:application:pdf',
+          name: 'PDF',
+          source: { id: 'application:pdf', kind: 'bundled' }
+        },
+        {
+          ...bundledSkill,
+          id: 'bundled:application:skill-installer',
+          name: 'skill-installer',
+          source: { id: 'application:skill-installer', kind: 'bundled' }
+        }
+      ])
+    )
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText('skills.bundled.skillInstaller.name')).toBeVisible()
+
+    const names = Array.from(
+      screen.container.querySelectorAll<HTMLElement>('.skill-management-row h2')
+    ).map((heading) => heading.textContent)
+
+    expect(names).toEqual([
+      'skills.bundled.skillInstaller.name',
+      'skills.bundled.imageGeneration.name',
+      'skills.bundled.documents.name',
+      'skills.bundled.presentations.name',
+      'skills.bundled.spreadsheets.name',
+      'skills.bundled.pdf.name'
+    ])
+  })
+
   it('uses the localized Image Generation presentation and its non-Office icon', async () => {
     service.listManagement.mockResolvedValueOnce(managementOutput([bundledImageGenerationSkill]))
     const screen = await render(<SkillsSettingsPage />)
