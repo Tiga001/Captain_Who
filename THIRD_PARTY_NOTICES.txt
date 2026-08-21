@@ -544,24 +544,45 @@ MIT OR Apache-2.0:
   dirs 6.0.0
   futures-util 0.3.32
   image 0.25.10
+  keyring 4.1.5
   libc 0.2.186
   reqwest 0.12.28
   roxmltree 0.21.1
+  security-framework 3.7.0
   serde 1.0.228
   serde_json 1.0.150
+  sha2 0.10.9
   tempfile 3.27.0
+  thiserror 2.0.18
   time 0.3.53
   uuid 1.23.4
+  windows-sys 0.61.2
+  zeroize 1.9.0
 
 MIT:
 
+  lopdf 0.44.0
   rusqlite 0.32.1
+  serde_yaml_ng 0.10.0
   tokio 1.52.3
+  tokio-util 0.7.18
+  tracing 0.1.44
+  tracing-subscriber 0.3.23
   zip 2.4.2
+  zstd 0.13.3
 
 Apache-2.0:
 
+  rmcp 3.0.0
   similar 2.7.0
+
+Apache-2.0 AND ISC:
+
+  ring 0.17.14
+
+MPL-2.0 (transitive dependency):
+
+  option-ext 0.2.0
 
 Applicable direct-crate MIT copyright notices supplied by the locked crate
 packages include:
@@ -603,6 +624,53 @@ tokio:
 
 zip:
   Copyright (c) 2014 Mathijs van de Nes
+
+keyring:
+  Copyright (c) Daniel Brotsky
+
+lopdf:
+  Copyright (c) 2016 Junfeng Liu
+
+security-framework:
+  Copyright (c) Steven Fackler, Kornel Lesiński
+
+serde_yaml_ng:
+  Copyright (c) Antoine Catton
+
+sha2:
+  Copyright (c) RustCrypto Developers
+
+thiserror:
+  Copyright (c) David Tolnay
+
+tokio-util:
+  Copyright (c) Tokio Contributors
+
+tracing:
+  Copyright (c) 2019 Tokio Contributors
+
+tracing-subscriber:
+  Copyright (c) 2019 Tokio Contributors
+
+windows-sys:
+  Copyright (c) Microsoft Corporation
+
+zeroize:
+  Copyright (c) The RustCrypto Project Developers
+
+zstd:
+  Copyright (c) 2016 Alexandre Bury
+
+ring:
+  New code is licensed under the ISC license; portions derived from
+  BoringSSL are licensed under the Apache License, Version 2.0 or the ISC
+  license as noted in the crate's LICENSE file.
+
+rmcp:
+  Copyright (c) Model Context Protocol Contributors (Apache-2.0)
+
+option-ext:
+  MPL-2.0 (see the Mozilla Public License, Version 2.0, referenced below)
 
 Crate sources and package-specific metadata are available from:
 
@@ -794,3 +862,76 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+BUNDLED RUNTIME COMPONENTS
+
+The following runtime components are bundled with the application through
+extraResources and are distributed as part of the product. Their license
+terms are summarized below; full license texts are shipped with each
+component inside the application bundle.
+
+LibreOffice (26.2.4.2)
+  Source: https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/
+  License: Mozilla Public License, Version 2.0 (MPL-2.0)
+  The complete MPL-2.0 text, together with third-party notices applicable to
+  LibreOffice, is distributed with the component at
+  LibreOffice.app/Contents/Resources/LICENSE (and NOTICE).
+  MPL-2.0 is a file-level copyleft license: it permits commercial use and
+  closed-source redistribution, provided that modified files are made
+  available under MPL-2.0 and attribution notices are retained.
+
+Chromium headless shell (149.0.7827.55, Playwright 1.61.1, revision 1228)
+  Source: https://cdn.playwright.dev/builds/cft/149.0.7827.55/
+  License: BSD-3-Clause (Chromium license)
+  The complete license text is distributed with the component at
+  browser/chrome-headless-shell-mac-arm64/LICENSE.headless_shell.
+
+OfficeCLI (1.0.139)
+  Source: https://github.com/iOfficeAI/OfficeCLI
+  License: Apache License, Version 2.0 (reproduced earlier in this file)
+  Distributed with the component: LICENSE, NOTICE, THIRD-PARTY-NOTICES.txt.
+  OfficeCLI bundles the following third-party components under the MIT
+  License:
+    DocumentFormat.OpenXml (3.4.1) — Copyright (c) Microsoft Corporation
+    System.CommandLine (3.0.0-preview.2.26159.112) — Copyright (c) .NET
+      Foundation and Contributors
+    .NET Runtime (self-contained publish) — Copyright (c) .NET Foundation
+      and Contributors
+
+artifact-runtime (bundled document artifact runtime)
+  The artifact runtime includes the following components, distributed under
+  their own license terms in the legal/ directory of the component:
+
+  Node.js
+    License: MIT (see legal/node/LICENSE in the component)
+
+  CPython runtime
+    License: Python Software Foundation License 2.0 (PSF-2.0)
+    See legal/python-runtime/CPython-LICENSE.txt in the component.
+
+  ripgrep
+    License: MIT / The Unlicense (dual)
+    See legal/ripgrep/ (COPYING, LICENSE-MIT, UNLICENSE) in the component.
+
+  Node packages (93 packages, legal/node-packages/)
+    Licensed primarily under MIT, ISC, Apache-2.0, BSD-2-Clause/3-Clause,
+    Unlicense, and BlueOak-1.0.0. Notable: jszip 3.10.1 is dual-licensed
+    (MIT OR GPL-3.0-or-later); the MIT option applies to this distribution.
+    Full per-package notices are distributed with the component.
+
+  Python packages (18 packages, legal/python-packages/)
+    Licensed under MIT, BSD-2-Clause/3-Clause, Apache-2.0, and PSF-2.0:
+    cffi (MIT), charset-normalizer (MIT), cryptography (Apache-2.0 OR
+    BSD-3-Clause), et_xmlfile (MIT), lxml (BSD-3-Clause), openpyxl (MIT),
+    pdfminer.six (MIT), pdfplumber (MIT), pillow (MIT-CMU), pip (MIT),
+    pycparser (BSD-3-Clause), pypdf (BSD-3-Clause), pypdfium2
+    (BSD-3-Clause/Apache-2.0), python-docx (MIT), python-pptx (MIT),
+    reportlab (BSD), typing_extensions (PSF-2.0), xlsxwriter (BSD-2-Clause).
+    Full per-package licenses are distributed with the component.
+
+The MIT License and the Apache License, Version 2.0 are reproduced earlier
+in this file. The Mozilla Public License, Version 2.0 is available at
+https://www.mozilla.org/MPL/2.0/ and is distributed in full with the
+bundled LibreOffice component.
