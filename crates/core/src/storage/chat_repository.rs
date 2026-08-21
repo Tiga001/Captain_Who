@@ -17,6 +17,8 @@ use crate::{AgentMcpToolApproval, AgentMcpToolInvocationEvent};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
 
+const THINKING_PLACEHOLDER: &str = "正在思考...";
+
 /// Persists one Renderer-safe MCP lifecycle card from the Host-authenticated frozen approval.
 ///
 /// Raw arguments, result content and diagnostics never enter this projection. The helper may
@@ -1143,10 +1145,83 @@ pub fn update_message_state(
     conversation_id: &str,
     message: &ChatMessageStateRecord,
 ) -> rusqlite::Result<()> {
+    let existing = connection
+        .query_row(
+            "SELECT status, content, agent_run_json, created_at
+             FROM messages
+             WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, &message.id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((_existing_status, existing_content, existing_run_json, created_at)) = existing else {
+        return Ok(());
+    };
+    let durable_terminal = durable_terminal_run(
+        connection,
+        conversation_id,
+        &message.id,
+        existing_run_json.as_deref(),
+    )?;
     let authoritative_usage =
         get_authoritative_message_usage(connection, conversation_id, &message.id)?;
-    let agent_run_json =
-        overlay_authoritative_usage(message.agent_run_json.clone(), authoritative_usage.as_ref());
+
+    let (content, status, agent_run_json) = if let Some(terminal) = durable_terminal {
+        let incoming_run_status = run_status_from_json(message.agent_run_json.as_deref());
+        let incoming_reopens_run = incoming_run_status
+            .as_deref()
+            .is_some_and(is_live_run_status);
+        if incoming_reopens_run || message.status.as_deref() == Some("pending") {
+            let next_status = Some(message_status_for_terminal_run(&terminal.status).to_string());
+            let next_content = content_for_terminal_write(
+                &existing_content,
+                &message.content,
+                incoming_reopens_run,
+            );
+            let base_json = if incoming_reopens_run {
+                existing_run_json
+                    .as_deref()
+                    .or(message.agent_run_json.as_deref())
+            } else {
+                message
+                    .agent_run_json
+                    .as_deref()
+                    .or(existing_run_json.as_deref())
+            };
+            let stamped = stamp_terminal_agent_run_json(base_json, &terminal, created_at)?;
+            (
+                next_content,
+                next_status,
+                overlay_authoritative_usage(stamped, authoritative_usage.as_ref()),
+            )
+        } else {
+            (
+                message.content.clone(),
+                message.status.clone(),
+                overlay_authoritative_usage(
+                    message.agent_run_json.clone(),
+                    authoritative_usage.as_ref(),
+                ),
+            )
+        }
+    } else {
+        (
+            message.content.clone(),
+            message.status.clone(),
+            overlay_authoritative_usage(
+                message.agent_run_json.clone(),
+                authoritative_usage.as_ref(),
+            ),
+        )
+    };
+
     connection.execute(
         "
         UPDATE messages
@@ -1158,8 +1233,8 @@ pub fn update_message_state(
         WHERE conversation_id = ?5 AND id = ?6
         ",
         params![
-            &message.content,
-            &message.status,
+            &content,
+            &status,
             &agent_run_json,
             &message.ui_state_json,
             conversation_id,
@@ -1207,11 +1282,17 @@ fn list_messages(
             usage.total_tokens,
             usage.cached_input_tokens,
             usage.cache_creation_input_tokens,
-            usage.billable_request_count
+            usage.billable_request_count,
+            trace.terminal_status,
+            trace.completed_at,
+            trace.run_id
         FROM messages AS message
         LEFT JOIN agent_usage_records AS usage
           ON usage.conversation_id = message.conversation_id
          AND usage.message_id = message.id
+        LEFT JOIN conversation_turn_traces AS trace
+          ON trace.conversation_id = message.conversation_id
+         AND trace.assistant_message_id = message.id
         WHERE message.conversation_id = ?1
         ORDER BY message.position ASC, message.created_at ASC
         ",
@@ -1232,17 +1313,28 @@ fn list_messages(
                 }),
                 None => None,
             };
+            let created_at = row.get::<_, i64>(3)?;
+            let content = row.get::<_, String>(2)?;
+            let status = row.get::<_, Option<String>>(4)?;
+            let agent_run_json =
+                overlay_authoritative_usage(row.get(5)?, authoritative_usage.as_ref());
+            let (content, status, agent_run_json) = overlay_loaded_message_with_terminal_trace(
+                content,
+                status,
+                agent_run_json,
+                created_at,
+                row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<i64>>(16)?,
+            );
             Ok(ChatMessageRecord {
                 id: row.get(0)?,
                 role: row.get(1)?,
-                content: row.get(2)?,
-                created_at: row.get(3)?,
-                status: row.get(4)?,
+                content,
+                created_at,
+                status,
                 attachments: Vec::new(),
-                agent_run_json: overlay_authoritative_usage(
-                    row.get(5)?,
-                    authoritative_usage.as_ref(),
-                ),
+                agent_run_json,
                 ui_state_json: row.get(6)?,
             })
         })?
@@ -1277,6 +1369,175 @@ fn list_persisted_messages(
         })?
         .collect();
     messages
+}
+
+struct DurableTerminalRun {
+    run_id: String,
+    status: String,
+    completed_at: i64,
+}
+
+fn is_terminal_run_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+fn is_live_run_status(status: &str) -> bool {
+    matches!(
+        status,
+        "starting" | "queued" | "running" | "waiting_for_approval" | "idle"
+    )
+}
+
+fn is_thinking_placeholder(content: &str) -> bool {
+    content.trim() == THINKING_PLACEHOLDER
+}
+
+fn message_status_for_terminal_run(status: &str) -> &'static str {
+    if status == "failed" {
+        "error"
+    } else {
+        "sent"
+    }
+}
+
+fn run_status_from_json(raw: Option<&str>) -> Option<String> {
+    raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("status")?.as_str().map(str::to_string))
+}
+
+fn content_for_terminal_write(
+    existing_content: &str,
+    incoming_content: &str,
+    incoming_reopens_run: bool,
+) -> String {
+    if is_thinking_placeholder(incoming_content)
+        || (incoming_reopens_run && is_thinking_placeholder(existing_content))
+    {
+        return if is_thinking_placeholder(existing_content) {
+            String::new()
+        } else {
+            existing_content.to_string()
+        };
+    }
+    if incoming_reopens_run {
+        return existing_content.to_string();
+    }
+    incoming_content.to_string()
+}
+
+fn stamp_terminal_agent_run_json(
+    base_json: Option<&str>,
+    terminal: &DurableTerminalRun,
+    started_at: i64,
+) -> rusqlite::Result<Option<String>> {
+    canonical_agent_run_lifecycle_projection(
+        base_json,
+        &terminal.run_id,
+        &terminal.status,
+        started_at,
+        terminal.completed_at,
+        Some(terminal.completed_at),
+    )
+    .map(Some)
+}
+
+fn durable_terminal_run(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    existing_agent_run_json: Option<&str>,
+) -> rusqlite::Result<Option<DurableTerminalRun>> {
+    let traced = connection
+        .query_row(
+            "SELECT run_id, terminal_status, completed_at
+             FROM conversation_turn_traces
+             WHERE conversation_id = ?1 AND assistant_message_id = ?2",
+            params![conversation_id, message_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((run_id, terminal_status, completed_at)) = traced {
+        if is_terminal_run_status(&terminal_status) {
+            return Ok(Some(DurableTerminalRun {
+                run_id,
+                status: terminal_status,
+                completed_at: completed_at.unwrap_or_else(now_ms),
+            }));
+        }
+    }
+
+    let Some(raw) = existing_agent_run_json else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Ok(None);
+    };
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    if !is_terminal_run_status(status) {
+        return Ok(None);
+    }
+    let Some(run_id) = value.get("runId").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    if run_id.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(DurableTerminalRun {
+        run_id: run_id.to_string(),
+        status: status.to_string(),
+        completed_at: value
+            .get("completedAt")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_else(now_ms),
+    }))
+}
+
+fn overlay_loaded_message_with_terminal_trace(
+    content: String,
+    status: Option<String>,
+    agent_run_json: Option<String>,
+    created_at: i64,
+    trace_run_id: Option<String>,
+    trace_terminal_status: Option<String>,
+    trace_completed_at: Option<i64>,
+) -> (String, Option<String>, Option<String>) {
+    let Some(trace_status) = trace_terminal_status.filter(|status| is_terminal_run_status(status))
+    else {
+        return (content, status, agent_run_json);
+    };
+    let Some(run_id) = trace_run_id.filter(|run_id| !run_id.is_empty()) else {
+        return (content, status, agent_run_json);
+    };
+    let run_json_status = run_status_from_json(agent_run_json.as_deref());
+    let needs_repair = status.as_deref() == Some("pending")
+        || run_json_status.as_deref().is_some_and(is_live_run_status);
+    if !needs_repair {
+        return (content, status, agent_run_json);
+    }
+    let terminal = DurableTerminalRun {
+        run_id,
+        status: trace_status,
+        completed_at: trace_completed_at.unwrap_or(created_at),
+    };
+    let next_content = if is_thinking_placeholder(&content) {
+        String::new()
+    } else {
+        content
+    };
+    let next_status = Some(message_status_for_terminal_run(&terminal.status).to_string());
+    let next_json = stamp_terminal_agent_run_json(agent_run_json.as_deref(), &terminal, created_at)
+        .ok()
+        .flatten()
+        .or(agent_run_json);
+    (next_content, next_status, next_json)
 }
 
 #[derive(Debug, Clone)]

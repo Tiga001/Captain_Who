@@ -37,6 +37,7 @@ import type {
 import type { ModelTransitionConfirmation } from './modelTransitionUiState'
 import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
+import { isAssistantMessageGenerating } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus } from '../agentRun/agentActionUtils'
@@ -432,9 +433,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const messagesRef = useRef<HTMLDivElement>(null)
   const handledScrollTargetRef = useRef<string | null>(null)
   const [sideChatPlaceholder, setSideChatPlaceholder] = useState<ChatQueuedMessage | null>(null)
-  const isGenerating = conversation.messages.some(
-    (message) => message.role === 'assistant' && message.status === 'pending'
-  )
+  const isGenerating = conversation.messages.some(isAssistantMessageGenerating)
   const lastAssistantMessageId = [...conversation.messages]
     .reverse()
     .find((message) => message.role === 'assistant')?.id
@@ -443,7 +442,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
     .find((message) => message.role === 'user')?.id
   const activeAssistantRun = [...conversation.messages]
     .reverse()
-    .find((message) => message.role === 'assistant' && message.status === 'pending')?.agentRun
+    .find(isAssistantMessageGenerating)?.agentRun
   const canGuideQueuedMessages = Boolean(
     activeAssistantRun?.runId && activeAssistantRun.status === 'running'
   )

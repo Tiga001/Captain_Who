@@ -1196,6 +1196,129 @@ fn canonical_recovery_preserves_the_current_pre_start_projection() {
     assert_eq!(recovered["timeline"][0]["content"], "kept");
 }
 
+#[test]
+fn renderer_live_save_cannot_reopen_a_cancelled_run() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut stored = conversation();
+    stored.messages[1].status = Some("pending".to_string());
+    stored.messages[1].content = THINKING_PLACEHOLDER.to_string();
+    stored.messages[1].agent_run_json = Some(live_running_agent_run().to_string());
+    save_conversation(&mut connection, stored).unwrap();
+
+    update_message_run_terminal_state(
+        &connection,
+        "conversation-1",
+        "assistant-1",
+        "run-1",
+        Some("sent"),
+        "cancelled",
+        20,
+    )
+    .unwrap();
+
+    update_message_state(
+        &connection,
+        "conversation-1",
+        &ChatMessageStateRecord {
+            id: "assistant-1".to_string(),
+            content: THINKING_PLACEHOLDER.to_string(),
+            status: Some("pending".to_string()),
+            agent_run_json: Some(live_running_agent_run().to_string()),
+            ui_state_json: None,
+        },
+    )
+    .unwrap();
+
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.messages[1].status.as_deref(), Some("sent"));
+    assert_eq!(loaded.messages[1].content, "");
+    let run: serde_json::Value =
+        serde_json::from_str(loaded.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "cancelled");
+    assert_eq!(run["completedAt"], 20);
+}
+
+#[test]
+fn load_repairs_pending_message_when_trace_is_already_cancelled() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut stored = conversation();
+    stored.messages[1].status = Some("pending".to_string());
+    stored.messages[1].content = THINKING_PLACEHOLDER.to_string();
+    stored.messages[1].agent_run_json = Some(live_running_agent_run().to_string());
+    save_conversation(&mut connection, stored).unwrap();
+
+    conversation_trace_repository::replace_trace(
+        &mut connection,
+        &ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Cancelled,
+            terminal_error: None,
+            truncated: false,
+            items: Vec::new(),
+        },
+        10,
+        20,
+    )
+    .unwrap();
+
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.messages[1].status.as_deref(), Some("sent"));
+    assert_eq!(loaded.messages[1].content, "");
+    let run: serde_json::Value =
+        serde_json::from_str(loaded.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "cancelled");
+    assert_eq!(run["completedAt"], 20);
+
+    update_message_state(
+        &connection,
+        "conversation-1",
+        &ChatMessageStateRecord {
+            id: "assistant-1".to_string(),
+            content: THINKING_PLACEHOLDER.to_string(),
+            status: Some("pending".to_string()),
+            agent_run_json: Some(live_running_agent_run().to_string()),
+            ui_state_json: None,
+        },
+    )
+    .unwrap();
+
+    let persisted = get_persisted_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.messages[1].status.as_deref(), Some("sent"));
+    let persisted_run: serde_json::Value =
+        serde_json::from_str(persisted.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(persisted_run["status"], "cancelled");
+}
+
+fn live_running_agent_run() -> serde_json::Value {
+    serde_json::json!({
+        "runId": "run-1",
+        "status": "running",
+        "startedAt": 2,
+        "toolDefinitions": [],
+        "toolCalls": [],
+        "toolResults": [],
+        "approvals": [],
+        "diffs": [],
+        "fileDrafts": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "mcpInvocations": [],
+        "messageStreamCheckpoints": {},
+        "timeline": []
+    })
+}
+
 fn conversation() -> ChatConversationRecord {
     ChatConversationRecord {
         id: "conversation-1".to_string(),

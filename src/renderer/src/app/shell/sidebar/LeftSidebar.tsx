@@ -4,6 +4,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { AppProject } from '../../../config/projectConfig'
 import type { ChatConversation } from '../../../features/chat/chatTypes'
+import { isAssistantMessageGenerating } from '../../../features/chat/assistantGeneration'
 import type {
   SidebarConversationSort,
   SidebarProjectSort
@@ -643,9 +644,7 @@ export function LeftSidebar({
     const isDragging = draggingProjectId === project.id
     const canDragProject = !isProjectOpen && sectionProjects.length > 1
     const hasPendingProjectConversation = projectConversations.some((conversation) =>
-      conversation.messages.some(
-        (message) => message.role === 'assistant' && message.status === 'pending'
-      )
+      conversation.messages.some(isAssistantMessageGenerating)
     )
     const hasUnreadProjectConversation = projectConversations.some(
       (conversation) => conversation.unreadAt && conversation.id !== activeConversationId

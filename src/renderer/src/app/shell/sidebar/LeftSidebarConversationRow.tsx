@@ -3,6 +3,7 @@ import { Archive, Mail, PencilLine, Pin } from 'lucide-react'
 import { useRef, useState } from 'react'
 import type { AppLanguage } from '../../../config/frontendTranslations'
 import type { ChatConversation } from '../../../features/chat/chatTypes'
+import { isAssistantMessageGenerating } from '../../../features/chat/assistantGeneration'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { formatConversationAge } from './leftSidebarUtils'
@@ -73,9 +74,7 @@ export function ConversationRow({
   const conversationMenuRef = useRef<HTMLDivElement>(null)
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null)
   const isPinned = Boolean(conversation.pinnedAt)
-  const isPending = conversation.messages.some(
-    (message) => message.role === 'assistant' && message.status === 'pending'
-  )
+  const isPending = conversation.messages.some(isAssistantMessageGenerating)
   const isWaitingForApproval = conversation.messages.some(
     (message) => message.role === 'assistant' && message.agentRun?.status === 'waiting_for_approval'
   )

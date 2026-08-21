@@ -40,6 +40,7 @@ import type {
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
+import { isAssistantMessageGenerating } from '../features/chat/assistantGeneration'
 import { cancelAgentRun, steerAgentRun } from '../features/agent/agentClient'
 import {
   reconcileSkillActivationSelections,
@@ -1487,7 +1488,7 @@ export function AppShell() {
     )
     const pendingMessage = [...(activeConversationSnapshot?.messages ?? [])]
       .reverse()
-      .find((message) => message.role === 'assistant' && message.status === 'pending')
+      .find(isAssistantMessageGenerating)
 
     if (!pendingMessage) return
     const runId = pendingMessage.agentRun?.runId
@@ -1517,7 +1518,7 @@ export function AppShell() {
       )
       const assistantMessage = [...(conversation?.messages ?? [])]
         .reverse()
-        .find((message) => message.role === 'assistant' && message.status === 'pending')
+        .find(isAssistantMessageGenerating)
       const runId = assistantMessage?.agentRun?.runId
       if (!assistantMessage || !runId || assistantMessage.agentRun?.status !== 'running') {
         mutateDraft(conversationId, (draft) => ({
