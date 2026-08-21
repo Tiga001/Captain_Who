@@ -577,9 +577,7 @@ fn durable_prefix_for_units<'a>(
                 {
                     return None;
                 }
-                if unit.first_role != LlmMessageRole::Assistant
-                    || unit.last_role != LlmMessageRole::Assistant
-                {
+                if !compaction_summary_roles_are_valid(unit.first_role, unit.last_role) {
                     return None;
                 }
             }
@@ -614,6 +612,17 @@ fn merge_candidate_ranges(candidates: &[&CompactionCandidate]) -> Vec<ContextCom
 
 fn percent_ceil(value: u64, percent: u64) -> u64 {
     value.saturating_mul(percent).div_ceil(100)
+}
+
+fn compaction_summary_roles_are_valid(
+    first_role: LlmMessageRole,
+    last_role: LlmMessageRole,
+) -> bool {
+    matches!(
+        (first_role, last_role),
+        (LlmMessageRole::Assistant, LlmMessageRole::Assistant)
+            | (LlmMessageRole::System, LlmMessageRole::System)
+    )
 }
 
 fn merge_reason_tokens(
@@ -1443,6 +1452,57 @@ mod tests {
         );
         let prefix = plan.steps[0].durable_prefix.as_ref().unwrap();
 
+        assert_eq!(prefix.previous_summary_id.as_deref(), Some("summary-1"));
+        assert_eq!(
+            prefix.covered_through,
+            ContextJournalCursor::message("assistant-new")
+        );
+    }
+
+    #[test]
+    fn recursive_compaction_accepts_the_production_system_summary_role() {
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                500,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                2_000,
+                LlmMessageRole::System,
+                ContextSource::ConversationSummary,
+                Some(ContextOrigin::compaction_summary("summary-1")),
+            ),
+            item(
+                2,
+                ContextUsageClass::Durable,
+                4_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-new")),
+            ),
+        ];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(6_800),
+                500,
+                6_000,
+                0,
+                0,
+            ),
+            &items,
+            false,
+        );
+        let prefix = plan.steps[0].durable_prefix.as_ref().unwrap();
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert_eq!(prefix.previous_summary_id.as_deref(), Some("summary-1"));
         assert_eq!(
             prefix.covered_through,

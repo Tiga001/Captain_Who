@@ -1412,6 +1412,12 @@ mod tests {
             frame.manifest().entries[1].sources,
             vec!["conversation_summary"]
         );
+        assert_eq!(frame.manifest().entries[1].role, "system");
+        assert_eq!(
+            frame.manifest().entries[1].origin_kind,
+            Some("compaction_summary")
+        );
+        assert_eq!(frame.manifest().entries[1].origin_id, Some("summary-1"));
         let persisted = compaction_summary();
         persisted.continuity.validate().unwrap();
         assert!(!persisted.continuity.archived_counts.is_empty());

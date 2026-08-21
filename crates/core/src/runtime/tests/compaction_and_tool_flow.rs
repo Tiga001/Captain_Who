@@ -486,6 +486,419 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
 }
 
 #[tokio::test]
+async fn recursive_compaction_starts_when_the_assembled_system_summary_is_already_present() {
+    use crate::context::{
+        ContextCompactionGeneration, ContextCompactionPlanStatus, ContextCompactionPlanner,
+        ContextCompactionSummary,
+    };
+    use crate::protocol::AgentApiStyle;
+    use crate::{
+        AgentUsage, ContextCompactionPrefix, ContextCompactionSourceItem,
+        ContextCompactionSummaryDraft, ContextJournalCursor,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_http_body(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    expected_length = Some(header_end + 4 + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        let body_start = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .unwrap();
+        request[body_start..].to_vec()
+    }
+
+    let previous_summary_prefix = ContextCompactionPrefix {
+        conversation_id: "conversation-1".to_string(),
+        source_revision: "source-previous".to_string(),
+        covered_through: ContextJournalCursor::message("assistant-old"),
+        previous_summary: None,
+        source_items: vec![
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("user-old"),
+                role: "user".to_string(),
+                content: "old request".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("assistant-old"),
+                role: "assistant".to_string(),
+                content: "old answer".to_string(),
+                created_at: 2,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+        ],
+    };
+    let previous_summary = ContextCompactionSummary {
+        schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        id: "summary-previous".to_string(),
+        conversation_id: "conversation-1".to_string(),
+        source_revision: previous_summary_prefix.source_revision.clone(),
+        previous_summary_id: None,
+        covered_through: previous_summary_prefix.covered_through.clone(),
+        content: "PREVIOUS_SUMMARY_MARKER: the old task was completed.".to_string(),
+        continuity: crate::ContextContinuitySnapshot::from_prefix(&previous_summary_prefix)
+            .expect("previous summary prefix should produce continuity records"),
+        generation: ContextCompactionGeneration::test(),
+        source_input_tokens: 40_000,
+        summary_input_tokens: 32,
+        continuity_input_tokens: 64,
+        uncovered_tail_input_tokens: 0,
+        replacement_input_tokens: 96,
+        created_at: 1,
+    };
+    let grown_user = AgentChatMessage {
+        message_id: Some("user-grown".to_string()),
+        role: "user".to_string(),
+        content: format!("GROWN_USER_MARKER {}", "x".repeat(60_000)),
+        created_at: None,
+        conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
+    };
+    let grown_assistant_content = format!("GROWN_HISTORY_MARKER {}", "y".repeat(60_000));
+    let mut grown_assistant_trace = conversation_context_trace(
+        ConversationTurnTraceTerminalStatus::Completed,
+        vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: grown_assistant_content.clone(),
+            truncated: false,
+        }],
+    );
+    grown_assistant_trace.run_id = "run-grown".to_string();
+    grown_assistant_trace.conversation_id = "conversation-1".to_string();
+    grown_assistant_trace.assistant_message_id = "assistant-grown".to_string();
+    let grown_assistant = traced_assistant_message(&grown_assistant_content, grown_assistant_trace);
+    let current_user = AgentChatMessage {
+        message_id: Some("user-current".to_string()),
+        role: "user".to_string(),
+        content: "continue after the first compaction".to_string(),
+        created_at: None,
+        conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
+    };
+    let mut input = AgentChatInput {
+        api_url: "http://127.0.0.1:0/v1/chat/completions".to_string(),
+        api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
+        model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
+        api_style: Some(AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(50_000),
+        context_window_indicator_enabled: false,
+        max_tokens: Some(1_000),
+        temperature: None,
+        stream: Some(false),
+        context: Some(AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: Some("conversation-1".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: Default::default(),
+        }),
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        assistant_message_id: Some("assistant-current".to_string()),
+        context_compaction_summary: Some(previous_summary.clone()),
+        world_state_records: Vec::new(),
+        skill_activation: None,
+        skill_discovery: None,
+        messages: vec![
+            grown_user.clone(),
+            grown_assistant.clone(),
+            current_user.clone(),
+        ],
+    };
+    freeze_runtime_test_generic_provider(&mut input, "recursive-compaction-system-summary");
+
+    let mut assembled_state = create_conversation_context_state(input.clone()).unwrap();
+    let mut assembled_frame = assembled_state.shared_baseline().unwrap().into_frame();
+    let detector =
+        ContextCapacityDetector::for_model(&input.model, AgentApiStyle::OpenAiCompatible, &[]);
+    let report = detector.inspect(
+        &mut assembled_frame,
+        input.context_window_tokens,
+        sanitize_max_tokens(input.max_tokens),
+    );
+    let assembled_plan = ContextCompactionPlanner::for_tools(&[]).plan(
+        &report.compaction_query(),
+        &assembled_frame.planning_items().unwrap(),
+        true,
+    );
+    assert_eq!(assembled_plan.status, ContextCompactionPlanStatus::Required);
+    assert_eq!(
+        assembled_plan.steps[0]
+            .durable_prefix
+            .as_ref()
+            .and_then(|prefix| prefix.previous_summary_id.as_deref()),
+        Some("summary-previous")
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    freeze_runtime_test_generic_provider(&mut input, "recursive-compaction-system-summary");
+    let request_bodies = Arc::new(Mutex::new(Vec::new()));
+    let request_bodies_for_server = request_bodies.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let body = read_http_body(&mut stream).await;
+        request_bodies_for_server.lock().unwrap().push(body);
+        let response_body = serde_json::to_vec(&json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "done after recursive compaction" },
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&response_body).await.unwrap();
+    });
+
+    let recursive_prefix = Arc::new(ContextCompactionPrefix {
+        conversation_id: "conversation-1".to_string(),
+        source_revision: "source-recursive".to_string(),
+        covered_through: ContextJournalCursor::message("user-current"),
+        previous_summary: Some(previous_summary.clone()),
+        source_items: vec![
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("user-grown"),
+                role: "user".to_string(),
+                content: "grown request".to_string(),
+                created_at: 3,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("assistant-grown"),
+                role: "assistant".to_string(),
+                content: "grown history".to_string(),
+                created_at: 4,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("user-current"),
+                role: "user".to_string(),
+                content: "continue after the first compaction".to_string(),
+                created_at: 5,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+        ],
+    });
+    let recursive_summary = ContextCompactionSummary {
+        schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        id: "summary-recursive".to_string(),
+        conversation_id: "conversation-1".to_string(),
+        source_revision: recursive_prefix.source_revision.clone(),
+        previous_summary_id: Some("summary-previous".to_string()),
+        covered_through: recursive_prefix.covered_through.clone(),
+        content: "RECURSIVE_SUMMARY_MARKER: later history was compacted.".to_string(),
+        continuity: crate::ContextContinuitySnapshot::from_prefix(&recursive_prefix)
+            .expect("recursive prefix should produce continuity records"),
+        generation: ContextCompactionGeneration::test(),
+        source_input_tokens: 40_000,
+        summary_input_tokens: 32,
+        continuity_input_tokens: 64,
+        uncovered_tail_input_tokens: 0,
+        replacement_input_tokens: 96,
+        created_at: 2,
+    };
+    let mut compacted_state = create_conversation_context_state(AgentChatInput {
+        context_compaction_summary: Some(recursive_summary.clone()),
+        messages: vec![current_user.clone()],
+        ..input.clone()
+    })
+    .unwrap();
+    let compacted_baseline = compacted_state.shared_baseline().unwrap();
+    let prepare_count = Arc::new(AtomicUsize::new(0));
+    let generate_count = Arc::new(AtomicUsize::new(0));
+    let commit_count = Arc::new(AtomicUsize::new(0));
+    let prepare_counter = prepare_count.clone();
+    let generate_counter = generate_count.clone();
+    let commit_counter = commit_count.clone();
+    let compacted_baseline_for_commit = compacted_baseline.clone();
+    let recursive_prefix_for_prepare = recursive_prefix.clone();
+    let services = AgentContextCompactionServices::new(
+        move |request, _| {
+            prepare_counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                request.expected_previous_summary_id.as_deref(),
+                Some("summary-previous")
+            );
+            assert_eq!(
+                request.covered_through,
+                ContextJournalCursor::message("user-current")
+            );
+            let recursive_prefix = recursive_prefix_for_prepare.clone();
+            async move {
+                Ok(AgentContextCompactionPrepareOutcome::Ready(
+                    recursive_prefix,
+                ))
+            }
+        },
+        move |request, _| {
+            generate_counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                request
+                    .prefix
+                    .previous_summary
+                    .as_ref()
+                    .map(|summary| summary.id.as_str()),
+                Some("summary-previous")
+            );
+            async move {
+                let observation =
+                    crate::model_request_observation::ModelRequestObservationBuilder::new(
+                        format!("model-request-{}", request.operation_id),
+                        request.run_id.clone(),
+                        Some(request.conversation_id.clone()),
+                        Some(request.assistant_message_id.clone()),
+                        Some(request.operation_id.clone()),
+                        request.request_index,
+                        crate::ModelRequestPurpose::ContextCompaction,
+                        "test-model",
+                        AgentApiStyle::OpenAiCompatible,
+                        None,
+                        1,
+                    )
+                    .completed(
+                        Some(AgentUsage {
+                            input_tokens: Some(80),
+                            output_tokens: Some(16),
+                            output_thinking_tokens: None,
+                            total_tokens: Some(96),
+                            cached_input_tokens: None,
+                            cache_creation_input_tokens: None,
+                            billable_request_count: Some(1),
+                        }),
+                        Some("stop".to_string()),
+                        2,
+                    )
+                    .unwrap();
+                Ok(AgentContextCompactionGenerationOutput {
+                    draft: ContextCompactionSummaryDraft {
+                        id: "summary-recursive".to_string(),
+                        source_revision: request.prefix.source_revision.clone(),
+                        content: "RECURSIVE_SUMMARY_MARKER: later history was compacted."
+                            .to_string(),
+                        continuity: request.continuity,
+                        generation: ContextCompactionGeneration::test(),
+                        source_input_tokens: request.source_input_tokens,
+                        summary_input_tokens: 32,
+                        continuity_input_tokens: 64,
+                        uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
+                        replacement_input_tokens: 96,
+                        created_at: 2,
+                    },
+                    observation,
+                })
+            }
+        },
+        move |request, _| {
+            let baseline = compacted_baseline_for_commit.clone();
+            commit_counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.draft.id, "summary-recursive");
+            async move {
+                Ok(AgentContextCompactionCommitOutcome::Applied {
+                    summary_id: "summary-recursive".to_string(),
+                    baseline: Box::new(baseline),
+                })
+            }
+        },
+        |_, _| async { Ok(()) },
+    );
+    let emitted_events = Arc::new(Mutex::new(Vec::new()));
+    let emitted_events_for_callback = emitted_events.clone();
+    let emitter: AgentEventEmitter = Arc::new(move |event| {
+        emitted_events_for_callback.lock().unwrap().push(event);
+    });
+
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-recursive-compaction".to_string()),
+            Some(emitter),
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_context_compaction(services)),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let request_body = String::from_utf8(request_bodies.lock().unwrap()[0].clone()).unwrap();
+
+    assert_eq!(output.content, "done after recursive compaction");
+    assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
+    assert_eq!(generate_count.load(Ordering::SeqCst), 1);
+    assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    assert!(request_body.contains("RECURSIVE_SUMMARY_MARKER"));
+    assert!(!request_body.contains("GROWN_USER_MARKER"));
+    assert!(!request_body.contains("GROWN_HISTORY_MARKER"));
+    assert!(!request_body.contains("PREVIOUS_SUMMARY_MARKER"));
+    let events = emitted_events.lock().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ContextCompactionStarted { .. })));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextCompactionFinished {
+            outcome: AgentContextCompactionEventOutcome::Applied,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn context_capacity_guard_rejects_the_initial_request_before_network_io() {
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};

@@ -28,10 +28,10 @@ use crate::command::{
 use crate::context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
     ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
-    ContextCapacityDetector, ContextCompactionPlan, ContextCompactionPlanner,
-    ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
-    ContextRetention, ContextScope, ContextSource, ModelToolResultGate, ModelToolResultRecovery,
-    MODEL_TOOL_RESULT_MAX_TOKENS,
+    ContextCapacityDetector, ContextCompactionPlan, ContextCompactionPlanStatus,
+    ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
+    ContextOrigin, ContextRetention, ContextScope, ContextSource, ModelToolResultGate,
+    ModelToolResultRecovery, MODEL_TOOL_RESULT_MAX_TOKENS,
 };
 use crate::conversation_trace::{
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
@@ -1096,6 +1096,13 @@ impl AgentRuntime {
                                     }
                                 }
                             }
+                            emit_compaction_skip_if_required(
+                                &run_id,
+                                model_request_index + 1,
+                                compaction_attempts,
+                                context_compaction_executor.is_some(),
+                                &compaction_plan,
+                            );
                             request_estimate =
                                 Some(ModelRequestEstimate::from_budget_report(&report));
                             let context_window_snapshot = report.snapshot(&llm_request.model);
