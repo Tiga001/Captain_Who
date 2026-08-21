@@ -91,4 +91,17 @@ describe('ChatMarkdown math normalization', () => {
       '$$not math\nstill code$$\n'
     )
   })
+
+  it('does not treat a shell prompt and $? as math when math is disabled', async () => {
+    const content =
+      '$ curl -sS -I --max-time 20 https://upload.wikimedia.org/wikipedia/commons/thumb/6/69/Zhejiang_University_logo.svg/512px-Zhejiang_University_logo.svg.png ; echo "EXIT=$?"运行这个命令'
+    const screen = await render(<ChatMarkdown enableMath={false} content={content} />)
+
+    expect(screen.container.querySelector('.katex')).toBeNull()
+    expect(screen.container.querySelector('.katex-display')).toBeNull()
+    expect(screen.container.textContent).toContain('$ curl')
+    expect(screen.container.textContent).toContain('Zhejiang_University_logo')
+    expect(screen.container.textContent).toContain('EXIT=$?')
+    expect(screen.container.textContent).toContain('运行这个命令')
+  })
 })

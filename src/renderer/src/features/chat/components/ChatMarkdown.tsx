@@ -11,6 +11,8 @@ import { useImagePreview } from './ImagePreview'
 interface ChatMarkdownProps {
   className?: string
   content: string
+  /** When false, skip `$...$` / KaTeX so shell prompts and URL underscores stay literal. */
+  enableMath?: boolean
 }
 
 interface MarkdownLine {
@@ -400,16 +402,20 @@ function openMarkdownLink(href: string) {
   })
 }
 
-export function ChatMarkdown({ className, content }: ChatMarkdownProps) {
+export function ChatMarkdown({ className, content, enableMath = true }: ChatMarkdownProps) {
   const openImagePreview = useImagePreview()
   const markdownClassName = ['chat-markdown', className].filter(Boolean).join(' ')
-  const normalizedContent = normalizeMarkdownMath(content)
+  const normalizedContent = enableMath ? normalizeMarkdownMath(content) : content
 
   return (
     <div className={markdownClassName}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkMath, remarkBreaks]}
-        rehypePlugins={[rehypeKatex]}
+        remarkPlugins={
+          enableMath
+            ? [remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkMath, remarkBreaks]
+            : [remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkBreaks]
+        }
+        rehypePlugins={enableMath ? [rehypeKatex] : []}
         components={{
           a: ({ children, href, ...props }) => {
             const normalizedHref = normalizeMarkdownExternalHref(href)

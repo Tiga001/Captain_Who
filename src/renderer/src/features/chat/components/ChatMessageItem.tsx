@@ -988,7 +988,7 @@ function MessageContent({
     )
   }
 
-  return <ChatMarkdown content={getUserVisibleContent(message)} />
+  return <ChatMarkdown enableMath={false} content={getUserVisibleContent(message)} />
 }
 
 function EditableUserMessage({
