@@ -201,6 +201,46 @@ describe('managed Playwright bridge wire contract', () => {
     ).toThrow()
   })
 
+  it('keeps host screenshot publish paths off the MCP tools/call result object', () => {
+    const completion = {
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+      requestId: REQUEST_ID,
+      outcome: {
+        type: 'tool_called' as const,
+        result: { content: [], isError: false },
+        hostImagePublishPath: '/private/browser-automation-artifacts/objects/abc'
+      }
+    }
+    expect(parseManagedPlaywrightCompletionInput(completion)).toEqual(completion)
+    expect(
+      parseManagedPlaywrightCompletionInput({
+        schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+        requestId: REQUEST_ID,
+        outcome: {
+          type: 'tool_called',
+          result: { content: [], isError: false }
+        }
+      })
+    ).toEqual({
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+      requestId: REQUEST_ID,
+      outcome: {
+        type: 'tool_called',
+        result: { content: [], isError: false }
+      }
+    })
+    expect(() =>
+      parseManagedPlaywrightCompletionInput({
+        ...completion,
+        outcome: {
+          type: 'tool_called',
+          result: { content: [], isError: false },
+          hostImagePublishPath: ''
+        }
+      })
+    ).toThrow()
+  })
+
   it('accepts only the TypeScript error completion camelCase field projection', () => {
     const completion = {
       schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,

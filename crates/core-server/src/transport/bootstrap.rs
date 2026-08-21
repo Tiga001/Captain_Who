@@ -130,9 +130,10 @@ impl CoreServerBootstrap {
             })?,
         );
         let (builtin_capability_runtime, builtin_capability_provider) =
-            HostBuiltinCapabilityProvider::runtime_and_provider(Arc::clone(
-                &mcp_builtin_capability_policies,
-            ))
+            HostBuiltinCapabilityProvider::runtime_and_provider_with_storage(
+                Arc::clone(&mcp_builtin_capability_policies),
+                Some(Arc::clone(&storage)),
+            )
             .map_err(|error| {
                 io::Error::other(format!(
                     "failed to initialize built-in MCP capability runtime: {error}"

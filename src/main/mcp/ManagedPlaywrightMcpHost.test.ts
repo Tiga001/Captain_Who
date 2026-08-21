@@ -2562,7 +2562,10 @@ describe('ManagedPlaywrightMcpHost', () => {
         },
         isError: false
       })
-      expect(JSON.stringify(result)).not.toContain(parent)
+      const { hostImagePublishPath, ...mcpResult } = result
+      expect(hostImagePublishPath).toEqual(expect.stringContaining('browser-automation-artifacts'))
+      expect(JSON.stringify(mcpResult)).not.toContain(parent)
+      expect(JSON.stringify(mcpResult)).not.toContain(hostImagePublishPath)
       expect(callTool).toHaveBeenLastCalledWith(
         expect.objectContaining({
           arguments: expect.objectContaining({
@@ -2573,6 +2576,51 @@ describe('ManagedPlaywrightMcpHost', () => {
         undefined,
         expect.any(Object)
       )
+    } finally {
+      await host.close()
+      await broker.shutdown()
+      await rm(parent, { force: true, recursive: true })
+    }
+  })
+
+  it('omits host screenshot publish paths when the image exceeds the read_image limit', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-host-screenshot-too-large-test-'))
+    const broker = new BrowserArtifactBroker({
+      rootDirectory: join(parent, 'browser-automation-artifacts'),
+      maxArtifactBytes: 9 * 1024 * 1024
+    })
+    const context = fakeBrowserContext()
+    const oversized = Buffer.alloc(8 * 1024 * 1024 + 1, 1)
+    const callTool = vi.fn(async ({ arguments: args }: { arguments: Record<string, unknown> }) => {
+      const meta = args._meta as { cwd: string }
+      await writeFile(join(meta.cwd, String(args.filename)), oversized)
+      return {
+        content: [{ type: 'text', text: `saved to ${meta.cwd}/${String(args.filename)}` }],
+        isError: false
+      }
+    })
+    const host = fakeHost({
+      artifactBroker: broker,
+      callTool: callTool as ManagedMcpClient['callTool'],
+      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
+      getBrowserContext: async () => context
+    })
+    try {
+      const result = await host.callTool(
+        'browser_take_screenshot',
+        { scale: 'css', filename: 'page.png', call_reason: 'Take a screenshot.' },
+        { authorizationContext: { ...RISK_CONTEXT, callId: 'call-screenshot-too-large' } }
+      )
+      expect(result.hostImagePublishPath).toBeUndefined()
+      expect(result.content[0]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('8 MiB read_image limit')
+      })
+      expect(result.structuredContent).toMatchObject({
+        status: 'completed',
+        artifacts: [expect.objectContaining({ kind: 'image', sizeBytes: oversized.length })]
+      })
+      expect(JSON.stringify(result)).not.toContain(parent)
     } finally {
       await host.close()
       await broker.shutdown()

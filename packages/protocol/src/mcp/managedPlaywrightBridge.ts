@@ -168,7 +168,12 @@ export type ManagedPlaywrightBridgeErrorCode =
 export type ManagedPlaywrightCompletionOutcome =
   | { type: 'connected'; protocol: unknown }
   | { type: 'tools_listed'; page: unknown }
-  | { type: 'tool_called'; result: unknown }
+  | {
+      type: 'tool_called'
+      result: unknown
+      /** Main/Core-only absolute screenshot file. Never copy this into MCP, Renderer, or model JSON. */
+      hostImagePublishPath?: string
+    }
   | {
       type: 'sensitive_tool_prepared'
       bindingId: string
@@ -814,9 +819,24 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
     case 'tools_listed':
       exactKeys(base, ['type', 'page'])
       return { type: 'tools_listed', page: base.page }
-    case 'tool_called':
-      exactKeys(base, ['type', 'result'])
-      return { type: 'tool_called', result: base.result }
+    case 'tool_called': {
+      const hostImagePublishPath =
+        typeof base.hostImagePublishPath === 'string' ? base.hostImagePublishPath : undefined
+      exactKeys(
+        base,
+        hostImagePublishPath === undefined
+          ? ['type', 'result']
+          : ['type', 'result', 'hostImagePublishPath']
+      )
+      if (hostImagePublishPath !== undefined && hostImagePublishPath.length < 1) {
+        throw new Error('Invalid managed Playwright host image publish path')
+      }
+      return {
+        type: 'tool_called',
+        result: base.result,
+        ...(hostImagePublishPath === undefined ? {} : { hostImagePublishPath })
+      }
+    }
     case 'sensitive_tool_prepared': {
       exactKeys(base, [
         'type',

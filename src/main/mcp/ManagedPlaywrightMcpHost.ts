@@ -85,6 +85,7 @@ const MAX_RESOURCE_DESCRIPTION_BYTES = 16 * 1024
 const MAX_RESOURCE_MIME_TYPE_BYTES = 256
 const MAX_RESOURCE_TEXT_BYTES = MAX_TEXT_BYTES
 const CONNECTION_CLOSE_SETTLE_MS = 2_000
+const MAX_READ_IMAGE_BYTES = 8 * 1024 * 1024
 // The fixed browser_drop implementation both base64-encodes file bytes and waits for OOPIF
 // actionability through the guest CDP relay. Every approved path therefore uses the exact-page
 // Host adapter; pure MIME data remains on the official path.
@@ -194,6 +195,11 @@ export interface ManagedPlaywrightCallResult {
   content: ManagedPlaywrightContentBlock[]
   structuredContent?: Record<string, unknown>
   isError: boolean
+  /**
+   * Main/Core-only absolute screenshot file used to publish an `image-artifact://` readPath.
+   * Callers must omit this from the MCP `tools/call` result object.
+   */
+  hostImagePublishPath?: string
 }
 
 export interface ManagedPlaywrightProtocolSnapshot {
@@ -1043,7 +1049,19 @@ export class ManagedPlaywrightMcpHost {
                 const artifact = await artifactPlan.reservation.commit()
                 artifactCommitted = true
                 if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
-                return artifactToolResult([artifact, ...downloadArtifacts])
+                const screenshot = artifact.kind === 'image' ? artifact : undefined
+                const readPathUnavailable =
+                  screenshot && screenshot.sizeBytes > MAX_READ_IMAGE_BYTES
+                    ? 'too_large'
+                    : undefined
+                const hostImagePublishPath =
+                  screenshot && !readPathUnavailable
+                    ? this.artifactBroker?.hostOwnedAbsolutePath(screenshot)
+                    : undefined
+                return artifactToolResult([artifact, ...downloadArtifacts], {
+                  ...(hostImagePublishPath ? { hostImagePublishPath } : {}),
+                  ...(readPathUnavailable ? { readPathUnavailable } : {})
+                })
               } finally {
                 if (artifactPlan && !artifactCommitted) {
                   await artifactPlan.reservation.discard().catch(() => undefined)
@@ -2888,7 +2906,8 @@ function managedBrowserConfigResult(): ManagedPlaywrightCallResult {
 }
 
 function artifactToolResult(
-  artifactOrArtifacts: BrowserArtifactReference | readonly BrowserArtifactReference[]
+  artifactOrArtifacts: BrowserArtifactReference | readonly BrowserArtifactReference[],
+  options: { hostImagePublishPath?: string; readPathUnavailable?: 'too_large' } = {}
 ): ManagedPlaywrightCallResult {
   const artifacts = Array.isArray(artifactOrArtifacts)
     ? [...artifactOrArtifacts]
@@ -2897,18 +2916,21 @@ function artifactToolResult(
   if (!primary) {
     throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
   }
+  const summary =
+    artifacts.length === 1
+      ? `Created managed ${primary.kind} Artifact “${primary.displayName}” (${primary.sizeBytes} bytes).`
+      : `Created ${artifacts.length} managed browser Artifacts.`
+  const text =
+    options.readPathUnavailable === 'too_large'
+      ? `${summary} This screenshot exceeds the 8 MiB read_image limit, so no readPath is available.`
+      : summary
   return {
-    content: [
-      {
-        type: 'text',
-        text:
-          artifacts.length === 1
-            ? `Created managed ${primary.kind} Artifact “${primary.displayName}” (${primary.sizeBytes} bytes).`
-            : `Created ${artifacts.length} managed browser Artifacts.`
-      }
-    ],
+    content: [{ type: 'text', text }],
     structuredContent: { status: 'completed', artifacts },
-    isError: false
+    isError: false,
+    ...(options.hostImagePublishPath
+      ? { hostImagePublishPath: options.hostImagePublishPath }
+      : {})
   }
 }
 

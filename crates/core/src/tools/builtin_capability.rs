@@ -299,6 +299,7 @@ impl BuiltinCapabilityAgentTool {
             host_overlay_digest: self.descriptor.host_overlay_digest.clone(),
             host_input_schema_digest: self.descriptor.schema_digest.clone(),
             call_id: context.tool_call_id()?.to_string(),
+            conversation_id: context.conversation_id().ok().map(str::to_string),
             arguments,
             builtin_tool_grant: None,
         })
@@ -573,6 +574,7 @@ impl AsyncAgentTool for BuiltinCapabilityAgentTool {
                     host_overlay_digest: self.descriptor.host_overlay_digest.clone(),
                     host_input_schema_digest: self.descriptor.schema_digest.clone(),
                     call_id: call_id.to_string(),
+                    conversation_id: context.conversation_id().ok().map(str::to_string),
                     arguments: args,
                     cancellation: context.cancellation_token(),
                 })
@@ -918,6 +920,15 @@ pub fn builtin_capability_tool_result_persistence_projection(
         .and_then(crate::browser_artifacts::safe_browser_artifact_references)
     {
         safe_result["artifacts"] = Value::Array(artifacts);
+    }
+    if let Some(read_path) = result
+        .result
+        .as_ref()
+        .and_then(|value| value.get("structuredContent"))
+        .and_then(|structured| structured.get("readPath"))
+        .and_then(crate::browser_artifacts::safe_image_artifact_read_path)
+    {
+        safe_result["readPath"] = json!(read_path);
     }
     AgentToolResult {
         exact_archive_file: None,
@@ -1464,6 +1475,8 @@ mod tests {
                 "structuredContent": {
                     "status": "completed",
                     "artifacts": [artifact.clone()],
+                    "readPath": format!("image-artifact://sha256/{}", "a".repeat(64)),
+                    "hostImagePublishPath": "/tmp/private-screenshot.png",
                     "privateDiagnostic": secret,
                 },
                 "content": [{"type": "text", "text": secret}],
@@ -1473,7 +1486,17 @@ mod tests {
         let projected = tool.checkpoint_projection(&artifact_result);
         let safe = projected.result.unwrap();
         assert_eq!(safe["artifacts"], json!([artifact.clone()]));
+        assert_eq!(
+            safe["readPath"],
+            json!(format!("image-artifact://sha256/{}", "a".repeat(64)))
+        );
         assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
+        assert!(!serde_json::to_string(&safe)
+            .unwrap()
+            .contains("hostImagePublishPath"));
+        assert!(!serde_json::to_string(&safe)
+            .unwrap()
+            .contains("/tmp/private-screenshot.png"));
 
         let mut malformed = artifact;
         malformed["managedPath"] = json!("/tmp/private-canary.png");

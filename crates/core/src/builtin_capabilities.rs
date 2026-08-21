@@ -942,6 +942,7 @@ pub struct BuiltinCapabilityInvocation {
     pub host_overlay_digest: String,
     pub host_input_schema_digest: String,
     pub call_id: String,
+    pub conversation_id: Option<String>,
     pub arguments: Value,
     pub builtin_tool_grant: Option<BuiltinMcpToolGrant>,
 }
@@ -986,6 +987,7 @@ pub(crate) struct BuiltinCapabilityDispatchRequest {
     pub host_overlay_digest: String,
     pub host_input_schema_digest: String,
     pub call_id: String,
+    pub conversation_id: Option<String>,
     pub arguments: Value,
     pub cancellation: AgentCancellationToken,
 }
@@ -1804,6 +1806,7 @@ impl BuiltinCapabilityRuntime {
             host_overlay_digest: request.host_overlay_digest,
             host_input_schema_digest: request.host_input_schema_digest,
             call_id: request.call_id,
+            conversation_id: request.conversation_id,
             arguments: request.arguments,
             builtin_tool_grant: None,
         };
@@ -2609,6 +2612,7 @@ mod tests {
             host_overlay_digest: format!("sha256:{}", "e".repeat(64)),
             host_input_schema_digest: format!("sha256:{}", "f".repeat(64)),
             call_id: "call-binding-scope".to_string(),
+            conversation_id: None,
             arguments,
             builtin_tool_grant: None,
         }

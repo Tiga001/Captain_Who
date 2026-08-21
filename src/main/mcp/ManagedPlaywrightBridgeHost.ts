@@ -315,7 +315,12 @@ export class ManagedPlaywrightBridgeHost {
               }
             }
           )
-          outcome = { type: 'tool_called', result }
+          const { hostImagePublishPath, ...mcpResult } = result
+          outcome = {
+            type: 'tool_called',
+            result: mcpResult,
+            ...(hostImagePublishPath ? { hostImagePublishPath } : {})
+          }
           break
         }
         case 'close': {

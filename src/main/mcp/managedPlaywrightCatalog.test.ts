@@ -61,6 +61,10 @@ describe('managed Playwright fixed Catalog', () => {
     })
     expect(MANAGED_PLAYWRIGHT_EXPOSED_TOOLS).toHaveLength(61)
     expect(
+      MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.find((tool) => tool.rawName === 'browser_take_screenshot')
+        ?.description
+    ).toContain('read_image.path')
+    expect(
       MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.filter((tool) => tool.handlingMode === 'pass_through')
     ).toHaveLength(25)
     expect(

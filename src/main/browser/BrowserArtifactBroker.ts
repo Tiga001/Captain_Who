@@ -292,6 +292,17 @@ export class BrowserArtifactBroker {
     return this.storeBytes({ ...input, bytes: Buffer.from(input.text, 'utf8') })
   }
 
+  /**
+   * Main/Core-only absolute file for publishing an `image-artifact://` readPath.
+   * Never include this path in MCP, Renderer, or model payloads.
+   */
+  hostOwnedAbsolutePath(reference: BrowserArtifactReference): string | undefined {
+    const record = this.artifacts.get(reference.artifactId)
+    if (!record || record.reference.kind !== 'image') return undefined
+    if (!sameReference(reference, record.reference)) return undefined
+    return record.path
+  }
+
   /** Reads only bounded preview-capable content; large/file-only Artifacts never cross IPC. */
   async readPreview(referenceValue: unknown): Promise<{
     artifact: BrowserArtifactReference

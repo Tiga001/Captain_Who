@@ -23,7 +23,7 @@ use mycopilot_core::{
     PreparedBuiltinMcpToolTargetBinding, BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
     BUILTIN_CAPABILITY_GRANT_TTL_SECONDS,
 };
-use mycopilot_mcp_client::{McpInvocationId, McpToolResult};
+use mycopilot_mcp_client::{McpContentBlock, McpInvocationId, McpToolResult};
 use mycopilot_protocol_rs::{
     BuiltinMcpToolRiskKindDto, ManagedPlaywrightAuthorizationContext,
     ManagedPlaywrightBuiltinToolGrantContext, ManagedPlaywrightCompletionOutcome,
@@ -32,6 +32,8 @@ use mycopilot_protocol_rs::{
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::{Uuid, Version};
@@ -156,6 +158,7 @@ pub(crate) struct HostBuiltinCapabilityProvider {
     grants: Mutex<ProcessGrantState>,
     activation_transition: Mutex<()>,
     managed_runtime: Mutex<Option<Arc<ManagedPlaywrightMcpRuntime>>>,
+    storage: Option<Arc<mycopilot_core::storage::service::StorageService>>,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     #[cfg(test)]
     approval_before_start_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -184,7 +187,14 @@ impl HostBuiltinCapabilityProvider {
     pub(crate) fn runtime_and_provider(
         policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
     ) -> AgentResult<(BuiltinCapabilityRuntime, Arc<Self>)> {
-        let provider = Arc::new(Self::new(policies)?);
+        Self::runtime_and_provider_with_storage(policies, None)
+    }
+
+    pub(crate) fn runtime_and_provider_with_storage(
+        policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
+        storage: Option<Arc<mycopilot_core::storage::service::StorageService>>,
+    ) -> AgentResult<(BuiltinCapabilityRuntime, Arc<Self>)> {
+        let provider = Arc::new(Self::new_with_storage(policies, storage)?);
         let runtime = BuiltinCapabilityRuntime::new(provider.clone())?;
         Ok((runtime, provider))
     }
@@ -205,12 +215,20 @@ impl HostBuiltinCapabilityProvider {
     }
 
     fn new(policies: Arc<SqliteBuiltinCapabilityPolicyStore>) -> AgentResult<Self> {
-        Self::with_clock(policies, Arc::new(unix_timestamp))
+        Self::new_with_storage(policies, None)
+    }
+
+    fn new_with_storage(
+        policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
+        storage: Option<Arc<mycopilot_core::storage::service::StorageService>>,
+    ) -> AgentResult<Self> {
+        Self::with_clock(policies, Arc::new(unix_timestamp), storage)
     }
 
     fn with_clock(
         policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+        storage: Option<Arc<mycopilot_core::storage::service::StorageService>>,
     ) -> AgentResult<Self> {
         let manifest = load_playwright_browser_manifest()?;
         Ok(Self {
@@ -219,6 +237,7 @@ impl HostBuiltinCapabilityProvider {
             grants: Mutex::new(ProcessGrantState::default()),
             activation_transition: Mutex::new(()),
             managed_runtime: Mutex::new(None),
+            storage,
             clock,
             #[cfg(test)]
             approval_before_start_hook: Mutex::new(None),
@@ -1598,7 +1617,24 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 }
                 result = &mut invoke => result,
             }
-            .map_err(crate::adapters::mcp_runtime::map_invocation_error)?;
+            .map_err(crate::adapters::mcp_runtime::map_invocation_error);
+            let publish_path = runtime.take_host_image_publish_path(&invocation.call_id);
+            let result = result?;
+            let result = attach_browser_screenshot_read_path(
+                result,
+                publish_path,
+                self.storage.as_deref(),
+                invocation
+                    .conversation_id
+                    .as_deref()
+                    .map(|conversation_id| {
+                        mycopilot_core::storage::service::ManagedArtifactAuthority {
+                            conversation_id,
+                            run_id: invocation.run_id.as_str(),
+                            call_id: invocation.call_id.as_str(),
+                        }
+                    }),
+            );
             project_managed_browser_result(result)
         })
     }
@@ -1658,6 +1694,95 @@ fn map_target_binding_release_reason(
     }
 }
 
+/// Publishes a Host-owned screenshot file into the managed Artifact store and returns a canonical
+/// `readPath` for `read_image`. The source path never survives this function.
+fn attach_browser_screenshot_read_path(
+    mut result: McpToolResult,
+    publish_path: Option<String>,
+    storage: Option<&mycopilot_core::storage::service::StorageService>,
+    authority: Option<mycopilot_core::storage::service::ManagedArtifactAuthority<'_>>,
+) -> McpToolResult {
+    if let Some(structured) = result
+        .structured_content
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        structured.remove("hostImagePublishPath");
+        structured.remove("managedPath");
+        structured.remove("privatePath");
+        structured.remove("outputDir");
+        structured.remove("path");
+    }
+    let Some(source) = publish_path.filter(|path| Path::new(path).is_absolute()) else {
+        return result;
+    };
+    let Some(storage) = storage else {
+        return result;
+    };
+    let Some(authority) = authority else {
+        return result;
+    };
+    let kind = result
+        .structured_content
+        .as_ref()
+        .and_then(|structured| structured.get("artifacts"))
+        .and_then(Value::as_array)
+        .and_then(|artifacts| artifacts.first())
+        .and_then(|artifact| artifact.get("kind"))
+        .and_then(Value::as_str);
+    let mime = result
+        .structured_content
+        .as_ref()
+        .and_then(|structured| structured.get("artifacts"))
+        .and_then(Value::as_array)
+        .and_then(|artifacts| artifacts.first())
+        .and_then(|artifact| artifact.get("mimeType"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind != Some("image") {
+        return result;
+    }
+    let extension = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => return result,
+    };
+    let source_path = Path::new(&source);
+    let staged = source_path.with_extension(extension);
+    if staged != source_path {
+        if fs::copy(source_path, &staged).is_err() {
+            return result;
+        }
+    }
+    let published = match storage.publish_managed_artifact_file(&staged, authority) {
+        Ok(published) => published,
+        Err(_) => {
+            if staged != source_path {
+                let _ = fs::remove_file(&staged);
+            }
+            return result;
+        }
+    };
+    if staged != source_path {
+        let _ = fs::remove_file(&staged);
+    }
+    let read_path = published.read_path();
+    if let Some(structured) = result
+        .structured_content
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        structured.insert("readPath".to_string(), json!(read_path));
+    }
+    if let Some(McpContentBlock::Text { text }) = result.content.first_mut() {
+        if !text.contains("read_image.path") {
+            text.push_str(&format!("\nread_image.path: {read_path}"));
+        }
+    }
+    result
+}
+
 /// Applies the same bounded MCP content policy used by external Servers before a result enters
 /// the generic built-in Tool path. Binary data and resource URIs are represented only by omission
 /// metadata; an authoritative `isError` response remains a completed Tool-level error rather than
@@ -1691,8 +1816,16 @@ fn project_managed_browser_result(result: McpToolResult) -> AgentResult<Value> {
         if structured.get("artifacts").is_none() {
             return Some(structured);
         }
-        mycopilot_core::browser_artifacts::safe_browser_artifact_references(&structured)
-            .map(|artifacts| json!({"artifacts": artifacts}))
+        let artifacts =
+            mycopilot_core::browser_artifacts::safe_browser_artifact_references(&structured)?;
+        let mut projected = json!({"artifacts": artifacts});
+        if let Some(read_path) = structured
+            .get("readPath")
+            .and_then(mycopilot_core::browser_artifacts::safe_image_artifact_read_path)
+        {
+            projected["readPath"] = json!(read_path);
+        }
+        Some(projected)
     });
     let envelope = json!({
         "schemaVersion": 1,
@@ -1755,6 +1888,7 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use mycopilot_core::{
         builtin_capability_activation_result, BrowserDestinationIdentity,
         BrowserResolvedAddressClass, BrowserRiskKind, BrowserRiskTrigger,
@@ -1791,7 +1925,7 @@ mod tests {
             Arc::new(move || now.load(Ordering::SeqCst)) as Arc<dyn Fn() -> u64 + Send + Sync>
         };
         let provider = Arc::new(
-            HostBuiltinCapabilityProvider::with_clock(Arc::clone(&policies), clock).unwrap(),
+            HostBuiltinCapabilityProvider::with_clock(Arc::clone(&policies), clock, None).unwrap(),
         );
         let runtime = BuiltinCapabilityRuntime::new(provider.clone()).unwrap();
         Harness {
@@ -1869,6 +2003,7 @@ mod tests {
             host_overlay_digest: descriptor.host_overlay_digest.clone(),
             host_input_schema_digest: descriptor.schema_digest.clone(),
             call_id: call_id.to_string(),
+            conversation_id: None,
             arguments,
             builtin_tool_grant: None,
         }
@@ -3106,6 +3241,7 @@ mod tests {
             host_overlay_digest: format!("sha256:{}", "b".repeat(64)),
             host_input_schema_digest: format!("sha256:{}", "c".repeat(64)),
             call_id: "call-unreviewed".to_string(),
+            conversation_id: None,
             arguments: serde_json::json!({}),
             builtin_tool_grant: None,
         };
@@ -3204,6 +3340,43 @@ mod tests {
             .unwrap()
             .contains("private-output"));
 
+        let image = json!({
+            "schemaVersion": 1,
+            "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+            "kind": "image",
+            "displayName": "page.png",
+            "mimeType": "image/png",
+            "sizeBytes": 42,
+            "createdAt": 1_000,
+            "expiresAt": 2_000,
+            "lifecycle": "run",
+            "owner": "browser_automation",
+            "preview": "image"
+        });
+        let read_path = format!("image-artifact://sha256/{}", "a".repeat(64));
+        let with_read_path = project_managed_browser_result(McpToolResult {
+            content: vec![McpContentBlock::Text {
+                text: "Created managed image Artifact.".to_string(),
+            }],
+            structured_content: Some(json!({
+                "artifacts": [image.clone()],
+                "readPath": read_path,
+                "hostImagePublishPath": "/tmp/private-output/page.png",
+            })),
+            is_error: false,
+        })
+        .unwrap();
+        assert_eq!(
+            with_read_path["structuredContent"],
+            json!({ "artifacts": [image], "readPath": read_path })
+        );
+        assert!(!serde_json::to_string(&with_read_path)
+            .unwrap()
+            .contains("private-output"));
+        assert!(!serde_json::to_string(&with_read_path)
+            .unwrap()
+            .contains("hostImagePublishPath"));
+
         let malformed = project_managed_browser_result(McpToolResult {
             content: vec![],
             structured_content: Some(json!({
@@ -3229,6 +3402,85 @@ mod tests {
         assert!(!serde_json::to_string(&malformed)
             .unwrap()
             .contains("private-output"));
+    }
+
+    #[test]
+    fn screenshot_publish_attaches_canonical_read_path_and_strips_host_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("storage.sqlite");
+        let storage =
+            mycopilot_core::storage::service::StorageService::open(&database_path).unwrap();
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at)
+                 VALUES ('conversation-1', 'test', 1, 1)",
+                [],
+            )
+            .unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            )
+            .unwrap();
+        let source = directory.path().join("screenshot-object");
+        std::fs::write(&source, &png).unwrap();
+        let artifact = json!({
+            "schemaVersion": 1,
+            "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+            "kind": "image",
+            "displayName": "page.png",
+            "mimeType": "image/png",
+            "sizeBytes": png.len(),
+            "createdAt": 1_000,
+            "expiresAt": 2_000,
+            "lifecycle": "run",
+            "owner": "browser_automation",
+            "preview": "image"
+        });
+        let attached = attach_browser_screenshot_read_path(
+            McpToolResult {
+                content: vec![McpContentBlock::Text {
+                    text: "Created managed image Artifact “page.png” (68 bytes).".to_string(),
+                }],
+                structured_content: Some(json!({
+                    "status": "completed",
+                    "artifacts": [artifact.clone()],
+                    "hostImagePublishPath": source.to_string_lossy(),
+                })),
+                is_error: false,
+            },
+            Some(source.to_string_lossy().into_owned()),
+            Some(&storage),
+            Some(mycopilot_core::storage::service::ManagedArtifactAuthority {
+                conversation_id: "conversation-1",
+                run_id: "run-1",
+                call_id: "call-1",
+            }),
+        );
+        let read_path = attached.structured_content.as_ref().unwrap()["readPath"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(read_path.starts_with("image-artifact://sha256/"));
+        assert_eq!(read_path.len(), "image-artifact://sha256/".len() + 64);
+        let attached_json = serde_json::to_string(&attached).unwrap();
+        assert!(!attached_json.contains("hostImagePublishPath"));
+        assert!(!attached_json.contains("screenshot-object"));
+        assert!(attached.content.iter().any(|block| matches!(
+            block,
+            McpContentBlock::Text { text } if text.contains(&format!("read_image.path: {read_path}"))
+        )));
+
+        let projected = project_managed_browser_result(attached).unwrap();
+        assert_eq!(
+            projected["structuredContent"],
+            json!({ "artifacts": [artifact], "readPath": read_path })
+        );
+        let projected_json = serde_json::to_string(&projected).unwrap();
+        assert!(!projected_json.contains("screenshot-object"));
+        assert!(!projected_json.contains("hostImagePublishPath"));
+        assert!(!projected_json.contains("managedPath"));
     }
 
     #[test]

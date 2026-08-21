@@ -377,7 +377,10 @@ function parsePolicyManifest(
     return Object.freeze({
       rawName: parsed.rawName,
       modelName: parsed.modelName,
-      description: upstream.description ?? parsed.rawName,
+      description:
+        parsed.rawName === 'browser_take_screenshot'
+          ? 'Take a screenshot of the current page. You can\'t perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.'
+          : (upstream.description ?? parsed.rawName),
       handlingMode: parsed.handlingMode,
       exposed: parsed.exposed,
       safety: readOnly ? ('read_only' as const) : ('destructive' as const),

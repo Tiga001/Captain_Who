@@ -144,6 +144,7 @@ pub(crate) struct ManagedPlaywrightHostBridge {
     pending: StdMutex<HashMap<Uuid, PendingRequest>>,
     authorization_contexts:
         StdMutex<HashMap<McpInvocationId, ManagedPlaywrightAuthorizationContext>>,
+    host_image_publish_paths: StdMutex<HashMap<String, String>>,
     closed: AtomicBool,
 }
 
@@ -195,6 +196,7 @@ impl ManagedPlaywrightHostBridge {
             outbound: StdMutex::new(None),
             pending: StdMutex::new(HashMap::new()),
             authorization_contexts: StdMutex::new(HashMap::new()),
+            host_image_publish_paths: StdMutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
         })
     }
@@ -664,6 +666,25 @@ impl ManagedPlaywrightHostBridge {
         }
     }
 
+    fn stash_host_image_publish_path(&self, call_id: String, path: String) {
+        if call_id.trim().is_empty()
+            || path.trim().is_empty()
+            || !std::path::Path::new(&path).is_absolute()
+        {
+            return;
+        }
+        if let Ok(mut paths) = self.host_image_publish_paths.lock() {
+            if paths.len() >= MAX_PENDING_REQUESTS {
+                paths.clear();
+            }
+            paths.insert(call_id, path);
+        }
+    }
+
+    fn take_host_image_publish_path(&self, call_id: &str) -> Option<String> {
+        self.host_image_publish_paths.lock().ok()?.remove(call_id)
+    }
+
     fn send_cancel(&self, request_id: Uuid, reason: ManagedPlaywrightCancelReason) {
         let notification = json!({
             "jsonrpc": "2.0",
@@ -783,6 +804,7 @@ impl ManagedPlaywrightHostBridgePeer {
                 .bridge
                 .take_authorization_context(invocation_id)
                 .map_err(authoritative_pre_dispatch_error)?;
+            let call_id = authorization_context.call_id.clone();
             let outcome = self
                 .bridge
                 .request(
@@ -798,9 +820,16 @@ impl ManagedPlaywrightHostBridgePeer {
                     Some(dispatch),
                 )
                 .await?;
-            let ManagedPlaywrightCompletionOutcome::ToolCalled { result } = outcome else {
+            let ManagedPlaywrightCompletionOutcome::ToolCalled {
+                result,
+                host_image_publish_path,
+            } = outcome
+            else {
                 return Err(error_from_outcome(outcome, PendingOperation::CallTool));
             };
+            if let Some(path) = host_image_publish_path {
+                self.bridge.stash_host_image_publish_path(call_id, path);
+            }
             serde_json::from_value(result).map_err(|_| {
                 McpError::protocol("managed Playwright tools/call result is invalid")
                     .with_authoritative_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
@@ -1008,6 +1037,10 @@ impl ManagedPlaywrightMcpRuntime {
 
     pub(crate) fn bridge(&self) -> Arc<ManagedPlaywrightHostBridge> {
         Arc::clone(&self.bridge)
+    }
+
+    pub(crate) fn take_host_image_publish_path(&self, call_id: &str) -> Option<String> {
+        self.bridge.take_host_image_publish_path(call_id)
     }
 
     #[cfg(test)]
@@ -1992,6 +2025,7 @@ mod tests {
                 request_id: params.request_id,
                 outcome: ManagedPlaywrightCompletionOutcome::ToolCalled {
                     result: json!({"content": [], "structuredContent": null, "isError": false}),
+                    host_image_publish_path: None,
                 },
             })
             .unwrap());
@@ -2408,6 +2442,7 @@ mod tests {
                             ManagedPlaywrightCompletionOutcome::ToolCalled {
                                 result: json!({"content":[{"type":"text","text":"ok"}],
                                   "structuredContent":null,"isError":false}),
+                                host_image_publish_path: None,
                             }
                         }
                     }

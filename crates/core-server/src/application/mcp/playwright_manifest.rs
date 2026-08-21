@@ -23,6 +23,7 @@ const REVIEWED_POLICY_JSON: &str =
 const FIXED_UPSTREAM_TOOL_COUNT: usize = 69;
 const MAX_REVIEWED_EXPOSED_TOOLS: usize = 128;
 const CALL_REASON_PROPERTY: &str = "call_reason";
+const BROWSER_TAKE_SCREENSHOT_DESCRIPTION: &str = "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PlaywrightToolIdentity(String);
@@ -291,7 +292,11 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
             let mut descriptor = BuiltinCapabilityToolDescriptor::new(
                 identity.as_str(),
                 &policy.model_name,
-                &upstream_tool.description,
+                if identity.as_str() == "browser_take_screenshot" {
+                    BROWSER_TAKE_SCREENSHOT_DESCRIPTION
+                } else {
+                    &upstream_tool.description
+                },
                 host_input_schema.clone(),
                 tool_safety(&upstream_tool.annotations)?,
                 false,
@@ -896,6 +901,16 @@ mod tests {
         }
         let forbidden = "browser_run_code_unsafe";
         assert!(!names.contains(forbidden), "{forbidden}");
+        let screenshot = manifest
+            .tools
+            .iter()
+            .find(|tool| tool.model_name == "browser_take_screenshot")
+            .unwrap();
+        assert!(screenshot.description.contains("read_image.path"));
+        assert!(screenshot.description.contains("image-artifact://sha256/"));
+        assert!(screenshot
+            .description
+            .contains("Do not guess a workspace path, filename, displayName, or artifactId."));
     }
 
     #[test]

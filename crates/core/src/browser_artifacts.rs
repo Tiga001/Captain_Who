@@ -43,6 +43,23 @@ pub fn safe_browser_artifact_references(structured: &Value) -> Option<Vec<Value>
     Some(safe)
 }
 
+const IMAGE_ARTIFACT_READ_PATH_PREFIX: &str = "image-artifact://sha256/";
+
+/// Accepts only the canonical `image-artifact://sha256/<64 hex>` URI used by `read_image.path`.
+pub fn safe_image_artifact_read_path(value: &Value) -> Option<String> {
+    let path = value.as_str()?;
+    let digest = path.strip_prefix(IMAGE_ARTIFACT_READ_PATH_PREFIX)?;
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
 fn safe_browser_artifact_reference(value: &Value) -> Option<Value> {
     let record = value.as_object()?;
     if record.len() != REFERENCE_FIELDS.len()
@@ -163,6 +180,22 @@ mod tests {
             "owner": "browser_automation",
             "preview": "image"
         })
+    }
+
+    #[test]
+    fn accepts_only_canonical_image_artifact_read_paths() {
+        let path = format!("image-artifact://sha256/{}", "a".repeat(64));
+        assert_eq!(safe_image_artifact_read_path(&json!(path)), Some(path));
+        assert!(
+            safe_image_artifact_read_path(&json!("image-artifact://sha256/not-a-digest")).is_none()
+        );
+        assert!(safe_image_artifact_read_path(&json!("/tmp/private.png")).is_none());
+        assert!(safe_image_artifact_read_path(&json!(format!(
+            "image-artifact://sha256/{}",
+            "A".repeat(64)
+        )))
+        .is_none());
+        assert!(safe_image_artifact_read_path(&json!("browser-artifact:123")).is_none());
     }
 
     #[test]

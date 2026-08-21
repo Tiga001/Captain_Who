@@ -328,6 +328,13 @@ pub enum ManagedPlaywrightCompletionOutcome {
     },
     ToolCalled {
         result: Value,
+        /// Main/Core-only absolute screenshot file. Never copy this into MCP, Renderer, or model JSON.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "hostImagePublishPath"
+        )]
+        host_image_publish_path: Option<String>,
     },
     SensitiveToolPrepared {
         #[serde(rename = "bindingId")]
