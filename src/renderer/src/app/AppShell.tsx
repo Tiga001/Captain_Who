@@ -89,6 +89,7 @@ import { AppShellWorkspace } from './AppShellWorkspace'
 import {
   getAppShellPanelStyle,
   getPermissionModeAvailability,
+  HAS_MACOS_WINDOW_CONTROLS,
   MainPanelToolbar,
   MaximizedSidebarControls,
   SUPPORTS_NATIVE_FONT_SMOOTHING
@@ -1649,6 +1650,7 @@ export function AppShell() {
       ref={shellRef}
       className="app-shell"
       data-left-open={leftOpen ? 'true' : 'false'}
+      data-macos-window-controls={HAS_MACOS_WINDOW_CONTROLS ? 'true' : undefined}
       data-native-font-smoothing={
         SUPPORTS_NATIVE_FONT_SMOOTHING && uiPreferences.nativeFontSmoothing ? 'true' : undefined
       }

@@ -18,6 +18,7 @@ import {
   type BrowserRiskTrigger
 } from './BrowserRiskCoordinator'
 import { BrowserDownloadBroker, type BrowserDownloadToolLease } from './BrowserDownloadBroker'
+import { ChromiumPdfViewerRequestGate } from './ChromiumPdfViewer'
 
 const MAX_REGISTERED_GUESTS = 32
 const MAX_REDIRECT_MARKERS = 1_024
@@ -196,6 +197,7 @@ export class BrowserNetworkOperationLease {
 
 export class BrowserNetworkGuard {
   private readonly accessPolicy: BrowserNetworkAccessPolicy
+  private readonly chromiumPdfViewerRequests = new ChromiumPdfViewerRequestGate()
   private readonly coordinator: BrowserRiskCoordinator
   private readonly downloadBroker?: BrowserDownloadBroker
   private readonly downloads = new Set<ActiveDownload>()
@@ -838,6 +840,7 @@ export class BrowserNetworkGuard {
   async shutdown(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    this.chromiumPdfViewerRequests.shutdown()
     for (const active of [...this.activeOperations]) {
       this.finishActiveOperation(active, 'shutdown')
     }
@@ -888,6 +891,9 @@ export class BrowserNetworkGuard {
       })
       throw new Error('browser.sensitive_navigation_blocked')
     }
+    // Chromium's PDF MIME handler owns a separate, unregistered WebContents. Admit only its
+    // compiled-in component resources; registered Browser surfaces still pass through policy.
+    if (!registeredRecord && this.chromiumPdfViewerRequests.allows(details)) return
     if (details.url === 'about:blank' || parseBrowserSurfaceBootstrapUrl(details.url) !== null) {
       return
     }

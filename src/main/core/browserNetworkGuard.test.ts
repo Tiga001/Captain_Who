@@ -1221,6 +1221,114 @@ describe('BrowserNetworkGuard', () => {
     expect(harness.resolver.calls).toBe(0)
   })
 
+  it('admits only Chromium PDF Viewer resources from its internal WebContents', async () => {
+    const harness = createHarness()
+    const viewerOrigin = 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai'
+    const internalWebContentsId = harness.guest.id + 1
+
+    await expect(
+      request(harness, {
+        resourceType: 'script',
+        url: 'chrome://resources/js/load_time_data.js',
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({ cancel: true })
+    await expect(
+      request(harness, {
+        id: 2,
+        url: `${viewerOrigin}/index.html`,
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({})
+    await expect(
+      request(harness, {
+        id: 3,
+        resourceType: 'script',
+        url: `${viewerOrigin}/main.js`,
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({})
+    await expect(
+      request(harness, {
+        id: 4,
+        resourceType: 'script',
+        url: 'chrome://resources/lit/v3_0/lit.rollup.js',
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({})
+
+    await expect(
+      request(harness, {
+        id: 5,
+        resourceType: 'script',
+        url: 'chrome://resources/js/load_time_data.js',
+        webContents: undefined,
+        webContentsId: internalWebContentsId + 1
+      })
+    ).resolves.toEqual({ cancel: true })
+    await expect(
+      request(harness, {
+        id: 6,
+        url: `${viewerOrigin}/options.html`,
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({ cancel: true })
+    await expect(
+      request(harness, {
+        id: 7,
+        method: 'POST',
+        url: `${viewerOrigin}/index.html`,
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({ cancel: true })
+    await expect(
+      request(harness, {
+        id: 8,
+        url: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.html',
+        webContents: undefined,
+        webContentsId: internalWebContentsId
+      })
+    ).resolves.toEqual({ cancel: true })
+    await expect(
+      request(harness, {
+        id: 9,
+        url: `${viewerOrigin}/index.html`
+      })
+    ).resolves.toEqual({ cancel: true })
+
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(harness.resolver.calls).toBe(0)
+  })
+
+  it('revokes Chromium PDF Viewer resource access when its internal WebContents closes', async () => {
+    const harness = createHarness()
+    const internalGuest = createGuest(harness.guest.session, harness.guest.id + 1)
+
+    await expect(
+      request(harness, {
+        url: 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html',
+        webContents: internalGuest,
+        webContentsId: internalGuest.id
+      })
+    ).resolves.toEqual({})
+    internalGuest.emit('destroyed')
+    await expect(
+      request(harness, {
+        id: 2,
+        resourceType: 'script',
+        url: 'chrome://resources/js/load_time_data.js',
+        webContents: undefined,
+        webContentsId: internalGuest.id
+      })
+    ).resolves.toEqual({ cancel: true })
+  })
+
   it('attributes frame-only requests to the exact registered guest', async () => {
     const harness = createHarness()
     const unknownTopFrame = { parent: null } as WebContents['mainFrame']

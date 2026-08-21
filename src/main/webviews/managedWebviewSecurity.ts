@@ -10,6 +10,7 @@ import type {
   BrowserNetworkGuard,
   BrowserTargetCreationAuthority
 } from '../browser/BrowserNetworkGuard'
+import { isChromiumPdfViewerEntryRequest } from '../browser/ChromiumPdfViewer'
 
 interface ManagedWebviewPolicy {
   allowedProtocols: ReadonlySet<string>
@@ -61,7 +62,11 @@ export function initializeManagedWebviewSessions(options: ManagedWebviewSessionO
       options.networkGuard.install()
     } else {
       managedSession.webRequest.onBeforeRequest((details, callback) => {
-        if (details.resourceType === 'mainFrame' && !isAllowedWebviewUrl(details.url, policy)) {
+        if (
+          details.resourceType === 'mainFrame' &&
+          !isAllowedWebviewUrl(details.url, policy) &&
+          !isChromiumPdfViewerEntryRequest(details)
+        ) {
           callback({ cancel: true })
           return
         }

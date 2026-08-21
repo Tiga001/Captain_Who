@@ -5,13 +5,24 @@ import { BROWSER_WEBVIEW_PARTITION, createBrowserSurfaceBootstrapUrl } from '@my
 import type { BrowserNetworkGuard } from '../browser/BrowserNetworkGuard'
 import {
   configureManagedWebviewHost,
+  initializeManagedWebviewSessions,
   type ManagedWebviewTargetRegistry
 } from '../webviews/managedWebviewSecurity'
 
 const electronFixture = vi.hoisted(() => {
-  const managedSession = {}
+  const onBeforeRequest = vi.fn()
+  const setPermissionCheckHandler = vi.fn()
+  const setPermissionRequestHandler = vi.fn()
+  const managedSession = {
+    setPermissionCheckHandler,
+    setPermissionRequestHandler,
+    webRequest: { onBeforeRequest }
+  }
   return {
     managedSession,
+    onBeforeRequest,
+    setPermissionCheckHandler,
+    setPermissionRequestHandler,
     fromPartition: vi.fn(() => managedSession)
   }
 })
@@ -22,7 +33,7 @@ vi.mock('electron', () => ({
 
 class WebContentsFixture extends EventEmitter {
   destroyed = false
-  readonly session = electronFixture.managedSession as Session
+  readonly session = electronFixture.managedSession as unknown as Session
   close = vi.fn(() => {
     this.destroyed = true
     this.emit('destroyed')
@@ -51,6 +62,53 @@ class WebContentsFixture extends EventEmitter {
 
 beforeEach(() => {
   electronFixture.fromPartition.mockClear()
+  electronFixture.onBeforeRequest.mockClear()
+  electronFixture.setPermissionCheckHandler.mockClear()
+  electronFixture.setPermissionRequestHandler.mockClear()
+})
+
+describe('managed webview session requests', () => {
+  it('admits only the Chromium PDF Viewer entry as an internal main frame', () => {
+    initializeManagedWebviewSessions()
+    const listener = electronFixture.onBeforeRequest.mock.calls[0]?.[0] as
+      | ((
+          details: { method: string; resourceType: 'mainFrame'; url: string },
+          callback: (response: { cancel?: boolean }) => void
+        ) => void)
+      | undefined
+    expect(listener).toBeDefined()
+
+    const callback = vi.fn()
+    listener?.(
+      {
+        method: 'GET',
+        resourceType: 'mainFrame',
+        url: 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html'
+      },
+      callback
+    )
+    expect(callback).toHaveBeenLastCalledWith({})
+
+    listener?.(
+      {
+        method: 'GET',
+        resourceType: 'mainFrame',
+        url: 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/options.html'
+      },
+      callback
+    )
+    expect(callback).toHaveBeenLastCalledWith({ cancel: true })
+
+    listener?.(
+      {
+        method: 'GET',
+        resourceType: 'mainFrame',
+        url: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/index.html'
+      },
+      callback
+    )
+    expect(callback).toHaveBeenLastCalledWith({ cancel: true })
+  })
 })
 
 describe('managed webview bootstrap registration', () => {

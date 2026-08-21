@@ -334,7 +334,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   right: 20px;
 }
 
-.app-shell[data-left-open='false']:not([data-window-maximized='true']) .panel-toggle--left {
+.app-shell[data-macos-window-controls='true'][data-left-open='false'] .panel-toggle--left {
   left: var(--mac-window-control-safe-width);
 }
 

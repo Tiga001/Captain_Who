@@ -23,7 +23,7 @@
   gap: 8px;
 }
 
-.app-shell[data-left-open='false']:not([data-window-maximized='true'])
+.app-shell[data-macos-window-controls='true'][data-left-open='false']
   .right-sidebar--maximized
   .right-sidebar__toolbar {
   padding-left: var(--mac-window-control-safe-width);

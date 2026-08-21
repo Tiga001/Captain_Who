@@ -7,6 +7,7 @@ import { getTranslucentSidebarOpacityPercent } from '../features/storage/storage
 import { isMacOS } from '../lib/platform'
 
 export const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
+export const HAS_MACOS_WINDOW_CONTROLS = isMacOS()
 export const STREAM_DELTA_FLUSH_MS = 80
 export const STREAM_DELTA_MAX_BUFFER_CHARS = 360
 
