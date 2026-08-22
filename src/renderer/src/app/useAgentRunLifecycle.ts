@@ -58,7 +58,7 @@ import {
 } from './AppShellSupport'
 
 const STOP_RECONCILIATION_DELAYS_MS = [400, 1500, 4000] as const
-const STOP_RECONCILIATION_READ_TIMEOUT_MS = 1500
+const RUN_RECONCILIATION_READ_TIMEOUT_MS = 1500
 const MAX_RETIRED_AGENT_RUN_IDS = 1024
 const MAX_BUFFERED_AGENT_RUNS = 128
 const MAX_BUFFERED_AGENT_EVENTS_PER_RUN = 128
@@ -184,7 +184,7 @@ function isSameRunBinding(
   )
 }
 
-function loadConversationForStopReconciliation(
+function loadConversationForRunReconciliation(
   conversationId: string
 ): Promise<ChatConversation | null> {
   return new Promise((resolve) => {
@@ -195,9 +195,54 @@ function loadConversationForStopReconciliation(
       window.clearTimeout(timeoutId)
       resolve(conversation)
     }
-    const timeoutId = window.setTimeout(() => finish(null), STOP_RECONCILIATION_READ_TIMEOUT_MS)
+    const timeoutId = window.setTimeout(() => finish(null), RUN_RECONCILIATION_READ_TIMEOUT_MS)
     void loadConversation(conversationId).then(finish, () => finish(null))
   })
+}
+
+function isTerminalRunMessage(
+  message: ChatMessage | undefined,
+  runId: string
+): message is ChatMessage {
+  if (message?.agentRun?.runId !== runId) return false
+  return (
+    message.agentRun.status === 'completed' ||
+    message.agentRun.status === 'failed' ||
+    message.agentRun.status === 'cancelled'
+  )
+}
+
+function mergeAuthoritativeTerminalMessage(
+  currentMessage: ChatMessage,
+  storedMessage: ChatMessage
+): ChatMessage {
+  const storedRun = storedMessage.agentRun
+  const currentRun = currentMessage.agentRun
+  if (!storedRun || !currentRun) {
+    return {
+      ...storedMessage,
+      uiState: currentMessage.uiState ?? storedMessage.uiState
+    }
+  }
+
+  const commandSessions =
+    storedRun.commandSessions || currentRun.commandSessions
+      ? { ...storedRun.commandSessions, ...currentRun.commandSessions }
+      : undefined
+  const commandOutputPreviews =
+    storedRun.commandOutputPreviews || currentRun.commandOutputPreviews
+      ? { ...storedRun.commandOutputPreviews, ...currentRun.commandOutputPreviews }
+      : undefined
+
+  return {
+    ...storedMessage,
+    uiState: currentMessage.uiState ?? storedMessage.uiState,
+    agentRun: {
+      ...storedRun,
+      ...(commandSessions ? { commandSessions } : {}),
+      ...(commandOutputPreviews ? { commandOutputPreviews } : {})
+    }
+  }
 }
 
 interface AgentRunLifecycleRefs {
@@ -451,6 +496,50 @@ export function useAgentRunLifecycle({
       }
     },
     [conversationsRef, enqueueChatMessageStateSave, setConversations]
+  )
+
+  const reconcileTerminalRunFromStorage = useCallback(
+    (conversationId: string, assistantMessageId: string, runId: string) => {
+      void loadConversationForRunReconciliation(conversationId).then((storedConversation) => {
+        const storedMessage = storedConversation?.messages.find(
+          (message) => message.id === assistantMessageId
+        )
+        const hasAuthoritativeTerminal = isTerminalRunMessage(storedMessage, runId)
+        let messageToSave: ChatMessage | null = null
+
+        setConversations((currentConversations) =>
+          currentConversations.map((conversation) => {
+            if (conversation.id !== conversationId) return conversation
+
+            return {
+              ...conversation,
+              messages: conversation.messages.map((currentMessage) => {
+                if (
+                  currentMessage.id !== assistantMessageId ||
+                  currentMessage.agentRun?.runId !== runId
+                ) {
+                  return currentMessage
+                }
+
+                // A terminal done notification is emitted only after the backend has committed the
+                // complete assistant trace. Replacing the bounded live projection here prevents an
+                // early Skill/resource event from being lost when pre-binding buffering overflowed.
+                // Managed command sessions outlive the Agent Run, so retain their newer live view.
+                messageToSave = hasAuthoritativeTerminal
+                  ? mergeAuthoritativeTerminalMessage(currentMessage, storedMessage)
+                  : currentMessage
+                return messageToSave
+              })
+            }
+          })
+        )
+
+        // Fence every older renderer write with the reconciled terminal message. The fallback is
+        // retained for tests and defensive compatibility if storage cannot return the committed row.
+        if (messageToSave) enqueueChatMessageStateSave(conversationId, messageToSave)
+      })
+    },
+    [enqueueChatMessageStateSave, setConversations]
   )
 
   const removeQueuedMessageByClientId = useCallback(
@@ -989,7 +1078,8 @@ export function useAgentRunLifecycle({
           // resurrect a stale countdown after reload; durable Run state remains unchanged.
           persist:
             agentEvent.type !== 'llm_retry' &&
-            (!isCommandSessionEvent || isTerminalCommandSessionEvent),
+            (!isCommandSessionEvent || isTerminalCommandSessionEvent) &&
+            !(agentEvent.type === 'done' && agentEvent.status !== 'waiting_for_approval'),
           touchConversation:
             !isCommandSessionEvent && shouldTouchConversationForAgentEvent(agentEvent)
         }
@@ -997,6 +1087,9 @@ export function useAgentRunLifecycle({
 
       if (agentEvent.type === 'done') {
         stopRequestedRunIdSet.delete(agentEvent.runId)
+        if (agentEvent.status !== 'waiting_for_approval') {
+          reconcileTerminalRunFromStorage(conversationId, assistantMessageId, agentEvent.runId)
+        }
         if (agentEvent.success && agentEvent.status !== 'waiting_for_approval') {
           const completedAt = Date.now()
           let conversationToSave: ChatConversation | null = null
@@ -1047,6 +1140,7 @@ export function useAgentRunLifecycle({
       flushPendingMessageDelta,
       locallyUnconfirmedStoppedRunIdSet,
       pendingGuidancePayloadMap,
+      reconcileTerminalRunFromStorage,
       removeQueuedMessageByClientId,
       restoreRejectedGuidance,
       setConversations,
@@ -1122,7 +1216,7 @@ export function useAgentRunLifecycle({
           const currentBinding = activeRunBindingMap.get(runId)
           if (!isSameRunBinding(currentBinding, binding)) return
 
-          void loadConversationForStopReconciliation(binding.conversationId)
+          void loadConversationForRunReconciliation(binding.conversationId)
             .then((storedConversation) => {
               // A terminal event may have cleaned up this binding while storage was loading. Never
               // let that older snapshot overwrite the newer authoritative event.

@@ -19,6 +19,7 @@ import type {
   ChatComposerDraft,
   ChatConversation,
   ChatConversationContinuationOrigin,
+  ChatMessage,
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../../features/chat/chatTypes'
@@ -2620,6 +2621,114 @@ describe('unified activated Skill inventory', () => {
       )
       .toBe(true)
   })
+
+  it('restores early workspace Skill resource activity from the authoritative terminal message', async () => {
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
+    const assistantMessageId = input.assistantMessageId!
+    const resourceUri = `skill://package/${encodeURIComponent(explicitSkillSummary.id)}/${encodeURIComponent(explicitSkillSummary.revision)}/references/workflows.md`
+
+    emitAgentEvent({
+      type: 'skill_activated',
+      runId: 'run-1',
+      activationRevision: 'activation-sha256-v1:workspace-resource',
+      activatedBy: 'model',
+      skill: explicitSkillSummary
+    })
+    emitAgentEvent({
+      type: 'tool_call',
+      runId: 'run-1',
+      traceSequence: 1,
+      identity: { type: 'builtin', toolName: 'skills_read_resource' },
+      call: {
+        id: 'read-workspace-resource',
+        tool: 'skills_read_resource',
+        args: { uri: resourceUri },
+        approvalStatus: 'not_required',
+        reason: null
+      }
+    })
+    emitAgentEvent({
+      type: 'tool_result',
+      runId: 'run-1',
+      result: {
+        callId: 'read-workspace-resource',
+        tool: 'skills_read_resource',
+        ok: true,
+        result: { uri: resourceUri }
+      }
+    })
+    for (let index = 0; index < 128; index += 1) {
+      emitAgentEvent({ type: 'message', runId: 'run-1', content: `buffered-${index}` })
+    }
+
+    const saveCountBeforeBinding = testState.saveChatMessageState.mock.calls.length
+    start.resolve(successfulTurnOutput(input, 1))
+    await expect
+      .poll(() => testState.saveChatMessageState.mock.calls.length)
+      .toBeGreaterThan(saveCountBeforeBinding)
+    await expect.element(screen.getByTestId('activated-skill-ids')).toHaveTextContent('')
+
+    const authoritative = storedConversationWithRun(assistantMessageId, 'run-1', 'completed')
+    const authoritativeAssistant = authoritative.messages.at(-1)
+    if (!authoritativeAssistant?.agentRun) throw new Error('missing authoritative run fixture')
+    authoritativeAssistant.agentRun.activatedSkills = [explicitSkillSummary]
+    authoritativeAssistant.agentRun.skillActivationRevision =
+      'activation-sha256-v1:workspace-resource'
+    authoritativeAssistant.agentRun.toolCalls = [
+      {
+        id: 'read-workspace-resource',
+        tool: 'skills_read_resource',
+        args: { uri: resourceUri },
+        approvalStatus: 'not_required',
+        reason: null
+      }
+    ]
+    authoritativeAssistant.agentRun.toolResults = [
+      {
+        callId: 'read-workspace-resource',
+        tool: 'skills_read_resource',
+        ok: true,
+        result: { uri: resourceUri }
+      }
+    ]
+    authoritativeAssistant.agentRun.timeline = [
+      {
+        id: 'tool-call-read-workspace-resource',
+        type: 'tool_call',
+        callId: 'read-workspace-resource'
+      }
+    ]
+    testState.persistedConversations.set('conversation-a', authoritative)
+    testState.loadConversation.mockResolvedValueOnce(authoritative)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'authoritative answer'
+    })
+
+    await expect
+      .element(screen.getByTestId('activated-skill-ids'))
+      .toHaveTextContent(explicitSkillSummary.id)
+    await expect
+      .poll(() =>
+        testState.saveChatMessageState.mock.calls.some((call) =>
+          (call[1] as ChatMessage).agentRun?.toolCalls.some(
+            (toolCall) =>
+              toolCall.id === 'read-workspace-resource' && toolCall.tool === 'skills_read_resource'
+          )
+        )
+      )
+      .toBe(true)
+  })
 })
 
 describe('activation failure recovery', () => {
@@ -3317,7 +3426,7 @@ describe('authoritative run cancellation and conversation forking', () => {
     vi.useRealTimers()
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    expect(testState.loadConversation).toHaveBeenCalledTimes(initialLoadCount + 1)
+    expect(testState.loadConversation).toHaveBeenCalledTimes(initialLoadCount + 2)
   })
 
   it('opens an existing continuation source at the original reply', async () => {
