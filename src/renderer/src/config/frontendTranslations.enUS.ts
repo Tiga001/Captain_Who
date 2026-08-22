@@ -920,6 +920,9 @@ export const enUSTranslations = {
   'skills.bundled.skillInstaller.name': 'Skill Installer',
   'skills.bundled.skillInstaller.description':
     'Inspect and install third-party Skills from GitHub links or authorized local paths.',
+  'skills.bundled.skillCreator.name': 'Skill Creator',
+  'skills.bundled.skillCreator.description':
+    'Create, improve, diagnose, and review MyCopilot Skills as editable Workspace packages.',
   'chat.unsupportedImageWarning': 'The current model does not support images',
   'chat.yesterday': 'Yesterday',
   'chat.messageActions': 'Message actions',

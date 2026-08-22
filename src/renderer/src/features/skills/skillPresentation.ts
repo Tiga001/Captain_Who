@@ -4,7 +4,13 @@ import type { Translate } from '../../config/translationFormat'
 import type { TranslationKey } from '../../config/frontendTranslations'
 
 export type BundledSkillPresentationKey =
-  'documents' | 'imageGeneration' | 'pdf' | 'presentations' | 'skillInstaller' | 'spreadsheets'
+  | 'documents'
+  | 'imageGeneration'
+  | 'pdf'
+  | 'presentations'
+  | 'skillCreator'
+  | 'skillInstaller'
+  | 'spreadsheets'
 
 interface SkillPresentationInput {
   description?: string
@@ -23,6 +29,7 @@ const BUNDLED_SKILL_KEY_BY_ID: Readonly<Record<string, BundledSkillPresentationK
   'bundled:application:image-generation': 'imageGeneration',
   'bundled:application:pdf': 'pdf',
   'bundled:application:presentations': 'presentations',
+  'bundled:application:skill-creator': 'skillCreator',
   'bundled:application:skill-installer': 'skillInstaller',
   'bundled:application:spreadsheets': 'spreadsheets'
 }
@@ -32,17 +39,19 @@ const BUNDLED_SKILL_KEY_BY_SOURCE_ID: Readonly<Record<string, BundledSkillPresen
   'application:image-generation': 'imageGeneration',
   'application:pdf': 'pdf',
   'application:presentations': 'presentations',
+  'application:skill-creator': 'skillCreator',
   'application:skill-installer': 'skillInstaller',
   'application:spreadsheets': 'spreadsheets'
 }
 
 const BUNDLED_SKILL_DISPLAY_ORDER: Readonly<Record<BundledSkillPresentationKey, number>> = {
   skillInstaller: 0,
-  imageGeneration: 1,
-  documents: 2,
-  presentations: 3,
-  spreadsheets: 4,
-  pdf: 5
+  skillCreator: 1,
+  imageGeneration: 2,
+  documents: 3,
+  presentations: 4,
+  spreadsheets: 5,
+  pdf: 6
 }
 
 const BUNDLED_SKILL_TRANSLATIONS: Readonly<
@@ -67,6 +76,10 @@ const BUNDLED_SKILL_TRANSLATIONS: Readonly<
   skillInstaller: {
     description: 'skills.bundled.skillInstaller.description',
     name: 'skills.bundled.skillInstaller.name'
+  },
+  skillCreator: {
+    description: 'skills.bundled.skillCreator.description',
+    name: 'skills.bundled.skillCreator.name'
   },
   spreadsheets: {
     description: 'skills.bundled.spreadsheets.description',

@@ -865,6 +865,21 @@ SOFTWARE.
 
 ---
 
+The following software may be included in this product:
+
+  Anthropic skill-creator workflow (adapted for MyCopilot)
+
+Copyright 2026 Anthropic, PBC.
+
+Source: https://github.com/anthropics/skills
+License: Apache License, Version 2.0 (reproduced earlier in this file)
+
+The bundled MyCopilot Skill is a modified adaptation. It replaces Claude-specific evaluation,
+packaging, and browser workflows with MyCopilot Workspace Skills, revision-bound resources,
+independent child Agent Runs, and the managed Skill installation workflow.
+
+---
+
 BUNDLED RUNTIME COMPONENTS
 
 The following runtime components are bundled with the application through

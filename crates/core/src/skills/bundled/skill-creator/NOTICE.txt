@@ -1,0 +1,8 @@
+This product includes a MyCopilot-specific adaptation of the skill-creator workflow originally
+published by Anthropic, PBC.
+
+Copyright 2026 Anthropic, PBC.
+
+The original work is licensed under the Apache License, Version 2.0. This adaptation was changed to
+use MyCopilot Workspace Skills, revision-bound resources, independent child Agent Runs, and the
+managed Skill installation workflow. The Apache License text is provided in LICENSE.txt.

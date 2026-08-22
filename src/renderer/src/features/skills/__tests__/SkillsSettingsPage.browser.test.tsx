@@ -479,7 +479,7 @@ describe('Skills settings navigation and management inventory', () => {
     }
   })
 
-  it('shows bundled skills in installer, image, Word, PPT, Excel, PDF order', async () => {
+  it('shows bundled skills in installer, creator, image, Word, PPT, Excel, PDF order', async () => {
     service.listManagement.mockResolvedValueOnce(
       managementOutput([
         ...bundledOfficeSkills,
@@ -495,6 +495,12 @@ describe('Skills settings navigation and management inventory', () => {
           id: 'bundled:application:skill-installer',
           name: 'skill-installer',
           source: { id: 'application:skill-installer', kind: 'bundled' }
+        },
+        {
+          ...bundledSkill,
+          id: 'bundled:application:skill-creator',
+          name: 'skill-creator',
+          source: { id: 'application:skill-creator', kind: 'bundled' }
         }
       ])
     )
@@ -507,6 +513,7 @@ describe('Skills settings navigation and management inventory', () => {
 
     expect(names).toEqual([
       'skills.bundled.skillInstaller.name',
+      'skills.bundled.skillCreator.name',
       'skills.bundled.imageGeneration.name',
       'skills.bundled.documents.name',
       'skills.bundled.presentations.name',

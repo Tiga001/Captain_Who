@@ -40,6 +40,12 @@ const bundledCases = [
     sourceId: 'application:skill-installer',
     zhName: 'Skill 安装器',
     enName: 'Skill Installer'
+  },
+  {
+    id: 'bundled:application:skill-creator',
+    sourceId: 'application:skill-creator',
+    zhName: 'Skill 创建器',
+    enName: 'Skill Creator'
   }
 ] as const
 
@@ -107,7 +113,7 @@ describe('bundled Skill presentation', () => {
 })
 
 describe('bundled Skill display order', () => {
-  it('lists installer, image generation, Word, PPT, Excel, then PDF before other skills', () => {
+  it('lists installer, creator, image generation, Word, PPT, Excel, then PDF before other skills', () => {
     const ordered = sortSkillsForDisplay([
       {
         id: 'bundled:application:documents',
@@ -135,6 +141,11 @@ describe('bundled Skill display order', () => {
         source: { id: 'application:skill-installer', kind: 'bundled' }
       },
       {
+        id: 'bundled:application:skill-creator',
+        name: 'Skill Creator',
+        source: { id: 'application:skill-creator', kind: 'bundled' }
+      },
+      {
         id: 'installed:user:custom-skill',
         name: 'Custom skill',
         source: { id: 'installed:user', kind: 'installed' }
@@ -148,6 +159,7 @@ describe('bundled Skill display order', () => {
 
     expect(ordered.map((skill) => skill.id)).toEqual([
       'bundled:application:skill-installer',
+      'bundled:application:skill-creator',
       'bundled:application:image-generation',
       'bundled:application:documents',
       'bundled:application:presentations',

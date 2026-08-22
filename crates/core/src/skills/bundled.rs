@@ -21,6 +21,7 @@ pub const DOCUMENTS_LOCAL_ID: &str = "documents";
 pub const IMAGE_GENERATION_LOCAL_ID: &str = "image-generation";
 pub const PDF_LOCAL_ID: &str = "pdf";
 pub const PRESENTATIONS_LOCAL_ID: &str = "presentations";
+pub const SKILL_CREATOR_LOCAL_ID: &str = "skill-creator";
 pub const SKILL_INSTALLER_LOCAL_ID: &str = "skill-installer";
 pub const SPREADSHEETS_LOCAL_ID: &str = "spreadsheets";
 
@@ -66,6 +67,43 @@ const PDF_RESOURCES: &[EmbeddedSkillResource] = &[
     EmbeddedSkillResource {
         path: "references/reading.md",
         bytes: include_bytes!("bundled/pdf/references/reading.md"),
+    },
+];
+
+const SKILL_CREATOR_PATH: &str = "skill-creator/SKILL.md";
+const SKILL_CREATOR_SOURCE: &str = include_str!("bundled/skill-creator/SKILL.md");
+const SKILL_CREATOR_RESOURCES: &[EmbeddedSkillResource] = &[
+    EmbeddedSkillResource {
+        path: "LICENSE.txt",
+        bytes: include_bytes!("bundled/skill-creator/LICENSE.txt"),
+    },
+    EmbeddedSkillResource {
+        path: "NOTICE.txt",
+        bytes: include_bytes!("bundled/skill-creator/NOTICE.txt"),
+    },
+    EmbeddedSkillResource {
+        path: "references/evaluation.md",
+        bytes: include_bytes!("bundled/skill-creator/references/evaluation.md"),
+    },
+    EmbeddedSkillResource {
+        path: "references/platform-workflows.md",
+        bytes: include_bytes!("bundled/skill-creator/references/platform-workflows.md"),
+    },
+    EmbeddedSkillResource {
+        path: "references/resource-layout.md",
+        bytes: include_bytes!("bundled/skill-creator/references/resource-layout.md"),
+    },
+    EmbeddedSkillResource {
+        path: "references/schemas.md",
+        bytes: include_bytes!("bundled/skill-creator/references/schemas.md"),
+    },
+    EmbeddedSkillResource {
+        path: "references/writing-guide.md",
+        bytes: include_bytes!("bundled/skill-creator/references/writing-guide.md"),
+    },
+    EmbeddedSkillResource {
+        path: "templates/starter-skill/SKILL.md",
+        bytes: include_bytes!("bundled/skill-creator/templates/starter-skill/SKILL.md"),
     },
 ];
 
@@ -158,6 +196,12 @@ const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[
         relative_path: PRESENTATIONS_PATH,
         source_text: PRESENTATIONS_SOURCE,
         resources: PRESENTATIONS_RESOURCES,
+    },
+    EmbeddedSkill {
+        local_id: SKILL_CREATOR_LOCAL_ID,
+        relative_path: SKILL_CREATOR_PATH,
+        source_text: SKILL_CREATOR_SOURCE,
+        resources: SKILL_CREATOR_RESOURCES,
     },
     EmbeddedSkill {
         local_id: SKILL_INSTALLER_LOCAL_ID,
@@ -483,7 +527,7 @@ mod tests {
     use crate::skills::{
         SkillMaterializationDestination, SkillMaterializationRequest, SkillMaterializationStatus,
         SkillResourceListOptions, SkillResourceMaterializer, SkillResourcePath,
-        SkillResourceTextReadOptions, SkillsService,
+        SkillResourceTextReadOptions, SkillTemplateTreeMaterializationRequest, SkillsService,
     };
     use serde_json::Value;
     use std::fs;
@@ -555,7 +599,7 @@ mod tests {
         assert_eq!(source.activation_scope(), SkillActivationScope::Run);
         assert!(catalog.diagnostics().is_empty());
         assert!(!catalog.truncated());
-        assert_eq!(catalog.skills().len(), 6);
+        assert_eq!(catalog.skills().len(), 7);
         assert_eq!(
             catalog
                 .skills()
@@ -567,6 +611,7 @@ mod tests {
                 "bundled:application:image-generation",
                 "bundled:application:pdf",
                 "bundled:application:presentations",
+                "bundled:application:skill-creator",
                 "bundled:application:skill-installer",
                 "bundled:application:spreadsheets",
             ]
@@ -824,6 +869,127 @@ mod tests {
         assert!(package.instructions().contains("untrusted data"));
         assert!(package.instructions().contains("Never install by calling"));
         assert!(!package.instructions().contains("description:"));
+    }
+
+    #[test]
+    fn skill_creator_is_a_resource_only_native_workflow_package() {
+        let source = BundledSkillSource::new().unwrap();
+        let descriptor = source
+            .list()
+            .unwrap()
+            .skills()
+            .iter()
+            .find(|skill| skill.id().local_id() == SKILL_CREATOR_LOCAL_ID)
+            .unwrap()
+            .clone();
+        let package = source.resolve(&descriptor.selection()).unwrap();
+
+        assert_eq!(
+            descriptor.id().as_str(),
+            "bundled:application:skill-creator"
+        );
+        assert_eq!(descriptor.trust(), SkillTrust::Application);
+        assert_eq!(descriptor.activation_scope(), SkillActivationScope::Run);
+        assert!(matches!(
+            descriptor.provenance(),
+            SkillProvenance::Bundled { source_id, relative_path }
+                if source_id == source.id() && relative_path == SKILL_CREATOR_PATH
+        ));
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert!(package
+            .revision()
+            .as_str()
+            .starts_with("skill-package-sha256-v3:"));
+        assert_eq!(package.source_text(), SKILL_CREATOR_SOURCE);
+        assert_eq!(
+            package
+                .resources()
+                .entries()
+                .iter()
+                .map(|resource| (resource.path(), resource.kind()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("LICENSE.txt", SkillResourceKind::Other),
+                ("NOTICE.txt", SkillResourceKind::Other),
+                ("references/evaluation.md", SkillResourceKind::Reference),
+                (
+                    "references/platform-workflows.md",
+                    SkillResourceKind::Reference,
+                ),
+                (
+                    "references/resource-layout.md",
+                    SkillResourceKind::Reference,
+                ),
+                ("references/schemas.md", SkillResourceKind::Reference),
+                ("references/writing-guide.md", SkillResourceKind::Reference,),
+                ("templates/starter-skill/SKILL.md", SkillResourceKind::Other,),
+            ]
+        );
+        assert!(!package
+            .resources()
+            .entries()
+            .iter()
+            .any(|resource| resource.kind() == SkillResourceKind::Script));
+
+        let normalized_instructions = package
+            .instructions()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for required in [
+            "fork_turns: \"none\"",
+            "`source=workspace`",
+            "Every new revision needs a new reviewer",
+            "does not require an HTML reviewer",
+            "does not replace an existing installation in place",
+            "remove only those files",
+        ] {
+            assert!(
+                normalized_instructions.contains(required),
+                "skill-creator instructions are missing `{required}`"
+            );
+        }
+        for forbidden in ["claude -p", "generate_review.py", "aggregate_benchmark.py"] {
+            assert!(
+                !package.source_text().contains(forbidden),
+                "skill-creator leaked unsupported workflow `{forbidden}`"
+            );
+        }
+
+        let reader = source.open_resource_reader(&package).unwrap().unwrap();
+        for resource in package.resources().entries() {
+            assert_eq!(
+                reader.read(resource).unwrap().len() as u64,
+                resource.byte_length()
+            );
+        }
+
+        let service = SkillsService::new().with_bundled_source().unwrap();
+        let activated = service.activate(&[descriptor.selection()]).unwrap();
+        let resources = service.resource_session(&activated).unwrap();
+        let package_uri = resources.package_uris().into_iter().next().unwrap();
+        let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join("skill-creator-tmp-01")).unwrap();
+        let request = SkillTemplateTreeMaterializationRequest::new(
+            package_uri,
+            SkillResourcePath::parse("templates/starter-skill").unwrap(),
+            workspace.path(),
+            SkillMaterializationDestination::parse("skill-creator-tmp-01/starter-skill").unwrap(),
+        )
+        .unwrap();
+        let outcome = SkillResourceMaterializer::new()
+            .materialize_template_tree(&resources, &request)
+            .unwrap();
+        assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
+        let starter = fs::read_to_string(
+            workspace
+                .path()
+                .join("skill-creator-tmp-01/starter-skill/SKILL.md"),
+        )
+        .unwrap();
+        let parsed = parse_skill_document(&starter, "starter-skill").unwrap();
+        assert_eq!(parsed.metadata.name, "replace-with-skill-name");
+        assert!(!starter[parsed.instructions_range].trim().is_empty());
     }
 
     #[test]

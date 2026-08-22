@@ -360,14 +360,14 @@ fn picker_catalog_filters_disabled_global_skills_and_revises_its_etag() {
     let descriptor = catalog.skills().first().unwrap();
 
     let enabled = enabled_catalog_response(&storage, &catalog).unwrap();
-    assert_eq!(enabled.skills.len(), 6);
+    assert_eq!(enabled.skills.len(), 7);
     assert_ne!(enabled.catalog_revision, catalog.catalog_revision());
 
     storage
         .set_skill_enablement_override(descriptor.id().as_str(), false)
         .unwrap();
     let disabled = enabled_catalog_response(&storage, &catalog).unwrap();
-    assert_eq!(disabled.skills.len(), 5);
+    assert_eq!(disabled.skills.len(), 6);
     assert!(disabled
         .skills
         .iter()
@@ -378,7 +378,7 @@ fn picker_catalog_filters_disabled_global_skills_and_revises_its_etag() {
         .set_skill_enablement_override(descriptor.id().as_str(), true)
         .unwrap();
     let restored = enabled_catalog_response(&storage, &catalog).unwrap();
-    assert_eq!(restored.skills.len(), 6);
+    assert_eq!(restored.skills.len(), 7);
     assert_eq!(restored.catalog_revision, enabled.catalog_revision);
 }
 

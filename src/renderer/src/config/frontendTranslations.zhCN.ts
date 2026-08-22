@@ -872,6 +872,9 @@ export const zhCNTranslations = {
   'skills.bundled.skillInstaller.name': 'Skill 安装器',
   'skills.bundled.skillInstaller.description':
     '检查并安装来自 GitHub 链接或已授权本地路径的第三方 Skill。',
+  'skills.bundled.skillCreator.name': 'Skill 创建器',
+  'skills.bundled.skillCreator.description':
+    '以可编辑的 Workspace 包创建、改进、诊断和评审 MyCopilot Skill。',
   'chat.unsupportedImageWarning': '当前模型不支持图片',
   'chat.yesterday': '昨天',
   'chat.messageActions': '消息操作',

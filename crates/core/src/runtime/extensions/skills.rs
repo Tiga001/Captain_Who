@@ -31,6 +31,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(test)]
+use crate::skills::SKILL_CREATOR_LOCAL_ID;
+
 pub(in crate::runtime) const SKILL_EXTENSION_ID: &str = "skills";
 const SKILL_EXTENSION_VERSION: u32 = 3;
 const SKILL_ACTIVATE_TOOL_NAME: &str = "skills_activate";
@@ -1855,6 +1858,24 @@ mod tests {
         );
         assert!(tool_capabilities_for_skill(&installed_same_name).is_empty());
         assert!(tool_capabilities_for_skill(&bundled_lookalike).is_empty());
+
+        let creator = ActivatedSkillRecord {
+            id: format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{SKILL_CREATOR_LOCAL_ID}"),
+            name: "Skill Creator".to_string(),
+            revision: revision('c'),
+            source: APPLICATION_BUNDLED_SKILL_SOURCE_ID.to_string(),
+            source_bytes: 512,
+            has_resources: true,
+            resource_kinds: vec!["other".to_string(), "reference".to_string()],
+            activated_by: AgentSkillActivationActor::Model,
+        };
+        assert_eq!(
+            tool_capabilities_for_skill(&creator),
+            BTreeSet::from([
+                ToolCapabilityId::application_owned(SKILL_RESOURCES_MATERIALIZE_CAPABILITY),
+                ToolCapabilityId::application_owned(SKILL_RESOURCES_READ_CAPABILITY),
+            ])
+        );
     }
 
     #[test]
