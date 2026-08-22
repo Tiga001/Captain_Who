@@ -55,6 +55,7 @@ function ResizeHarness({
   return (
     <div
       ref={targetRef}
+      className="app-shell"
       data-testid="resize-target"
       style={
         {
@@ -262,10 +263,123 @@ describe('ResizeHandle', () => {
 
     dispatchPointerEvent(handle, 'pointerdown', 300)
     dispatchPointerEvent(handle, 'pointermove', testCase.collapseClientX)
+    await waitForAnimationFrame()
+
+    expect(onCollapse).not.toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(document.body.classList.contains('is-resizing')).toBe(true)
+
+    const target = screen.getByTestId('resize-target').element()
+    const attribute =
+      testCase.side === 'left'
+        ? 'data-left-sidebar-drag-collapsed'
+        : 'data-right-sidebar-drag-collapsed'
+    const property =
+      testCase.side === 'left' ? '--left-panel-live-width' : '--right-panel-live-width'
+    expect(target.getAttribute(attribute)).toBe('true')
+    expect(target.style.getPropertyValue(property)).toBe('0px')
+
+    dispatchPointerEvent(handle, 'pointerup', testCase.collapseClientX)
 
     expect(onCollapse).toHaveBeenCalledOnce()
     expect(onCommit).not.toHaveBeenCalled()
     expect(document.body.classList.contains('is-resizing')).toBe(false)
+  })
+
+  it.each([
+    {
+      collapseClientX: 220 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO,
+      expandClientX: 220 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO + 1,
+      minimum: 220,
+      side: 'left' as const
+    },
+    {
+      collapseClientX: 300 + (300 - 280 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO),
+      expandClientX: 300 + (300 - 280 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO) - 1,
+      minimum: 280,
+      side: 'right' as const
+    }
+  ])(
+    'reopens the $side sidebar when the captured pointer crosses back over its remembered threshold',
+    async (testCase) => {
+      const onCollapse = vi.fn()
+      const onCommit = vi.fn()
+      const screen = await render(
+        <ResizeHarness
+          minimum={testCase.minimum}
+          onCollapse={onCollapse}
+          onCommit={onCommit}
+          onRender={() => undefined}
+          side={testCase.side}
+        />
+      )
+      const handle = screen.container.querySelector<HTMLDivElement>('.resize-handle')
+      const target = screen.getByTestId('resize-target').element()
+      if (!handle) throw new Error('Resize handle did not render')
+
+      vi.spyOn(handle, 'setPointerCapture').mockImplementation(() => undefined)
+      vi.spyOn(handle, 'hasPointerCapture').mockReturnValue(true)
+      vi.spyOn(handle, 'releasePointerCapture').mockImplementation(() => undefined)
+
+      const attribute =
+        testCase.side === 'left'
+          ? 'data-left-sidebar-drag-collapsed'
+          : 'data-right-sidebar-drag-collapsed'
+      const property =
+        testCase.side === 'left' ? '--left-panel-live-width' : '--right-panel-live-width'
+
+      dispatchPointerEvent(handle, 'pointerdown', 300)
+      dispatchPointerEvent(handle, 'pointermove', testCase.collapseClientX)
+      await waitForAnimationFrame()
+      expect(target.getAttribute(attribute)).toBe('true')
+      expect(target.style.getPropertyValue(property)).toBe('0px')
+
+      dispatchPointerEvent(handle, 'pointermove', testCase.expandClientX)
+      await waitForAnimationFrame()
+      expect(target.getAttribute(attribute)).toBe('false')
+      expect(target.style.getPropertyValue(property)).toBe(`${testCase.minimum}px`)
+      expect(getComputedStyle(target).transitionDuration).toContain('0.18s')
+      expect(onCollapse).not.toHaveBeenCalled()
+
+      dispatchPointerEvent(handle, 'pointerup', testCase.expandClientX)
+
+      expect(onCollapse).not.toHaveBeenCalled()
+      expect(onCommit).toHaveBeenCalledOnce()
+      expect(onCommit).toHaveBeenCalledWith(testCase.side, testCase.minimum)
+      expect(document.body.classList.contains('is-resizing')).toBe(false)
+    }
+  )
+
+  it('uses the final threshold position after crossing it repeatedly in one drag', async () => {
+    const onCollapse = vi.fn()
+    const onCommit = vi.fn()
+    const screen = await render(
+      <ResizeHarness
+        onCollapse={onCollapse}
+        onCommit={onCommit}
+        onRender={() => undefined}
+        side="left"
+      />
+    )
+    const handle = screen.container.querySelector<HTMLDivElement>('.resize-handle')
+    if (!handle) throw new Error('Resize handle did not render')
+
+    vi.spyOn(handle, 'setPointerCapture').mockImplementation(() => undefined)
+    vi.spyOn(handle, 'hasPointerCapture').mockReturnValue(true)
+    vi.spyOn(handle, 'releasePointerCapture').mockImplementation(() => undefined)
+
+    const threshold = 220 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO
+    dispatchPointerEvent(handle, 'pointerdown', 300)
+    dispatchPointerEvent(handle, 'pointermove', threshold)
+    await waitForAnimationFrame()
+    dispatchPointerEvent(handle, 'pointermove', threshold + 1)
+    await waitForAnimationFrame()
+    dispatchPointerEvent(handle, 'pointermove', threshold - 1)
+    await waitForAnimationFrame()
+    dispatchPointerEvent(handle, 'pointerup', threshold - 1)
+
+    expect(onCollapse).toHaveBeenCalledOnce()
+    expect(onCommit).not.toHaveBeenCalled()
   })
 
   it('keeps the sidebar open above half of its minimum width', async () => {

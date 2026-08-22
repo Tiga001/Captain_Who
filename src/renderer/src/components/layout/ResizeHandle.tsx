@@ -7,7 +7,6 @@ import {
 } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import {
-  calculateSidebarRawWidth,
   resolveSidebarResizeDragIntent,
   type SidebarResizeMetrics,
   type SidebarSide
@@ -22,7 +21,7 @@ interface ResizeHandleProps {
 }
 
 type ResizeSession = {
-  currentWidth: number
+  collapsed: boolean
   frameId: number | null
   maximum: number
   minimum: number
@@ -30,25 +29,19 @@ type ResizeSession = {
   pointerId: number
   startClientX: number
   startWidth: number
+  transitionTimerId: number | null
 }
 
 const KEYBOARD_RESIZE_STEP = 8
 const KEYBOARD_RESIZE_LARGE_STEP = 32
+const SIDEBAR_TOGGLE_TRANSITION_MS = 180
 
 function liveWidthProperty(side: SidebarSide): string {
   return side === 'left' ? '--left-panel-live-width' : '--right-panel-live-width'
 }
 
-export function calculateSidebarResizeWidth(
-  side: SidebarSide,
-  startWidth: number,
-  startClientX: number,
-  currentClientX: number,
-  minimum: number,
-  maximum: number
-): number {
-  const width = calculateSidebarRawWidth(side, startWidth, startClientX, currentClientX)
-  return Math.min(Math.max(width, minimum), maximum)
+function dragCollapsedAttribute(side: SidebarSide): string {
+  return side === 'left' ? 'data-left-sidebar-drag-collapsed' : 'data-right-sidebar-drag-collapsed'
 }
 
 export function ResizeHandle({
@@ -62,37 +55,43 @@ export function ResizeHandle({
   const handleRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ResizeSession | null>(null)
   const property = liveWidthProperty(side)
+  const collapsedAttribute = dragCollapsedAttribute(side)
 
   useEffect(() => {
     if (sessionRef.current) return
     resizeTargetRef.current?.style.removeProperty(property)
-  }, [metrics.width, property, resizeTargetRef])
+    resizeTargetRef.current?.removeAttribute(collapsedAttribute)
+  }, [collapsedAttribute, metrics.width, property, resizeTargetRef])
 
   useEffect(
     () => () => {
       const session = sessionRef.current
       if (session?.frameId != null) cancelAnimationFrame(session.frameId)
+      if (session?.transitionTimerId != null) window.clearTimeout(session.transitionTimerId)
       sessionRef.current = null
       resizeTargetRef.current?.style.removeProperty(property)
+      resizeTargetRef.current?.removeAttribute(collapsedAttribute)
       if (session) document.body.classList.remove('is-resizing')
     },
-    [property, resizeTargetRef]
+    [collapsedAttribute, property, resizeTargetRef]
   )
 
-  const applyVisualWidth = (width: number) => {
-    resizeTargetRef.current?.style.setProperty(property, `${width}px`)
+  const applyVisualWidth = (width: number, animateFromCollapse = false) => {
+    const target = resizeTargetRef.current
+    if (animateFromCollapse) {
+      target?.setAttribute(collapsedAttribute, 'false')
+    } else if (target?.getAttribute(collapsedAttribute) !== 'false') {
+      target?.removeAttribute(collapsedAttribute)
+    }
+    target?.style.setProperty(property, `${width}px`)
     handleRef.current?.setAttribute('aria-valuenow', String(Math.round(width)))
   }
 
-  const widthForClientX = (session: ResizeSession, clientX: number) =>
-    calculateSidebarResizeWidth(
-      side,
-      session.startWidth,
-      session.startClientX,
-      clientX,
-      session.minimum,
-      session.maximum
-    )
+  const applyVisualCollapse = () => {
+    resizeTargetRef.current?.setAttribute(collapsedAttribute, 'true')
+    resizeTargetRef.current?.style.setProperty(property, '0px')
+    handleRef.current?.setAttribute('aria-valuenow', '0')
+  }
 
   const intentForClientX = (session: ResizeSession, clientX: number) =>
     resolveSidebarResizeDragIntent(
@@ -108,8 +107,29 @@ export function ResizeHandle({
     const session = sessionRef.current
     if (!session) return
     session.frameId = null
-    session.currentWidth = widthForClientX(session, session.pendingClientX)
-    applyVisualWidth(session.currentWidth)
+    const intent = intentForClientX(session, session.pendingClientX)
+
+    if (intent.type === 'collapse') {
+      if (session.transitionTimerId !== null) {
+        window.clearTimeout(session.transitionTimerId)
+        session.transitionTimerId = null
+      }
+      session.collapsed = true
+      applyVisualCollapse()
+      return
+    }
+
+    const animateFromCollapse = session.collapsed
+    session.collapsed = false
+    applyVisualWidth(intent.width, animateFromCollapse)
+
+    if (animateFromCollapse) {
+      session.transitionTimerId = window.setTimeout(() => {
+        if (sessionRef.current !== session || session.collapsed) return
+        session.transitionTimerId = null
+        resizeTargetRef.current?.removeAttribute(collapsedAttribute)
+      }, SIDEBAR_TOGGLE_TRANSITION_MS)
+    }
   }
 
   const scheduleVisualFrame = (clientX: number) => {
@@ -125,6 +145,7 @@ export function ResizeHandle({
     if (!session) return
 
     if (session.frameId !== null) cancelAnimationFrame(session.frameId)
+    if (session.transitionTimerId !== null) window.clearTimeout(session.transitionTimerId)
     const intent = intentForClientX(session, clientX)
     sessionRef.current = null
     document.body.classList.remove('is-resizing')
@@ -134,14 +155,15 @@ export function ResizeHandle({
     }
 
     if (intent.type === 'collapse') {
-      // Keep the panel at its minimum until the shared toggle commits the closed layout.
-      // The handle then unmounts and its cleanup removes this transient CSS width.
-      applyVisualWidth(session.minimum)
+      // Collapsing stays visual-only until pointer-up so the same captured drag can cross
+      // the remembered threshold in either direction. The canonical toggle commits here.
+      applyVisualCollapse()
       onCollapse()
       return
     }
 
     const finalWidth = intent.width
+    resizeTargetRef.current?.removeAttribute(collapsedAttribute)
     applyVisualWidth(finalWidth)
 
     // Keep the transient CSS width until React commits the matching preferred width.
@@ -155,14 +177,15 @@ export function ResizeHandle({
     event.preventDefault()
 
     sessionRef.current = {
-      currentWidth: metrics.width,
+      collapsed: false,
       frameId: null,
       maximum: metrics.maximum,
       minimum: metrics.minimum,
       pendingClientX: event.clientX,
       pointerId: event.pointerId,
       startClientX: event.clientX,
-      startWidth: metrics.width
+      startWidth: metrics.width,
+      transitionTimerId: null
     }
     document.body.classList.add('is-resizing')
     applyVisualWidth(metrics.width)
@@ -172,12 +195,6 @@ export function ResizeHandle({
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const session = sessionRef.current
     if (event.pointerId !== session?.pointerId) return
-
-    if (intentForClientX(session, event.clientX).type === 'collapse') {
-      finishResize(event.currentTarget, event.clientX)
-      return
-    }
-
     scheduleVisualFrame(event.clientX)
   }
 

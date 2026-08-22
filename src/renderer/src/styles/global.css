@@ -221,6 +221,16 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   opacity: 0;
 }
 
+/*
+ * Crossing the collapse threshold is reversible until pointer-up. Keep the real sidebar
+ * mounted for pointer capture, but hide its surface while the live grid width is zero.
+ */
+.app-shell[data-left-sidebar-drag-collapsed='true'] .side-panel--left,
+.app-shell[data-right-sidebar-drag-collapsed='true'] .side-panel--right {
+  visibility: hidden;
+  opacity: 0;
+}
+
 .side-panel__surface,
 .main-panel__surface {
   height: 100%;
@@ -439,14 +449,34 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   transition: none;
 }
 
+/* Threshold crossings reuse the regular sidebar collapse/expand animation. */
+.is-resizing .app-shell[data-left-sidebar-drag-collapsed],
+.is-resizing .app-shell[data-right-sidebar-drag-collapsed] {
+  transition: grid-template-columns 180ms ease;
+}
+
 .is-resizing .side-panel--right {
   transition: none;
+}
+
+.is-resizing .app-shell[data-right-sidebar-drag-collapsed] .side-panel--right {
+  transition:
+    width 180ms ease,
+    opacity 120ms ease,
+    visibility 0ms linear 180ms,
+    border-color 120ms ease;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .app-shell,
   .side-panel,
   .panel-toggle {
+    transition: none;
+  }
+
+  .is-resizing .app-shell[data-left-sidebar-drag-collapsed],
+  .is-resizing .app-shell[data-right-sidebar-drag-collapsed],
+  .is-resizing .app-shell[data-right-sidebar-drag-collapsed] .side-panel--right {
     transition: none;
   }
 }
