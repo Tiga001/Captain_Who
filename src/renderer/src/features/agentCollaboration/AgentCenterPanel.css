@@ -119,18 +119,8 @@
 }
 
 .agent-center__avatar {
-  display: grid;
   width: 30px;
   height: 30px;
-  place-items: center;
-  color: var(--mc-color-icon-default);
-  background: var(--mc-color-surface-selected-subtle);
-  border-radius: 50%;
-}
-
-.agent-center__avatar svg {
-  width: 16px;
-  height: 16px;
 }
 
 .agent-center__row-copy,

@@ -118,6 +118,9 @@ describe('Agent Center right sidebar', () => {
     const listCenter = requiredElement(screen.container, '.agent-center')
     const listRow = requiredElement(screen.container, '.agent-center__row')
     const listMeta = requiredElement(listRow, '.agent-center__row-meta')
+    const listAvatar = requiredElement(listRow, '.agent-avatar')
+    const listAvatarIndex = listAvatar.dataset.agentAvatarIndex
+    const listAvatarSource = requiredElement(listAvatar, 'img').getAttribute('src')
     expect(listRow.title).toBe(`${longTask} · kimi`)
     expect(requiredElement(listRow, '.agent-center__row-copy strong').textContent).toBe(longTask)
     expect(listMeta.children).toHaveLength(1)
@@ -141,6 +144,9 @@ describe('Agent Center right sidebar', () => {
     await userEvent.keyboard('{Enter}')
     await expect.element(screen.getByTestId('agent-observer-child-running')).toBeVisible()
     await expect.element(screen.getByText('kimi', { exact: true })).toBeVisible()
+    const detailAvatar = requiredElement(screen.container, '.agent-center__avatar--detail')
+    expect(detailAvatar.dataset.agentAvatarIndex).toBe(listAvatarIndex)
+    expect(requiredElement(detailAvatar, 'img').getAttribute('src')).toBe(listAvatarSource)
 
     const backButton = screen.getByRole('button', { name: 'Back to subagents' })
     await tabUntil(backButton.element() as HTMLButtonElement)

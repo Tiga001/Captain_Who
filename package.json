@@ -27,6 +27,8 @@
     "test:web": "pnpm prepare:office-renderer && vitest run --project unit --project browser && vitest run --project managed-playwright-e2e",
     "test:multi-agent-release": "node scripts/run-multi-agent-release-gate.mjs",
     "generate:playwright-conformance-report": "node scripts/playwright-conformance-report.mjs --write",
+    "generate:agent-avatars": "node scripts/generate-agent-avatars.mjs",
+    "verify:agent-avatars": "node scripts/generate-agent-avatars.mjs --check",
     "test:playwright-conformance-report": "node --test scripts/playwright-conformance-report.test.mjs",
     "test:playwright-fixed-catalog": "vitest run --project unit src/main/mcp/managedPlaywrightCatalog.test.ts",
     "test:playwright-round3-stress": "vitest run --project unit src/main/mcp/managedPlaywrightRound3Stress.test.ts",
@@ -37,7 +39,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "pnpm typecheck:node && pnpm typecheck:web",
-    "check": "pnpm format:check && pnpm check:docs && pnpm lint && pnpm typecheck && pnpm lint:rust && pnpm test",
+    "check": "pnpm format:check && pnpm check:docs && pnpm verify:agent-avatars && pnpm lint && pnpm typecheck && pnpm lint:rust && pnpm test",
     "start": "electron-vite preview",
     "prepare:officecli": "node scripts/prepare-officecli.mjs",
     "verify:officecli": "node scripts/prepare-officecli.mjs --verify",
@@ -68,6 +70,8 @@
     "playwright": "1.63.0-alpha-2026-08-05"
   },
   "devDependencies": {
+    "@dicebear/core": "10.5.0",
+    "@dicebear/styles": "10.5.0",
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",

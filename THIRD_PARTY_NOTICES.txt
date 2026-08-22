@@ -241,7 +241,7 @@ SOFTWARE.
 
 SUPPLEMENTAL THIRD-PARTY ATTRIBUTIONS
 
-Audit snapshot: 2026-07-17
+Audit snapshot: 2026-08-23
 
 This section records principal third-party runtime components, visual assets,
 and adapted color palettes used by MyCopilot. It supplements the component
@@ -256,6 +256,36 @@ this file as:
   LICENSES.chromium.html
 
 VISUAL ASSETS AND ICONS
+
+DiceBear Core, Pixelbot, and Voxel Bot (10.5.0)
+
+MyCopilot bundles 48 Pixelbot and 48 Voxel Bot SVG avatars generated locally
+with deterministic seeds. The application uses these static files and does not
+call the DiceBear HTTP API at runtime.
+
+Generator:
+  @dicebear/core 10.5.0
+  Immutable source:
+    https://github.com/dicebear/dicebear/tree/7d54afd83aa593577f73075fdd06d6c09f3db82c
+  License: MIT (license text below)
+  Copyright (c) 2026 Florian Körner
+
+Style definitions:
+  @dicebear/styles 10.5.0, pixelbot.json and voxel-bot.json
+  Immutable source:
+    https://github.com/dicebear/styles/tree/ce7a25b8de0f086291c1395757354dfe9282d4f0
+  Artist: DiceBear
+  License: CC0 1.0 Universal Public Domain Dedication
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+Generated assets:
+  src/renderer/src/assets/agent-avatars/pixelbot/pixelbot-01.svg through
+    pixelbot-48.svg
+  src/renderer/src/assets/agent-avatars/voxel-bot/voxel-bot-01.svg through
+    voxel-bot-48.svg
+
+Each generated SVG also embeds the upstream title, creator, source, license,
+and rights metadata supplied by DiceBear.
 
 Material Icon Theme (5.36.1)
 

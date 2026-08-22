@@ -145,12 +145,14 @@ export function AppShell() {
   const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
     useProjectSettings()
   const {
+    commitSidebarResize,
+    leftResizeMetrics,
     leftOpen,
     leftWidth,
     openRightSidebar,
-    resizeSide,
     rightMaximized,
     rightOpen,
+    rightResizeMetrics,
     rightWidth,
     shellRef,
     toggleLeftSidebar,
@@ -1714,7 +1716,14 @@ export function AppShell() {
         </div>
       </aside>
 
-      {leftOpen && <ResizeHandle side="left" onResize={(deltaX) => resizeSide('left', deltaX)} />}
+      {leftOpen && (
+        <ResizeHandle
+          metrics={leftResizeMetrics}
+          onResizeCommit={commitSidebarResize}
+          resizeTargetRef={shellRef}
+          side="left"
+        />
+      )}
 
       <main className="main-panel" aria-label={t('app.mainWorkspace')}>
         <MainPanelToolbar
@@ -1819,7 +1828,12 @@ export function AppShell() {
       </main>
 
       {rightOpen && !rightMaximized && (
-        <ResizeHandle side="right" onResize={(deltaX) => resizeSide('right', deltaX)} />
+        <ResizeHandle
+          metrics={rightResizeMetrics}
+          onResizeCommit={commitSidebarResize}
+          resizeTargetRef={shellRef}
+          side="right"
+        />
       )}
 
       <aside className="side-panel side-panel--right">

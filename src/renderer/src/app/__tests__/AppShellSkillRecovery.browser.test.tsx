@@ -103,11 +103,13 @@ vi.mock('../../components/toast/ToastContext', () => ({
 
 vi.mock('../useShellLayout', () => ({
   useShellLayout: () => ({
+    commitSidebarResize: vi.fn(),
+    leftResizeMetrics: { maximum: 420, minimum: 220, width: 0 },
     leftOpen: false,
     leftWidth: 0,
-    resizeSide: vi.fn(),
     rightMaximized: false,
     rightOpen: false,
+    rightResizeMetrics: { maximum: 1200, minimum: 280, width: 0 },
     rightWidth: 0,
     shellRef: { current: null },
     toggleLeftSidebar: vi.fn(),

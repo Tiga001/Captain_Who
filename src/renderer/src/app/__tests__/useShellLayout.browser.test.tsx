@@ -26,7 +26,8 @@ describe('useShellLayout', () => {
 })
 
 function LayoutHarness() {
-  const { openRightSidebar, resizeSide, rightOpen, rightWidth, shellRef } = useShellLayout()
+  const { commitSidebarResize, openRightSidebar, rightOpen, rightWidth, shellRef } =
+    useShellLayout()
   return (
     <div ref={shellRef} style={{ width: 1600 }}>
       <output data-testid="right-open">{String(rightOpen)}</output>
@@ -34,7 +35,7 @@ function LayoutHarness() {
       <button onClick={openRightSidebar} type="button">
         open right
       </button>
-      <button onClick={() => resizeSide('right', -1000)} type="button">
+      <button onClick={() => commitSidebarResize('right', 1000)} type="button">
         expand right
       </button>
     </div>

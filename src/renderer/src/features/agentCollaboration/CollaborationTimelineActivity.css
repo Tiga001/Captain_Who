@@ -82,19 +82,13 @@
   outline-offset: 2px;
 }
 
-.collaboration-timeline__chip svg {
-  color: var(--mc-color-icon-muted);
+.collaboration-timeline__chip .agent-avatar {
   flex: 0 0 auto;
-  height: 13px;
-  width: 13px;
+  height: 15px;
+  width: 15px;
 }
 
-.collaboration-timeline__chip:hover svg,
-.collaboration-timeline__chip:focus-visible svg {
-  color: currentColor;
-}
-
-.collaboration-timeline__chip span {
+.collaboration-timeline__chip-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -7,7 +7,7 @@ import {
   RIGHT_MIN_WIDTH,
   clamp
 } from './appConstants'
-import type { Side } from './appTypes'
+import type { SidebarSide } from '../lib/sidebarResize'
 
 export interface ShellLayoutIntent {
   shellWidth: number
@@ -15,7 +15,7 @@ export interface ShellLayoutIntent {
   rightRequestedOpen: boolean
   leftPreferredWidth: number
   rightPreferredWidth: number
-  preferredSide?: Side
+  preferredSide?: SidebarSide
 }
 
 export interface ResolvedShellLayout {
@@ -34,7 +34,7 @@ export function getRightMaximumWidth(shellWidth: number): number {
 }
 
 export function getSidebarResizeMaximum(
-  side: Side,
+  side: SidebarSide,
   shellWidth: number,
   otherVisibleWidth: number
 ): number {

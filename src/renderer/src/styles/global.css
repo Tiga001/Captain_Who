@@ -59,11 +59,13 @@ button {
 }
 
 .app-shell {
+  --left-panel-render-width: var(--left-panel-live-width, var(--left-panel-width));
+  --right-panel-render-width: var(--right-panel-live-width, var(--right-panel-width));
   position: relative;
   display: grid;
-  grid-template-columns:
-    var(--left-panel-width) 1fr
-    var(--right-panel-width);
+  grid-template-columns: var(--left-panel-render-width) minmax(0, 1fr) var(
+      --right-panel-render-width
+    );
   width: 100%;
   height: 100%;
   min-width: 520px;
@@ -92,7 +94,7 @@ button {
   top: 0;
   right: 0;
   bottom: 0;
-  left: var(--left-panel-width);
+  left: var(--left-panel-render-width);
   background: var(--main-panel);
   content: '';
   pointer-events: none;
@@ -129,7 +131,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   position: absolute;
   right: 0;
   bottom: 0;
-  left: var(--left-panel-width);
+  left: var(--left-panel-render-width);
   height: 0.5px;
   background: var(--hairline);
   content: '';
@@ -179,7 +181,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   top: 0;
   right: 0;
   bottom: 0;
-  width: var(--right-panel-width);
+  width: var(--right-panel-render-width);
   background: var(--right-panel);
   border-left: 1px solid var(--hairline);
   transition:
@@ -190,7 +192,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .app-shell[data-right-maximized='true'] .side-panel--right {
-  width: calc(100% - var(--left-panel-width));
+  width: calc(100% - var(--left-panel-render-width));
   visibility: visible;
   opacity: 1;
   transition:
@@ -419,11 +421,11 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .resize-handle--left {
-  left: var(--left-panel-width);
+  left: var(--left-panel-render-width);
 }
 
 .resize-handle--right {
-  right: var(--right-panel-width);
+  right: var(--right-panel-render-width);
   transform: translateX(50%);
 }
 
@@ -433,6 +435,10 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .is-resizing .app-shell {
+  transition: none;
+}
+
+.is-resizing .side-panel--right {
   transition: none;
 }
 

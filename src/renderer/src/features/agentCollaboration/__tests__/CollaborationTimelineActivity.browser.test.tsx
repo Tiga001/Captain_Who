@@ -99,6 +99,20 @@ it('deduplicates replay, merges adjacent agents, retains updates, and exposes ex
   expect(screen.getByText('Failed')).toBeVisible()
   expect(screen.getByText('Interrupted')).toBeVisible()
   expect(screen.container.querySelectorAll('[data-agent-id="agent-a"]')).toHaveLength(4)
+  const repeatedAgentAvatars = screen.container.querySelectorAll<HTMLElement>(
+    '[data-agent-id="agent-a"] .agent-avatar'
+  )
+  expect(repeatedAgentAvatars).toHaveLength(4)
+  expect(
+    new Set(Array.from(repeatedAgentAvatars, (avatar) => avatar.dataset.agentAvatarIndex)).size
+  ).toBe(1)
+  expect(
+    new Set(
+      Array.from(repeatedAgentAvatars, (avatar) =>
+        avatar.querySelector<HTMLImageElement>('img')?.getAttribute('src')
+      )
+    ).size
+  ).toBe(1)
 
   const reviewer = screen.getByRole('button', {
     name: 'View sub-agent Reviewer: Started working'

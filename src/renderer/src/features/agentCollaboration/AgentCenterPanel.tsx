@@ -1,10 +1,11 @@
 import type { AgentDisplayStatusView, AgentSummary } from '@mycopilot/protocol'
-import { Bot, ChevronLeft, Settings2 } from 'lucide-react'
+import { ChevronLeft, Settings2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../config/translationFormat'
 import { useRightSidebarRuntimeContext } from '../rightSidebar/RightSidebarRuntimeContext'
 import type { RightSidebarModulePageState } from '../rightSidebar/rightSidebarTypes'
+import { AgentAvatar } from './AgentAvatar'
 import './AgentCenterPanel.css'
 
 interface AgentCenterPanelProps {
@@ -108,9 +109,10 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
             >
               <ChevronLeft aria-hidden="true" />
             </button>
-            <span className="agent-center__avatar agent-center__avatar--detail" aria-hidden="true">
-              <Bot />
-            </span>
+            <AgentAvatar
+              agentId={agent.agentId}
+              className="agent-center__avatar agent-center__avatar--detail"
+            />
             <div className="agent-center__detail-copy">
               <strong title={agent.taskName}>{agent.taskName}</strong>
               <span title={baseModelLabel(agent, t)}>{baseModelLabel(agent, t)}</span>
@@ -284,9 +286,7 @@ function AgentRows({
             title={`${agent.taskName} · ${modelLabel}`}
             type="button"
           >
-            <span className="agent-center__avatar" aria-hidden="true">
-              <Bot />
-            </span>
+            <AgentAvatar agentId={agent.agentId} className="agent-center__avatar" />
             <span className="agent-center__row-copy">
               <strong title={agent.taskName}>{agent.taskName}</strong>
               <span title={modelLabel}>{modelLabel}</span>

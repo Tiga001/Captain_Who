@@ -7,7 +7,7 @@ import {
   clamp
 } from './appConstants'
 import { getSidebarResizeMaximum, resolveShellLayout } from './shellLayoutPolicy'
-import type { Side } from './appTypes'
+import type { SidebarResizeMetrics, SidebarSide } from '../lib/sidebarResize'
 
 function readShellWidth(element: HTMLDivElement | null): number {
   return element?.clientWidth || window.innerWidth
@@ -20,7 +20,7 @@ export function useShellLayout() {
   const [rightPreferredWidth, setRightPreferredWidth] = useState(RIGHT_DEFAULT_WIDTH)
   const [leftRequestedOpen, setLeftRequestedOpen] = useState(true)
   const [rightRequestedOpen, setRightRequestedOpen] = useState(false)
-  const [preferredSide, setPreferredSide] = useState<Side | undefined>()
+  const [preferredSide, setPreferredSide] = useState<SidebarSide | undefined>()
   const [rightMaximized, setRightMaximized] = useState(false)
 
   const layout = useMemo(
@@ -43,28 +43,40 @@ export function useShellLayout() {
     ]
   )
 
-  const resizeSide = useCallback(
-    (side: Side, deltaX: number) => {
+  const leftResizeMetrics = useMemo<SidebarResizeMetrics>(
+    () => ({
+      maximum: getSidebarResizeMaximum(
+        'left',
+        shellWidth,
+        layout.rightOpen ? layout.rightWidth : 0
+      ),
+      minimum: LEFT_MIN_WIDTH,
+      width: layout.leftWidth
+    }),
+    [layout.rightOpen, layout.rightWidth, layout.leftWidth, shellWidth]
+  )
+
+  const rightResizeMetrics = useMemo<SidebarResizeMetrics>(
+    () => ({
+      maximum: getSidebarResizeMaximum('right', shellWidth, layout.leftOpen ? layout.leftWidth : 0),
+      minimum: RIGHT_MIN_WIDTH,
+      width: layout.rightWidth
+    }),
+    [layout.leftOpen, layout.leftWidth, layout.rightWidth, shellWidth]
+  )
+
+  const commitSidebarResize = useCallback(
+    (side: SidebarSide, width: number) => {
       setPreferredSide(side)
 
       if (side === 'left') {
-        const maximum = getSidebarResizeMaximum(
-          'left',
-          shellWidth,
-          layout.rightOpen ? layout.rightWidth : 0
-        )
-        setLeftPreferredWidth(clamp(layout.leftWidth + deltaX, LEFT_MIN_WIDTH, maximum))
+        setLeftPreferredWidth(clamp(width, leftResizeMetrics.minimum, leftResizeMetrics.maximum))
         return
       }
 
-      const maximum = getSidebarResizeMaximum(
-        'right',
-        shellWidth,
-        layout.leftOpen ? layout.leftWidth : 0
-      )
-      setRightPreferredWidth(clamp(layout.rightWidth - deltaX, RIGHT_MIN_WIDTH, maximum))
+      setRightPreferredWidth(clamp(width, rightResizeMetrics.minimum, rightResizeMetrics.maximum))
     },
-    [layout.leftOpen, layout.leftWidth, layout.rightOpen, layout.rightWidth, shellWidth]
+    [leftResizeMetrics, rightResizeMetrics]
   )
 
   const toggleLeftSidebar = useCallback(() => {
@@ -121,12 +133,14 @@ export function useShellLayout() {
   }, [])
 
   return {
+    commitSidebarResize,
+    leftResizeMetrics,
     leftOpen: layout.leftOpen,
     leftWidth: layout.leftWidth,
     openRightSidebar,
-    resizeSide,
     rightMaximized,
     rightOpen: layout.rightOpen,
+    rightResizeMetrics,
     rightWidth: layout.rightWidth,
     shellRef,
     toggleLeftSidebar,

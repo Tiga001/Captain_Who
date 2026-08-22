@@ -1,4 +1,3 @@
-import { Bot } from 'lucide-react'
 import { useMemo } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
@@ -8,6 +7,7 @@ import {
   type CollaborationActivitySemantic,
   type CollaborationTimelineActivity
 } from './collaborationTimelineModel'
+import { AgentAvatar } from './AgentAvatar'
 import './CollaborationTimelineActivity.css'
 
 export {
@@ -125,8 +125,10 @@ export function CollaborationTimelineActivityList({
                   onClick={() => onOpenAgent(activity.agentId)}
                   type="button"
                 >
-                  <Bot aria-hidden="true" />
-                  <span>{activity.taskNameSnapshot}</span>
+                  <AgentAvatar agentId={activity.agentId} />
+                  <span className="collaboration-timeline__chip-label">
+                    {activity.taskNameSnapshot}
+                  </span>
                 </button>
               ))}
             </span>
