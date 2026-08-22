@@ -759,17 +759,12 @@ function AgentRunView({
   }, [run?.llmRetry, t])
 
   const headerState = useMemo(() => {
-    if (llmRetryLabel) {
-      return {
-        isThinking: true,
-        label: llmRetryLabel
-      }
-    }
     const hasFirstResponse = Boolean(run?.firstResponseAt)
     const hasVisibleToolStatus = Boolean(run && hasCollapsibleTimelineContent(run, timeline))
 
     if (
       run &&
+      !llmRetryLabel &&
       !hasFirstResponse &&
       !hasVisibleToolStatus &&
       !waitingForCommandCompletion &&
@@ -830,11 +825,12 @@ function AgentRunView({
     now - (run.lastResponseAt ?? 0) <= ACTIVE_STREAMING_GRACE_MS
   const isStreamingFileWrite = hasRecentFileWriteActivity(run, now)
   const showThinkingActivity =
-    !(canToggleTimeline && timelineCollapsed) &&
-    !headerState.isThinking &&
-    !isStreamingAssistantText &&
-    !isStreamingFileWrite &&
-    (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline))
+    Boolean(llmRetryLabel) ||
+    (!(canToggleTimeline && timelineCollapsed) &&
+      !headerState.isThinking &&
+      !isStreamingAssistantText &&
+      !isStreamingFileWrite &&
+      (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline)))
   const showTokenLimitNotice = isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
   const webSearchSources = getUniqueWebSearchSources(run)
 
@@ -943,9 +939,10 @@ function AgentRunView({
       )}
       {showThinkingActivity && (
         <AgentThinkingActivity
-          label={t(
-            waitingForCommandCompletion ? 'agent.command.waitingForCompletion' : 'agent.thinking'
-          )}
+          label={
+            llmRetryLabel ??
+            t(waitingForCommandCompletion ? 'agent.command.waitingForCompletion' : 'agent.thinking')
+          }
         />
       )}
       {showTimeline && run.error && !hasTimelineError && (

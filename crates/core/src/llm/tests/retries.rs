@@ -27,10 +27,21 @@ fn classifies_transient_llm_errors_as_retryable() {
         "",
     )
     .to_agent_error();
+    let invalid_stream_arguments = AgentError::structured(
+        INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE,
+        "模型返回的流式工具参数不完整或格式无效。",
+        json!({
+            "type": "invalid_stream_tool_arguments",
+            "retryable": true,
+            "providerProtocol": "openai",
+            "parseCategory": "eof",
+        }),
+    );
 
     assert!(is_retryable_llm_error(&transport));
     assert!(is_retryable_llm_error(&rate_limited));
     assert!(is_retryable_llm_error(&overloaded));
+    assert!(is_retryable_llm_error(&invalid_stream_arguments));
 }
 
 #[test]
@@ -429,6 +440,77 @@ async fn streaming_partial_output_is_reset_before_retrying() {
     assert!(events.iter().all(|event| !matches!(
         event,
         LlmStreamEvent::AttemptReset { reason } if reason.contains(CANARY)
+    )));
+}
+
+#[tokio::test]
+async fn streaming_invalid_tool_arguments_reset_the_attempt_and_recover() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let body = if attempt == 1 {
+                format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({
+                        "choices": [{
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "call-invalid",
+                                    "function": {
+                                        "name": "run_command",
+                                        "arguments": "{\"command\":\"pwd\""
+                                    }
+                                }]
+                            }
+                        }]
+                    }),
+                    json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})
+                )
+            } else {
+                format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"delta":{"content":"recovered"}}]}),
+                    json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                )
+            };
+            stream.write_all(body.as_bytes()).await.unwrap();
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    let mut events = Vec::new();
+
+    let response = complete_chat_streaming(request, AgentCancellationToken::new(), |event| {
+        events.push(event);
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.content(), "recovered");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LlmStreamEvent::AttemptReset { reason }
+            if reason == "模型返回的流式工具参数不完整或格式无效。"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        LlmStreamEvent::Retrying {
+            attempt: 2,
+            max_attempts: LLM_MAX_ATTEMPTS,
+            provider_code: Some(code),
+            ..
+        } if code == "invalid_stream_tool_arguments"
     )));
 }
 
@@ -1103,6 +1185,40 @@ fn rate_limit_retry_plan_has_longer_bounded_delay_and_canonical_metadata() {
     assert!(plan.delay >= Duration::from_millis(LLM_RATE_LIMIT_RETRY_BASE_DELAY_MS));
     assert!(plan.delay <= Duration::from_millis(2_500));
     assert!(plan.delay > retry_delay(1));
+}
+
+#[test]
+fn every_retryable_failure_uses_the_same_attempt_budget_and_exhaustion_boundary() {
+    let rate_limited = LlmProviderFailure::from_http_response(
+        AgentApiStyle::OpenAiCompatible,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &reqwest::header::HeaderMap::new(),
+        r#"{"error":{"code":"API_KEY_RATE_LIMIT_EXCEEDED"}}"#,
+        "",
+    )
+    .to_agent_error();
+    let network =
+        LlmProviderFailure::from_local_transport_failure("connection reset").to_agent_error();
+    let invalid_stream_arguments = AgentError::structured(
+        INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE,
+        "模型返回的流式工具参数不完整或格式无效。",
+        json!({
+            "type": "invalid_stream_tool_arguments",
+            "retryable": true,
+        }),
+    );
+
+    for error in [&rate_limited, &network, &invalid_stream_arguments] {
+        let plan = retry_plan(error, 1, Duration::ZERO, LLM_LOGICAL_REQUEST_TIMEOUT).unwrap();
+        assert_eq!(plan.max_attempts, LLM_MAX_ATTEMPTS);
+        assert!(retry_plan(
+            error,
+            LLM_MAX_ATTEMPTS,
+            Duration::ZERO,
+            LLM_LOGICAL_REQUEST_TIMEOUT,
+        )
+        .is_none());
+    }
 }
 
 #[test]

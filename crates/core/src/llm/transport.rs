@@ -8,7 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MAX_PROVIDER_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
 pub(super) const LLM_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub(super) const LLM_MAX_ATTEMPTS: usize = 6;
+/// Every recoverable model failure shares one attempt budget and one exhaustion path.
+pub(super) const LLM_MAX_ATTEMPTS: usize = 3;
 pub(super) const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
 pub(super) const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
 pub(super) const LLM_RATE_LIMIT_RETRY_BASE_DELAY_MS: u64 = 2_000;
@@ -748,21 +749,20 @@ pub(super) fn retry_plan(
     if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(error) {
         return None;
     }
-    let (category, retry_after_ms, provider_code) = provider_failure_metadata(error)
-        .map(|(category, _, retry_after_ms, provider_code)| {
-            (category, retry_after_ms, provider_code)
-        })
-        .unwrap_or((LlmProviderFailureCategory::Unknown, None, None));
-    let category_attempt_limit = match category {
-        LlmProviderFailureCategory::RateLimited => LLM_MAX_ATTEMPTS,
-        LlmProviderFailureCategory::Overloaded
-        | LlmProviderFailureCategory::Network
-        | LlmProviderFailureCategory::Unknown => 3,
-        _ => 1,
+    let (category, retry_after_ms, provider_code) = if is_invalid_stream_tool_arguments_error(error)
+    {
+        (
+            LlmProviderFailureCategory::Unknown,
+            None,
+            Some("invalid_stream_tool_arguments".to_string()),
+        )
+    } else {
+        provider_failure_metadata(error)
+            .map(|(category, _, retry_after_ms, provider_code)| {
+                (category, retry_after_ms, provider_code)
+            })
+            .unwrap_or((LlmProviderFailureCategory::Unknown, None, None))
     };
-    if attempt >= category_attempt_limit {
-        return None;
-    }
     let delay = retry_after_ms.map_or_else(
         || positive_retry_jitter(retry_delay_for_category(category, attempt), attempt),
         Duration::from_millis,
@@ -774,7 +774,7 @@ pub(super) fn retry_plan(
     Some(LlmRetryPlan {
         category,
         provider_code,
-        max_attempts: category_attempt_limit,
+        max_attempts: LLM_MAX_ATTEMPTS,
         delay,
         retry_at: unix_epoch_ms().saturating_add(duration_ms(delay)),
     })
@@ -830,6 +830,10 @@ fn duration_ms(duration: Duration) -> u64 {
 }
 
 fn safe_retry_reason(error: &AgentError) -> String {
+    if is_invalid_stream_tool_arguments_error(error) {
+        return "模型返回的流式工具参数不完整或格式无效。".to_string();
+    }
+
     public_provider_error_message(error).unwrap_or_else(|| {
         if error.is_cancelled() {
             "模型请求已取消。".to_string()
@@ -871,7 +875,25 @@ pub(super) fn is_retryable_llm_error(error: &AgentError) -> bool {
         return false;
     }
 
+    if is_invalid_stream_tool_arguments_error(error) {
+        return true;
+    }
+
     provider_failure_metadata(error).is_some_and(|(_, retryable, _, _)| retryable)
+}
+
+fn is_invalid_stream_tool_arguments_error(error: &AgentError) -> bool {
+    error.code() == Some(INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE)
+        && error
+            .details()
+            .and_then(|details| details.get("type"))
+            .and_then(Value::as_str)
+            == Some("invalid_stream_tool_arguments")
+        && error
+            .details()
+            .and_then(|details| details.get("retryable"))
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 pub(super) fn streaming_response_diagnostic(response: &LlmChatResponse) -> String {

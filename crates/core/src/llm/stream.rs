@@ -3,7 +3,8 @@ use super::adapter::{ProviderAdapter, ProviderAdapterRegistry};
 use super::provider_error::{stream_inactivity_timeout_error, LlmProviderFailure};
 use super::response::{extract_api_error, parse_tool_arguments};
 use super::{
-    LlmAssistantTurn, LlmChatResponse, LlmStreamEvent, LlmToolCall, MAX_PROVIDER_CONTINUATION_BYTES,
+    LlmAssistantTurn, LlmChatResponse, LlmStreamEvent, LlmToolCall,
+    INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE, MAX_PROVIDER_CONTINUATION_BYTES,
 };
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
@@ -16,6 +17,31 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::time::Duration;
+
+fn invalid_stream_tool_arguments_error(
+    provider_protocol: &'static str,
+    error: &serde_json::Error,
+    usage: Option<AgentUsage>,
+) -> AgentError {
+    let parse_category = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+
+    AgentError::structured(
+        INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE,
+        "模型返回的流式工具参数不完整或格式无效。",
+        json!({
+            "type": "invalid_stream_tool_arguments",
+            "retryable": true,
+            "providerProtocol": provider_protocol,
+            "parseCategory": parse_category,
+        }),
+    )
+    .with_usage(usage)
+}
 
 pub(super) async fn parse_sse_response<F>(
     response: reqwest::Response,
@@ -650,11 +676,7 @@ impl OpenAiStreamAccumulator {
                 continue;
             }
             let args = call.arguments.parse().map_err(|error| {
-                AgentError::new(format!(
-                    "OpenAI 流式 tool_call `{}` 的 arguments 不是有效 JSON：{error}",
-                    call.name
-                ))
-                .with_usage(error_usage.clone())
+                invalid_stream_tool_arguments_error("openai", &error, error_usage.clone())
             })?;
             tool_calls.push(LlmToolCall {
                 id: call.id.unwrap_or_default(),
@@ -854,10 +876,7 @@ impl AnthropicStreamAccumulator {
                 continue;
             };
             let args = parse_tool_arguments(&block.input_json).map_err(|error| {
-                AgentError::new(format!(
-                    "Anthropic 流式 tool_use `{name}` 的 input 不是有效 JSON：{error}"
-                ))
-                .with_usage(error_usage.clone())
+                invalid_stream_tool_arguments_error("anthropic", &error, error_usage.clone())
             })?;
             tool_calls.push(LlmToolCall {
                 id: block.id.unwrap_or_default(),
@@ -1187,6 +1206,21 @@ mod tests {
         .unwrap();
 
         let error = accumulator.finish().unwrap_err();
+        assert_eq!(error.code(), Some(INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE));
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("type"))
+                .and_then(Value::as_str),
+            Some("invalid_stream_tool_arguments")
+        );
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("retryable"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
         let usage = error.usage().unwrap();
         assert_eq!(usage.input_tokens, Some(12));
         assert_eq!(usage.output_tokens, Some(5));

@@ -66,6 +66,12 @@ describe('LLM retry transient status', () => {
     const text = screen.container.textContent ?? ''
     expect(text).toContain('正在重新连接')
     expect(text).toContain('1/2')
+    expect(screen.container.querySelector('.agent-thinking')?.textContent).toBe(
+      '正在重新连接（1/2）'
+    )
+    expect(screen.container.querySelector('.agent-run__elapsed')?.textContent).not.toContain(
+      '正在重新连接'
+    )
     expect(screen.container.textContent).not.toContain('provider_secret_code')
   })
 

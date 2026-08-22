@@ -50,6 +50,11 @@ use zeroize::Zeroizing;
 /// solely to bound memory, hashing and checkpoint amplification.
 pub(crate) const MAX_PROVIDER_TOOL_CALL_ID_BYTES: usize = 16 * 1024;
 
+/// The provider finished a streamed tool call without producing a complete JSON argument value.
+/// This is a recoverable model-response failure, not a network transport failure.
+pub(crate) const INVALID_STREAM_TOOL_ARGUMENTS_ERROR_CODE: &str =
+    "agent.invalid_stream_tool_arguments";
+
 #[derive(Clone)]
 pub(crate) struct LlmChatRequest {
     pub api_url: String,
