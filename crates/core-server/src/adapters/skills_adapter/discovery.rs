@@ -1,21 +1,31 @@
 use super::*;
 use mycopilot_core::skills::AgentSkillDiscoverySnapshot;
 
-/// Freezes the complete globally enabled Skill catalog for one Agent run.
-///
-/// Workspace Skills are intentionally absent: the global Settings page does not govern repository
-/// content, so those Skills remain explicit-only until a separate project policy is introduced.
+/// Freezes the complete enabled Skill catalog for one Agent run. Workspace Skills belong only to
+/// the current project and participate without global Settings enablement.
 /// Catalog truncation and registered-source failures are fail-closed because they make discovery
 /// incomplete. Diagnostics for one invalid installed receipt or immutable package stay isolated;
 /// the remaining verified descriptors can still be exposed deterministically.
 pub(crate) fn prepare_enabled_skill_discovery(
     storage: &StorageService,
     service: &SkillsService,
+    workspace: Option<(&str, &Path)>,
     effective_context_window_tokens: u32,
 ) -> Result<Option<AgentSkillDiscoverySnapshot>, String> {
-    let catalog = service
-        .list()
-        .map_err(|error| format!("Cannot discover enabled Skills: {error}"))?;
+    let workspace_source = workspace
+        .map(|(workspace_id, workspace_root)| {
+            SkillsService::for_workspace(workspace_id, workspace_root)
+                .map_err(|error| format!("Cannot register Workspace Skill discovery: {error}"))
+        })
+        .transpose()?;
+    let catalog = match workspace {
+        Some((workspace_id, workspace_root)) => service
+            .list_with_workspace(workspace_id, workspace_root)
+            .map_err(|error| format!("Cannot register Workspace Skill discovery: {error}"))?,
+        None => service
+            .list()
+            .map_err(|error| format!("Cannot discover enabled Skills: {error}"))?,
+    };
     if catalog.truncated() {
         return Err(
             "The Skill catalog was truncated and cannot be safely exposed to the Agent. Remove invalid or excessive installations and retry."
@@ -27,7 +37,10 @@ pub(crate) fn prepare_enabled_skill_discovery(
         .iter()
         .filter(|diagnostic| {
             diagnostic.severity() == SkillDiagnosticSeverity::Error
-                && service.is_registered_source_id(diagnostic.path())
+                && (service.is_registered_source_id(diagnostic.path())
+                    || workspace_source
+                        .as_ref()
+                        .is_some_and(|source| source.is_registered_source_id(diagnostic.path())))
                 && matches!(
                     diagnostic.code(),
                     SkillDiagnosticCode::SourceUnavailable
@@ -60,6 +73,12 @@ pub(crate) fn prepare_enabled_skill_discovery(
     let enabled = managed
         .into_iter()
         .filter(|skill| enablement.get(skill.id().as_str()) == Some(&true))
+        .chain(
+            catalog
+                .skills()
+                .iter()
+                .filter(|skill| skill.source_kind() == SkillSourceKind::Workspace),
+        )
         .collect::<Vec<_>>();
     if enabled.is_empty() {
         return Ok(None);

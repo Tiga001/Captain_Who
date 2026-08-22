@@ -1680,15 +1680,33 @@ impl AgentService {
         if selections.is_empty() {
             return Ok(discovery.map(|_| Arc::new(SkillResourceSession::empty())));
         }
-        self.skills
-            .restore_resource_session(&selections)
-            .map(Arc::new)
-            .map(Some)
-            .map_err(|error| {
-                AgentError::new(format!(
-                    "cannot restore activated Skill resource snapshot: {error}"
-                ))
-            })
+        let workspace = input
+            .context
+            .as_ref()
+            .and_then(|context| context.workspace.as_ref())
+            .and_then(|workspace| {
+                workspace
+                    .project_id
+                    .as_deref()
+                    .zip(workspace.root_path.as_deref())
+            });
+        match workspace {
+            Some((workspace_id, workspace_root)) => {
+                self.skills.restore_resource_session_with_workspace(
+                    workspace_id,
+                    std::path::Path::new(workspace_root),
+                    &selections,
+                )
+            }
+            None => self.skills.restore_resource_session(&selections),
+        }
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|error| {
+            AgentError::new(format!(
+                "cannot restore activated Skill resource snapshot: {error}"
+            ))
+        })
     }
 
     #[cfg(test)]

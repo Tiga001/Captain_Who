@@ -4,12 +4,14 @@ use super::model::{
     SkillReferenceError, SkillRegistrationError, SkillResolveError, SkillSelection, SkillSourceId,
     SkillSourceKind, SkillTrust,
 };
-use super::resolver::resolve_workspace_source;
+use super::resolver::{prepare_workspace_source_snapshot, resolve_workspace_source};
 use super::resource_runtime::{
-    restore_resolve_error, SkillResourceError, SkillResourceReaderRef, SkillResourceSessionBinding,
+    restore_resolve_error, SkillResourceError, SkillResourceReader, SkillResourceReaderRef,
+    SkillResourceSessionBinding, SkillResourceSourceError,
 };
 use super::workspace::percent_encode;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(super) trait SkillSource: Send + Sync {
     fn id(&self) -> &SkillSourceId;
@@ -139,6 +141,68 @@ impl SkillSource for WorkspaceSkillSource {
         selection: &SkillSelection,
     ) -> Result<ResolvedSkillPackage, SkillResolveError> {
         resolve_workspace_source(self, selection)
+    }
+
+    fn open_resource_reader(
+        &self,
+        package: &ResolvedSkillPackage,
+    ) -> Result<Option<SkillResourceReaderRef>, SkillResourceError> {
+        if package.id().source_id() != &self.source_id {
+            return Err(SkillResourceError::SourceContractViolation {
+                source_id: self.source_id.clone(),
+                reason: format!(
+                    "Skill `{}` does not belong to this workspace source",
+                    package.id()
+                ),
+            });
+        }
+        if package.resources().is_empty() {
+            return Ok(None);
+        }
+        let snapshot =
+            prepare_workspace_source_snapshot(self, &package.descriptor().selection())
+                .map_err(|error| restore_resolve_error(package.id(), package.revision(), error))?;
+        if snapshot.package.format_version() != package.format_version()
+            || snapshot.package.resource_index() != *package.resources()
+        {
+            return Err(SkillResourceError::SnapshotIntegrityMismatch {
+                skill_id: package.id().clone(),
+                revision: package.revision().clone(),
+                reason: "workspace package resources changed while activation was prepared"
+                    .to_string(),
+            });
+        }
+        Ok(Some(Arc::new(WorkspaceSkillResourceReader {
+            package: snapshot.package,
+        })))
+    }
+}
+
+struct WorkspaceSkillResourceReader {
+    package: super::prepared::PreparedSkillPackage,
+}
+
+impl SkillResourceReader for WorkspaceSkillResourceReader {
+    fn read(
+        &self,
+        expected: &super::model::SkillResourceDescriptor,
+    ) -> Result<Vec<u8>, SkillResourceSourceError> {
+        let resource = self
+            .package
+            .resources()
+            .iter()
+            .find(|resource| resource.descriptor().path() == expected.path())
+            .ok_or_else(|| {
+                SkillResourceSourceError::Unavailable(
+                    "the frozen workspace package has no such resource".to_string(),
+                )
+            })?;
+        if resource.descriptor() != expected {
+            return Err(SkillResourceSourceError::Integrity(
+                "the frozen workspace resource identity does not match its descriptor".to_string(),
+            ));
+        }
+        Ok(resource.bytes().to_vec())
     }
 }
 

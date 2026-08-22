@@ -35,6 +35,7 @@ pub(super) const AGENTS_DIRECTORY: &str = ".agents";
 pub(super) const SKILL_FILE_NAME: &str = "SKILL.md";
 pub(super) const MAX_SKILL_FILE_BYTES: usize = 256 * 1024;
 pub(super) const MAX_SKILL_ROOT_ENTRIES: usize = 2_000;
+#[allow(dead_code)]
 pub(super) const MAX_SKILL_DIRECTORY_ENTRIES: usize = 1_024;
 pub(super) const MAX_SKILL_SCAN_ENTRIES: usize = 10_000;
 pub(super) const MAX_SKILL_CATALOG_BYTES: usize = 16 * 1024 * 1024;
@@ -57,6 +58,7 @@ pub(super) enum WorkspaceRootError {
     Invalid(WorkspaceSourceIssue),
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(super) struct WorkspaceSourceIssue {
     pub code: SkillDiagnosticCode,
@@ -65,6 +67,7 @@ pub(super) struct WorkspaceSourceIssue {
     pub message: String,
 }
 
+#[allow(dead_code)]
 impl WorkspaceSourceIssue {
     fn error(
         path: impl Into<PathBuf>,
@@ -266,6 +269,7 @@ pub(super) fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
     false
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(super) struct LoadedWorkspaceSkill {
     pub directory_name: String,
@@ -274,6 +278,7 @@ pub(super) struct LoadedWorkspaceSkill {
     pub bytes: Vec<u8>,
 }
 
+#[allow(dead_code)]
 pub(super) fn load_workspace_skill(
     roots: &WorkspaceSkillRoots,
     skill_directory: &Path,
@@ -504,6 +509,7 @@ impl ByteBudget {
     }
 }
 
+#[allow(dead_code)]
 pub(super) enum ExactSkillFile {
     Found(PathBuf),
     Missing,
@@ -511,6 +517,7 @@ pub(super) enum ExactSkillFile {
     ScanBudgetExceeded,
 }
 
+#[allow(dead_code)]
 pub(super) fn find_exact_skill_file(
     skill_directory: &Path,
     scan_budget: &mut ScanBudget,

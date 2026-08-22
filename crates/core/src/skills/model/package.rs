@@ -204,6 +204,7 @@ pub struct SkillResourceDescriptor {
 }
 
 impl SkillResourceDescriptor {
+    #[allow(dead_code)]
     pub(crate) fn new(
         path: String,
         kind: SkillResourceKind,
@@ -299,6 +300,7 @@ impl fmt::Display for SkillPackageInvariantError {
 impl Error for SkillPackageInvariantError {}
 
 impl ResolvedSkillPackage {
+    #[allow(dead_code)]
     pub(crate) fn new(
         descriptor: SkillDescriptor,
         source_text: Arc<str>,

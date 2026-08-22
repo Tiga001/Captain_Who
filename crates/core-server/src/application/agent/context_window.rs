@@ -97,8 +97,12 @@ impl AgentService {
             .map(|(project, root)| (project.id.as_str(), root));
         let prepared_skills =
             activate_selected_skills(&self.storage, &self.skills, workspace, &input.skills)?;
-        let skill_discovery =
-            prepare_enabled_skill_discovery(&self.storage, &self.skills, context_window_tokens)?;
+        let skill_discovery = prepare_enabled_skill_discovery(
+            &self.storage,
+            &self.skills,
+            workspace,
+            context_window_tokens,
+        )?;
         let attachment_library = conversation_id
             .as_deref()
             .map(|conversation_id| {

@@ -97,6 +97,20 @@ collection of JSON-RPC handlers:
 Allowed dependencies are `transport -> application -> core` and
 `transport/application -> adapters -> core/protocol`. Adapters must not depend on transport.
 
+### Workspace Skills
+
+The current project's `.agents/skills/<directory>/SKILL.md` packages participate in the same
+model-discovery catalog as bundled and installed Skills. A Workspace Skill may carry the same
+revision-bound `references/`, `assets/`, `templates/`, and `scripts/` resources as an installed
+Skill. Discovery, activation, resource authority, and checkpoint recovery all bind the complete
+package snapshot rather than only `SKILL.md`; a changed package receives a new revision and cannot
+silently satisfy an older selection or restored run.
+
+Workspace Skills remain project-scoped. They are discovered only while that project is the active
+workspace, are not installed into the global managed store, and do not inherit a new trust or
+permission level. Script execution and materialization continue to use the existing capability,
+approval, and file-policy boundaries.
+
 ## Protocol ownership
 
 Protocol has two intentionally different levels:

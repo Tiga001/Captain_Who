@@ -192,10 +192,11 @@ impl AgentSkillDiscoverySnapshot {
                 skill.source_kind.as_str(),
                 value if value == SkillSourceKind::Bundled.stable_name()
                     || value == SkillSourceKind::Installed.stable_name()
+                    || value == SkillSourceKind::Workspace.stable_name()
             ) {
                 return Err(SkillDiscoverySnapshotError::Invalid {
                     reason: format!(
-                        "source kind `{}` is not eligible for global model discovery",
+                        "source kind `{}` is not eligible for model discovery",
                         skill.source_kind
                     ),
                 });

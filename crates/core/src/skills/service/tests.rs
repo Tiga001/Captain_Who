@@ -669,6 +669,56 @@ fn request_scoped_workspace_activation_keeps_other_registered_sources() {
 }
 
 #[test]
+fn request_scoped_workspace_resources_prepare_and_restore_through_the_exact_source() {
+    let workspace = tempdir().unwrap();
+    write_workspace_skill(workspace.path(), "workspace-skill");
+    let skill_root = workspace
+        .path()
+        .join(AGENTS_DIRECTORY)
+        .join(SKILLS_DIRECTORY)
+        .join("workspace-skill");
+    fs::create_dir_all(skill_root.join("references")).unwrap();
+    let guide = skill_root.join("references/guide.md");
+    fs::write(&guide, "request-scoped guide v1").unwrap();
+    let service = SkillsService::new();
+    let selection = service
+        .list_workspace("project", workspace.path())
+        .unwrap()
+        .skills()[0]
+        .selection();
+    let activated = service
+        .activate_workspace(
+            "project",
+            workspace.path(),
+            std::slice::from_ref(&selection),
+        )
+        .unwrap();
+
+    let initial = service
+        .resource_session_with_workspace("project", workspace.path(), &activated)
+        .unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial.sole_activation_binding_manifest().unwrap().1, 1);
+    let restored = service
+        .restore_resource_session_with_workspace(
+            "project",
+            workspace.path(),
+            std::slice::from_ref(&selection),
+        )
+        .unwrap();
+    assert_eq!(restored.package_uris(), initial.package_uris());
+
+    fs::write(&guide, "request-scoped guide v2").unwrap();
+    assert!(service
+        .restore_resource_session_with_workspace(
+            "project",
+            workspace.path(),
+            std::slice::from_ref(&selection),
+        )
+        .is_err());
+}
+
+#[test]
 fn request_scoped_workspace_activation_rejects_an_ambiguous_registered_source() {
     let workspace = tempdir().unwrap();
     write_workspace_skill(workspace.path(), "workspace-skill");

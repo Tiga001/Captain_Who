@@ -52,6 +52,7 @@ pub struct PreparedSkillPackage {
     revision: SkillRevision,
     name: String,
     description: String,
+    name_was_defaulted: bool,
     instructions_range: Range<usize>,
     origin: SkillPackageOrigin,
 }
@@ -88,6 +89,7 @@ impl PreparedSkillPackage {
             revision,
             name: validated.name,
             description: validated.description,
+            name_was_defaulted: validated.name_was_defaulted,
             instructions_range: validated.instructions_range,
             origin,
         })
@@ -126,6 +128,63 @@ impl PreparedSkillPackage {
         files: Vec<(String, Vec<u8>)>,
         origin: SkillPackageOrigin,
     ) -> Result<Self, SkillPackagePreparationError> {
+        Self::from_files_with_name_policy(files, origin, None)
+    }
+
+    /// Captures one workspace Skill directory using the same canonical package format as an
+    /// installed Skill while preserving the existing workspace-only directory-name fallback.
+    pub(super) fn from_workspace_directory(
+        directory: &Path,
+        reference: impl Into<String>,
+        default_name: &str,
+    ) -> Result<Self, SkillPackagePreparationError> {
+        let origin = SkillPackageOrigin::new("workspace", reference).map_err(|error| {
+            SkillPackagePreparationError::new(
+                SkillDiagnosticCode::SourceContractViolation,
+                format!("Invalid workspace origin reference: {error}"),
+            )
+        })?;
+        let files = read_local_skill_directory(directory)?;
+        Self::from_files_with_name_policy(files, origin, Some(default_name))
+    }
+
+    /// Computes the canonical package identity before parsing `SKILL.md`, allowing resolution to
+    /// report an exact stale selection ahead of content-validation errors.
+    pub(super) fn workspace_directory_revision(
+        directory: &Path,
+    ) -> Result<SkillRevision, SkillPackagePreparationError> {
+        let mut files = read_local_skill_directory(directory)?;
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        let skill = files
+            .iter()
+            .find(|(path, _)| path == super::workspace::SKILL_FILE_NAME)
+            .ok_or_else(|| {
+                SkillPackagePreparationError::new(
+                    SkillDiagnosticCode::MissingSkillFile,
+                    "Skill package does not contain an exact-case SKILL.md file.",
+                )
+            })?;
+        if files.len() == 1 {
+            return Ok(package_revision(&skill.1));
+        }
+        let entries = files
+            .into_iter()
+            .map(|(path, bytes)| {
+                SkillPackagePath::parse(path)
+                    .map(|path| PackageManifestEntry::from_bytes(path, &bytes))
+                    .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let manifest = PackageManifest::new(entries)
+            .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+        Ok(manifest.revision())
+    }
+
+    fn from_files_with_name_policy(
+        files: Vec<(String, Vec<u8>)>,
+        origin: SkillPackageOrigin,
+        default_name: Option<&str>,
+    ) -> Result<Self, SkillPackagePreparationError> {
         if files.is_empty() || files.len() > MAX_SKILL_PACKAGE_FILES {
             return Err(SkillPackagePreparationError::new(
                 SkillDiagnosticCode::TooManyEntries,
@@ -157,11 +216,25 @@ impl PreparedSkillPackage {
             })?;
         if canonical.len() == 1 {
             let (_, bytes) = canonical.pop().expect("one package file");
-            return Self::from_bytes(bytes, origin);
+            let validated = validate_skill_bytes(bytes, default_name)
+                .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+            let revision = package_revision(validated.source.as_bytes());
+            return Ok(Self {
+                format_version: SKILL_PACKAGE_FORMAT_VERSION,
+                source: validated.source,
+                resources: Arc::from([]),
+                manifest_bytes: None,
+                revision,
+                name: validated.name,
+                description: validated.description,
+                name_was_defaulted: validated.name_was_defaulted,
+                instructions_range: validated.instructions_range,
+                origin,
+            });
         }
 
         let skill_bytes = canonical[skill_index].1.clone();
-        let validated = validate_installable_skill_bytes(skill_bytes)
+        let validated = validate_skill_bytes(skill_bytes, default_name)
             .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
         let manifest = PackageManifest::new(
             canonical
@@ -205,6 +278,7 @@ impl PreparedSkillPackage {
             revision,
             name: validated.name,
             description: validated.description,
+            name_was_defaulted: validated.name_was_defaulted,
             instructions_range: validated.instructions_range,
             origin,
         })
@@ -226,12 +300,24 @@ impl PreparedSkillPackage {
         &self.description
     }
 
+    pub(super) fn name_was_defaulted(&self) -> bool {
+        self.name_was_defaulted
+    }
+
     pub fn origin(&self) -> &SkillPackageOrigin {
         &self.origin
     }
 
     pub fn source_bytes(&self) -> &[u8] {
         self.source.as_bytes()
+    }
+
+    pub(super) fn source(&self) -> Arc<str> {
+        Arc::clone(&self.source)
+    }
+
+    pub(super) fn instructions_range(&self) -> Range<usize> {
+        self.instructions_range.clone()
     }
 
     /// Bytes retained by the immutable package payload while it is staged in
@@ -325,6 +411,7 @@ pub(super) struct ValidatedSkillDocument {
     pub source: Arc<str>,
     pub name: String,
     pub description: String,
+    pub name_was_defaulted: bool,
     pub instructions_range: Range<usize>,
 }
 
@@ -336,6 +423,20 @@ pub(super) struct SkillPackageContentError {
 
 pub(super) fn validate_installable_skill_bytes(
     bytes: Vec<u8>,
+) -> Result<ValidatedSkillDocument, SkillPackageContentError> {
+    let validated = validate_skill_bytes(bytes, None)?;
+    if validated.name_was_defaulted {
+        return Err(content_error(
+            SkillDiagnosticCode::InvalidName,
+            "User-installed Skills must declare an explicit frontmatter name.",
+        ));
+    }
+    Ok(validated)
+}
+
+fn validate_skill_bytes(
+    bytes: Vec<u8>,
+    default_name: Option<&str>,
 ) -> Result<ValidatedSkillDocument, SkillPackageContentError> {
     if bytes.len() > MAX_SKILL_FILE_BYTES {
         return Err(content_error(
@@ -355,22 +456,18 @@ pub(super) fn validate_installable_skill_bytes(
             "SKILL.md must be valid UTF-8.",
         )
     })?;
-    let document = parse_skill_document(&source, "").map_err(|error| {
-        content_error(
-            error.diagnostic_code(),
-            format!("Invalid Skill document: {error}"),
-        )
-    })?;
-    if document.metadata.name_was_defaulted {
-        return Err(content_error(
-            SkillDiagnosticCode::InvalidName,
-            "User-installed Skills must declare an explicit frontmatter name.",
-        ));
-    }
+    let document =
+        parse_skill_document(&source, default_name.unwrap_or_default()).map_err(|error| {
+            content_error(
+                error.diagnostic_code(),
+                format!("Invalid Skill document: {error}"),
+            )
+        })?;
     Ok(ValidatedSkillDocument {
         source: Arc::from(source),
         name: document.metadata.name,
         description: document.metadata.description,
+        name_was_defaulted: document.metadata.name_was_defaulted,
         instructions_range: document.instructions_range,
     })
 }

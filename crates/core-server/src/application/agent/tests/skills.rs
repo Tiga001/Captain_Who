@@ -28,13 +28,17 @@ fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
     let prepared = prepare_conversation_turn(
         &storage,
         &skills,
-        skill_turn_input("project-skills", selection, "conversation-skills"),
+        skill_turn_input("project-skills", selection.clone(), "conversation-skills"),
         "run-skills",
     )
     .unwrap();
 
     let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
-    assert!(prepared.agent_input.skill_discovery.is_none());
+    let discovery = prepared.agent_input.skill_discovery.as_ref().unwrap();
+    assert_eq!(discovery.skills.len(), 1);
+    assert_eq!(discovery.skills[0].id, selection.id);
+    assert_eq!(discovery.skills[0].revision, selection.revision);
+    assert_eq!(discovery.skills[0].source_kind, "workspace");
     assert_eq!(activation.skills.len(), 1);
     assert_eq!(activation.skills[0].instructions.trim(), INSTRUCTIONS);
     assert_eq!(prepared.output.activated_skills.len(), 1);

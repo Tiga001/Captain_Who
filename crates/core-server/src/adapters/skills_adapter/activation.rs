@@ -16,7 +16,7 @@ pub(crate) fn activate_workspace(
         .activate_workspace(workspace_id, workspace_root, &selections)
         .map_err(activation_failure)?;
 
-    prepare_activated_skills(service, activated, Some(workspace_id))
+    prepare_activated_skills(service, activated, Some((workspace_id, workspace_root)))
 }
 
 /// Resolves one run's selected Skills while enforcing durable enablement at
@@ -69,19 +69,13 @@ pub(crate) fn activate_selected_skills(
         return Err(SkillActivationFailure::disabled(disabled_id.clone()));
     }
 
-    let (activated, expected_workspace_id) = match workspace {
-        Some((workspace_id, workspace_root)) => (
-            service
-                .activate_workspace(workspace_id, workspace_root, &selections)
-                .map_err(activation_failure)?,
-            Some(workspace_id),
-        ),
-        None => (
-            service.activate(&selections).map_err(activation_failure)?,
-            None,
-        ),
+    let activated = match workspace {
+        Some((workspace_id, workspace_root)) => service
+            .activate_workspace(workspace_id, workspace_root, &selections)
+            .map_err(activation_failure)?,
+        None => service.activate(&selections).map_err(activation_failure)?,
     };
-    prepare_activated_skills(service, activated, expected_workspace_id)
+    prepare_activated_skills(service, activated, workspace)
 }
 
 /// Creates the host-only resolver used by the model-facing `skills_activate` tool.
@@ -92,6 +86,7 @@ pub(crate) fn activate_selected_skills(
 pub(crate) fn model_skill_activation_resolver(
     storage: std::sync::Arc<StorageService>,
     service: std::sync::Arc<SkillsService>,
+    workspace: Option<(String, std::path::PathBuf)>,
 ) -> AgentSkillActivationResolver {
     std::sync::Arc::new(move |selection: &SkillSelection| {
         let source_kind = selection
@@ -100,10 +95,10 @@ pub(crate) fn model_skill_activation_resolver(
             .as_str()
             .split_once(':')
             .map(|(kind, _)| kind);
-        if !matches!(source_kind, Some("bundled" | "installed")) {
+        if !matches!(source_kind, Some("bundled" | "installed" | "workspace")) {
             return Err(AgentError::structured(
                 "skill.notImplicitlyDiscoverable",
-                "Only globally managed Skills can be activated through skills_activate.",
+                "Only Skills from this run's frozen catalog can be activated through skills_activate.",
                 serde_json::json!({
                     "type": "skillActivation",
                     "code": "skill.notImplicitlyDiscoverable",
@@ -113,39 +108,67 @@ pub(crate) fn model_skill_activation_resolver(
             ));
         }
         let skill_id = selection.skill_id().as_str().to_string();
-        let enablement = storage
-            .load_skill_enablement(std::slice::from_ref(&skill_id))
-            .map_err(|error| {
-                AgentError::structured(
-                    "skill.enablementUnavailable",
-                    format!("Cannot verify Skill enablement: {error}"),
+        if matches!(source_kind, Some("bundled" | "installed")) {
+            let enablement = storage
+                .load_skill_enablement(std::slice::from_ref(&skill_id))
+                .map_err(|error| {
+                    AgentError::structured(
+                        "skill.enablementUnavailable",
+                        format!("Cannot verify Skill enablement: {error}"),
+                        serde_json::json!({
+                            "type": "skillActivation",
+                            "code": "skill.enablementUnavailable",
+                            "recovery": "retry",
+                            "skillId": skill_id,
+                        }),
+                    )
+                })?;
+            if enablement.get(&skill_id) != Some(&true) {
+                return Err(AgentError::structured(
+                    "skill.disabled",
+                    format!("Skill `{skill_id}` is disabled in Settings."),
                     serde_json::json!({
                         "type": "skillActivation",
-                        "code": "skill.enablementUnavailable",
-                        "recovery": "retry",
+                        "code": "skill.disabled",
+                        "recovery": "enableSkill",
                         "skillId": skill_id,
                     }),
-                )
-            })?;
-        if enablement.get(&skill_id) != Some(&true) {
-            return Err(AgentError::structured(
-                "skill.disabled",
-                format!("Skill `{skill_id}` is disabled in Settings."),
-                serde_json::json!({
-                    "type": "skillActivation",
-                    "code": "skill.disabled",
-                    "recovery": "enableSkill",
-                    "skillId": skill_id,
-                }),
-            ));
+                ));
+            }
         }
 
-        let activated = service
-            .activate(std::slice::from_ref(selection))
-            .map_err(activation_failure)
-            .map_err(agent_activation_error)?;
-        let prepared =
-            prepare_activated_skills(&service, activated, None).map_err(agent_activation_error)?;
+        let activated = match source_kind {
+            Some("workspace") => {
+                let (workspace_id, workspace_root) = workspace.as_ref().ok_or_else(|| {
+                    AgentError::structured(
+                        "skill.workspaceUnavailable",
+                        "This run has no workspace for the selected Workspace Skill.",
+                        serde_json::json!({
+                            "type": "skillActivation",
+                            "code": "skill.workspaceUnavailable",
+                            "recovery": "restartRun",
+                            "skillId": skill_id,
+                        }),
+                    )
+                })?;
+                service.activate_workspace(
+                    workspace_id,
+                    workspace_root,
+                    std::slice::from_ref(selection),
+                )
+            }
+            _ => service.activate(std::slice::from_ref(selection)),
+        }
+        .map_err(activation_failure)
+        .map_err(agent_activation_error)?;
+        let prepared = prepare_activated_skills(
+            &service,
+            activated,
+            workspace
+                .as_ref()
+                .map(|(workspace_id, root)| (workspace_id.as_str(), root.as_path())),
+        )
+        .map_err(agent_activation_error)?;
         let mut runtime = prepared.runtime.ok_or_else(|| {
             AgentError::new("Skill resolver produced no runtime activation snapshot.")
         })?;
@@ -195,8 +218,9 @@ pub(super) fn parse_selections(
 pub(super) fn prepare_activated_skills(
     service: &SkillsService,
     activated: mycopilot_core::skills::ActivatedSkillSet,
-    expected_workspace_id: Option<&str>,
+    workspace: Option<(&str, &Path)>,
 ) -> Result<PreparedSkillActivation, SkillActivationFailure> {
+    let expected_workspace_id = workspace.map(|(workspace_id, _)| workspace_id);
     for skill in activated.skills() {
         validate_protocol_descriptor(skill.descriptor(), expected_workspace_id).map_err(
             |message| {
@@ -208,7 +232,13 @@ pub(super) fn prepare_activated_skills(
         )?;
     }
 
-    let resource_session = service.resource_session(&activated).map_err(|error| {
+    let resource_session = match workspace {
+        Some((workspace_id, workspace_root)) => {
+            service.resource_session_with_workspace(workspace_id, workspace_root, &activated)
+        }
+        None => service.resource_session(&activated),
+    }
+    .map_err(|error| {
         SkillActivationFailure::invalid_selection(
             error.skill_id().map(|id| id.as_str().to_string()),
             format!("Cannot prepare activated Skill resources: {error}"),

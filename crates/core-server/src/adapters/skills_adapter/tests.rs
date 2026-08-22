@@ -35,10 +35,10 @@ fn agent_discovery_freezes_every_enabled_managed_skill_with_deterministic_refs()
         .with_installed_source(&store_root)
         .unwrap();
 
-    let first = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let first = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
-    let second = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let second = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
 
@@ -57,6 +57,74 @@ fn agent_discovery_freezes_every_enabled_managed_skill_with_deterministic_refs()
         .skills
         .iter()
         .all(|skill| skill.activation_ref.starts_with("s_") && skill.activation_ref.len() == 26));
+}
+
+#[test]
+fn workspace_skill_is_auto_discovered_with_full_resources_and_exact_activation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let workspace = fixture.path().join("workspace");
+    let skill = workspace
+        .join(".agents")
+        .join("skills")
+        .join("project-auditor");
+    std::fs::create_dir_all(skill.join("references")).unwrap();
+    std::fs::create_dir_all(skill.join("assets")).unwrap();
+    std::fs::create_dir_all(skill.join("templates")).unwrap();
+    std::fs::create_dir_all(skill.join("scripts")).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: project-auditor\ndescription: Audit this project.\n---\n# Audit\nUse the bundled project evidence.\n",
+    )
+    .unwrap();
+    let reference = skill.join("references/guide.md");
+    std::fs::write(&reference, "workspace reference v1").unwrap();
+    std::fs::write(skill.join("assets/icon.bin"), [1_u8, 2, 3]).unwrap();
+    std::fs::write(skill.join("templates/report.md"), "report template").unwrap();
+    std::fs::write(skill.join("scripts/check.py"), "print('ok')\n").unwrap();
+    let service = Arc::new(SkillsService::new());
+
+    let discovery = prepare_enabled_skill_discovery(
+        &storage,
+        &service,
+        Some(("project-1", workspace.as_path())),
+        128_000,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(discovery.skills.len(), 1);
+    let entry = &discovery.skills[0];
+    assert_eq!(entry.source_kind, "workspace");
+    assert_eq!(entry.name, "project-auditor");
+
+    let resolver = model_skill_activation_resolver(
+        Arc::clone(&storage),
+        Arc::clone(&service),
+        Some(("project-1".to_string(), workspace.clone())),
+    );
+    let selection = SkillSelection::parse(entry.id.clone(), entry.revision.clone()).unwrap();
+    let resolved = resolver(&selection).unwrap();
+    let resources = resolved.skill.resources.as_ref().unwrap();
+    assert_eq!(resources.resource_count, 4);
+    assert_eq!(
+        resources.kinds,
+        vec!["asset", "other", "reference", "script"]
+    );
+    assert_eq!(resolved.resources.package_uris().len(), 1);
+
+    std::fs::write(&reference, "workspace reference v2").unwrap();
+    let stale = resolver(&selection).unwrap_err();
+    assert_eq!(stale.code(), Some("skill.activationFailed"));
+    let changed = prepare_enabled_skill_discovery(
+        &storage,
+        &service,
+        Some(("project-1", workspace.as_path())),
+        128_000,
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(changed.skills[0].revision, entry.revision);
+    assert_ne!(changed.skills[0].activation_ref, entry.activation_ref);
 }
 
 #[test]
@@ -91,7 +159,7 @@ fn agent_discovery_isolates_a_broken_receipt_and_keeps_valid_skills() {
         diagnostic.severity() == SkillDiagnosticSeverity::Error
             && diagnostic.code() == SkillDiagnosticCode::InvalidInstallationReceipt
     }));
-    let discovery = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let discovery = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
 
@@ -122,7 +190,7 @@ fn agent_discovery_rejects_an_unavailable_registered_source() {
         diagnostic.code() == SkillDiagnosticCode::SourceUnavailable
             && diagnostic.path() == "installed:user"
     }));
-    let error = prepare_enabled_skill_discovery(&storage, &service, 128_000).unwrap_err();
+    let error = prepare_enabled_skill_discovery(&storage, &service, None, 128_000).unwrap_err();
 
     assert!(error.contains("source-level error"));
 }
@@ -153,7 +221,7 @@ fn agent_discovery_keeps_complete_catalogs_with_nonfatal_warnings() {
         .diagnostics()
         .iter()
         .any(|diagnostic| diagnostic.severity() == SkillDiagnosticSeverity::Warning));
-    let discovery = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let discovery = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
 
@@ -175,7 +243,7 @@ fn agent_discovery_honors_settings_enablement_and_revises_the_frozen_catalog() {
     let service = SkillsService::new().with_bundled_source().unwrap();
     let descriptor = service.list().unwrap().skills()[0].clone();
 
-    let enabled = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let enabled = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
     assert!(enabled
@@ -186,7 +254,7 @@ fn agent_discovery_honors_settings_enablement_and_revises_the_frozen_catalog() {
     storage
         .set_skill_enablement_override(descriptor.id().as_str(), false)
         .unwrap();
-    let disabled = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let disabled = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
     assert!(disabled
@@ -198,7 +266,7 @@ fn agent_discovery_honors_settings_enablement_and_revises_the_frozen_catalog() {
     storage
         .set_skill_enablement_override(descriptor.id().as_str(), true)
         .unwrap();
-    let restored = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let restored = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
     assert_eq!(restored, enabled);
@@ -208,9 +276,11 @@ fn agent_discovery_honors_settings_enablement_and_revises_the_frozen_catalog() {
             .set_skill_enablement_override(skill.id().as_str(), false)
             .unwrap();
     }
-    assert!(prepare_enabled_skill_discovery(&storage, &service, 128_000)
-        .unwrap()
-        .is_none());
+    assert!(
+        prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -218,12 +288,13 @@ fn model_activation_resolver_rechecks_enablement_after_discovery_is_frozen() {
     let fixture = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let service = Arc::new(SkillsService::new().with_bundled_source().unwrap());
-    let discovery = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+    let discovery = prepare_enabled_skill_discovery(&storage, &service, None, 128_000)
         .unwrap()
         .unwrap();
     let entry = discovery.skills.first().unwrap();
     let selection = SkillSelection::parse(entry.id.clone(), entry.revision.clone()).unwrap();
-    let resolver = model_skill_activation_resolver(Arc::clone(&storage), Arc::clone(&service));
+    let resolver =
+        model_skill_activation_resolver(Arc::clone(&storage), Arc::clone(&service), None);
 
     let resolved = resolver(&selection).unwrap();
     assert_eq!(resolved.skill.id, entry.id);

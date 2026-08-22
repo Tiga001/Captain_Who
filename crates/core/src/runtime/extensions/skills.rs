@@ -913,15 +913,23 @@ fn source_kind(source_id: &str) -> Option<&str> {
     source_id.split_once(':').map(|(kind, _)| kind)
 }
 
-fn is_globally_managed(record: &ActivatedSkillRecord) -> bool {
-    matches!(source_kind(&record.source), Some("bundled" | "installed"))
+fn is_discovery_managed(record: &ActivatedSkillRecord) -> bool {
+    matches!(
+        source_kind(&record.source),
+        Some("bundled" | "installed" | "workspace")
+    )
 }
 
 fn validate_record_against_discovery(
     record: &ActivatedSkillRecord,
     discovery: Option<&AgentSkillDiscoverySnapshot>,
 ) -> AgentResult<()> {
-    if !is_globally_managed(record) {
+    if !is_discovery_managed(record) {
+        return Ok(());
+    }
+    if source_kind(&record.source) == Some("workspace") && discovery.is_none() {
+        // Explicit user selections from pre-discovery or project-preview paths retain their
+        // request-scoped Host authority without pretending to be globally enabled.
         return Ok(());
     }
     let entry = discovery
@@ -1081,7 +1089,7 @@ fn validate_resource_authority(
     for record in active.values().filter(|record| match requirement {
         ResourceAuthorityRequirement::Initial => true,
         ResourceAuthorityRequirement::Restored => {
-            record.has_resources || is_globally_managed(record)
+            record.has_resources || is_discovery_managed(record)
         }
     }) {
         if !resource_packages.iter().any(|package| {
@@ -1331,7 +1339,7 @@ pub(in crate::runtime) fn checkpoint_authority_from_snapshots(
                 skill.id
             )));
         }
-        if skill.has_resources || is_globally_managed(&skill) {
+        if skill.has_resources || is_discovery_managed(&skill) {
             selections.push(
                 SkillSelection::parse(skill.id.clone(), skill.revision.clone()).map_err(
                     |error| AgentError::new(format!("Invalid Skill checkpoint selection: {error}")),

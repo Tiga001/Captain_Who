@@ -1,17 +1,16 @@
-use super::digest::package_revision;
 use super::model::SkillId;
 use super::model::{
     SkillActivationScope, SkillCatalog, SkillDescriptor, SkillDescriptorParts, SkillDiagnostic,
     SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscoveryError, SkillProvenance,
     SkillSourceKind, SkillTrust,
 };
-use super::parser::parse_skill_document;
+use super::prepared::PreparedSkillPackage;
 use super::service::finalize_catalog;
 use super::source::WorkspaceSkillSource;
 use super::workspace::{
-    load_workspace_skill, percent_encode, resolve_workspace_skills_root, ByteBudget, ScanBudget,
-    WorkspaceRootError, WorkspaceSkillsRoot, MAX_SKILL_CATALOG_BYTES, MAX_SKILL_ROOT_ENTRIES,
-    MAX_SKILL_SCAN_ENTRIES,
+    percent_encode, relative_display, resolve_workspace_skills_root, validate_skill_directory_name,
+    ByteBudget, ScanBudget, WorkspaceRootError, WorkspaceSkillsRoot, MAX_SKILL_CATALOG_BYTES,
+    MAX_SKILL_ROOT_ENTRIES, MAX_SKILL_SCAN_ENTRIES, SKILL_FILE_NAME,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 use super::workspace::{
     find_exact_skill_file, normalize_windows_path_units, read_bounded_verified,
     read_open_file_bounded, BoundedReadError, ExactSkillFile, AGENTS_DIRECTORY,
-    MAX_SKILL_FILE_BYTES, SKILLS_DIRECTORY, SKILL_FILE_NAME,
+    MAX_SKILL_FILE_BYTES, SKILLS_DIRECTORY,
 };
 #[cfg(test)]
 use std::fs::File;
@@ -56,69 +55,87 @@ pub(super) fn list_workspace_source(
     let mut byte_budget = ByteBudget::new(MAX_SKILL_CATALOG_BYTES);
     let mut catalog_truncated = false;
     for skill_directory in candidates {
-        let loaded = match load_workspace_skill(
-            &roots,
-            &skill_directory,
-            &mut scan_budget,
-            &mut byte_budget,
-        ) {
-            Ok(loaded) => loaded,
-            Err(issue) => {
-                let truncates_catalog = issue.truncates_catalog();
-                diagnostics.push(diagnostic(
-                    &issue.path,
-                    issue.code,
-                    issue.severity,
-                    issue.message,
-                ));
-                if truncates_catalog {
-                    catalog_truncated = true;
-                    break;
-                }
-                continue;
-            }
-        };
-        let directory_name = loaded.directory_name.as_str();
-        let canonical_skill_file = &loaded.canonical_path;
-        let bytes = &loaded.bytes;
-
-        if bytes.contains(&0) {
+        let Some(directory_name) = skill_directory.file_name().and_then(|name| name.to_str())
+        else {
             diagnostics.push(diagnostic(
-                canonical_skill_file,
-                SkillDiagnosticCode::NulByte,
+                &skill_directory,
+                SkillDiagnosticCode::UnsupportedPathEncoding,
                 SkillDiagnosticSeverity::Error,
-                "SKILL.md contains a NUL byte.",
+                "Workspace Skill directory names must use valid UTF-8.",
+            ));
+            continue;
+        };
+        if let Err(reason) = validate_skill_directory_name(directory_name) {
+            diagnostics.push(diagnostic(
+                &skill_directory,
+                SkillDiagnosticCode::InvalidDirectoryName,
+                SkillDiagnosticSeverity::Error,
+                reason,
             ));
             continue;
         }
-        let contents = match std::str::from_utf8(bytes) {
-            Ok(contents) => contents,
-            Err(_) => {
-                diagnostics.push(diagnostic(
-                    canonical_skill_file,
-                    SkillDiagnosticCode::InvalidUtf8,
-                    SkillDiagnosticSeverity::Error,
-                    "SKILL.md must be valid UTF-8.",
-                ));
-                continue;
-            }
-        };
-        let document = match parse_skill_document(contents, directory_name) {
-            Ok(document) => document,
+        let skill_file = skill_directory.join(SKILL_FILE_NAME);
+        let reference = format!(
+            "{}:{}",
+            source.workspace_id(),
+            percent_encode(directory_name.as_bytes())
+        );
+        let package = match PreparedSkillPackage::from_workspace_directory(
+            &skill_directory,
+            reference,
+            directory_name,
+        ) {
+            Ok(package) => package,
             Err(error) => {
+                let code = if error.code() == SkillDiagnosticCode::UnexpectedPackageEntry
+                    && error
+                        .reason()
+                        .contains("entrypoint must use the exact-case")
+                {
+                    SkillDiagnosticCode::MissingSkillFile
+                } else {
+                    error.code()
+                };
                 diagnostics.push(diagnostic(
-                    canonical_skill_file,
-                    error.diagnostic_code(),
+                    &skill_file,
+                    code,
                     SkillDiagnosticSeverity::Error,
-                    error.to_string(),
+                    error.reason(),
                 ));
                 continue;
             }
         };
-        let metadata = document.metadata;
-        if metadata.name_was_defaulted {
+        let package_entries = package.resource_index().len().saturating_add(1);
+        if (0..package_entries).any(|_| !scan_budget.consume_entry()) {
             diagnostics.push(diagnostic(
-                canonical_skill_file,
+                canonical_skills_root,
+                SkillDiagnosticCode::ScanBudgetExceeded,
+                SkillDiagnosticSeverity::Warning,
+                format!(
+                    "Workspace Skill discovery exceeded its {MAX_SKILL_SCAN_ENTRIES}-entry scan budget."
+                ),
+            ));
+            catalog_truncated = true;
+            break;
+        }
+        let package_bytes = package.retained_payload_bytes();
+        if package_bytes > byte_budget.remaining_bytes {
+            diagnostics.push(diagnostic(
+                canonical_skills_root,
+                SkillDiagnosticCode::CatalogTooLarge,
+                SkillDiagnosticSeverity::Warning,
+                format!(
+                    "Workspace Skill catalog exceeds the {MAX_SKILL_CATALOG_BYTES}-byte scan budget."
+                ),
+            ));
+            catalog_truncated = true;
+            break;
+        }
+        byte_budget.remaining_bytes -= package_bytes;
+
+        if package.name_was_defaulted() {
+            diagnostics.push(diagnostic(
+                &skill_file,
                 SkillDiagnosticCode::DefaultedName,
                 SkillDiagnosticSeverity::Warning,
                 format!("Skill frontmatter has no name; using directory name `{directory_name}`."),
@@ -130,7 +147,7 @@ pub(super) fn list_workspace_source(
             Ok(id) => id,
             Err(error) => {
                 diagnostics.push(diagnostic(
-                    canonical_skill_file,
+                    &skill_file,
                     SkillDiagnosticCode::InvalidDirectoryName,
                     SkillDiagnosticSeverity::Error,
                     format!("Skill directory cannot form a bounded Skill id: {error}"),
@@ -140,15 +157,15 @@ pub(super) fn list_workspace_source(
         };
         skills.push(SkillDescriptor::new(SkillDescriptorParts {
             id,
-            name: metadata.name,
-            description: metadata.description,
+            name: package.name().to_string(),
+            description: package.description().to_string(),
             source_kind: SkillSourceKind::Workspace,
             trust: SkillTrust::Untrusted,
             activation_scope: SkillActivationScope::Run,
-            revision: package_revision(bytes),
+            revision: package.revision().clone(),
             provenance: SkillProvenance::Workspace {
                 workspace_id: source.workspace_id().to_owned(),
-                relative_path: loaded.relative_path,
+                relative_path: relative_display(&roots.workspace_root, &skill_file),
             },
         }));
     }
@@ -562,7 +579,10 @@ mod tests {
             .map(SkillDiagnostic::code)
             .collect::<Vec<_>>();
 
-        assert!(codes.contains(&SkillDiagnosticCode::MissingSkillFile));
+        assert!(
+            codes.contains(&SkillDiagnosticCode::MissingSkillFile),
+            "diagnostic codes: {codes:?}"
+        );
         assert!(codes.contains(&SkillDiagnosticCode::InvalidUtf8));
         assert!(codes.contains(&SkillDiagnosticCode::NulByte));
         assert!(codes.contains(&SkillDiagnosticCode::SkillFileTooLarge));

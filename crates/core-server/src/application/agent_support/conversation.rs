@@ -349,7 +349,7 @@ fn prepare_conversation_turn_from_source(
     let prepared_skills =
         activate_selected_skills(storage, skills_service, workspace, &input.skills)?;
     let skill_discovery =
-        prepare_enabled_skill_discovery(storage, skills_service, context_window_tokens)?;
+        prepare_enabled_skill_discovery(storage, skills_service, workspace, context_window_tokens)?;
 
     let mut conversation = existing.unwrap_or_else(|| ChatConversationRecord {
         id: conversation_id.clone(),

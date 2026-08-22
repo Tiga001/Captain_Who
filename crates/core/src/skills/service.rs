@@ -267,6 +267,22 @@ impl SkillsService {
         SkillResourceSession::from_bindings(bindings)
     }
 
+    /// Creates resource authority for an activation that may include request-scoped Workspace
+    /// Skills. The scoped source is used only to freeze exact package bytes for this run.
+    pub fn resource_session_with_workspace(
+        &self,
+        workspace_id: &str,
+        workspace_root: &Path,
+        activated: &ActivatedSkillSet,
+    ) -> Result<SkillResourceSession, SkillResourceError> {
+        let service = self
+            .with_request_workspace(workspace_id, workspace_root)
+            .map_err(|error| SkillResourceError::InvalidRequest {
+                reason: format!("cannot register workspace Skill resource authority: {error}"),
+            })?;
+        service.resource_session(activated)
+    }
+
     /// Restore run-scoped resource grants from persisted activated id +
     /// revision metadata, such as a pending approval after process restart.
     ///
@@ -319,6 +335,22 @@ impl SkillsService {
             bindings.push(binding);
         }
         SkillResourceSession::from_bindings(bindings)
+    }
+
+    /// Restores exact resource identities for a run that may contain Workspace Skills. Mutable
+    /// project files are never followed across revisions: a changed package fails closed.
+    pub fn restore_resource_session_with_workspace(
+        &self,
+        workspace_id: &str,
+        workspace_root: &Path,
+        selections: &[SkillSelection],
+    ) -> Result<SkillResourceSession, SkillResourceError> {
+        let service = self
+            .with_request_workspace(workspace_id, workspace_root)
+            .map_err(|error| SkillResourceError::InvalidRequest {
+                reason: format!("cannot register workspace Skill resource authority: {error}"),
+            })?;
+        service.restore_resource_session(selections)
     }
 
     /// Compatibility adapter for request-scoped workspace lookup.
