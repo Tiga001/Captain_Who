@@ -3211,28 +3211,62 @@ impl AgentRuntime {
     }
 }
 
-/// Revalidates every ToolCall identity frozen into a resumed run against the trusted registry.
+/// Revalidates every authority-bearing ToolCall identity frozen into a resumed run.
 ///
-/// `Unregistered` is a rejection-only audit identity for hallucinated calls. It is deliberately
-/// impossible to use as checkpoint, approval, or execution authority. Likewise, a registered tool
-/// whose implementation identity changed cannot be resumed merely because its provider-visible
-/// name stayed the same.
+/// A conclusively failed `Unregistered` call is retained only as paired audit history; it never
+/// becomes checkpoint, approval, or execution authority. Any unresolved unknown call, legacy
+/// identity, or registered tool whose implementation identity changed remains fail-closed even
+/// when its provider-visible name stayed the same.
 fn validate_resumed_tool_provenance(
     recorder: &ConversationTraceRecorder,
     tool_registry: &ToolRegistry,
 ) -> AgentResult<()> {
-    for item in recorder.checkpoint_snapshot().items {
+    let snapshot = recorder.checkpoint_snapshot();
+    for (item_index, item) in snapshot.items.iter().enumerate() {
         let ConversationTurnTraceItem::ToolCall {
-            tool, provenance, ..
+            sequence: call_sequence,
+            call_id,
+            tool,
+            provenance,
+            approval_status,
+            ..
         } = item
         else {
             continue;
         };
+
+        if let AgentToolIdentity::Unregistered { tool_name } = provenance {
+            // An unknown model call is allowed to remain in the immutable audit prefix only after
+            // it has been conclusively rejected. It carries no execution authority into the
+            // resumed batch. Unresolved, mismatched, or non-failure records remain fail-closed.
+            let has_matching_failure = tool_name == tool
+                && *approval_status == AgentApprovalStatus::NotRequired
+                && matches!(
+                    snapshot.items.get(item_index.saturating_add(1)),
+                    Some(ConversationTurnTraceItem::ToolResult {
+                        sequence: result_sequence,
+                        call_id: result_call_id,
+                        tool: result_tool,
+                        status: crate::conversation_trace::ConversationTraceToolResultStatus::Failed,
+                        success: false,
+                        approval_status: AgentApprovalStatus::NotRequired,
+                        ..
+                    }) if result_sequence > call_sequence
+                        && result_call_id == call_id
+                        && result_tool == tool
+                );
+            if has_matching_failure {
+                continue;
+            }
+            return Err(AgentError::new(
+                "运行检查点的工具来源与当前冻结工具注册不一致。",
+            ));
+        }
+
         if matches!(
             provenance,
-            AgentToolIdentity::Unregistered { .. }
-                | AgentToolIdentity::LegacyBuiltinCapability { .. }
-        ) || tool_registry.identity(&tool) != Some(&provenance)
+            AgentToolIdentity::LegacyBuiltinCapability { .. }
+        ) || tool_registry.identity(tool) != Some(provenance)
         {
             return Err(AgentError::new(
                 "运行检查点的工具来源与当前冻结工具注册不一致。",

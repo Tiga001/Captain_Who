@@ -77,6 +77,87 @@ fn resume_accepts_only_tool_provenance_from_the_frozen_registry() {
     );
     assert!(validate_resumed_tool_provenance(&unregistered, &registry).is_err());
 
+    let rejected_unknown_result = AgentToolResult {
+        exact_archive_file: None,
+        call_id: unregistered_call.id.clone(),
+        tool: unregistered_call.tool.clone(),
+        ok: false,
+        result: None,
+        error: Some("tool is not registered".to_string()),
+    };
+    unregistered.record_tool_result(&unregistered_call, &rejected_unknown_result);
+    validate_resumed_tool_provenance(&unregistered, &registry)
+        .expect("a settled unknown call is audit history, not resumed execution authority");
+
+    let rejected_but_not_failed = ConversationTraceRecorder::from_checkpoint_with_model_context(
+        vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: unregistered_call.id.clone(),
+                tool: unregistered_call.tool.clone(),
+                provenance: AgentToolIdentity::Unregistered {
+                    tool_name: unregistered_call.tool.clone(),
+                },
+                operation: json!({}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: unregistered_call.id.clone(),
+                tool: unregistered_call.tool.clone(),
+                status: crate::conversation_trace::ConversationTraceToolResultStatus::Rejected,
+                success: false,
+                observation: json!({}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                error: Some("rejected".to_string()),
+                truncated: false,
+                archive: Default::default(),
+            },
+        ],
+        Vec::new(),
+        2,
+        false,
+    );
+    assert!(validate_resumed_tool_provenance(&rejected_but_not_failed, &registry).is_err());
+
+    let non_adjacent_failure = ConversationTraceRecorder::from_checkpoint_with_model_context(
+        vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: unregistered_call.id.clone(),
+                tool: unregistered_call.tool.clone(),
+                provenance: AgentToolIdentity::Unregistered {
+                    tool_name: unregistered_call.tool.clone(),
+                },
+                operation: json!({}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 1,
+                content: "unexpected gap".to_string(),
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 2,
+                call_id: unregistered_call.id.clone(),
+                tool: unregistered_call.tool.clone(),
+                status: crate::conversation_trace::ConversationTraceToolResultStatus::Failed,
+                success: false,
+                observation: json!({}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                error: Some("failed too late".to_string()),
+                truncated: false,
+                archive: Default::default(),
+            },
+        ],
+        Vec::new(),
+        3,
+        false,
+    );
+    assert!(validate_resumed_tool_provenance(&non_adjacent_failure, &registry).is_err());
+
     let mut legacy_builtin_capability = ConversationTraceRecorder::default();
     legacy_builtin_capability.record_tool_call_with_identity(
         &registered_call,
