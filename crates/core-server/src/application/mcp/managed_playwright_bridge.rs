@@ -4637,7 +4637,7 @@ mod tests {
             .set_allowed(StoredCapabilityId::BrowserAutomation, 0, true)
             .expect("allow managed Browser capability in fixture");
         let (capability_runtime, _provider) =
-            HostBuiltinCapabilityProvider::runtime_and_provider(policies)
+            HostBuiltinCapabilityProvider::runtime_and_provider(policies, None)
                 .expect("create managed Browser capability runtime");
         let grant = approve_managed_playwright_e2e_activation(
             &capability_runtime,

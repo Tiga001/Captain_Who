@@ -53,9 +53,10 @@ impl TestHarness {
             SqliteBuiltinCapabilityPolicyStore::open(&database_path)
                 .expect("open test built-in MCP policy store"),
         );
-        let builtin_capability_runtime =
-            crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider::runtime(
+        let (builtin_capability_runtime, _) =
+            crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider::runtime_and_provider(
                 Arc::clone(&builtin_capability_policies),
+                None,
             )
             .expect("construct test built-in capability runtime");
         let registry_for_manager: Arc<dyn McpRegistry> = registry.clone();

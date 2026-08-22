@@ -388,9 +388,10 @@ mod tests {
                 )
                 .expect("open temporary built-in MCP policy store"),
             );
-            let builtin_capability_runtime =
-                crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider::runtime(
+            let (builtin_capability_runtime, _) =
+                crate::application::mcp::builtin_capability_runtime::HostBuiltinCapabilityProvider::runtime_and_provider(
                     Arc::clone(&builtin_capability_policies),
+                    None,
                 )
                 .expect("construct test built-in capability runtime");
             let connector_attempts = Arc::new(AtomicUsize::new(0));

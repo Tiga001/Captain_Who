@@ -177,20 +177,7 @@ impl std::fmt::Debug for HostBuiltinCapabilityProvider {
 }
 
 impl HostBuiltinCapabilityProvider {
-    #[cfg(test)]
-    pub(crate) fn runtime(
-        policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
-    ) -> AgentResult<BuiltinCapabilityRuntime> {
-        BuiltinCapabilityRuntime::new(Arc::new(Self::new(policies)?))
-    }
-
     pub(crate) fn runtime_and_provider(
-        policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
-    ) -> AgentResult<(BuiltinCapabilityRuntime, Arc<Self>)> {
-        Self::runtime_and_provider_with_storage(policies, None)
-    }
-
-    pub(crate) fn runtime_and_provider_with_storage(
         policies: Arc<SqliteBuiltinCapabilityPolicyStore>,
         storage: Option<Arc<mycopilot_core::storage::service::StorageService>>,
     ) -> AgentResult<(BuiltinCapabilityRuntime, Arc<Self>)> {
@@ -212,10 +199,6 @@ impl HostBuiltinCapabilityProvider {
         }
         *slot = Some(runtime);
         Ok(())
-    }
-
-    fn new(policies: Arc<SqliteBuiltinCapabilityPolicyStore>) -> AgentResult<Self> {
-        Self::new_with_storage(policies, None)
     }
 
     fn new_with_storage(

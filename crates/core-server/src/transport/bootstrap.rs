@@ -130,7 +130,7 @@ impl CoreServerBootstrap {
             })?,
         );
         let (builtin_capability_runtime, builtin_capability_provider) =
-            HostBuiltinCapabilityProvider::runtime_and_provider_with_storage(
+            HostBuiltinCapabilityProvider::runtime_and_provider(
                 Arc::clone(&mcp_builtin_capability_policies),
                 Some(Arc::clone(&storage)),
             )

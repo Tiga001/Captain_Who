@@ -877,7 +877,7 @@ mod tests {
             .set_allowed(StoredCapabilityId::BrowserAutomation, 0, true)
             .unwrap();
         let (runtime, _) =
-            HostBuiltinCapabilityProvider::runtime_and_provider(Arc::clone(&policies)).unwrap();
+            HostBuiltinCapabilityProvider::runtime_and_provider(Arc::clone(&policies), None).unwrap();
         let manifest = runtime.manifests()[0].clone();
         let now = unix_timestamp();
         let approval = AgentBuiltinCapabilityActivationApproval {
