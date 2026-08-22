@@ -203,6 +203,7 @@ describe('CoreServer collaboration client', () => {
       return () => undefined
     })
     const handler = vi.fn()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     new CoreServer().onCollaborationObserverEvent(handler)
     const notification = {
       schemaVersion: 1,
@@ -223,5 +224,135 @@ describe('CoreServer collaboration client', () => {
     )
     expect(handler).toHaveBeenCalledTimes(1)
     expect(handler).toHaveBeenCalledWith(notification)
+    expect(warning).toHaveBeenCalledWith('Ignored invalid Agent observer event', {
+      category: 'validation_failed',
+      eventType: 'message_delta',
+      count: 1
+    })
+    warning.mockRestore()
+  })
+
+  it('forwards sustained valid observer tool input progress without invalid-event warnings', () => {
+    let receiver: ((value: unknown) => void) | undefined
+    onNotification.mockImplementation((_method, handler) => {
+      receiver = handler
+      return () => undefined
+    })
+    const handler = vi.fn()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    new CoreServer().onCollaborationObserverEvent(handler)
+    const notification = {
+      schemaVersion: 1,
+      rootAgentId: 'agent-root',
+      rootConversationId: 'conversation-root',
+      agentId: 'agent-child',
+      conversationId: 'conversation-child',
+      runId: 'run-child',
+      assistantMessageId: 'assistant-child',
+      event: {
+        type: 'tool_input_progress',
+        runId: 'run-child',
+        streamId: 'stream-child',
+        attempt: 1,
+        toolCallIndex: 0,
+        toolCallId: 'call-child',
+        tool: 'apply_patch',
+        receivedBytes: 1
+      }
+    }
+
+    for (let index = 0; index < 268; index += 1) {
+      receiver?.({
+        ...notification,
+        event: { ...notification.event, receivedBytes: index + 1 }
+      })
+    }
+
+    expect(handler).toHaveBeenCalledTimes(268)
+    expect(warning).not.toHaveBeenCalled()
+    warning.mockRestore()
+  })
+
+  it('rate-limits invalid observer warnings without logging rejected payloads or identities', () => {
+    let receiver: ((value: unknown) => void) | undefined
+    onNotification.mockImplementation((_method, handler) => {
+      receiver = handler
+      return () => undefined
+    })
+    const handler = vi.fn()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    new CoreServer().onCollaborationObserverEvent(handler)
+    const notification = {
+      schemaVersion: 1,
+      rootAgentId: 'fixed-canary-root-id',
+      rootConversationId: 'fixed-canary-root-conversation',
+      agentId: 'fixed-canary-agent-id',
+      conversationId: 'fixed-canary-conversation',
+      runId: 'fixed-canary-run-id',
+      assistantMessageId: 'fixed-canary-message-id',
+      event: {
+        type: 'tool_input_progress',
+        runId: 'fixed-canary-run-id',
+        secret: 'fixed-canary-content'
+      }
+    }
+
+    for (let index = 0; index < 268; index += 1) receiver?.(notification)
+    receiver?.({
+      ...notification,
+      event: { type: 'fixed-canary-event-type', runId: 'fixed-canary-run-id' }
+    })
+
+    expect(handler).not.toHaveBeenCalled()
+    expect(warning.mock.calls).toEqual([
+      [
+        'Ignored invalid Agent observer event',
+        { category: 'validation_failed', eventType: 'tool_input_progress', count: 1 }
+      ],
+      [
+        'Ignored invalid Agent observer event',
+        { category: 'validation_failed', eventType: 'tool_input_progress', count: 100 }
+      ],
+      [
+        'Ignored invalid Agent observer event',
+        { category: 'validation_failed', eventType: 'tool_input_progress', count: 200 }
+      ],
+      [
+        'Ignored invalid Agent observer event',
+        { category: 'validation_failed', eventType: 'unknown', count: 1 }
+      ]
+    ])
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('fixed-canary')
+    warning.mockRestore()
+  })
+
+  it('does not misreport or rethrow observer handler failures as validation failures', () => {
+    let receiver: ((value: unknown) => void) | undefined
+    onNotification.mockImplementation((_method, handler) => {
+      receiver = handler
+      return () => undefined
+    })
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const notification = {
+      schemaVersion: 1,
+      rootAgentId: 'agent-root',
+      rootConversationId: 'conversation-root',
+      agentId: 'agent-child',
+      conversationId: 'conversation-child',
+      runId: 'run-child',
+      assistantMessageId: 'assistant-child',
+      event: { type: 'message_delta', runId: 'run-child', delta: 'hello' }
+    }
+    new CoreServer().onCollaborationObserverEvent(() => {
+      throw new Error('observer handler failed')
+    })
+
+    expect(() => receiver?.(notification)).not.toThrow()
+    expect(warning).toHaveBeenCalledWith('Agent observer handler failed', {
+      category: 'handler_failed',
+      eventType: 'message_delta',
+      count: 1
+    })
+    warning.mockRestore()
   })
 })

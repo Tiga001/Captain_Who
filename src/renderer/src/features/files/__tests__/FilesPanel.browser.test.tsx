@@ -314,7 +314,7 @@ describe('FilesPanel', () => {
     await expect.poll(() => pdfDocumentDestroySpy).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the current preview stable while opening tree selections as new pages', async () => {
+  it('forwards both new selections and repeated clicks on the selected file', async () => {
     const screen = await render(
       <div style={{ height: 620, width: 620 }}>
         <TestFilesPanel
@@ -334,6 +334,23 @@ describe('FilesPanel', () => {
     void tree
     const host = screen.container.querySelector<HTMLElement>('file-tree-container')
     if (!host?.shadowRoot) throw new Error('Pierre tree did not attach an open shadow root')
+
+    await expect
+      .poll(() =>
+        host.shadowRoot?.querySelector<HTMLButtonElement>(
+          '[data-item-path="README.md"][data-item-selected]'
+        )
+      )
+      .not.toBeNull()
+    const selectedReadmeRow = host.shadowRoot.querySelector<HTMLButtonElement>(
+      '[data-item-path="README.md"][data-item-selected]'
+    )
+    if (!selectedReadmeRow) throw new Error('Selected README row did not render')
+    selectedReadmeRow.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 0, composed: true })
+    )
+    await expect.poll(() => openFileSpy).toHaveBeenCalledWith('README.md')
+    openFileSpy.mockClear()
 
     const srcRow = await expect
       .poll(() => host.shadowRoot?.querySelector<HTMLButtonElement>('[data-item-path="src/"]'))

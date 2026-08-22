@@ -1,6 +1,6 @@
 import { FileTree } from '@pierre/trees/react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import type { CSSProperties, FocusEvent, KeyboardEvent, ReactNode } from 'react'
+import type { CSSProperties, FocusEvent, KeyboardEvent, PointerEvent, ReactNode } from 'react'
 import {
   Check,
   ChevronRight,
@@ -84,6 +84,23 @@ export function FilesPanel({
   const handleFileSelect = useCallback(
     (path: string) => {
       onOpenFile(path)
+    },
+    [onOpenFile]
+  )
+  const handleSelectedFilePointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return
+
+      const selectedFileRow = event.nativeEvent
+        .composedPath()
+        .find(
+          (target): target is HTMLElement =>
+            target instanceof HTMLElement &&
+            target.dataset.itemType === 'file' &&
+            target.dataset.itemSelected !== undefined
+        )
+      const path = selectedFileRow?.dataset.itemPath
+      if (path) onOpenFile(path)
     },
     [onOpenFile]
   )
@@ -382,7 +399,10 @@ export function FilesPanel({
             )}
           </div>
 
-          <div className="files-panel__tree-content">
+          <div
+            className="files-panel__tree-content"
+            onPointerDownCapture={handleSelectedFilePointerDown}
+          >
             <FileTree className="files-panel__tree" model={model} style={TREE_STYLE} />
             {rootState?.status === 'loading' && (
               <div className="files-panel__tree-overlay">{t('files.loading')}</div>

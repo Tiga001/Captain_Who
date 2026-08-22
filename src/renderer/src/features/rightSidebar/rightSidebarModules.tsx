@@ -231,7 +231,7 @@ function renderGitReviewModule({
       <GitReviewModuleSurface
         isActive={activity === 'foreground'}
         onOpenFile={(path) => {
-          onOpenPage(createWorkspaceFileOpenRequest(path, 'reuse-source-if-empty'))
+          onOpenPage(createWorkspaceFileOpenRequest(path))
         }}
         pageState={page.moduleState}
         projectId={page.workspaceKey ?? ''}
@@ -294,36 +294,31 @@ function renderFilesModule({
         isActive={activity === 'foreground'}
         markdownView={markdownView}
         onMarkdownViewChange={(nextMarkdownView) => {
-          if (!filePath) return
+          if (!fileState) return
           onPageUpdate({
             moduleState: {
-              kind: 'workspace-file',
-              path: filePath,
+              ...fileState,
               preview: { ...fileState?.preview, markdownView: nextMarkdownView }
             }
           })
         }}
         onOpenFile={(path) => {
-          onOpenPage(
-            createWorkspaceFileOpenRequest(path, filePath ? 'new-page' : 'reuse-source-if-empty')
-          )
+          onOpenPage(createWorkspaceFileOpenRequest(path))
         }}
         onPdfPageChange={(nextPdfPage) => {
-          if (!filePath) return
+          if (!fileState) return
           onPageUpdate({
             moduleState: {
-              kind: 'workspace-file',
-              path: filePath,
+              ...fileState,
               preview: { ...fileState?.preview, pdfPage: nextPdfPage }
             }
           })
         }}
         onWrapLinesChange={(nextWrapLines) => {
-          if (!filePath) return
+          if (!fileState) return
           onPageUpdate({
             moduleState: {
-              kind: 'workspace-file',
-              path: filePath,
+              ...fileState,
               preview: { ...fileState?.preview, wrapLines: nextWrapLines }
             }
           })
@@ -352,14 +347,11 @@ function renderAgentCenterModule({ onPageUpdate, page, t }: RightSidebarModuleRe
   )
 }
 
-function createWorkspaceFileOpenRequest(
-  path: string,
-  disposition: NonNullable<RightSidebarPageOpenRequest['disposition']>
-): RightSidebarPageOpenRequest {
+function createWorkspaceFileOpenRequest(path: string): RightSidebarPageOpenRequest {
   return {
-    disposition,
+    disposition: 'preview',
     iconUrl: getFileTypeIconSource(path),
-    moduleState: { kind: 'workspace-file', path },
+    moduleState: { kind: 'workspace-file', path, tabState: 'transient' },
     resourceKey: `workspace-file:${path}`,
     targetModuleId: 'files',
     title: path.split('/').at(-1) ?? path

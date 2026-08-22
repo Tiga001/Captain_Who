@@ -71,6 +71,7 @@ export type RightSidebarModulePageState =
   | {
       kind: 'workspace-file'
       path: string
+      tabState?: 'stable' | 'transient'
       preview?: {
         markdownView?: 'preview' | 'source'
         pdfPage?: number
@@ -97,7 +98,7 @@ export type RightSidebarReviewNavigationRequest = Extract<
 >
 
 export interface RightSidebarPageOpenRequest {
-  disposition?: 'new-page' | 'reuse-source-if-empty'
+  disposition?: 'new-page' | 'preview' | 'reuse-source-if-empty'
   iconUrl?: string | null
   moduleState?: RightSidebarModulePageState
   resourceKey?: string

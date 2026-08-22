@@ -40,14 +40,14 @@ const WORKSPACE_B = createRightSidebarWorkspaceContext('project-b', 'Project B',
 const HOME = createRightSidebarWorkspaceContext(null, null, undefined)
 
 describe('right sidebar platform context lifecycle', () => {
-  it('reuses an empty file source page once, then opens independent previews', () => {
+  it('replaces a transient file preview, stabilizes it on repeat, then preserves it', () => {
     const initial = openPages(WORKSPACE_A, ['files'])
     const firstPreview = reduceRightSidebarPlatform(initial, {
       pageId: 'unused-file-page',
       request: {
-        disposition: 'reuse-source-if-empty',
+        disposition: 'preview',
         iconUrl: 'file:///markdown.svg',
-        moduleState: { kind: 'workspace-file', path: 'README.md' },
+        moduleState: { kind: 'workspace-file', path: 'README.md', tabState: 'transient' },
         resourceKey: 'workspace-file:README.md',
         title: 'README.md'
       },
@@ -63,30 +63,49 @@ describe('right sidebar platform context lifecycle', () => {
     expect(firstPreview.pages[0]).toMatchObject({
       iconUrl: 'file:///markdown.svg',
       id: 'files-page',
-      moduleState: { kind: 'workspace-file', path: 'README.md' },
+      moduleState: { kind: 'workspace-file', path: 'README.md', tabState: 'transient' },
       resourceKey: 'workspace-file:README.md',
       title: 'README.md',
       workspaceKey: WORKSPACE_A.key,
       workspaceSessionKey: WORKSPACE_A.sessionKey
     })
 
-    const secondPreview = reduceRightSidebarPlatform(firstPreview, {
-      pageId: 'second-file-page',
-      request: {
-        disposition: 'new-page',
-        moduleState: { kind: 'workspace-file', path: 'src/index.ts' },
-        resourceKey: 'workspace-file:src/index.ts',
-        title: 'index.ts'
-      },
-      sourceModule: getModule('files'),
-      sourcePageId: 'files-page',
-      t: translate,
-      targetModule: getModule('files'),
-      type: 'open-related-page'
+    const secondPreview = openPreviewFile(firstPreview, 'files-page', 'src/index.ts', 'unused-2')
+
+    expect(secondPreview.activePageId).toBe('files-page')
+    expect(secondPreview.pages).toHaveLength(1)
+    expect(secondPreview.pages[0]).toMatchObject({
+      id: 'files-page',
+      moduleState: { kind: 'workspace-file', path: 'src/index.ts', tabState: 'transient' },
+      resourceKey: 'workspace-file:src/index.ts',
+      title: 'index.ts'
     })
 
-    expect(secondPreview.activePageId).toBe('second-file-page')
-    expect(secondPreview.pages.map((page) => page.id)).toEqual(['files-page', 'second-file-page'])
+    const stablePreview = openPreviewFile(secondPreview, 'files-page', 'src/index.ts', 'unused-3')
+    expect(stablePreview.pages).toHaveLength(1)
+    expect(stablePreview.pages[0].moduleState).toMatchObject({
+      kind: 'workspace-file',
+      path: 'src/index.ts',
+      tabState: 'stable'
+    })
+
+    const nextPreview = openPreviewFile(stablePreview, 'files-page', 'src/next.ts', 'next-page')
+    expect(nextPreview.activePageId).toBe('next-page')
+    expect(nextPreview.pages.map((page) => page.id)).toEqual(['files-page', 'next-page'])
+    expect(nextPreview.pages[1].moduleState).toMatchObject({
+      kind: 'workspace-file',
+      path: 'src/next.ts',
+      tabState: 'transient'
+    })
+  })
+
+  it('discards the active transient preview when its target already has a stable page', () => {
+    const stable = openFilePage(openPages(WORKSPACE_A, ['files']), 'stable.ts')
+    const transient = openPreviewFile(stable, 'file-stable.ts', 'draft.ts', 'draft-page')
+    const reopened = openPreviewFile(transient, 'draft-page', 'stable.ts', 'unused-page')
+
+    expect(reopened.activePageId).toBe('file-stable.ts')
+    expect(reopened.pages.map((page) => page.id)).toEqual(['files-page', 'file-stable.ts'])
   })
 
   it('opens related resources as independent pages and reuses an existing resource page', () => {
@@ -464,6 +483,28 @@ function openFilePage(state: RightSidebarPlatformState, path: string): RightSide
     },
     sourceModule: getModule('files'),
     sourcePageId: 'files-page',
+    t: translate,
+    targetModule: getModule('files'),
+    type: 'open-related-page'
+  })
+}
+
+function openPreviewFile(
+  state: RightSidebarPlatformState,
+  sourcePageId: string,
+  path: string,
+  pageId: string
+): RightSidebarPlatformState {
+  return reduceRightSidebarPlatform(state, {
+    pageId,
+    request: {
+      disposition: 'preview',
+      moduleState: { kind: 'workspace-file', path, tabState: 'transient' },
+      resourceKey: `workspace-file:${path}`,
+      title: path.split('/').at(-1) ?? path
+    },
+    sourceModule: getModule('files'),
+    sourcePageId,
     t: translate,
     targetModule: getModule('files'),
     type: 'open-related-page'

@@ -1,36 +1,42 @@
 # MyCopilot Next
 
-MyCopilot 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust 核心负责。
+MyCopilot 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust Core 负责。
 
 目前已实现：
 
 - 本地项目、对话、草稿、归档与全文搜索
-- OpenAI-compatible 与 Anthropic-compatible 模型接入
+- Provider Profile、OpenAI-compatible、Anthropic-compatible 与 DeepSeek 模型接入和安全切换
 - 文件、图片、PDF、Word、演示文稿和表格附件读取
-- 工作区搜索、补丁编辑、流式文件写入、Git diff 与命令执行
+- 工作区搜索、补丁编辑、流式文件写入、Git diff、受管命令与持久 Command Session
 - 可审批的文件/命令操作，以及默认、完全、自定义三种权限模式
 - Tavily 联网搜索与网页读取
-- 内置终端、浏览器、用量统计和本地费用估算
-- 跨轮 Agent 工具轨迹、上下文容量保护与长期使用量提示
+- 内置终端、手动浏览器、Managed Playwright 自动化、用量统计和本地费用估算
+- 用户配置的 stdio MCP Server、内部 HostBridge Capability、bundled/installed/workspace Skill
+- 多智能体协作、只读子 Agent 观察、审批转交和崩溃恢复
+- Word、表格、演示文稿、PDF 与图片生成的受管 Artifact 工作流
+- 跨轮 Agent 工具轨迹、上下文压缩、Exact Archive 与长期使用量提示
 
 ## 架构
 
 ```text
 src/main/                 Electron 主进程、分域 IPC、浏览器/终端桥接
-src/preload/              隔离的 renderer Host API
+src/preload/              隔离的 Renderer Host API
 src/renderer/             React 界面
 packages/protocol/        TypeScript 跨进程数据类型
 packages/host-api/        Renderer 可调用的 Host API 类型
 crates/protocol-rs/       Rust JSON-RPC 协议
 crates/core/              Agent、工具、权限与 SQLite 存储
-crates/core-server/       Rust 应用边界（application / transport / adapters）
+crates/core-server/       Core Server 应用边界（application / transport / adapters）
+crates/mcp-client/        MCP 协议、Catalog、连接和 stdio transport
+packages/artifact-runtime-node/ 受管 Artifact Runtime 的 Node 入口
+scripts/                  组件准备、测试、打包、签名和发布验证
 ```
 
 开发模式下，Electron 通过 Cargo 启动 `core-server`；生产包会把 release 二进制复制到 `process.resourcesPath`。Electron 与 Rust 之间使用逐行 JSON-RPC 通信。
 
-Agent 上下文的组装、长期轨迹、会话状态、分类计量、容量保护、压缩规划、审批恢复和前端用量投影见[上下文管理架构](docs/context-management.md)。
-各层依赖方向、core-server 分层、Agent 协议所有权和 IPC 约束见[架构边界](docs/architecture.md)；
-MCP 模块、fixture、扩展和安全约束见 [MCP v1 开发文档](docs/mcp.md)。
+完整的架构、子系统、开发、测试、发布和安全文档统一从
+[开发文档索引](docs/README.md)进入。新成员建议先阅读[开发环境](docs/development/getting-started.md)、
+[仓库结构](docs/development/repository-layout.md)和[系统架构总览](docs/architecture/overview.md)。
 
 ## 环境要求
 
@@ -55,18 +61,21 @@ pnpm dev
 
 ## 常用命令
 
-| 命令                | 用途                                        |
-| ------------------- | ------------------------------------------- |
-| `pnpm dev`          | 启动 Electron 开发环境与 Rust core-server   |
-| `pnpm format`       | 格式化 TypeScript、CSS、文档与 Rust         |
-| `pnpm lint`         | 运行 ESLint                                 |
-| `pnpm typecheck`    | 检查主进程、preload 与 renderer 类型        |
-| `pnpm lint:rust`    | 对整个 Rust workspace 运行严格 Clippy       |
-| `pnpm test`         | 运行 Rust workspace 测试                    |
-| `pnpm check`        | 依次执行格式、lint、类型、Clippy 和测试检查 |
-| `pnpm build`        | 类型检查并生成 Electron 的 `out/` 产物      |
-| `pnpm build:core`   | 构建并校验 release core-server              |
-| `pnpm build:unpack` | 生成当前平台的未封装应用，用于打包冒烟测试  |
+| 命令                | 用途                                           |
+| ------------------- | ---------------------------------------------- |
+| `pnpm dev`          | 启动 Electron 开发环境与 Core Server           |
+| `pnpm format`       | 格式化 TypeScript、CSS、文档与 Rust            |
+| `pnpm check:docs`   | 检查文档元数据、链接、路径、命令与版本真源     |
+| `pnpm lint`         | 运行 ESLint                                    |
+| `pnpm typecheck`    | 检查 Main、Preload 与 Renderer 类型            |
+| `pnpm lint:rust`    | 对整个 Rust workspace 运行严格 Clippy          |
+| `pnpm test:web`     | Vitest unit、browser 与 Managed Playwright E2E |
+| `pnpm test:rust`    | 运行 Rust workspace 测试                       |
+| `pnpm test`         | 运行脚本、Web/Browser 与 Rust 常规测试         |
+| `pnpm check`        | 执行格式、文档、lint、类型、Clippy 和测试      |
+| `pnpm build`        | 类型检查并生成 Electron 的 `out/` 产物         |
+| `pnpm build:core`   | 构建并校验 release Core Server binary          |
+| `pnpm build:unpack` | 生成当前平台的未封装应用，用于打包冒烟测试     |
 
 ## 打包
 
@@ -85,12 +94,14 @@ pnpm build:linux
 
 `electron-builder.yml` 只把 `out/`、运行时资源、生产依赖和当前平台的 `core-server` 放入应用，不会再把源码或 Cargo `target/` 缓存打进 ASAR。
 
-当前项目没有配置代码签名、macOS notarization 或自动更新发布地址。对外分发前需要单独补齐这些发布环节。
+macOS `build:mac` 已强制代码签名、hardened runtime 和严格验签；notarization 与自动更新发布地址尚未
+配置。`pnpm check` 也不包含全部专项发布门禁，对外分发前必须按
+[构建与发布](docs/development/build-and-release.md)执行同一最终代码树上的平台验证。
 
 ## 本地数据与隐私
 
 Electron 应用以 `app.getPath('userData')` 返回的位置作为唯一权威数据根目录，并在启动
-Rust Core 时显式传入该目录。数据库位于数据根的 `storage.sqlite`，附件、已安装 Skill、
+Core Server 时显式传入该目录。数据库位于数据根的 `storage.sqlite`，附件、已安装 Skill、
 生成图片和开发环境凭据分别保存在同级的受管子目录中；启动时会清理无数据库引用的孤立
 附件文件。具体路径由 Electron 按当前操作系统和应用身份解析，业务代码不再分别猜测
 macOS、Windows 或 Linux 的目录。
@@ -110,7 +121,7 @@ pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-命令通过 Electron 解析同一个权威数据根；应用或 Core 仍持有数据库时会拒绝执行。确认
+命令通过 Electron 解析同一个权威数据根；应用或 Core Server 仍持有数据库时会拒绝执行。确认
 重建会先在数据根的 `storage-backups/` 中创建权限受限、经过 SQLite 校验的时间戳备份，
 再原子发布 fresh canonical database。模型与搜索配置、UI/Prompt 偏好、Skill 启用状态、
 MCP Server 配置和有效的图片生成 Profile 会通过当前严格写入路径恢复；对话、项目、草稿、
@@ -131,13 +142,18 @@ Usage、审批、Continuation、Compaction、Fork 等会话派生状态不会恢
 - “移除项目”会永久删除 MyCopilot 中该项目的本地对话、消息与附件，但不会修改项目目录中的文件。
 - 费用只是按模型设置中的每 1k token 单价计算的本地估算，不代表服务商账单，也不区分币种。
 
-## 文档格式支持
+## 文档与 Artifact 支持
 
-- `.docx`、`.pptx`、`.xlsx`、`.csv`、`.tsv`：跨平台解析
+- Agent 附件读取支持 `.docx`、`.pptx`、`.xlsx`、`.csv`、`.tsv` 等格式；右侧栏文件预览的支持范围
+  与附件读取不同，见[工作区文件](docs/subsystems/workspace-files.md)。
 - 旧版 `.doc`：仅在 macOS 上通过系统 `textutil` 解析
 - 旧版 `.ppt`、`.xls`：暂不支持，请先转换为 `.pptx`、`.xlsx` 或文本格式
-- PDF：文本提取；扫描件是否可读取决于 PDF 是否包含文本层
+- PDF 附件可提取文本；扫描件是否可读取取决于 PDF 是否包含文本层。复杂 PDF 处理由受管 PDF Skill
+  和命令工作流提供。
+- Word、表格和演示文稿创建/编辑通过受管 Builder、Editor、Renderer 和 Artifact 发布门禁完成，详见
+  [Office 与 Artifact](docs/subsystems/office-and-artifacts.md)。
 
 ## 仓库状态
 
-项目当前为私有、`UNLICENSED`。不要在未补充许可证、凭据安全方案、签名与发布流程前直接公开发布。
+项目当前为私有、`UNLICENSED`。不要在未补充许可证、完整凭据安全方案、notarization、自动更新和
+目标平台发布验证前直接公开发布。

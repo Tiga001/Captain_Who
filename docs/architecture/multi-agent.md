@@ -1,0 +1,239 @@
+---
+status: current
+audience: developers/maintainers
+owner: engineering
+last_verified: 2026-08-23
+---
+
+# Multi-Agent 当前架构
+
+本文是当前 Multi-Agent 实现的规范文档。历史上的“六轮实施路线”已移至 [Multi-Agent rollout 历史](../archive/multi-agent-rollout-history.md)，不得再用轮次编号判断功能是否已实现。
+
+一句话定义：**协作层维护持久 Agent 父子树、Mailbox、Wake、receipt 与事件；每次真正执行仍交给唯一 Agent Loop。**
+
+## 1. 范围与不变量
+
+1. 图中只有 Agent 节点，唯一边为 `parent_agent_id`；它是一棵树，不是通用 DAG 或 workflow DSL。
+2. 每棵树由唯一根 Agent 和 `root_conversation_id` 标识。Project 只提供隔离和索引，不合并多个根 Agent。
+3. 每个 Agent 唯一绑定一个持久 Conversation。Agent、Turn/Run 和内存 Runtime 是三个不同概念。
+4. MCP、Skill、Command Session、Artifact、Approval、Context 与模型调用仍走现有 Agent Runtime。
+5. 同一 Agent 同时最多一个活跃 Turn；根 Agent Human Turn 和子 Agent Wake Turn 共用进程级并发上限。
+6. Usage 仍归各自 Conversation、assistant message、Run 和模型，不在树层重复聚合。
+7. 用户只与根 Agent 交互；子 Agent Conversation 是 observer-only。模型侧的父任务可投影为 `role=user`，但持久 origin 必须是 `agent`。
+8. 所有结果、状态和 cursor 先提交 SQLite，再发布通知。channel、`Notify` 和 Renderer store 不是权威状态。
+9. Turn 的 completed/failed/interrupted 不会删除 Agent；后续 `followup_task` 可再次唤醒。长期生命周期另由 active/disabled/archived 表示。
+10. 对未知外部副作用绝不自动重放；恢复无法证明安全时必须得到 `outcome_unknown`。
+
+## 2. 运行时组成
+
+```text
+模型调用六个协作 Tool
+        │
+        ▼
+mycopilot-core 严格 schema + AgentCollaborationExecutor port
+        │ Host 注入可信 caller/run context
+        ▼
+Core Server AgentHarness
+        │
+        ▼
+AgentCollaborationService / Authorizer / WaitKernel
+        │                         │
+        ▼                         ▼
+SQLite Agent Graph            process Notify（仅加速）
+Mailbox / Wake / receipts
+        │
+        ▼
+AgentDispatcher → 统一 Turn executor → 原 Agent Runtime/Tool
+```
+
+核心职责：
+
+- `mycopilot-core` 声明六工具、Host port、持久 Agent Graph 类型、repository、receipt 与事件。
+- `AgentHarness` 从可信 `ToolExecutionContext` 构造 caller，执行授权和 application use case；模型参数不能指定 sender/根 Agent/project。
+- `AgentDispatcher` 领取 Wake、持有共享并发许可、续租、启动/观察 Turn、结算结果并执行恢复。
+- `AgentWaitKernel` 只等待 caller 自己可接收的持久结果、消息和 target 状态。
+- `CollaborationAuthorizer` 是 Harness、Renderer RPC 和旧 Conversation 入口共同的权限边界。
+- Renderer `CollaborationStore` 只维护根 Agent 范围的 tree/activity projection；子 Agent 消息仍由同一 Conversation reducer 展示。
+
+## 3. 持久模型
+
+### AgentNode
+
+节点保存稳定 ID、根 Agent/父 Agent、独立 Conversation、可空 Project、树内唯一 task name/path、创建 request ID、模板/模型 snapshot、lifecycle/revision 和时间。
+
+- 根 Agent 对旧 Conversation 按需幂等物化。
+- 子 Agent spawn 在同一事务创建/导入 Conversation、冻结 snapshot、AgentNode、initial task Mailbox、唯一投影/ack 和 queued Wake。
+- task path 由后端从父子关系生成；不得接受模型传入的完整路径。
+- 模板更新只影响未来节点；模型 snapshot 冻结精确 `model_config_id` 与审计能力，不复制 Token、URL 或 Provider 凭据。
+- `fork_turns=none | all | N` 复制已结算的逻辑轮次；active 尾部、Usage、pending action、Command Session、provider continuation 等不复制。
+
+### MailboxMessage
+
+Mailbox 是 Agent 间传输的唯一真相。消息保存 sender/recipient/根 Agent、kind、payload、FIFO sequence、request ID 和 delivery/lease 状态。
+
+- 消息正文与身份一旦入队不可修改。
+- 同一 recipient 同时最多 claim 一条；投影/ack 与 claim 使用 SQLite 事务和唯一约束。
+- `messages.source_agent_message_id` 保证一条 Mailbox 最多一个 Conversation projection。
+- 普通发送只入队，不暗示目标正在执行。
+
+每个 recipient 的未绑定 model receipt 配额：
+
+| 配额         | 硬上限 | 普通 message/follow-up 软上限 |
+| ------------ | -----: | ----------------------------: |
+| 条数         |  1,024 |                           960 |
+| payload 总量 | 16 MiB |                        15 MiB |
+
+预留的 64 条/1 MiB 用于 initial task、terminal result 等协调事实，总硬上限仍不可突破。
+
+### WakeRequest
+
+Wake 表示“需要一次执行机会”，不是线程或可无条件重试的副作用。
+
+- `send_message` 不创建 Wake；`followup_task` 在同一事务写 Mailbox 与 deferred Wake。
+- Wake 依 FIFO sequence 领取，持久 claim lease 为 60 秒，半开区间为 `[claimed_at, lease_expires_at)`。
+- `status_revision` 只在语义状态变化时增加；单纯 owner/lease 续期不增加。
+- result outbox、Wake 终态及必要的父 Agent deferred Wake 在一个事务内提交，随后才通知。
+
+### Receipt 与事件
+
+- `agent_model_batch_receipts` 以 `(run_id, model_batch_index)` 锁定一次模型采样 admission；Mailbox item 只能被 safe sampling 或 wait 的一方消费。
+- `wait_agent` 的 target snapshot、cursor、ToolResult/model-context prefix 在同一事务预提交，Runtime 不得再次写同一 ToolResult。
+- `agent_collaboration_events` 是根 Agent 本地单调 invalidation outbox，不是第二份聊天表。snapshot/read 先取得保守 replay cursor，允许重复 replay，不允许 cursor 越过未观察状态。
+
+## 4. 六个模型工具
+
+工具集合必须精确为六个：
+
+| Tool              | 当前语义                        | 关键约束                                                                    |
+| ----------------- | ------------------------------- | --------------------------------------------------------------------------- |
+| `spawn_agent`     | 创建直接子 Agent 并排队初始任务 | selector 精确匹配；`task_name` 256 bytes；message 64 KiB；`fork_turns` 明确 |
+| `send_message`    | mailbox-only 消息               | 不创建 Wake，不保证目标执行；Tool 描述用于子 Agent 向父 Agent 汇报/求助     |
+| `followup_task`   | 向严格后代分配、继续或返工      | 创建可靠执行机会，但不与目标现有 Turn 并发                                  |
+| `wait_agent`      | first-ready 等待消息/结果/状态  | 1–32 targets；默认 30 秒；0 为立即快照；最长 300 秒                         |
+| `list_agents`     | 返回授权范围内简洁树投影        | 只读，不泄漏内部 lease/checkpoint                                           |
+| `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；request receipt 保证幂等                   |
+
+不存在 `wait_any` 或第七个协作工具。只有 Host 为本 Turn 注入可信协作 capability 时才整组注册六工具。
+
+### Selector 目录
+
+Host 给每个 Turn 冻结脱敏模板/模型目录：每类最多 32 项，总编码后 JSON 最多 16 KiB，并包含后端权威 `imageInput` 能力。目录只是精确 allowlist；过期、被禁用或截断的 selector 必须 fail closed，不按名称猜测。Approval continuation 使用原 checkpoint 的目录，不在恢复时扩大权限。
+
+## 5. 授权与配额
+
+- 默认树深度 8、每树 64 节点、Harness message 64 KiB、全局 Turn 并发 4。
+- spawn 配额在同一 `BEGIN IMMEDIATE` 内核验；幂等 request 先返回原事实，不重复占配额。
+- `send_message` 的后端授权当前只校验消息大小、调用者 active、目标存在且同树；Tool 描述约定用于子 Agent → 父 Agent 报告，但 Authorizer 尚未强制方向，甚至同树其他目标也可通过。它不是方向性授权边界；工作指派必须使用 `followup_task`。
+- follow-up、wait、interrupt 只允许 caller 的严格后代。不存在、跨树、跨项目和越权 target 对调用方统一表现为 permission denied，避免存在性探测。
+- 子 Agent 新 Turn 的权限以直接父 Agent 的最新持久 effective snapshot 为基线，再与完整祖先链取交集；任一 snapshot 缺失或损坏即 fail closed。
+- 已开始 Run 冻结权限；Approval continuation 使用 checkpoint 原权限。下一次 Wake 才读取新的收紧策略。
+- 根 Agent 可交互，子 Agent 只能通过精确的根 Agent Conversation + 子 Agent Conversation observer RPC 读取。旧历史、搜索、meta、start/steer/cancel/fork/Provider transition 和 Approval 等写入口均受同一根 Agent guard。
+
+## 6. Dispatcher、等待与恢复
+
+### Dispatcher
+
+生产默认值：
+
+| 参数                  | 默认值 | 代码真源                                  |
+| --------------------- | -----: | ----------------------------------------- |
+| 进程级 Turn 并发      |      4 | `DEFAULT_AGENT_GLOBAL_CONCURRENCY`        |
+| Wake lease            |  60 秒 | Graph repository `WAKE_LEASE_DURATION_MS` |
+| lease 续租间隔        |  20 秒 | `DEFAULT_WAKE_LEASE_RENEW_INTERVAL`       |
+| durable fallback scan |   1 秒 | `DEFAULT_DISPATCH_IDLE_POLL_INTERVAL`     |
+| 单阶段关停 grace      |   5 秒 | `DEFAULT_DISPATCH_SHUTDOWN_GRACE`         |
+
+Dispatcher 先取得共享 gate reservation，再 claim SQLite Wake；无工作时不会伪装为活跃 Turn。根 Agent Human Turn、子 Agent Wake 和重启恢复都计入同一 gate。
+
+关停算法最多可使用两个 5 秒阶段：先等待 manager 自行完成；第一次超时后请求取消非 Approval Run，并在第二个 deadline 前反复扫描 Approval 恢复竞态。因此不能把表中的 5 秒理解为完整 shutdown 的绝对上限。Main 当前 6 秒 Core Server watchdog 更短，超时后的未收口事实必须依赖 SQLite 启动恢复。
+
+恢复规则：
+
+1. 过期 `claimed` 且尚未 Turn admission：安全退回 queued 或确定失败。
+2. `running/waiting_for_approval`：换 owner/lease 后根据 exact run、trace、checkpoint 与 pending action 分类。
+3. 已有 terminal trace：观察并完成 outbox/释放 owner，不重跑 Runtime。
+4. 有可恢复 Approval：继续等待或走原 checkpoint continuation。
+5. admission 后无可恢复 checkpoint 且副作用可能发生：写 `outcome_unknown`，绝不盲重放。
+6. recovery 不是只在启动时扫描一次；周期扫描覆盖“新进程启动时旧 lease 尚未过期”的窗口。
+
+### Wait
+
+`AgentWaitKernel` 执行：检查停止信号 → 查 SQLite → 注册一次性通知 → 再检查 → 再查 SQLite。之后用 50ms durable poll 保证跨进程提交或通知丢失仍可见。
+
+- steer 优先终止当前 wait，结果保持 pending。
+- timeout/cancel/shutdown 只结束本次等待，不取消 target 或删除结果。
+- Agent wait 与 Command Session wait 是两个独立等待域，不能互相唤醒或消费。
+- 多 target 按全局 Mailbox sequence 取 first-ready；单批最多 64 条并受有界投影预算约束，超预算内容留待后续 wait。
+
+## 7. Approval 与 Renderer 事件
+
+子 Agent Approval 仍使用原 `agent_pending_actions`、checkpoint 和 continuation 状态机。根 Agent UI 看到的是 JOIN 得到的投影，决定请求只提交 `root_conversation_id + approval_id + decision`；Core Server 反查 source Agent/Run/action。重复、过期或已结算决定不会启动第二次 continuation。
+
+当前协作 notification 名必须是：
+
+- `agent.collaboration.event`
+- `agent.collaboration.observerEvent`
+- `agent.collaboration.resync`
+
+notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.collaboration.listEvents` 验证根 Agent 本地连续 sequence；重复、乱序、缺口、Core Server 重启或窗口 reload 都从数据库 rehydrate/replay。
+
+根聊天的 semantic activity 只来自后端持久 mutation：started、updated、waiting_approval、completed、failed、interrupted。Tool 名、模型文案、时间戳或 Mailbox JSON 不得被 UI 用来反推状态。observer live event 是低延迟 overlay，durable Conversation 与 event log 才是恢复真相。
+
+## 8. Schema
+
+当前 canonical storage 是 **v16**。唯一真源：
+
+```rust
+pub const STORAGE_SCHEMA_VERSION: i32 = 16;
+```
+
+版本不等于 16、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v16。
+
+## 9. 代码真源
+
+- Tool/Host 契约：`crates/core/src/agent_collaboration_harness.rs`、`crates/core/src/tools/agent_collaboration.rs`
+- Graph 与配额：`crates/core/src/agent_graph.rs`、`crates/core/src/storage/agent_graph_repository.rs`
+- canonical schema：`crates/core/src/storage/canonical_schema.sql`、`migrations.rs`
+- application service/Harness：`crates/core-server/src/application/agent_collaboration.rs`、`agent_harness.rs`
+- Dispatcher/Wait：`crates/core-server/src/application/agent_dispatcher.rs`、`agent_wait.rs`
+- 授权：`crates/core-server/src/application/collaboration_authorization.rs`
+- RPC/DTO：`crates/protocol-rs/src/agent_collaboration.rs`、`packages/protocol/src/agentCollaboration.ts`
+- Renderer：`src/renderer/src/features/agentCollaboration` 与 `ConversationSurface`
+
+## 10. 测试
+
+```bash
+pnpm test:multi-agent-release
+cargo test -p mycopilot-core --lib storage::migrations::tests
+cargo test -p mycopilot-core-server application::agent_dispatcher
+cargo test -p mycopilot-core-server application::agent::tests::collaboration_harness
+cargo test -p mycopilot-protocol-rs
+pnpm exec vitest run --project unit src/main/core/coreServer.collaboration.test.ts
+pnpm exec vitest run --project browser src/renderer/src/features/agentCollaboration
+```
+
+发布 profile/smoke 的精确步骤和未覆盖项见 [Multi-Agent 发布门禁](../operations/multi-agent-release-gate.md)。恢复类变更还必须运行 queued 子 Agent restart、lease expiry、Approval continuation、Command/Agent 双等待和事件 gap/resync 测试。
+
+## 11. 当前限制
+
+- 不支持通用 DAG、条件边、图形工作流、自动规划器或把 MCP/Tool/Skill 做成节点。
+- 用户不能直接编辑或启动子 Agent Conversation；observer 是只读投影。
+- Agent-bound tree 的完整归档/物理删除需要专用生命周期事务，不能借旧单 Conversation 删除入口实现。
+- 并发 4、树深 8、节点 64 是产品默认硬边界，不是生产容量承诺。
+- 内存 notification 不支持跨进程广播；正确性依赖 SQLite polling/event replay。
+- `outcome_unknown` 需要用户或维护者理解外部系统状态，当前没有通用自动补偿引擎。
+- `send_message` 的子 Agent → 父 Agent 方向目前只写在 Tool 描述中，后端 Authorizer 仅强制同树；需要把方向作为安全不变量时必须先补实现与负向测试。
+- Main 的 6 秒 shutdown watchdog 短于 Dispatcher 两阶段理论上限；超时退出依赖 SQLite 恢复，尚未形成完全对齐的优雅关停预算。
+
+## 12. 变更检查表
+
+- [ ] 工具集合是否仍精确为六个，schema/Host adapter/测试是否同步？
+- [ ] 是否保持 Agent tree 而非引入隐式 DAG 或第二套 Runtime？
+- [ ] 新写路径是否在一个事务内提交 Mailbox/Wake/projection/receipt/outbox 的必要组合？
+- [ ] 幂等 request ID、FIFO、lease 半开区间和 per-Agent 单 Turn 是否仍由数据库约束？
+- [ ] 新副作用是否定义 pre-dispatch、possibly-dispatched 和 `outcome_unknown`？
+- [ ] 根 Agent/子 Agent/project/祖先权限是否从持久事实解析，而不是调用参数？
+- [ ] wait 是否保持 SQLite 权威、first-ready、独立停止域和 precommitted ToolResult？
+- [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
+- [ ] 是否更新 schema v16 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
+- [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

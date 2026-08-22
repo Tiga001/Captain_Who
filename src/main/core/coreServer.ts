@@ -531,6 +531,67 @@ function sameManagedArtifact(
   return left.kind === 'document' && right.kind === 'document'
 }
 
+const AGENT_OBSERVER_EVENT_TYPES = {
+  started: true,
+  tool_set_changed: true,
+  state: true,
+  message_delta: true,
+  message_stream_started: true,
+  message_stream_reset: true,
+  message_stream_committed: true,
+  llm_retry: true,
+  tool_input_progress: true,
+  file_write_preview_updated: true,
+  file_write_preview_cleared: true,
+  message: true,
+  guidance_queued: true,
+  guidance_applied: true,
+  guidance_rejected: true,
+  tool_call: true,
+  tool_result: true,
+  mcp_tool_invocation_state_changed: true,
+  todo_updated: true,
+  skill_activated: true,
+  file_draft_updated: true,
+  context_window_updated: true,
+  context_compaction_started: true,
+  context_compaction_finished: true,
+  approval_required: true,
+  diff: true,
+  command_started: true,
+  command_output: true,
+  command_exited: true,
+  command_interrupted: true,
+  error: true,
+  done: true
+} as const satisfies Readonly<Record<AgentEvent['type'], true>>
+
+type AgentObserverEventLogType = AgentEvent['type'] | 'unknown'
+
+interface AgentObserverWarning {
+  category: 'validation_failed' | 'handler_failed'
+  eventType: AgentObserverEventLogType
+  count: number
+}
+
+function readAgentObserverEventLogType(value: unknown): AgentObserverEventLogType {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'unknown'
+  const event = 'event' in value ? value.event : undefined
+  if (typeof event !== 'object' || event === null || Array.isArray(event)) return 'unknown'
+  const eventType = 'type' in event ? event.type : undefined
+  if (
+    typeof eventType !== 'string' ||
+    !Object.prototype.hasOwnProperty.call(AGENT_OBSERVER_EVENT_TYPES, eventType)
+  ) {
+    return 'unknown'
+  }
+  return eventType as AgentEvent['type']
+}
+
+function shouldLogAgentObserverWarning(count: number): boolean {
+  return count === 1 || count % 100 === 0
+}
+
 export interface CoreServerOptions {
   /**
    * The Electron Host-owned application data root. Production construction must inject the
@@ -542,6 +603,24 @@ export interface CoreServerOptions {
 
 export class CoreServer {
   private readonly rpc: CoreJsonRpcClient
+  private readonly agentObserverWarningCounts = new Map<string, number>()
+
+  private warnAgentObserverEvent(
+    category: AgentObserverWarning['category'],
+    eventType: AgentObserverEventLogType
+  ): void {
+    const key = `${category}:${eventType}`
+    const count = (this.agentObserverWarningCounts.get(key) ?? 0) + 1
+    this.agentObserverWarningCounts.set(key, count)
+    if (!shouldLogAgentObserverWarning(count)) return
+    const warning: AgentObserverWarning = { category, eventType, count }
+    console.warn(
+      category === 'validation_failed'
+        ? 'Ignored invalid Agent observer event'
+        : 'Agent observer handler failed',
+      warning
+    )
+  }
 
   constructor(options: CoreServerOptions = {}) {
     this.rpc =
@@ -1291,10 +1370,19 @@ export class CoreServer {
     return this.rpc.onNotification(
       AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
       (params) => {
+        let event: AgentObserverEventEnvelope
         try {
-          handler(parseAgentObserverEventEnvelope(params))
+          event = parseAgentObserverEventEnvelope(params)
         } catch {
-          console.warn('Ignored invalid Agent observer event')
+          this.warnAgentObserverEvent('validation_failed', readAgentObserverEventLogType(params))
+          return
+        }
+        try {
+          handler(event)
+        } catch {
+          // Preserve the notification boundary's fail-closed behavior without misclassifying a
+          // renderer/subscriber failure as an invalid Core event or echoing the event payload.
+          this.warnAgentObserverEvent('handler_failed', event.event.type)
         }
       }
     )

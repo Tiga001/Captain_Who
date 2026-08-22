@@ -13,6 +13,7 @@
   "scripts": {
     "format": "prettier --write . && cargo fmt --all",
     "format:check": "prettier --check . && cargo fmt --all -- --check",
+    "check:docs": "node scripts/check-docs.mjs",
     "lint": "eslint --cache .",
     "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings",
     "test": "pnpm test:officecli && pnpm test:office-renderer && pnpm test:mac-signing && pnpm test:dev-electron-icon && pnpm test:storage-reset-dev && pnpm test:artifact-runtime && pnpm test:web && pnpm test:rust",
@@ -36,7 +37,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "pnpm typecheck:node && pnpm typecheck:web",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm lint:rust && pnpm test",
+    "check": "pnpm format:check && pnpm check:docs && pnpm lint && pnpm typecheck && pnpm lint:rust && pnpm test",
     "start": "electron-vite preview",
     "prepare:officecli": "node scripts/prepare-officecli.mjs",
     "verify:officecli": "node scripts/prepare-officecli.mjs --verify",

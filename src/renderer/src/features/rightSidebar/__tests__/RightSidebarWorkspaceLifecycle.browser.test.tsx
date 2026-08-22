@@ -282,6 +282,40 @@ describe('RightSidebar workspace lifecycle', () => {
     expect(lifecycleCount('unmount', 'browser')).toBe(0)
   })
 
+  it('renders transient file tabs in italics and stabilizes them on a repeated open', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const screen = await render(
+      <RightSidebar
+        {...workspace}
+        capabilities={gitCapability(workspace, 'available')}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+      />
+    )
+
+    await openHomeModule(screen, 'rightSidebar.files')
+    clickTestButton(screen.getByTestId('files-open-readme').element())
+
+    const transientTab = screen.getByRole('tab', { name: 'README.md' })
+    await expect.element(transientTab).toHaveAttribute('data-file-preview-state', 'transient')
+    expect(getComputedStyle(transientTab.element().querySelector('span')!).fontStyle).toBe('italic')
+
+    clickTestButton(screen.getByTestId('files-open-readme').element())
+    await expect.element(transientTab).not.toHaveAttribute('data-file-preview-state')
+    expect(getComputedStyle(transientTab.element().querySelector('span')!).fontStyle).toBe('normal')
+
+    clickTestButton(screen.getByTestId('files-open-index').element())
+    await expect.poll(() => getTabLabels(screen.container)).toEqual(['README.md', 'index.ts'])
+    await expect
+      .element(screen.getByRole('tab', { name: 'README.md' }))
+      .not.toHaveAttribute('data-file-preview-state')
+    await expect
+      .element(screen.getByRole('tab', { name: 'index.ts' }))
+      .toHaveAttribute('data-file-preview-state', 'transient')
+  })
+
   it('removes only file pages whose project was deleted', async () => {
     const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
     const renderSidebar = (workspaceKeys: readonly string[]) => (
@@ -544,6 +578,7 @@ function renderTestModule(id: RightSidebarModuleId, props: RightSidebarModuleRen
       isSelected={props.isSelected}
       moduleState={props.page.moduleState}
       moduleId={id}
+      onOpenPage={props.onOpenPage}
       workspaceKey={props.page.workspaceKey}
     />
   )
@@ -554,12 +589,14 @@ function TrackedSurface({
   isSelected,
   moduleState,
   moduleId,
+  onOpenPage,
   workspaceKey
 }: {
   activity: RightSidebarActivity
   isSelected: boolean
   moduleState: RightSidebarModuleRenderProps['page']['moduleState']
   moduleId: RightSidebarModuleId
+  onOpenPage: RightSidebarModuleRenderProps['onOpenPage']
   workspaceKey?: string | null
 }) {
   const [localState, setLocalState] = useState(0)
@@ -587,8 +624,40 @@ function TrackedSurface({
       >
         {localState}
       </button>
+      {moduleId === 'files' && (
+        <>
+          <button
+            data-testid="files-open-readme"
+            onClick={() => onOpenPage(createFilePreviewRequest('README.md'))}
+            type="button"
+          >
+            README.md
+          </button>
+          <button
+            data-testid="files-open-index"
+            onClick={() => onOpenPage(createFilePreviewRequest('src/index.ts'))}
+            type="button"
+          >
+            index.ts
+          </button>
+        </>
+      )}
     </div>
   )
+}
+
+function createFilePreviewRequest(path: string) {
+  return {
+    disposition: 'preview' as const,
+    moduleState: { kind: 'workspace-file' as const, path, tabState: 'transient' as const },
+    resourceKey: `workspace-file:${path}`,
+    title: path.split('/').at(-1) ?? path
+  }
+}
+
+function clickTestButton(element: Element): void {
+  if (!(element instanceof HTMLButtonElement)) throw new Error('Expected a test button')
+  element.click()
 }
 
 function workspaceProps(workspaceKey: string, workspaceName: string, workspacePath: string) {

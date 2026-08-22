@@ -168,16 +168,22 @@ function openRelatedPage(
         page.workspaceSessionKey === targetBasePage.workspaceSessionKey
     )
     if (existingPage) {
+      if (request.disposition === 'preview') {
+        return reopenPreviewPage(state, sourcePage, existingPage)
+      }
       return state.activePageId === existingPage.id
         ? state
         : { ...state, activePageId: existingPage.id }
     }
   }
 
-  const reusablePage =
-    request.disposition === 'reuse-source-if-empty'
-      ? findReusableEmptyPage(state.pages, targetModule.id, targetBasePage, sourcePage)
-      : undefined
+  const reusablePage = findReusableRelatedPage(
+    state.pages,
+    request.disposition,
+    targetModule.id,
+    targetBasePage,
+    sourcePage
+  )
   const pageBase = reusablePage ?? targetBasePage
   const title = request.title.trim() || pageBase.title
   const page: RightSidebarPage = {
@@ -188,7 +194,9 @@ function openRelatedPage(
     resourceKey,
     title
   }
-  const pages = evictRelatedPageAtLimit(state, targetModule, targetBasePage, reusablePage?.id)
+  const pages = reusablePage?.resourceKey
+    ? state.pages
+    : evictRelatedPageAtLimit(state, targetModule, targetBasePage, reusablePage?.id)
   if (reusablePage) {
     return {
       activePageId: reusablePage.id,
@@ -202,6 +210,42 @@ function openRelatedPage(
     activePageId: page.id,
     pages: [...pages, page]
   }
+}
+
+function reopenPreviewPage(
+  state: RightSidebarPlatformState,
+  sourcePage: RightSidebarPage,
+  existingPage: RightSidebarPage
+): RightSidebarPlatformState {
+  const sourceIsReplaceable =
+    sourcePage.id !== existingPage.id &&
+    sourcePage.moduleId === existingPage.moduleId &&
+    sourcePage.workspaceSessionKey === existingPage.workspaceSessionKey &&
+    isTransientWorkspaceFilePage(sourcePage)
+  const existingIsTransient = isTransientWorkspaceFilePage(existingPage)
+  const pages = state.pages
+    .filter((page) => !sourceIsReplaceable || page.id !== sourcePage.id)
+    .map((page) => {
+      if (
+        page.id !== existingPage.id ||
+        !existingIsTransient ||
+        page.moduleState?.kind !== 'workspace-file'
+      ) {
+        return page
+      }
+      return {
+        ...page,
+        moduleState: {
+          ...page.moduleState,
+          tabState: 'stable' as const
+        }
+      }
+    })
+
+  if (!sourceIsReplaceable && !existingIsTransient && state.activePageId === existingPage.id) {
+    return state
+  }
+  return { ...state, activePageId: existingPage.id, pages }
 }
 
 function createCrossModulePageBase(
@@ -229,18 +273,26 @@ function createCrossModulePageBase(
   )
 }
 
-function findReusableEmptyPage(
+function findReusableRelatedPage(
   pages: RightSidebarPage[],
+  disposition: RightSidebarPageOpenRequest['disposition'],
   targetModuleId: RightSidebarModuleId,
   targetBasePage: RightSidebarPage,
   sourcePage: RightSidebarPage
 ): RightSidebarPage | undefined {
-  const sourceIsReusable =
+  if (disposition !== 'reuse-source-if-empty' && disposition !== 'preview') return undefined
+
+  const sourceIsEmpty =
     sourcePage.moduleId === targetModuleId &&
     sourcePage.workspaceSessionKey === targetBasePage.workspaceSessionKey &&
     sourcePage.moduleState === undefined &&
     sourcePage.resourceKey === undefined
-  if (sourceIsReusable) return sourcePage
+  const sourceIsTransientPreview =
+    disposition === 'preview' &&
+    sourcePage.workspaceSessionKey === targetBasePage.workspaceSessionKey &&
+    isTransientWorkspaceFilePage(sourcePage)
+  if (sourceIsEmpty || sourceIsTransientPreview) return sourcePage
+  if (sourcePage.moduleId === targetModuleId) return undefined
 
   return pages.find(
     (page) =>
@@ -248,6 +300,14 @@ function findReusableEmptyPage(
       page.workspaceSessionKey === targetBasePage.workspaceSessionKey &&
       page.moduleState === undefined &&
       page.resourceKey === undefined
+  )
+}
+
+function isTransientWorkspaceFilePage(page: RightSidebarPage): boolean {
+  return (
+    page.moduleId === 'files' &&
+    page.moduleState?.kind === 'workspace-file' &&
+    page.moduleState.tabState === 'transient'
   )
 }
 

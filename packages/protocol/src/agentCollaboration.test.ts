@@ -429,7 +429,7 @@ describe('agent collaboration protocol', () => {
           traceSequence: 4,
           identity: { type: 'builtin', toolName: 'read_file' },
           call: {
-            id: 'call-1',
+            id: `tc1_${'a'.repeat(43)}`,
             tool: 'read_file',
             args: {},
             approvalStatus: 'approved',
@@ -447,7 +447,7 @@ describe('agent collaboration protocol', () => {
           traceSequence: 4,
           identity: { type: 'builtin', toolName: 'different_tool' },
           call: {
-            id: 'call-1',
+            id: `tc1_${'a'.repeat(43)}`,
             tool: 'read_file',
             args: {},
             approvalStatus: 'approved',

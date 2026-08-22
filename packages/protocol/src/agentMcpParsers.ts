@@ -9,7 +9,13 @@ import type {
   AgentBuiltinMcpToolApproval,
   AgentBuiltinMcpToolRiskKind,
   AgentChatOutput,
+  AgentCommandActionProjection,
+  AgentContextWindowSnapshot,
+  AgentDiffProposal,
   AgentEvent,
+  AgentFileDraftSnapshot,
+  AgentFileWritePreview,
+  AgentFileWriteProposal,
   AgentLlmRetryCategory,
   AgentMcpArgumentSummary,
   AgentMcpInvocationDiagnostics,
@@ -19,11 +25,22 @@ import type {
   AgentMcpToolInvocationEvent,
   AgentMcpToolInvocationIdentity,
   AgentMcpToolProvenance,
+  AgentOfficeOperationRequest,
   AgentProposedAction,
+  AgentSkillInstallationRequest,
+  AgentSkillMaterializationRequest,
+  AgentSkillScriptRequest,
+  AgentStateSnapshot,
+  AgentTodoState,
+  AgentToolDefinition,
   AgentToolIdentity,
   AgentToolCall,
+  AgentToolResult,
+  AgentUsage,
+  ConversationTraceAttachment,
   PendingAgentActionSnapshot
 } from './agent'
+import type { ActivatedSkillSummary } from './skills'
 import { parseMcpBuiltinCapabilityId } from './mcp/parsers'
 import {
   expectBoolean,
@@ -34,10 +51,7 @@ import {
   expectString,
   invalidProtocolValue
 } from './skills/validation'
-import {
-  isAgentCommandSessionEventType,
-  parseAgentCommandSessionEvent
-} from './agentCommandSessionParsers'
+import { parseAgentCommandSessionEvent } from './agentCommandSessionParsers'
 
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -50,6 +64,7 @@ const BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS = 15 * 60
 const BROWSER_RISK_APPROVAL_TTL_SECONDS = 15 * 60
 const MAX_RENDERER_DATE_UNIX_SECONDS = 253_402_300_799
 const MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES = 1024 * 1024
+const MAX_RENDERER_SAFE_AGENT_EVENT_BYTES = 16 * 1024 * 1024
 const MAX_RENDERER_SAFE_PROPOSED_ACTIONS = 1024
 const MAX_MCP_DIAGNOSTIC_ARGUMENT_BYTES = 64 * 1024
 const MAX_MCP_DIAGNOSTIC_ARGUMENT_VALUES = 4096
@@ -154,230 +169,336 @@ const BUILTIN_MCP_APPROVAL_TOOL_NAMES = [
   'browser_storage_state'
 ] as const
 
-/**
- * Parses Agent event families that have dedicated strict Host-boundary contracts. Other current
- * event families keep their existing typed projection until they receive dedicated parsers.
- */
+const AGENT_EVENT_TYPES = {
+  started: true,
+  tool_set_changed: true,
+  state: true,
+  message_delta: true,
+  message_stream_started: true,
+  message_stream_reset: true,
+  message_stream_committed: true,
+  llm_retry: true,
+  tool_input_progress: true,
+  file_write_preview_updated: true,
+  file_write_preview_cleared: true,
+  message: true,
+  guidance_queued: true,
+  guidance_applied: true,
+  guidance_rejected: true,
+  tool_call: true,
+  tool_result: true,
+  mcp_tool_invocation_state_changed: true,
+  todo_updated: true,
+  skill_activated: true,
+  file_draft_updated: true,
+  context_window_updated: true,
+  context_compaction_started: true,
+  context_compaction_finished: true,
+  approval_required: true,
+  diff: true,
+  command_started: true,
+  command_output: true,
+  command_exited: true,
+  command_interrupted: true,
+  error: true,
+  done: true
+} as const satisfies Record<AgentEvent['type'], true>
+
+/** Canonical strict parser for every Renderer-facing Agent event variant. */
 export function parseAgentEventForHost(value: unknown): AgentEvent {
   const record = expectRecord(value, 'Agent event')
-  if (record.type === 'tool_call') {
-    const context = 'Agent ToolCall event'
-    expectOnlyKeys(record, ['type', 'runId', 'traceSequence', 'call', 'identity'] as const, context)
-    const call = expectRecord(record.call, `${context}.call`)
-    expectOnlyKeys(
-      call,
-      ['id', 'tool', 'args', 'approvalStatus', 'reason'] as const,
-      `${context}.call`
-    )
-    if (!Object.hasOwn(call, 'reason')) {
-      throw invalidProtocolValue(`${context}.call`, 'reason is required')
-    }
-    const parsedCall: AgentToolCall = {
-      id: expectModelToolCallId(call.id, `${context}.call.id`),
-      tool: expectBoundedNonEmptyString(call.tool, `${context}.call.tool`, 256),
-      args: call.args,
-      approvalStatus: expectEnum(
-        call.approvalStatus,
-        ['not_required', 'required', 'approved', 'rejected'] as const,
-        `${context}.call.approvalStatus`
-      ),
-      reason:
-        call.reason === null ? null : expectDisplayText(call.reason, `${context}.call.reason`, 4096)
-    }
-    const identity = parseAgentToolIdentityForHost(record.identity)
-    const identityToolName =
-      identity.type === 'mcp'
-        ? identity.provenance.modelToolName
-        : identity.type === 'builtin_capability'
-          ? identity.modelName
-          : identity.toolName
-    if (identityToolName !== parsedCall.tool) {
-      throw invalidProtocolValue(context, 'identity must match call.tool')
-    }
-    if (identity.type === 'builtin_capability') {
-      // Managed browser arguments can contain URLs, typed form values, or passwords. The model
-      // already has its own Tool call history; Renderer needs only a stable activity anchor.
-      parsedCall.args = {}
-    }
-    return {
-      type: 'tool_call',
-      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
-      traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
-      identity,
-      call: parsedCall
-    }
-  }
-  if (record.type === 'message_stream_committed') {
-    const context = 'Agent message stream committed event'
-    expectOnlyKeys(record, ['type', 'runId', 'streamId', 'traceSequence'] as const, context)
-    return {
-      type: 'message_stream_committed',
-      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
-      streamId: expectBoundedNonEmptyString(record.streamId, `${context}.streamId`, 2048),
-      traceSequence:
-        record.traceSequence === null
-          ? null
-          : expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
-    }
-  }
-  if (record.type === 'context_compaction_started') {
-    const context = 'Agent context compaction started event'
-    expectOnlyKeys(record, ['type', 'runId', 'operationId', 'traceSequence'] as const, context)
-    return {
-      type: 'context_compaction_started',
-      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
-      operationId: expectOpaqueRunId(record.operationId, `${context}.operationId`),
-      traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
-    }
-  }
-  if (record.type === 'context_compaction_finished') {
-    const context = 'Agent context compaction finished event'
-    expectOnlyKeys(
-      record,
-      ['type', 'runId', 'operationId', 'outcome', 'traceSequence'] as const,
-      context
-    )
-    return {
-      type: 'context_compaction_finished',
-      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
-      operationId: expectOpaqueRunId(record.operationId, `${context}.operationId`),
-      outcome: expectEnum(
-        record.outcome,
-        ['applied', 'skipped', 'failed', 'cancelled'] as const,
-        `${context}.outcome`
-      ),
-      traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
-    }
-  }
-  if (record.type === 'error') {
-    const context = 'Agent error event'
-    expectOnlyKeys(
-      record,
-      ['type', 'runId', 'traceSequence', 'message', 'recoverable', 'code', 'details'] as const,
-      context
-    )
-    const runId =
-      record.runId === null || record.runId === undefined
-        ? undefined
-        : expectOpaqueRunId(record.runId, `${context}.runId`)
-    const code =
-      record.code === undefined
-        ? undefined
-        : expectBoundedNonEmptyString(record.code, `${context}.code`, 128)
-    if (record.details !== undefined) {
-      let encoded: string
-      try {
-        encoded = JSON.stringify(record.details)
-      } catch {
-        throw invalidProtocolValue(`${context}.details`, 'must be JSON encodable')
-      }
-      if (new TextEncoder().encode(encoded).byteLength > MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES) {
-        throw invalidProtocolValue(`${context}.details`, 'exceeded the Renderer-safe byte limit')
-      }
-    }
-    return {
-      type: 'error',
-      ...(runId === undefined ? {} : { runId }),
-      traceSequence:
-        record.traceSequence === null
-          ? null
-          : expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
-      message: expectBoundedString(
-        record.message,
-        `${context}.message`,
-        MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
-      ),
-      recoverable: expectBoolean(record.recoverable, `${context}.recoverable`),
-      ...(code === undefined ? {} : { code }),
-      ...(record.details === undefined ? {} : { details: record.details })
-    }
-  }
-  if (record.type === 'llm_retry') {
-    return parseAgentLlmRetryEvent(record)
-  }
-  if (record.type === 'message_stream_reset') {
-    return parseAgentMessageStreamResetEvent(record)
-  }
-  if (isAgentCommandSessionEventType(record.type)) {
-    return parseAgentCommandSessionEvent(record)
-  }
-  if (record.type === 'mcp_tool_invocation_state_changed') {
-    expectOnlyKeys(record, ['type', 'runId', 'invocation'] as const, 'MCP Agent event')
-    return {
-      type: 'mcp_tool_invocation_state_changed',
-      runId: expectOpaqueRunId(record.runId, 'MCP Agent event.runId'),
-      invocation: parseAgentMcpToolInvocationEvent(record.invocation)
-    }
-  }
+  assertRendererSafeJson(record, 'Agent event', MAX_RENDERER_SAFE_AGENT_EVENT_BYTES)
+  const type = expectAgentEventType(record.type, 'Agent event.type')
+  const context = `Agent ${type} event`
 
-  if (record.type === 'approval_required') {
-    const action = expectRecord(record.action, 'Agent approval event.action')
-    if (action.type === 'mcp_tool_call') {
-      expectOnlyKeys(record, ['type', 'runId', 'action'] as const, 'MCP approval event')
-      const runId = expectOpaqueRunId(record.runId, 'MCP approval event.runId')
-      const parsedAction = parseAgentMcpProposedAction(action)
-      if (parsedAction.approval.identity.runId !== runId) {
-        throw invalidProtocolValue(
-          'MCP approval event',
-          'action identity runId must match event runId'
+  switch (type) {
+    case 'started':
+      expectOnlyKeys(record, ['type', 'runId', 'toolDefinitions'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        toolDefinitions: parseAgentToolDefinitions(
+          record.toolDefinitions,
+          `${context}.toolDefinitions`
         )
       }
-      return { type: 'approval_required', runId, action: parsedAction }
-    }
-    if (action.type === 'builtin_capability_activation') {
-      const context = 'built-in capability approval event'
+    case 'tool_set_changed':
+      expectOnlyKeys(
+        record,
+        [
+          'type',
+          'runId',
+          'stableRevision',
+          'dynamicRevision',
+          'effectiveRevision',
+          'toolDefinitions'
+        ] as const,
+        context
+      )
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        stableRevision: expectOpaqueRunId(record.stableRevision, `${context}.stableRevision`),
+        dynamicRevision: expectOpaqueRunId(record.dynamicRevision, `${context}.dynamicRevision`),
+        effectiveRevision: expectOpaqueRunId(
+          record.effectiveRevision,
+          `${context}.effectiveRevision`
+        ),
+        toolDefinitions: parseAgentToolDefinitions(
+          record.toolDefinitions,
+          `${context}.toolDefinitions`
+        )
+      }
+    case 'state':
+      expectOnlyKeys(record, ['type', 'runId', 'state'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        state: parseAgentStateSnapshot(record.state, `${context}.state`)
+      }
+    case 'message_delta':
+      expectOnlyKeys(record, ['type', 'runId', 'streamId', 'delta'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        ...(record.streamId === undefined
+          ? {}
+          : { streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`) }),
+        delta: expectBoundedString(
+          record.delta,
+          `${context}.delta`,
+          MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+        )
+      }
+    case 'message_stream_started':
+      expectOnlyKeys(record, ['type', 'runId', 'streamId', 'attempt'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`),
+        attempt: expectSafeInteger(record.attempt, `${context}.attempt`, 0)
+      }
+    case 'message_stream_reset':
+      return parseAgentMessageStreamResetEvent(record)
+    case 'message_stream_committed':
+      expectOnlyKeys(record, ['type', 'runId', 'streamId', 'traceSequence'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`),
+        traceSequence:
+          record.traceSequence === null
+            ? null
+            : expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
+      }
+    case 'llm_retry':
+      return parseAgentLlmRetryEvent(record)
+    case 'tool_input_progress':
+      expectOnlyKeys(
+        record,
+        [
+          'type',
+          'runId',
+          'streamId',
+          'attempt',
+          'toolCallIndex',
+          'toolCallId',
+          'tool',
+          'receivedBytes'
+        ] as const,
+        context
+      )
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`),
+        attempt: expectSafeInteger(record.attempt, `${context}.attempt`, 0),
+        toolCallIndex: expectSafeInteger(record.toolCallIndex, `${context}.toolCallIndex`, 0),
+        ...(record.toolCallId === undefined
+          ? {}
+          : {
+              toolCallId: expectBoundedNonEmptyString(
+                record.toolCallId,
+                `${context}.toolCallId`,
+                2048
+              )
+            }),
+        tool: expectBoundedNonEmptyString(record.tool, `${context}.tool`, 1024),
+        receivedBytes: expectSafeInteger(record.receivedBytes, `${context}.receivedBytes`, 0)
+      }
+    case 'file_write_preview_updated':
+      expectOnlyKeys(record, ['type', 'runId', 'preview'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        preview: parseAgentFileWritePreview(record.preview, `${context}.preview`)
+      }
+    case 'file_write_preview_cleared':
+      expectOnlyKeys(record, ['type', 'runId', 'streamId', 'attempt'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        streamId: expectOpaqueRunId(record.streamId, `${context}.streamId`),
+        attempt: expectSafeInteger(record.attempt, `${context}.attempt`, 0)
+      }
+    case 'message':
+      expectOnlyKeys(record, ['type', 'runId', 'content'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        content: expectBoundedString(
+          record.content,
+          `${context}.content`,
+          MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+        )
+      }
+    case 'guidance_queued':
+    case 'guidance_applied':
+    case 'guidance_rejected':
+      return parseAgentGuidanceEvent(type, record)
+    case 'tool_call':
+      return parseAgentToolCallEvent(record)
+    case 'tool_result':
+      expectOnlyKeys(record, ['type', 'runId', 'result'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        result: parseAgentToolResultForHost(record.result, `${context}.result`)
+      }
+    case 'mcp_tool_invocation_state_changed':
+      expectOnlyKeys(record, ['type', 'runId', 'invocation'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        invocation: parseAgentMcpToolInvocationEvent(record.invocation)
+      }
+    case 'todo_updated':
+      expectOnlyKeys(record, ['type', 'runId', 'todo'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        todo: parseAgentTodoState(record.todo, `${context}.todo`)
+      }
+    case 'skill_activated':
+      expectOnlyKeys(
+        record,
+        ['type', 'runId', 'activationRevision', 'activatedBy', 'skill'] as const,
+        context
+      )
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        activationRevision: expectOpaqueRunId(
+          record.activationRevision,
+          `${context}.activationRevision`
+        ),
+        activatedBy: expectEnum(
+          record.activatedBy,
+          ['user', 'model'] as const,
+          `${context}.activatedBy`
+        ),
+        skill: parseActivatedSkillSummary(record.skill, `${context}.skill`)
+      }
+    case 'file_draft_updated':
+      expectOnlyKeys(record, ['type', 'runId', 'draft'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        draft: parseAgentFileDraftSnapshot(record.draft, `${context}.draft`)
+      }
+    case 'context_window_updated':
+      expectOnlyKeys(record, ['type', 'runId', 'conversationId', 'snapshot'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        ...(record.conversationId === undefined
+          ? {}
+          : {
+              conversationId: expectOpaqueRunId(record.conversationId, `${context}.conversationId`)
+            }),
+        snapshot: parseAgentContextWindowSnapshot(record.snapshot, `${context}.snapshot`)
+      }
+    case 'context_compaction_started':
+      expectOnlyKeys(record, ['type', 'runId', 'operationId', 'traceSequence'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        operationId: expectOpaqueRunId(record.operationId, `${context}.operationId`),
+        traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
+      }
+    case 'context_compaction_finished':
+      expectOnlyKeys(
+        record,
+        ['type', 'runId', 'operationId', 'outcome', 'traceSequence'] as const,
+        context
+      )
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        operationId: expectOpaqueRunId(record.operationId, `${context}.operationId`),
+        outcome: expectEnum(
+          record.outcome,
+          ['applied', 'skipped', 'failed', 'cancelled'] as const,
+          `${context}.outcome`
+        ),
+        traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
+      }
+    case 'approval_required': {
       expectOnlyKeys(record, ['type', 'runId', 'action'] as const, context)
       const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
-      const parsedAction = parseAgentBuiltinCapabilityActivationProposedAction(action)
-      if (parsedAction.approval.runId !== runId) {
-        throw invalidProtocolValue(context, 'action runId must match event runId')
+      return {
+        type,
+        runId,
+        action: parseAgentProposedActionForHost(record.action, `${context}.action`, runId, true)
       }
-      if (parsedAction.approval.approvalStatus !== 'required') {
-        throw invalidProtocolValue(context, 'approval_required action must remain required')
-      }
-      return { type: 'approval_required', runId, action: parsedAction }
     }
-    if (action.type === 'builtin_mcp_tool_approval') {
-      const context = 'built-in MCP Tool approval event'
-      expectOnlyKeys(record, ['type', 'runId', 'action'] as const, context)
-      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
-      const parsedAction = parseAgentBuiltinMcpToolApprovalProposedAction(action)
-      if (parsedAction.approval.identity.runId !== runId) {
-        throw invalidProtocolValue(context, 'action runId must match event runId')
+    case 'diff':
+      expectOnlyKeys(record, ['type', 'runId', 'diff'] as const, context)
+      return {
+        type,
+        runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+        diff: parseAgentDiffProposal(record.diff, `${context}.diff`)
       }
-      if (parsedAction.approval.approvalStatus !== 'required') {
-        throw invalidProtocolValue(context, 'approval_required action must remain required')
+    case 'command_started':
+    case 'command_output':
+    case 'command_exited':
+    case 'command_interrupted':
+      return parseAgentCommandSessionEvent(record)
+    case 'error': {
+      expectOnlyKeys(
+        record,
+        ['type', 'runId', 'traceSequence', 'message', 'recoverable', 'code', 'details'] as const,
+        context
+      )
+      const runId =
+        record.runId === null || record.runId === undefined
+          ? undefined
+          : expectOpaqueRunId(record.runId, `${context}.runId`)
+      const code =
+        record.code === undefined
+          ? undefined
+          : expectBoundedNonEmptyString(record.code, `${context}.code`, 128)
+      if (record.details !== undefined) {
+        assertRendererSafeJson(record.details, `${context}.details`)
       }
-      return { type: 'approval_required', runId, action: parsedAction }
+      return {
+        type,
+        ...(runId === undefined ? {} : { runId }),
+        traceSequence:
+          record.traceSequence === null
+            ? null
+            : expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
+        message: expectBoundedString(
+          record.message,
+          `${context}.message`,
+          MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+        ),
+        recoverable: expectBoolean(record.recoverable, `${context}.recoverable`),
+        ...(code === undefined ? {} : { code }),
+        ...(record.details === undefined ? {} : { details: record.details })
+      }
     }
-    if (action.type === 'browser_risk_approval') {
-      const context = 'browser risk approval event'
-      expectOnlyKeys(record, ['type', 'runId', 'action'] as const, context)
-      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
-      const parsedAction = parseAgentBrowserRiskProposedAction(action)
-      if (parsedAction.approval.runId !== runId) {
-        throw invalidProtocolValue(context, 'action runId must match event runId')
-      }
-      if (parsedAction.approval.approvalStatus !== 'required') {
-        throw invalidProtocolValue(context, 'approval_required action must remain required')
-      }
-      return { type: 'approval_required', runId, action: parsedAction }
-    }
-  }
-
-  if (record.type === 'done' && Array.isArray(record.proposedActions)) {
-    const hasStrictAction = record.proposedActions.some(
-      (action) =>
-        typeof action === 'object' &&
-        action !== null &&
-        !Array.isArray(action) &&
-        'type' in action &&
-        (action.type === 'mcp_tool_call' ||
-          action.type === 'builtin_capability_activation' ||
-          action.type === 'builtin_mcp_tool_approval' ||
-          action.type === 'browser_risk_approval')
-    )
-    if (hasStrictAction) {
+    case 'done': {
       expectOnlyKeys(
         record,
         [
@@ -390,18 +511,13 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
           'finishReason',
           'proposedActions'
         ] as const,
-        'Agent done event containing MCP actions'
+        context
       )
-      const runId = expectOpaqueRunId(record.runId, 'Agent done event containing MCP actions.runId')
-      const proposedActions = parseStrictProposedActions(
-        record.proposedActions,
-        'Agent done event containing protected actions.proposedActions',
-        runId
-      )
+      const runId = expectOpaqueRunId(record.runId, `${context}.runId`)
       return {
-        type: 'done',
+        type,
         runId,
-        success: expectBoolean(record.success, 'Agent done event containing MCP actions.success'),
+        success: expectBoolean(record.success, `${context}.success`),
         ...(record.status === undefined
           ? {}
           : {
@@ -409,14 +525,13 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
                 record.status,
                 [
                   'idle',
-                  'queued',
                   'running',
                   'waiting_for_approval',
                   'completed',
                   'failed',
                   'cancelled'
                 ] as const,
-                'Agent done event containing MCP actions.status'
+                `${context}.status`
               )
             }),
         ...(record.content === undefined
@@ -424,25 +539,1347 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
           : {
               content: expectBoundedString(
                 record.content,
-                'Agent done event containing MCP actions.content',
+                `${context}.content`,
                 MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
               )
             }),
+        ...(record.usage === undefined
+          ? {}
+          : { usage: parseAgentUsage(record.usage, `${context}.usage`) }),
         ...(record.finishReason === undefined
           ? {}
           : {
               finishReason: expectBoundedString(
                 record.finishReason,
-                'Agent done event containing MCP actions.finishReason',
-                256
+                `${context}.finishReason`,
+                2048
               )
             }),
-        proposedActions
+        ...(record.proposedActions === undefined
+          ? {}
+          : {
+              proposedActions: parseAgentProposedActionsForHost(
+                record.proposedActions,
+                `${context}.proposedActions`,
+                runId
+              )
+            })
       }
     }
+    default:
+      return assertNeverAgentEventType(type)
+  }
+}
+
+function expectAgentEventType(value: unknown, context: string): AgentEvent['type'] {
+  const type = expectBoundedNonEmptyString(value, context, 128)
+  if (!Object.hasOwn(AGENT_EVENT_TYPES, type)) {
+    throw invalidProtocolValue(context, `unknown event type ${type}`)
+  }
+  return type as AgentEvent['type']
+}
+
+function assertNeverAgentEventType(value: never): never {
+  throw invalidProtocolValue('Agent event.type', `unknown event type ${String(value)}`)
+}
+
+function assertRendererSafeJson(
+  value: unknown,
+  context: string,
+  maximumBytes = MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+): void {
+  let encoded: string | undefined
+  try {
+    encoded = JSON.stringify(value)
+  } catch {
+    throw invalidProtocolValue(context, 'must be JSON encodable')
+  }
+  if (encoded === undefined || new TextEncoder().encode(encoded).byteLength > maximumBytes) {
+    throw invalidProtocolValue(context, `exceeded the Renderer-safe ${maximumBytes} byte limit`)
+  }
+}
+
+function expectBoundedArray(value: unknown, context: string, maximumItems: number): unknown[] {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    throw invalidProtocolValue(context, `expected an array with at most ${maximumItems} items`)
+  }
+  return value
+}
+
+function parseAgentToolDefinitions(value: unknown, context: string): AgentToolDefinition[] {
+  return expectBoundedArray(value, context, 4096).map((entry, index) => {
+    const itemContext = `${context}[${index}]`
+    const item = expectRecord(entry, itemContext)
+    expectOnlyKeys(
+      item,
+      [
+        'name',
+        'description',
+        'inputSchema',
+        'safety',
+        'requiresWorkspace',
+        'requiresApproval',
+        'approvalMode'
+      ] as const,
+      itemContext
+    )
+    assertRendererSafeJson(item.inputSchema, `${itemContext}.inputSchema`, 4 * 1024 * 1024)
+    return {
+      name: expectBoundedNonEmptyString(item.name, `${itemContext}.name`, 1024),
+      description: expectBoundedString(item.description, `${itemContext}.description`, 64 * 1024),
+      inputSchema: item.inputSchema,
+      safety: expectEnum(
+        item.safety,
+        ['read_only', 'requires_approval', 'destructive'] as const,
+        `${itemContext}.safety`
+      ),
+      requiresWorkspace: expectBoolean(item.requiresWorkspace, `${itemContext}.requiresWorkspace`),
+      requiresApproval: expectBoolean(item.requiresApproval, `${itemContext}.requiresApproval`),
+      approvalMode: expectEnum(
+        item.approvalMode,
+        ['never', 'always', 'dynamic'] as const,
+        `${itemContext}.approvalMode`
+      )
+    }
+  })
+}
+
+function parseAgentStateSnapshot(value: unknown, context: string): AgentStateSnapshot {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['status', 'activeRunId', 'lastError', 'updatedAt'] as const, context)
+  return {
+    status: expectEnum(
+      item.status,
+      ['idle', 'running', 'waiting_for_approval', 'completed', 'failed', 'cancelled'] as const,
+      `${context}.status`
+    ),
+    activeRunId:
+      item.activeRunId === null
+        ? null
+        : expectOpaqueRunId(item.activeRunId, `${context}.activeRunId`),
+    lastError:
+      item.lastError === null
+        ? null
+        : expectBoundedString(
+            item.lastError,
+            `${context}.lastError`,
+            MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+          ),
+    updatedAt: expectSafeInteger(item.updatedAt, `${context}.updatedAt`, 0)
+  }
+}
+
+function parseAgentFileWritePreview(value: unknown, context: string): AgentFileWritePreview {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'previewId',
+      'streamId',
+      'attempt',
+      'toolCallIndex',
+      'toolCallId',
+      'draftId',
+      'filePath',
+      'additions',
+      'deletions',
+      'lineCount',
+      'byteCount',
+      'generatedBytes',
+      'contentOffsetBytes',
+      'contentDelta',
+      'updatedAt'
+    ] as const,
+    context
+  )
+  return {
+    previewId: expectOpaqueRunId(item.previewId, `${context}.previewId`),
+    streamId: expectOpaqueRunId(item.streamId, `${context}.streamId`),
+    attempt: expectSafeInteger(item.attempt, `${context}.attempt`, 0),
+    toolCallIndex: expectSafeInteger(item.toolCallIndex, `${context}.toolCallIndex`, 0),
+    ...(item.toolCallId === undefined
+      ? {}
+      : {
+          toolCallId: expectBoundedNonEmptyString(item.toolCallId, `${context}.toolCallId`, 2048)
+        }),
+    draftId: expectOpaqueRunId(item.draftId, `${context}.draftId`),
+    filePath: expectBoundedString(item.filePath, `${context}.filePath`, 16 * 1024),
+    additions: expectSafeInteger(item.additions, `${context}.additions`, 0),
+    deletions: expectSafeInteger(item.deletions, `${context}.deletions`, 0),
+    lineCount: expectSafeInteger(item.lineCount, `${context}.lineCount`, 0),
+    byteCount: expectSafeInteger(item.byteCount, `${context}.byteCount`, 0),
+    generatedBytes: expectSafeInteger(item.generatedBytes, `${context}.generatedBytes`, 0),
+    contentOffsetBytes: expectSafeInteger(
+      item.contentOffsetBytes,
+      `${context}.contentOffsetBytes`,
+      0
+    ),
+    contentDelta: expectBoundedString(
+      item.contentDelta,
+      `${context}.contentDelta`,
+      MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+    ),
+    updatedAt: expectSafeInteger(item.updatedAt, `${context}.updatedAt`, 0)
+  }
+}
+
+function parseConversationTraceAttachments(
+  value: unknown,
+  context: string
+): ConversationTraceAttachment[] {
+  return expectBoundedArray(value, context, 256).map((entry, index) => {
+    const itemContext = `${context}[${index}]`
+    const item = expectRecord(entry, itemContext)
+    expectOnlyKeys(item, ['id', 'kind', 'name', 'mimeType', 'sizeBytes'] as const, itemContext)
+    return {
+      id: expectOpaqueRunId(item.id, `${itemContext}.id`),
+      kind: expectEnum(item.kind, ['file', 'image'] as const, `${itemContext}.kind`),
+      name: expectBoundedString(item.name, `${itemContext}.name`, 16 * 1024),
+      ...(item.mimeType === undefined
+        ? {}
+        : {
+            mimeType: expectBoundedNonEmptyString(item.mimeType, `${itemContext}.mimeType`, 1024)
+          }),
+      sizeBytes: expectSafeInteger(item.sizeBytes, `${itemContext}.sizeBytes`, 0)
+    }
+  })
+}
+
+function parseAgentGuidanceEvent(
+  type: 'guidance_queued' | 'guidance_applied' | 'guidance_rejected',
+  record: Record<string, unknown>
+): Extract<AgentEvent, { type: typeof type }> {
+  const context = `Agent ${type} event`
+  const commonKeys = [
+    'type',
+    'runId',
+    'guidanceId',
+    'clientMessageId',
+    'content',
+    'attachments',
+    'createdAt'
+  ] as const
+  if (type === 'guidance_queued') {
+    expectOnlyKeys(record, commonKeys, context)
+    return {
+      type,
+      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+      guidanceId: expectOpaqueRunId(record.guidanceId, `${context}.guidanceId`),
+      clientMessageId: expectOpaqueRunId(record.clientMessageId, `${context}.clientMessageId`),
+      content: expectBoundedString(
+        record.content,
+        `${context}.content`,
+        MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+      ),
+      attachments: parseConversationTraceAttachments(record.attachments, `${context}.attachments`),
+      createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
+    }
+  }
+  if (type === 'guidance_applied') {
+    expectOnlyKeys(record, [...commonKeys, 'sequence'] as const, context)
+    return {
+      type,
+      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+      guidanceId: expectOpaqueRunId(record.guidanceId, `${context}.guidanceId`),
+      clientMessageId: expectOpaqueRunId(record.clientMessageId, `${context}.clientMessageId`),
+      content: expectBoundedString(
+        record.content,
+        `${context}.content`,
+        MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+      ),
+      attachments: parseConversationTraceAttachments(record.attachments, `${context}.attachments`),
+      createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0),
+      sequence: expectSafeInteger(record.sequence, `${context}.sequence`, 0)
+    }
+  }
+  expectOnlyKeys(
+    record,
+    [
+      'type',
+      'runId',
+      'guidanceId',
+      'clientMessageId',
+      'content',
+      'rejectionCode',
+      'message',
+      'createdAt'
+    ] as const,
+    context
+  )
+  return {
+    type,
+    runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+    guidanceId: expectOpaqueRunId(record.guidanceId, `${context}.guidanceId`),
+    clientMessageId: expectOpaqueRunId(record.clientMessageId, `${context}.clientMessageId`),
+    content: expectBoundedString(
+      record.content,
+      `${context}.content`,
+      MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+    ),
+    rejectionCode: expectEnum(
+      record.rejectionCode,
+      [
+        'run_not_steerable',
+        'run_interrupted',
+        'conversation_mismatch',
+        'identity_conflict',
+        'attachments_not_supported',
+        'model_does_not_support_attachments',
+        'attachment_validation_failed',
+        'attachment_limit_exceeded',
+        'attachment_persistence_failed'
+      ] as const,
+      `${context}.rejectionCode`
+    ),
+    message: expectBoundedString(
+      record.message,
+      `${context}.message`,
+      MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+    ),
+    createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
+  }
+}
+
+function parseAgentToolCallForHost(value: unknown, context: string): AgentToolCall {
+  const call = expectRecord(value, context)
+  expectOnlyKeys(call, ['id', 'tool', 'args', 'approvalStatus', 'reason'] as const, context)
+  if (!Object.hasOwn(call, 'reason')) {
+    throw invalidProtocolValue(context, 'reason is required')
+  }
+  assertRendererSafeJson(call.args, `${context}.args`, 4 * 1024 * 1024)
+  return {
+    id: expectModelToolCallId(call.id, `${context}.id`),
+    tool: expectBoundedNonEmptyString(call.tool, `${context}.tool`, 256),
+    args: call.args,
+    approvalStatus: expectEnum(
+      call.approvalStatus,
+      ['not_required', 'required', 'approved', 'rejected'] as const,
+      `${context}.approvalStatus`
+    ),
+    reason: call.reason === null ? null : expectDisplayText(call.reason, `${context}.reason`, 4096)
+  }
+}
+
+function parseAgentToolCallEvent(
+  record: Record<string, unknown>
+): Extract<AgentEvent, { type: 'tool_call' }> {
+  const context = 'Agent tool_call event'
+  expectOnlyKeys(record, ['type', 'runId', 'traceSequence', 'call', 'identity'] as const, context)
+  const call = parseAgentToolCallForHost(record.call, `${context}.call`)
+  const identity = parseAgentToolIdentityForHost(record.identity)
+  const identityToolName =
+    identity.type === 'mcp'
+      ? identity.provenance.modelToolName
+      : identity.type === 'builtin_capability'
+        ? identity.modelName
+        : identity.toolName
+  if (identityToolName !== call.tool) {
+    throw invalidProtocolValue(context, 'identity must match call.tool')
+  }
+  if (identity.type === 'builtin_capability') {
+    // Managed arguments can contain credentials and form values. Renderer needs only activity.
+    call.args = {}
+  }
+  return {
+    type: 'tool_call',
+    runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+    traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
+    call,
+    identity
+  }
+}
+
+function parseAgentToolResultForHost(value: unknown, context: string): AgentToolResult {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['callId', 'tool', 'ok', 'result', 'error'] as const, context)
+  if (item.result !== undefined) {
+    assertRendererSafeJson(item.result, `${context}.result`, 4 * 1024 * 1024)
+  }
+  return {
+    callId: expectBoundedNonEmptyString(item.callId, `${context}.callId`, 2048),
+    tool: expectBoundedNonEmptyString(item.tool, `${context}.tool`, 1024),
+    ok: expectBoolean(item.ok, `${context}.ok`),
+    ...(item.result === undefined ? {} : { result: item.result }),
+    ...(item.error === undefined
+      ? {}
+      : {
+          error: expectBoundedString(
+            item.error,
+            `${context}.error`,
+            MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+          )
+        })
+  }
+}
+
+function parseAgentTodoState(value: unknown, context: string): AgentTodoState {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['revision', 'items', 'updatedAt'] as const, context)
+  const items = expectBoundedArray(item.items, `${context}.items`, 4096).map((entry, index) => {
+    const itemContext = `${context}.items[${index}]`
+    const todo = expectRecord(entry, itemContext)
+    expectOnlyKeys(todo, ['id', 'title', 'status', 'note', 'createdAt', 'updatedAt'], itemContext)
+    return {
+      id: expectOpaqueRunId(todo.id, `${itemContext}.id`),
+      title: expectBoundedString(todo.title, `${itemContext}.title`, 16 * 1024),
+      status: expectEnum(
+        todo.status,
+        ['pending', 'in_progress', 'completed', 'blocked'] as const,
+        `${itemContext}.status`
+      ),
+      ...(todo.note === undefined
+        ? {}
+        : { note: expectBoundedString(todo.note, `${itemContext}.note`, 64 * 1024) }),
+      createdAt: expectSafeInteger(todo.createdAt, `${itemContext}.createdAt`, 0),
+      updatedAt: expectSafeInteger(todo.updatedAt, `${itemContext}.updatedAt`, 0)
+    }
+  })
+  return {
+    revision: expectSafeInteger(item.revision, `${context}.revision`, 0),
+    items,
+    updatedAt: expectSafeInteger(item.updatedAt, `${context}.updatedAt`, 0)
+  }
+}
+
+function parseActivatedSkillSummary(value: unknown, context: string): ActivatedSkillSummary {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['id', 'name', 'revision', 'source'] as const, context)
+  const source = expectRecord(item.source, `${context}.source`)
+  expectOnlyKeys(source, ['kind', 'id'] as const, `${context}.source`)
+  return {
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    name: expectBoundedString(item.name, `${context}.name`, 1024),
+    revision: expectOpaqueRunId(item.revision, `${context}.revision`),
+    source: {
+      kind: expectEnum(
+        source.kind,
+        ['workspace', 'bundled', 'installed'] as const,
+        `${context}.source.kind`
+      ),
+      id: expectOpaqueRunId(source.id, `${context}.source.id`)
+    }
+  }
+}
+
+function parseAgentFileDraftSnapshot(value: unknown, context: string): AgentFileDraftSnapshot {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'draftId',
+      'conversationId',
+      'projectId',
+      'filePath',
+      'mode',
+      'status',
+      'baseRevision',
+      'additions',
+      'deletions',
+      'lineCount',
+      'byteCount',
+      'chunkCount',
+      'nextChunkIndex',
+      'statsFinal',
+      'summary',
+      'createdAt',
+      'updatedAt'
+    ] as const,
+    context
+  )
+  return {
+    draftId: expectOpaqueRunId(item.draftId, `${context}.draftId`),
+    conversationId: expectOpaqueRunId(item.conversationId, `${context}.conversationId`),
+    ...(item.projectId === undefined
+      ? {}
+      : { projectId: expectOpaqueRunId(item.projectId, `${context}.projectId`) }),
+    filePath: expectBoundedString(item.filePath, `${context}.filePath`, 16 * 1024),
+    mode: expectEnum(
+      item.mode,
+      ['create', 'rewrite', 'modify', 'append', 'upsert'] as const,
+      `${context}.mode`
+    ),
+    status: expectEnum(
+      item.status,
+      [
+        'drafting',
+        'ready',
+        'waiting_approval',
+        'applying',
+        'applied',
+        'rejected',
+        'conflict',
+        'failed',
+        'aborted',
+        'expired'
+      ] as const,
+      `${context}.status`
+    ),
+    ...(item.baseRevision === undefined
+      ? {}
+      : {
+          baseRevision: expectBoundedNonEmptyString(
+            item.baseRevision,
+            `${context}.baseRevision`,
+            2048
+          )
+        }),
+    additions: expectSafeInteger(item.additions, `${context}.additions`, 0),
+    deletions: expectSafeInteger(item.deletions, `${context}.deletions`, 0),
+    lineCount: expectSafeInteger(item.lineCount, `${context}.lineCount`, 0),
+    byteCount: expectSafeInteger(item.byteCount, `${context}.byteCount`, 0),
+    chunkCount: expectSafeInteger(item.chunkCount, `${context}.chunkCount`, 0),
+    nextChunkIndex: expectSafeInteger(item.nextChunkIndex, `${context}.nextChunkIndex`, 0),
+    statsFinal: expectBoolean(item.statsFinal, `${context}.statsFinal`),
+    ...(item.summary === undefined
+      ? {}
+      : { summary: expectBoundedString(item.summary, `${context}.summary`, 16 * 1024) }),
+    createdAt: expectSafeInteger(item.createdAt, `${context}.createdAt`, 0),
+    updatedAt: expectSafeInteger(item.updatedAt, `${context}.updatedAt`, 0)
+  }
+}
+
+function parseAgentContextWindowSnapshot(
+  value: unknown,
+  context: string
+): AgentContextWindowSnapshot {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'model',
+      'status',
+      'contextWindowTokens',
+      'reservedOutputTokens',
+      'safetyMarginTokens',
+      'inputCapacityTokens',
+      'inputTokens',
+      'costBreakdown',
+      'remainingInputTokens'
+    ] as const,
+    context
+  )
+  const cost = expectRecord(item.costBreakdown, `${context}.costBreakdown`)
+  expectOnlyKeys(
+    cost,
+    [
+      'systemTokens',
+      'toolSchemaTokens',
+      'summaryTokens',
+      'worldStateTokens',
+      'todoTokens',
+      'providerContinuationTokens',
+      'recentHistoryTokens',
+      'totalInputTokens'
+    ] as const,
+    `${context}.costBreakdown`
+  )
+  const nonNegative = (field: string): number =>
+    expectSafeInteger(cost[field], `${context}.costBreakdown.${field}`, 0)
+  return {
+    model: expectBoundedNonEmptyString(item.model, `${context}.model`, 1024),
+    status: expectEnum(
+      item.status,
+      ['unconfigured', 'within_budget', 'over_budget', 'invalid_configuration'] as const,
+      `${context}.status`
+    ),
+    ...(item.contextWindowTokens === undefined
+      ? {}
+      : {
+          contextWindowTokens: expectSafeInteger(
+            item.contextWindowTokens,
+            `${context}.contextWindowTokens`,
+            0
+          )
+        }),
+    reservedOutputTokens: expectSafeInteger(
+      item.reservedOutputTokens,
+      `${context}.reservedOutputTokens`,
+      0
+    ),
+    safetyMarginTokens: expectSafeInteger(
+      item.safetyMarginTokens,
+      `${context}.safetyMarginTokens`,
+      0
+    ),
+    ...(item.inputCapacityTokens === undefined
+      ? {}
+      : {
+          inputCapacityTokens: expectSafeInteger(
+            item.inputCapacityTokens,
+            `${context}.inputCapacityTokens`,
+            0
+          )
+        }),
+    inputTokens: expectSafeInteger(item.inputTokens, `${context}.inputTokens`, 0),
+    costBreakdown: {
+      systemTokens: nonNegative('systemTokens'),
+      toolSchemaTokens: nonNegative('toolSchemaTokens'),
+      summaryTokens: nonNegative('summaryTokens'),
+      worldStateTokens: nonNegative('worldStateTokens'),
+      todoTokens: nonNegative('todoTokens'),
+      providerContinuationTokens: nonNegative('providerContinuationTokens'),
+      recentHistoryTokens: nonNegative('recentHistoryTokens'),
+      totalInputTokens: nonNegative('totalInputTokens')
+    },
+    ...(item.remainingInputTokens === undefined
+      ? {}
+      : {
+          remainingInputTokens: expectSignedSafeInteger(
+            item.remainingInputTokens,
+            `${context}.remainingInputTokens`
+          )
+        })
+  }
+}
+
+function expectSignedSafeInteger(value: unknown, context: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    throw invalidProtocolValue(context, 'expected a safe integer')
+  }
+  return value
+}
+
+function parseAgentDiffProposal(value: unknown, context: string): AgentDiffProposal {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    ['id', 'operation', 'filePath', 'patch', 'baseRevision', 'summary', 'approvalStatus'] as const,
+    context
+  )
+  return {
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    operation: expectEnum(
+      item.operation,
+      ['create', 'update', 'delete'] as const,
+      `${context}.operation`
+    ),
+    filePath: expectBoundedString(item.filePath, `${context}.filePath`, 16 * 1024),
+    patch: expectBoundedString(
+      item.patch,
+      `${context}.patch`,
+      MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+    ),
+    baseRevision:
+      item.baseRevision === null
+        ? null
+        : expectBoundedNonEmptyString(item.baseRevision, `${context}.baseRevision`, 2048),
+    summary:
+      item.summary === null
+        ? null
+        : expectBoundedString(item.summary, `${context}.summary`, 16 * 1024),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`)
+  }
+}
+
+function parseAgentUsage(value: unknown, context: string): AgentUsage {
+  const item = expectRecord(value, context)
+  const keys = [
+    'inputTokens',
+    'outputTokens',
+    'outputThinkingTokens',
+    'totalTokens',
+    'cachedInputTokens',
+    'cacheCreationInputTokens',
+    'billableRequestCount'
+  ] as const
+  expectOnlyKeys(item, keys, context)
+  const usage: AgentUsage = {}
+  for (const key of keys) {
+    if (item[key] !== undefined) {
+      usage[key] = expectSafeInteger(item[key], `${context}.${key}`, 0)
+    }
+  }
+  return usage
+}
+
+function parseAgentApprovalStatus(value: unknown, context: string) {
+  return expectEnum(value, ['not_required', 'required', 'approved', 'rejected'] as const, context)
+}
+
+function parseAgentProposedActionsForHost(
+  value: unknown,
+  context: string,
+  runId: string
+): AgentProposedAction[] {
+  return expectBoundedArray(value, context, MAX_RENDERER_SAFE_PROPOSED_ACTIONS).map(
+    (action, index) => parseAgentProposedActionForHost(action, `${context}[${index}]`, runId, false)
+  )
+}
+
+function parseAgentProposedActionForHost(
+  value: unknown,
+  context: string,
+  runId: string,
+  requireApproval: boolean
+): AgentProposedAction {
+  const item = expectRecord(value, context)
+  const type = expectBoundedNonEmptyString(item.type, `${context}.type`, 128)
+  let action: AgentProposedAction
+  switch (type) {
+    case 'tool_call':
+      expectOnlyKeys(item, ['type', 'call'] as const, context)
+      action = { type, call: parseAgentToolCallForHost(item.call, `${context}.call`) }
+      break
+    case 'mcp_tool_call':
+      action = parseAgentMcpProposedAction(item)
+      if (action.approval.identity.runId !== runId) {
+        throw invalidProtocolValue(context, 'approval identity runId must match enclosing runId')
+      }
+      break
+    case 'builtin_capability_activation':
+      action = parseAgentBuiltinCapabilityActivationProposedAction(item)
+      if (action.approval.runId !== runId) {
+        throw invalidProtocolValue(context, 'approval runId must match enclosing runId')
+      }
+      break
+    case 'builtin_mcp_tool_approval':
+      action = parseAgentBuiltinMcpToolApprovalProposedAction(item)
+      if (action.approval.identity.runId !== runId) {
+        throw invalidProtocolValue(context, 'approval identity runId must match enclosing runId')
+      }
+      break
+    case 'browser_risk_approval':
+      action = parseAgentBrowserRiskProposedAction(item)
+      if (action.approval.runId !== runId) {
+        throw invalidProtocolValue(context, 'approval runId must match enclosing runId')
+      }
+      break
+    case 'diff':
+      expectOnlyKeys(item, ['type', 'diff'] as const, context)
+      action = { type, diff: parseAgentDiffProposal(item.diff, `${context}.diff`) }
+      break
+    case 'file_write':
+      expectOnlyKeys(item, ['type', 'fileWrite'] as const, context)
+      action = {
+        type,
+        fileWrite: parseAgentFileWriteProposal(item.fileWrite, `${context}.fileWrite`)
+      }
+      break
+    case 'command':
+      expectOnlyKeys(item, ['type', 'command'] as const, context)
+      action = { type, command: parseAgentCommandAction(item.command, `${context}.command`) }
+      break
+    case 'skill_materialization':
+      expectOnlyKeys(item, ['type', 'materialization'] as const, context)
+      action = {
+        type,
+        materialization: parseAgentSkillMaterializationRequest(
+          item.materialization,
+          `${context}.materialization`
+        )
+      }
+      break
+    case 'skill_script':
+      expectOnlyKeys(item, ['type', 'script'] as const, context)
+      action = { type, script: parseAgentSkillScriptRequest(item.script, `${context}.script`) }
+      break
+    case 'office_operation':
+      expectOnlyKeys(item, ['type', 'officeOperation'] as const, context)
+      action = {
+        type,
+        officeOperation: parseAgentOfficeOperationRequest(
+          item.officeOperation,
+          `${context}.officeOperation`
+        )
+      }
+      break
+    case 'skill_installation':
+      expectOnlyKeys(item, ['type', 'installation'] as const, context)
+      action = {
+        type,
+        installation: parseAgentSkillInstallationRequest(
+          item.installation,
+          `${context}.installation`
+        )
+      }
+      break
+    default:
+      throw invalidProtocolValue(`${context}.type`, `unknown proposed action type ${type}`)
   }
 
-  return value as AgentEvent
+  if (requireApproval && proposedActionApprovalStatus(action) !== 'required') {
+    throw invalidProtocolValue(context, 'approval_required action must remain required')
+  }
+  return action
+}
+
+function proposedActionApprovalStatus(action: AgentProposedAction) {
+  switch (action.type) {
+    case 'tool_call':
+      return action.call.approvalStatus
+    case 'mcp_tool_call':
+      return action.approval.call.approvalStatus
+    case 'builtin_capability_activation':
+    case 'builtin_mcp_tool_approval':
+    case 'browser_risk_approval':
+      return action.approval.approvalStatus
+    case 'diff':
+      return action.diff.approvalStatus
+    case 'file_write':
+      return action.fileWrite.approvalStatus
+    case 'command':
+      return action.command.approvalStatus
+    case 'skill_materialization':
+      return action.materialization.approvalStatus
+    case 'skill_script':
+      return action.script.approvalStatus
+    case 'office_operation':
+      return action.officeOperation.approvalStatus
+    case 'skill_installation':
+      return action.installation.approvalStatus
+  }
+}
+
+function parseAgentFileWriteProposal(value: unknown, context: string): AgentFileWriteProposal {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'id',
+      'draftId',
+      'mode',
+      'filePath',
+      'baseRevision',
+      'summary',
+      'additions',
+      'deletions',
+      'lineCount',
+      'byteCount',
+      'approvalStatus'
+    ] as const,
+    context
+  )
+  return {
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    draftId: expectOpaqueRunId(item.draftId, `${context}.draftId`),
+    mode: expectEnum(
+      item.mode,
+      ['create', 'rewrite', 'modify', 'append', 'upsert'] as const,
+      `${context}.mode`
+    ),
+    filePath: expectBoundedString(item.filePath, `${context}.filePath`, 16 * 1024),
+    baseRevision:
+      item.baseRevision === null
+        ? null
+        : expectBoundedNonEmptyString(item.baseRevision, `${context}.baseRevision`, 2048),
+    summary:
+      item.summary === null
+        ? null
+        : expectBoundedString(item.summary, `${context}.summary`, 16 * 1024),
+    additions: expectSafeInteger(item.additions, `${context}.additions`, 0),
+    deletions: expectSafeInteger(item.deletions, `${context}.deletions`, 0),
+    lineCount: expectSafeInteger(item.lineCount, `${context}.lineCount`, 0),
+    byteCount: expectSafeInteger(item.byteCount, `${context}.byteCount`, 0),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`)
+  }
+}
+
+function parseAgentCommandAction(value: unknown, context: string): AgentCommandActionProjection {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'id',
+      'command',
+      'cwd',
+      'timeoutMs',
+      'approvalStatus',
+      'riskLevel',
+      'reason',
+      'observe'
+    ] as const,
+    context
+  )
+  const observe =
+    item.observe === null
+      ? null
+      : parseAgentCommandObservationRequest(item.observe, `${context}.observe`)
+  return {
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    command: expectBoundedString(item.command, `${context}.command`, 256 * 1024),
+    cwd: item.cwd === null ? null : expectBoundedString(item.cwd, `${context}.cwd`, 16 * 1024),
+    timeoutMs:
+      item.timeoutMs === null ? null : expectSafeInteger(item.timeoutMs, `${context}.timeoutMs`, 0),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`),
+    riskLevel:
+      item.riskLevel === null
+        ? null
+        : expectEnum(
+            item.riskLevel,
+            ['read_only', 'writes_workspace', 'network', 'destructive', 'unknown'] as const,
+            `${context}.riskLevel`
+          ),
+    reason:
+      item.reason === null
+        ? null
+        : expectBoundedString(item.reason, `${context}.reason`, 16 * 1024),
+    observe
+  }
+}
+
+function parseAgentCommandObservationRequest(
+  value: unknown,
+  context: string
+): NonNullable<AgentCommandActionProjection['observe']> {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['kinds', 'expectedOutputs', 'additionalRoots'] as const, context)
+  const kinds = expectBoundedArray(item.kinds, `${context}.kinds`, 32).map((kind, index) =>
+    expectEnum(kind, ['office'] as const, `${context}.kinds[${index}]`)
+  )
+  return {
+    kinds,
+    ...(item.expectedOutputs === undefined
+      ? {}
+      : {
+          expectedOutputs: parseStringArray(
+            item.expectedOutputs,
+            `${context}.expectedOutputs`,
+            1024,
+            16 * 1024
+          )
+        }),
+    ...(item.additionalRoots === undefined
+      ? {}
+      : {
+          additionalRoots: parseStringArray(
+            item.additionalRoots,
+            `${context}.additionalRoots`,
+            1024,
+            16 * 1024
+          )
+        })
+  }
+}
+
+function parseAgentSkillMaterializationRequest(
+  value: unknown,
+  context: string
+): AgentSkillMaterializationRequest {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    ['id', 'sourceUri', 'sourcePrefix', 'destination', 'approvalStatus', 'reason'] as const,
+    context
+  )
+  return {
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    sourceUri: expectBoundedString(item.sourceUri, `${context}.sourceUri`, 16 * 1024),
+    sourcePrefix:
+      item.sourcePrefix === null
+        ? null
+        : expectBoundedString(item.sourcePrefix, `${context}.sourcePrefix`, 16 * 1024),
+    destination: expectBoundedString(item.destination, `${context}.destination`, 16 * 1024),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`),
+    reason:
+      item.reason === null ? null : expectBoundedString(item.reason, `${context}.reason`, 16 * 1024)
+  }
+}
+
+function parseAgentSkillScriptRequest(value: unknown, context: string): AgentSkillScriptRequest {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'id',
+      'scriptUri',
+      'skillId',
+      'skillRevision',
+      'resourcePath',
+      'resourceDigest',
+      'interpreter',
+      'args',
+      'requirements',
+      'preflight',
+      'timeoutMs',
+      'approvalStatus',
+      'reason'
+    ] as const,
+    context
+  )
+  return {
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    scriptUri: expectBoundedString(item.scriptUri, `${context}.scriptUri`, 16 * 1024),
+    skillId: expectOpaqueRunId(item.skillId, `${context}.skillId`),
+    skillRevision: expectOpaqueRunId(item.skillRevision, `${context}.skillRevision`),
+    resourcePath: expectBoundedString(item.resourcePath, `${context}.resourcePath`, 16 * 1024),
+    resourceDigest: expectBoundedNonEmptyString(
+      item.resourceDigest,
+      `${context}.resourceDigest`,
+      2048
+    ),
+    interpreter: expectEnum(item.interpreter, ['python3'] as const, `${context}.interpreter`),
+    args: parseStringArray(item.args, `${context}.args`, 4096, 64 * 1024),
+    requirements: parseAgentSkillScriptRequirements(item.requirements, `${context}.requirements`),
+    preflight: parseAgentSkillScriptPreflight(item.preflight, `${context}.preflight`),
+    timeoutMs:
+      item.timeoutMs === null ? null : expectSafeInteger(item.timeoutMs, `${context}.timeoutMs`, 0),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`),
+    reason:
+      item.reason === null ? null : expectBoundedString(item.reason, `${context}.reason`, 16 * 1024)
+  }
+}
+
+function parseAgentSkillScriptRequirements(
+  value: unknown,
+  context: string
+): AgentSkillScriptRequest['requirements'] {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['pythonDistributions', 'commands'] as const, context)
+  return {
+    ...(item.pythonDistributions === undefined
+      ? {}
+      : {
+          pythonDistributions: parseStringArray(
+            item.pythonDistributions,
+            `${context}.pythonDistributions`,
+            4096,
+            1024
+          )
+        }),
+    ...(item.commands === undefined
+      ? {}
+      : {
+          commands: parseStringArray(item.commands, `${context}.commands`, 4096, 1024)
+        })
+  }
+}
+
+function parseAgentSkillScriptPreflight(
+  value: unknown,
+  context: string
+): AgentSkillScriptRequest['preflight'] {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'status',
+      'interpreter',
+      'interpreterVersion',
+      'dependencies',
+      'runtimeFingerprint',
+      'errorCode',
+      'message'
+    ] as const,
+    context
+  )
+  return {
+    status: expectEnum(
+      item.status,
+      ['ready', 'missing_dependencies', 'unsupported', 'conflict'] as const,
+      `${context}.status`
+    ),
+    interpreter: expectEnum(item.interpreter, ['python3'] as const, `${context}.interpreter`),
+    ...(item.interpreterVersion === undefined
+      ? {}
+      : {
+          interpreterVersion: expectBoundedNonEmptyString(
+            item.interpreterVersion,
+            `${context}.interpreterVersion`,
+            1024
+          )
+        }),
+    ...(item.dependencies === undefined
+      ? {}
+      : {
+          dependencies: expectBoundedArray(item.dependencies, `${context}.dependencies`, 4096).map(
+            (dependency, index) => {
+              const dependencyContext = `${context}.dependencies[${index}]`
+              const entry = expectRecord(dependency, dependencyContext)
+              expectOnlyKeys(
+                entry,
+                ['kind', 'name', 'status', 'version'] as const,
+                dependencyContext
+              )
+              return {
+                kind: expectEnum(
+                  entry.kind,
+                  ['python_distribution', 'command'] as const,
+                  `${dependencyContext}.kind`
+                ),
+                name: expectBoundedNonEmptyString(entry.name, `${dependencyContext}.name`, 1024),
+                status: expectEnum(
+                  entry.status,
+                  ['available', 'missing'] as const,
+                  `${dependencyContext}.status`
+                ),
+                ...(entry.version === undefined
+                  ? {}
+                  : {
+                      version: expectBoundedNonEmptyString(
+                        entry.version,
+                        `${dependencyContext}.version`,
+                        1024
+                      )
+                    })
+              }
+            }
+          )
+        }),
+    runtimeFingerprint: expectBoundedNonEmptyString(
+      item.runtimeFingerprint,
+      `${context}.runtimeFingerprint`,
+      4096
+    ),
+    ...(item.errorCode === undefined
+      ? {}
+      : {
+          errorCode: expectBoundedNonEmptyString(item.errorCode, `${context}.errorCode`, 1024)
+        }),
+    ...(item.message === undefined
+      ? {}
+      : {
+          message: expectBoundedString(
+            item.message,
+            `${context}.message`,
+            MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+          )
+        })
+  }
+}
+
+function parseAgentOfficeOperationRequest(
+  value: unknown,
+  context: string
+): AgentOfficeOperationRequest {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    ['schemaVersion', 'id', 'semanticArgs', 'prepared', 'approvalStatus', 'reason'] as const,
+    context
+  )
+  const semanticArgs = expectRecord(item.semanticArgs, `${context}.semanticArgs`)
+  assertRendererSafeJson(semanticArgs, `${context}.semanticArgs`, 4 * 1024 * 1024)
+  return {
+    schemaVersion: expectExactSchemaVersion(item.schemaVersion, 6, `${context}.schemaVersion`),
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    semanticArgs,
+    prepared: parseAgentOfficePreparedExecution(item.prepared, `${context}.prepared`),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`),
+    reason: expectBoundedString(item.reason, `${context}.reason`, 16 * 1024)
+  }
+}
+
+function parseAgentOfficePreparedExecution(
+  value: unknown,
+  context: string
+): AgentOfficeOperationRequest['prepared'] {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'schemaVersion',
+      'providerId',
+      'engineRevision',
+      'workspaceRevision',
+      'access',
+      'request',
+      'argv',
+      'resolvedRenderPlan',
+      'paths',
+      'inputBindings'
+    ] as const,
+    context
+  )
+  assertRendererSafeJson(item, context, 4 * 1024 * 1024)
+  expectExactSchemaVersion(item.schemaVersion, 6, `${context}.schemaVersion`)
+  expectBoundedNonEmptyString(item.providerId, `${context}.providerId`, 1024)
+  expectBoundedNonEmptyString(item.engineRevision, `${context}.engineRevision`, 4096)
+  if (item.workspaceRevision !== null) {
+    expectBoundedNonEmptyString(item.workspaceRevision, `${context}.workspaceRevision`, 4096)
+  }
+  expectEnum(item.access, ['readOnly', 'fileWrite'] as const, `${context}.access`)
+  parseStringArray(item.argv, `${context}.argv`, 4096, 64 * 1024)
+  if (item.resolvedRenderPlan !== null) {
+    expectRecord(item.resolvedRenderPlan, `${context}.resolvedRenderPlan`)
+  }
+  expectBoundedArray(item.paths, `${context}.paths`, 4096)
+  expectBoundedArray(item.inputBindings, `${context}.inputBindings`, 4096)
+
+  const requestContext = `${context}.request`
+  const request = expectRecord(item.request, requestContext)
+  expectOnlyKeys(
+    request,
+    [
+      'documentKind',
+      'operation',
+      'documentPath',
+      'outputPath',
+      'destinationPath',
+      'inputs',
+      'timeoutMs',
+      'parameters'
+    ] as const,
+    requestContext
+  )
+  expectEnum(
+    request.documentKind,
+    ['document', 'spreadsheet', 'presentation'] as const,
+    `${requestContext}.documentKind`
+  )
+  const operation = expectEnum(
+    request.operation,
+    [
+      'help',
+      'create',
+      'view',
+      'get',
+      'query',
+      'validate',
+      'set',
+      'add',
+      'remove',
+      'move',
+      'swap'
+    ] as const,
+    `${requestContext}.operation`
+  )
+  for (const field of ['documentPath', 'outputPath', 'destinationPath'] as const) {
+    if (request[field] !== null) {
+      expectBoundedString(request[field], `${requestContext}.${field}`, 16 * 1024)
+    }
+  }
+  expectBoundedArray(request.inputs, `${requestContext}.inputs`, 4096)
+  if (request.timeoutMs !== null) {
+    expectSafeInteger(request.timeoutMs, `${requestContext}.timeoutMs`, 0)
+  }
+  const parameters = expectRecord(request.parameters, `${requestContext}.parameters`)
+  if (parameters.type !== operation) {
+    throw invalidProtocolValue(
+      `${requestContext}.parameters.type`,
+      'must match the prepared Office operation'
+    )
+  }
+
+  return JSON.parse(JSON.stringify(item)) as AgentOfficeOperationRequest['prepared']
+}
+
+function parseAgentSkillInstallationRequest(
+  value: unknown,
+  context: string
+): AgentSkillInstallationRequest {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    ['schemaVersion', 'id', 'installRef', 'preview', 'approvalStatus', 'expiresAt'] as const,
+    context
+  )
+  return {
+    schemaVersion: expectExactSchemaVersion(item.schemaVersion, 1, `${context}.schemaVersion`),
+    id: expectOpaqueRunId(item.id, `${context}.id`),
+    installRef: expectBoundedString(item.installRef, `${context}.installRef`, 16 * 1024),
+    preview: parseAgentSkillInstallationPreview(item.preview, `${context}.preview`),
+    approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`),
+    expiresAt: expectSafeInteger(item.expiresAt, `${context}.expiresAt`, 0)
+  }
+}
+
+function parseAgentSkillInstallationPreview(
+  value: unknown,
+  context: string
+): AgentSkillInstallationRequest['preview'] {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'name',
+      'description',
+      'sourceSummary',
+      'resolvedRevision',
+      'fileCount',
+      'totalBytes',
+      'resourceSummary',
+      'containsScripts',
+      'warnings',
+      'compatibility',
+      'operation',
+      'impact'
+    ] as const,
+    context
+  )
+  assertRendererSafeJson(item.sourceSummary, `${context}.sourceSummary`)
+  const resourceSummary = expectRecord(item.resourceSummary, `${context}.resourceSummary`)
+  expectOnlyKeys(
+    resourceSummary,
+    ['total', 'references', 'assets', 'scripts', 'bytes'] as const,
+    `${context}.resourceSummary`
+  )
+  return {
+    name: expectBoundedNonEmptyString(item.name, `${context}.name`, 1024),
+    description: expectBoundedString(
+      item.description,
+      `${context}.description`,
+      MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+    ),
+    sourceSummary: item.sourceSummary,
+    resolvedRevision: expectBoundedNonEmptyString(
+      item.resolvedRevision,
+      `${context}.resolvedRevision`,
+      4096
+    ),
+    fileCount: expectSafeInteger(item.fileCount, `${context}.fileCount`, 0),
+    totalBytes: expectSafeInteger(item.totalBytes, `${context}.totalBytes`, 0),
+    resourceSummary: {
+      total: expectSafeInteger(resourceSummary.total, `${context}.resourceSummary.total`, 0),
+      references: expectSafeInteger(
+        resourceSummary.references,
+        `${context}.resourceSummary.references`,
+        0
+      ),
+      assets: expectSafeInteger(resourceSummary.assets, `${context}.resourceSummary.assets`, 0),
+      scripts: expectSafeInteger(resourceSummary.scripts, `${context}.resourceSummary.scripts`, 0),
+      bytes: expectSafeInteger(resourceSummary.bytes, `${context}.resourceSummary.bytes`, 0)
+    },
+    containsScripts: expectBoolean(item.containsScripts, `${context}.containsScripts`),
+    warnings: expectBoundedArray(item.warnings, `${context}.warnings`, 1024).map(
+      (warning, index) => {
+        const warningContext = `${context}.warnings[${index}]`
+        const entry = expectRecord(warning, warningContext)
+        expectOnlyKeys(
+          entry,
+          ['code', 'message', 'requiresAcknowledgement'] as const,
+          warningContext
+        )
+        return {
+          code: expectBoundedNonEmptyString(entry.code, `${warningContext}.code`, 1024),
+          message: expectBoundedString(
+            entry.message,
+            `${warningContext}.message`,
+            MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+          ),
+          requiresAcknowledgement: expectBoolean(
+            entry.requiresAcknowledgement,
+            `${warningContext}.requiresAcknowledgement`
+          )
+        }
+      }
+    ),
+    compatibility: expectBoundedNonEmptyString(
+      item.compatibility,
+      `${context}.compatibility`,
+      1024
+    ),
+    operation: expectBoundedNonEmptyString(item.operation, `${context}.operation`, 1024),
+    impact: expectBoundedNonEmptyString(item.impact, `${context}.impact`, 1024)
+  }
+}
+
+function expectExactSchemaVersion(value: unknown, expected: number, context: string): number {
+  const version = expectSafeInteger(value, context, 1)
+  if (version !== expected) {
+    throw invalidProtocolValue(context, `expected schema version ${expected}`)
+  }
+  return version
+}
+
+function parseStringArray(
+  value: unknown,
+  context: string,
+  maximumItems: number,
+  maximumItemBytes: number
+): string[] {
+  return expectBoundedArray(value, context, maximumItems).map((entry, index) =>
+    expectBoundedString(entry, `${context}[${index}]`, maximumItemBytes)
+  )
 }
 
 function parseAgentLlmRetryEvent(
@@ -2201,15 +3638,7 @@ function parseMcpAgentChatOutput(value: unknown, context: string): AgentChatOutp
     ),
     status: expectEnum(
       record.status,
-      [
-        'idle',
-        'queued',
-        'running',
-        'waiting_for_approval',
-        'completed',
-        'failed',
-        'cancelled'
-      ] as const,
+      ['idle', 'running', 'waiting_for_approval', 'completed', 'failed', 'cancelled'] as const,
       `${context}.status`
     ),
     runId,

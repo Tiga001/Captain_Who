@@ -135,6 +135,10 @@
   white-space: nowrap;
 }
 
+.right-sidebar__tab[data-file-preview-state='transient'] span {
+  font-style: italic;
+}
+
 .right-sidebar__tab-close {
   position: absolute;
   right: 6px;

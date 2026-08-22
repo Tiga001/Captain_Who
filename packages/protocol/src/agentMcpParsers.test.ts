@@ -1553,7 +1553,7 @@ describe('Round 4 MCP Agent contract', () => {
           { type: 'run_command', command: 'must-not-be-filtered' }
         ]
       })
-    ).toThrow(/mixed MCP and non-MCP/)
+    ).toThrow(/unknown proposed action type/)
     expect(() =>
       parseAgentEventForHost({
         ...done,

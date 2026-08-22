@@ -153,6 +153,59 @@ fn child_observer_notification_adds_exact_identity_without_changing_safe_event_p
 }
 
 #[test]
+fn child_observer_notification_preserves_previously_dropped_runtime_event_projections() {
+    let identity = mycopilot_core::AgentCollaborationIdentity {
+        agent_id: "agent-child".to_string(),
+        root_agent_id: "agent-root".to_string(),
+        root_conversation_id: "conversation-root".to_string(),
+        parent_agent_id: "agent-root".to_string(),
+        parent_task_name: "root".to_string(),
+        parent_task_path: "/root".to_string(),
+        conversation_id: "conversation-child".to_string(),
+        task_name: "child".to_string(),
+        task_path: "/root/child".to_string(),
+        source_agent_id: "agent-root".to_string(),
+        source_kind: mycopilot_core::AgentMailboxKind::Task,
+        source_task_name: "root".to_string(),
+        source_task_path: "/root".to_string(),
+        source_agent_message_id: "mailbox-task".to_string(),
+        entrusted_task: "review".to_string(),
+        template_instructions: None,
+    };
+    let events = vec![
+        AgentEvent::Started {
+            run_id: "run-child".to_string(),
+            tool_definitions: Vec::new(),
+        },
+        AgentEvent::ToolInputProgress {
+            run_id: "run-child".to_string(),
+            stream_id: "stream-child".to_string(),
+            attempt: 1,
+            tool_call_index: 0,
+            tool_call_id: Some("call-child".to_string()),
+            tool: "read_file".to_string(),
+            received_bytes: 42,
+        },
+        AgentEvent::Error {
+            run_id: None,
+            trace_sequence: None,
+            message: "provider temporarily unavailable".to_string(),
+            recoverable: true,
+            code: Some("provider_unavailable".to_string()),
+            details: None,
+        },
+    ];
+
+    for event in events {
+        let safe_event = agent_event_notification(event.clone())["params"].clone();
+        let notification =
+            child_observer_event_notification(&identity, "run-child", "assistant-child", event);
+        assert_eq!(notification["params"]["runId"], "run-child");
+        assert_eq!(notification["params"]["event"], safe_event);
+    }
+}
+
+#[test]
 fn renderer_command_projection_excludes_host_runtime_authority_and_private_input_paths() {
     let private_artifact_path = "/private/managed-artifacts/objects/secret/manual.pdf";
     let artifact_uri =
@@ -215,6 +268,43 @@ fn renderer_command_projection_excludes_host_runtime_authority_and_private_input
         renderer_event["params"]["proposedActions"][0]["command"]["command"],
         "pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'"
     );
+}
+
+#[test]
+fn renderer_command_projection_excludes_managed_office_script_authority() {
+    let mut projection = serde_json::json!({
+        "type": "command",
+        "command": {
+            "id": "command-office-editor",
+            "command": "node edit_deck.mjs --output edited.pptx",
+            "cwd": null,
+            "timeoutMs": 120000,
+            "approvalStatus": "required",
+            "riskLevel": null,
+            "reason": "edit the presentation",
+            "observe": null,
+            "inputs": [],
+            "runtimeBinding": { "runtimeFingerprint": "private-runtime" },
+            "managedOfficeScript": {
+                "destination": "/private/office/staging/edited.pptx",
+                "planPath": "/private/office/staging/edit-plan.json"
+            }
+        }
+    });
+
+    redact_renderer_mcp_binding_fields(&mut projection);
+
+    let command = projection["command"].as_object().unwrap();
+    assert!(!command.contains_key("inputs"));
+    assert!(!command.contains_key("runtimeBinding"));
+    assert!(!command.contains_key("managedOfficeScript"));
+    assert_eq!(
+        command.get("command").and_then(Value::as_str),
+        Some("node edit_deck.mjs --output edited.pptx")
+    );
+    assert!(!serde_json::to_string(&projection)
+        .unwrap()
+        .contains("/private/office/staging"));
 }
 
 #[test]

@@ -541,6 +541,10 @@ export const RightSidebar = memo(function RightSidebar({
                 const Icon = module?.icon
                 const isSelected = page.id === activePageId
                 const iconUrl = page.iconUrl?.trim()
+                const isTransientFilePreview =
+                  page.moduleId === 'files' &&
+                  page.moduleState?.kind === 'workspace-file' &&
+                  page.moduleState.tabState === 'transient'
 
                 return (
                   <div
@@ -562,6 +566,7 @@ export const RightSidebar = memo(function RightSidebar({
                       role="tab"
                       aria-selected={isSelected}
                       data-active={isSelected ? 'true' : undefined}
+                      data-file-preview-state={isTransientFilePreview ? 'transient' : undefined}
                       onClick={() => {
                         if (page.id !== activePageId && hasForegroundBrowser) {
                           clearCurrentBrowserSelection()
