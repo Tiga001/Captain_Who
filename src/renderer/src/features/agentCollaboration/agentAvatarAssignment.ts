@@ -3,7 +3,7 @@ import {
   AGENT_AVATAR_URLS
 } from '../../assets/agent-avatars/manifest'
 
-const EXPECTED_AGENT_AVATAR_COUNT = 96
+const EXPECTED_AGENT_AVATAR_COUNT = 144
 export const AGENT_AVATAR_COUNT = BUNDLED_AGENT_AVATAR_COUNT
 
 /**

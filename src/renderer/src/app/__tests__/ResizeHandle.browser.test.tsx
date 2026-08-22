@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { ResizeHandle } from '../../components/layout/ResizeHandle'
-import type { SidebarSide } from '../../lib/sidebarResize'
+import { SIDEBAR_COLLAPSE_THRESHOLD_RATIO, type SidebarSide } from '../../lib/sidebarResize'
 import '../../styles/global.css'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -32,10 +32,14 @@ function waitForAnimationFrame() {
 }
 
 function ResizeHarness({
+  minimum = 220,
+  onCollapse = () => undefined,
   onCommit,
   onRender,
   side
 }: {
+  minimum?: number
+  onCollapse?: () => void
   onCommit: (side: SidebarSide, width: number) => void
   onRender: () => void
   side: SidebarSide
@@ -65,7 +69,8 @@ function ResizeHarness({
         unrelated render
       </button>
       <ResizeHandle
-        metrics={{ maximum: 500, minimum: 220, width }}
+        metrics={{ maximum: 500, minimum, width }}
+        onCollapse={onCollapse}
         onResizeCommit={(resizeSide, nextWidth) => {
           onCommit(resizeSide, nextWidth)
           setWidth(nextWidth)
@@ -101,6 +106,7 @@ function RightSidebarGeometryHarness() {
       <aside className="side-panel side-panel--right" data-testid="geometry-right" />
       <ResizeHandle
         metrics={{ maximum: 700, minimum: 220, width }}
+        onCollapse={() => undefined}
         onResizeCommit={(_side, nextWidth) => setWidth(nextWidth)}
         resizeTargetRef={targetRef}
         side="right"
@@ -110,6 +116,17 @@ function RightSidebarGeometryHarness() {
 }
 
 describe('ResizeHandle', () => {
+  it('uses a wider transparent hit target while keeping the divider one pixel wide', async () => {
+    const screen = await render(
+      <ResizeHarness onCommit={() => undefined} onRender={() => undefined} side="left" />
+    )
+    const handle = screen.container.querySelector<HTMLDivElement>('.resize-handle')
+    if (!handle) throw new Error('Resize handle did not render')
+
+    expect(Number.parseFloat(getComputedStyle(handle).width)).toBeGreaterThanOrEqual(13)
+    expect(getComputedStyle(handle, '::after').width).toBe('1px')
+  })
+
   it('tracks the latest absolute pointer position without rendering React on every move', async () => {
     const onCommit = vi.fn()
     const onRender = vi.fn()
@@ -211,5 +228,70 @@ describe('ResizeHandle', () => {
 
     expect(onCommit).toHaveBeenCalledWith('left', 300)
     expect(target.style.getPropertyValue('--left-panel-live-width')).toBe('')
+  })
+
+  it.each([
+    {
+      collapseClientX: 220 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO,
+      minimum: 220,
+      side: 'left' as const
+    },
+    {
+      collapseClientX: 300 + (300 - 280 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO),
+      minimum: 280,
+      side: 'right' as const
+    }
+  ])('collapses the $side sidebar at half of its minimum width', async (testCase) => {
+    const onCollapse = vi.fn()
+    const onCommit = vi.fn()
+    const screen = await render(
+      <ResizeHarness
+        minimum={testCase.minimum}
+        onCollapse={onCollapse}
+        onCommit={onCommit}
+        onRender={() => undefined}
+        side={testCase.side}
+      />
+    )
+    const handle = screen.container.querySelector<HTMLDivElement>('.resize-handle')
+    if (!handle) throw new Error('Resize handle did not render')
+
+    vi.spyOn(handle, 'setPointerCapture').mockImplementation(() => undefined)
+    vi.spyOn(handle, 'hasPointerCapture').mockReturnValue(true)
+    vi.spyOn(handle, 'releasePointerCapture').mockImplementation(() => undefined)
+
+    dispatchPointerEvent(handle, 'pointerdown', 300)
+    dispatchPointerEvent(handle, 'pointermove', testCase.collapseClientX)
+
+    expect(onCollapse).toHaveBeenCalledOnce()
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(document.body.classList.contains('is-resizing')).toBe(false)
+  })
+
+  it('keeps the sidebar open above half of its minimum width', async () => {
+    const onCollapse = vi.fn()
+    const onCommit = vi.fn()
+    const screen = await render(
+      <ResizeHarness
+        onCollapse={onCollapse}
+        onCommit={onCommit}
+        onRender={() => undefined}
+        side="left"
+      />
+    )
+    const handle = screen.container.querySelector<HTMLDivElement>('.resize-handle')
+    if (!handle) throw new Error('Resize handle did not render')
+
+    vi.spyOn(handle, 'setPointerCapture').mockImplementation(() => undefined)
+    vi.spyOn(handle, 'hasPointerCapture').mockReturnValue(true)
+    vi.spyOn(handle, 'releasePointerCapture').mockImplementation(() => undefined)
+
+    const clientX = 220 * SIDEBAR_COLLAPSE_THRESHOLD_RATIO + 1
+    dispatchPointerEvent(handle, 'pointerdown', 300)
+    dispatchPointerEvent(handle, 'pointermove', clientX)
+    dispatchPointerEvent(handle, 'pointerup', clientX)
+
+    expect(onCollapse).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith('left', 220)
   })
 })

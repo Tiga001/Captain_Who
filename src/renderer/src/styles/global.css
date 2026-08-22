@@ -398,7 +398,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   z-index: 40;
   top: 0;
   bottom: 0;
-  width: 7px;
+  width: 13px;
   cursor: col-resize;
   touch-action: none;
   transform: translateX(-50%);
@@ -408,10 +408,11 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 3px;
+  left: 50%;
   width: 1px;
   content: '';
   background: transparent;
+  transform: translateX(-50%);
   transition: background-color 120ms ease;
 }
 

@@ -1719,6 +1719,7 @@ export function AppShell() {
       {leftOpen && (
         <ResizeHandle
           metrics={leftResizeMetrics}
+          onCollapse={toggleLeftSidebar}
           onResizeCommit={commitSidebarResize}
           resizeTargetRef={shellRef}
           side="left"
@@ -1830,6 +1831,7 @@ export function AppShell() {
       {rightOpen && !rightMaximized && (
         <ResizeHandle
           metrics={rightResizeMetrics}
+          onCollapse={toggleRightSidebar}
           onResizeCommit={commitSidebarResize}
           resizeTargetRef={shellRef}
           side="right"

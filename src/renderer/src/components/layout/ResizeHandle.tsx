@@ -6,10 +6,16 @@ import {
   type RefObject
 } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
-import type { SidebarResizeMetrics, SidebarSide } from '../../lib/sidebarResize'
+import {
+  calculateSidebarRawWidth,
+  resolveSidebarResizeDragIntent,
+  type SidebarResizeMetrics,
+  type SidebarSide
+} from '../../lib/sidebarResize'
 
 interface ResizeHandleProps {
   metrics: SidebarResizeMetrics
+  onCollapse: () => void
   onResizeCommit: (side: SidebarSide, width: number) => void
   resizeTargetRef: RefObject<HTMLElement | null>
   side: SidebarSide
@@ -41,13 +47,13 @@ export function calculateSidebarResizeWidth(
   minimum: number,
   maximum: number
 ): number {
-  const pointerDelta = currentClientX - startClientX
-  const width = startWidth + (side === 'left' ? pointerDelta : -pointerDelta)
+  const width = calculateSidebarRawWidth(side, startWidth, startClientX, currentClientX)
   return Math.min(Math.max(width, minimum), maximum)
 }
 
 export function ResizeHandle({
   metrics,
+  onCollapse,
   onResizeCommit,
   resizeTargetRef,
   side
@@ -88,6 +94,16 @@ export function ResizeHandle({
       session.maximum
     )
 
+  const intentForClientX = (session: ResizeSession, clientX: number) =>
+    resolveSidebarResizeDragIntent(
+      side,
+      session.startWidth,
+      session.startClientX,
+      clientX,
+      session.minimum,
+      session.maximum
+    )
+
   const flushVisualFrame = () => {
     const session = sessionRef.current
     if (!session) return
@@ -109,14 +125,24 @@ export function ResizeHandle({
     if (!session) return
 
     if (session.frameId !== null) cancelAnimationFrame(session.frameId)
-    const finalWidth = widthForClientX(session, clientX)
+    const intent = intentForClientX(session, clientX)
     sessionRef.current = null
-    applyVisualWidth(finalWidth)
     document.body.classList.remove('is-resizing')
 
     if (element.hasPointerCapture(session.pointerId)) {
       element.releasePointerCapture(session.pointerId)
     }
+
+    if (intent.type === 'collapse') {
+      // Keep the panel at its minimum until the shared toggle commits the closed layout.
+      // The handle then unmounts and its cleanup removes this transient CSS width.
+      applyVisualWidth(session.minimum)
+      onCollapse()
+      return
+    }
+
+    const finalWidth = intent.width
+    applyVisualWidth(finalWidth)
 
     // Keep the transient CSS width until React commits the matching preferred width.
     // This prevents unrelated streaming renders from snapping the panel back mid-drag.
@@ -144,7 +170,14 @@ export function ResizeHandle({
   }
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerId !== sessionRef.current?.pointerId) return
+    const session = sessionRef.current
+    if (event.pointerId !== session?.pointerId) return
+
+    if (intentForClientX(session, event.clientX).type === 'collapse') {
+      finishResize(event.currentTarget, event.clientX)
+      return
+    }
+
     scheduleVisualFrame(event.clientX)
   }
 

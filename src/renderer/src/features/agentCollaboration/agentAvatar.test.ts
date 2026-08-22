@@ -9,9 +9,12 @@ import {
 
 describe('Agent avatar assignment', () => {
   it('maps immutable Agent ids deterministically across all entry points and reloads', () => {
-    expect(getAgentAvatarIndex('agent-a')).toBe(57)
+    expect(getAgentAvatarIndex('agent-a')).toBe(9)
     expect(getAgentAvatarIndex('agent-b')).toBe(1)
-    expect(getAgentAvatarIndex('agent-你好')).toBe(15)
+    expect(getAgentAvatarIndex('agent-你好')).toBe(111)
+    expect(getAgentAvatarUrl('agent-a')).toContain('pixelbot')
+    expect(getAgentAvatarUrl('agent-2')).toContain('voxel-bot')
+    expect(getAgentAvatarUrl('agent-你好')).toContain('fluent-emoji')
 
     const firstProjection = Array.from({ length: 256 }, (_, index) =>
       getAgentAvatarUrl(`agent-${index}`)
@@ -45,7 +48,7 @@ describe('Agent avatar assignment', () => {
     expect(getAgentAvatarIndex(firstId)).toBeLessThan(AGENT_AVATAR_COUNT)
   })
 
-  it('ships exactly 96 non-remote local assets', () => {
+  it('ships exactly 144 non-remote local assets across all three avatar pools', () => {
     expect(validateAgentAvatarManifest()).toBe(true)
     expect(AGENT_AVATAR_URLS).toHaveLength(AGENT_AVATAR_COUNT)
     expect(new Set(AGENT_AVATAR_URLS).size).toBe(AGENT_AVATAR_COUNT)
@@ -53,5 +56,7 @@ describe('Agent avatar assignment', () => {
       expect(avatarUrl).not.toMatch(/^https?:\/\//i)
       expect(avatarUrl).not.toContain('api.dicebear.com')
     }
+    expect(AGENT_AVATAR_URLS.slice(96)).toHaveLength(48)
+    expect(AGENT_AVATAR_URLS.slice(96).every((url) => url.includes('fluent-emoji'))).toBe(true)
   })
 })

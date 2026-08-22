@@ -300,11 +300,19 @@ Copyright (c) 2025 Material Extensions
 Fluent Emoji
 
 MyCopilot bundles selected Flat SVG assets from Fluent Emoji for the Image
-Generation, Skill Installer, and Skill Creator application Skill icons.
+Generation, Skill Installer, and Skill Creator application Skill icons. It also
+bundles 48 selected Color SVG assets depicting generic animals, fantasy
+creatures, and a robot for deterministic, local child-Agent avatars. The
+application does not call a Fluent Emoji or Microsoft service at runtime.
 
 Source: https://github.com/microsoft/fluentui-emoji
+Immutable source commit:
+  https://github.com/microsoft/fluentui-emoji/tree/62ecdc0d7ca5c6df32148c169556bc8d3782fca4
 License: MIT (license text below)
 Copyright (c) Microsoft Corporation.
+
+Agent avatar assets:
+  src/renderer/src/assets/agent-avatars/fluent-emoji/*.svg
 
 Lucide React (1.23.0)
 
