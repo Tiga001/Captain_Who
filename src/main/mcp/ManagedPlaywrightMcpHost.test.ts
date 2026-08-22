@@ -608,7 +608,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       callTool: callTool as ManagedMcpClient['callTool'],
       createOfficialConnection,
       surfaceGroup: singleSurfaceGroup(),
-      toolTimeoutMs: 5
+      toolTimeoutMs: 500
     })
     await host.callTool(
       'browser_network_requests',
@@ -629,7 +629,8 @@ describe('ManagedPlaywrightMcpHost', () => {
       host.callTool('browser_evaluate', evaluateArguments, {
         authorizationContext: sensitiveContext('browser_evaluate', evaluateArguments, {
           callId: 'call-evaluate-retire-network-ledger'
-        })
+        }),
+        timeoutMs: 5
       })
     ).rejects.toMatchObject({
       code: 'browser.risk_outcome_unknown',

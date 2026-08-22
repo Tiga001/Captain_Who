@@ -846,6 +846,10 @@ mod tests {
             "bundled:application:skill-installer"
         );
         assert_eq!(descriptor.trust(), SkillTrust::Application);
+        assert_eq!(
+            descriptor.description(),
+            "Inspect and install unchanged third-party Skills from GitHub links or authorized local paths. Use when the user asks to add, install, or import a Skill without changing its behavior or files. Use skill-creator first when changes are required."
+        );
         assert!(package.resources().is_empty());
         assert_eq!(package.source_text(), SKILL_INSTALLER_SOURCE);
         assert!(source.open_resource_reader(&package).unwrap().is_none());
@@ -890,6 +894,11 @@ mod tests {
         );
         assert_eq!(descriptor.trust(), SkillTrust::Application);
         assert_eq!(descriptor.activation_scope(), SkillActivationScope::Run);
+        assert_eq!(
+            descriptor.description(),
+            "Create, modify, fix, test, or review Skill packages. Use when the user wants a new Skill or wants to change the behavior or files of a Workspace, Installed, or user-authorized external Skill. Make changes in an editable Workspace version. If the request is only to install an unchanged Skill, use skill-installer instead."
+        );
+        assert!(!descriptor.description().contains("MyCopilot"));
         assert!(matches!(
             descriptor.provenance(),
             SkillProvenance::Bundled { source_id, relative_path }
@@ -943,6 +952,8 @@ mod tests {
             "does not require an HTML reviewer",
             "does not replace an existing installation in place",
             "remove only those files",
+            "Never edit an Installed Skill's application-managed package in place",
+            "copy only the manifest-listed Skill files into Workspace",
         ] {
             assert!(
                 normalized_instructions.contains(required),
@@ -955,8 +966,31 @@ mod tests {
                 "skill-creator leaked unsupported workflow `{forbidden}`"
             );
         }
+        assert!(!normalized_instructions
+            .contains("the platform cannot guarantee a byte-for-byte export of every entry"));
 
         let reader = source.open_resource_reader(&package).unwrap().unwrap();
+        let platform_workflows = package
+            .resources()
+            .entries()
+            .iter()
+            .find(|resource| resource.path() == "references/platform-workflows.md")
+            .unwrap();
+        let platform_workflows =
+            String::from_utf8(reader.read(platform_workflows).unwrap()).unwrap();
+        for required in [
+            "Authorized external source",
+            "Copy an Installed package",
+            "Re-read the manifest, live receipt",
+            "retired-installations/<installation-id>.json",
+            "Do not copy the manifest itself",
+            "MYCOPILOT_APP_DATA_ROOT",
+        ] {
+            assert!(
+                platform_workflows.contains(required),
+                "skill-creator platform workflow is missing `{required}`"
+            );
+        }
         for resource in package.resources().entries() {
             assert_eq!(
                 reader.read(resource).unwrap().len() as u64,

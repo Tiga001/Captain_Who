@@ -1140,6 +1140,146 @@ pub fn update_message_run_waiting_state(
     Ok(())
 }
 
+/// Atomically projects an approved Skill script back into its exact live Assistant run.
+///
+/// This is intentionally strict: an approval decision may resume only the pending Assistant
+/// message that still owns the same run and the same frozen Skill ToolCall. The existing Timeline
+/// and every unrelated activity are preserved byte-for-byte at the JSON value level; only the
+/// run lifecycle and the matching Skill approval fields advance.
+pub(crate) fn update_message_run_running_state(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    updated_at: i64,
+) -> rusqlite::Result<()> {
+    let Some((existing_agent_run_json, started_at, role, message_status)) = connection
+        .query_row(
+            "SELECT agent_run_json, created_at, role, status
+             FROM messages
+             WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    if role != "assistant" || message_status.as_deref() != Some("pending") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let existing_agent_run_json = existing_agent_run_json.ok_or(rusqlite::Error::InvalidQuery)?;
+    let mut value = serde_json::from_str::<serde_json::Value>(&existing_agent_run_json)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let run = value.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
+    if !current_agent_run_projection_is_safe(run, run_id)
+        || run.get("status").and_then(serde_json::Value::as_str) != Some("waiting_for_approval")
+        || run
+            .get("state")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|state| state.get("status"))
+            .and_then(serde_json::Value::as_str)
+            != Some("waiting_for_approval")
+        || run
+            .get("state")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|state| state.get("activeRunId"))
+            .and_then(serde_json::Value::as_str)
+            != Some(run_id)
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    let mut matching_tool_calls = 0usize;
+    for call in run
+        .get_mut("toolCalls")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(rusqlite::Error::InvalidQuery)?
+    {
+        if call.get("id").and_then(serde_json::Value::as_str) != Some(tool_call_id) {
+            continue;
+        }
+        if call.get("tool").and_then(serde_json::Value::as_str) != Some("skills_run_script")
+            || call
+                .get("approvalStatus")
+                .and_then(serde_json::Value::as_str)
+                != Some("required")
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        call["approvalStatus"] = serde_json::Value::String("approved".to_string());
+        matching_tool_calls += 1;
+    }
+
+    let mut matching_skill_approvals = 0usize;
+    for approval in run
+        .get_mut("approvals")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(rusqlite::Error::InvalidQuery)?
+    {
+        if approval.get("type").and_then(serde_json::Value::as_str) != Some("skill_script")
+            || approval
+                .get("script")
+                .and_then(|script| script.get("id"))
+                .and_then(serde_json::Value::as_str)
+                != Some(tool_call_id)
+        {
+            continue;
+        }
+        if approval
+            .get("script")
+            .and_then(|script| script.get("approvalStatus"))
+            .and_then(serde_json::Value::as_str)
+            != Some("required")
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        approval["script"]["approvalStatus"] = serde_json::Value::String("approved".to_string());
+        matching_skill_approvals += 1;
+    }
+    if matching_tool_calls != 1 || matching_skill_approvals != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    let approved_waiting_json = serde_json::to_string(&value)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let next_agent_run_json = canonical_agent_run_lifecycle_projection(
+        Some(&approved_waiting_json),
+        run_id,
+        "running",
+        started_at,
+        updated_at,
+        None,
+    )?;
+    let changed = connection.execute(
+        "UPDATE messages
+         SET agent_run_json = ?1
+         WHERE conversation_id = ?2
+           AND id = ?3
+           AND role = 'assistant'
+           AND status = 'pending'
+           AND agent_run_json = ?4",
+        params![
+            next_agent_run_json,
+            conversation_id,
+            message_id,
+            existing_agent_run_json,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
 pub fn update_message_state(
     connection: &Connection,
     conversation_id: &str,

@@ -140,16 +140,13 @@ function rollbackUncommittedModelStreams(message: ChatMessage): ChatMessage {
     return { ...message, content: committedAssistantContent(message.content) }
   }
 
-  const earliestCheckpoint = checkpoints.reduce((earliest, current) =>
-    current[1].baseContentLength < earliest[1].baseContentLength ? current : earliest
-  )
+  // Model requests are sequential within one Agent Run, so at most one stream is provisional.
+  const [, checkpoint] = checkpoints[checkpoints.length - 1]
   const activeStreamIds = new Set(checkpoints.map(([streamId]) => streamId))
-  const currentContent = committedAssistantContent(message.content)
-  const restoredContent = currentContent.slice(0, earliestCheckpoint[1].baseContentLength)
 
   return {
     ...message,
-    content: earliestCheckpoint[1].baseWasThinking && !restoredContent ? '' : restoredContent,
+    content: committedAssistantContent(checkpoint.previousContent),
     agentRun: {
       ...run,
       messageStreamCheckpoints: {},
@@ -304,16 +301,17 @@ export function applyAgentEventToChatMessage(
     if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId]) {
       return message
     }
-    const currentContent = message.content === THINKING_PLACEHOLDER ? '' : message.content
     return {
       ...message,
+      // Every stream is one model turn. Earlier turns stay in the Timeline; the main message
+      // projection starts fresh so tool-loop narration can never become the final answer.
+      content: '',
       agentRun: {
         ...currentRun,
         messageStreamCheckpoints: {
           ...currentRun.messageStreamCheckpoints,
           [agentEvent.streamId]: {
-            baseContentLength: currentContent.length,
-            baseWasThinking: message.content === THINKING_PLACEHOLDER
+            previousContent: message.content
           }
         }
       }
@@ -323,14 +321,11 @@ export function applyAgentEventToChatMessage(
   if (agentEvent.type === 'message_stream_reset') {
     const checkpoint = currentRun.messageStreamCheckpoints?.[agentEvent.streamId]
     if (!checkpoint) return message
-    const currentContent = message.content === THINKING_PLACEHOLDER ? '' : message.content
-    const restoredContent = currentContent.slice(0, checkpoint.baseContentLength)
     const nextCheckpoints = { ...currentRun.messageStreamCheckpoints }
     delete nextCheckpoints[agentEvent.streamId]
     return {
       ...message,
-      content:
-        checkpoint.baseWasThinking && !restoredContent ? THINKING_PLACEHOLDER : restoredContent,
+      content: checkpoint.previousContent,
       agentRun: {
         ...currentRun,
         messageStreamCheckpoints: nextCheckpoints,

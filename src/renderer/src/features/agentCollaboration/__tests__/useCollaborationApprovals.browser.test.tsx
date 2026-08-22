@@ -1,8 +1,10 @@
 import type {
   AgentProposedAction,
+  CollaborationApprovalDecisionResult,
   CollaborationApprovalProjection,
   CollaborationApprovalStatus
 } from '@mycopilot/protocol'
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 
@@ -63,6 +65,7 @@ function Harness({
   rootConversationId?: string
   sequence: number
 }) {
+  const [decisionError, setDecisionError] = useState<string | null>(null)
   const controller = useCollaborationApprovals({
     invalidationSequence: sequence,
     rootConversationId
@@ -77,14 +80,36 @@ function Harness({
       <output data-testid="approvals">
         {controller.approvals.map((entry) => entry.approvalId).join(',')}
       </output>
+      <output data-testid="load-error">{controller.error ?? 'none'}</output>
+      <output data-testid="decision-error">{decisionError ?? 'none'}</output>
       <button
-        onClick={() => void controller.decide('approval-stable', 'approve', null)}
+        onClick={() => {
+          setDecisionError(null)
+          void controller
+            .decide('approval-stable', 'approve', null)
+            .catch((error) =>
+              setDecisionError(error instanceof Error ? error.message : String(error))
+            )
+        }}
         type="button"
       >
         decide
       </button>
     </div>
   )
+}
+
+function decisionResult(
+  overrides: Partial<CollaborationApprovalDecisionResult> = {}
+): CollaborationApprovalDecisionResult {
+  return {
+    schemaVersion: 1,
+    approvalId: 'approval-stable',
+    accepted: true,
+    alreadySettled: false,
+    status: 'approved',
+    ...overrides
+  }
 }
 
 describe('useCollaborationApprovals', () => {
@@ -113,13 +138,7 @@ describe('useCollaborationApprovals', () => {
     clients.list
       .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending')] })
       .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('approved')] })
-    clients.decide.mockResolvedValue({
-      schemaVersion: 1,
-      approvalId: 'approval-stable',
-      accepted: true,
-      alreadySettled: false,
-      status: 'approved'
-    })
+    clients.decide.mockResolvedValue(decisionResult())
     const screen = await render(<Harness sequence={1} />)
     await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
 
@@ -132,6 +151,63 @@ describe('useCollaborationApprovals', () => {
       rootConversationId: 'conversation-root'
     })
     expect(clients.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps an accepted decision authoritative when the projection refresh fails', async () => {
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending')] })
+      .mockRejectedValueOnce(new Error('projection temporarily unavailable'))
+    clients.decide.mockReset().mockResolvedValue(decisionResult())
+    const screen = await render(<Harness sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+
+    await screen.getByRole('button', { name: 'decide' }).click()
+
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+    await expect
+      .element(screen.getByTestId('load-error'))
+      .toHaveTextContent('projection temporarily unavailable')
+    await expect.element(screen.getByTestId('decision-error')).toHaveTextContent('none')
+  })
+
+  it('returns an unaccepted pending result for the decision card to reopen', async () => {
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending')] })
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending')] })
+    clients.decide
+      .mockReset()
+      .mockResolvedValue(
+        decisionResult({ accepted: false, alreadySettled: true, status: 'pending' })
+      )
+    const screen = await render(<Harness sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+
+    await screen.getByRole('button', { name: 'decide' }).click()
+
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+    await expect.element(screen.getByTestId('decision-error')).toHaveTextContent('none')
+    expect(clients.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('projects an already-settled authoritative status without reopening the decision', async () => {
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending')] })
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('completed')] })
+    clients.decide
+      .mockReset()
+      .mockResolvedValue(
+        decisionResult({ accepted: false, alreadySettled: true, status: 'completed' })
+      )
+    const screen = await render(<Harness sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+
+    await screen.getByRole('button', { name: 'decide' }).click()
+
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('completed')
+    await expect.element(screen.getByTestId('decision-error')).toHaveTextContent('none')
   })
 
   it('never exposes approvals from the previous root while the new root is loading', async () => {

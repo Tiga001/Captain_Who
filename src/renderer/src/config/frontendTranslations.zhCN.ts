@@ -871,10 +871,10 @@ export const zhCNTranslations = {
   'skills.bundled.pdf.description': '读取、搜索、检查、创建、编辑、渲染和验证 PDF 文件。',
   'skills.bundled.skillInstaller.name': 'Skill 安装器',
   'skills.bundled.skillInstaller.description':
-    '检查并安装来自 GitHub 链接或已授权本地路径的第三方 Skill。',
+    '检查并安装来自 GitHub 链接或已授权本地路径且无需修改的第三方 Skill。',
   'skills.bundled.skillCreator.name': 'Skill 创建器',
   'skills.bundled.skillCreator.description':
-    '以可编辑的 Workspace 包创建、改进、诊断和评审 MyCopilot Skill。',
+    '通过可编辑的 Workspace 版本创建、修改、修复、测试或评审 Skill 包。',
   'chat.unsupportedImageWarning': '当前模型不支持图片',
   'chat.yesterday': '昨天',
   'chat.messageActions': '消息操作',
@@ -1148,6 +1148,7 @@ export const zhCNTranslations = {
   'collaboration.approval.title': '子智能体请求审批',
   'collaboration.approval.openAgent': '查看来源子智能体 {task}',
   'collaboration.approval.decisionFailed': '审批操作未完成：{error}',
+  'collaboration.approval.decisionNotAccepted': '审批仍在等待中，服务端未受理本次操作，请重试。',
   'collaboration.approval.loadFailed': '审批请求加载失败：{error}',
   'collaboration.approval.retry': '重试',
   'collaboration.approval.observerNotice': '只读对话中不能处理审批，请返回根对话操作。',
@@ -1517,6 +1518,7 @@ export const zhCNTranslations = {
   'agent.skillInstallation.installed': '已安装 Skill',
   'agent.skillInstallation.alreadyInstalled': 'Skill 已安装',
   'agent.skillInstallation.rejected': '已拒绝安装 Skill',
+  'agent.skillInstallation.cancelled': '已取消安装 Skill',
   'agent.skillInstallation.installFailed': 'Skill 安装失败',
   'agent.skillInstallation.uncertain': 'Skill 安装结果不确定',
   'agent.skillInstallation.prepareExpired': 'Skill 安装准备已过期',

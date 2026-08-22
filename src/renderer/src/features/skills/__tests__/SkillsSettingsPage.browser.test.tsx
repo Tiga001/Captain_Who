@@ -11,6 +11,9 @@ import type {
 import { StrictMode, useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import imageGenerationIcon from '../../../assets/skill-icons/fluent-artist-palette-flat.svg?url'
+import skillCreatorIcon from '../../../assets/skill-icons/fluent-magic-wand-flat.svg?url'
+import skillInstallerIcon from '../../../assets/skill-icons/fluent-toolbox-flat.svg?url'
 
 const service = vi.hoisted(() => ({
   cancelPreparation: vi.fn(),
@@ -522,17 +525,38 @@ describe('Skills settings navigation and management inventory', () => {
     ])
   })
 
-  it('uses the localized Image Generation presentation and its non-Office icon', async () => {
-    service.listManagement.mockResolvedValueOnce(managementOutput([bundledImageGenerationSkill]))
+  it('uses distinct colored icons for image generation, Skill Installer, and Skill Creator', async () => {
+    service.listManagement.mockResolvedValueOnce(
+      managementOutput([
+        bundledImageGenerationSkill,
+        {
+          ...bundledSkill,
+          id: 'bundled:application:skill-installer',
+          name: 'skill-installer',
+          source: { id: 'application:skill-installer', kind: 'bundled' }
+        },
+        {
+          ...bundledSkill,
+          id: 'bundled:application:skill-creator',
+          name: 'skill-creator',
+          source: { id: 'application:skill-creator', kind: 'bundled' }
+        }
+      ])
+    )
     const screen = await render(<SkillsSettingsPage />)
 
-    const name = 'skills.bundled.imageGeneration.name'
-    await expect.element(screen.getByText(name)).toBeVisible()
-    const row = findSkillRow(screen.container, name)
-    const icon = row.querySelector('.skill-management-row__icon')
-    expect(icon?.querySelector('svg')).not.toBeNull()
-    expect(icon?.querySelector('img')).toBeNull()
-    expect(row.querySelector<HTMLButtonElement>('[role="switch"]')?.disabled).toBe(false)
+    const expectedIcons = [
+      ['skills.bundled.imageGeneration.name', imageGenerationIcon],
+      ['skills.bundled.skillInstaller.name', skillInstallerIcon],
+      ['skills.bundled.skillCreator.name', skillCreatorIcon]
+    ] as const
+
+    for (const [name, expectedIcon] of expectedIcons) {
+      await expect.element(screen.getByText(name)).toBeVisible()
+      const row = findSkillRow(screen.container, name)
+      const icon = row.querySelector<HTMLImageElement>('.skill-management-row__icon img')
+      expect(icon?.getAttribute('src')).toBe(expectedIcon)
+    }
   })
 
   it('does not offer update when backend actions deny it for a local installation', async () => {

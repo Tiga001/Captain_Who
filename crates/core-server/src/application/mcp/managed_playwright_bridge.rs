@@ -3640,7 +3640,7 @@ mod tests {
             "managed browser_storage_state failed: {}",
             tool_result_text(&storage_export)
         );
-        assert_safe_browser_artifact(&storage_export, "json");
+        assert_safe_browser_artifact(&storage_export, "json", "browser_storage_state");
 
         let storage_import = invoke_approved_browser_sensitive_tool_with_resolved_files(
             &runtime,
@@ -3885,7 +3885,7 @@ mod tests {
                 "managed fixture {tool} Artifact failed: {}",
                 tool_result_text(&result)
             );
-            assert_safe_browser_artifact(&result, kind);
+            assert_safe_browser_artifact(&result, kind, tool);
         }
         let pdf = invoke_browser_tool_with_grant(
             &runtime,
@@ -3930,7 +3930,7 @@ mod tests {
         )
         .await;
         assert!(!trace_stop.is_error);
-        assert_safe_browser_artifact(&trace_stop, "trace");
+        assert_safe_browser_artifact(&trace_stop, "trace", "browser_stop_tracing");
         let download = invoke_browser_tool_with_grant(
             &runtime,
             &capability_grant,
@@ -3946,7 +3946,7 @@ mod tests {
             "managed fixture download failed: {}",
             tool_result_text(&download)
         );
-        assert_safe_browser_artifact(&download, "download");
+        assert_safe_browser_artifact(&download, "download", "browser_click download");
 
         for (tool, arguments) in [
             (
@@ -4348,7 +4348,7 @@ mod tests {
             let result =
                 invoke_browser_tool_with_grant(&runtime, &capability_grant, tool, arguments).await;
             assert!(!result.is_error, "{tool}: {}", tool_result_text(&result));
-            assert_safe_browser_artifact(&result, kind);
+            assert_safe_browser_artifact(&result, kind, tool);
             assert_browser_artifact_preview(&result, "none");
         }
 
@@ -5122,11 +5122,13 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn assert_safe_browser_artifact(result: &McpToolResult, expected_kind: &str) {
-        let structured = result
-            .structured_content
-            .as_ref()
-            .expect("managed Artifact structured content");
+    fn assert_safe_browser_artifact(result: &McpToolResult, expected_kind: &str, operation: &str) {
+        let structured = result.structured_content.as_ref().unwrap_or_else(|| {
+            panic!(
+                "managed Artifact structured content missing for {operation}: {}",
+                tool_result_text(result)
+            )
+        });
         let artifacts = structured["artifacts"]
             .as_array()
             .expect("managed Artifact reference array");

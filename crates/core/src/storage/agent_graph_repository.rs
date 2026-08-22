@@ -1089,7 +1089,7 @@ pub fn get_agent_display_status(
                  WHERE action.run_id = trace.run_id
                    AND action.conversation_id = trace.conversation_id
                    AND action.assistant_message_id = trace.assistant_message_id
-                   AND action.status IN ('pending', 'approved')
+                   AND action.status = 'pending'
              )
              FROM conversation_turn_traces AS trace
              WHERE trace.conversation_id = ?1 AND trace.terminal_status = 'in_progress'
@@ -2908,13 +2908,38 @@ pub fn transition_agent_wake(
     claim_token: Option<&str>,
     transitioned_at: i64,
 ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
+    let transaction = immediate(connection)?;
+    let updated = transition_agent_wake_in_connection(
+        &transaction,
+        wake_id,
+        expected_status,
+        requested_status,
+        claim_token,
+        transitioned_at,
+    )?;
+    transaction.commit().map_err(write_error)?;
+    Ok(updated)
+}
+
+/// Applies one Wake lifecycle CAS inside a caller-owned transaction.
+///
+/// Approval resumption uses this primitive so the pending-action decision and the child Wake
+/// cannot become externally visible as two contradictory durable facts. Callers own commit or
+/// rollback; this helper never starts a nested SQLite transaction.
+pub(crate) fn transition_agent_wake_in_connection(
+    connection: &Connection,
+    wake_id: &str,
+    expected_status: AgentWakeStatus,
+    requested_status: AgentWakeStatus,
+    claim_token: Option<&str>,
+    transitioned_at: i64,
+) -> Result<AgentWakeRequestRecord, AgentGraphError> {
     validate_id("wake_id", wake_id)?;
     validate_time(transitioned_at)?;
     if let Some(token) = claim_token {
         validate_id("claim_token", token)?;
     }
-    let transaction = immediate(connection)?;
-    let current = query_wake(&transaction, wake_id)?
+    let current = query_wake(connection, wake_id)?
         .ok_or_else(|| AgentGraphError::WakeNotFound(wake_id.to_string()))?;
     if current.status != expected_status {
         return Err(conflict(
@@ -2923,7 +2948,6 @@ pub fn transition_agent_wake(
     }
     if current.status == requested_status {
         if current.claim_token.as_deref() == claim_token || claim_token.is_none() {
-            transaction.commit().map_err(write_error)?;
             return Ok(current);
         }
         return Err(conflict("Wake is held by another claim token"));
@@ -2980,7 +3004,7 @@ pub fn transition_agent_wake(
             }
             AgentWakeStatus::Completed | AgentWakeStatus::Satisfied => unreachable!(),
         };
-    transaction
+    connection
         .execute(
             "UPDATE agent_wake_requests
              SET status = ?1, status_revision = status_revision + 1,
@@ -3000,9 +3024,8 @@ pub fn transition_agent_wake(
             ],
         )
         .map_err(write_error)?;
-    let updated = query_wake(&transaction, wake_id)?
+    let updated = query_wake(connection, wake_id)?
         .ok_or_else(|| corrupt("updated Wake could not be read back"))?;
-    transaction.commit().map_err(write_error)?;
     Ok(updated)
 }
 

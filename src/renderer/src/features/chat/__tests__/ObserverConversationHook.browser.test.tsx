@@ -628,6 +628,6 @@ it('resets an obsolete model attempt before streaming the retry through the shar
     mocks.observerEvent?.({ ...identity, event })
   }
 
-  await expect.element(screen.getByText('base fresh')).toBeVisible()
+  await expect.element(screen.getByText(' fresh')).toBeVisible()
   expect(screen.container.textContent).not.toContain('obsolete')
 })

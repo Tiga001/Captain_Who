@@ -622,6 +622,7 @@ fn record_applied_member_compaction(
     receipt
 }
 
+mod approval_resume;
 mod attachments_spawn;
 mod model_recovery;
 mod recursive_forks;

@@ -493,6 +493,35 @@ fn root_display_uses_durable_human_turn_and_approval_state_without_a_wake() {
             .status,
         AgentDisplayStatus::WaitingApproval
     );
+    connection
+        .execute(
+            "UPDATE agent_pending_actions
+             SET status = 'approved', updated_at = 22
+             WHERE action_id = 'approval-root-running'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        get_agent_display_status(&connection, "agent-root")
+            .unwrap()
+            .status,
+        AgentDisplayStatus::Running,
+        "an accepted approval is execution state, not another user-approval wait"
+    );
+    connection
+        .execute(
+            "UPDATE agent_pending_actions
+             SET status = 'executing', updated_at = 23
+             WHERE action_id = 'approval-root-running'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        get_agent_display_status(&connection, "agent-root")
+            .unwrap()
+            .status,
+        AgentDisplayStatus::Running
+    );
 
     crate::storage::conversation_trace_repository::replace_trace(
         &mut connection,

@@ -1,5 +1,6 @@
 import type {
   AgentProposedAction,
+  CollaborationApprovalDecisionResult,
   CollaborationApprovalProjection,
   CollaborationApprovalStatus
 } from '@mycopilot/protocol'
@@ -12,6 +13,7 @@ const translations: Record<string, string> = {
   'collaboration.approval.title': '子智能体请求审批',
   'collaboration.approval.openAgent': '查看来源子智能体 {task}',
   'collaboration.approval.decisionFailed': '审批操作未完成：{error}',
+  'collaboration.approval.decisionNotAccepted': '审批仍在等待中，服务端未受理本次操作，请重试。',
   'collaboration.approval.loadFailed': '审批请求加载失败：{error}',
   'collaboration.approval.retry': '重试',
   'collaboration.approval.observerNotice': '只读对话中不能处理审批，请返回根对话操作。',
@@ -74,9 +76,22 @@ function approval(
   }
 }
 
+function decisionResult(
+  overrides: Partial<CollaborationApprovalDecisionResult> = {}
+): CollaborationApprovalDecisionResult {
+  return {
+    schemaVersion: 1,
+    approvalId: 'approval-stable',
+    accepted: true,
+    alreadySettled: false,
+    status: 'approved',
+    ...overrides
+  }
+}
+
 describe('CollaborationApprovalPanel', () => {
   it('routes a root decision by stable approval identity without offering remember-for-run', async () => {
-    const onDecision = vi.fn(async () => undefined)
+    const onDecision = vi.fn(async () => decisionResult())
     const onOpenAgent = vi.fn()
     const screen = await render(
       <CollaborationApprovalPanel
@@ -106,7 +121,7 @@ describe('CollaborationApprovalPanel', () => {
   })
 
   it('routes root rejection guidance to the original child approval', async () => {
-    const onDecision = vi.fn(async () => undefined)
+    const onDecision = vi.fn(async () => decisionResult({ status: 'rejected' }))
     const screen = await render(
       <CollaborationApprovalPanel
         approvals={[approval()]}
@@ -137,9 +152,9 @@ describe('CollaborationApprovalPanel', () => {
 
   it('remounts the decision shell after a transport failure so the user can retry', async () => {
     const onDecision = vi
-      .fn<() => Promise<void>>()
+      .fn<() => Promise<CollaborationApprovalDecisionResult>>()
       .mockRejectedValueOnce(new Error('temporarily unavailable'))
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(decisionResult())
     const screen = await render(
       <CollaborationApprovalPanel
         approvals={[approval()]}
@@ -155,12 +170,54 @@ describe('CollaborationApprovalPanel', () => {
     expect(onDecision).toHaveBeenCalledTimes(2)
   })
 
+  it('does not latch an unaccepted decision that is still pending', async () => {
+    const onDecision = vi
+      .fn<() => Promise<CollaborationApprovalDecisionResult>>()
+      .mockResolvedValueOnce(
+        decisionResult({ accepted: false, alreadySettled: true, status: 'pending' })
+      )
+      .mockResolvedValueOnce(decisionResult())
+    const screen = await render(
+      <CollaborationApprovalPanel
+        approvals={[approval()]}
+        mode="interactive"
+        onDecision={onDecision}
+      />
+    )
+
+    await screen.getByRole('button', { name: '批准' }).click()
+    await expect.element(screen.getByRole('alert')).toHaveTextContent('服务端未受理')
+    await expect.element(screen.getByRole('button', { name: '批准' })).toBeEnabled()
+
+    await screen.getByRole('button', { name: '批准' }).click()
+    expect(onDecision).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps one decision in flight when the approve control is clicked repeatedly', async () => {
+    const pending = deferred<CollaborationApprovalDecisionResult>()
+    const onDecision = vi.fn(() => pending.promise)
+    const screen = await render(
+      <CollaborationApprovalPanel
+        approvals={[approval()]}
+        mode="interactive"
+        onDecision={onDecision}
+      />
+    )
+
+    const approve = screen.getByRole('button', { name: '批准' })
+    await approve.click()
+    await approve.click({ force: true })
+    expect(onDecision).toHaveBeenCalledOnce()
+
+    pending.resolve(decisionResult())
+  })
+
   it('shows durable settled status without approval controls', async () => {
     const screen = await render(
       <CollaborationApprovalPanel
         approvals={[approval('completed')]}
         mode="interactive"
-        onDecision={vi.fn()}
+        onDecision={vi.fn(async () => decisionResult({ status: 'completed' }))}
       />
     )
 
@@ -175,7 +232,7 @@ describe('CollaborationApprovalPanel', () => {
         approvals={[approval()]}
         loadError="temporarily unavailable"
         mode="interactive"
-        onDecision={vi.fn()}
+        onDecision={vi.fn(async () => decisionResult())}
         onRetryLoad={onRetryLoad}
       />
     )
@@ -186,3 +243,11 @@ describe('CollaborationApprovalPanel', () => {
     expect(onRetryLoad).toHaveBeenCalledOnce()
   })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((finish) => {
+    resolve = finish
+  })
+  return { promise, resolve }
+}

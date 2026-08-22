@@ -311,8 +311,7 @@ export const enUSTranslations = {
   'settings.page.environment': 'Environment',
   'settings.page.archivedConversations': 'Archived chats',
 
-  'agentTemplates.descriptionText':
-    'Subagent templates the main agent can call',
+  'agentTemplates.descriptionText': 'Subagent templates the main agent can call',
   'agentTemplates.project': 'Project',
   'agentTemplates.create': 'New template',
   'agentTemplates.createTitle': 'New Agent template',
@@ -919,10 +918,10 @@ export const enUSTranslations = {
     'Read, search, inspect, create, edit, render, and validate PDF files.',
   'skills.bundled.skillInstaller.name': 'Skill Installer',
   'skills.bundled.skillInstaller.description':
-    'Inspect and install third-party Skills from GitHub links or authorized local paths.',
+    'Inspect and install unchanged third-party Skills from GitHub links or authorized local paths.',
   'skills.bundled.skillCreator.name': 'Skill Creator',
   'skills.bundled.skillCreator.description':
-    'Create, improve, diagnose, and review MyCopilot Skills as editable Workspace packages.',
+    'Create, modify, fix, test, or review Skill packages through editable Workspace versions.',
   'chat.unsupportedImageWarning': 'The current model does not support images',
   'chat.yesterday': 'Yesterday',
   'chat.messageActions': 'Message actions',
@@ -1203,6 +1202,8 @@ export const enUSTranslations = {
   'collaboration.approval.title': 'Sub-agent approval requests',
   'collaboration.approval.openAgent': 'View source sub-agent {task}',
   'collaboration.approval.decisionFailed': 'Approval was not completed: {error}',
+  'collaboration.approval.decisionNotAccepted':
+    'The approval is still pending and was not accepted. Please try again.',
   'collaboration.approval.loadFailed': 'Approval requests could not be loaded: {error}',
   'collaboration.approval.retry': 'Retry',
   'collaboration.approval.observerNotice':
@@ -1601,6 +1602,7 @@ export const enUSTranslations = {
   'agent.skillInstallation.installed': 'Installed Skill',
   'agent.skillInstallation.alreadyInstalled': 'Skill already installed',
   'agent.skillInstallation.rejected': 'Skill installation rejected',
+  'agent.skillInstallation.cancelled': 'Skill installation cancelled',
   'agent.skillInstallation.installFailed': 'Skill installation failed',
   'agent.skillInstallation.uncertain': 'Skill installation result is uncertain',
   'agent.skillInstallation.prepareExpired': 'Skill installation preparation expired',

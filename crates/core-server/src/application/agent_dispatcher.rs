@@ -5,6 +5,7 @@
 //! interprets a Graph workflow and never invokes a second Agent loop: the production execution
 //! port below is backed by the shared [`AgentService`] Turn executor.
 
+use mycopilot_core::storage::service::AgentWakeApprovalWaitOutcome;
 use mycopilot_core::{
     AgentGraphError, AgentResultArtifactReference, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
     AgentWakeRequestRecord, AgentWakeStatus, ConversationTurnTraceTerminalStatus,
@@ -300,9 +301,12 @@ pub(crate) trait AgentDispatcherStore: Send + Sync {
     fn mark_waiting_for_approval(
         &self,
         wake_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
         claim_token: &str,
         now_ms: i64,
-    ) -> Result<AgentWakeRequestRecord, String>;
+    ) -> Result<AgentWakeApprovalWaitOutcome, String>;
 
     fn renew_lease(&self, wake_id: &str, claim_token: &str, now_ms: i64) -> Result<(), String>;
 
@@ -390,22 +394,27 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
     fn mark_waiting_for_approval(
         &self,
         wake_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
         claim_token: &str,
         now_ms: i64,
-    ) -> Result<AgentWakeRequestRecord, String> {
-        let wake = self
+    ) -> Result<AgentWakeApprovalWaitOutcome, String> {
+        let outcome = self
             .storage
-            .transition_agent_wake_at(
+            .mark_agent_wake_waiting_for_pending_approval_at(
                 wake_id,
-                AgentWakeStatus::Running,
-                AgentWakeStatus::WaitingForApproval,
-                Some(claim_token),
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                claim_token,
                 now_ms,
-            )
-            .map_err(|error| error.to_string())?;
-        self.wait_notifications
-            .notify_caller(&wake.requester_agent_id);
-        Ok(wake)
+            )?;
+        if let AgentWakeApprovalWaitOutcome::Waiting(wake) = &outcome {
+            self.wait_notifications
+                .notify_caller(&wake.requester_agent_id);
+        }
+        Ok(outcome)
     }
 
     fn renew_lease(&self, wake_id: &str, claim_token: &str, now_ms: i64) -> Result<(), String> {
@@ -550,7 +559,7 @@ impl SharedAgentTurnExecutionPort {
                                     == Some(handle.conversation_id.as_str())
                                 && action.assistant_message_id.as_deref()
                                     == Some(handle.assistant_message_id.as_str())
-                                && matches!(action.status.as_str(), "pending" | "approved")
+                                && action.status == "pending"
                         });
                 if !waiting_already_reported && has_pending_approval {
                     return Ok(Some(AgentWakeExecutionObservation::WaitingForApproval));
@@ -1407,22 +1416,26 @@ async fn observe_and_settle(
         match observed {
             AgentWakeExecutionObservation::WaitingForApproval => {
                 if !waiting_already_reported {
-                    shared
+                    let outcome = shared
                         .store
                         .mark_waiting_for_approval(
                             &wake.wake_id,
+                            &handle.run_id,
+                            &handle.conversation_id,
+                            &handle.assistant_message_id,
                             &claim_token,
                             shared.clock.now_ms(),
                         )
                         .map_err(AgentDispatcherError::Storage)?;
-                    waiting_already_reported = true;
+                    waiting_already_reported =
+                        matches!(outcome, AgentWakeApprovalWaitOutcome::Waiting(_));
                     if let Some(running) = shared
                         .running
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .get_mut(&wake.agent_id)
                     {
-                        running.waiting_for_approval = true;
+                        running.waiting_for_approval = waiting_already_reported;
                     }
                 }
             }
@@ -1645,13 +1658,17 @@ mod tests {
         fn mark_waiting_for_approval(
             &self,
             wake_id: &str,
+            _run_id: &str,
+            _conversation_id: &str,
+            _assistant_message_id: &str,
             _claim_token: &str,
             _now_ms: i64,
-        ) -> Result<AgentWakeRequestRecord, String> {
+        ) -> Result<AgentWakeApprovalWaitOutcome, String> {
             mutate_wake(&self.state, wake_id, |wake| {
                 wake.status = AgentWakeStatus::WaitingForApproval;
                 Ok(())
             })
+            .map(AgentWakeApprovalWaitOutcome::Waiting)
         }
 
         fn renew_lease(

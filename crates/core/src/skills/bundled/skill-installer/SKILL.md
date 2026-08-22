@@ -1,6 +1,6 @@
 ---
 name: skill-installer
-description: Inspect and install third-party Skills from GitHub links or authorized local paths. Use when the user provides a Skill link or asks to add, install, or import a Skill. Always verify the source, identify the Skill, and explain its purpose before requesting installation approval.
+description: Inspect and install unchanged third-party Skills from GitHub links or authorized local paths. Use when the user asks to add, install, or import a Skill without changing its behavior or files. Use skill-creator first when changes are required.
 ---
 
 # Skill Installer

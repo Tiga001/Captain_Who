@@ -97,12 +97,12 @@ describe('bundled Skill presentation', () => {
     }
 
     expect(getSkillPresentation(bundled, (key) => getTranslation('zh-CN', key))).toEqual({
-      description: '检查并安装来自 GitHub 链接或已授权本地路径的第三方 Skill。',
+      description: '检查并安装来自 GitHub 链接或已授权本地路径且无需修改的第三方 Skill。',
       name: 'Skill 安装器'
     })
     expect(getSkillPresentation(bundled, (key) => getTranslation('en-US', key))).toEqual({
       description:
-        'Inspect and install third-party Skills from GitHub links or authorized local paths.',
+        'Inspect and install unchanged third-party Skills from GitHub links or authorized local paths.',
       name: 'Skill Installer'
     })
     expect(getSkillPresentation(installed, (key) => getTranslation('zh-CN', key))).toEqual({

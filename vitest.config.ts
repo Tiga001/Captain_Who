@@ -10,6 +10,7 @@ const filesTests = 'src/renderer/src/features/files/__tests__'
 const mainWindowLifecycleTest = 'src/main/mainWindowLifecycle.test.ts'
 const workspaceFilesTests = 'src/main/workspaceFiles'
 const coreMainTests = 'src/main/core'
+const managedPlaywrightElectronE2e = 'src/main/core/managedPlaywrightBridge.electron.test.ts'
 const mcpMainTests = 'src/main/mcp'
 const terminalMainTests = 'src/main/terminal'
 const terminalPreloadTests = 'src/preload'
@@ -82,6 +83,7 @@ export default defineConfig({
             `${agentCollaborationTests}/**/*.test.ts`,
             `${protocolTests}/**/*.test.ts`
           ],
+          exclude: [managedPlaywrightElectronE2e],
           name: 'unit'
         }
       },
@@ -104,6 +106,14 @@ export default defineConfig({
             `${agentCollaborationTests}/**/*.browser.test.tsx`
           ],
           name: 'browser'
+        }
+      },
+      {
+        test: {
+          environment: 'node',
+          fileParallelism: false,
+          include: [managedPlaywrightElectronE2e],
+          name: 'managed-playwright-e2e'
         }
       }
     ]

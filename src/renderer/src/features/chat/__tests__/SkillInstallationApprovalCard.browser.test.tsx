@@ -21,6 +21,8 @@ const translations: Record<string, string> = {
   'agent.skillInstallation.inspecting': '正在检查来源、下载并验证 Skill',
   'agent.skillInstallation.identified': '已识别 Skill',
   'agent.skillInstallation.installed': '已安装 Skill',
+  'agent.skillInstallation.cancelled': '已取消安装 Skill',
+  'agent.skillInstallation.installFailed': 'Skill 安装失败',
   'agent.approval.dialog.rejectPlaceholder': '拒绝原因'
 }
 
@@ -206,5 +208,45 @@ describe('SkillInstallationApprovalCard', () => {
     expect(installed.container.textContent).toContain('参考资料 1 · 资产 1 · 脚本 1')
     expect(installed.container.textContent).not.toContain('0123456789abcdef')
     expect(installed.container.textContent).not.toContain('This Skill contains scripts.')
+  })
+
+  it('settles a direct installation failure without keeping the running shimmer', async () => {
+    const screen = await render(
+      <SkillInstallationToolActivity
+        call={{
+          id: 'failed-install',
+          tool: 'skills_commit_install',
+          args: { installRef: `skill_install_${'b'.repeat(32)}` },
+          approvalStatus: 'not_required',
+          reason: null
+        }}
+        result={{
+          callId: 'failed-install',
+          tool: 'skills_commit_install',
+          ok: false,
+          result: null,
+          error: 'The Skill installation reference does not belong to this run.'
+        }}
+        run={{
+          runId: 'run-1',
+          status: 'completed',
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: []
+        }}
+      />
+    )
+
+    const label = screen.getByText('Skill 安装失败')
+    await expect.element(label).toBeVisible()
+    expect(label.element()).not.toHaveClass('agent-running-text')
+    expect(screen.container.querySelector('.lucide-circle-x')).not.toBeNull()
+    await label.click()
+    expect(screen.container.textContent).toContain(
+      'The Skill installation reference does not belong to this run.'
+    )
   })
 })

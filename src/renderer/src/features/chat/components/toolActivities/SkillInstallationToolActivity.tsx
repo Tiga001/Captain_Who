@@ -95,27 +95,38 @@ export function SkillInstallationToolActivity({
   }
 
   const status = expired ? 'expired' : installation?.status
+  const failed =
+    result?.ok === false ||
+    settledStatus === 'failed' ||
+    status === 'failed' ||
+    status === 'uncertain' ||
+    status === 'expired'
+  const cancelled = settledStatus === 'cancelled'
+  const stopped = status === 'rejected' || cancelled
+  const pending =
+    !failed &&
+    !stopped &&
+    (status === 'waiting_for_approval' ||
+      status === 'installing' ||
+      (!status && !result && !settledStatus))
   const label =
-    status === 'waiting_for_approval'
-      ? t('agent.skillInstallation.waitingApproval')
-      : status === 'installing'
-        ? t('agent.skillInstallation.installing')
-        : status === 'installed'
-          ? t('agent.skillInstallation.installed')
-          : status === 'already_installed'
-            ? t('agent.skillInstallation.alreadyInstalled')
-            : status === 'rejected'
-              ? t('agent.skillInstallation.rejected')
-              : status === 'uncertain'
-                ? t('agent.skillInstallation.uncertain')
-                : status === 'expired'
-                  ? t('agent.skillInstallation.prepareExpired')
-                  : result?.ok === false || settledStatus === 'failed'
-                    ? t('agent.skillInstallation.installFailed')
+    status === 'uncertain'
+      ? t('agent.skillInstallation.uncertain')
+      : status === 'expired'
+        ? t('agent.skillInstallation.prepareExpired')
+        : status === 'rejected'
+          ? t('agent.skillInstallation.rejected')
+          : cancelled
+            ? t('agent.skillInstallation.cancelled')
+            : failed
+              ? t('agent.skillInstallation.installFailed')
+              : status === 'installed'
+                ? t('agent.skillInstallation.installed')
+                : status === 'already_installed'
+                  ? t('agent.skillInstallation.alreadyInstalled')
+                  : status === 'waiting_for_approval'
+                    ? t('agent.skillInstallation.waitingApproval')
                     : t('agent.skillInstallation.installing')
-  const failed = status === 'failed' || status === 'uncertain' || status === 'expired'
-  const stopped = status === 'rejected'
-  const pending = status === 'waiting_for_approval' || status === 'installing' || !status
   const Icon = failed
     ? CircleX
     : stopped

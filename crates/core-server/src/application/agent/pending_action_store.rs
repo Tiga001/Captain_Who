@@ -1195,7 +1195,7 @@ impl AgentService {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn action_audit_record(
+pub(super) fn action_audit_record(
     record: &PendingActionRecord,
     decision: Option<&str>,
     status: &str,

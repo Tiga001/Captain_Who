@@ -81,8 +81,8 @@ pub use managed_artifacts::{
 };
 pub use pending_actions::{
     AgentPendingActionResultCommitOutcome, AgentPendingActionSettlementInspection,
-    McpActionTerminalizationRequest, McpAutoActionJournalTerminalOutcome,
-    McpStartupActionTerminalOutcome,
+    AgentWakeApprovalWaitOutcome, McpActionTerminalizationRequest,
+    McpAutoActionJournalTerminalOutcome, McpStartupActionTerminalOutcome,
 };
 #[cfg(test)]
 use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;

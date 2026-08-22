@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type {
+  CollaborationApprovalDecisionResult,
   CollaborationApprovalProjection,
   CollaborationApprovalStatus
 } from '@mycopilot/protocol'
@@ -34,7 +35,7 @@ export type CollaborationApprovalPanelProps = CollaborationApprovalPanelBaseProp
           approvalId: string,
           decision: CollaborationApprovalDecision,
           message: string | null
-        ) => unknown | Promise<unknown>
+        ) => Promise<CollaborationApprovalDecisionResult>
         onRetryLoad?: () => void
       }
     | {
@@ -126,17 +127,26 @@ function ProjectedApprovalDecisionCard({
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
 
-  const decide = (decision: CollaborationApprovalDecision, message: string | null = null) => {
+  const decide = async (decision: CollaborationApprovalDecision, message: string | null = null) => {
     setError(null)
-    void Promise.resolve(onDecision(approval.approvalId, decision, message)).catch(
-      (decisionError) => {
-        setError(decisionError instanceof Error ? decisionError.message : String(decisionError))
-        // AgentApprovalDialog intentionally latches while a root decision is being routed. Remount
-        // only after a failed request so the user can retry; successful decisions wait for the
-        // durable approval invalidation instead of optimistically reopening the action.
-        setAttempt((current) => current + 1)
+    try {
+      const result = await onDecision(approval.approvalId, decision, message)
+      if (!result.accepted && result.status === 'pending') {
+        throw new Error(t('collaboration.approval.decisionNotAccepted'))
       }
-    )
+      if (!result.accepted && !result.alreadySettled) {
+        throw new Error(t('collaboration.approval.decisionNotAccepted'))
+      }
+      // accepted=true is the only new decision acknowledgement that stays latched. An
+      // already-settled response is also left closed because its authoritative non-pending status
+      // is projected by the controller; it must never invite a duplicate decision.
+    } catch (decisionError) {
+      setError(decisionError instanceof Error ? decisionError.message : String(decisionError))
+      // AgentApprovalDialog intentionally latches while a root decision is being routed. Remount
+      // after a rejected or unaccepted request so the user can retry. Accepted decisions wait for
+      // the durable approval projection instead of optimistically reopening the action.
+      setAttempt((current) => current + 1)
+    }
   }
 
   return (
@@ -144,9 +154,9 @@ function ProjectedApprovalDecisionCard({
       <AgentApprovalDialog
         allowRememberForRun={false}
         key={`${approval.approvalId}:${attempt}`}
-        onApprove={() => decide('approve')}
-        onCancel={() => decide('cancel')}
-        onReject={(_messageId, _action, message) => decide('reject', message?.trim() || null)}
+        onApprove={() => void decide('approve')}
+        onCancel={() => void decide('cancel')}
+        onReject={(_messageId, _action, message) => void decide('reject', message?.trim() || null)}
         target={{ action: approval.action, messageId: approval.approvalId }}
       />
       {error && (

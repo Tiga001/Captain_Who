@@ -30,32 +30,43 @@ describe('WorkspacePdfPreview', () => {
       </div>
     )
 
-    await expect
-      .poll(
-        () => screen.container.querySelector<HTMLCanvasElement>('.files-panel__pdf-page')?.width
-      )
-      .toBeGreaterThan(0)
-    await expect.poll(() => screen.container.querySelector('.files-panel__pdf-loading')).toBeNull()
+    try {
+      // A canvas has a non-zero default size before PDF.js paints it. Wait for the component's
+      // real render terminal state so this remains a worker integration test instead of a DOM race.
+      await expect
+        .poll(() => screen.container.querySelector('.files-panel__pdf-loading'), {
+          interval: 50,
+          timeout: 15_000
+        })
+        .toBeNull()
+      await expect
+        .poll(() => screen.container.querySelector('.files-panel__pdf-pager')?.textContent, {
+          interval: 50,
+          timeout: 15_000
+        })
+        .toContain('1/1')
 
-    const canvas = screen.container.querySelector<HTMLCanvasElement>('.files-panel__pdf-page')
-    if (!canvas) throw new Error('PDF preview did not render a canvas')
-    const context = canvas.getContext('2d')
-    if (!context) throw new Error('PDF preview canvas has no 2D context')
-    const pixel = context.getImageData(
-      Math.floor(canvas.width / 2),
-      Math.floor(canvas.height / 2),
-      1,
-      1
-    ).data
+      const canvas = screen.container.querySelector<HTMLCanvasElement>('.files-panel__pdf-page')
+      if (!canvas) throw new Error('PDF preview did not render a canvas')
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('PDF preview canvas has no 2D context')
+      const pixel = context.getImageData(
+        Math.floor(canvas.width / 2),
+        Math.floor(canvas.height / 2),
+        1,
+        1
+      ).data
 
-    expect(Array.from(pixel)).toEqual([255, 0, 0, 255])
-    expect(screen.container.querySelector('.files-panel__pdf-pager')?.textContent).toContain('1/1')
-    await expect
-      .element(screen.getByRole('button', { name: 'files.pdf.previousPage' }))
-      .toBeDisabled()
-    await expect.element(screen.getByRole('button', { name: 'files.pdf.nextPage' })).toBeDisabled()
-
-    screen.unmount()
+      expect(Array.from(pixel)).toEqual([255, 0, 0, 255])
+      await expect
+        .element(screen.getByRole('button', { name: 'files.pdf.previousPage' }))
+        .toBeDisabled()
+      await expect
+        .element(screen.getByRole('button', { name: 'files.pdf.nextPage' }))
+        .toBeDisabled()
+    } finally {
+      screen.unmount()
+    }
   })
 })
 

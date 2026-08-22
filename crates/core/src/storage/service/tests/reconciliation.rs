@@ -2163,6 +2163,45 @@ fn every_manual_non_command_file_effect_settles_atomically_and_idempotently() {
 }
 
 #[test]
+fn executing_skill_script_settles_with_its_terminal_tool_receipt() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let storage_id = "run-executing-skill:executing-skill-call";
+    let (mut pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
+        ManualNonCommandFileEffect::SkillScript,
+        storage_id,
+        "executing-skill-call",
+        "run-executing-skill",
+        "conversation-executing-skill",
+        "assistant-executing-skill",
+    );
+    pending.status = "executing".to_string();
+    save_assistant_conversation(
+        &service,
+        "conversation-executing-skill",
+        "assistant-executing-skill",
+    );
+    service.store_pending_agent_action(pending).unwrap();
+    service.upsert_agent_action_audit(approved).unwrap();
+
+    let outcome = service
+        .commit_current_manual_settlement(&terminal, "executing", "completed", &trace, 12)
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AgentPendingActionResultCommitOutcome::Committed {
+            trace_changed: true
+        }
+    );
+    let settled = service
+        .get_pending_agent_action(storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled.status, "executing");
+    assert_eq!(settled.target_status.as_deref(), Some("completed"));
+}
+
+#[test]
 fn every_manual_non_command_trace_failure_rolls_back_audit_and_pending_target() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

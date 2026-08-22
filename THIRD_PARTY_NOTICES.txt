@@ -267,6 +267,15 @@ Source: https://github.com/material-extensions/vscode-material-icon-theme
 License: MIT (license text below)
 Copyright (c) 2025 Material Extensions
 
+Fluent Emoji
+
+MyCopilot bundles selected Flat SVG assets from Fluent Emoji for the Image
+Generation, Skill Installer, and Skill Creator application Skill icons.
+
+Source: https://github.com/microsoft/fluentui-emoji
+License: MIT (license text below)
+Copyright (c) Microsoft Corporation.
+
 Lucide React (1.23.0)
 
 MyCopilot uses Lucide icons throughout the desktop UI, including the Git review,

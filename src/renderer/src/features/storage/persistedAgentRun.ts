@@ -350,9 +350,8 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     !Object.values(value.messageStreamCheckpoints).every(
       (checkpoint) =>
         isRecord(checkpoint) &&
-        hasExactKeys(checkpoint, ['baseContentLength', 'baseWasThinking']) &&
-        isSafeInteger(checkpoint.baseContentLength) &&
-        typeof checkpoint.baseWasThinking === 'boolean'
+        hasExactKeys(checkpoint, ['previousContent']) &&
+        isBoundedString(checkpoint.previousContent, 4 * 1024 * 1024, true)
     )
   ) {
     return undefined

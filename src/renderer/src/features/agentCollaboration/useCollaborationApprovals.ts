@@ -42,6 +42,31 @@ export function useCollaborationApprovals({
   const [loading, setLoading] = useState(false)
   const generationRef = useRef(0)
   const inFlightRef = useRef(new Set<string>())
+  const rootConversationIdRef = useRef(rootConversationId)
+
+  useEffect(() => {
+    rootConversationIdRef.current = rootConversationId
+  }, [rootConversationId])
+
+  const applyAuthoritativeDecisionStatus = useCallback(
+    (decisionRootConversationId: string, result: CollaborationApprovalDecisionResult) => {
+      if (
+        result.status === 'pending' ||
+        rootConversationIdRef.current !== decisionRootConversationId
+      ) {
+        return
+      }
+
+      setApprovals((current) =>
+        current.map((approval) =>
+          approval.approvalId === result.approvalId && approval.status === 'pending'
+            ? { ...approval, status: result.status }
+            : approval
+        )
+      )
+    },
+    []
+  )
 
   const refresh = useCallback(async () => {
     const generation = ++generationRef.current
@@ -92,19 +117,27 @@ export function useCollaborationApprovals({
 
       inFlightRef.current.add(approvalId)
       try {
+        const decisionRootConversationId = rootConversationId
         const result = await decideCollaborationApproval({
           approvalId,
           decision,
           message,
-          rootConversationId
+          rootConversationId: decisionRootConversationId
         })
+
+        // The decision response is already an authoritative durable acknowledgement. Reflect a
+        // non-pending status immediately, then use the existing projection reload to close any
+        // notification gap. A failed reload must not regress an accepted decision back to a
+        // clickable pending card.
+        applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
         await refresh()
+        applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
         return result
       } finally {
         inFlightRef.current.delete(approvalId)
       }
     },
-    [enabled, refresh, rootConversationId]
+    [applyAuthoritativeDecisionStatus, enabled, refresh, rootConversationId]
   )
 
   const isCurrentScope = approvalsRootConversationId === rootConversationId

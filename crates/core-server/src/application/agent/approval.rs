@@ -1125,6 +1125,7 @@ impl AgentService {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
         );
+        let decided_at = now_ms();
         let (
             record,
             call,
@@ -1383,6 +1384,11 @@ impl AgentService {
                         | AgentProposedAction::McpToolCall { .. }
                         | AgentProposedAction::BuiltinMcpToolApproval { .. }
                 );
+            let is_approved_skill_script = decision_status == AgentApprovalDecisionStatus::Approved
+                && matches!(
+                    record.snapshot.action,
+                    AgentProposedAction::SkillScript { .. }
+                );
             let is_approved_materialization = decision_status
                 == AgentApprovalDecisionStatus::Approved
                 && matches!(
@@ -1410,7 +1416,9 @@ impl AgentService {
                 self.process_runs
                     .register(&record.storage_id, &record.snapshot.run_id)
             });
-            let execution_status = if is_approved_process || is_approved_materialization {
+            let execution_status = if is_approved_skill_script {
+                PendingActionStatus::Executing
+            } else if is_approved_process || is_approved_materialization {
                 PendingActionStatus::Approved
             } else if is_rejected_mcp {
                 // Rejection is definitely pre-dispatch. Keep either the original `pending`
@@ -1422,11 +1430,56 @@ impl AgentService {
                 PendingActionStatus::Executing
             };
             if execution_status != record.snapshot.status {
-                self.persist_pending_status(
-                    record,
-                    PendingActionStatus::Pending,
-                    execution_status,
-                )?;
+                if is_approved_skill_script {
+                    let approved_audit = action_audit_record(
+                        record,
+                        Some("approved"),
+                        "approved",
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(decided_at),
+                        None,
+                    );
+                    let active_child_wake = record
+                        .agent_input
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.collaboration_identity.as_ref())
+                        .map(|identity| {
+                            ChildAgentFactory::new(Arc::clone(&self.storage))
+                                .resolve_trusted_active_wake_by_identity(identity)
+                                .map_err(|error| {
+                                    format!("子 Agent 审批无法取得原 Wake 的执行权：{error}")
+                                })
+                        })
+                        .transpose()?;
+                    let child_wake = active_child_wake.as_ref().map(|active| {
+                        (
+                            active.spawn.initial_wake.wake_id.as_str(),
+                            active.spawn.initial_wake.status,
+                            active.claim_token.as_str(),
+                        )
+                    });
+                    self.storage
+                        .commit_pending_skill_script_approval_execution(
+                            &record.storage_id,
+                            &persisted_pending_agent_input_json(
+                                &record.agent_input,
+                                PendingActionStatus::Executing,
+                            )?,
+                            &approved_audit,
+                            child_wake,
+                            decided_at,
+                        )?;
+                } else {
+                    self.persist_pending_status(
+                        record,
+                        PendingActionStatus::Pending,
+                        execution_status,
+                    )?;
+                }
                 record.snapshot.status = execution_status;
             }
             (
@@ -1456,7 +1509,6 @@ impl AgentService {
                 AgentApprovalDecisionStatus::Rejected => AgentApprovalStatus::Rejected,
             };
         }
-        let decided_at = now_ms();
         if decision_status == AgentApprovalDecisionStatus::Rejected
             && !is_mcp_action
             && !is_builtin_mcp_action
@@ -1491,17 +1543,6 @@ impl AgentService {
                 AgentProposedAction::SkillScript { .. }
             )
         {
-            self.record_action_audit(
-                &record,
-                Some("approved"),
-                "approved",
-                None,
-                None,
-                None,
-                None,
-                Some(decided_at),
-                None,
-            );
             drop(deletion_lifecycle);
             return self.queue_skill_script_execution(
                 record,

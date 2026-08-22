@@ -55,6 +55,173 @@ fn persisted_builtin_mcp_tool_result(result: &AgentToolResult) -> AgentToolResul
 
 const BUILTIN_MCP_APPROVED_INVOCATION_WATCHDOG: Duration = Duration::from_secs(65);
 
+async fn join_skill_script_worker<F>(worker: F) -> Result<(), tokio::task::JoinError>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(worker).await
+}
+
+#[cfg(test)]
+static SKILL_SCRIPT_WORKER_PANIC_TARGETS: Mutex<Vec<(std::sync::Weak<StorageService>, String)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+static SKILL_SCRIPT_POST_RECEIPT_PANIC_TARGETS: Mutex<
+    Vec<(std::sync::Weak<StorageService>, String)>,
+> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn inject_skill_script_worker_panic_once(storage: &Arc<StorageService>, action_id: &str) {
+    let mut targets = SKILL_SCRIPT_WORKER_PANIC_TARGETS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    targets.retain(|(candidate_storage, _)| candidate_storage.strong_count() > 0);
+    let storage = Arc::downgrade(storage);
+    if !targets.iter().any(|(candidate_storage, candidate_id)| {
+        candidate_storage.ptr_eq(&storage) && candidate_id == action_id
+    }) {
+        targets.push((storage, action_id.to_string()));
+    }
+}
+
+#[cfg(test)]
+fn skill_script_worker_panic_is_pending(storage: &Arc<StorageService>, action_id: &str) -> bool {
+    let storage = Arc::downgrade(storage);
+    SKILL_SCRIPT_WORKER_PANIC_TARGETS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .any(|(candidate_storage, candidate_id)| {
+            candidate_storage.ptr_eq(&storage) && candidate_id == action_id
+        })
+}
+
+#[cfg(test)]
+fn maybe_panic_skill_script_worker_after_effect_boundary(
+    storage: &Arc<StorageService>,
+    action_id: &str,
+) {
+    let should_panic = {
+        let storage = Arc::downgrade(storage);
+        let mut targets = SKILL_SCRIPT_WORKER_PANIC_TARGETS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        targets
+            .iter()
+            .position(|(candidate_storage, candidate_id)| {
+                candidate_storage.ptr_eq(&storage) && candidate_id == action_id
+            })
+            .map(|index| targets.swap_remove(index))
+            .is_some()
+    };
+    if should_panic {
+        panic!("injected Skill script worker panic after effect boundary");
+    }
+}
+
+#[cfg(test)]
+fn inject_skill_script_post_receipt_panic_once(storage: &Arc<StorageService>, action_id: &str) {
+    let mut targets = SKILL_SCRIPT_POST_RECEIPT_PANIC_TARGETS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    targets.retain(|(candidate_storage, _)| candidate_storage.strong_count() > 0);
+    let storage = Arc::downgrade(storage);
+    if !targets.iter().any(|(candidate_storage, candidate_id)| {
+        candidate_storage.ptr_eq(&storage) && candidate_id == action_id
+    }) {
+        targets.push((storage, action_id.to_string()));
+    }
+}
+
+#[cfg(test)]
+fn maybe_panic_skill_script_worker_after_receipt(storage: &Arc<StorageService>, action_id: &str) {
+    let should_panic = {
+        let storage = Arc::downgrade(storage);
+        let mut targets = SKILL_SCRIPT_POST_RECEIPT_PANIC_TARGETS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        targets
+            .iter()
+            .position(|(candidate_storage, candidate_id)| {
+                candidate_storage.ptr_eq(&storage) && candidate_id == action_id
+            })
+            .map(|index| targets.swap_remove(index))
+            .is_some()
+    };
+    if should_panic {
+        panic!("injected Skill script worker panic after durable receipt");
+    }
+}
+
+fn skill_script_worker_failure_result(
+    call_id: &str,
+    effects_may_have_occurred: bool,
+    worker_cancelled: bool,
+) -> AgentToolResult {
+    let (status, outcome, code, recovery, message) = if effects_may_have_occurred {
+        (
+            "outcome_unknown",
+            "outcome_unknown",
+            "skill_script.outcome_unknown",
+            "inspectState",
+            "The Skill script worker stopped after execution began. Workspace effects may have occurred; inspect durable state before retrying.",
+        )
+    } else {
+        (
+            "failed",
+            "definitely_not_executed",
+            if worker_cancelled {
+                "skill_script.worker_cancelled_before_execution"
+            } else {
+                "skill_script.worker_failed_before_execution"
+            },
+            "retry",
+            "The Skill script worker stopped before execution began.",
+        )
+    };
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: call_id.to_string(),
+        tool: "skills_run_script".to_string(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "type": "skill_script",
+            "status": status,
+            "outcome": outcome,
+            "code": code,
+            "recovery": recovery,
+            "effectsMayHaveOccurred": effects_may_have_occurred,
+            "retryable": !effects_may_have_occurred,
+        })),
+        error: Some(message.to_string()),
+    }
+}
+
+fn skill_script_setup_failure_result(
+    call_id: &str,
+    code: &str,
+    recovery: &str,
+    message: &str,
+) -> AgentToolResult {
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: call_id.to_string(),
+        tool: "skills_run_script".to_string(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "type": "skill_script",
+            "status": "failed",
+            "outcome": "definitely_not_executed",
+            "code": code,
+            "recovery": recovery,
+            "effectsMayHaveOccurred": false,
+            "retryable": true,
+        })),
+        error: Some(message.to_string()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::application::agent) enum BuiltinMcpToolResultCommitDisposition {
     Committed,
@@ -477,6 +644,22 @@ fn mcp_invocation_failure_stage(
 }
 
 impl AgentService {
+    #[cfg(test)]
+    pub(in crate::application::agent) fn inject_skill_script_worker_panic_once(
+        &self,
+        action_id: &str,
+    ) {
+        inject_skill_script_worker_panic_once(&self.storage, action_id);
+    }
+
+    #[cfg(test)]
+    pub(in crate::application::agent) fn inject_skill_script_post_receipt_panic_once(
+        &self,
+        action_id: &str,
+    ) {
+        inject_skill_script_post_receipt_panic_once(&self.storage, action_id);
+    }
+
     pub(in crate::application::agent) fn execute_office_operation(
         &self,
         agent_input: &AgentChatInput,
@@ -1661,7 +1844,7 @@ impl AgentService {
         let execution_record = record.clone();
         tokio::spawn(async move {
             service
-                .run_skill_script_execution(execution_record, call, guard, notifications)
+                .supervise_skill_script_execution(execution_record, call, guard, notifications)
                 .await;
         });
 
@@ -1885,7 +2068,7 @@ impl AgentService {
         .await;
     }
 
-    pub(in crate::application::agent) async fn run_skill_script_execution(
+    async fn supervise_skill_script_execution(
         &self,
         record: PendingActionRecord,
         call: AgentToolCall,
@@ -1894,92 +2077,274 @@ impl AgentService {
     ) {
         let run_id = record.snapshot.run_id.clone();
         let action_id = record.snapshot.action_id.clone();
-        self.seed_trace_snapshot_from_checkpoint(
-            &run_id,
-            record.agent_input.resume_checkpoint.as_ref(),
-        );
+        let effects_started = Arc::new(AtomicBool::new(false));
+        let worker_effects_started = Arc::clone(&effects_started);
+        let worker_service = self.clone();
+        let worker_record = record.clone();
+        let worker_call = call.clone();
+        let worker_notifications = notifications.clone();
+        let worker = join_skill_script_worker(async move {
+            worker_service
+                .run_skill_script_execution(
+                    worker_record,
+                    worker_call,
+                    guard,
+                    worker_notifications,
+                    worker_effects_started,
+                )
+                .await;
+        })
+        .await;
+        let Err(error) = worker else {
+            return;
+        };
+
+        // A worker panic/cancellation must never strand an approved action in this live process.
+        // Runtime shutdown also cancels this supervisor, so startup reconciliation remains the
+        // authority for that separate crash window and the Skill script is never replayed.
+        self.unregister_cancellation(&run_id);
         if self.is_agent_input_scope_deleting(&record.agent_input) {
             self.discard_usage_context(&run_id);
             return;
         }
-        let AgentProposedAction::SkillScript { mut script } = record.snapshot.action.clone() else {
-            let _ = self.persist_pending_target_status(&record, PendingActionStatus::Failed);
-            let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
+        let current = match self.storage.get_pending_agent_action(&record.storage_id) {
+            Ok(Some(current)) => current,
+            Ok(None) => return,
+            Err(storage_error) => {
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    trace_sequence: None,
+                    message: "The Skill script worker stopped, but its durable action state could not be inspected; restart reconciliation will resolve it without replaying the script.".to_string(),
+                    recoverable: true,
+                    code: Some("skill_script_worker_state_unavailable".to_string()),
+                    details: Some(serde_json::json!({
+                        "type": "skill_script",
+                        "code": "workerStateUnavailable",
+                        "effectsMayHaveOccurred": effects_started.load(Ordering::SeqCst),
+                        "inspectionError": bounded_audit_error(&storage_error),
+                    })),
+                }));
+                return;
+            }
+        };
+        if let Some(target_status) = current
+            .target_status
+            .as_deref()
+            .and_then(pending_status_from_label)
+            .filter(|status| {
+                matches!(
+                    status,
+                    PendingActionStatus::Completed
+                        | PendingActionStatus::Failed
+                        | PendingActionStatus::Cancelled
+                )
+            })
+        {
+            self.finish_supervised_skill_script_continuation_failure(
+                &record,
+                &call,
+                &notifications,
+                target_status,
+            );
+            return;
+        }
+        if !matches!(current.status.as_str(), "approved" | "executing")
+            || current.target_status.is_some()
+        {
+            return;
+        }
+
+        let effects_may_have_occurred = effects_started.load(Ordering::SeqCst);
+        let tool_result = skill_script_worker_failure_result(
+            &action_id,
+            effects_may_have_occurred,
+            error.is_cancelled(),
+        );
+        // If the panicking worker crossed the effect boundary, dropping its original guard
+        // deliberately left an unsettled fence. Registering the same identity lets the common
+        // terminal settlement clear that fence only after the outcome-unknown receipt is durable.
+        let file_effect_guard = match self.register_file_effect(
+            &record.agent_input,
+            &run_id,
+            &record.storage_id,
+        ) {
+            Ok(guard) => Some(guard),
+            Err(_) if self.is_agent_input_scope_deleting(&record.agent_input) => {
+                self.discard_usage_context(&run_id);
+                return;
+            }
+            Err(register_error) => {
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    trace_sequence: None,
+                    message: "The Skill script worker stopped and its terminal receipt could not acquire the file-effect settlement guard; restart reconciliation will resolve it without replaying the script.".to_string(),
+                    recoverable: true,
+                    code: Some("skill_script_worker_settlement_unavailable".to_string()),
+                    details: Some(serde_json::json!({
+                        "type": "skill_script",
+                        "code": "workerSettlementUnavailable",
+                        "effectsMayHaveOccurred": effects_may_have_occurred,
+                        "registrationError": bounded_audit_error(&register_error.to_string()),
+                    })),
+                }));
+                return;
+            }
+        };
+        self.finish_skill_script_execution(
+            record,
+            call,
+            tool_result,
+            notifications,
+            file_effect_guard,
+            None,
+        )
+        .await;
+    }
+
+    fn finish_supervised_skill_script_continuation_failure(
+        &self,
+        record: &PendingActionRecord,
+        call: &AgentToolCall,
+        notifications: &CoreServerNotificationSender,
+        target_status: PendingActionStatus,
+    ) {
+        const FAILURE_CODE: &str = "skill_script_continuation_worker_failed";
+        const FAILURE_MESSAGE: &str = "The Skill script result was durably recorded, but its model continuation stopped unexpectedly. The script and Provider request were not replayed.";
+        let run_id = &record.snapshot.run_id;
+        let (Some(conversation_id), Some(assistant_message_id)) = (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+        ) else {
             return;
         };
-        script.approval_status = AgentApprovalStatus::Approved;
+        let exact_receipt_is_pending = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)
+            .ok()
+            .flatten()
+            .is_some_and(|trace| {
+                trace.run_id == *run_id
+                    && trace.conversation_id == conversation_id
+                    && trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+                    && trace.items.iter().any(|item| {
+                        matches!(
+                            item,
+                            ConversationTurnTraceItem::ToolResult {
+                                call_id,
+                                tool,
+                                ..
+                            } if call_id == &call.id && tool == &call.tool
+                        )
+                    })
+            });
+        if !exact_receipt_is_pending {
+            return;
+        }
 
-        let mut file_effect_guard =
-            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
-                Ok(guard) => guard,
-                Err(_) => {
-                    self.discard_usage_context(&run_id);
-                    return;
-                }
-            };
-
+        let active_child_wake = record
+            .agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref())
+            .and_then(|identity| {
+                ChildAgentFactory::new(Arc::clone(&self.storage))
+                    .resolve_trusted_active_wake_by_identity(identity)
+                    .ok()
+            });
         let cancellation_token = AgentCancellationToken::new();
-        self.register_cancellation(&run_id, cancellation_token.clone());
-        let cancel_flag = guard.cancel_flag();
-        let post_execution_cancel_flag = Arc::clone(&cancel_flag);
-        let run_cancellation_token = cancellation_token.clone();
-        let mut tool_result = match self.restore_skill_resource_session(&record.agent_input) {
-            Err(error) => {
-                drop(guard);
-                AgentToolResult {
-                    exact_archive_file: None,
-                    call_id: action_id.clone(),
-                    tool: "skills_run_script".to_string(),
-                    ok: false,
-                    result: Some(serde_json::json!({
-                        "type": "skill_script",
-                        "code": "snapshotUnavailable",
-                        "recovery": "reactivateSkill",
-                    })),
-                    error: Some(error.to_string()),
+        self.register_cancellation(run_id, cancellation_token.clone());
+        let steer_input = self.register_active_run_control(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            record
+                .agent_input
+                .context
+                .as_ref()
+                .and_then(|context| context.project_id.as_deref()),
+            record.agent_input.model_capabilities,
+        );
+        self.finish_pre_runtime_action_continuation_failure(
+            record,
+            notifications,
+            &steer_input,
+            &cancellation_token,
+            target_status,
+            FAILURE_CODE,
+            FAILURE_MESSAGE.to_string(),
+        );
+
+        let durably_failed = self
+            .storage
+            .get_pending_agent_action(&record.storage_id)
+            .ok()
+            .flatten()
+            .is_some_and(|pending| pending.status == "failed")
+            && self
+                .storage
+                .get_conversation_turn_trace(assistant_message_id)
+                .ok()
+                .flatten()
+                .is_some_and(|trace| {
+                    trace.terminal_status == ConversationTurnTraceTerminalStatus::Failed
+                });
+        if !durably_failed {
+            return;
+        }
+
+        if let Some(active) = active_child_wake {
+            let finish = mycopilot_core::FinishAgentTurnResultInput {
+                wake_id: active.spawn.initial_wake.wake_id,
+                expected_status: active.spawn.initial_wake.status,
+                claim_token: active.claim_token,
+                terminal_status: mycopilot_core::AgentWakeStatus::Failed,
+                run_id: Some(run_id.clone()),
+                assistant_message_id: Some(assistant_message_id.to_string()),
+                summary: "The child Agent stopped after recording the Skill script result."
+                    .to_string(),
+                terminal_error: Some(FAILURE_MESSAGE.to_string()),
+            };
+            let mut settled = false;
+            for _ in 0..2 {
+                if self.storage.finish_agent_turn_with_result(&finish).is_ok() {
+                    settled = true;
+                    break;
                 }
             }
-            Ok(resources) => {
-                let service = self.clone();
-                let agent_input = record.agent_input.clone();
-                file_effect_guard.mark_effects_started();
-                match tokio::task::spawn_blocking(move || {
-                    let _guard = guard;
-                    service.execute_skill_script(
-                        &agent_input,
-                        &script,
-                        resources.as_deref(),
-                        CommandAuthorizationSource::ExplicitUser,
-                        cancellation_token,
-                        Some(cancel_flag),
-                    )
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(error) => AgentToolResult {
-                        exact_archive_file: None,
-                        call_id: action_id.clone(),
-                        tool: "skills_run_script".to_string(),
-                        ok: false,
-                        result: Some(serde_json::json!({
-                            "type": "skill_script",
-                            "code": "executionTaskFailed",
-                            "recovery": "retry",
-                        })),
-                        error: Some(format!("Skill script execution task failed: {error}")),
-                    },
-                }
+            if !settled {
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id.clone()),
+                    trace_sequence: None,
+                    message: "The Skill continuation failed durably, but its child Wake result could not be settled; startup recovery will finish it without replay.".to_string(),
+                    recoverable: true,
+                    code: Some("skill_script_continuation_wake_settlement_failed".to_string()),
+                    details: None,
+                }));
             }
-        };
-        let result_cancelled = run_cancellation_token.is_cancelled()
-            || post_execution_cancel_flag.load(Ordering::SeqCst)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::application::agent) async fn finish_skill_script_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        tool_result: AgentToolResult,
+        notifications: CoreServerNotificationSender,
+        mut file_effect_guard: Option<super::super::run_lifecycle::FileEffectGuard>,
+        cancellation_token: Option<AgentCancellationToken>,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        let result_cancelled = cancellation_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
             || tool_result
                 .result
                 .as_ref()
                 .and_then(|result| result.get("cancelled"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        let mut tool_result = tool_result;
         if result_cancelled {
             tool_result.ok = false;
             let message = "Skill script execution was cancelled.".to_string();
@@ -2015,7 +2380,9 @@ impl AgentService {
                 pending_status,
             } => (*agent_input, tool_result, pending_status),
             ManualFileEffectSettlement::CommittedAndAdvanced => {
-                file_effect_guard.mark_durably_settled();
+                if let Some(guard) = file_effect_guard.as_mut() {
+                    guard.mark_durably_settled();
+                }
                 self.unregister_cancellation(&run_id);
                 return;
             }
@@ -2024,7 +2391,9 @@ impl AgentService {
                 return;
             }
         };
-        file_effect_guard.mark_durably_settled();
+        if let Some(guard) = file_effect_guard.as_mut() {
+            guard.mark_durably_settled();
+        }
         drop(file_effect_guard);
         {
             let deletion_lifecycle = self
@@ -2038,11 +2407,157 @@ impl AgentService {
                 }));
             }
         }
+        #[cfg(test)]
+        maybe_panic_skill_script_worker_after_receipt(&self.storage, &record.snapshot.action_id);
         self.run_action_continuation(
             record,
             agent_input,
             notifications,
             final_pending_status,
+            cancellation_token,
+        )
+        .await;
+    }
+
+    pub(in crate::application::agent) async fn run_skill_script_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+        effects_started: Arc<AtomicBool>,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        let action_id = record.snapshot.action_id.clone();
+        self.seed_trace_snapshot_from_checkpoint(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+        );
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            return;
+        }
+        let AgentProposedAction::SkillScript { mut script } = record.snapshot.action.clone() else {
+            drop(guard);
+            self.finish_skill_script_execution(
+                record,
+                call,
+                skill_script_setup_failure_result(
+                    &action_id,
+                    "invalidActionSnapshot",
+                    "retry",
+                    "The approved action is not a Skill script snapshot.",
+                ),
+                notifications,
+                None,
+                None,
+            )
+            .await;
+            return;
+        };
+        script.approval_status = AgentApprovalStatus::Approved;
+
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) if self.is_agent_input_scope_deleting(&record.agent_input) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+                Err(error) => {
+                    drop(guard);
+                    self.finish_skill_script_execution(
+                        record,
+                        call,
+                        skill_script_setup_failure_result(
+                            &action_id,
+                            "executionSetupFailed",
+                            "retry",
+                            &format!("Skill script execution setup failed: {error}"),
+                        ),
+                        notifications,
+                        None,
+                        None,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+        #[cfg(test)]
+        {
+            let injected_action_id_matches =
+                skill_script_worker_panic_is_pending(&self.storage, &action_id);
+            if injected_action_id_matches {
+                file_effect_guard.mark_effects_started();
+                effects_started.store(true, Ordering::SeqCst);
+                maybe_panic_skill_script_worker_after_effect_boundary(&self.storage, &action_id);
+            }
+        }
+
+        let cancellation_token = AgentCancellationToken::new();
+        self.register_cancellation(&run_id, cancellation_token.clone());
+        let cancel_flag = guard.cancel_flag();
+        let post_execution_cancel_flag = Arc::clone(&cancel_flag);
+        let run_cancellation_token = cancellation_token.clone();
+        let mut tool_result = match self.restore_skill_resource_session(&record.agent_input) {
+            Err(error) => {
+                drop(guard);
+                skill_script_setup_failure_result(
+                    &action_id,
+                    "snapshotUnavailable",
+                    "reactivateSkill",
+                    &format!("Skill resource snapshot could not be restored: {error}"),
+                )
+            }
+            Ok(resources) => {
+                let service = self.clone();
+                let agent_input = record.agent_input.clone();
+                file_effect_guard.mark_effects_started();
+                effects_started.store(true, Ordering::SeqCst);
+                match tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    service.execute_skill_script(
+                        &agent_input,
+                        &script,
+                        resources.as_deref(),
+                        CommandAuthorizationSource::ExplicitUser,
+                        cancellation_token,
+                        Some(cancel_flag),
+                    )
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        skill_script_worker_failure_result(&action_id, true, error.is_cancelled())
+                    }
+                }
+            }
+        };
+        if post_execution_cancel_flag.load(Ordering::SeqCst) {
+            run_cancellation_token.cancel();
+        }
+        let result_cancelled = run_cancellation_token.is_cancelled();
+        if result_cancelled {
+            tool_result.ok = false;
+            let message = "Skill script execution was cancelled.".to_string();
+            tool_result.error = Some(message.clone());
+            if let Some(result) = tool_result.result.as_mut().and_then(Value::as_object_mut) {
+                result.insert("cancelled".to_string(), Value::Bool(true));
+                result.insert(
+                    "errorCode".to_string(),
+                    Value::String("skill_script.cancelled".to_string()),
+                );
+                result.insert("error".to_string(), Value::String(message));
+            }
+        }
+        self.finish_skill_script_execution(
+            record,
+            call,
+            tool_result,
+            notifications,
+            Some(file_effect_guard),
             Some(run_cancellation_token),
         )
         .await;
@@ -3427,7 +3942,7 @@ impl AgentService {
         if let Some(active) = active_child_wake.as_ref() {
             if let Err(error) = self.storage.transition_agent_wake(
                 &active.spawn.initial_wake.wake_id,
-                mycopilot_core::AgentWakeStatus::WaitingForApproval,
+                active.spawn.initial_wake.status,
                 mycopilot_core::AgentWakeStatus::Running,
                 Some(&active.claim_token),
             ) {
@@ -4003,5 +4518,82 @@ mod mcp_lifecycle_tests {
                 .and_then(Value::as_str),
             Some("possibly_dispatched")
         );
+    }
+
+    #[test]
+    fn skill_script_setup_failure_is_explicitly_pre_execution_and_retryable() {
+        let result = skill_script_setup_failure_result(
+            "skill-call",
+            "executionSetupFailed",
+            "retry",
+            "fixture setup failure",
+        );
+        let details = result.result.expect("setup failure is structured");
+
+        assert!(!result.ok);
+        assert_eq!(details["status"], "failed");
+        assert_eq!(details["outcome"], "definitely_not_executed");
+        assert_eq!(details["effectsMayHaveOccurred"], false);
+        assert_eq!(details["retryable"], true);
+    }
+
+    #[tokio::test]
+    async fn skill_script_worker_panic_is_observed_by_supervisor_join() {
+        let joined = join_skill_script_worker(async {
+            panic!("fixture Skill script worker panic");
+        })
+        .await;
+
+        assert!(joined
+            .expect_err("worker panic must be observed")
+            .is_panic());
+    }
+
+    #[test]
+    fn skill_script_worker_failure_after_effect_boundary_is_outcome_unknown() {
+        let result = skill_script_worker_failure_result("skill-call", true, false);
+        let details = result.result.expect("worker failure is structured");
+
+        assert!(!result.ok);
+        assert_eq!(details["status"], "outcome_unknown");
+        assert_eq!(details["outcome"], "outcome_unknown");
+        assert_eq!(details["code"], "skill_script.outcome_unknown");
+        assert_eq!(details["effectsMayHaveOccurred"], true);
+        assert_eq!(details["retryable"], false);
+
+        let pre_effect = skill_script_worker_failure_result("skill-call", false, false);
+        let pre_effect_details = pre_effect.result.expect("worker failure is structured");
+        assert_eq!(pre_effect_details["status"], "failed");
+        assert_eq!(pre_effect_details["outcome"], "definitely_not_executed");
+        assert_eq!(pre_effect_details["effectsMayHaveOccurred"], false);
+        assert_eq!(pre_effect_details["retryable"], true);
+    }
+
+    #[test]
+    fn durable_unknown_receipt_clears_worker_file_effect_fence() {
+        let tracker = Arc::new(FileEffectTracker::default());
+        let conversation_id = "conversation-skill-worker";
+        let run_id = "run-skill-worker";
+        let effect_id = "effect-skill-worker";
+        {
+            let mut worker_guard = tracker.register(None, Some(conversation_id), run_id, effect_id);
+            worker_guard.mark_effects_started();
+        }
+        assert_eq!(
+            tracker.unsettled_effect_ids_for_conversation(conversation_id),
+            vec![format!("{run_id}/{effect_id}")]
+        );
+
+        {
+            let mut settlement_guard =
+                tracker.register(None, Some(conversation_id), run_id, effect_id);
+            settlement_guard.mark_durably_settled();
+        }
+        assert!(tracker
+            .unsettled_effect_ids_for_conversation(conversation_id)
+            .is_empty());
+        assert!(tracker
+            .active_run_ids_for_conversation(conversation_id)
+            .is_empty());
     }
 }

@@ -236,7 +236,8 @@ export interface ChatAgentRunView {
   commandSessions?: Record<string, ChatCommandSessionView>
   /** Safe lifecycle-only MCP views. Never store MCP arguments or result bodies here. */
   mcpInvocations?: ChatMcpToolInvocationView[]
-  messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
+  /** Previous committed answer projection, retained only while the next model stream is provisional. */
+  messageStreamCheckpoints?: Record<string, { previousContent: string }>
   /** Ephemeral retry status. Cleared by the next model output or a terminal boundary. */
   llmRetry?: {
     category: AgentLlmRetryCategory

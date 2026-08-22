@@ -165,10 +165,66 @@ fn load_durable_pending_trace_snapshot(
     })
 }
 
+fn validate_manual_approval_execution_audit(
+    action_id: &str,
+    audit: &AgentActionAuditRecord,
+    committed_at: i64,
+) -> Result<(), String> {
+    if action_id.trim().is_empty() || action_id != audit.action_id {
+        return Err("manual approval audit action identity is invalid".to_string());
+    }
+    if audit.decision.as_deref() != Some("approved")
+        || audit.status != "approved"
+        || audit.decision_source.as_deref() != Some("manual")
+        || audit.decided_at.is_none()
+        || audit
+            .decided_at
+            .is_some_and(|decided_at| decided_at > committed_at)
+        || audit.completed_at.is_some()
+        || audit.patch_result_json.is_some()
+        || audit.command_result_json.is_some()
+        || audit.tool_result_json.is_some()
+        || audit.error.is_some()
+        || audit.blocked_reason.is_some()
+    {
+        return Err(
+            "manual approval execution audit is not an approved pre-execution receipt".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_manual_approval_execution_identity(
+    pending: &AgentPendingActionRecord,
+    audit: &AgentActionAuditRecord,
+) -> Result<(), String> {
+    if pending.action_id != audit.action_id
+        || pending.run_id != audit.run_id
+        || pending.conversation_id != audit.conversation_id
+        || pending.assistant_message_id != audit.assistant_message_id
+        || pending.action_type != audit.action_type
+        || pending.tool_name != audit.tool_name
+        || pending.action_json != audit.action_json
+        || pending.created_at != audit.created_at
+    {
+        return Err(format!(
+            "manual approval audit does not match the frozen pending action: actionId={}",
+            pending.action_id
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentPendingActionResultCommitOutcome {
     Committed { trace_changed: bool },
     Idempotent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentWakeApprovalWaitOutcome {
+    Waiting(crate::AgentWakeRequestRecord),
+    RunningAfterApproval(crate::AgentWakeRequestRecord),
 }
 
 /// Authoritative durable state of one attempted manual-command settlement.
@@ -2296,6 +2352,217 @@ impl StorageService {
         Ok(())
     }
 
+    /// Marks one exact child Wake as approval-paused only while its owning action is still
+    /// pending in the same SQLite write transaction.
+    ///
+    /// A dispatcher observation can be older than a concurrent user decision. Serializing the
+    /// pending-action recheck with the Wake CAS prevents that stale observation from moving an
+    /// already resumed Wake back to `waiting_for_approval`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mark_agent_wake_waiting_for_pending_approval_at(
+        &self,
+        wake_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        claim_token: &str,
+        marked_at: i64,
+    ) -> Result<AgentWakeApprovalWaitOutcome, String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let running = agent_graph_repository::transition_agent_wake_in_connection(
+            &transaction,
+            wake_id,
+            crate::AgentWakeStatus::Running,
+            crate::AgentWakeStatus::Running,
+            Some(claim_token),
+            marked_at,
+        )
+        .map_err(|error| error.to_string())?;
+        if running.run_id.as_deref() != Some(run_id)
+            || running.assistant_message_id.as_deref() != Some(assistant_message_id)
+        {
+            return Err(
+                "approval wait transition does not own the dispatched child Turn".to_string(),
+            );
+        }
+        let pending_count: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM agent_pending_actions
+                 WHERE run_id = ?1
+                   AND conversation_id = ?2
+                   AND assistant_message_id = ?3
+                   AND status = 'pending'
+                   AND target_status IS NULL",
+                rusqlite::params![run_id, conversation_id, assistant_message_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let outcome = match pending_count {
+            0 => AgentWakeApprovalWaitOutcome::RunningAfterApproval(running),
+            1 => {
+                let waiting = agent_graph_repository::transition_agent_wake_in_connection(
+                    &transaction,
+                    wake_id,
+                    crate::AgentWakeStatus::Running,
+                    crate::AgentWakeStatus::WaitingForApproval,
+                    Some(claim_token),
+                    marked_at,
+                )
+                .map_err(|error| error.to_string())?;
+                AgentWakeApprovalWaitOutcome::Waiting(waiting)
+            }
+            count => {
+                return Err(format!(
+                    "approval wait transition found {count} pending actions for one child Turn"
+                ));
+            }
+        };
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
+    }
+
+    /// Atomically accepts one Skill-script approval and, for a delegated Turn, resumes its exact
+    /// Wake.
+    ///
+    /// The side effect may only be started after this transaction commits. Keeping the approved
+    /// audit, the pending-action execution claim, and the child Wake in one CAS boundary prevents
+    /// the durable `approved + waiting_for_approval` split-brain that otherwise has no executor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_pending_skill_script_approval_execution(
+        &self,
+        action_id: &str,
+        executing_agent_input_json: &str,
+        approved_audit: &AgentActionAuditRecord,
+        child_wake: Option<(&str, crate::AgentWakeStatus, &str)>,
+        committed_at: i64,
+    ) -> Result<(), String> {
+        validate_manual_approval_execution_audit(action_id, approved_audit, committed_at)?;
+        serde_json::from_str::<serde_json::Value>(executing_agent_input_json)
+            .map_err(|_| "manual approval execution checkpoint is not valid JSON".to_string())?;
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let pending = pending_action_repository::load_pending_action(&transaction, action_id)
+            .map_err(storage_error)?
+            .ok_or_else(|| format!("manual approval has no pending action: {action_id}"))?;
+        validate_manual_approval_execution_identity(&pending, approved_audit)?;
+        if pending.action_type != "skill_script" || pending.tool_name != "skills_run_script" {
+            return Err(
+                "manual Skill-script approval does not own a Skill-script pending action"
+                    .to_string(),
+            );
+        }
+        if pending.status != "pending" || pending.target_status.is_some() {
+            return Err(format!(
+                "manual approval execution lost its pending CAS: actionId={action_id}, status={}",
+                pending.status
+            ));
+        }
+        if let Some(existing) =
+            agent_action_audit_repository::load_action_audit_record(&transaction, action_id)
+                .map_err(storage_error)?
+        {
+            if !agent_action_audit_repository::matches_manual_preterminal_action_audit(
+                &existing,
+                approved_audit,
+            ) {
+                return Err(format!(
+                    "manual approval audit identity changed before execution: actionId={action_id}"
+                ));
+            }
+        }
+
+        let changed = pending_action_repository::transition_pending_action(
+            &transaction,
+            action_id,
+            "pending",
+            "executing",
+            executing_agent_input_json,
+            committed_at,
+        )
+        .map_err(storage_error)?;
+        if changed != 1 {
+            return Err(format!(
+                "manual approval execution must claim exactly one pending action: actionId={action_id}, changed={changed}"
+            ));
+        }
+        agent_action_audit_repository::upsert_action_audit_record(&transaction, approved_audit)
+            .map_err(storage_error)?;
+
+        if let Some((wake_id, expected_wake_status, claim_token)) = child_wake {
+            if !matches!(
+                expected_wake_status,
+                crate::AgentWakeStatus::Running | crate::AgentWakeStatus::WaitingForApproval
+            ) {
+                return Err(
+                    "manual approval child Wake must already own an active Turn".to_string()
+                );
+            }
+            let resumed = agent_graph_repository::transition_agent_wake_in_connection(
+                &transaction,
+                wake_id,
+                expected_wake_status,
+                crate::AgentWakeStatus::Running,
+                Some(claim_token),
+                committed_at,
+            )
+            .map_err(|error| error.to_string())?;
+            if resumed.run_id.as_deref() != Some(pending.run_id.as_str())
+                || resumed.assistant_message_id.as_deref()
+                    != pending.assistant_message_id.as_deref()
+            {
+                return Err(
+                    "manual approval child Wake does not own the pending action Turn".to_string(),
+                );
+            }
+
+            let conversation_id = pending.conversation_id.as_deref().ok_or_else(|| {
+                "manual approval child Skill script has no conversation owner".to_string()
+            })?;
+            let assistant_message_id =
+                pending.assistant_message_id.as_deref().ok_or_else(|| {
+                    "manual approval child Skill script has no Assistant owner".to_string()
+                })?;
+            let tool_call_id = pending.tool_call_id.as_deref().ok_or_else(|| {
+                "manual approval child Skill script has no ToolCall owner".to_string()
+            })?;
+            chat_repository::update_message_run_running_state(
+                &transaction,
+                conversation_id,
+                assistant_message_id,
+                &pending.run_id,
+                tool_call_id,
+                committed_at,
+            )
+            .map_err(storage_error)?;
+            let usage_changed = transaction
+                .execute(
+                    "UPDATE agent_usage_records
+                     SET status = 'running', error = NULL, completed_at = NULL
+                     WHERE run_id = ?1
+                       AND conversation_id = ?2
+                       AND message_id = ?3
+                       AND status = 'waiting_for_approval'",
+                    rusqlite::params![&pending.run_id, conversation_id, assistant_message_id,],
+                )
+                .map_err(storage_error)?;
+            if usage_changed != 1 {
+                return Err(format!(
+                    "manual approval child Skill script must resume exactly one waiting Usage row: actionId={action_id}, changed={usage_changed}"
+                ));
+            }
+        }
+
+        transaction.commit().map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn set_pending_agent_action_target_status(
         &self,
         action_id: &str,
@@ -3098,6 +3365,7 @@ fn validate_manual_file_effect_settlement_request(
         || expected_pending_status == "approved"
         || (expected_action_type == "skill_materialization"
             && expected_pending_status == "executing")
+        || (expected_action_type == "skill_script" && expected_pending_status == "executing")
         || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing")
         || (expected_action_type == "builtin_mcp_tool_approval"
             && expected_pending_status == "executing");

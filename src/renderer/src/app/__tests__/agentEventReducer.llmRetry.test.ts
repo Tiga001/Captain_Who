@@ -167,6 +167,73 @@ describe('LLM retry Renderer projection', () => {
     expect(recovered.agentRun?.llmRetry).toBeUndefined()
   })
 
+  it('keeps earlier model turns in the timeline without appending them to the final answer', () => {
+    const firstStarted = applyAgentEventToChatMessage(runningMessage(), {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      attempt: 1
+    })
+    const firstTurn = applyAgentEventToChatMessage(firstStarted, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      delta: '先读取现有文件。'
+    })
+    const firstCommitted = applyAgentEventToChatMessage(firstTurn, {
+      type: 'message_stream_committed',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      traceSequence: 1
+    })
+    const secondStarted = applyAgentEventToChatMessage(firstCommitted, {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-2',
+      attempt: 1
+    })
+    const secondTurn = applyAgentEventToChatMessage(secondStarted, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-2',
+      delta: '现在开始实质性升级。'
+    })
+    const secondCommitted = applyAgentEventToChatMessage(secondTurn, {
+      type: 'message_stream_committed',
+      runId: 'run-retry',
+      streamId: 'stream-2',
+      traceSequence: 2
+    })
+    const finalStarted = applyAgentEventToChatMessage(secondCommitted, {
+      type: 'message_stream_started',
+      runId: 'run-retry',
+      streamId: 'stream-3',
+      attempt: 1
+    })
+    const finalTurn = applyAgentEventToChatMessage(finalStarted, {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-3',
+      delta: '升级完成。'
+    })
+
+    expect(finalTurn.content).toBe('升级完成。')
+    expect(
+      finalTurn.agentRun?.timeline
+        .filter((item) => item.type === 'message')
+        .map((item) => item.content)
+    ).toEqual(['先读取现有文件。', '现在开始实质性升级。', '升级完成。'])
+
+    const completed = applyAgentEventToChatMessage(finalTurn, {
+      type: 'done',
+      runId: 'run-retry',
+      success: true,
+      status: 'completed',
+      content: '升级完成。'
+    })
+    expect(completed.content).toBe('升级完成。')
+  })
+
   it('does not let a late retry resurrect a terminal run', () => {
     const completed = applyAgentEventToChatMessage(runningMessage(), {
       type: 'done',
