@@ -869,6 +869,21 @@ mod tests {
             .contains("only the exact returned `installRef`"));
         assert!(package
             .instructions()
+            .contains("in an intermediate progress message"));
+        assert!(package
+            .instructions()
+            .contains("immediately call `skills_commit_install` in the same run"));
+        assert!(package
+            .instructions()
+            .contains("Do not ask for another textual confirmation"));
+        assert!(package
+            .instructions()
+            .contains("valid only in the run that returned it"));
+        assert!(package
+            .instructions()
+            .contains("distinguish an approved and completed installation"));
+        assert!(package
+            .instructions()
             .contains("discoverable on the next run"));
         assert!(package.instructions().contains("untrusted data"));
         assert!(package.instructions().contains("Never install by calling"));
@@ -949,6 +964,18 @@ mod tests {
             "fork_turns: \"none\"",
             "`source=workspace`",
             "Every new revision needs a new reviewer",
+            "copy-first boundary is a hard gate",
+            "one fresh direct child Agent",
+            "each blind case",
+            "revision mismatch",
+            "cannot PASS",
+            "only the original natural-language user request",
+            "mark the case `UNVERIFIED`",
+            "Do not combine explicit activation and blind triggering",
+            "byte-for-byte snapshot",
+            "Do not reconstruct the source with read/write tools",
+            "use `run_command.inputs`",
+            "wait for it in the same Run",
             "does not require an HTML reviewer",
             "does not replace an existing installation in place",
             "remove only those files",
@@ -978,17 +1005,61 @@ mod tests {
             .unwrap();
         let platform_workflows =
             String::from_utf8(reader.read(platform_workflows).unwrap()).unwrap();
+        let normalized_platform_workflows = platform_workflows
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for required in [
             "Authorized external source",
             "Copy an Installed package",
+            "real filesystem byte copy",
+            "cp -R --",
+            "below 16,000 characters",
+            "`cmp -s --",
+            "ordinary `shasum` is not equivalent",
+            "test ! -L '.agents/skills/<skill-directory>' && mv -n",
+            "every segment with `&&`",
+            "same filesystem",
+            "skill-file-sha256-v1:",
+            "This is the only inline verification code authorized",
+            "not a Host-level atomic no-replace primitive",
+            "On Windows",
             "Re-read the manifest, live receipt",
             "retired-installations/<installation-id>.json",
             "Do not copy the manifest itself",
             "MYCOPILOT_APP_DATA_ROOT",
+            "Never place the suffix inside the double quotes",
+            "redirect provider diagnostics",
         ] {
             assert!(
-                platform_workflows.contains(required),
+                normalized_platform_workflows.contains(required),
                 "skill-creator platform workflow is missing `{required}`"
+            );
+        }
+        assert!(!normalized_platform_workflows.contains("printenv MYCOPILOT_APP_DATA_ROOT"));
+        let evaluation = package
+            .resources()
+            .entries()
+            .iter()
+            .find(|resource| resource.path() == "references/evaluation.md")
+            .unwrap();
+        let evaluation = String::from_utf8(reader.read(evaluation).unwrap()).unwrap();
+        let normalized_evaluation = evaluation.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "one new direct child with `fork_turns: \"none\"` for each review case",
+            "Never put reports, fixtures, generated artifacts, or `test-outputs`",
+            "establishes the exact review package revision",
+            "cancelled, interrupted, missing its final report",
+            "Use a separate fresh child for every blind case",
+            "must be exactly the original natural-language user request",
+            "Host-provided or otherwise trusted child execution traces",
+            "mark the blind case `UNVERIFIED`",
+            "independent child Runs",
+            "invalidates all of its verdicts",
+        ] {
+            assert!(
+                normalized_evaluation.contains(required),
+                "skill-creator evaluation workflow is missing `{required}`"
             );
         }
         for resource in package.resources().entries() {

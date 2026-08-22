@@ -236,6 +236,12 @@ async fn model_activation_preserves_exposed_siblings_and_discloses_new_tools_nex
     assert!(first_serialized.contains("backend_available_skills"));
     assert!(first_serialized.contains("skills_activate"));
     assert!(!first_serialized.contains(INSTRUCTIONS));
+    let first_system_prompt = requests[0]["messages"][0]["content"]
+        .as_str()
+        .expect("backend-owned system prompt");
+    assert!(first_system_prompt.contains("Skill 激活、激活后指令和动态工具只在当前 Run 有效"));
+    assert!(first_system_prompt.contains("当前 Run 冻结的 available-Skills catalog"));
+    assert!(first_system_prompt.contains("每个子 Agent 都有独立 Run"));
     let first_tool_names = open_ai_tool_names(&requests[0]);
     assert!(
         !first_tool_names.contains(&"read_word"),
