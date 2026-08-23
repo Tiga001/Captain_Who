@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "permissionModeVersion": 1,
+  "permissionModeVersion": 2,
   "permissionModes": ["default", "full", "custom"],
   "permissionGolden": {
     "customPermissions": {
@@ -8,7 +8,8 @@
       "write": "denied",
       "command": "auto_approve",
       "commandSafety": "full_access",
-      "patch": "auto_approve"
+      "patch": "auto_approve",
+      "builtinExecution": "auto_approve"
     },
     "resolved": {
       "default": {
@@ -16,21 +17,24 @@
         "write": "workspace_only",
         "command": "require_approval",
         "commandSafety": "guarded",
-        "patch": "require_approval"
+        "patch": "require_approval",
+        "builtinExecution": "require_approval"
       },
       "full": {
         "read": "all",
         "write": "all",
         "command": "auto_approve",
         "commandSafety": "full_access",
-        "patch": "auto_approve"
+        "patch": "auto_approve",
+        "builtinExecution": "auto_approve"
       },
       "custom": {
         "read": "all",
         "write": "denied",
         "command": "auto_approve",
         "commandSafety": "guarded",
-        "patch": "auto_approve"
+        "patch": "auto_approve",
+        "builtinExecution": "auto_approve"
       }
     }
   },
@@ -122,7 +126,7 @@
       "modelId": "model-1"
     },
     "permissionMode": "default",
-    "permissionModeVersion": 1,
+    "permissionModeVersion": 2,
     "schedule": {
       "kind": "weekly",
       "weekdays": ["monday", "friday"],
@@ -151,13 +155,14 @@
       }
     },
     "permissionMode": "default",
-    "permissionModeVersion": 1,
+    "permissionModeVersion": 2,
     "resolvedPermissions": {
       "read": "workspace_only",
       "write": "workspace_only",
       "command": "require_approval",
       "commandSafety": "guarded",
-      "patch": "require_approval"
+      "patch": "require_approval",
+      "builtinExecution": "require_approval"
     },
     "schedule": {
       "kind": "weekly",

@@ -10,7 +10,8 @@ const customPermissions: AgentPermissions = {
   write: 'denied',
   command: 'auto_approve',
   commandSafety: 'full_access',
-  patch: 'require_approval'
+  patch: 'require_approval',
+  builtinExecution: 'auto_approve'
 }
 
 interface PermissionGoldenFixture {
@@ -49,7 +50,8 @@ describe('resolveChatPermissions', () => {
       write: 'workspace_only',
       command: 'require_approval',
       commandSafety: 'guarded',
-      patch: 'require_approval'
+      patch: 'require_approval',
+      builtinExecution: 'require_approval'
     })
     expect(resolveChatPermissions('custom', customPermissions)).toEqual({
       ...customPermissions,
@@ -63,7 +65,8 @@ describe('resolveChatPermissions', () => {
       write: 'all',
       command: 'auto_approve',
       commandSafety: 'full_access',
-      patch: 'auto_approve'
+      patch: 'auto_approve',
+      builtinExecution: 'auto_approve'
     })
   })
 })

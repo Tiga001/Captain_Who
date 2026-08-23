@@ -717,6 +717,7 @@ mod tests {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: AgentCommandSafetyPolicy::Guarded,
                 patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
             },
         }))
         .with_tool_call_id("attachments-test-call".to_string())

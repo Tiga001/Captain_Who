@@ -261,7 +261,7 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
                     "scopeId": child_conversation,
                     "message": "forged",
                     "permissionMode": "default",
-                    "permissionModeVersion": 1,
+                    "permissionModeVersion": 2,
                     "modelId": "model-a",
                     "projectId": "project-a",
                     "attachmentsJson": "[]",

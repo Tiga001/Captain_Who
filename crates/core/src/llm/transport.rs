@@ -275,12 +275,10 @@ where
     let provider_protocol = request.provider_protocol.clone();
     let provider_profile = request.provider_profile.clone();
     validate_request(request)?;
-    let inactivity_deadline = tokio::time::Instant::now() + inactivity_timeout;
-    let response = send_llm_request_with_stream_timeout(
+    let (response, inactivity_deadline) = send_llm_request_with_stream_timeout(
         request,
         cancellation_token.clone(),
         inactivity_timeout,
-        inactivity_deadline,
     )
     .await
     .map_err(with_request_usage)?;
@@ -422,28 +420,26 @@ pub(super) async fn send_llm_request(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<reqwest::Response> {
-    let inactivity_deadline = tokio::time::Instant::now() + LLM_STREAM_INACTIVITY_TIMEOUT;
-    send_llm_request_with_stream_timeout(
+    let (response, _) = send_llm_request_with_stream_timeout(
         request,
         cancellation_token,
         LLM_STREAM_INACTIVITY_TIMEOUT,
-        inactivity_deadline,
     )
-    .await
+    .await?;
+    Ok(response)
 }
 
 async fn send_llm_request_with_stream_timeout(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
     inactivity_timeout: Duration,
-    inactivity_deadline: tokio::time::Instant,
-) -> AgentResult<reqwest::Response> {
+) -> AgentResult<(reqwest::Response, tokio::time::Instant)> {
     cancellation_token.check()?;
     validate_request(request)?;
     let adapter = ProviderAdapterRegistry::resolve(request)?;
     let payload = adapter.prepare_request(request)?;
     let headers = adapter.build_headers(request.api_token.trim())?;
-    let client_builder = reqwest::Client::builder();
+    let client_builder = provider_client_builder(request.api_url.trim());
     let client_builder = if request.stream {
         client_builder
     } else {
@@ -465,6 +461,10 @@ async fn send_llm_request_with_stream_timeout(
         .headers(headers)
         .json(&payload)
         .send();
+    // Client construction may read the native trust store and system proxy configuration. That is
+    // setup work, not Provider inactivity. Start the single header/body window only when the HTTP
+    // request is ready to be polled.
+    let inactivity_deadline = tokio::time::Instant::now() + inactivity_timeout;
     let response = if request.stream {
         tokio::select! {
             _ = cancellation_token.cancelled() => {
@@ -539,7 +539,37 @@ async fn send_llm_request_with_stream_timeout(
     }
 
     complete_provider_cooldown(cooldown_permit);
-    Ok(response)
+    Ok((response, inactivity_deadline))
+}
+
+/// Local model endpoints must never be routed through a desktop/VPN proxy. Besides avoiding an
+/// unnecessary trust boundary, this keeps loopback providers usable when macOS system proxy
+/// resolution is slow or does not carry the expected bypass list.
+fn provider_client_builder(api_url: &str) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    if provider_url_is_loopback(api_url) {
+        // A loopback endpoint neither needs the system proxy nor enterprise Keychain roots. Keep
+        // the bundled WebPKI roots available for an explicitly TLS-enabled local endpoint while
+        // avoiding synchronous native proxy/certificate discovery on its request path.
+        builder.no_proxy().tls_built_in_native_certs(false)
+    } else {
+        builder
+    }
+}
+
+fn provider_url_is_loopback(api_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 pub(super) async fn response_text(

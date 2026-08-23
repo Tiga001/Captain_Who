@@ -639,6 +639,9 @@ export const zhCNTranslations = {
   'general.autoApproveFileEditsDescription': '开启后，在允许的写入范围内自动应用文件修改。',
   'general.autoApproveCommands': '运行命令无需审批',
   'general.autoApproveCommandsDescription': '开启后，符合权限和风险校验的命令会自动执行。',
+  'general.autoApproveBuiltinExecution': '内置能力无需审批',
+  'general.autoApproveBuiltinExecutionDescription':
+    '开启后，内置skill/插件的脚本和工具执行无需审批。',
   'general.readPermission': '读取权限',
   'general.writePermission': '写入权限',
   'general.workspaceOnly': '仅工作区',

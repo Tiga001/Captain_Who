@@ -1407,6 +1407,7 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
         command: mycopilot_core::AgentCommandPermission::AutoApprove,
         command_safety: mycopilot_core::AgentCommandSafetyPolicy::Guarded,
         patch: mycopilot_core::AgentPatchPermission::AutoApprove,
+        builtin_execution: mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove,
     };
     seed_root_effective_permissions(
         &storage,
@@ -1557,7 +1558,8 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
             "write": "workspace_only",
             "command": "auto_approve",
             "commandSafety": "guarded",
-            "patch": "auto_approve"
+            "patch": "auto_approve",
+            "builtinExecution": "auto_approve"
         })
     );
     assert_eq!(

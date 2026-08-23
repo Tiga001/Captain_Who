@@ -599,6 +599,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
             command: AgentCommandPermission::RequireApproval,
             command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: Default::default(),
         },
     });
     input.skill_discovery = Some(discovery);

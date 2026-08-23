@@ -151,6 +151,7 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: Default::default(),
+            builtin_execution: Default::default(),
         },
     });
     let output = AgentRuntime::default()
@@ -384,6 +385,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: Default::default(),
+            builtin_execution: Default::default(),
         },
     });
     let error = AgentRuntime::default()
@@ -609,6 +611,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: Default::default(),
+            builtin_execution: Default::default(),
         },
     });
     let snapshots = Arc::new(Mutex::new(Vec::<ConversationTraceSnapshot>::new()));
@@ -709,6 +712,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: Default::default(),
+            builtin_execution: Default::default(),
         },
     });
     let recovered = AgentRuntime::default()
@@ -1093,6 +1097,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
                 command: AgentCommandPermission::AutoApprove,
                 command_safety: AgentCommandSafetyPolicy::FullAccess,
                 patch: Default::default(),
+                builtin_execution: Default::default(),
             },
         }),
         search_config: None,

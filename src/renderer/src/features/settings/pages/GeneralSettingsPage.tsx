@@ -293,6 +293,26 @@ export function GeneralSettingsPage({
               }
             />
           </div>
+
+          <div className="settings-list-row">
+            <span className="settings-list-row__text">
+              <span className="settings-list-row__title">
+                {t('general.autoApproveBuiltinExecution')}
+              </span>
+              <p className="settings-list-row__description">
+                {t('general.autoApproveBuiltinExecutionDescription')}
+              </p>
+            </span>
+            <SettingsToggle
+              checked={uiPreferences.customPermissions.builtinExecution === 'auto_approve'}
+              label={t('general.autoApproveBuiltinExecution')}
+              onChange={(checked) =>
+                updateCustomPermissions({
+                  builtinExecution: checked ? 'auto_approve' : 'require_approval'
+                })
+              }
+            />
+          </div>
         </div>
       </section>
 

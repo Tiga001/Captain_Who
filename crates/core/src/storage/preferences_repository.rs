@@ -1,6 +1,6 @@
 use crate::protocol::{
-    AgentCommandPermission, AgentCommandSafetyPolicy, AgentPatchPermission, AgentPermissions,
-    AgentReadPermission, AgentWritePermission,
+    AgentBuiltinExecutionPermission, AgentCommandPermission, AgentCommandSafetyPolicy,
+    AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
 };
 use crate::storage::models::UiPreferencesRecord;
 use crate::storage::now_ms;
@@ -37,6 +37,7 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                 custom_write_permission,
                 custom_command_permission,
                 custom_patch_permission,
+                custom_builtin_execution_permission,
                 full_permission_enabled,
                 custom_permission_enabled,
                 updated_at
@@ -66,10 +67,13 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                         command: parse_command_permission(row.get::<_, String>(14)?.as_str()),
                         command_safety: AgentCommandSafetyPolicy::Guarded,
                         patch: parse_patch_permission(row.get::<_, String>(15)?.as_str()),
+                        builtin_execution: parse_builtin_execution_permission(
+                            row.get::<_, String>(16)?.as_str(),
+                        ),
                     },
-                    full_permission_enabled: row.get::<_, i64>(16)? != 0,
-                    custom_permission_enabled: row.get::<_, i64>(17)? != 0,
-                    updated_at: row.get(18)?,
+                    full_permission_enabled: row.get::<_, i64>(17)? != 0,
+                    custom_permission_enabled: row.get::<_, i64>(18)? != 0,
+                    updated_at: row.get(19)?,
                 })
             },
         )
@@ -109,11 +113,12 @@ pub fn save_ui_preferences(
             custom_write_permission,
             custom_command_permission,
             custom_patch_permission,
+            custom_builtin_execution_permission,
             full_permission_enabled,
             custom_permission_enabled,
             updated_at
         )
-        VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
         ON CONFLICT(id) DO UPDATE SET
             sidebar_conversation_sort = excluded.sidebar_conversation_sort,
             sidebar_project_sort = excluded.sidebar_project_sort,
@@ -131,6 +136,7 @@ pub fn save_ui_preferences(
             custom_write_permission = excluded.custom_write_permission,
             custom_command_permission = excluded.custom_command_permission,
             custom_patch_permission = excluded.custom_patch_permission,
+            custom_builtin_execution_permission = excluded.custom_builtin_execution_permission,
             full_permission_enabled = excluded.full_permission_enabled,
             custom_permission_enabled = excluded.custom_permission_enabled,
             updated_at = excluded.updated_at
@@ -168,6 +174,7 @@ pub fn save_ui_preferences(
             write_permission_value(preferences.custom_permissions.write),
             command_permission_value(preferences.custom_permissions.command),
             patch_permission_value(preferences.custom_permissions.patch),
+            builtin_execution_permission_value(preferences.custom_permissions.builtin_execution),
             if preferences.full_permission_enabled { 1 } else { 0 },
             if preferences.custom_permission_enabled { 1 } else { 0 },
             timestamp,
@@ -202,6 +209,7 @@ fn default_ui_preferences() -> UiPreferencesRecord {
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
         },
         updated_at: 0,
     }
@@ -278,6 +286,13 @@ fn parse_patch_permission(value: &str) -> AgentPatchPermission {
     }
 }
 
+fn parse_builtin_execution_permission(value: &str) -> AgentBuiltinExecutionPermission {
+    match value {
+        "auto_approve" => AgentBuiltinExecutionPermission::AutoApprove,
+        _ => AgentBuiltinExecutionPermission::RequireApproval,
+    }
+}
+
 fn read_permission_value(value: AgentReadPermission) -> &'static str {
     match value {
         AgentReadPermission::WorkspaceOnly => "workspace_only",
@@ -304,6 +319,13 @@ fn patch_permission_value(value: AgentPatchPermission) -> &'static str {
     match value {
         AgentPatchPermission::RequireApproval => "require_approval",
         AgentPatchPermission::AutoApprove => "auto_approve",
+    }
+}
+
+fn builtin_execution_permission_value(value: AgentBuiltinExecutionPermission) -> &'static str {
+    match value {
+        AgentBuiltinExecutionPermission::RequireApproval => "require_approval",
+        AgentBuiltinExecutionPermission::AutoApprove => "auto_approve",
     }
 }
 
@@ -383,6 +405,7 @@ mod tests {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: AgentCommandSafetyPolicy::Guarded,
                 patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
             }
         );
 
@@ -392,6 +415,7 @@ mod tests {
             command: AgentCommandPermission::AutoApprove,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: AgentPatchPermission::AutoApprove,
+            builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
         };
         preferences.full_permission_enabled = false;
         preferences.custom_permission_enabled = false;
@@ -410,6 +434,7 @@ mod tests {
                 command: AgentCommandPermission::AutoApprove,
                 command_safety: AgentCommandSafetyPolicy::Guarded,
                 patch: AgentPatchPermission::AutoApprove,
+                builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
             }
         );
     }

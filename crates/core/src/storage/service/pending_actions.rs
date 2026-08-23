@@ -1209,7 +1209,12 @@ impl StorageService {
         else {
             return Ok(false);
         };
-        if record.status != expected_status || record.action_type != "mcp_tool_call" {
+        if record.status != expected_status
+            || !matches!(
+                record.action_type.as_str(),
+                "mcp_tool_call" | "builtin_mcp_tool_approval"
+            )
+        {
             return Ok(false);
         }
         let message_owner = match (
@@ -1226,67 +1231,103 @@ impl StorageService {
         };
         let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
             .map_err(|_| "automatic MCP journal contains an invalid frozen action".to_string())?;
-        let AgentProposedAction::McpToolCall { approval } = action else {
-            return Err("automatic MCP journal action type is inconsistent".to_string());
-        };
-        let identity = &approval.identity;
-        let provenance = &identity.provenance;
-        let expected_storage_id = format!(
-            "v2:{}:{}:{}",
-            identity.run_id.len(),
-            identity.run_id,
-            identity.action_id
-        );
-        if approval.approval_mode != crate::AgentMcpApprovalMode::Auto
-            || approval.call.approval_status != crate::AgentApprovalStatus::Approved
-            || record.action_id != expected_storage_id
-            || record.run_id != identity.run_id
-            || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
-            || record.tool_name != provenance.model_tool_name
-            || approval.call.id != identity.call_id
-            || approval.call.tool != provenance.model_tool_name
-            || approval.summary.server_id != provenance.server_id
-            || approval.summary.scope != provenance.scope
-            || approval.summary.raw_tool_name != provenance.raw_tool_name
-            || approval.summary.model_tool_name != provenance.model_tool_name
-            || !approval.summary.external
-        {
-            return Err("automatic MCP journal rejected a drifted typed identity".to_string());
-        }
-        if let Some(invocation) = invocation {
-            let lifecycle_matches_outcome = match outcome {
-                McpAutoActionJournalTerminalOutcome::Completed => {
-                    invocation.state == crate::AgentMcpToolInvocationState::Completed
+        let action_type = record.action_type.clone();
+        match action {
+            AgentProposedAction::McpToolCall { approval } => {
+                if action_type != "mcp_tool_call" {
+                    return Err("automatic MCP journal action type is inconsistent".to_string());
                 }
-                McpAutoActionJournalTerminalOutcome::Cancelled => {
-                    invocation.state == crate::AgentMcpToolInvocationState::Cancelled
-                }
-                McpAutoActionJournalTerminalOutcome::OutcomeUnknown => {
-                    invocation.state == crate::AgentMcpToolInvocationState::OutcomeUnknown
-                }
-                McpAutoActionJournalTerminalOutcome::Failed => matches!(
-                    invocation.state,
-                    crate::AgentMcpToolInvocationState::Failed
-                        | crate::AgentMcpToolInvocationState::Expired
-                        | crate::AgentMcpToolInvocationState::PayloadUnavailable
-                        | crate::AgentMcpToolInvocationState::PolicyDenied
-                ),
-            };
-            if !lifecycle_matches_outcome {
-                return Err(
-                    "automatic MCP journal lifecycle projection contradicts settlement".to_string(),
+                let identity = &approval.identity;
+                let provenance = &identity.provenance;
+                let expected_storage_id = format!(
+                    "v2:{}:{}:{}",
+                    identity.run_id.len(),
+                    identity.run_id,
+                    identity.action_id
                 );
+                if approval.approval_mode != crate::AgentMcpApprovalMode::Auto
+                    || approval.call.approval_status != crate::AgentApprovalStatus::Approved
+                    || record.action_id != expected_storage_id
+                    || record.run_id != identity.run_id
+                    || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
+                    || record.tool_name != provenance.model_tool_name
+                    || approval.call.id != identity.call_id
+                    || approval.call.tool != provenance.model_tool_name
+                    || approval.summary.server_id != provenance.server_id
+                    || approval.summary.scope != provenance.scope
+                    || approval.summary.raw_tool_name != provenance.raw_tool_name
+                    || approval.summary.model_tool_name != provenance.model_tool_name
+                    || !approval.summary.external
+                {
+                    return Err(
+                        "automatic MCP journal rejected a drifted typed identity".to_string()
+                    );
+                }
+                if let Some(invocation) = invocation {
+                    let lifecycle_matches_outcome = match outcome {
+                        McpAutoActionJournalTerminalOutcome::Completed => {
+                            invocation.state == crate::AgentMcpToolInvocationState::Completed
+                        }
+                        McpAutoActionJournalTerminalOutcome::Cancelled => {
+                            invocation.state == crate::AgentMcpToolInvocationState::Cancelled
+                        }
+                        McpAutoActionJournalTerminalOutcome::OutcomeUnknown => {
+                            invocation.state == crate::AgentMcpToolInvocationState::OutcomeUnknown
+                        }
+                        McpAutoActionJournalTerminalOutcome::Failed => matches!(
+                            invocation.state,
+                            crate::AgentMcpToolInvocationState::Failed
+                                | crate::AgentMcpToolInvocationState::Expired
+                                | crate::AgentMcpToolInvocationState::PayloadUnavailable
+                                | crate::AgentMcpToolInvocationState::PolicyDenied
+                        ),
+                    };
+                    if !lifecycle_matches_outcome {
+                        return Err(
+                            "automatic MCP journal lifecycle projection contradicts settlement"
+                                .to_string(),
+                        );
+                    }
+                    if let Some((conversation_id, assistant_message_id)) = message_owner {
+                        chat_repository::upsert_message_mcp_invocation_event(
+                            &transaction,
+                            conversation_id,
+                            assistant_message_id,
+                            &approval,
+                            invocation,
+                            updated_at,
+                        )
+                        .map_err(storage_error)?;
+                    }
+                }
             }
-            if let Some((conversation_id, assistant_message_id)) = message_owner {
-                chat_repository::upsert_message_mcp_invocation_event(
-                    &transaction,
-                    conversation_id,
-                    assistant_message_id,
-                    &approval,
-                    invocation,
-                    updated_at,
-                )
-                .map_err(storage_error)?;
+            AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                if action_type != "builtin_mcp_tool_approval" || invocation.is_some() {
+                    return Err("automatic MCP journal action type is inconsistent".to_string());
+                }
+                crate::validate_builtin_mcp_tool_approval_shape(&approval)
+                    .map_err(|_| "automatic built-in MCP journal shape is invalid".to_string())?;
+                let identity = &approval.identity;
+                let expected_storage_id = format!(
+                    "v2:{}:{}:{}",
+                    identity.run_id.len(),
+                    identity.run_id,
+                    identity.action_id
+                );
+                if approval.approval_status != crate::AgentApprovalStatus::Approved
+                    || record.action_id != expected_storage_id
+                    || record.run_id != identity.run_id
+                    || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
+                    || record.tool_name != identity.model_name
+                {
+                    return Err(
+                        "automatic built-in MCP journal rejected a drifted typed identity"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                return Err("automatic MCP journal action type is inconsistent".to_string());
             }
         }
 
@@ -1302,9 +1343,15 @@ impl StorageService {
                     updated_at = ?4
                 WHERE action_id = ?1
                   AND status = ?2
-                  AND action_type = 'mcp_tool_call'
+                  AND action_type = ?5
                 ",
-                rusqlite::params![action_id, expected_status, terminal_status, updated_at],
+                rusqlite::params![
+                    action_id,
+                    expected_status,
+                    terminal_status,
+                    updated_at,
+                    action_type
+                ],
             )
             .map_err(storage_error)?;
         if affected != 1 {
@@ -1755,9 +1802,9 @@ impl StorageService {
         &self,
         record: AgentActionAuditRecord,
     ) -> Result<agent_action_audit_repository::AgentActionAuditFinalizationOutcome, String> {
-        if !matches!(record.status.as_str(), "completed" | "failed") {
+        if !matches!(record.status.as_str(), "completed" | "failed" | "cancelled") {
             return Err(format!(
-                "自动操作审计终态无效：{}（仅允许 completed 或 failed）。",
+                "自动操作审计终态无效：{}（仅允许 completed、failed 或 cancelled）。",
                 record.status
             ));
         }

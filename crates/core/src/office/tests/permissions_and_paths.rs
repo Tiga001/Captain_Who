@@ -356,7 +356,6 @@ fn browser_proxy_self_test_rejects_an_unidentified_executable_before_officecli_s
         timeout_ms: Some(MAX_OFFICE_TIMEOUT_MS),
     };
 
-    let started = Instant::now();
     let error = engine
         .execute(
             &workspace_context(workspace.path()),
@@ -370,7 +369,9 @@ fn browser_proxy_self_test_rejects_an_unidentified_executable_before_officecli_s
         error.code(),
         OfficeEngineErrorCode::RenderBackendUnavailable
     );
-    assert!(started.elapsed().as_millis() < 2_000);
+    assert!(error
+        .message()
+        .contains("did not identify itself as the trusted core-server proxy"));
     assert!(!started_marker.exists());
 }
 

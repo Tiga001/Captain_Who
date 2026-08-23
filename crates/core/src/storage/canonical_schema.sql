@@ -473,6 +473,9 @@ CREATE TABLE ui_preferences (
             custom_write_permission TEXT NOT NULL DEFAULT 'workspace_only',
             custom_command_permission TEXT NOT NULL DEFAULT 'require_approval',
             custom_patch_permission TEXT NOT NULL DEFAULT 'require_approval',
+            custom_builtin_execution_permission TEXT NOT NULL DEFAULT 'require_approval' CHECK (
+                custom_builtin_execution_permission IN ('require_approval', 'auto_approve')
+            ),
             full_permission_enabled INTEGER NOT NULL DEFAULT 1 CHECK (
                 full_permission_enabled IN (0, 1)
             ),
@@ -2588,7 +2591,7 @@ CREATE TABLE agent_effective_permission_snapshots (
                 typeof(agent_id) = 'text'
                 AND length(CAST(agent_id AS BLOB)) BETWEEN 1 AND 128
             ),
-            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 2),
             root_agent_id TEXT NOT NULL CHECK (
                 typeof(root_agent_id) = 'text'
                 AND length(CAST(root_agent_id AS BLOB)) BETWEEN 1 AND 128
@@ -2620,6 +2623,9 @@ CREATE TABLE agent_effective_permission_snapshots (
             patch_permission TEXT NOT NULL CHECK (
                 patch_permission IN ('require_approval', 'auto_approve')
             ),
+            builtin_execution_permission TEXT NOT NULL CHECK (
+                builtin_execution_permission IN ('require_approval', 'auto_approve')
+            ),
             revision INTEGER NOT NULL CHECK (revision > 0),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
@@ -2648,7 +2654,8 @@ CREATE TRIGGER validate_agent_effective_permission_snapshot_source_insert
 CREATE TRIGGER validate_agent_effective_permission_snapshot_source_update
         BEFORE UPDATE OF
             source_run_id, source_assistant_message_id, read_permission, write_permission,
-            command_permission, command_safety_policy, patch_permission, revision, updated_at
+            command_permission, command_safety_policy, patch_permission,
+            builtin_execution_permission, revision, updated_at
         ON agent_effective_permission_snapshots
         WHEN NOT EXISTS (
             SELECT 1

@@ -643,6 +643,66 @@ fn mcp_invocation_failure_stage(
     }
 }
 
+fn verify_frozen_skill_script_source(
+    script: &AgentSkillScriptRequest,
+    resources: &SkillResourceSession,
+) -> Result<VerifiedSkillResourceSource, String> {
+    let uri = SkillResourceUri::parse(&script.script_uri)
+        .map_err(|error| format!("The frozen Skill script URI is invalid: {error}"))?;
+    if uri.package().skill_id().as_str() != script.skill_id
+        || uri.package().revision().as_str() != script.skill_revision
+        || uri.path().as_str() != script.resource_path
+    {
+        return Err(
+            "The frozen Skill script identity does not match its canonical URI.".to_string(),
+        );
+    }
+    let verified = resources
+        .verify_resource_source(&uri)
+        .map_err(|error| format!("The Skill script source could not be verified: {error}"))?;
+    let kind_matches = matches!(
+        (script.source.source_kind, verified.source_kind()),
+        (
+            AgentSkillScriptSourceKind::Workspace,
+            SkillSourceKind::Workspace
+        ) | (
+            AgentSkillScriptSourceKind::Bundled,
+            SkillSourceKind::Bundled
+        ) | (
+            AgentSkillScriptSourceKind::Installed,
+            SkillSourceKind::Installed
+        )
+    );
+    let trust_matches = matches!(
+        (script.source.trust, verified.trust()),
+        (AgentSkillScriptTrust::Untrusted, SkillTrust::Untrusted)
+            | (
+                AgentSkillScriptTrust::UserApproved,
+                SkillTrust::UserApproved
+            )
+            | (AgentSkillScriptTrust::Application, SkillTrust::Application)
+    );
+    if verified.package() != uri.package()
+        || verified.resource_digest() != script.resource_digest
+        || verified.source_id().as_str() != script.source.source_id
+        || !kind_matches
+        || !trust_matches
+    {
+        return Err(
+            "The frozen Skill script source proof no longer matches the active resource session."
+                .to_string(),
+        );
+    }
+    Ok(verified)
+}
+
+fn is_verified_application_bundled_source(source: &VerifiedSkillResourceSource) -> bool {
+    source.source_id().as_str() == APPLICATION_BUNDLED_SKILL_SOURCE_ID
+        && source.package().skill_id().source_id().as_str() == APPLICATION_BUNDLED_SKILL_SOURCE_ID
+        && source.source_kind() == SkillSourceKind::Bundled
+        && source.trust() == SkillTrust::Application
+}
+
 impl AgentService {
     #[cfg(test)]
     pub(in crate::application::agent) fn inject_skill_script_worker_panic_once(
@@ -787,14 +847,10 @@ impl AgentService {
             };
         }
         let permissions = permissions_from_input(agent_input);
-        let authorized = permissions.read == mycopilot_core::AgentReadPermission::All
+        let unrestricted = permissions.read == mycopilot_core::AgentReadPermission::All
             && permissions.write == mycopilot_core::AgentWritePermission::All
-            && permissions.command_safety == mycopilot_core::AgentCommandSafetyPolicy::FullAccess
-            && match authorization_source {
-                CommandAuthorizationSource::Automatic => false,
-                CommandAuthorizationSource::ExplicitUser => true,
-            };
-        if !authorized {
+            && permissions.command_safety == mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+        if !unrestricted {
             return AgentToolResult {
                 exact_archive_file: None,
                 call_id: script.id.clone(),
@@ -825,6 +881,48 @@ impl AgentService {
                 error: Some("The activated Skill resource snapshot is unavailable.".to_string()),
             };
         };
+        let verified_source = match verify_frozen_skill_script_source(script, resources) {
+            Ok(verified) => verified,
+            Err(error) => {
+                return AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: script.id.clone(),
+                    tool: "skills_run_script".to_string(),
+                    ok: false,
+                    result: Some(serde_json::json!({
+                        "type": "skill_script_policy",
+                        "code": "sourceVerificationFailed",
+                        "recovery": "reactivateSkill",
+                    })),
+                    error: Some(error),
+                };
+            }
+        };
+        let source_authorized = match authorization_source {
+            CommandAuthorizationSource::ExplicitUser => true,
+            CommandAuthorizationSource::Automatic => {
+                permissions.builtin_execution
+                    == mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove
+                    && is_verified_application_bundled_source(&verified_source)
+            }
+        };
+        if !source_authorized {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: script.id.clone(),
+                tool: "skills_run_script".to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "skill_script_policy",
+                    "code": "authorizationDenied",
+                    "authorizationSource": authorization_source,
+                })),
+                error: Some(
+                    "The current permission policy does not authorize this Skill script."
+                        .to_string(),
+                ),
+            };
+        }
         let Some(workspace_root) = workspace_root_optional(agent_input) else {
             return AgentToolResult {
                 exact_archive_file: None,
@@ -1636,6 +1734,178 @@ impl AgentService {
         Ok(settlement.tool_result)
     }
 
+    pub(in crate::application::agent) async fn execute_auto_builtin_mcp_tool_action(
+        &self,
+        context: &AutoApprovedActionContext,
+        approval: Box<mycopilot_core::AgentBuiltinMcpToolApproval>,
+        cancellation: AgentCancellationToken,
+    ) -> AgentResult<AgentToolResult> {
+        let action = AgentProposedAction::BuiltinMcpToolApproval {
+            approval: approval.clone(),
+        };
+        let permissions = permissions_from_input(&context.agent_input);
+        if permissions.builtin_execution
+            != mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove
+            || approval.approval_status != AgentApprovalStatus::Approved
+            || approval.identity.run_id != context.run_id
+        {
+            self.invalidate_mcp_pending_payload(&action);
+            return Err(AgentError::structured(
+                "builtin_mcp.auto_invocation_not_authorized",
+                "The built-in MCP invocation is not authorized for automatic execution.",
+                serde_json::json!({
+                    "type": "builtin_mcp_tool_approval",
+                    "code": "autoInvocationNotAuthorized",
+                    "retryable": false,
+                    "dispatchCertainty": "definitely_not_dispatched",
+                }),
+            ));
+        }
+        let Some(runtime) = self.builtin_capabilities.clone() else {
+            self.invalidate_mcp_pending_payload(&action);
+            return Err(AgentError::structured(
+                "builtin_mcp.runtime_unavailable",
+                "The built-in MCP invocation runtime is unavailable.",
+                serde_json::json!({
+                    "type": "builtin_mcp_tool_approval",
+                    "code": "runtimeUnavailable",
+                    "retryable": false,
+                    "dispatchCertainty": "definitely_not_dispatched",
+                }),
+            ));
+        };
+        if self.is_agent_input_scope_deleting(&context.agent_input) {
+            self.invalidate_mcp_pending_payload(&action);
+            return Err(AgentError::cancelled());
+        }
+
+        // The hidden approved row is the durable definitely-not-dispatched state. It is never
+        // projected as a user approval; startup retires it as payload-unavailable rather than
+        // replaying the process-only arguments or grant.
+        let mut journal = match self.prepare_auto_mcp_action_journal(
+            &context.run_id,
+            context.conversation_id.as_deref(),
+            context.assistant_message_id.as_deref(),
+            action.clone(),
+            context.agent_input.clone(),
+        ) {
+            Ok(record) => record,
+            Err(_) => {
+                self.invalidate_mcp_pending_payload(&action);
+                return Err(AgentError::structured(
+                    "builtin_mcp.auto_dispatch_journal_unavailable",
+                    "The built-in MCP invocation could not establish its durable dispatch boundary.",
+                    serde_json::json!({
+                        "type": "builtin_mcp_tool_approval",
+                        "code": "autoDispatchJournalUnavailable",
+                        "retryable": false,
+                        "dispatchCertainty": "definitely_not_dispatched",
+                    }),
+                ));
+            }
+        };
+
+        let grant = match runtime.approve_builtin_mcp_tool(&approval) {
+            Ok(grant) => grant,
+            Err(error) => {
+                let _ = runtime.dismiss_builtin_mcp_tool_approval(&approval);
+                let _ = self.settle_auto_mcp_action_journal(
+                    &journal,
+                    McpAutoActionJournalTerminalOutcome::Failed,
+                    None,
+                );
+                return Ok(AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: approval.identity.call_id.clone(),
+                    tool: approval.identity.model_name.clone(),
+                    ok: false,
+                    result: Some(serde_json::json!({
+                        "schemaVersion": 1,
+                        "type": "builtin_mcp_tool_approval",
+                        "status": "failed",
+                        "dispatchCertainty": "definitely_not_dispatched",
+                        "contentOmitted": true,
+                    })),
+                    error: Some(error.to_string()),
+                });
+            }
+        };
+
+        if cancellation.is_cancelled() {
+            let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+            let result = mycopilot_core::builtin_mcp_tool_cancelled_result(&approval);
+            let _ = self.settle_auto_mcp_action_journal(
+                &journal,
+                McpAutoActionJournalTerminalOutcome::Cancelled,
+                None,
+            );
+            return Ok(result);
+        }
+        if self.claim_auto_mcp_dispatch(&mut journal).is_err() {
+            let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+            // A failed CAS may be a post-commit observation failure. Leave any executing row for
+            // startup reconciliation and never dispatch the process-only payload.
+            let _ = self.settle_auto_mcp_action_journal(
+                &journal,
+                McpAutoActionJournalTerminalOutcome::Failed,
+                None,
+            );
+            return Err(AgentError::structured(
+                "builtin_mcp.auto_dispatch_claim_failed",
+                "The built-in MCP invocation lost its durable dispatch claim and was not sent.",
+                serde_json::json!({
+                    "type": "builtin_mcp_tool_approval",
+                    "code": "autoDispatchClaimFailed",
+                    "retryable": false,
+                    "dispatchCertainty": "definitely_not_dispatched",
+                }),
+            ));
+        }
+
+        let invocation_runtime = runtime.clone();
+        let invocation_approval = (*approval).clone();
+        let invocation_cancellation = cancellation.clone();
+        let result = supervised_builtin_mcp_tool_result(
+            &approval,
+            BUILTIN_MCP_APPROVED_INVOCATION_WATCHDOG,
+            async move {
+                invocation_runtime
+                    .invoke_approved_builtin_mcp_tool(
+                        invocation_approval,
+                        grant,
+                        invocation_cancellation,
+                    )
+                    .await
+            },
+        )
+        .await;
+        let status = result
+            .result
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str);
+        let journal_outcome = if result.ok {
+            McpAutoActionJournalTerminalOutcome::Completed
+        } else if status == Some("cancelled") {
+            McpAutoActionJournalTerminalOutcome::Cancelled
+        } else if status == Some("outcome_unknown") {
+            McpAutoActionJournalTerminalOutcome::OutcomeUnknown
+        } else {
+            McpAutoActionJournalTerminalOutcome::Failed
+        };
+        if self
+            .settle_auto_mcp_action_journal(&journal, journal_outcome, None)
+            .is_err()
+        {
+            // The call crossed the durable dispatch fence. If its terminal journal cannot be
+            // proven, suppress the transient response and force an outcome-unknown observation.
+            return Ok(mycopilot_core::builtin_mcp_tool_outcome_unknown_result(
+                &approval,
+            ));
+        }
+        Ok(result)
+    }
+
     pub(in crate::application::agent) async fn run_mcp_tool_execution(
         &self,
         mut record: PendingActionRecord,
@@ -2263,6 +2533,7 @@ impl AgentService {
                 .as_ref()
                 .and_then(|context| context.project_id.as_deref()),
             record.agent_input.model_capabilities,
+            permissions_from_input(&record.agent_input),
         );
         self.finish_pre_runtime_action_continuation_failure(
             record,
@@ -3899,6 +4170,7 @@ impl AgentService {
                 .as_ref()
                 .and_then(|context| context.project_id.as_deref()),
             record.agent_input.model_capabilities,
+            permissions_from_input(&record.agent_input),
         );
 
         let skill_resources = match self.restore_skill_resource_session(&agent_input) {

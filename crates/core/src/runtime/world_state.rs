@@ -399,7 +399,8 @@ mod tests {
                     "write": "workspace_only",
                     "command": "require_approval",
                     "commandSafety": "guarded",
-                    "patch": "require_approval"
+                    "patch": "require_approval",
+                    "builtinExecution": "require_approval"
                 }
             },
             "promptPreferences": {
@@ -427,6 +428,7 @@ mod tests {
         assert!(rendered.contains("\"lifetime\":\"run\""));
         assert!(rendered.contains("tools.effective"));
         assert!(rendered.contains("permissions.effective"));
+        assert!(rendered.contains("\"builtinExecution\":\"require_approval\""));
         assert!(rendered.contains("model.selection"));
         assert!(rendered.contains("\"configuredModelId\":\"test-model\""));
         assert!(rendered.contains("\"imageInput\":true"));

@@ -72,12 +72,20 @@ export type AgentCommandSafetyPolicy = 'guarded' | 'full_access'
  */
 export type AgentPatchPermission = 'require_approval' | 'auto_approve'
 
+/**
+ * Controls whether execution of Host-authenticated built-in Skills and capabilities requires a
+ * human click. auto_approve only skips the prompt; it does not widen read, write, command, path,
+ * manifest, revision, digest, or runtime safety authority.
+ */
+export type AgentBuiltinExecutionPermission = 'require_approval' | 'auto_approve'
+
 export interface AgentPermissions {
   read: AgentReadPermission
   write: AgentWritePermission
   command: AgentCommandPermission
   commandSafety: AgentCommandSafetyPolicy
   patch: AgentPatchPermission
+  builtinExecution: AgentBuiltinExecutionPermission
 }
 
 export type AgentPromptWorkMode = 'coding' | 'general'
@@ -1496,6 +1504,16 @@ export interface AgentSkillScriptPreflightReport {
   message?: string
 }
 
+export type AgentSkillScriptSourceKind = 'workspace' | 'bundled' | 'installed'
+export type AgentSkillScriptTrust = 'untrusted' | 'user_approved' | 'application'
+
+/** Host-derived evidence; execution revalidates it against the active resource session. */
+export interface AgentSkillScriptSourceProof {
+  sourceId: string
+  sourceKind: AgentSkillScriptSourceKind
+  trust: AgentSkillScriptTrust
+}
+
 export interface AgentSkillScriptRequest {
   id: string
   scriptUri: string
@@ -1503,6 +1521,7 @@ export interface AgentSkillScriptRequest {
   skillRevision: string
   resourcePath: string
   resourceDigest: string
+  source: AgentSkillScriptSourceProof
   interpreter: AgentSkillScriptInterpreter
   args: string[]
   requirements: AgentSkillScriptRequirements

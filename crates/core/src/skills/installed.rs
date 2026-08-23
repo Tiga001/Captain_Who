@@ -267,6 +267,8 @@ impl SkillSource for InstalledSkillSource {
             skill_id: selection.skill_id().clone(),
             revision: selection.expected_revision().clone(),
             source_id: self.source_id.clone(),
+            source_kind: SkillSourceKind::Installed,
+            trust: SkillTrust::Untrusted,
             resources: snapshot.resources,
             reader,
         })

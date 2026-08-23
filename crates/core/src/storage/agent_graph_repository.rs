@@ -7,19 +7,20 @@ use crate::storage::{
     chat_repository, conversation_model_context_repository, conversation_trace_repository,
 };
 use crate::{
-    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentCommandPermission,
-    AgentCommandSafetyPolicy, AgentDisplayStatus, AgentDisplayStatusSnapshot,
-    AgentEffectivePermissionSnapshot, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
-    AgentMailboxKind, AgentMailboxMessageRecord, AgentMessageDispatch, AgentModelSelectionSnapshot,
-    AgentModelSelectionSource, AgentNodeRecord, AgentPatchPermission, AgentPermissions,
-    AgentReadPermission, AgentResultArtifactKind, AgentResultArtifactReference,
+    AcknowledgeAgentTaskAndWakeInput, AgentBuiltinExecutionPermission, AgentCollaborationIdentity,
+    AgentCommandPermission, AgentCommandSafetyPolicy, AgentDisplayStatus,
+    AgentDisplayStatusSnapshot, AgentEffectivePermissionSnapshot, AgentGraphError, AgentLifecycle,
+    AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord, AgentMessageDispatch,
+    AgentModelSelectionSnapshot, AgentModelSelectionSource, AgentNodeRecord, AgentPatchPermission,
+    AgentPermissions, AgentReadPermission, AgentResultArtifactKind, AgentResultArtifactReference,
     AgentTemplateSnapshot, AgentTurnResultEnvelope, AgentTurnResultSettlement,
     AgentWakeRecoveryAction, AgentWakeRecoveryBatch, AgentWakeRequestRecord, AgentWakeStatus,
     AgentWritePermission, ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
     EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
     FinishAgentTurnResultInput, FinishAgentWakeWithResultInput, IdempotentCreate,
     InterruptAgentExecutionOutcome, ReasoningEffort, SendAgentMessageRequest,
-    TrustedActiveChildWakeBundle, AGENT_GRAPH_SCHEMA_VERSION, AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
+    TrustedActiveChildWakeBundle, AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION,
+    AGENT_GRAPH_SCHEMA_VERSION, AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -73,8 +74,9 @@ const EFFECTIVE_PERMISSION_SELECT: &str = "
            snapshot.conversation_id, snapshot.source_run_id,
            snapshot.source_assistant_message_id, snapshot.read_permission,
            snapshot.write_permission, snapshot.command_permission,
-           snapshot.command_safety_policy, snapshot.patch_permission, snapshot.revision,
-           snapshot.created_at, snapshot.updated_at
+           snapshot.command_safety_policy, snapshot.patch_permission,
+           snapshot.builtin_execution_permission, snapshot.revision, snapshot.created_at,
+           snapshot.updated_at
     FROM agent_effective_permission_snapshots AS snapshot";
 
 pub fn ensure_root_agent(
@@ -697,9 +699,9 @@ pub(crate) fn record_agent_effective_permissions_in_transaction(
                 "INSERT INTO agent_effective_permission_snapshots (
                      agent_id, schema_version, root_agent_id, conversation_id, source_run_id,
                      source_assistant_message_id, read_permission, write_permission,
-                     command_permission, command_safety_policy, patch_permission, revision,
-                     created_at, updated_at
-                 ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12)
+                     command_permission, command_safety_policy, patch_permission,
+                     builtin_execution_permission, revision, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14)
                  ON CONFLICT(agent_id) DO UPDATE SET
                      source_run_id = excluded.source_run_id,
                      source_assistant_message_id = excluded.source_assistant_message_id,
@@ -708,10 +710,12 @@ pub(crate) fn record_agent_effective_permissions_in_transaction(
                      command_permission = excluded.command_permission,
                      command_safety_policy = excluded.command_safety_policy,
                      patch_permission = excluded.patch_permission,
+                     builtin_execution_permission = excluded.builtin_execution_permission,
                      revision = agent_effective_permission_snapshots.revision + 1,
                      updated_at = excluded.updated_at",
                 params![
                     agent_id,
+                    i64::from(AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION),
                     &node.root_agent_id,
                     conversation_id,
                     run_id,
@@ -721,6 +725,7 @@ pub(crate) fn record_agent_effective_permissions_in_transaction(
                     command_permission_as_str(permissions.command),
                     command_safety_as_str(permissions.command_safety),
                     patch_permission_as_str(permissions.patch),
+                    builtin_execution_permission_as_str(permissions.builtin_execution),
                     created_at,
                     next_updated_at,
                 ],
@@ -3749,9 +3754,10 @@ fn read_effective_permission_row(
         command_permission: row.get(8)?,
         command_safety_policy: row.get(9)?,
         patch_permission: row.get(10)?,
-        revision: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        builtin_execution_permission: row.get(11)?,
+        revision: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -3767,6 +3773,7 @@ struct EffectivePermissionRow {
     command_permission: String,
     command_safety_policy: String,
     patch_permission: String,
+    builtin_execution_permission: String,
     revision: i64,
     created_at: i64,
     updated_at: i64,
@@ -3775,7 +3782,11 @@ struct EffectivePermissionRow {
 fn decode_effective_permission_snapshot(
     row: EffectivePermissionRow,
 ) -> Result<AgentEffectivePermissionSnapshot, AgentGraphError> {
-    validate_schema_version(row.schema_version)?;
+    if row.schema_version != i64::from(AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION) {
+        return Err(corrupt(
+            "unsupported Agent effective permission snapshot schema version",
+        ));
+    }
     Ok(AgentEffectivePermissionSnapshot {
         agent_id: row.agent_id,
         root_agent_id: row.root_agent_id,
@@ -3788,6 +3799,9 @@ fn decode_effective_permission_snapshot(
             command: parse_command_permission(&row.command_permission)?,
             command_safety: parse_command_safety(&row.command_safety_policy)?,
             patch: parse_patch_permission(&row.patch_permission)?,
+            builtin_execution: parse_builtin_execution_permission(
+                &row.builtin_execution_permission,
+            )?,
         },
         revision: positive_u64(row.revision, "Agent effective permission revision")?,
         created_at: row.created_at,
@@ -4642,6 +4656,23 @@ fn parse_patch_permission(value: &str) -> Result<AgentPatchPermission, AgentGrap
         "require_approval" => Ok(AgentPatchPermission::RequireApproval),
         "auto_approve" => Ok(AgentPatchPermission::AutoApprove),
         _ => Err(corrupt("unknown effective patch permission")),
+    }
+}
+
+fn builtin_execution_permission_as_str(value: AgentBuiltinExecutionPermission) -> &'static str {
+    match value {
+        AgentBuiltinExecutionPermission::RequireApproval => "require_approval",
+        AgentBuiltinExecutionPermission::AutoApprove => "auto_approve",
+    }
+}
+
+fn parse_builtin_execution_permission(
+    value: &str,
+) -> Result<AgentBuiltinExecutionPermission, AgentGraphError> {
+    match value {
+        "require_approval" => Ok(AgentBuiltinExecutionPermission::RequireApproval),
+        "auto_approve" => Ok(AgentBuiltinExecutionPermission::AutoApprove),
+        _ => Err(corrupt("unknown effective built-in execution permission")),
     }
 }
 

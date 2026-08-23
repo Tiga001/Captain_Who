@@ -1798,13 +1798,18 @@ mod tests {
                 approval_status: AgentApprovalStatus::Required,
                 reason: None,
             };
-            let error = tool
+            let action = tool
                 .proposed_action_async(&tool_context, &frame_call)
                 .await
-                .unwrap_err();
+                .unwrap();
+            let AgentProposedAction::BuiltinMcpToolApproval { approval } = action else {
+                panic!("expected a typed sensitive built-in MCP approval");
+            };
+            let serialized = serde_json::to_string(&approval).unwrap();
+            assert!(!serialized.contains(target));
             assert_eq!(
-                error.code(),
-                Some("builtin_mcp_tool.sensitive_target_scope_unsupported")
+                approval.call_reason,
+                "The model requests running a reviewed script in the managed page."
             );
         }
     }

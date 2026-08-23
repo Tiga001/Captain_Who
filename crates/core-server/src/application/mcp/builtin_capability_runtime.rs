@@ -1733,10 +1733,8 @@ fn attach_browser_screenshot_read_path(
     };
     let source_path = Path::new(&source);
     let staged = source_path.with_extension(extension);
-    if staged != source_path {
-        if fs::copy(source_path, &staged).is_err() {
-            return result;
-        }
+    if staged != source_path && fs::copy(source_path, &staged).is_err() {
+        return result;
     }
     let published = match storage.publish_managed_artifact_file(&staged, authority) {
         Ok(published) => published,

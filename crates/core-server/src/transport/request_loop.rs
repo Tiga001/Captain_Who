@@ -349,7 +349,7 @@ where
                         continue;
                     }
                 };
-                let (conversation_id, assistant_message_id) = match agent_service
+                let (conversation_id, assistant_message_id, permissions) = match agent_service
                     .authorize_browser_risk_request(&input.authorization_context.run_id)
                 {
                     Ok(conversation_id) => conversation_id,
@@ -384,7 +384,13 @@ where
                 let task = async move {
                     let _permit = permit;
                     let output = coordinator
-                        .authorize(input, conversation_id, assistant_message_id, notifications)
+                        .authorize_with_permissions(
+                            input,
+                            conversation_id,
+                            assistant_message_id,
+                            permissions,
+                            notifications,
+                        )
                         .await;
                     let _ =
                         enqueue_outbound(&request_outbound, response_success(request_id, output));

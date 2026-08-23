@@ -120,7 +120,7 @@ pub use resource_runtime::{
     SkillPackageUri, SkillResourceError, SkillResourceErrorCode, SkillResourceListEntry,
     SkillResourceListOptions, SkillResourceListPage, SkillResourcePath, SkillResourceRecovery,
     SkillResourceSession, SkillResourceTextPage, SkillResourceTextReadOptions, SkillResourceUri,
-    SkillResourceUriError, DEFAULT_SKILL_RESOURCE_LIST_PAGE_SIZE,
+    SkillResourceUriError, VerifiedSkillResourceSource, DEFAULT_SKILL_RESOURCE_LIST_PAGE_SIZE,
     DEFAULT_SKILL_RESOURCE_TEXT_PAGE_BYTES, MAX_SKILL_RESOURCE_LIST_PAGE_SIZE,
     MAX_SKILL_RESOURCE_TEXT_PAGE_BYTES, MAX_SKILL_RESOURCE_URI_BYTES,
 };

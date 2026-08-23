@@ -1,6 +1,8 @@
 use super::*;
 use crate::skills::digest::package_file_digest;
-use crate::skills::model::{SkillId, SkillResourceIndex, SkillRevision, SkillSourceId};
+use crate::skills::model::{
+    SkillId, SkillResourceIndex, SkillRevision, SkillSourceId, SkillSourceKind, SkillTrust,
+};
 use crate::skills::resource_runtime::{
     SkillResourceReader, SkillResourceReaderRef, SkillResourceSessionBinding,
     SkillResourceSourceError,
@@ -55,6 +57,8 @@ fn test_session(
         skill_id: skill_id.clone(),
         revision: revision.clone(),
         source_id,
+        source_kind: SkillSourceKind::Installed,
+        trust: SkillTrust::Untrusted,
         resources: SkillResourceIndex::new(vec![descriptor]),
         reader: Some(reader),
     }])
@@ -92,6 +96,8 @@ fn test_tree_session(
         skill_id,
         revision,
         source_id,
+        source_kind: SkillSourceKind::Installed,
+        trust: SkillTrust::Untrusted,
         resources: SkillResourceIndex::new(descriptors),
         reader: Some(reader),
     }])

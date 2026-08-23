@@ -406,6 +406,11 @@ impl ManualNonCommandFileEffect {
                     skill_revision: "revision-1".to_string(),
                     resource_path: "scripts/build.py".to_string(),
                     resource_digest: "sha256:fixture".to_string(),
+                    source: crate::AgentSkillScriptSourceProof {
+                        source_id: "installed:user".to_string(),
+                        source_kind: crate::AgentSkillScriptSourceKind::Installed,
+                        trust: crate::AgentSkillScriptTrust::Untrusted,
+                    },
                     interpreter: crate::AgentSkillScriptInterpreter::Python3,
                     args: if alternate_payload {
                         vec!["--alternate".to_string()]

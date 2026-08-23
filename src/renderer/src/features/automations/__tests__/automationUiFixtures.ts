@@ -41,7 +41,7 @@ export function makeAutomationDraft(patch: Partial<AutomationDraft> = {}): Autom
       modelId: 'model-1'
     },
     permissionMode: 'default',
-    permissionModeVersion: 1,
+    permissionModeVersion: 2,
     schedule: {
       kind: 'daily',
       timeMinutes: 9 * 60,
@@ -94,13 +94,14 @@ export function makeAutomationTask(patch: Partial<AutomationTask> = {}): Automat
       reasoning: { source: 'model_config', mode: 'enabled', effort: 'high' }
     },
     permissionMode: 'default',
-    permissionModeVersion: 1,
+    permissionModeVersion: 2,
     resolvedPermissions: {
       read: 'workspace_only',
       write: 'workspace_only',
       command: 'require_approval',
       commandSafety: 'guarded',
-      patch: 'require_approval'
+      patch: 'require_approval',
+      builtinExecution: 'require_approval'
     },
     schedule: {
       kind: 'daily',

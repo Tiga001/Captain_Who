@@ -179,6 +179,7 @@ fn install_active_run(
         assistant_message_id,
         None,
         ModelCapabilities { image_input },
+        AgentPermissions::default(),
     )
 }
 
@@ -371,6 +372,7 @@ fn stale_finalizer_cannot_remove_a_new_approval_continuation_queue() {
         "assistant-approval-resume",
         None,
         ModelCapabilities { image_input: false },
+        AgentPermissions::default(),
     );
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
 

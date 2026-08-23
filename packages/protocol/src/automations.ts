@@ -14,7 +14,7 @@ import {
 
 /** Stable JSON-RPC contract shared by Renderer, Electron Main, and Core. */
 export const AUTOMATION_SCHEMA_VERSION = 1 as const
-export const AUTOMATION_PERMISSION_MODE_VERSION = 1 as const
+export const AUTOMATION_PERMISSION_MODE_VERSION = 2 as const
 export const AUTOMATION_ERROR_CODE = -32045 as const
 
 export const AUTOMATION_LIST_METHOD = 'automation.list'
@@ -731,7 +731,11 @@ function parseDestination(value: unknown): AutomationDestination {
 function parsePermissions(value: unknown): AgentPermissions {
   const context = 'Automation resolved permissions'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['read', 'write', 'command', 'commandSafety', 'patch'], context)
+  expectOnlyKeys(
+    record,
+    ['read', 'write', 'command', 'commandSafety', 'patch', 'builtinExecution'],
+    context
+  )
   return {
     read: expectEnum(record.read, ['workspace_only', 'all'] as const, `${context}.read`),
     write: expectEnum(
@@ -753,6 +757,11 @@ function parsePermissions(value: unknown): AgentPermissions {
       record.patch,
       ['require_approval', 'auto_approve'] as const,
       `${context}.patch`
+    ),
+    builtinExecution: expectEnum(
+      record.builtinExecution,
+      ['require_approval', 'auto_approve'] as const,
+      `${context}.builtinExecution`
     )
   }
 }

@@ -266,14 +266,15 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 9 freezes model-visible Agent collaboration selector capabilities and removes the
+/// Version 10 freezes built-in execution approval authority alongside every other permission
+/// dimension. Version 9 froze model-visible Agent collaboration selector capabilities and removed the
 /// retired Provider-specific Skill-activation sibling deferral bit. Tools exposed in the request
 /// that produced a batch remain executable under that frozen ToolSet; newly activated Skill
 /// instructions and Tool capabilities become visible only on the next model request.
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 9;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -722,6 +723,17 @@ pub enum AgentPatchPermission {
     AutoApprove,
 }
 
+/// Controls whether Host-authenticated built-in Skill and capability execution requires a human
+/// click. `AutoApprove` skips only the prompt; every independent scope, manifest, revision, digest,
+/// path, and runtime safety check remains authoritative.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentBuiltinExecutionPermission {
+    #[default]
+    RequireApproval,
+    AutoApprove,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPermissions {
@@ -730,6 +742,7 @@ pub struct AgentPermissions {
     pub command: AgentCommandPermission,
     pub command_safety: AgentCommandSafetyPolicy,
     pub patch: AgentPatchPermission,
+    pub builtin_execution: AgentBuiltinExecutionPermission,
 }
 
 impl Default for AgentPermissions {
@@ -740,6 +753,7 @@ impl Default for AgentPermissions {
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
         }
     }
 }
@@ -779,6 +793,13 @@ impl AgentPermissions {
                     AgentPatchPermission::AutoApprove
                 }
                 _ => AgentPatchPermission::RequireApproval,
+            },
+            builtin_execution: match (self.builtin_execution, ceiling.builtin_execution) {
+                (
+                    AgentBuiltinExecutionPermission::AutoApprove,
+                    AgentBuiltinExecutionPermission::AutoApprove,
+                ) => AgentBuiltinExecutionPermission::AutoApprove,
+                _ => AgentBuiltinExecutionPermission::RequireApproval,
             },
         }
     }
@@ -2642,6 +2663,35 @@ pub struct AgentSkillScriptPreflightReport {
     pub message: Option<String>,
 }
 
+/// Host-derived source classification frozen with a Skill script request.
+///
+/// This is evidence for later policy checks, not a grant by itself. The Host
+/// must match it against the active, revision-bound resource session before
+/// execution.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillScriptSourceKind {
+    Workspace,
+    Bundled,
+    Installed,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillScriptTrust {
+    Untrusted,
+    UserApproved,
+    Application,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentSkillScriptSourceProof {
+    pub source_id: String,
+    pub source_kind: AgentSkillScriptSourceKind,
+    pub trust: AgentSkillScriptTrust,
+}
+
 /// Frozen, revision-bound Skill script request. The script URI and digest
 /// identify immutable package bytes; arguments remain a structured argv and
 /// are never converted to a shell command.
@@ -2654,6 +2704,7 @@ pub struct AgentSkillScriptRequest {
     pub skill_revision: String,
     pub resource_path: String,
     pub resource_digest: String,
+    pub source: AgentSkillScriptSourceProof,
     pub interpreter: AgentSkillScriptInterpreter,
     pub args: Vec<String>,
     pub requirements: AgentSkillScriptRequirements,

@@ -671,6 +671,7 @@ fn editor_permissions() -> AgentPermissions {
         command: AgentCommandPermission::RequireApproval,
         command_safety: AgentCommandSafetyPolicy::Guarded,
         patch: AgentPatchPermission::RequireApproval,
+        builtin_execution: Default::default(),
     }
 }
 

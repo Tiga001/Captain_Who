@@ -8,7 +8,7 @@
 
 use super::{
     SkillResourceError, SkillResourceKind, SkillResourceSession, SkillResourceUri,
-    SkillResourceUriError,
+    SkillResourceUriError, SkillSourceKind, SkillTrust,
 };
 use crate::command::{
     configure_command_process_group, join_process_output_capture, spawn_process_output_capture,
@@ -19,7 +19,7 @@ use crate::{
     AgentCancellationToken, AgentSkillDependencyCheck, AgentSkillDependencyKind,
     AgentSkillDependencyStatus, AgentSkillScriptInterpreter, AgentSkillScriptPreflightReport,
     AgentSkillScriptPreflightStatus, AgentSkillScriptRequest, AgentSkillScriptRequirements,
-    AgentSkillScriptResult,
+    AgentSkillScriptResult, AgentSkillScriptSourceKind, AgentSkillScriptTrust,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -305,6 +305,39 @@ pub fn execute_skill_python_script(
     {
         return Err(runtime_conflict(
             "The frozen Skill script identity does not match its canonical URI.",
+        ));
+    }
+    let verified_source = resources.verify_resource_source(&uri)?;
+    let kind_matches = matches!(
+        (request.source.source_kind, verified_source.source_kind()),
+        (
+            AgentSkillScriptSourceKind::Workspace,
+            SkillSourceKind::Workspace
+        ) | (
+            AgentSkillScriptSourceKind::Bundled,
+            SkillSourceKind::Bundled
+        ) | (
+            AgentSkillScriptSourceKind::Installed,
+            SkillSourceKind::Installed
+        )
+    );
+    let trust_matches = matches!(
+        (request.source.trust, verified_source.trust()),
+        (AgentSkillScriptTrust::Untrusted, SkillTrust::Untrusted)
+            | (
+                AgentSkillScriptTrust::UserApproved,
+                SkillTrust::UserApproved
+            )
+            | (AgentSkillScriptTrust::Application, SkillTrust::Application)
+    );
+    if verified_source.package() != uri.package()
+        || verified_source.source_id().as_str() != request.source.source_id
+        || verified_source.resource_digest() != request.resource_digest
+        || !kind_matches
+        || !trust_matches
+    {
+        return Err(runtime_conflict(
+            "The frozen Skill script source proof no longer matches the active resource session.",
         ));
     }
 
@@ -1266,6 +1299,7 @@ mod tests {
     use crate::skills::digest::package_file_digest;
     use crate::skills::model::{
         SkillId, SkillResourceDescriptor, SkillResourceIndex, SkillRevision, SkillSourceId,
+        SkillSourceKind, SkillTrust,
     };
     use crate::skills::resource_runtime::{
         SkillResourceReader, SkillResourceSessionBinding, SkillResourceSourceError,
@@ -1319,6 +1353,8 @@ mod tests {
             skill_id: skill_id.clone(),
             revision: revision.clone(),
             source_id,
+            source_kind: SkillSourceKind::Installed,
+            trust: SkillTrust::Untrusted,
             resources: SkillResourceIndex::new(vec![descriptor]),
             reader: Some(Arc::new(ScriptReader {
                 path: path.clone(),
@@ -1357,6 +1393,11 @@ mod tests {
             skill_revision: fixture.uri.package().revision().to_string(),
             resource_path: fixture.uri.path().to_string(),
             resource_digest: fixture.digest.clone(),
+            source: crate::AgentSkillScriptSourceProof {
+                source_id: "installed:user".to_string(),
+                source_kind: crate::AgentSkillScriptSourceKind::Installed,
+                trust: crate::AgentSkillScriptTrust::Untrusted,
+            },
             interpreter: AgentSkillScriptInterpreter::Python3,
             args,
             requirements: AgentSkillScriptRequirements::default(),
@@ -1734,6 +1775,23 @@ mod tests {
 
         request.resource_digest = fixture.digest.clone();
         request.skill_revision = format!("skill-package-sha256-v3:{}", "b".repeat(64));
+        let error = execute(&fixture, &request).unwrap_err();
+        assert_eq!(error.code(), SkillScriptRuntimeErrorCode::RuntimeConflict);
+    }
+
+    #[test]
+    fn frozen_source_proof_drift_fails_closed_before_execution() {
+        let fixture = fixture("raise RuntimeError('must not run')\n");
+        let Some(mut request) = ready_request(&fixture, Vec::new()) else {
+            return;
+        };
+        request.source.trust = AgentSkillScriptTrust::Application;
+        let error = execute(&fixture, &request).unwrap_err();
+        assert_eq!(error.code(), SkillScriptRuntimeErrorCode::RuntimeConflict);
+
+        request.source.trust = AgentSkillScriptTrust::Untrusted;
+        request.source.source_id = "bundled:application".to_string();
+        request.source.source_kind = AgentSkillScriptSourceKind::Bundled;
         let error = execute(&fixture, &request).unwrap_err();
         assert_eq!(error.code(), SkillScriptRuntimeErrorCode::RuntimeConflict);
     }

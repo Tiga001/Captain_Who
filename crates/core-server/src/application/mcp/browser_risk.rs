@@ -10,10 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mycopilot_core::{
-    AgentApprovalStatus, AgentBrowserRiskApproval, AgentChatOutput, AgentProposedAction,
-    AgentRunStatus, BrowserDestinationIdentity, BrowserResolvedAddressClass,
-    BrowserRiskAuthorizationRequest, BrowserRiskKind, BrowserRiskTrigger, BuiltinCapabilityId,
-    BuiltinCapabilityRuntime, CapabilityActivationId, BROWSER_RISK_APPROVAL_TTL_SECONDS,
+    AgentApprovalStatus, AgentBrowserRiskApproval, AgentBuiltinExecutionPermission,
+    AgentChatOutput, AgentPermissions, AgentProposedAction, AgentRunStatus,
+    BrowserDestinationIdentity, BrowserResolvedAddressClass, BrowserRiskAuthorizationRequest,
+    BrowserRiskKind, BrowserRiskTrigger, BuiltinCapabilityId, BuiltinCapabilityRuntime,
+    CapabilityActivationId, BROWSER_RISK_APPROVAL_TTL_SECONDS,
 };
 use mycopilot_protocol_rs::{
     BrowserResolvedAddressClassDto, BrowserRiskAuthorizationDecisionDto, BrowserRiskAuthorizeInput,
@@ -174,11 +175,34 @@ impl BrowserRiskCoordinator {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn authorize(
         &self,
         input: BrowserRiskAuthorizeInput,
         conversation_id: String,
         assistant_message_id: String,
+        notifications: CoreServerNotificationSender,
+    ) -> BrowserRiskAuthorizeOutput {
+        self.authorize_with_permissions(
+            input,
+            conversation_id,
+            assistant_message_id,
+            AgentPermissions::default(),
+            notifications,
+        )
+        .await
+    }
+
+    /// Resolves a Browser-risk boundary under the exact permissions frozen for the active run.
+    /// Automatic approval skips only the UI waiter: request parsing, active capability authority,
+    /// destination classification, one-time grant creation, and every Host hard-deny remain on the
+    /// same reviewed runtime path as an explicit user approval.
+    pub(crate) async fn authorize_with_permissions(
+        &self,
+        input: BrowserRiskAuthorizeInput,
+        conversation_id: String,
+        assistant_message_id: String,
+        permissions: AgentPermissions,
         notifications: CoreServerNotificationSender,
     ) -> BrowserRiskAuthorizeOutput {
         let request_id = input.request_id.clone();
@@ -226,6 +250,39 @@ impl BrowserRiskCoordinator {
                     None,
                 )
             }
+        }
+
+        if permissions.builtin_execution == AgentBuiltinExecutionPermission::AutoApprove {
+            let cancelled = {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.cancel_tombstone_overflow || state.cancelled_request_ids.remove(&request_id)
+            };
+            if cancelled {
+                return decision(BrowserRiskAuthorizationDecisionDto::Cancelled, None, None);
+            }
+            let mut approval = match self.runtime.prepare_browser_risk_approval(&request) {
+                Ok(approval) => approval,
+                Err(_) => {
+                    return decision(
+                        BrowserRiskAuthorizationDecisionDto::PolicyDenied,
+                        None,
+                        None,
+                    )
+                }
+            };
+            approval.approval_status = AgentApprovalStatus::Approved;
+            return match self.runtime.approve_browser_risk(&approval) {
+                Ok(grant) => decision(
+                    BrowserRiskAuthorizationDecisionDto::Approved,
+                    Some(grant.grant_id),
+                    None,
+                ),
+                Err(_) => decision(
+                    BrowserRiskAuthorizationDecisionDto::PolicyDenied,
+                    None,
+                    None,
+                ),
+            };
         }
 
         let scope = BrowserRiskScope::from_request(&request);
@@ -1008,6 +1065,35 @@ mod tests {
             assert!(output.grant_id.is_some());
         }
         assert!(harness.coordinator.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn trusted_builtin_auto_permission_mints_the_same_risk_grant_without_a_ui_waiter() {
+        let harness = harness();
+        let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let permissions = AgentPermissions {
+            builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
+            ..AgentPermissions::default()
+        };
+
+        let output = harness
+            .coordinator
+            .authorize_with_permissions(
+                input(&harness, Uuid::new_v4()),
+                "conversation".to_string(),
+                "assistant".to_string(),
+                permissions,
+                notifications,
+            )
+            .await;
+
+        assert_eq!(
+            output.decision,
+            BrowserRiskAuthorizationDecisionDto::Approved
+        );
+        assert!(output.grant_id.is_some());
+        assert!(harness.coordinator.list_pending().is_empty());
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]

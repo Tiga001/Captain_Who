@@ -18,7 +18,7 @@ function currentDraft(
     scopeId: 'conversation-current',
     message: 'Continue the current task',
     permissionMode: 'default',
-    permissionModeVersion: 1,
+    permissionModeVersion: 2,
     modelId: null,
     projectId: null,
     attachmentsJson: '[]',

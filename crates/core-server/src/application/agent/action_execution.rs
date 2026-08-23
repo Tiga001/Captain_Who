@@ -76,6 +76,49 @@ impl AgentService {
                     cancellation_token,
                 ));
             }
+            if let AgentProposedAction::BuiltinMcpToolApproval { approval } = action {
+                let Some(checkpoint) = checkpoint else {
+                    service.invalidate_mcp_pending_payload(
+                        &AgentProposedAction::BuiltinMcpToolApproval {
+                            approval: approval.clone(),
+                        },
+                    );
+                    return Err(AgentError::structured(
+                        "builtin_mcp.auto_checkpoint_missing",
+                        "The automatic built-in MCP invocation is missing its frozen run checkpoint.",
+                        serde_json::json!({
+                            "type": "builtin_mcp_tool_approval",
+                            "code": "autoCheckpointMissing",
+                            "retryable": false,
+                            "dispatchCertainty": "definitely_not_dispatched",
+                        }),
+                    ));
+                };
+                refreshed.agent_input =
+                    agent_input_with_run_checkpoint(&refreshed.agent_input, &checkpoint);
+                let Some(runtime) = runtime.as_ref() else {
+                    service.invalidate_mcp_pending_payload(
+                        &AgentProposedAction::BuiltinMcpToolApproval {
+                            approval: approval.clone(),
+                        },
+                    );
+                    return Err(AgentError::structured(
+                        "builtin_mcp.runtime_unavailable",
+                        "The built-in MCP invocation runtime is unavailable.",
+                        serde_json::json!({
+                            "type": "builtin_mcp_tool_approval",
+                            "code": "runtimeUnavailable",
+                            "retryable": false,
+                            "dispatchCertainty": "definitely_not_dispatched",
+                        }),
+                    ));
+                };
+                return runtime.block_on(service.execute_auto_builtin_mcp_tool_action(
+                    &refreshed,
+                    approval,
+                    cancellation_token,
+                ));
+            }
             service
                 .refresh_agent_input_attachment_library(&mut refreshed.agent_input)
                 .map_err(AgentError::new)?;
@@ -1284,8 +1327,159 @@ impl AgentService {
                 })?;
                 Ok(service.commit_approved(&installation, conversation_id, &run_id))
             }
-            AgentProposedAction::BuiltinCapabilityActivation { .. } => {
-                Err(AgentError::new("内置能力激活必须经过任务级用户审批。"))
+            AgentProposedAction::BuiltinCapabilityActivation { approval } => {
+                let permissions = permissions_from_input(&agent_input);
+                if permissions.builtin_execution
+                    != mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove
+                    || approval.approval_status != AgentApprovalStatus::Approved
+                    || approval.run_id != run_id
+                {
+                    return Err(AgentError::new(
+                        "内置能力激活未获得当前任务的自动批准权限。",
+                    ));
+                }
+                let runtime = self
+                    .builtin_capabilities
+                    .as_ref()
+                    .ok_or_else(|| AgentError::new("Builtin capability Host is unavailable."))?;
+                let action = AgentProposedAction::BuiltinCapabilityActivation {
+                    approval: approval.clone(),
+                };
+                match self.claim_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(AgentActionAuditExecutionClaimOutcome::Claimed) => {}
+                    Ok(
+                        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed { .. }
+                        | AgentActionAuditExecutionClaimOutcome::IdentityConflict { .. },
+                    ) => {
+                        return Err(AgentError::structured(
+                            "builtin_capability.auto_activation_already_claimed",
+                            "The automatic built-in capability activation was already claimed and was not replayed.",
+                            serde_json::json!({
+                                "type": "builtin_capability_activation",
+                                "code": "autoActivationAlreadyClaimed",
+                                "retryable": false,
+                            }),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(AgentError::structured(
+                            "builtin_capability.auto_activation_audit_unavailable",
+                            "The automatic built-in capability activation could not establish its durable execution receipt.",
+                            serde_json::json!({
+                                "type": "builtin_capability_activation",
+                                "code": "autoActivationAuditUnavailable",
+                                "retryable": false,
+                            }),
+                        ));
+                    }
+                }
+                let (grant, mut tool_result, mut status) =
+                    match runtime.approve_activation(&approval) {
+                        Ok(grant) => (
+                            Some(grant),
+                            mycopilot_core::builtin_capability_activation_result(
+                                &approval,
+                                mycopilot_core::CapabilityActivationState::Active,
+                                None,
+                            ),
+                            "completed",
+                        ),
+                        Err(error) => (
+                            None,
+                            AgentToolResult {
+                                exact_archive_file: None,
+                                call_id: approval.call_id.clone(),
+                                tool: "activate_capability".to_string(),
+                                ok: false,
+                                result: Some(serde_json::json!({
+                                    "status": "revoked",
+                                    "capability": approval.capability_id,
+                                })),
+                                error: Some(error.to_string()),
+                            },
+                            "failed",
+                        ),
+                    };
+                if cancellation_token.is_cancelled() {
+                    if let Some(grant) = grant.as_ref() {
+                        let _ =
+                            runtime.revoke_activation(&grant.activation_id, &approval.action_id);
+                    }
+                    tool_result = AgentToolResult {
+                        exact_archive_file: None,
+                        call_id: approval.call_id.clone(),
+                        tool: "activate_capability".to_string(),
+                        ok: false,
+                        result: Some(serde_json::json!({
+                            "status": "revoked",
+                            "capability": approval.capability_id,
+                        })),
+                        error: Some("agent run 已取消。".to_string()),
+                    };
+                    status = "cancelled";
+                }
+                let finalize = self.finalize_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    status,
+                    None,
+                    &tool_result,
+                    tool_result.error.as_deref(),
+                    created_at,
+                    now_ms(),
+                );
+                if finalize.is_err() {
+                    let reconciled = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &action,
+                            created_at,
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some_and(|outcome| match outcome {
+                            AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+                                status: persisted_status,
+                                tool_result_json: Some(persisted_result),
+                            } => {
+                                persisted_status == status
+                                    && serde_json::from_str::<AgentToolResult>(&persisted_result)
+                                        .is_ok_and(|persisted| {
+                                            agent_tool_results_match(&persisted, &tool_result)
+                                        })
+                            }
+                            _ => false,
+                        });
+                    if !reconciled {
+                        if let Some(grant) = grant.as_ref() {
+                            let _ = runtime
+                                .revoke_activation(&grant.activation_id, &approval.action_id);
+                        }
+                        return Err(AgentError::structured(
+                            "builtin_capability.auto_activation_receipt_unavailable",
+                            "The automatic built-in capability activation did not produce a durable terminal receipt; its process grant was revoked.",
+                            serde_json::json!({
+                                "type": "builtin_capability_activation",
+                                "code": "autoActivationReceiptUnavailable",
+                                "retryable": false,
+                            }),
+                        ));
+                    }
+                }
+                Ok(tool_result)
             }
             AgentProposedAction::BuiltinMcpToolApproval { .. } => Err(AgentError::new(
                 "内置 MCP 敏感 Tool 必须经过原调用的持久化用户审批。",

@@ -36,13 +36,14 @@ const task = {
     reasoning: { source: 'model_config', mode: 'provider_default', effort: 'provider_default' }
   },
   permissionMode: 'default',
-  permissionModeVersion: 1,
+  permissionModeVersion: 2,
   resolvedPermissions: {
     read: 'workspace_only',
     write: 'workspace_only',
     command: 'require_approval',
     commandSafety: 'guarded',
-    patch: 'require_approval'
+    patch: 'require_approval',
+    builtinExecution: 'require_approval'
   },
   schedule: {
     kind: 'daily',
@@ -109,7 +110,7 @@ describe('automation renderer client', () => {
           modelId: 'model-1'
         },
         permissionMode: 'default',
-        permissionModeVersion: 1,
+        permissionModeVersion: 2,
         schedule: staleSchedule,
         notificationPolicy: 'all_runs'
       },
@@ -128,7 +129,7 @@ describe('automation renderer client', () => {
         modelId: 'model-1'
       },
       permissionMode: 'default',
-      permissionModeVersion: 1,
+      permissionModeVersion: 2,
       schedule: {
         ...staleSchedule,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -154,7 +155,7 @@ describe('automation renderer client', () => {
           modelId: 'model-1'
         },
         permissionMode: 'default',
-        permissionModeVersion: 1,
+        permissionModeVersion: 2,
         schedule: staleSchedule,
         notificationPolicy: 'all_runs'
       }

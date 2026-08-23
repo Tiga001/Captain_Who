@@ -304,7 +304,8 @@ export function defaultUiPreferences(): UiPreferencesSnapshot {
       write: 'workspace_only',
       command: 'require_approval',
       commandSafety: 'guarded',
-      patch: 'require_approval'
+      patch: 'require_approval',
+      builtinExecution: 'require_approval'
     },
     updatedAt: 0
   }

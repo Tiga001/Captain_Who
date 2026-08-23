@@ -38,7 +38,7 @@ fn config() -> AutomationConfigRecord {
         project_id: None,
         model_id: Some("model-a".to_string()),
         permission_mode: "default".to_string(),
-        permission_mode_version: 1,
+        permission_mode_version: 2,
         permissions_json: r#"{"read":"workspace_only","write":"workspace_only","command":"require_approval","commandSafety":"guarded","patch":"require_approval"}"#.to_string(),
         reasoning_json: Some(r#"{"source":"model_config","effort":"high"}"#.to_string()),
         schedule_kind: "daily".to_string(),

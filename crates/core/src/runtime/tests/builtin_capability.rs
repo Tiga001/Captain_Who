@@ -34,13 +34,28 @@ impl BuiltinCapabilityProvider for PayloadCapabilityProvider {
 
     fn approve_activation(
         &self,
-        _: &AgentBuiltinCapabilityActivationApproval,
+        approval: &AgentBuiltinCapabilityActivationApproval,
     ) -> AgentResult<CapabilityGrant> {
-        self.grant
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| AgentError::new("fixture grant unavailable"))
+        let capability_id = BuiltinCapabilityId::parse(approval.capability_id.clone())?;
+        let grant = CapabilityGrant {
+            run_id: approval.run_id.clone(),
+            capability_id,
+            activation_id: CapabilityActivationId::parse(approval.activation_id.clone())?,
+            manifest_digest: approval.manifest_digest.clone(),
+            upstream_catalog_digest: self
+                .manifest
+                .provider_contract
+                .upstream_catalog_digest
+                .clone(),
+            provider_policy_digest: self.manifest.provider_contract.policy_digest.clone(),
+            policy_revision: approval.policy_revision,
+            created_at: approval.created_at,
+            expires_at: approval
+                .created_at
+                .saturating_add(crate::BUILTIN_CAPABILITY_GRANT_TTL_SECONDS),
+        };
+        *self.grant.lock().unwrap() = Some(grant.clone());
+        Ok(grant)
     }
 
     fn revoke_grants(&self, _: &BuiltinCapabilityId) -> AgentResult<()> {
@@ -287,4 +302,156 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
 async fn reviewed_dynamic_tool_enters_openai_and_anthropic_payload_only_after_grant() {
     run_payload_case(crate::protocol::AgentApiStyle::OpenAiCompatible).await;
     run_payload_case(crate::protocol::AgentApiStyle::AnthropicCompatible).await;
+}
+
+#[tokio::test]
+async fn automatic_builtin_activation_uses_typed_host_action_without_waiting_for_approval() {
+    let (runtime, _) = payload_capability_runtime();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for response in [
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "activate-browser-call",
+                            "type": "function",
+                            "function": {
+                                "name": "activate_capability",
+                                "arguments": "{\"capability\":\"browser_automation\",\"reason\":\"Open the reviewed browser\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "activated"},
+                    "finish_reason": "stop"
+                }]
+            }),
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_runtime_test_json_request(&mut stream).await;
+            write_runtime_test_json_response(&mut stream, response).await;
+        }
+    });
+
+    let host_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor_runtime = runtime.clone();
+    let executor_calls = Arc::clone(&host_calls);
+    let host_executor: AgentHostActionExecutor =
+        Arc::new(move |action, checkpoint, cancellation| {
+            assert!(!cancellation.is_cancelled());
+            assert!(
+                checkpoint.is_none(),
+                "activation has no external dispatch payload"
+            );
+            let AgentProposedAction::BuiltinCapabilityActivation { approval } = action else {
+                return Err(AgentError::new("expected typed built-in activation"));
+            };
+            assert_eq!(approval.approval_status, AgentApprovalStatus::Approved);
+            executor_runtime.approve_activation(&approval)?;
+            executor_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::builtin_capability_activation_result(
+                &approval,
+                crate::CapabilityActivationState::Active,
+                None,
+            ))
+        });
+
+    let mut input = conversation_context_input(vec![message("user", "Open the browser")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.context = Some(crate::AgentRunContext {
+        conversation_id: None,
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: crate::AgentPermissions {
+            builtin_execution: crate::AgentBuiltinExecutionPermission::AutoApprove,
+            ..crate::AgentPermissions::default()
+        },
+        collaboration_identity: None,
+    });
+    freeze_runtime_test_generic_provider(&mut input, "builtin-auto-activation");
+    let storage_fixture = tempfile::tempdir().unwrap();
+    let storage = Arc::new(
+        crate::storage::service::StorageService::open(&storage_fixture.path().join("core.sqlite"))
+            .unwrap(),
+    );
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("builtin-auto-activation-run".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_builtin_capabilities(runtime)
+                    .with_host_actions(host_executor, storage),
+            ),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    assert_eq!(host_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!output
+        .events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ApprovalRequired { .. })));
+}
+
+#[test]
+fn builtin_auto_route_requires_both_effective_permission_and_call_level_approval() {
+    let activation = AgentToolIdentity::RuntimeExtension {
+        extension_id: crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+            .to_string(),
+        tool_name: crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME.to_string(),
+    };
+    assert!(!auto_executes_builtin_prepared_action(
+        crate::AgentBuiltinExecutionPermission::RequireApproval,
+        true,
+        &activation,
+    ));
+    assert!(auto_executes_builtin_prepared_action(
+        crate::AgentBuiltinExecutionPermission::AutoApprove,
+        true,
+        &activation,
+    ));
+
+    let sensitive = AgentToolIdentity::BuiltinCapability {
+        capability_id: "browser_automation".into(),
+        managed_mcp_id: "builtin.browser_automation.mcp".into(),
+        package_name: "fixture".into(),
+        package_version: "1.0.0".into(),
+        upstream_catalog_digest: "catalog".into(),
+        policy_digest: "policy".into(),
+        manifest_digest: "manifest".into(),
+        tool_id: "browser_file_upload".into(),
+        raw_name: "browser_file_upload".into(),
+        model_name: "browser_file_upload".into(),
+        upstream_schema_digest: "upstream".into(),
+        host_overlay_digest: "overlay".into(),
+        host_input_schema_digest: "input".into(),
+    };
+    assert!(auto_executes_builtin_prepared_action(
+        crate::AgentBuiltinExecutionPermission::AutoApprove,
+        true,
+        &sensitive,
+    ));
+    assert!(
+        !auto_executes_builtin_prepared_action(
+            crate::AgentBuiltinExecutionPermission::AutoApprove,
+            false,
+            &sensitive,
+        ),
+        "a Dynamic upload/drop call with benign arguments must not enter the sensitive grant path"
+    );
 }

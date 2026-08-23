@@ -33,6 +33,11 @@ describe('AgentApprovalDialog Skill script approval', () => {
         skillRevision: 'sha256:revision',
         resourcePath: 'scripts/build.py',
         resourceDigest: 'sha256:script',
+        source: {
+          sourceId: 'installed:user',
+          sourceKind: 'installed',
+          trust: 'untrusted'
+        },
         interpreter: 'python3',
         args: ['--output', 'budget.xlsx'],
         requirements: {

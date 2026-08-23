@@ -175,14 +175,30 @@ impl AgentService {
         action: AgentProposedAction,
         agent_input: AgentChatInput,
     ) -> Result<PendingActionRecord, String> {
-        let AgentProposedAction::McpToolCall { approval } = &action else {
-            return Err("automatic MCP journal requires a typed MCP action".to_string());
+        let (action_id, call_id) = match &action {
+            AgentProposedAction::McpToolCall { approval }
+                if approval.approval_mode == mycopilot_core::AgentMcpApprovalMode::Auto
+                    && approval.call.approval_status == AgentApprovalStatus::Approved =>
+            {
+                (
+                    approval.identity.action_id.clone(),
+                    approval.identity.call_id.clone(),
+                )
+            }
+            AgentProposedAction::BuiltinMcpToolApproval { approval }
+                if approval.approval_status == AgentApprovalStatus::Approved =>
+            {
+                (
+                    approval.identity.action_id.clone(),
+                    approval.identity.call_id.clone(),
+                )
+            }
+            _ => {
+                return Err(
+                    "automatic MCP journal requires a Host-authorized typed MCP action".to_string(),
+                )
+            }
         };
-        if approval.approval_mode != mycopilot_core::AgentMcpApprovalMode::Auto
-            || approval.call.approval_status != AgentApprovalStatus::Approved
-        {
-            return Err("automatic MCP journal requires Host-authorized Auto policy".to_string());
-        }
         let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
         let deletion_lifecycle = self
             .deletion_lifecycle
@@ -191,11 +207,10 @@ impl AgentService {
         if deletion_lifecycle.contains_input(&agent_input) {
             return Err("项目或会话正在移除，无法启动 MCP 操作。".to_string());
         }
-        if !pending_action_binding_matches(run_id, None, &action, &agent_input) {
+        if !pending_action_binding_matches_for_auto_journal(run_id, None, &action, &agent_input) {
             return Err("automatic MCP journal frozen identity is inconsistent".to_string());
         }
 
-        let action_id = approval.identity.action_id.clone();
         let storage_id = pending_action_storage_id(run_id, &action_id);
         let record = PendingActionRecord {
             storage_id: storage_id.clone(),
@@ -206,7 +221,7 @@ impl AgentService {
                 assistant_message_id: normalized_optional(assistant_message_id),
                 action_type: action_type_for_action(&action).to_string(),
                 tool_name: tool_name_for_action(&action),
-                tool_call_id: Some(approval.identity.call_id.clone()),
+                tool_call_id: Some(call_id),
                 action,
                 created_at: now_ms(),
                 status: PendingActionStatus::Approved,
@@ -1284,11 +1299,48 @@ fn auto_action_audit_record(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuiltinMcpBindingApprovalStatus {
+    Required,
+    Approved,
+}
+
 pub(super) fn pending_action_binding_matches(
     run_id: &str,
     record: Option<&AgentPendingActionRecord>,
     action: &AgentProposedAction,
     agent_input: &AgentChatInput,
+) -> bool {
+    pending_action_binding_matches_with_builtin_status(
+        run_id,
+        record,
+        action,
+        agent_input,
+        BuiltinMcpBindingApprovalStatus::Required,
+    )
+}
+
+fn pending_action_binding_matches_for_auto_journal(
+    run_id: &str,
+    record: Option<&AgentPendingActionRecord>,
+    action: &AgentProposedAction,
+    agent_input: &AgentChatInput,
+) -> bool {
+    pending_action_binding_matches_with_builtin_status(
+        run_id,
+        record,
+        action,
+        agent_input,
+        BuiltinMcpBindingApprovalStatus::Approved,
+    )
+}
+
+fn pending_action_binding_matches_with_builtin_status(
+    run_id: &str,
+    record: Option<&AgentPendingActionRecord>,
+    action: &AgentProposedAction,
+    agent_input: &AgentChatInput,
+    builtin_status: BuiltinMcpBindingApprovalStatus,
 ) -> bool {
     if matches!(
         action,
@@ -1360,7 +1412,11 @@ pub(super) fn pending_action_binding_matches(
 
     if let AgentProposedAction::BuiltinMcpToolApproval { approval } = action {
         return mycopilot_core::validate_builtin_mcp_tool_approval_shape(approval).is_ok()
-            && approval.approval_status == AgentApprovalStatus::Required
+            && approval.approval_status
+                == match builtin_status {
+                    BuiltinMcpBindingApprovalStatus::Required => AgentApprovalStatus::Required,
+                    BuiltinMcpBindingApprovalStatus::Approved => AgentApprovalStatus::Approved,
+                }
             && approval.identity.run_id == run_id
             && approval.identity.call_id == checkpoint_call.id
             && approval.identity.model_name == checkpoint_call.name

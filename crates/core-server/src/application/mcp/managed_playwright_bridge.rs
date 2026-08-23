@@ -588,6 +588,9 @@ impl ManagedPlaywrightHostBridge {
         result
     }
 
+    // These values are independent pieces of frozen interruption evidence; grouping them into a
+    // loosely typed bag would make certainty regressions easier to introduce.
+    #[allow(clippy::too_many_arguments)]
     async fn settle_interrupted_request(
         &self,
         request_id: Uuid,

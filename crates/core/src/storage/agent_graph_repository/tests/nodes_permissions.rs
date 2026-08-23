@@ -122,6 +122,7 @@ fn effective_permissions_inherit_direct_parent_and_meet_every_ancestor_snapshot(
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
     };
     record_permissions_for_test_turn(
         &mut connection,
@@ -138,6 +139,16 @@ fn effective_permissions_inherit_direct_parent_and_meet_every_ancestor_snapshot(
         "child-custom",
         custom_parent,
         30,
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT schema_version FROM agent_effective_permission_snapshots WHERE agent_id = 'agent-child'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        i64::from(AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION)
     );
 
     let inherited = inherit_agent_permissions_in_transaction(&connection, "agent-grand")

@@ -27,6 +27,11 @@ fn waiting_skill_run(action_id: &str) -> String {
                 "skillRevision": "revision-1",
                 "resourcePath": "scripts/check.py",
                 "resourceDigest": "sha256:fixture",
+                "source": {
+                    "sourceId": "installed:user",
+                    "sourceKind": "installed",
+                    "trust": "untrusted"
+                },
                 "interpreter": "python3",
                 "args": [],
                 "requirements": {

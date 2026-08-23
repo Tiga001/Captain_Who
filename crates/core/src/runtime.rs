@@ -49,13 +49,14 @@ use crate::model_request_observation::{
 };
 use crate::prompts::{build_system_prompt_with_collaboration, collaboration_harness_section};
 use crate::protocol::{
-    AgentApprovalStatus, AgentAutomationExecutionContext, AgentChatInput, AgentChatMessage,
-    AgentChatOutput, AgentCommandPermission, AgentCommandSafetyPolicy,
-    AgentContextCompactionEventOutcome, AgentContextWindowSnapshot, AgentError, AgentEvent,
-    AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences, AgentProposedAction,
-    AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus, AgentSkillActivation,
-    AgentSkillScriptPreflightStatus, AgentSteerInput, AgentToolApprovalMode, AgentToolCall,
-    AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
+    AgentApprovalStatus, AgentAutomationExecutionContext, AgentBuiltinExecutionPermission,
+    AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
+    AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowSnapshot,
+    AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences,
+    AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus,
+    AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
+    AgentSkillScriptSourceKind, AgentSkillScriptTrust, AgentSteerInput, AgentToolApprovalMode,
+    AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
 use crate::provider_profile::{
     ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
@@ -1900,9 +1901,22 @@ impl AgentRuntime {
                         && definition_requires_approval;
                     let auto_execute_mcp_action = policy_preflight_failure.is_none()
                         && tool_registry.auto_executes_prepared_action(&call.tool);
+                    // Built-in capability actions still need their typed Host preparation even
+                    // when the effective permission skips the human prompt. In particular,
+                    // activation mints a run-bound capability grant and sensitive MCP calls mint
+                    // a target-bound one-shot grant. Only calls whose reviewed call-level policy
+                    // actually requires approval enter this route, so Dynamic tools with benign
+                    // arguments continue through the ordinary direct execution path.
+                    let auto_execute_builtin_action = policy_preflight_failure.is_none()
+                        && auto_executes_builtin_prepared_action(
+                            command_permissions.builtin_execution,
+                            definition_requires_approval,
+                            &tool_identity,
+                        );
                     let auto_execute_host_action = auto_execute_policy_action
                         || auto_execute_patch
-                        || auto_execute_mcp_action;
+                        || auto_execute_mcp_action
+                        || auto_execute_builtin_action;
                     if !is_policy_process_tool {
                         if policy_preflight_failure.is_some() {
                             // A rejected or unavailable call is terminal for this attempt. Never
@@ -2615,8 +2629,17 @@ impl AgentRuntime {
                                         diff: diff.clone(),
                                     });
                                 }
-                                let frozen_checkpoint_result = match &action {
+                                let frozen_pending_action_id = match &action {
                                     AgentProposedAction::McpToolCall { approval } => {
+                                        Some(approval.identity.action_id.clone())
+                                    }
+                                    AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                                        Some(approval.identity.action_id.clone())
+                                    }
+                                    _ => None,
+                                };
+                                let frozen_checkpoint_result =
+                                    if let Some(pending_action_id) = frozen_pending_action_id {
                                         runtime_extensions.snapshots().and_then(
                                             |extension_snapshots| {
                                                 let trace = conversation_trace
@@ -2646,17 +2669,16 @@ impl AgentRuntime {
                                                     },
                                                 )
                                                 .map(|mut checkpoint| {
-                                                    checkpoint.pending_action_id = Some(
-                                                        approval.identity.action_id.clone(),
-                                                    );
+                                                    checkpoint.pending_action_id =
+                                                        Some(pending_action_id);
                                                     checkpoint
                                                 })
                                             },
                                         )
                                         .map(Some)
-                                    }
-                                    _ => Ok(None),
-                                };
+                                    } else {
+                                        Ok(None)
+                                    };
                                 match frozen_checkpoint_result {
                                     Ok(frozen_checkpoint) => {
                                         if let Some(executor) = host_executor.as_ref() {
@@ -4378,6 +4400,25 @@ fn projection_differs(left: &AgentToolResult, right: &AgentToolResult) -> bool {
         (Ok(left), Ok(right)) => left != right,
         _ => true,
     }
+}
+
+fn auto_executes_builtin_prepared_action(
+    permission: crate::AgentBuiltinExecutionPermission,
+    call_requires_approval: bool,
+    identity: &AgentToolIdentity,
+) -> bool {
+    permission == crate::AgentBuiltinExecutionPermission::AutoApprove
+        && call_requires_approval
+        && (matches!(identity, AgentToolIdentity::BuiltinCapability { .. })
+            || matches!(
+                identity,
+                AgentToolIdentity::RuntimeExtension {
+                    extension_id,
+                    tool_name,
+                } if extension_id
+                    == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+                    && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME
+            ))
 }
 
 #[cfg(test)]

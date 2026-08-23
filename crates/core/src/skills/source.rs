@@ -64,6 +64,8 @@ pub(super) trait SkillSource: Send + Sync {
             skill_id: package.id().clone(),
             revision: package.revision().clone(),
             source_id: self.id().clone(),
+            source_kind: self.kind(),
+            trust: self.trust(),
             resources: package.resources().clone(),
             reader,
         })

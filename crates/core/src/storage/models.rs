@@ -589,7 +589,7 @@ pub struct ChatSearchResult {
 
 /// Permission choices persisted before this version predate the current `full` semantics and
 /// must not be interpreted as an explicit opt-in to those broader privileges.
-pub const CURRENT_COMPOSER_PERMISSION_MODE_VERSION: i64 = 1;
+pub const CURRENT_COMPOSER_PERMISSION_MODE_VERSION: i64 = 2;
 const COMPOSER_DRAFT_PAYLOAD_ERROR: &str = "stored_composer_draft_malformed";
 
 #[derive(Debug, Deserialize)]

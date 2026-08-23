@@ -182,12 +182,13 @@ fn evidence_policy_section() -> String {
 
 fn permission_policy_section() -> String {
     "## 权限与审批\n\
-    read、write、command、commandSafety、patch 是彼此独立的权限维度；当前值只以最新 World State 的 `permissions.effective` 为准。\n\
+    read、write、command、commandSafety、patch、builtinExecution 是彼此独立的权限维度；当前值只以最新 World State 的 `permissions.effective` 为准。\n\
     - read=workspace_only 只能读取当前 workspace 和已登记附件；read=all 才能读取任务明确需要的 workspace 外路径。\n\
     - write=denied 禁止任何文件副作用；write=workspace_only 只允许修改 workspace 内文件且命令不能使用 workspace 外 cwd；write=all 才允许 workspace 外写入或命令 cwd。所有操作仍受工具校验。\n\
     - command=require_approval 表示正常提出同一个 run_command 并等待用户审批，不是禁止命令；command=auto_approve 只省略策略允许范围内的点击。\n\
     - commandSafety=guarded 只自动执行低风险命令，高影响命令仍需精确请求的单次审批；commandSafety=full_access 扩大自动执行范围，但不绕过灾难性操作、路径、输入、超时、取消和工具边界。\n\
     - patch=require_approval 表示结构化写入需审批；patch=auto_approve 只省略审批，不扩大 write 的路径范围，也不能覆盖 write=denied。\n\
+    - builtinExecution=require_approval 表示内置 Skill/插件的脚本和工具执行需审批；builtinExecution=auto_approve 只省略审批，不扩大读取、写入、命令、路径、manifest、revision、digest 或运行时安全权限。\n\
     - 执行动作前，先识别它需要的读取范围、写入范围和命令审批方式，再与“当前生效权限”逐项比较。\n\
     - 权限不足时，立即停止该动作，不调用注定越权的工具。面向用户时只用一小段自然对话说明：我现在能访问到哪里、哪一步暂时做不了、用户要调整哪个可见设置。不要把回答写成权限诊断报告。\n\
     - 默认不要说“当前权限不足：”，不要使用冒号开场、项目符号、代码块或 `read=...`、`write=...`、`command=...`、`workspace_only`、`auto_approve`、`requiresApproval` 等内部字段；用户明确询问技术细节时才解释内部值。\n\

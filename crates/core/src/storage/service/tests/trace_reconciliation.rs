@@ -308,6 +308,10 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
             "id": "tool-call-call-run-cancelled-orphan",
             "type": "tool_call",
             "callId": "call-run-cancelled-orphan",
+            "identity": {
+                "type": "builtin",
+                "toolName": "read_file"
+            },
             "traceSequence": 1
         })
     );
@@ -585,6 +589,13 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
                 "id": "live-tool-call",
                 "type": "tool_call",
                 "callId": call_id,
+                // Renderer state is only a projection. A reload must not preserve an identity
+                // supplied by that projection when the durable trace has authoritative
+                // provenance for the same call.
+                "identity": {
+                    "type": "unregistered",
+                    "toolName": "renderer-spoofed-read-file"
+                },
                 "traceSequence": 2
             },
             {
@@ -728,6 +739,10 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
             "id": "tool-call-call-live-trace-reload",
             "type": "tool_call",
             "callId": "call-live-trace-reload",
+            "identity": {
+                "type": "builtin",
+                "toolName": "read_file"
+            },
             "traceSequence": 2
         },
         {

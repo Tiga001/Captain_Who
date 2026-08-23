@@ -1,13 +1,14 @@
 use mycopilot_core::protocol::{
-    AgentCommandPermission, AgentCommandSafetyPolicy, AgentPatchPermission, AgentPermissions,
-    AgentReadPermission, AgentWritePermission,
+    AgentBuiltinExecutionPermission, AgentCommandPermission, AgentCommandSafetyPolicy,
+    AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
 };
 use mycopilot_core::provider_profile::{ReasoningEffort, ReasoningMode};
 use mycopilot_core::storage::models::{ModelConfigRecord, UiPreferencesRecord};
 use mycopilot_protocol_rs::{
-    AutomationCommandPermissionDto, AutomationCommandSafetyPolicyDto, AutomationPatchPermissionDto,
-    AutomationPermissionModeDto, AutomationReadPermissionDto, AutomationReasoningEffortDto,
-    AutomationReasoningModeDto, AutomationReasoningProjectionDto, AutomationReasoningSourceDto,
+    AutomationBuiltinExecutionPermissionDto, AutomationCommandPermissionDto,
+    AutomationCommandSafetyPolicyDto, AutomationPatchPermissionDto, AutomationPermissionModeDto,
+    AutomationReadPermissionDto, AutomationReasoningEffortDto, AutomationReasoningModeDto,
+    AutomationReasoningProjectionDto, AutomationReasoningSourceDto,
     AutomationResolvedPermissionsDto, AutomationWritePermissionDto,
     AUTOMATION_PERMISSION_MODE_VERSION,
 };
@@ -154,6 +155,14 @@ pub(crate) fn permissions_projection(
             AgentPatchPermission::RequireApproval => AutomationPatchPermissionDto::RequireApproval,
             AgentPatchPermission::AutoApprove => AutomationPatchPermissionDto::AutoApprove,
         },
+        builtin_execution: match permissions.builtin_execution {
+            AgentBuiltinExecutionPermission::RequireApproval => {
+                AutomationBuiltinExecutionPermissionDto::RequireApproval
+            }
+            AgentBuiltinExecutionPermission::AutoApprove => {
+                AutomationBuiltinExecutionPermissionDto::AutoApprove
+            }
+        },
     }
 }
 
@@ -187,6 +196,14 @@ pub(crate) fn permissions_from_projection(
             AutomationPatchPermissionDto::RequireApproval => AgentPatchPermission::RequireApproval,
             AutomationPatchPermissionDto::AutoApprove => AgentPatchPermission::AutoApprove,
         },
+        builtin_execution: match projection.builtin_execution {
+            AutomationBuiltinExecutionPermissionDto::RequireApproval => {
+                AgentBuiltinExecutionPermission::RequireApproval
+            }
+            AutomationBuiltinExecutionPermissionDto::AutoApprove => {
+                AgentBuiltinExecutionPermission::AutoApprove
+            }
+        },
     }
 }
 
@@ -216,6 +233,7 @@ fn default_chat_permissions() -> AgentPermissions {
         command: AgentCommandPermission::RequireApproval,
         command_safety: AgentCommandSafetyPolicy::Guarded,
         patch: AgentPatchPermission::RequireApproval,
+        builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
     }
 }
 
@@ -226,6 +244,7 @@ fn full_chat_permissions() -> AgentPermissions {
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
     }
 }
 
@@ -258,6 +277,7 @@ mod tests {
                 command: AgentCommandPermission::AutoApprove,
                 command_safety: AgentCommandSafetyPolicy::FullAccess,
                 patch: AgentPatchPermission::AutoApprove,
+                builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
             },
             updated_at: 0,
         }
@@ -325,6 +345,7 @@ mod tests {
                 command: AutomationCommandPermissionDto::RequireApproval,
                 command_safety: AutomationCommandSafetyPolicyDto::Guarded,
                 patch: AutomationPatchPermissionDto::RequireApproval,
+                builtin_execution: AutomationBuiltinExecutionPermissionDto::RequireApproval,
             }
         );
     }
@@ -353,6 +374,10 @@ mod tests {
             resolved.projection.patch,
             AutomationPatchPermissionDto::AutoApprove
         );
+        assert_eq!(
+            resolved.projection.builtin_execution,
+            AutomationBuiltinExecutionPermissionDto::AutoApprove
+        );
     }
 
     #[test]
@@ -378,6 +403,10 @@ mod tests {
         assert_eq!(
             resolved.permissions.patch,
             AgentPatchPermission::AutoApprove
+        );
+        assert_eq!(
+            resolved.permissions.builtin_execution,
+            AgentBuiltinExecutionPermission::AutoApprove
         );
     }
 

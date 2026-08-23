@@ -515,7 +515,8 @@ fn current_permissions_require_explicit_command_safety_policy() {
         "read": "all",
         "write": "all",
         "command": "auto_approve",
-        "patch": "auto_approve"
+        "patch": "auto_approve",
+        "builtinExecution": "require_approval"
     }));
     assert!(missing.is_err());
 
@@ -524,7 +525,8 @@ fn current_permissions_require_explicit_command_safety_policy() {
         "write": "all",
         "command": "auto_approve",
         "commandSafety": "guarded",
-        "patch": "auto_approve"
+        "patch": "auto_approve",
+        "builtinExecution": "require_approval"
     }))
     .unwrap();
     assert_eq!(
@@ -704,12 +706,21 @@ fn command_safety_policy_uses_stable_camel_case_field_and_wire_value() {
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
     };
 
     let serialized = serde_json::to_value(permissions).unwrap();
 
     assert_eq!(serialized["commandSafety"], "full_access");
+    assert_eq!(serialized["builtinExecution"], "auto_approve");
     assert!(serialized.get("command_safety").is_none());
+
+    let mut missing_builtin_execution = serialized;
+    missing_builtin_execution
+        .as_object_mut()
+        .unwrap()
+        .remove("builtinExecution");
+    assert!(serde_json::from_value::<AgentPermissions>(missing_builtin_execution).is_err());
 }
 
 #[test]
@@ -857,6 +868,7 @@ fn agent_permission_meet_is_component_wise_and_never_widens() {
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
     };
     let custom = AgentPermissions {
         read: AgentReadPermission::All,
@@ -864,6 +876,7 @@ fn agent_permission_meet_is_component_wise_and_never_widens() {
         command: AgentCommandPermission::RequireApproval,
         command_safety: AgentCommandSafetyPolicy::Guarded,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
     };
     let minimum = AgentPermissions::default();
 

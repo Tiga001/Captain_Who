@@ -664,6 +664,9 @@ export const enUSTranslations = {
   'general.autoApproveCommands': 'Run commands without approval',
   'general.autoApproveCommandsDescription':
     'Automatically run commands that pass permission and risk checks.',
+  'general.autoApproveBuiltinExecution': 'Use built-in capabilities without approval',
+  'general.autoApproveBuiltinExecutionDescription':
+    'Run scripts and tools from built-in Skills and plugins without approval.',
   'general.readPermission': 'Read access',
   'general.writePermission': 'Write access',
   'general.workspaceOnly': 'Workspace only',

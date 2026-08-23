@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 9;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 10;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -546,8 +546,13 @@ mod tests {
         assert!(!encoded.contains(API_URL_CANARY));
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
-        assert!(encoded.contains("\"resumeInputSchemaVersion\":9"));
         let encoded_object = serde_json::from_str::<Value>(&encoded).unwrap();
+        assert_eq!(
+            encoded_object
+                .get("resumeInputSchemaVersion")
+                .and_then(Value::as_u64),
+            Some(u64::from(PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION))
+        );
         for absent_placeholder in [
             "approvalDecision",
             "toolContinuation",

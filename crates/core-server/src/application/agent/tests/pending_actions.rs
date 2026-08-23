@@ -3698,6 +3698,535 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
     ));
 }
 
+#[derive(Clone)]
+struct AutoActivationTestProvider {
+    manifest: mycopilot_core::BuiltinCapabilityManifest,
+    grant: Arc<Mutex<Option<mycopilot_core::CapabilityGrant>>>,
+    approvals: Arc<std::sync::atomic::AtomicUsize>,
+    revocations: Arc<std::sync::atomic::AtomicUsize>,
+    cancel_on_approve: Arc<Mutex<Option<AgentCancellationToken>>>,
+}
+
+impl mycopilot_core::BuiltinCapabilityProvider for AutoActivationTestProvider {
+    fn manifests(&self) -> AgentResult<Vec<mycopilot_core::BuiltinCapabilityManifest>> {
+        Ok(vec![self.manifest.clone()])
+    }
+
+    fn policy(
+        &self,
+        _capability_id: &mycopilot_core::BuiltinCapabilityId,
+    ) -> AgentResult<mycopilot_core::BuiltinCapabilityPolicy> {
+        Ok(mycopilot_core::BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 1,
+        })
+    }
+
+    fn grant(
+        &self,
+        _run_id: &str,
+        _capability_id: &mycopilot_core::BuiltinCapabilityId,
+    ) -> AgentResult<Option<mycopilot_core::CapabilityGrant>> {
+        Ok(self.grant.lock().unwrap().clone())
+    }
+
+    fn approve_activation(
+        &self,
+        approval: &mycopilot_core::AgentBuiltinCapabilityActivationApproval,
+    ) -> AgentResult<mycopilot_core::CapabilityGrant> {
+        self.approvals
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let grant = mycopilot_core::CapabilityGrant {
+            run_id: approval.run_id.clone(),
+            capability_id: mycopilot_core::BuiltinCapabilityId::parse(
+                approval.capability_id.clone(),
+            )?,
+            activation_id: mycopilot_core::CapabilityActivationId::parse(
+                approval.activation_id.clone(),
+            )?,
+            manifest_digest: approval.manifest_digest.clone(),
+            upstream_catalog_digest: self
+                .manifest
+                .provider_contract
+                .upstream_catalog_digest
+                .clone(),
+            provider_policy_digest: self.manifest.provider_contract.policy_digest.clone(),
+            policy_revision: approval.policy_revision,
+            created_at: approval.created_at,
+            expires_at: approval
+                .created_at
+                .saturating_add(mycopilot_core::BUILTIN_CAPABILITY_GRANT_TTL_SECONDS),
+        };
+        *self.grant.lock().unwrap() = Some(grant.clone());
+        if let Some(cancellation) = self.cancel_on_approve.lock().unwrap().take() {
+            cancellation.cancel();
+        }
+        Ok(grant)
+    }
+
+    fn revoke_activation(
+        &self,
+        _activation_id: &mycopilot_core::CapabilityActivationId,
+        _action_id: &str,
+    ) -> AgentResult<()> {
+        self.revocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.grant.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn revoke_grants(
+        &self,
+        _capability_id: &mycopilot_core::BuiltinCapabilityId,
+    ) -> AgentResult<()> {
+        *self.grant.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        _invocation: mycopilot_core::BuiltinCapabilityInvocation,
+        _expected_grant: mycopilot_core::CapabilityGrant,
+        _cancellation: AgentCancellationToken,
+    ) -> mycopilot_core::BuiltinCapabilityFuture<'a, Value> {
+        Box::pin(async { Err(AgentError::new("not used by activation test")) })
+    }
+}
+
+fn auto_activation_test_provider() -> AutoActivationTestProvider {
+    let manifest = mycopilot_core::BuiltinCapabilityManifest::new(
+        mycopilot_core::BuiltinCapabilityDescriptor {
+            id: mycopilot_core::BuiltinCapabilityId::parse("browser_automation").unwrap(),
+            display_name: "Browser automation".to_string(),
+            description: "Control the reviewed browser".to_string(),
+        },
+        "builtin.browser_automation.mcp",
+        "fixture-v1",
+        vec![mycopilot_core::BuiltinCapabilityToolDescriptor::new(
+            "browser_snapshot",
+            "browser_snapshot",
+            "Read the current page",
+            json!({"type":"object", "additionalProperties": false}),
+            mycopilot_core::AgentToolSafety::ReadOnly,
+            false,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    AutoActivationTestProvider {
+        manifest,
+        grant: Arc::new(Mutex::new(None)),
+        approvals: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        revocations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        cancel_on_approve: Arc::new(Mutex::new(None)),
+    }
+}
+
+fn auto_activation_test_input() -> AgentChatInput {
+    let mut input: AgentChatInput = serde_json::from_value(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    input.context = Some(mycopilot_core::AgentRunContext {
+        conversation_id: None,
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: mycopilot_core::AgentPermissions {
+            builtin_execution: mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove,
+            ..mycopilot_core::AgentPermissions::default()
+        },
+        collaboration_identity: None,
+    });
+    input
+}
+
+fn auto_activation_test_action(
+    provider: &AutoActivationTestProvider,
+    run_id: &str,
+) -> AgentProposedAction {
+    let now = u64::try_from(mycopilot_core::storage::now_ms()).unwrap() / 1_000;
+    AgentProposedAction::BuiltinCapabilityActivation {
+        approval: Box::new(mycopilot_core::AgentBuiltinCapabilityActivationApproval {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            activation_id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            call_id: "auto-activation-call".to_string(),
+            capability_id: "browser_automation".to_string(),
+            display_name: "Browser automation".to_string(),
+            reason: "Open the reviewed browser".to_string(),
+            manifest_digest: provider.manifest.manifest_digest.clone(),
+            policy_revision: 1,
+            created_at: now,
+            expires_at: now.saturating_add(900),
+            approval_status: AgentApprovalStatus::Approved,
+        }),
+    }
+}
+
+#[derive(Clone)]
+struct AutoSensitiveTestProvider {
+    manifest: mycopilot_core::BuiltinCapabilityManifest,
+    capability_grant: mycopilot_core::CapabilityGrant,
+    storage: Arc<StorageService>,
+    invocations: Arc<std::sync::atomic::AtomicUsize>,
+    revocations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl mycopilot_core::BuiltinCapabilityProvider for AutoSensitiveTestProvider {
+    fn manifests(&self) -> AgentResult<Vec<mycopilot_core::BuiltinCapabilityManifest>> {
+        Ok(vec![self.manifest.clone()])
+    }
+
+    fn policy(
+        &self,
+        _capability_id: &mycopilot_core::BuiltinCapabilityId,
+    ) -> AgentResult<mycopilot_core::BuiltinCapabilityPolicy> {
+        Ok(mycopilot_core::BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 1,
+        })
+    }
+
+    fn grant(
+        &self,
+        run_id: &str,
+        capability_id: &mycopilot_core::BuiltinCapabilityId,
+    ) -> AgentResult<Option<mycopilot_core::CapabilityGrant>> {
+        Ok((self.capability_grant.run_id == run_id
+            && self.capability_grant.capability_id == *capability_id)
+            .then(|| self.capability_grant.clone()))
+    }
+
+    fn approve_activation(
+        &self,
+        _approval: &mycopilot_core::AgentBuiltinCapabilityActivationApproval,
+    ) -> AgentResult<mycopilot_core::CapabilityGrant> {
+        Err(AgentError::new("not used by sensitive auto test"))
+    }
+
+    fn revoke_activation(
+        &self,
+        _activation_id: &mycopilot_core::CapabilityActivationId,
+        _action_id: &str,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    fn revoke_grants(
+        &self,
+        _capability_id: &mycopilot_core::BuiltinCapabilityId,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    fn approve_builtin_mcp_tool(
+        &self,
+        approval: &mycopilot_core::AgentBuiltinMcpToolApproval,
+    ) -> AgentResult<mycopilot_core::BuiltinMcpToolGrant> {
+        let identity = &approval.identity;
+        Ok(mycopilot_core::BuiltinMcpToolGrant {
+            grant_id: uuid::Uuid::new_v4().to_string(),
+            approval_id: identity.approval_id.clone(),
+            run_id: identity.run_id.clone(),
+            call_id: identity.call_id.clone(),
+            capability_id: mycopilot_core::BuiltinCapabilityId::parse(
+                identity.capability_id.clone(),
+            )?,
+            capability_activation_id: mycopilot_core::CapabilityActivationId::parse(
+                identity.capability_activation_id.clone(),
+            )?,
+            managed_mcp_id: identity.managed_mcp_id.clone(),
+            package_name: identity.package_name.clone(),
+            package_version: identity.package_version.clone(),
+            upstream_catalog_digest: identity.upstream_catalog_digest.clone(),
+            manifest_digest: identity.manifest_digest.clone(),
+            policy_digest: identity.policy_digest.clone(),
+            policy_revision: identity.policy_revision,
+            tool_id: identity.tool_id.clone(),
+            raw_name: identity.raw_name.clone(),
+            model_name: identity.model_name.clone(),
+            upstream_schema_digest: identity.upstream_schema_digest.clone(),
+            host_overlay_digest: identity.host_overlay_digest.clone(),
+            host_input_schema_digest: identity.host_input_schema_digest.clone(),
+            arguments_digest: identity.arguments_digest.clone(),
+            resource_scope_digest: identity.resource_scope_digest.clone(),
+            target_binding_id: None,
+            target_binding_digest: None,
+            origin: identity.origin.clone(),
+            risk_kinds: approval.risk_kinds.clone(),
+            created_at: approval.created_at,
+            expires_at: approval.expires_at,
+        })
+    }
+
+    fn revoke_builtin_mcp_tool_grant(
+        &self,
+        _grant_id: &str,
+        _approval_id: &str,
+    ) -> AgentResult<()> {
+        self.revocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn invoke_approved_builtin_mcp_tool<'a>(
+        &'a self,
+        approval: mycopilot_core::AgentBuiltinMcpToolApproval,
+        _grant: mycopilot_core::BuiltinMcpToolGrant,
+        _cancellation: AgentCancellationToken,
+    ) -> mycopilot_core::BuiltinCapabilityFuture<'a, Value> {
+        Box::pin(async move {
+            let storage_id =
+                pending_action_storage_id(&approval.identity.run_id, &approval.identity.action_id);
+            let record = self
+                .storage
+                .get_pending_agent_action(&storage_id)?
+                .ok_or_else(|| AgentError::new("missing durable sensitive auto journal"))?;
+            if record.status != "executing" {
+                return Err(AgentError::new(
+                    "sensitive invocation ran before the durable executing claim",
+                ));
+            }
+            self.invocations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"status": "ok"}))
+        })
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        _invocation: mycopilot_core::BuiltinCapabilityInvocation,
+        _expected_grant: mycopilot_core::CapabilityGrant,
+        _cancellation: AgentCancellationToken,
+    ) -> mycopilot_core::BuiltinCapabilityFuture<'a, Value> {
+        Box::pin(async { Err(AgentError::new("not used by sensitive auto test")) })
+    }
+}
+
+fn auto_sensitive_test_fixture(
+    storage: Arc<StorageService>,
+    run_id: &str,
+    call_id: &str,
+) -> (
+    mycopilot_core::BuiltinCapabilityRuntime,
+    AutoSensitiveTestProvider,
+    mycopilot_core::AgentBuiltinMcpToolApproval,
+    AgentChatInput,
+) {
+    let descriptor = mycopilot_core::BuiltinCapabilityToolDescriptor::new(
+        "browser_evaluate",
+        "browser_evaluate",
+        "Evaluate a reviewed script",
+        json!({
+            "type": "object",
+            "properties": {"function": {"type": "string"}},
+            "required": ["function"],
+            "additionalProperties": false
+        }),
+        mycopilot_core::AgentToolSafety::RequiresApproval,
+        false,
+    )
+    .unwrap()
+    .with_builtin_approval_policy(
+        mycopilot_core::BuiltinMcpToolApprovalMode::Always,
+        vec![mycopilot_core::BuiltinMcpToolRiskKind::PageScriptExecution],
+    )
+    .unwrap();
+    let manifest = mycopilot_core::BuiltinCapabilityManifest::new(
+        mycopilot_core::BuiltinCapabilityDescriptor {
+            id: mycopilot_core::BuiltinCapabilityId::parse("browser_automation").unwrap(),
+            display_name: "Browser automation".to_string(),
+            description: "Control the reviewed browser".to_string(),
+        },
+        "builtin.browser_automation.mcp",
+        "fixture-v1",
+        vec![descriptor.clone()],
+    )
+    .unwrap();
+    let now = u64::try_from(mycopilot_core::storage::now_ms()).unwrap() / 1_000;
+    let activation_id = mycopilot_core::CapabilityActivationId::generate();
+    let capability_grant = mycopilot_core::CapabilityGrant {
+        run_id: run_id.to_string(),
+        capability_id: manifest.descriptor.id.clone(),
+        activation_id: activation_id.clone(),
+        manifest_digest: manifest.manifest_digest.clone(),
+        upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+        provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
+        policy_revision: 1,
+        created_at: now,
+        expires_at: now.saturating_add(mycopilot_core::BUILTIN_CAPABILITY_GRANT_TTL_SECONDS),
+    };
+    let provider = AutoSensitiveTestProvider {
+        manifest: manifest.clone(),
+        capability_grant,
+        storage: Arc::clone(&storage),
+        invocations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        revocations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let runtime =
+        mycopilot_core::BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap();
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let approval = mycopilot_core::AgentBuiltinMcpToolApproval {
+        schema_version: mycopilot_core::BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION,
+        identity: mycopilot_core::BuiltinMcpToolApprovalIdentity {
+            action_id: action_id.clone(),
+            approval_id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            call_id: call_id.to_string(),
+            capability_id: manifest.descriptor.id.as_str().to_string(),
+            capability_activation_id: activation_id.as_str().to_string(),
+            managed_mcp_id: manifest.managed_mcp_id.clone(),
+            package_name: manifest.provider_contract.package_name.clone(),
+            package_version: manifest.provider_contract.package_version.clone(),
+            upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+            manifest_digest: manifest.manifest_digest.clone(),
+            policy_digest: manifest.provider_contract.policy_digest.clone(),
+            policy_revision: 1,
+            tool_id: descriptor.tool_id.clone(),
+            raw_name: descriptor.raw_name.clone(),
+            model_name: descriptor.model_name.clone(),
+            upstream_schema_digest: descriptor.upstream_schema_digest.clone(),
+            host_overlay_digest: descriptor.host_overlay_digest.clone(),
+            host_input_schema_digest: descriptor.schema_digest.clone(),
+            arguments_digest: format!("sha256:{}", "7".repeat(64)),
+            resource_scope_digest: format!("sha256:{}", "8".repeat(64)),
+            origin: Some("https://mail.example.test".to_string()),
+        },
+        capability_display_name: manifest.descriptor.display_name.clone(),
+        tool_display_name: descriptor.model_name.clone(),
+        call_reason: "Run the reviewed page script.".to_string(),
+        operation_category: "page_script_execution".to_string(),
+        resource_summary: mycopilot_core::BuiltinMcpToolResourceSummary {
+            scope: "managed_surface".to_string(),
+            display_name: "Current managed page".to_string(),
+            file_basenames: Vec::new(),
+            origin: Some("https://mail.example.test".to_string()),
+        },
+        risk_kinds: vec![mycopilot_core::BuiltinMcpToolRiskKind::PageScriptExecution],
+        created_at: now,
+        expires_at: now.saturating_add(900),
+        approval_status: AgentApprovalStatus::Approved,
+    };
+    let call = AgentToolCall {
+        id: call_id.to_string(),
+        tool: descriptor.model_name.clone(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Approved,
+        reason: Some(approval.call_reason.clone()),
+    };
+    let provenance = AgentToolIdentity::BuiltinCapability {
+        capability_id: approval.identity.capability_id.clone().into(),
+        managed_mcp_id: approval.identity.managed_mcp_id.clone().into(),
+        package_name: approval.identity.package_name.clone().into(),
+        package_version: approval.identity.package_version.clone().into(),
+        upstream_catalog_digest: approval.identity.upstream_catalog_digest.clone().into(),
+        policy_digest: approval.identity.policy_digest.clone().into(),
+        manifest_digest: approval.identity.manifest_digest.clone().into(),
+        tool_id: approval.identity.tool_id.clone().into(),
+        raw_name: approval.identity.raw_name.clone().into(),
+        model_name: approval.identity.model_name.clone().into(),
+        upstream_schema_digest: approval.identity.upstream_schema_digest.clone().into(),
+        host_overlay_digest: approval.identity.host_overlay_digest.clone().into(),
+        host_input_schema_digest: approval.identity.host_input_schema_digest.clone().into(),
+    };
+    let mut input: AgentChatInput = serde_json::from_value(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": {"imageInput": false},
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut input);
+    let run_context = mycopilot_core::AgentRunContext {
+        conversation_id: None,
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: mycopilot_core::AgentPermissions {
+            builtin_execution: mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove,
+            ..mycopilot_core::AgentPermissions::default()
+        },
+        collaboration_identity: None,
+    };
+    input.context = Some(run_context.clone());
+    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&action_id),
+        &call,
+        provenance,
+    ));
+    input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    (runtime, provider, approval, input)
+}
+
+#[test]
+fn auto_activation_has_durable_non_replayable_receipt_and_cancellation_revokes_grant() {
+    for cancel_during_approval in [false, true] {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("auto-activation.sqlite")).unwrap());
+        let provider = auto_activation_test_provider();
+        let runtime =
+            mycopilot_core::BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap();
+        let service = AgentService::new(Arc::clone(&storage)).with_builtin_capabilities(runtime);
+        let run_id = if cancel_during_approval {
+            "auto-activation-cancel-run"
+        } else {
+            "auto-activation-success-run"
+        };
+        let action = auto_activation_test_action(&provider, run_id);
+        let input = auto_activation_test_input();
+        let cancellation = AgentCancellationToken::new();
+        if cancel_during_approval {
+            *provider.cancel_on_approve.lock().unwrap() = Some(cancellation.clone());
+        }
+        let context =
+            AutoApprovedActionContext::new(input.clone(), run_id.to_string(), None, None, None);
+        let result = service
+            .execute_auto_approved_action(context, action.clone(), cancellation)
+            .unwrap();
+        assert_eq!(
+            result.ok, !cancel_during_approval,
+            "cancellation after grant minting must be reflected in the durable result"
+        );
+        assert_eq!(
+            provider.approvals.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            provider.grant.lock().unwrap().is_some(),
+            !cancel_during_approval
+        );
+        assert_eq!(
+            provider
+                .revocations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(cancel_during_approval)
+        );
+
+        let replay = service.execute_auto_approved_action(
+            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None),
+            action,
+            AgentCancellationToken::new(),
+        );
+        assert!(
+            replay.is_err(),
+            "a durable activation receipt must never replay"
+        );
+        assert_eq!(
+            provider.approvals.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+}
+
 #[test]
 fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
     let fixture = tempdir().unwrap();
@@ -4186,6 +4715,187 @@ fn store_builtin_sensitive_test_pending(
         .store_pending_action(run_id, conversation_id, assistant_message_id, action, input,)
         .unwrap());
     (action_id, call)
+}
+
+#[test]
+fn automatic_builtin_sensitive_journal_is_durable_cancelable_and_non_replayable() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "http://127.0.0.1:9/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "auto-builtin-sensitive-journal-run";
+    let (manual_action_id, _) = store_builtin_sensitive_test_pending(
+        &service,
+        &storage,
+        run_id,
+        "auto-builtin-sensitive-conversation",
+        "auto-builtin-sensitive-assistant",
+        "auto-builtin-sensitive-call",
+    );
+    let manual_storage_id = pending_action_storage_id(run_id, &manual_action_id);
+    let template = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&manual_storage_id)
+        .cloned()
+        .unwrap();
+
+    for (index, outcome) in [
+        McpAutoActionJournalTerminalOutcome::Completed,
+        McpAutoActionJournalTerminalOutcome::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let mut action = template.snapshot.action.clone();
+        let AgentProposedAction::BuiltinMcpToolApproval { approval } = &mut action else {
+            unreachable!("fixture always creates a built-in MCP approval")
+        };
+        approval.identity.action_id = action_id.clone();
+        approval.approval_status = AgentApprovalStatus::Approved;
+
+        let mut input = template.agent_input.clone();
+        let run_context = mycopilot_core::AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: mycopilot_core::AgentPermissions {
+                builtin_execution: mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove,
+                ..mycopilot_core::AgentPermissions::default()
+            },
+            collaboration_identity: None,
+        };
+        input.context = Some(run_context.clone());
+        let checkpoint = input.resume_checkpoint.as_mut().unwrap();
+        checkpoint.run_context = Some(run_context);
+        checkpoint.pending_action_id = Some(action_id.clone());
+        assert!(
+            !pending_action_binding_matches(run_id, None, &action, &input),
+            "the manual pending-action boundary must never accept an auto-approved action"
+        );
+
+        let mut journal = service
+            .prepare_auto_mcp_action_journal(run_id, None, None, action.clone(), input.clone())
+            .unwrap();
+        assert_eq!(journal.snapshot.status, PendingActionStatus::Approved);
+        if outcome == McpAutoActionJournalTerminalOutcome::Completed {
+            service.claim_auto_mcp_dispatch(&mut journal).unwrap();
+            assert_eq!(journal.snapshot.status, PendingActionStatus::Executing);
+        }
+        service
+            .settle_auto_mcp_action_journal(&journal, outcome, None)
+            .unwrap();
+
+        let durable = storage
+            .get_pending_agent_action(&pending_action_storage_id(run_id, &action_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.status,
+            if outcome == McpAutoActionJournalTerminalOutcome::Completed {
+                "completed"
+            } else {
+                "cancelled"
+            },
+            "case {index} must have an exact durable terminal state"
+        );
+        assert_eq!(durable.action_json, "{}");
+        assert_eq!(durable.agent_input_json, "{}");
+        assert!(service
+            .prepare_auto_mcp_action_journal(run_id, None, None, action, input)
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn automatic_builtin_sensitive_execution_claims_before_invoke_and_never_replays() {
+    for cancelled in [false, true] {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        save_test_pending_provider(
+            &storage,
+            "test-model",
+            "https://example.test/v1/chat/completions",
+            "test-token",
+            "disabled",
+            "",
+        );
+        let run_id = if cancelled {
+            "auto-sensitive-cancel-run"
+        } else {
+            "auto-sensitive-success-run"
+        };
+        let (runtime, provider, approval, input) =
+            auto_sensitive_test_fixture(Arc::clone(&storage), run_id, "auto-sensitive-call");
+        let service = AgentService::new(Arc::clone(&storage)).with_builtin_capabilities(runtime);
+        let context =
+            AutoApprovedActionContext::new(input.clone(), run_id.to_string(), None, None, None);
+        let cancellation = AgentCancellationToken::new();
+        if cancelled {
+            cancellation.cancel();
+        }
+        let result = service
+            .execute_auto_builtin_mcp_tool_action(
+                &context,
+                Box::new(approval.clone()),
+                cancellation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.ok, !cancelled);
+        assert_eq!(
+            provider
+                .invocations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(!cancelled)
+        );
+        assert_eq!(
+            provider
+                .revocations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(cancelled)
+        );
+        let durable = storage
+            .get_pending_agent_action(&pending_action_storage_id(
+                run_id,
+                &approval.identity.action_id,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.status,
+            if cancelled { "cancelled" } else { "completed" }
+        );
+        assert_eq!(durable.action_json, "{}");
+        assert_eq!(durable.agent_input_json, "{}");
+
+        let replay = service
+            .execute_auto_builtin_mcp_tool_action(
+                &context,
+                Box::new(approval),
+                AgentCancellationToken::new(),
+            )
+            .await;
+        assert!(replay.is_err());
+        assert_eq!(
+            provider
+                .invocations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(!cancelled),
+            "a durable terminal action must never invoke twice"
+        );
+    }
 }
 
 #[test]
@@ -5276,9 +5986,10 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     drop(service);
 
     let row = storage.list_pending_agent_actions().unwrap().remove(0);
-    assert!(row
-        .agent_input_json
-        .contains("\"resumeInputSchemaVersion\":9"));
+    assert!(
+        PersistedAgentResumeInput::decode(&row.agent_input_json).is_ok(),
+        "the durable projection must use the current resume-input schema"
+    );
     for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
         assert!(!row.agent_input_json.contains(forbidden_key));
     }
@@ -6254,6 +6965,11 @@ async fn skill_script_worker_setup_failure_persists_receipt_and_runs_continuatio
             skill_revision: "revision".to_string(),
             resource_path: "scripts/build.py".to_string(),
             resource_digest: "sha256:fixture".to_string(),
+            source: mycopilot_core::AgentSkillScriptSourceProof {
+                source_id: "installed:user".to_string(),
+                source_kind: mycopilot_core::AgentSkillScriptSourceKind::Installed,
+                trust: mycopilot_core::AgentSkillScriptTrust::Untrusted,
+            },
             interpreter: mycopilot_core::AgentSkillScriptInterpreter::Python3,
             args: Vec::new(),
             requirements: mycopilot_core::AgentSkillScriptRequirements::default(),
@@ -6452,6 +7168,11 @@ async fn assert_queued_skill_script_worker_panic_is_supervised(
             skill_revision: "revision".to_string(),
             resource_path: "scripts/build.py".to_string(),
             resource_digest: "sha256:fixture".to_string(),
+            source: mycopilot_core::AgentSkillScriptSourceProof {
+                source_id: "installed:user".to_string(),
+                source_kind: mycopilot_core::AgentSkillScriptSourceKind::Installed,
+                trust: mycopilot_core::AgentSkillScriptTrust::Untrusted,
+            },
             interpreter: mycopilot_core::AgentSkillScriptInterpreter::Python3,
             args: Vec::new(),
             requirements: mycopilot_core::AgentSkillScriptRequirements::default(),
@@ -6741,6 +7462,11 @@ async fn projected_child_skill_approval_atomically_resumes_wake_before_worker_ru
             skill_revision: "revision".to_string(),
             resource_path: "scripts/build.py".to_string(),
             resource_digest: "sha256:fixture".to_string(),
+            source: mycopilot_core::AgentSkillScriptSourceProof {
+                source_id: "installed:user".to_string(),
+                source_kind: mycopilot_core::AgentSkillScriptSourceKind::Installed,
+                trust: mycopilot_core::AgentSkillScriptTrust::Untrusted,
+            },
             interpreter: mycopilot_core::AgentSkillScriptInterpreter::Python3,
             args: Vec::new(),
             requirements: mycopilot_core::AgentSkillScriptRequirements::default(),

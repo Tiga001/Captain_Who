@@ -20,7 +20,11 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::preferences_repository;
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::storage::{acquire_database_instance_lock, create_verified_sqlite_snapshot};
-use mycopilot_core::{ProviderProfileConfig, ProviderProtocolDialect};
+use mycopilot_core::{
+    AgentBuiltinExecutionPermission, AgentCommandPermission, AgentCommandSafetyPolicy,
+    AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
+    ProviderProfileConfig, ProviderProtocolDialect,
+};
 use mycopilot_mcp_client::{McpRegistry, McpTrustLevel};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
@@ -287,8 +291,7 @@ fn inspect_source(
     let connection = open_read_only(source_path)?;
     let model_settings = load_model_settings_for_development_reset(&connection)?;
     let model_settings = model_settings.map(validate_model_profiles).transpose()?;
-    let ui_preferences =
-        preferences_repository::load_ui_preferences(&connection).map_err(redacted_storage_error)?;
+    let ui_preferences = load_ui_preferences_for_development_reset(&connection)?;
     let agent_prompt_preferences =
         agent_prompt_preferences_repository::load_agent_prompt_preferences(&connection)
             .map_err(redacted_storage_error)?;
@@ -333,6 +336,191 @@ fn inspect_source(
         mcp_server_count: mcp_count,
     };
     Ok((Some(configuration), discarded_conversation_rows))
+}
+
+/// Preserves only the UI configuration from the immediately previous development schema.
+///
+/// Conversation, checkpoint, pending-action, and Agent runtime records are intentionally never
+/// decoded or migrated by this reset utility. Schema 18 predates the built-in execution approval
+/// preference, so its safe value is fixed to `RequireApproval` while the fresh schema is built.
+fn load_ui_preferences_for_development_reset(
+    connection: &Connection,
+) -> io::Result<UiPreferencesRecord> {
+    let schema_version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+        .map_err(redacted_storage_error)?;
+    if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION {
+        return preferences_repository::load_ui_preferences(connection)
+            .map_err(redacted_storage_error);
+    }
+
+    if schema_version != 18 {
+        return Err(invalid_data(
+            "only the immediately previous development UI preference schema can be preserved",
+        ));
+    }
+
+    type LegacyUiPreferencesRow = (
+        String,
+        String,
+        String,
+        String,
+        bool,
+        i64,
+        bool,
+        bool,
+        bool,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        bool,
+        i64,
+    );
+
+    let row: Option<LegacyUiPreferencesRow> = connection
+        .query_row(
+            "SELECT
+                 sidebar_conversation_sort,
+                 sidebar_project_sort,
+                 sidebar_project_order_json,
+                 sidebar_section_order,
+                 translucent_sidebar,
+                 translucent_sidebar_transparency,
+                 native_font_smoothing,
+                 show_token_usage_details,
+                 show_context_window_usage,
+                 profile_display_name,
+                 profile_handle,
+                 profile_avatar_data_url,
+                 custom_read_permission,
+                 custom_write_permission,
+                 custom_command_permission,
+                 custom_patch_permission,
+                 full_permission_enabled,
+                 custom_permission_enabled,
+                 updated_at
+             FROM ui_preferences
+             WHERE id = 'default'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                    row.get(18)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(redacted_storage_error)?;
+
+    let Some((
+        sidebar_conversation_sort,
+        sidebar_project_sort,
+        sidebar_project_order_json,
+        sidebar_section_order,
+        translucent_sidebar,
+        translucent_sidebar_transparency,
+        native_font_smoothing,
+        show_token_usage_details,
+        show_context_window_usage,
+        profile_display_name,
+        profile_handle,
+        profile_avatar_data_url,
+        custom_read_permission,
+        custom_write_permission,
+        custom_command_permission,
+        custom_patch_permission,
+        full_permission_enabled,
+        custom_permission_enabled,
+        updated_at,
+    )) = row
+    else {
+        return Ok(legacy_default_ui_preferences());
+    };
+
+    let sidebar_project_order = serde_json::from_str::<Vec<String>>(&sidebar_project_order_json)
+        .map_err(|_| invalid_data("stored project ordering could not be read safely"))?;
+
+    Ok(UiPreferencesRecord {
+        profile_avatar_data_url,
+        profile_display_name,
+        profile_handle,
+        sidebar_conversation_sort,
+        sidebar_project_sort,
+        sidebar_project_order,
+        sidebar_section_order,
+        native_font_smoothing,
+        show_token_usage_details,
+        show_context_window_usage,
+        translucent_sidebar,
+        translucent_sidebar_transparency,
+        full_permission_enabled,
+        custom_permission_enabled,
+        custom_permissions: AgentPermissions {
+            read: match custom_read_permission.as_str() {
+                "all" => AgentReadPermission::All,
+                _ => AgentReadPermission::WorkspaceOnly,
+            },
+            write: match custom_write_permission.as_str() {
+                "denied" => AgentWritePermission::Denied,
+                "all" => AgentWritePermission::All,
+                _ => AgentWritePermission::WorkspaceOnly,
+            },
+            command: match custom_command_permission.as_str() {
+                "auto_approve" => AgentCommandPermission::AutoApprove,
+                _ => AgentCommandPermission::RequireApproval,
+            },
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            patch: match custom_patch_permission.as_str() {
+                "auto_approve" => AgentPatchPermission::AutoApprove,
+                _ => AgentPatchPermission::RequireApproval,
+            },
+            builtin_execution: AgentBuiltinExecutionPermission::RequireApproval,
+        },
+        updated_at,
+    })
+}
+
+fn legacy_default_ui_preferences() -> UiPreferencesRecord {
+    UiPreferencesRecord {
+        profile_avatar_data_url: None,
+        profile_display_name: String::new(),
+        profile_handle: "USER".to_string(),
+        sidebar_conversation_sort: "updated".to_string(),
+        sidebar_project_sort: "created".to_string(),
+        sidebar_project_order: Vec::new(),
+        sidebar_section_order: "projects_first".to_string(),
+        native_font_smoothing: false,
+        show_token_usage_details: true,
+        show_context_window_usage: true,
+        translucent_sidebar: false,
+        translucent_sidebar_transparency: 54,
+        full_permission_enabled: true,
+        custom_permission_enabled: true,
+        custom_permissions: AgentPermissions::default(),
+        updated_at: 0,
+    }
 }
 
 /// Reads only the configuration fields that the explicit development reset preserves.
@@ -1498,6 +1686,34 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(!report.render().contains(secret));
+    }
+
+    #[test]
+    fn reset_preserves_v18_ui_configuration_without_migrating_runtime_history() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "v18-reset-test-token");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE ui_preferences DROP COLUMN custom_builtin_execution_permission;
+                 PRAGMA user_version = 18;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = execute(options(fixture.path(), true)).unwrap();
+        assert!(report.confirmed);
+
+        let storage = StorageService::open(&database).unwrap();
+        let preferences = storage.load_ui_preferences().unwrap();
+        assert_eq!(preferences.profile_display_name, "Reset Test");
+        assert_eq!(
+            preferences.custom_permissions.builtin_execution,
+            AgentBuiltinExecutionPermission::RequireApproval
+        );
+        assert!(storage.load_projects().unwrap().is_empty());
     }
 
     #[test]

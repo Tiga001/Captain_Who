@@ -682,6 +682,7 @@ mod tests {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
             },
         )
         .unwrap_err();
@@ -785,6 +786,7 @@ mod tests {
             command: AgentCommandPermission::RequireApproval,
             command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: Default::default(),
         }
     }
 
@@ -795,6 +797,7 @@ mod tests {
             command: AgentCommandPermission::RequireApproval,
             command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: Default::default(),
         }
     }
 

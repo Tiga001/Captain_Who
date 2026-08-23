@@ -1486,6 +1486,7 @@ function parseAgentSkillScriptRequest(value: unknown, context: string): AgentSki
       'skillRevision',
       'resourcePath',
       'resourceDigest',
+      'source',
       'interpreter',
       'args',
       'requirements',
@@ -1507,6 +1508,7 @@ function parseAgentSkillScriptRequest(value: unknown, context: string): AgentSki
       `${context}.resourceDigest`,
       2048
     ),
+    source: parseAgentSkillScriptSourceProof(item.source, `${context}.source`),
     interpreter: expectEnum(item.interpreter, ['python3'] as const, `${context}.interpreter`),
     args: parseStringArray(item.args, `${context}.args`, 4096, 64 * 1024),
     requirements: parseAgentSkillScriptRequirements(item.requirements, `${context}.requirements`),
@@ -1516,6 +1518,27 @@ function parseAgentSkillScriptRequest(value: unknown, context: string): AgentSki
     approvalStatus: parseAgentApprovalStatus(item.approvalStatus, `${context}.approvalStatus`),
     reason:
       item.reason === null ? null : expectBoundedString(item.reason, `${context}.reason`, 16 * 1024)
+  }
+}
+
+function parseAgentSkillScriptSourceProof(
+  value: unknown,
+  context: string
+): AgentSkillScriptRequest['source'] {
+  const item = expectRecord(value, context)
+  expectOnlyKeys(item, ['sourceId', 'sourceKind', 'trust'] as const, context)
+  return {
+    sourceId: expectBoundedNonEmptyString(item.sourceId, `${context}.sourceId`, 2048),
+    sourceKind: expectEnum(
+      item.sourceKind,
+      ['workspace', 'bundled', 'installed'] as const,
+      `${context}.sourceKind`
+    ),
+    trust: expectEnum(
+      item.trust,
+      ['untrusted', 'user_approved', 'application'] as const,
+      `${context}.trust`
+    )
   }
 }
 

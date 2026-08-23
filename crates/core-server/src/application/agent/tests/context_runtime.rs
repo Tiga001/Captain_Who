@@ -110,7 +110,8 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                 "write": "denied",
                 "command": "require_approval",
                 "commandSafety": "guarded",
-                "patch": "require_approval"
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
             }
         },
         "messages": []
@@ -382,7 +383,8 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
                 "write": "denied",
                 "command": "require_approval",
                 "commandSafety": "guarded",
-                "patch": "require_approval"
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
             }
         },
         "messages": []
@@ -651,7 +653,8 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
                 "write": "denied",
                 "command": "require_approval",
                 "commandSafety": "guarded",
-                "patch": "require_approval"
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
             }
         },
         "messages": []
@@ -731,7 +734,8 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
                 "write": "denied",
                 "command": "require_approval",
                 "commandSafety": "guarded",
-                "patch": "require_approval"
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
             }
         },
         "messages": []
@@ -822,7 +826,8 @@ fn deleting_messages_invalidates_the_conversation_context_state() {
                 "write": "denied",
                 "command": "require_approval",
                 "commandSafety": "guarded",
-                "patch": "require_approval"
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
             }
         },
         "messages": []

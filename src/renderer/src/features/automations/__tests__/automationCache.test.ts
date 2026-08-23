@@ -17,13 +17,14 @@ function task(revision: number, updatedAt = revision): AutomationTask {
     health: { state: 'ok' },
     destination: { kind: 'existing_chat', conversationId: 'conversation-1' },
     permissionMode: 'default',
-    permissionModeVersion: 1,
+    permissionModeVersion: 2,
     resolvedPermissions: {
       read: 'workspace_only',
       write: 'workspace_only',
       command: 'require_approval',
       commandSafety: 'guarded',
-      patch: 'require_approval'
+      patch: 'require_approval',
+      builtinExecution: 'require_approval'
     },
     schedule: {
       kind: 'daily',

@@ -9,7 +9,12 @@ import type { ModelConfig } from '../../config/modelConfig'
 import type { AppProject } from '../../config/projectConfig'
 import type { ChatConversation, ChatPermissionMode } from '../chat/chatTypes'
 import { createDefaultAutomationSchedule, withSystemTimeZone } from './automationSchedule'
-import type { AutomationDraft, AutomationFilter, AutomationMutationInput } from './automationTypes'
+import {
+  AUTOMATION_PERMISSION_VERSION,
+  type AutomationDraft,
+  type AutomationFilter,
+  type AutomationMutationInput
+} from './automationTypes'
 import { useAutomations } from './useAutomations'
 import { useAutomationAttention } from './useAutomationAttention'
 import { useAutomationDetail } from './useAutomationDetail'
@@ -80,7 +85,7 @@ function createDraft({
       modelId: preferredModel?.id ?? ''
     },
     permissionMode: defaultPermissionMode,
-    permissionModeVersion: 1,
+    permissionModeVersion: AUTOMATION_PERMISSION_VERSION,
     schedule: createDefaultAutomationSchedule(),
     notificationPolicy: 'all_runs'
   }

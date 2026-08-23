@@ -397,6 +397,7 @@ mod tests {
             command: AgentCommandPermission::RequireApproval,
             command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: Default::default(),
         }
     }
 
@@ -482,6 +483,7 @@ mod tests {
             command: AgentCommandPermission::AutoApprove,
             command_safety: crate::AgentCommandSafetyPolicy::FullAccess,
             patch: AgentPatchPermission::AutoApprove,
+            builtin_execution: crate::AgentBuiltinExecutionPermission::AutoApprove,
         };
         assert_eq!(
             file_write_approval_route(full_access),

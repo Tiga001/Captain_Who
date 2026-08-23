@@ -49,7 +49,8 @@ use mycopilot_core::skills::{
     SkillMaterializationDestination, SkillMaterializationError, SkillMaterializationRequest,
     SkillMaterializationStatus, SkillPackageUri, SkillResourceMaterializer, SkillResourcePath,
     SkillResourceSession, SkillResourceUri, SkillScriptRuntimeError, SkillSelection,
-    SkillTemplateTreeMaterializationRequest, SkillsService,
+    SkillSourceKind, SkillTemplateTreeMaterializationRequest, SkillTrust, SkillsService,
+    VerifiedSkillResourceSource, APPLICATION_BUNDLED_SKILL_SOURCE_ID,
 };
 use mycopilot_core::storage::agent_action_audit_repository::{
     AgentActionAuditExecutionClaimOutcome, AgentActionAuditFinalizationOutcome,
@@ -88,13 +89,14 @@ use mycopilot_core::{
     AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary, AgentMcpServerScope,
     AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState,
     AgentModelRequestInterruptionReason, AgentModelRequestObserver, AgentPatchResult,
-    AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
-    AgentRuntimeHostServices, AgentSearchConfig, AgentSkillInstallationPrepareExecutor,
-    AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
-    AgentSkillMaterializationResultStatus, AgentSkillScriptRequest, AgentSkillScriptResult,
-    AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
-    AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
+    AgentPermissions, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
+    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig,
+    AgentSkillInstallationPrepareExecutor, AgentSkillMaterializationRequest,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
+    AgentSkillScriptRequest, AgentSkillScriptResult, AgentSkillScriptSourceKind,
+    AgentSkillScriptTrust, AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue,
+    AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus,
+    AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, AutomationReportKind,
     AutomationReportSink, BuiltinCapabilityRuntime, CapabilityActivationId, ContextJournalCursor,
     ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
@@ -541,6 +543,7 @@ struct ActiveRunControl {
     assistant_message_id: String,
     project_id: Option<String>,
     model_capabilities: ModelCapabilities,
+    permissions: AgentPermissions,
     steer_state: ActiveRunSteerState,
     steer_input: AgentSteerInputQueue,
 }
@@ -846,7 +849,7 @@ impl AgentService {
     pub(crate) fn authorize_browser_risk_request(
         &self,
         run_id: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String, AgentPermissions), String> {
         let binding = self
             .active_runs
             .lock()
@@ -856,6 +859,7 @@ impl AgentService {
                 (
                     run.conversation_id.clone(),
                     run.assistant_message_id.clone(),
+                    run.permissions,
                 )
             })
             .ok_or_else(|| {

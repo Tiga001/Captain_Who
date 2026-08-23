@@ -2593,6 +2593,42 @@ fn canonical_json(value: &Value) -> Value {
 mod tests {
     use super::*;
 
+    fn approval_descriptor(
+        tool_id: &str,
+        mode: BuiltinMcpToolApprovalMode,
+    ) -> BuiltinCapabilityToolDescriptor {
+        BuiltinCapabilityToolDescriptor::new(
+            tool_id,
+            tool_id,
+            "Reviewed browser fixture",
+            json!({"type":"object", "additionalProperties": true}),
+            crate::protocol::AgentToolSafety::RequiresApproval,
+            false,
+        )
+        .unwrap()
+        .with_builtin_approval_policy(mode, vec![BuiltinMcpToolRiskKind::FileUpload])
+        .unwrap()
+    }
+
+    #[test]
+    fn call_level_builtin_approval_keeps_always_and_dynamic_semantics() {
+        let always = approval_descriptor("browser_evaluate", BuiltinMcpToolApprovalMode::Always);
+        assert!(builtin_tool_requires_approval(&always, &json!({})));
+
+        for tool_id in ["browser_file_upload", "browser_drop"] {
+            let dynamic = approval_descriptor(tool_id, BuiltinMcpToolApprovalMode::Dynamic);
+            assert!(!builtin_tool_requires_approval(&dynamic, &json!({})));
+            assert!(!builtin_tool_requires_approval(
+                &dynamic,
+                &json!({"paths": []}),
+            ));
+            assert!(builtin_tool_requires_approval(
+                &dynamic,
+                &json!({"paths": ["/workspace/reviewed.pptx"]}),
+            ));
+        }
+    }
+
     fn binding_scope_invocation(tool_id: &str, arguments: Value) -> BuiltinCapabilityInvocation {
         BuiltinCapabilityInvocation {
             run_id: "run-binding-scope".to_string(),

@@ -9,6 +9,7 @@ fn runtime_command_definition_is_fixed_while_dispatch_uses_current_permissions()
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: Default::default(),
         },
         AgentPermissions {
             read: AgentReadPermission::All,
@@ -16,6 +17,7 @@ fn runtime_command_definition_is_fixed_while_dispatch_uses_current_permissions()
             command: AgentCommandPermission::AutoApprove,
             command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::AutoApprove,
+            builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
         },
         AgentPermissions {
             read: AgentReadPermission::All,
@@ -23,6 +25,7 @@ fn runtime_command_definition_is_fixed_while_dispatch_uses_current_permissions()
             command: AgentCommandPermission::AutoApprove,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: AgentPatchPermission::AutoApprove,
+            builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
         },
     ]
     .into_iter()
@@ -107,6 +110,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
             command: AgentCommandPermission::RequireApproval,
             command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: Default::default(),
         },
     });
     let baseline_revision = conversation_context_configuration_revision(&baseline).unwrap();
@@ -134,6 +138,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
             command: AgentCommandPermission::AutoApprove,
             command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: AgentPatchPermission::AutoApprove,
+            builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
         },
     });
     assert_eq!(
@@ -158,6 +163,8 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
         .render_sanitized_text();
     assert_ne!(baseline_world_state, changed_world_state);
     assert!(changed_world_state.contains("\"read\":\"all\""));
+    assert!(baseline_world_state.contains("\"builtinExecution\":\"require_approval\""));
+    assert!(changed_world_state.contains("\"builtinExecution\":\"auto_approve\""));
     assert!(changed_world_state.contains("\"displayName\":\"Runtime Workspace\""));
     assert_eq!(
         changed_world_state.matches("permissions.effective").count(),
@@ -430,6 +437,7 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
         command: AgentCommandPermission::RequireApproval,
         command_safety: AgentCommandSafetyPolicy::Guarded,
         patch: AgentPatchPermission::RequireApproval,
+        builtin_execution: Default::default(),
     };
     let full_permissions = AgentPermissions {
         read: AgentReadPermission::All,
@@ -437,6 +445,7 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
     };
     let custom_permissions = AgentPermissions {
         read: AgentReadPermission::All,
@@ -444,24 +453,14 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::Guarded,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
     };
 
-    let default = prepare_runtime_capabilities(
-        &input_with_permissions(default_permissions),
-        "stable-default",
-        &[],
-        true,
-        None,
-    )
-    .unwrap();
-    let full = prepare_runtime_capabilities(
-        &input_with_permissions(full_permissions),
-        "stable-full",
-        &[],
-        true,
-        None,
-    )
-    .unwrap();
+    let default_input = input_with_permissions(default_permissions);
+    let full_input = input_with_permissions(full_permissions);
+    let default =
+        prepare_runtime_capabilities(&default_input, "stable-default", &[], true, None).unwrap();
+    let full = prepare_runtime_capabilities(&full_input, "stable-full", &[], true, None).unwrap();
     let denied_input = input_with_permissions(custom_permissions);
     let custom =
         prepare_runtime_capabilities(&denied_input, "stable-custom", &[], true, None).unwrap();
@@ -483,6 +482,31 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
         default.initial_tool_set.stable_revision(),
         custom.initial_tool_set.stable_revision()
     );
+    let host_services = AgentRuntimeHostServices::new();
+    let default_world_state =
+        prepare_context_window_tool_projection(&default_input, &host_services, true)
+            .unwrap()
+            .initial_run_world_state()
+            .model_projection(WorldStateLifetime::Run)
+            .unwrap()
+            .render_sanitized_text();
+    let full_world_state =
+        prepare_context_window_tool_projection(&full_input, &host_services, true)
+            .unwrap()
+            .initial_run_world_state()
+            .model_projection(WorldStateLifetime::Run)
+            .unwrap()
+            .render_sanitized_text();
+    let custom_world_state =
+        prepare_context_window_tool_projection(&denied_input, &host_services, true)
+            .unwrap()
+            .initial_run_world_state()
+            .model_projection(WorldStateLifetime::Run)
+            .unwrap()
+            .render_sanitized_text();
+    assert!(default_world_state.contains("\"builtinExecution\":\"require_approval\""));
+    assert!(full_world_state.contains("\"builtinExecution\":\"auto_approve\""));
+    assert!(custom_world_state.contains("\"builtinExecution\":\"auto_approve\""));
     for name in ["apply_patch", "write_file", "run_command"] {
         assert!(
             custom.initial_tool_set.contains(name),
@@ -526,6 +550,7 @@ fn conversation_identity_does_not_change_the_stable_history_tool() {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: AgentCommandSafetyPolicy::Guarded,
                 patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
             },
         });
         input

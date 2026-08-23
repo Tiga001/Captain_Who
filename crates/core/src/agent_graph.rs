@@ -5,6 +5,7 @@ use std::fmt;
 use crate::provider_profile::ReasoningEffort;
 
 pub const AGENT_GRAPH_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Derives the one trusted root-Agent identity for a Conversation.
 ///

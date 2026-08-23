@@ -298,6 +298,10 @@ pub fn effective_permissions_section(
             crate::protocol::AgentPatchPermission::RequireApproval => "require_approval",
             crate::protocol::AgentPatchPermission::AutoApprove => "auto_approve",
         },
+        "builtinExecution": match permissions.builtin_execution {
+            crate::protocol::AgentBuiltinExecutionPermission::RequireApproval => "require_approval",
+            crate::protocol::AgentBuiltinExecutionPermission::AutoApprove => "auto_approve",
+        },
     });
     WorldStateSectionEnvelope::model_visible(
         WorldStateSectionId::EffectivePermissions,

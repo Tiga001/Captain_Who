@@ -2,12 +2,13 @@ use super::{AgentTool, ToolExecutionContext};
 use crate::protocol::{
     AgentCommandSafetyPolicy, AgentError, AgentProposedAction, AgentReadPermission, AgentResult,
     AgentSkillScriptInterpreter, AgentSkillScriptRequest, AgentSkillScriptRequirements,
-    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentWritePermission,
+    AgentSkillScriptSourceKind, AgentSkillScriptSourceProof, AgentSkillScriptTrust, AgentToolCall,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentWritePermission,
 };
 use crate::skills::{
     preflight_skill_python_script, SkillResourceUri, SkillScriptPreflightOutcome,
-    SkillScriptRuntimeError, DEFAULT_SKILL_SCRIPT_TIMEOUT_MS, MAX_SKILL_SCRIPT_ARGUMENTS,
-    MAX_SKILL_SCRIPT_ARGUMENT_BYTES, MAX_SKILL_SCRIPT_TIMEOUT_MS,
+    SkillScriptRuntimeError, SkillSourceKind, SkillTrust, DEFAULT_SKILL_SCRIPT_TIMEOUT_MS,
+    MAX_SKILL_SCRIPT_ARGUMENTS, MAX_SKILL_SCRIPT_ARGUMENT_BYTES, MAX_SKILL_SCRIPT_TIMEOUT_MS,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -83,7 +84,7 @@ impl AgentTool for SkillsRunScriptTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "skills_run_script".to_string(),
-            description: "Request execution of one revision-bound scripts/*.py resource from a currently activated Skill. Arguments are a structured argv and never pass through a shell. The host repeats dependency/integrity checks immediately before execution. Until an OS process sandbox and trusted capability grants exist, execution requires unrestricted read/write scope and Full Access, plus explicit approval for every script. Missing dependencies are reported but never installed automatically.".to_string(),
+            description: "Request execution of one revision-bound scripts/*.py resource from a currently activated Skill. Arguments are a structured argv and never pass through a shell. The host repeats source, dependency, revision, and digest checks immediately before execution. Execution requires unrestricted read/write scope and Full Access. Exact application-bundled scripts may follow the built-in execution approval preference; workspace and installed scripts always require explicit approval. Missing dependencies are reported but never installed automatically.".to_string(),
             input_schema: script_input_schema(true),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: true,
@@ -134,6 +135,7 @@ impl AgentTool for SkillsRunScriptTool {
                 }),
             ));
         };
+        let source = freeze_source_proof(context, &uri, plan.resource_digest())?;
         Ok(AgentProposedAction::SkillScript {
             script: Box::new(AgentSkillScriptRequest {
                 id: call.id.clone(),
@@ -142,6 +144,7 @@ impl AgentTool for SkillsRunScriptTool {
                 skill_revision: uri.package().revision().as_str().to_string(),
                 resource_path: uri.path().as_str().to_string(),
                 resource_digest: plan.resource_digest().to_string(),
+                source,
                 interpreter: args.interpreter,
                 args: args.args,
                 requirements: args.requirements,
@@ -276,6 +279,7 @@ pub(crate) fn validate_frozen_skill_script_trace_args(
         .map_err(|_| "skills_run_script frozen reason is invalid".to_string())?;
 
     if uri.as_str() != frozen.script_uri
+        || uri.package().skill_id().source_id().as_str() != frozen.source.source_id
         || args.interpreter != frozen.interpreter
         || args.args != frozen.args
         || args.requirements != frozen.requirements
@@ -285,6 +289,47 @@ pub(crate) fn validate_frozen_skill_script_trace_args(
         return Err("skills_run_script ToolCall differs from the frozen request".to_string());
     }
     Ok(())
+}
+
+fn freeze_source_proof(
+    context: &ToolExecutionContext,
+    uri: &SkillResourceUri,
+    expected_digest: &str,
+) -> AgentResult<AgentSkillScriptSourceProof> {
+    let verified = context
+        .skill_resources()?
+        .verify_resource_source(uri)
+        .map_err(|error| {
+            AgentError::structured(
+                "skill_script.source_verification_failed",
+                error.to_string(),
+                json!({
+                    "type": "skill_script",
+                    "code": error.code().stable_name(),
+                    "recovery": error.recovery().stable_name(),
+                }),
+            )
+        })?;
+    if verified.package() != uri.package() || verified.resource_digest() != expected_digest {
+        return Err(AgentError::new(
+            "The Skill script source changed while its execution request was being prepared.",
+        ));
+    }
+    let source_kind = match verified.source_kind() {
+        SkillSourceKind::Workspace => AgentSkillScriptSourceKind::Workspace,
+        SkillSourceKind::Bundled => AgentSkillScriptSourceKind::Bundled,
+        SkillSourceKind::Installed => AgentSkillScriptSourceKind::Installed,
+    };
+    let trust = match verified.trust() {
+        SkillTrust::Untrusted => AgentSkillScriptTrust::Untrusted,
+        SkillTrust::UserApproved => AgentSkillScriptTrust::UserApproved,
+        SkillTrust::Application => AgentSkillScriptTrust::Application,
+    };
+    Ok(AgentSkillScriptSourceProof {
+        source_id: verified.source_id().as_str().to_string(),
+        source_kind,
+        trust,
+    })
 }
 
 fn python3() -> AgentSkillScriptInterpreter {

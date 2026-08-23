@@ -47,7 +47,7 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 
 ### Automation 与当前设置
 
-Automation 不是 Settings 页面中的第二份模型/权限配置。保存任务时，Core Server 根据 permission mode v1
+Automation 不是 Settings 页面中的第二份模型/权限配置。保存任务时，Core Server 根据 permission mode v2
 把 `default`、`full` 或 `custom` 解析为完整权限 snapshot；新 Conversation 的 reasoning 只投影自所选
 模型配置。后续 Run 使用已冻结权限，而当前 `full`/`custom` enablement 仅作为撤销上限，不能自动扩宽
 旧 snapshot。修改自定义权限、模型配置、项目路径或当前电脑 timezone 后，必须理解以下边界：

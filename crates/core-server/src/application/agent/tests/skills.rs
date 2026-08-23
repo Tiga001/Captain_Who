@@ -887,6 +887,11 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
             skill_revision: script_uri.package().revision().as_str().to_string(),
             resource_path: script_uri.path().as_str().to_string(),
             resource_digest: plan.resource_digest().to_string(),
+            source: mycopilot_core::AgentSkillScriptSourceProof {
+                source_id: "installed:user".to_string(),
+                source_kind: mycopilot_core::AgentSkillScriptSourceKind::Installed,
+                trust: mycopilot_core::AgentSkillScriptTrust::Untrusted,
+            },
             interpreter: mycopilot_core::AgentSkillScriptInterpreter::Python3,
             args: Vec::new(),
             requirements: mycopilot_core::AgentSkillScriptRequirements::default(),
@@ -923,6 +928,12 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         script_input.context.as_mut().unwrap().permissions.read =
             mycopilot_core::AgentReadPermission::All;
         script_input.context.as_mut().unwrap().permissions.write = AgentWritePermission::All;
+        script_input
+            .context
+            .as_mut()
+            .unwrap()
+            .permissions
+            .builtin_execution = mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove;
         let full_access_automatic = service.execute_skill_script(
             &script_input,
             &script_request,
@@ -939,6 +950,29 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
                 .and_then(|result| result.get("code"))
                 .and_then(Value::as_str),
             Some("authorizationDenied")
+        );
+        let mut forged_trusted_request = script_request.clone();
+        forged_trusted_request.source = mycopilot_core::AgentSkillScriptSourceProof {
+            source_id: mycopilot_core::skills::APPLICATION_BUNDLED_SKILL_SOURCE_ID.to_string(),
+            source_kind: mycopilot_core::AgentSkillScriptSourceKind::Bundled,
+            trust: mycopilot_core::AgentSkillScriptTrust::Application,
+        };
+        let forged_automatic = service.execute_skill_script(
+            &script_input,
+            &forged_trusted_request,
+            Some(session),
+            CommandAuthorizationSource::Automatic,
+            AgentCancellationToken::new(),
+            None,
+        );
+        assert!(!forged_automatic.ok);
+        assert_eq!(
+            forged_automatic
+                .result
+                .as_ref()
+                .and_then(|result| result.get("code"))
+                .and_then(Value::as_str),
+            Some("sourceVerificationFailed")
         );
         let explicitly_approved = service.execute_skill_script(
             &script_input,

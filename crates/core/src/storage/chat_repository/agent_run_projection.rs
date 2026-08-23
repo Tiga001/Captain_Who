@@ -407,6 +407,7 @@ fn current_skill_script_is_safe(script: &serde_json::Map<String, serde_json::Val
             "skillRevision",
             "resourcePath",
             "resourceDigest",
+            "source",
             "interpreter",
             "args",
             "requirements",
@@ -421,6 +422,7 @@ fn current_skill_script_is_safe(script: &serde_json::Map<String, serde_json::Val
         && bounded_string(&script["skillRevision"], 1_024, false)
         && bounded_string(&script["resourcePath"], 16 * 1_024, false)
         && bounded_string(&script["resourceDigest"], 1_024, false)
+        && current_skill_script_source_is_safe(&script["source"])
         && script["interpreter"] == "python3"
         && current_string_array_is_safe(&script["args"], 64 * 1_024)
         && current_skill_script_requirements_are_safe(&script["requirements"])
@@ -432,6 +434,22 @@ fn current_skill_script_is_safe(script: &serde_json::Map<String, serde_json::Val
             script.clone(),
         ))
         .is_ok()
+}
+
+fn current_skill_script_source_is_safe(value: &serde_json::Value) -> bool {
+    let Some(source) = value.as_object() else {
+        return false;
+    };
+    exact_keys(source, &["sourceId", "sourceKind", "trust"])
+        && bounded_string(&source["sourceId"], 2_048, false)
+        && matches!(
+            source["sourceKind"].as_str(),
+            Some("workspace" | "bundled" | "installed")
+        )
+        && matches!(
+            source["trust"].as_str(),
+            Some("untrusted" | "user_approved" | "application")
+        )
 }
 
 fn current_file_input_ref_is_safe(value: &serde_json::Value) -> bool {

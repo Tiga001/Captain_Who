@@ -6,7 +6,7 @@ import {
 } from '../../storage/composerPermissionModePersistence'
 
 describe('normalizeStoredComposerPermissionMode', () => {
-  it.each([undefined, null, 0, 2])(
+  it.each([undefined, null, 0, 1, 3])(
     'downgrades full permission stored with legacy or unknown version %s',
     (permissionModeVersion) => {
       expect(normalizeStoredComposerPermissionMode('full', permissionModeVersion)).toBe('default')

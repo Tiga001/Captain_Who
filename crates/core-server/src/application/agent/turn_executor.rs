@@ -770,6 +770,12 @@ impl AgentService {
                 .as_ref()
                 .and_then(|context| context.project_id.as_deref()),
             prepared.agent_input.model_capabilities,
+            prepared
+                .agent_input
+                .context
+                .as_ref()
+                .map(|context| context.permissions)
+                .unwrap_or_default(),
         );
         initialize_turn_diff_best_effort(
             &self.storage,

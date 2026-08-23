@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const AUTOMATION_SCHEMA_VERSION: u32 = 1;
-pub const AUTOMATION_PERMISSION_MODE_VERSION: u32 = 1;
+pub const AUTOMATION_PERMISSION_MODE_VERSION: u32 = 2;
 pub const AUTOMATION_ERROR_CODE: i32 = -32045;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -247,6 +247,13 @@ pub enum AutomationPatchPermissionDto {
     AutoApprove,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationBuiltinExecutionPermissionDto {
+    RequireApproval,
+    AutoApprove,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AutomationResolvedPermissionsDto {
@@ -255,6 +262,7 @@ pub struct AutomationResolvedPermissionsDto {
     pub command: AutomationCommandPermissionDto,
     pub command_safety: AutomationCommandSafetyPolicyDto,
     pub patch: AutomationPatchPermissionDto,
+    pub builtin_execution: AutomationBuiltinExecutionPermissionDto,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

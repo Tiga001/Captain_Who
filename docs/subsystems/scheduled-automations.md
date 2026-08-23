@@ -113,14 +113,14 @@ Exact Archive。
 
 ## 4. 权限与 Approval
 
-任务表单提交 `default`、`full` 或 `custom` 模式及 permission mode v1；Core Server 根据保存当时的 UI
+任务表单提交 `default`、`full` 或 `custom` 模式及 permission mode v2；Core Server 根据保存当时的 UI
 preferences 解析成完整 `AgentPermissions` 并冻结到任务/Run snapshot：
 
-| 模式      | 冻结权限                                                               |
-| --------- | ---------------------------------------------------------------------- |
-| `default` | workspace read/write；命令与 patch 需要 Approval；命令安全为 `guarded` |
-| `full`    | all read/write；命令与 patch 自动批准；命令安全为 `full_access`        |
-| `custom`  | 使用当时自定义各维度，但命令安全强制保持 `guarded`                     |
+| 模式      | 冻结权限                                                                                 |
+| --------- | ---------------------------------------------------------------------------------------- |
+| `default` | workspace read/write；命令、patch 与内置能力执行需要 Approval；命令安全为 `guarded`      |
+| `full`    | all read/write；命令、patch 与内置能力执行自动批准；命令安全为 `full_access`             |
+| `custom`  | 使用当时自定义的 read/write/command/patch/builtinExecution，但命令安全强制保持 `guarded` |
 
 `full`/`custom` 只有在当前 UI preferences 允许时才能保存。每个未来 Run admission 还会把当前开关作为
 撤销上限复核：关闭某模式会阻止使用该模式的新 Run，但重新开启或修改自定义设置不会暗中放宽已有
@@ -168,7 +168,7 @@ Main 显示前再次向 Core Server 校验 lease 和语义时效，收到 Electr
 
 ## 7. 持久化、恢复与删除联动
 
-SQLite canonical schema 当前为 **v18**，而 Automation DTO、permission mode 和 Automation 表记录的
+SQLite canonical schema 当前为 **v19**，而 Automation DTO、permission mode 和 Automation 表记录的
 `schemaVersion` 各为 **v1**；这些版本域不能混用。四组权威数据为：
 
 - `automations`：配置、schedule、目标/权限 snapshot、revision、health、attention 和 tombstone；

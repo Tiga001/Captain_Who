@@ -489,6 +489,11 @@ describe('Agent observer event contract', () => {
         skillRevision: 'revision-1',
         resourcePath: 'scripts/script.py',
         resourceDigest: 'digest-1',
+        source: {
+          sourceId: 'installed:user',
+          sourceKind: 'installed',
+          trust: 'untrusted'
+        },
         interpreter: 'python3',
         args: [],
         requirements: {},

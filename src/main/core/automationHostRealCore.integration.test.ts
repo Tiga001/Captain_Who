@@ -144,7 +144,7 @@ describe('Automation Renderer Host API to real core-server', () => {
         modelId: 'automation-e2e-model'
       },
       permissionMode: 'default',
-      permissionModeVersion: 1,
+      permissionModeVersion: 2,
       schedule: {
         kind: 'daily',
         timeMinutes: 9 * 60,
@@ -175,7 +175,7 @@ describe('Automation Renderer Host API to real core-server', () => {
         modelId: 'automation-e2e-model'
       },
       permissionMode: 'default',
-      permissionModeVersion: 1,
+      permissionModeVersion: 2,
       schedule: created.schedule,
       notificationPolicy: 'all_runs'
     })

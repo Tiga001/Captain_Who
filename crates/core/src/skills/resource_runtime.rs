@@ -7,7 +7,7 @@
 use super::digest::package_file_digest;
 use super::model::{
     SkillId, SkillResolveError, SkillResourceDescriptor, SkillResourceIndex, SkillResourceKind,
-    SkillRevision, SkillSourceId,
+    SkillRevision, SkillSourceId, SkillSourceKind, SkillTrust,
 };
 use super::package::SkillPackagePath;
 use super::workspace::{percent_encode, SKILL_FILE_NAME};
@@ -745,8 +745,43 @@ pub(super) struct SkillResourceSessionBinding {
     pub skill_id: SkillId,
     pub revision: SkillRevision,
     pub source_id: SkillSourceId,
+    pub source_kind: SkillSourceKind,
+    pub trust: SkillTrust,
     pub resources: SkillResourceIndex,
     pub reader: Option<SkillResourceReaderRef>,
+}
+
+/// Backend-derived evidence for a resource in the active, immutable Skill
+/// session. Callers still have to apply their own execution policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSkillResourceSource {
+    package: SkillPackageUri,
+    source_id: SkillSourceId,
+    source_kind: SkillSourceKind,
+    trust: SkillTrust,
+    resource_digest: String,
+}
+
+impl VerifiedSkillResourceSource {
+    pub fn package(&self) -> &SkillPackageUri {
+        &self.package
+    }
+
+    pub fn source_id(&self) -> &SkillSourceId {
+        &self.source_id
+    }
+
+    pub fn source_kind(&self) -> SkillSourceKind {
+        self.source_kind
+    }
+
+    pub fn trust(&self) -> SkillTrust {
+        self.trust
+    }
+
+    pub fn resource_digest(&self) -> &str {
+        &self.resource_digest
+    }
 }
 
 /// Owned bytes verified against the descriptor frozen in a resource session.
@@ -785,6 +820,8 @@ pub(super) fn restore_resolve_error(
 struct SessionBinding {
     package: SkillPackageUri,
     source_id: SkillSourceId,
+    source_kind: SkillSourceKind,
+    trust: SkillTrust,
     resources: SkillResourceIndex,
     reader: Option<SkillResourceReaderRef>,
 }
@@ -815,6 +852,12 @@ impl SkillResourceSession {
     ) -> Result<Self, SkillResourceError> {
         let mut indexed = BTreeMap::new();
         for binding in bindings {
+            if binding.skill_id.source_id() != &binding.source_id {
+                return Err(SkillResourceError::SourceContractViolation {
+                    source_id: binding.source_id,
+                    reason: format!("Skill `{}` belongs to a different source", binding.skill_id),
+                });
+            }
             if !binding.resources.is_empty() && binding.reader.is_none() {
                 return Err(SkillResourceError::SourceContractViolation {
                     source_id: binding.source_id,
@@ -829,6 +872,8 @@ impl SkillResourceSession {
             let value = SessionBinding {
                 package,
                 source_id: binding.source_id,
+                source_kind: binding.source_kind,
+                trust: binding.trust,
                 resources: binding.resources,
                 reader: binding.reader,
             };
@@ -861,6 +906,8 @@ impl SkillResourceSession {
             if let Some(existing) = current.get(skill_id) {
                 if existing.package != addition.package
                     || existing.source_id != addition.source_id
+                    || existing.source_kind != addition.source_kind
+                    || existing.trust != addition.trust
                     || existing.resources != addition.resources
                 {
                     return Err(SkillResourceError::RevisionNotActivated {
@@ -890,6 +937,24 @@ impl SkillResourceSession {
             .values()
             .map(|binding| binding.package.clone())
             .collect()
+    }
+
+    /// Re-read and verify one resource, then return its frozen source identity.
+    /// The URI proves the activated package revision and the returned digest is
+    /// taken from the verified descriptor, never from an Agent request.
+    pub fn verify_resource_source(
+        &self,
+        uri: &SkillResourceUri,
+    ) -> Result<VerifiedSkillResourceSource, SkillResourceError> {
+        let binding = self.binding(uri.package())?;
+        let snapshot = self.read_verified_bytes(uri)?;
+        Ok(VerifiedSkillResourceSource {
+            package: binding.package,
+            source_id: binding.source_id,
+            source_kind: binding.source_kind,
+            trust: binding.trust,
+            resource_digest: snapshot.descriptor.content_digest().to_string(),
+        })
     }
 
     /// Freeze the candidate session's sole binding for one expected package.
@@ -1168,6 +1233,14 @@ pub(crate) fn memory_resource_session_for_test(
     source_id: SkillSourceId,
     resources: Vec<(String, SkillResourceKind, Vec<u8>)>,
 ) -> Result<SkillResourceSession, SkillResourceError> {
+    let (source_kind, trust) =
+        if source_id.as_str() == super::bundled::APPLICATION_BUNDLED_SKILL_SOURCE_ID {
+            (SkillSourceKind::Bundled, SkillTrust::Application)
+        } else if source_id.as_str().starts_with("workspace:") {
+            (SkillSourceKind::Workspace, SkillTrust::Untrusted)
+        } else {
+            (SkillSourceKind::Installed, SkillTrust::Untrusted)
+        };
     let mut descriptors = Vec::with_capacity(resources.len());
     let mut bytes_by_path = BTreeMap::new();
     for (path, kind, bytes) in resources {
@@ -1183,6 +1256,8 @@ pub(crate) fn memory_resource_session_for_test(
         skill_id,
         revision,
         source_id,
+        source_kind,
+        trust,
         resources: SkillResourceIndex::new(descriptors),
         reader: Some(Arc::new(TestMemoryResourceReader {
             resources: bytes_by_path,
@@ -1249,6 +1324,8 @@ mod tests {
             skill_id,
             revision,
             source_id,
+            source_kind: SkillSourceKind::Installed,
+            trust: SkillTrust::Untrusted,
             resources: SkillResourceIndex::new(descriptors),
             reader: Some(reader),
         }])
@@ -1374,6 +1451,23 @@ mod tests {
     }
 
     #[test]
+    fn verified_source_is_bound_to_session_identity_revision_and_digest() {
+        let session = session();
+        let package = session.package_uris().remove(0);
+        let uri = package.resource(SkillResourcePath::parse("references/guide.md").unwrap());
+        let verified = session.verify_resource_source(&uri).unwrap();
+
+        assert_eq!(verified.package(), &package);
+        assert_eq!(verified.source_id().as_str(), "installed:user");
+        assert_eq!(verified.source_kind(), SkillSourceKind::Installed);
+        assert_eq!(verified.trust(), SkillTrust::Untrusted);
+        assert_eq!(
+            verified.resource_digest(),
+            package_file_digest(b"alpha\n\xE4\xB8\xAD\xE6\x96\x87\nomega\n")
+        );
+    }
+
+    #[test]
     fn session_rejects_unactivated_ids_and_revisions() {
         let session = session();
         let package = session.package_uris().remove(0);
@@ -1427,6 +1521,25 @@ mod tests {
 
         assert_eq!(active_session.len(), 1);
         assert_eq!(active_session.package_uris(), packages_before);
+    }
+
+    #[test]
+    fn extending_cannot_drift_frozen_source_trust() {
+        let active_session = session();
+        let candidate = session();
+        {
+            let mut bindings = candidate.write_bindings();
+            bindings.values_mut().next().unwrap().trust = SkillTrust::Application;
+        }
+
+        let error = active_session.extend_from(&candidate).unwrap_err();
+        assert_eq!(error.code(), SkillResourceErrorCode::RevisionNotActivated);
+        let package = active_session.package_uris().remove(0);
+        let uri = package.resource(SkillResourcePath::parse("references/guide.md").unwrap());
+        assert_eq!(
+            active_session.verify_resource_source(&uri).unwrap().trust(),
+            SkillTrust::Untrusted
+        );
     }
 
     #[test]

@@ -1167,6 +1167,7 @@ fn root_permission_snapshot_is_atomic_with_turn_admission_and_survives_reopen() 
         command: crate::AgentCommandPermission::AutoApprove,
         command_safety: crate::AgentCommandSafetyPolicy::FullAccess,
         patch: crate::AgentPatchPermission::AutoApprove,
+        builtin_execution: crate::AgentBuiltinExecutionPermission::AutoApprove,
     };
     let (_, admitted) = service
         .save_conversation_and_begin_turn(
@@ -1387,7 +1388,7 @@ fn graph_bound_deletes_preserve_and_block_referencing_automations() {
                         project_id: None,
                         model_id: None,
                         permission_mode: "default".to_string(),
-                        permission_mode_version: 1,
+                        permission_mode_version: 2,
                         permissions_json: "{}".to_string(),
                         reasoning_json: None,
                         schedule_kind: "daily".to_string(),

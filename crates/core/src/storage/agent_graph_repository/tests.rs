@@ -119,6 +119,7 @@ fn full_permissions() -> AgentPermissions {
         command: AgentCommandPermission::AutoApprove,
         command_safety: AgentCommandSafetyPolicy::FullAccess,
         patch: AgentPatchPermission::AutoApprove,
+        builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
     }
 }
 

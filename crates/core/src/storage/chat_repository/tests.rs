@@ -253,6 +253,11 @@ fn current_persisted_approval_variants_match_the_renderer_projection() {
                 "skillRevision": "revision-1",
                 "resourcePath": "scripts/check.py",
                 "resourceDigest": "digest-1",
+                "source": {
+                    "sourceId": "workspace",
+                    "sourceKind": "workspace",
+                    "trust": "untrusted"
+                },
                 "interpreter": "python3",
                 "args": ["--check"],
                 "requirements": {
@@ -344,6 +349,11 @@ fn persisted_approval_rejects_wrong_office_versions_and_malformed_nested_data() 
             "skillRevision": "revision-1",
             "resourcePath": "scripts/check.py",
             "resourceDigest": "digest-1",
+            "source": {
+                "sourceId": "workspace",
+                "sourceKind": "workspace",
+                "trust": "untrusted"
+            },
             "interpreter": "python3",
             "args": [],
             "requirements": {},

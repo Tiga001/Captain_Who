@@ -237,6 +237,8 @@ impl SkillsService {
                     skill_id: package.id().clone(),
                     revision: package.revision().clone(),
                     source_id: source_id.clone(),
+                    source_kind: package.source_kind(),
+                    trust: package.trust(),
                     resources: package.resources().clone(),
                     reader: None,
                 });
@@ -260,6 +262,8 @@ impl SkillsService {
                 skill_id: package.id().clone(),
                 revision: package.revision().clone(),
                 source_id: source_id.clone(),
+                source_kind: source.kind(),
+                trust: source.trust(),
                 resources: package.resources().clone(),
                 reader,
             });

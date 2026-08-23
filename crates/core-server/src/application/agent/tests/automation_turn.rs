@@ -34,7 +34,7 @@ fn seed_automation(
                 project_id: None,
                 model_id: Some("model-1".to_string()),
                 permission_mode: "default".to_string(),
-                permission_mode_version: 1,
+                permission_mode_version: 2,
                 permissions_json: serde_json::to_string(&permissions).unwrap(),
                 reasoning_json: Some(r#"{"source":"model_config"}"#.to_string()),
                 schedule_kind: "daily".to_string(),
@@ -497,6 +497,7 @@ async fn permission_revoked_after_precheck_is_blocked_atomically_before_humanroo
         command: mycopilot_core::AgentCommandPermission::AutoApprove,
         command_safety: mycopilot_core::AgentCommandSafetyPolicy::Guarded,
         patch: mycopilot_core::AgentPatchPermission::AutoApprove,
+        builtin_execution: mycopilot_core::AgentBuiltinExecutionPermission::AutoApprove,
     })
     .unwrap();
     let task = match storage

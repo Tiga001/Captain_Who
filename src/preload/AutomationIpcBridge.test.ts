@@ -23,7 +23,7 @@ describe('Automation IPC bridge', () => {
         modelId: 'model-1'
       },
       permissionMode: 'default' as const,
-      permissionModeVersion: 1 as const,
+      permissionModeVersion: 2 as const,
       schedule: {
         kind: 'daily' as const,
         timeMinutes: 540,

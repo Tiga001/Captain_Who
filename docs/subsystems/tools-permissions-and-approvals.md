@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-24
 ---
 
 # Tool 体系、权限与审批
@@ -55,18 +55,25 @@ last_verified: 2026-08-23
 | command        | `require_approval` / `auto_approve` | 用户正常审批偏好                                                  |
 | command safety | `guarded` / `full_access`           | 独立的风险上限；always-denied 操作不因 full access 放行           |
 | patch          | `require_approval` / `auto_approve` | 结构化文件/Office 写入是否弹窗，仍保留路径与 revision 校验        |
+| builtin execution | `require_approval` / `auto_approve` | 应用可证明来源的内置 Skill/Capability 是否弹窗；不扩大其他权限 |
 
 模板、项目、父 Agent 和动态 policy 之间使用逐维 `meet`，只能收紧不能扩权。Tool 用 `AgentToolPermissionPolicy::Default` 或 `FileWrite(ReadWrite|WriteOnly)` 声明权限域；禁止在 Runtime 中维护第二份按 Tool 名判断的易漂移 allowlist。
 
+`builtin execution=auto_approve` 只把人工点击替换成 Host 自动批准。它不改变 Tool
+定义、顺序或 schema，也不扩大 read/write/command/network/path 权限。自动路径仍创建同一 typed
+action，复核 source/manifest/revision/digest，建立一次性 grant 或 durable dispatch receipt，并在
+取消、过期、崩溃恢复时 fail closed。外部 MCP、workspace/installed Skill 和用户插件不因这个值获得
+应用内置信任。
+
 ### Scheduled Automation 权限快照
 
-Automation 的 `permissionModeVersion` 当前为 1。Core Server 在创建/更新时把 Composer 的三种模式解析成完整 `AgentPermissions`，同时保存安全 DTO；Run 入队时再把这份权限冻结进 `config_snapshot_json`：
+Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更新时把 Composer 的三种模式解析成完整 `AgentPermissions`，同时保存安全 DTO；Run 入队时再把这份权限冻结进 `config_snapshot_json`：
 
 | 模式      | 当前解析                                                                                                |
 | --------- | ------------------------------------------------------------------------------------------------------- |
-| `default` | workspace read/write；command、patch 需审批；`guarded`                                                  |
-| `full`    | read/write all；command、patch auto approve；`full_access`，且用户设置必须仍启用 Full                   |
-| `custom`  | 复制当前自定义 read/write/command/patch，但无条件把 command safety 收紧为 `guarded`，且 Custom 必须启用 |
+| `default` | workspace read/write；command、patch、builtin execution 需审批；`guarded`                                                  |
+| `full`    | read/write all；command、patch、builtin execution auto approve；`full_access`，且用户设置必须仍启用 Full                   |
+| `custom`  | 复制当前自定义 read/write/command/patch/builtin execution，但无条件把 command safety 收紧为 `guarded`，且 Custom 必须启用 |
 
 未来 Run 使用冻结权限，当前用户偏好只作为撤销上限，绝不能重新解析出更宽权限。Full/Custom 会在 scheduler precheck 和 HumanRoot `BEGIN IMMEDIATE` admission 事务中再次检查；若权限在两个检查之间被关闭，Task 与未 admission Run 在该事务内变为 blocked/failed，Conversation、message 和 Trace 不会写入。重新开启偏好不会自动修复已 blocked Task，用户必须提交一次有效更新。
 
@@ -124,13 +131,13 @@ Scheduled Automation 复用普通 HumanRoot pending action、audit、Checkpoint 
 ## MCP Server 与内置 Capability
 
 - 外部 MCP Server Tool 使用 typed MCP identity；模型可见名不能用于判断来源。其原始参数由受限授权信封处理，普通 Checkpoint 禁止直接持久未知/外部 MCP 参数。
-- `activate_capability` 的 UI 语义是当前任务批准；实际 live grant 绑定当前 Run、manifest digest 与 policy revision，只存在于 Core Server 进程内存。新 Run 仍需重新批准，Checkpoint 不序列化该 grant。激活后 Tool 进入 dynamic Toolset 并触发 `ToolSetChanged`。
+- `activate_capability` 的授权语义是当前任务批准；实际 live grant 绑定当前 Run、manifest digest 与 policy revision，只存在于 Core Server 进程内存。`builtin execution=auto_approve` 时 Host 自动结算同一个 typed action 并写 durable receipt；否则由用户点击。新 Run 仍需重新建立 grant，Checkpoint 不序列化该 grant。激活后 Tool 进入 dynamic Toolset 并触发 `ToolSetChanged`。
 - Managed Playwright Browser Tool 通过内部 HostBridge 运行；敏感操作还需 per-Tool 或 Browser risk approval，并绑定当前 managed surface/origin、activation ID、schema/manifest digest。
 - Managed Playwright/MCP Server 结果已经由 Main/Core Server 做安全 Artifact 投影，不进入普通 Exact Archive。截图可额外发布 `image-artifact://` readPath；下载等其他产物保留为 Run 生命周期的 Browser Artifact 引用，由 Main 的 broker 预览或导出。
 
 ## Skill Script 权限特例
 
-`skills_preflight_script` 虽声明为不启动脚本的 ReadOnly Tool，当前依赖检查仍需检查宿主 Python 与安装元数据；`skills_preflight_script` 和 `skills_run_script` 因而都要求 `read=all`、`write=all`、`command safety=full_access`。`skills_run_script` 还固定为 `approval_mode=Always`，每次执行都要显式批准。两者均不安装缺失依赖；这些临时高权限前置条件不能由 Skill trust 或 Capability 激活替代。
+`skills_preflight_script` 虽声明为不启动脚本的 ReadOnly Tool，当前依赖检查仍需检查宿主 Python 与安装元数据；`skills_preflight_script` 和 `skills_run_script` 因而都要求 `read=all`、`write=all`、`command safety=full_access`。`skills_run_script` 的静态 Tool 定义仍固定为 `approval_mode=Always`，以保持模型工具前缀稳定。仅当 active resource session 再次证明脚本来自 exact `bundled:application`、trust 为 `Application`、revision 与 bytes digest 均一致，且 `builtin execution=auto_approve` 时，Runtime 才将该次 prepared action 交给自动 Host 执行。workspace、installed 或伪造 source proof 的脚本仍必须显式批准。两类工具均不安装缺失依赖；这些高权限前置条件不能由 Skill trust、Capability 激活或新开关替代。
 
 ## 命令风险与授权
 

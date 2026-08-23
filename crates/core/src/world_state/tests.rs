@@ -40,6 +40,7 @@ fn canonical_domain_sections_keep_authority_projection_and_lifetime_separate() {
         command: crate::protocol::AgentCommandPermission::AutoApprove,
         command_safety: crate::protocol::AgentCommandSafetyPolicy::Guarded,
         patch: crate::protocol::AgentPatchPermission::RequireApproval,
+        builtin_execution: crate::protocol::AgentBuiltinExecutionPermission::AutoApprove,
     };
     let conversation_permissions =
         effective_permissions_section(permissions, WorldStateLifetime::Conversation).unwrap();

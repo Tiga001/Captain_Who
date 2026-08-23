@@ -378,6 +378,7 @@ describe('Skills settings navigation and management inventory', () => {
             command: 'require_approval',
             commandSafety: 'guarded',
             patch: 'require_approval',
+            builtinExecution: 'require_approval',
             read: 'workspace_only',
             write: 'workspace_only'
           },

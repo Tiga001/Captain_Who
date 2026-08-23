@@ -945,6 +945,7 @@ mod tests {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
             },
         }))
         .with_runtime_services("run-1".to_string(), Some(storage.clone()));
@@ -1040,6 +1041,7 @@ mod tests {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
             },
         }))
         .with_runtime_services("run-1".to_string(), Some(storage.clone()));

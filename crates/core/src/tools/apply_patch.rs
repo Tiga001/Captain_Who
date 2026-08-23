@@ -653,6 +653,7 @@ mod tests {
                 command: AgentCommandPermission::RequireApproval,
                 command_safety: Default::default(),
                 patch: Default::default(),
+                builtin_execution: Default::default(),
             },
         }));
         let call = tool_call(json!({
@@ -909,6 +910,7 @@ mod tests {
                     command: AgentCommandPermission::RequireApproval,
                     command_safety: Default::default(),
                     patch: Default::default(),
+                    builtin_execution: Default::default(),
                 },
             }))
         }

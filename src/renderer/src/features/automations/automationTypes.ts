@@ -1,5 +1,5 @@
+import { AUTOMATION_PERMISSION_MODE_VERSION } from '@mycopilot/protocol'
 import type {
-  AUTOMATION_PERMISSION_MODE_VERSION,
   AutomationAttention,
   AutomationAttentionKind,
   AutomationCustomFrequency,
@@ -124,4 +124,4 @@ export interface AutomationErrorDetails {
   retryable: boolean
 }
 
-export const AUTOMATION_PERMISSION_VERSION: typeof AUTOMATION_PERMISSION_MODE_VERSION = 1
+export const AUTOMATION_PERMISSION_VERSION = AUTOMATION_PERMISSION_MODE_VERSION

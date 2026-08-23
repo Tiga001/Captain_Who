@@ -17,7 +17,7 @@ function draft(overrides: Partial<AutomationDraft> = {}): AutomationDraft {
       modelId: 'model-1'
     },
     permissionMode: 'default',
-    permissionModeVersion: 1,
+    permissionModeVersion: 2,
     schedule: {
       kind: 'daily',
       timeMinutes: 540,

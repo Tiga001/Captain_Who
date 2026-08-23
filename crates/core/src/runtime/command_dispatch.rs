@@ -59,15 +59,15 @@ pub(super) fn prepare_command_dispatch(
 
 /// Routes an opaque, revision-bound Skill script through the same user
 /// authorization dimensions as shell commands without pretending its body can
-/// be classified as a shell command. Until Skill processes have an OS-level
-/// filesystem/network sandbox and source trust grants, execution requires the
-/// complete unrestricted scope and explicit approval for every script.
+/// be classified as a shell command. Every script requires complete unrestricted
+/// scope. Only an exact application-bundled source proof may additionally use
+/// the built-in execution preference to skip the human prompt.
 pub(super) fn prepare_skill_script_dispatch(
     call: &AgentToolCall,
     action: AgentProposedAction,
     permissions: AgentPermissions,
     workspace_root: Option<&Path>,
-    _auto_approve: bool,
+    _command_auto_approve: bool,
 ) -> CommandDispatch {
     let AgentProposedAction::SkillScript { script } = &action else {
         return CommandDispatch::Reject(failed_tool_call_result(
@@ -123,7 +123,22 @@ pub(super) fn prepare_skill_script_dispatch(
             ),
         });
     }
-    CommandDispatch::RequireApproval(action)
+    if permissions.builtin_execution == AgentBuiltinExecutionPermission::AutoApprove
+        && is_exact_application_bundled_script(script)
+    {
+        CommandDispatch::ExecuteAutomatically(action)
+    } else {
+        CommandDispatch::RequireApproval(action)
+    }
+}
+
+fn is_exact_application_bundled_script(script: &AgentSkillScriptRequest) -> bool {
+    let expected_source = crate::skills::APPLICATION_BUNDLED_SKILL_SOURCE_ID;
+    script.source.source_id == expected_source
+        && script.source.source_kind == AgentSkillScriptSourceKind::Bundled
+        && script.source.trust == AgentSkillScriptTrust::Application
+        && crate::skills::SkillId::parse(&script.skill_id)
+            .is_ok_and(|skill_id| skill_id.source_id().as_str() == expected_source)
 }
 
 pub(super) fn command_policy_cwd(
@@ -143,7 +158,8 @@ mod tests {
     use crate::protocol::{
         AgentApprovalStatus, AgentCommandPermission, AgentPatchPermission, AgentReadPermission,
         AgentSkillScriptInterpreter, AgentSkillScriptPreflightReport, AgentSkillScriptRequest,
-        AgentSkillScriptRequirements, AgentWritePermission,
+        AgentSkillScriptRequirements, AgentSkillScriptSourceKind, AgentSkillScriptSourceProof,
+        AgentSkillScriptTrust, AgentWritePermission,
     };
     use serde_json::json;
 
@@ -167,6 +183,11 @@ mod tests {
                 skill_revision: "revision".to_string(),
                 resource_path: "scripts/run.py".to_string(),
                 resource_digest: "digest".to_string(),
+                source: AgentSkillScriptSourceProof {
+                    source_id: "installed:user".to_string(),
+                    source_kind: AgentSkillScriptSourceKind::Installed,
+                    trust: AgentSkillScriptTrust::Untrusted,
+                },
                 interpreter: AgentSkillScriptInterpreter::Python3,
                 args: Vec::new(),
                 requirements: AgentSkillScriptRequirements::default(),
@@ -201,7 +222,24 @@ mod tests {
             command: AgentCommandPermission::AutoApprove,
             command_safety: safety,
             patch: AgentPatchPermission::RequireApproval,
+            builtin_execution: AgentBuiltinExecutionPermission::AutoApprove,
         }
+    }
+
+    fn application_bundled_action() -> AgentProposedAction {
+        let mut action = action();
+        let AgentProposedAction::SkillScript { script } = &mut action else {
+            unreachable!();
+        };
+        script.skill_id = "bundled:application:fixture".to_string();
+        script.script_uri =
+            "skill://package/bundled%3Aapplication%3Afixture/revision/scripts/run.py".to_string();
+        script.source = AgentSkillScriptSourceProof {
+            source_id: crate::skills::APPLICATION_BUNDLED_SKILL_SOURCE_ID.to_string(),
+            source_kind: AgentSkillScriptSourceKind::Bundled,
+            trust: AgentSkillScriptTrust::Application,
+        };
+        action
     }
 
     #[test]
@@ -253,5 +291,57 @@ mod tests {
             ),
             CommandDispatch::RequireApproval(_)
         ));
+    }
+
+    #[test]
+    fn exact_application_bundled_script_uses_builtin_permission_only() {
+        assert!(matches!(
+            prepare_skill_script_dispatch(
+                &call(),
+                application_bundled_action(),
+                permissions(AgentCommandSafetyPolicy::FullAccess),
+                Some(Path::new("/workspace")),
+                false,
+            ),
+            CommandDispatch::ExecuteAutomatically(_)
+        ));
+
+        let mut manual = permissions(AgentCommandSafetyPolicy::FullAccess);
+        manual.builtin_execution = AgentBuiltinExecutionPermission::RequireApproval;
+        assert!(matches!(
+            prepare_skill_script_dispatch(
+                &call(),
+                application_bundled_action(),
+                manual,
+                Some(Path::new("/workspace")),
+                true,
+            ),
+            CommandDispatch::RequireApproval(_)
+        ));
+    }
+
+    #[test]
+    fn forged_application_trust_or_source_never_auto_executes() {
+        for mutate in [0, 1, 2] {
+            let mut action = application_bundled_action();
+            let AgentProposedAction::SkillScript { script } = &mut action else {
+                unreachable!();
+            };
+            match mutate {
+                0 => script.source.source_id = "bundled:other".to_string(),
+                1 => script.source.source_kind = AgentSkillScriptSourceKind::Installed,
+                _ => script.source.trust = AgentSkillScriptTrust::Untrusted,
+            }
+            assert!(matches!(
+                prepare_skill_script_dispatch(
+                    &call(),
+                    action,
+                    permissions(AgentCommandSafetyPolicy::FullAccess),
+                    Some(Path::new("/workspace")),
+                    true,
+                ),
+                CommandDispatch::RequireApproval(_)
+            ));
+        }
     }
 }

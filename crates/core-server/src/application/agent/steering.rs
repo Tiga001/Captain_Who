@@ -370,6 +370,7 @@ impl AgentService {
         assistant_message_id: &str,
         project_id: Option<&str>,
         model_capabilities: ModelCapabilities,
+        permissions: AgentPermissions,
     ) -> AgentSteerInputQueue {
         let steer_input = AgentSteerInputQueue::new();
         self.active_runs
@@ -382,6 +383,7 @@ impl AgentService {
                     assistant_message_id: assistant_message_id.to_string(),
                     project_id: project_id.map(ToString::to_string),
                     model_capabilities,
+                    permissions,
                     steer_state: ActiveRunSteerState::Accepting,
                     steer_input: steer_input.clone(),
                 },
