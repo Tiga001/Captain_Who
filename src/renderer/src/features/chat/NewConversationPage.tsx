@@ -38,14 +38,34 @@ export function NewConversationPage({
   const { projects } = useProjectSettings()
   const selectedProjectId = draft.projectId ?? defaultProjectId
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
-  const title = selectedProject
-    ? t('chat.projectTitle').replace('{projectName}', selectedProject.name)
-    : t('chat.title')
+  const projectTitleTemplate = t('chat.projectTitle')
+  const projectNamePlaceholder = '{projectName}'
+  const projectNamePlaceholderIndex = projectTitleTemplate.indexOf(projectNamePlaceholder)
+  const projectTitlePrefix =
+    projectNamePlaceholderIndex >= 0
+      ? projectTitleTemplate.slice(0, projectNamePlaceholderIndex)
+      : projectTitleTemplate
+  const projectTitleSuffix =
+    projectNamePlaceholderIndex >= 0
+      ? projectTitleTemplate.slice(projectNamePlaceholderIndex + projectNamePlaceholder.length)
+      : ''
 
   return (
     <section className="new-conversation-page" aria-label={t('chat.newConversation')}>
       <div className="new-conversation-page__content">
-        <h1>{title}</h1>
+        <h1>
+          {selectedProject ? (
+            <>
+              {projectTitlePrefix}
+              <span className="new-conversation-page__project-name" title={selectedProject.name}>
+                {selectedProject.name}
+              </span>
+              {projectTitleSuffix}
+            </>
+          ) : (
+            t('chat.title')
+          )}
+        </h1>
         <ChatComposer
           contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
           contextWindowSnapshot={contextWindowSnapshot}

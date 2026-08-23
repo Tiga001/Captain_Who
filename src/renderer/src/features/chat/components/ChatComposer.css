@@ -81,6 +81,7 @@
 .chat-composer__project-row {
   display: flex;
   align-items: center;
+  min-width: 0;
   min-height: 58px;
   padding: 10px 12px 10px;
   margin: 8px -12px -4px -16px;
@@ -391,6 +392,12 @@
   flex: 0 0 auto;
 }
 
+.composer-project-picker {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
 .composer-model-button span {
   overflow: hidden;
   max-width: 150px;
@@ -402,6 +409,7 @@
   display: inline-flex;
   align-items: center;
   min-width: 0;
+  max-width: 100%;
   height: 38px;
   padding: 0 12px;
   gap: 8px;
@@ -420,9 +428,17 @@
 }
 
 .composer-project-button svg {
+  flex: 0 0 auto;
   width: var(--mc-icon-size-lg);
   height: var(--mc-icon-size-lg);
   color: var(--mc-color-icon-muted);
+}
+
+.composer-project-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-permission-button[data-permission='default'] {

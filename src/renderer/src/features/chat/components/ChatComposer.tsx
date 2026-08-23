@@ -929,7 +929,9 @@ export function ChatComposer({
                 }}
               >
                 <Folder aria-hidden="true" />
-                <span>{selectedProject?.name ?? t('project.chooseProject')}</span>
+                <span title={selectedProject?.name}>
+                  {selectedProject?.name ?? t('project.chooseProject')}
+                </span>
               </button>
 
               {isProjectMenuOpen && (
