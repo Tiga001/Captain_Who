@@ -394,10 +394,7 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.poll(() => service.showToast.mock.calls.length).toBe(1)
     expect(service.loadModelSettings).toHaveBeenCalledTimes(3)
     expect(service.saveModelSettings).not.toHaveBeenCalled()
-    expect(service.showToast).toHaveBeenCalledWith(
-      'configuration.loadFailed: storage unavailable',
-      { durationMs: 5000 }
-    )
+    expect(service.showToast).toHaveBeenCalledWith('configuration.loadFailed', { durationMs: 5000 })
     consoleError.mockRestore()
   })
 })

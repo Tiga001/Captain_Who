@@ -208,7 +208,8 @@ describe('Agent template settings', () => {
     const screen = await render(
       <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
     )
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('project-a unavailable')
+    await expect.element(screen.getByRole('alert')).toHaveTextContent('agentTemplates.loadFailed')
+    expect(screen.container.textContent).not.toContain('project-a unavailable')
 
     await screen.getByRole('button', { name: 'agentTemplates.retry' }).click()
     await screen.getByRole('button', { name: /agentTemplates.project: Project A/ }).click()

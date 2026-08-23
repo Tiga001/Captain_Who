@@ -14,8 +14,10 @@ import type {
   SkillsListManagementOutput,
   SkillsSetEnabledOutput
 } from '@mycopilot/protocol'
+import type { TranslationKey } from '../../../config/languageRegistry'
 import {
   getSkillOperationErrorDetails,
+  getSkillOperationErrorKey,
   shouldRefreshSkillsAfterError
 } from './skillManagementErrors'
 import {
@@ -26,7 +28,7 @@ import {
 } from './skillsManagementClient'
 
 export interface SkillManagementViewState {
-  errorMessage: string | null
+  errorKey: TranslationKey | null
   isRefreshing: boolean
   output: SkillsListManagementOutput | null
   status: 'loading' | 'ready' | 'error'
@@ -35,7 +37,7 @@ export interface SkillManagementViewState {
 export type SkillRowPendingOperation = 'enablement' | 'uninstall' | 'update'
 
 const INITIAL_STATE: SkillManagementViewState = {
-  errorMessage: null,
+  errorKey: null,
   isRefreshing: false,
   output: null,
   status: 'loading'
@@ -59,7 +61,7 @@ export function useSkillManagement() {
       const mutationEpoch = mutationEpochRef.current
       setState((current) => ({
         ...current,
-        errorMessage: current.output ? current.errorMessage : null,
+        errorKey: current.output ? current.errorKey : null,
         isRefreshing: Boolean(current.output),
         status: current.output ? 'ready' : 'loading'
       }))
@@ -75,7 +77,7 @@ export function useSkillManagement() {
           continue
         }
         outputRef.current = output
-        setState({ errorMessage: null, isRefreshing: false, output, status: 'ready' })
+        setState({ errorKey: null, isRefreshing: false, output, status: 'ready' })
       } catch (error) {
         completedRefreshRef.current = requestNumber
         if (
@@ -85,11 +87,14 @@ export function useSkillManagement() {
         ) {
           continue
         }
-        const message = getSkillOperationErrorDetails(error).message
+        const errorKey = getSkillOperationErrorKey(
+          getSkillOperationErrorDetails(error),
+          'skills.loadFailed'
+        )
         setState((current) =>
           current.output
-            ? { ...current, errorMessage: message, isRefreshing: false, status: 'ready' }
-            : { errorMessage: message, isRefreshing: false, output: null, status: 'error' }
+            ? { ...current, errorKey, isRefreshing: false, status: 'ready' }
+            : { errorKey, isRefreshing: false, output: null, status: 'error' }
         )
       }
     }
@@ -220,7 +225,7 @@ function patchEnablementOutput(
     )
   }
   outputRef.current = output
-  setState({ errorMessage: null, isRefreshing: false, output, status: 'ready' })
+  setState({ errorKey: null, isRefreshing: false, output, status: 'ready' })
 }
 
 function removeManagementEntry(
@@ -232,5 +237,5 @@ function removeManagementEntry(
   if (!current) return
   const output = { ...current, skills: current.skills.filter((entry) => entry.id !== skillId) }
   outputRef.current = output
-  setState({ errorMessage: null, isRefreshing: false, output, status: 'ready' })
+  setState({ errorKey: null, isRefreshing: false, output, status: 'ready' })
 }

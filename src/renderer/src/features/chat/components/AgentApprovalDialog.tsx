@@ -8,6 +8,10 @@ import { BuiltinCapabilityActivationApprovalCard } from './BuiltinCapabilityActi
 import { BuiltinMcpToolApprovalCard } from './BuiltinMcpToolApprovalCard'
 import { McpToolApprovalCard } from './McpToolApprovalCard'
 import { SkillInstallationApprovalCard } from './SkillInstallationApprovalCard'
+import {
+  resetApprovalSubmissionOnFailure,
+  type ApprovalSubmissionResult
+} from './approvalSubmission'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
 
 type StandardAgentProposedAction = Exclude<
@@ -35,9 +39,13 @@ interface AgentApprovalDialogProps {
     messageId: string,
     action: AgentProposedAction,
     options?: { rememberForRun?: boolean }
-  ) => void
-  onCancel?: (messageId: string, action: AgentProposedAction) => void
-  onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  ) => ApprovalSubmissionResult
+  onCancel?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
+  onReject?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
 }
 
 function getApprovalFallbackTitle(action: StandardAgentProposedAction, t: Translate) {
@@ -172,13 +180,17 @@ function StandardAgentApprovalDialog({
   const approve = (rememberForRun = false) => {
     if (isSubmitting) return
     setIsSubmitting(true)
-    onApprove?.(messageId, action, { rememberForRun })
+    resetApprovalSubmissionOnFailure(onApprove?.(messageId, action, { rememberForRun }), () =>
+      setIsSubmitting(false)
+    )
   }
 
   const reject = () => {
     if (isSubmitting) return
     setIsSubmitting(true)
-    onReject?.(messageId, action, rejectMessage)
+    resetApprovalSubmissionOnFailure(onReject?.(messageId, action, rejectMessage), () =>
+      setIsSubmitting(false)
+    )
   }
 
   return (

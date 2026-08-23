@@ -799,6 +799,10 @@ describe('ChatComposer Skill picker', () => {
       .element(screen.getByText('chat.skillCatalogTruncated', { exact: true }))
       .toBeVisible()
     await expect.element(screen.getByText('chat.skillDiagnostics', { exact: true })).toBeVisible()
+    await expect
+      .element(screen.getByText('skills.diagnosticsAvailable', { exact: true }))
+      .toBeVisible()
+    expect(screen.container.textContent).not.toContain('Broken frontmatter')
     await expect.element(screen.getByText('chat.noSkills', { exact: true })).toBeVisible()
   })
 
@@ -810,7 +814,8 @@ describe('ChatComposer Skill picker', () => {
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
     await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('catalog offline')
+    await expect.element(screen.getByRole('alert')).toHaveTextContent('chat.skillsLoadFailed')
+    expect(screen.container.textContent).not.toContain('catalog offline')
     await screen.getByRole('button', { name: /chat.retrySkills/ }).click()
 
     await expect.poll(() => listSkillsSpy.mock.calls.length).toBe(2)

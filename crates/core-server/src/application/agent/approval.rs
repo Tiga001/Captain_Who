@@ -1204,35 +1204,6 @@ impl AgentService {
                         );
                     }
                 }
-                if let AgentProposedAction::BuiltinCapabilityActivation { approval } =
-                    &record.snapshot.action
-                {
-                    let now_ms = self.mcp_approval_now_ms();
-                    let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
-                    if approval.expires_at <= now_seconds {
-                        let retired = self
-                            .storage
-                            .expire_builtin_capability_agent_action(
-                                &record.storage_id,
-                                pending_status_label(record.snapshot.status),
-                                now_ms,
-                            )
-                            .map_err(|_| {
-                                "Built-in capability approval expiry could not be persisted safely."
-                                    .to_string()
-                            })?;
-                        if !retired {
-                            return Err(
-                                "Built-in capability approval changed while its expiry was being settled."
-                                    .to_string(),
-                            );
-                        }
-                        record.snapshot.status = PendingActionStatus::Failed;
-                        return Err(
-                            "Built-in capability approval expired before activation.".to_string()
-                        );
-                    }
-                }
                 if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
                     &record.snapshot.action
                 {
@@ -1809,6 +1780,15 @@ impl AgentService {
             } else {
                 let mut approved = (**approval).clone();
                 approved.approval_status = AgentApprovalStatus::Approved;
+                // Waiting for a human decision has no deadline. The timestamp carried by the
+                // pending card only bounded the original proposal; mint a fresh, short-lived
+                // activation authorization when the user actually approves it. Grant lifetime
+                // and all live policy/manifest checks remain unchanged.
+                let approved_at =
+                    u64::try_from(self.mcp_approval_now_ms().max(0)).unwrap_or_default() / 1_000;
+                approved.created_at = approved_at;
+                approved.expires_at = approved_at
+                    .saturating_add(mycopilot_core::BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS);
                 match self.builtin_capabilities.as_ref() {
                     Some(runtime) => match runtime.approve_activation(&approved) {
                         Ok(grant) => {

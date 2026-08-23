@@ -19,6 +19,7 @@ import type {
 } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
+import type { ApprovalSubmissionResult } from './components/approvalSubmission'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
 import { ConversationTurnNavigationRail } from './components/ConversationTurnNavigationRail'
@@ -80,8 +81,8 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
     messageId: string,
     action: AgentProposedAction,
     options?: AgentApprovalOptions
-  ) => void
-  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
+  ) => ApprovalSubmissionResult
+  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onComposerDraftChange: (draft: ChatComposerDraft) => void
   onComposerDraftMessageChange?: (draft: ChatComposerDraft) => void
   onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void | Promise<void>
@@ -96,7 +97,11 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onOpenCollaborationAgent?: (agentId: string) => void
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
-  onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onRejectAgentAction?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
   onReviewLastTurn?: (filePath?: string) => void
   onStopGenerating?: () => void
   onSubmitMessage: (
@@ -187,15 +192,19 @@ interface ChatMessageListProps {
     messageId: string,
     action: AgentProposedAction,
     options?: AgentApprovalOptions
-  ) => void
-  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
+  ) => ApprovalSubmissionResult
+  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void | Promise<void>
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onOpenCollaborationAgent?: (agentId: string) => void
-  onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onRejectAgentAction?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
   onReviewLastTurn?: (filePath?: string) => void
   parentAgentId?: string | null
   observerRootConversationId?: string

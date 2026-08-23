@@ -3,11 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { hostClient } from '../../host/hostClient'
-import {
-  AppStartupReporterContext,
-  AppStartupStatusContext,
-  getStartupErrorMessage
-} from './AppStartupContext'
+import { AppStartupReporterContext, AppStartupStatusContext } from './AppStartupContext'
 import type {
   AppStartupReporterContextValue,
   AppStartupState,
@@ -27,18 +23,18 @@ export function AppStartupProvider({ children }: { children: ReactNode }) {
   }))
 
   const reportStage = useCallback<AppStartupReporterContextValue['reportStage']>(
-    (attempt, stageId, status, error) => {
+    (attempt, stageId, status) => {
       setState((current) => {
         // A retry owns a new attempt. Responses from abandoned Core or storage requests must not
         // unlock the workspace or overwrite the failure state of the current startup attempt.
         if (current.attempt !== attempt) return current
         const previous = current.stages[stageId]
-        if (previous.status === status && previous.error === error) return current
+        if (previous.status === status) return current
         return {
           ...current,
           stages: {
             ...current.stages,
-            [stageId]: error ? { error, status } : { status }
+            [stageId]: { status }
           }
         }
       })
@@ -63,9 +59,9 @@ export function AppStartupProvider({ children }: { children: ReactNode }) {
       .then(() => {
         if (!cancelled) reportStage(attempt, 'core', 'ready')
       })
-      .catch((error) => {
+      .catch(() => {
         if (!cancelled) {
-          reportStage(attempt, 'core', 'failed', getStartupErrorMessage(error))
+          reportStage(attempt, 'core', 'failed')
         }
       })
 

@@ -20,6 +20,8 @@ const translations: Record<string, string> = {
   'agent.skillInstallation.noDescription': '未提供描述。',
   'agent.skillInstallation.inspecting': '正在检查来源、下载并验证 Skill',
   'agent.skillInstallation.identified': '已识别 Skill',
+  'agent.skillInstallation.waitingApproval': '等待批准安装 Skill',
+  'agent.skillInstallation.prepareExpired': 'Skill 安装准备已过期',
   'agent.skillInstallation.installed': '已安装 Skill',
   'agent.skillInstallation.cancelled': '已取消安装 Skill',
   'agent.skillInstallation.installFailed': 'Skill 安装失败',
@@ -110,7 +112,30 @@ describe('SkillInstallationApprovalCard', () => {
     expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
   })
 
-  it('blocks an expired approval but still lets the user reject it and unblock the run', async () => {
+  it('keeps approval actionable despite a legacy client expiry timestamp', async () => {
+    const onApprove = vi.fn()
+    const onReject = vi.fn()
+    const expiredAction = {
+      ...action,
+      installation: { ...action.installation, expiresAt: Date.now() - 1 }
+    }
+    const screen = await render(
+      <SkillInstallationApprovalCard
+        action={expiredAction}
+        messageId="assistant-message"
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    )
+
+    const approve = screen.getByRole('button', { name: '批准安装' })
+    await expect.element(approve).toBeEnabled()
+    expect(screen.container.textContent).not.toContain('安装准备已过期。')
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', expiredAction)
+  })
+
+  it('keeps rejection available for a legacy expired approval', async () => {
     const onReject = vi.fn()
     const expiredAction = {
       ...action,
@@ -125,9 +150,40 @@ describe('SkillInstallationApprovalCard', () => {
       />
     )
 
-    await expect.element(screen.getByRole('button', { name: '批准安装' })).toBeDisabled()
     await screen.getByRole('button', { name: '拒绝' }).click()
     expect(onReject).toHaveBeenCalledWith('assistant-message', expiredAction, undefined)
+  })
+
+  it('does not turn a waiting timeline item into expired from the local clock', async () => {
+    const expiredAction = {
+      ...action.installation,
+      expiresAt: Date.now() - 1
+    }
+    const screen = await render(
+      <SkillInstallationToolActivity
+        call={{
+          id: expiredAction.id,
+          tool: 'skills_commit_install',
+          args: { installRef: expiredAction.installRef },
+          approvalStatus: 'required',
+          reason: null
+        }}
+        run={{
+          runId: 'run-1',
+          status: 'waiting_for_approval',
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: [],
+          skillInstallations: [{ action: expiredAction, status: 'waiting_for_approval' }]
+        }}
+      />
+    )
+
+    await expect.element(screen.getByText('等待批准安装 Skill')).toBeVisible()
+    expect(screen.container.textContent).not.toContain('Skill 安装准备已过期')
   })
 
   it('uses the Skill loading icon and the same three-field summary in identified and installed Timeline states', async () => {

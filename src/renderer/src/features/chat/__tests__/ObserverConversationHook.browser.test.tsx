@@ -78,7 +78,7 @@ function runningObserver(
   conversationId: string,
   runId: string,
   assistantMessageId: string,
-  content = '正在思考...'
+  content = ''
 ): AgentObserverConversation {
   const value = observer(conversationId, content)
   value.messages[0] = {

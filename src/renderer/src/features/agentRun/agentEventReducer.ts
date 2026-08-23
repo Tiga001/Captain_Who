@@ -11,7 +11,6 @@ import type {
   ChatGuidanceTimelineItem,
   ChatMessage
 } from '../chat/chatTypes'
-import { THINKING_PLACEHOLDER } from './constants'
 import {
   normalizeReadActivities,
   settlePendingReadActivities,
@@ -130,7 +129,7 @@ function parseSafeModelRequestInterruption(details: unknown): ChatAgentInterrupt
 }
 
 function committedAssistantContent(content: string): string {
-  return content === THINKING_PLACEHOLDER ? '' : content
+  return content
 }
 
 function rollbackUncommittedModelStreams(message: ChatMessage): ChatMessage {
@@ -1032,7 +1031,7 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
     ? (currentRun.completedAt ?? Date.now())
     : currentRun.completedAt
   const finalResponseAt =
-    nextContent && nextContent !== THINKING_PLACEHOLDER && !currentRun.firstResponseAt
+    nextContent && !currentRun.firstResponseAt
       ? (outputCompletedAt ?? Date.now())
       : currentRun.firstResponseAt
   const mcpProjection = addMcpApprovalViews(

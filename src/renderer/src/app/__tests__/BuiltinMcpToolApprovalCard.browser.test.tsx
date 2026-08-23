@@ -172,6 +172,8 @@ describe('BuiltinMcpToolApprovalCard', () => {
     expect(screen.container.querySelector('script')).toBeNull()
     expect(screen.container.querySelector('a')).toBeNull()
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
+    expect(screen.container.textContent).not.toContain('Expires')
+    expect(screen.container.querySelectorAll('time')).toHaveLength(1)
 
     const hidden = [
       'CDP_ENDPOINT_TARGET_TOKEN_CANARY',
@@ -251,7 +253,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
     await emptyRejection.unmount()
   })
 
-  it('keeps cancellation separate and fails closed after expiry', async () => {
+  it('keeps cancellation separate and ignores the legacy client expiry timestamp', async () => {
     const proposed = action()
     const onCancel = vi.fn()
     const screen = await render(
@@ -269,17 +271,21 @@ describe('BuiltinMcpToolApprovalCard', () => {
 
     const now = Math.floor(Date.now() / 1000)
     const expired = action({ createdAt: now - 901, expiresAt: now - 1 })
+    const onApprove = vi.fn()
     const expiredScreen = await render(
       <AgentApprovalDialog
         target={{ action: expired, messageId: 'assistant-sensitive' }}
-        onApprove={vi.fn()}
+        onApprove={onApprove}
         onReject={vi.fn()}
       />
     )
-    await expect.element(expiredScreen.getByRole('button', { name: 'Yes' })).toBeDisabled()
-    expect(expiredScreen.container.textContent).toContain(
+    const approve = expiredScreen.getByRole('button', { name: 'Yes' })
+    await expect.element(approve).toBeEnabled()
+    expect(expiredScreen.container.textContent).not.toContain(
       'sensitive browser operation request has expired'
     )
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-sensitive', expired)
     await expiredScreen.unmount()
   })
 

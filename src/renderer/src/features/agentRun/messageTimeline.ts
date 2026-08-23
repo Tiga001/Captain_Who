@@ -1,5 +1,4 @@
 import type { ChatAgentRunView, ChatAgentTimelineItem } from '../chat/chatTypes'
-import { THINKING_PLACEHOLDER } from './constants'
 
 export function removeTransientToolTimelineItems(timeline: ChatAgentTimelineItem[]) {
   return timeline
@@ -92,15 +91,11 @@ export function appendMessageToTimeline(
 }
 
 export function getMessageContentAfterDelta(content: string, delta: string) {
-  const previousContent = content === THINKING_PLACEHOLDER ? '' : content
-  return `${previousContent}${delta}`
+  return `${content}${delta}`
 }
 
 export function getFinalMessageContent(currentContent: string, finalContent?: string) {
-  if (finalContent === undefined) {
-    return currentContent === THINKING_PLACEHOLDER ? '' : currentContent
-  }
-  return finalContent
+  return finalContent ?? currentContent
 }
 
 export function getFinalTimeline(run: ChatAgentRunView, finalContent?: string) {

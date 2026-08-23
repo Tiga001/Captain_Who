@@ -546,6 +546,8 @@ export const enUSTranslations = {
   'skills.install': 'Install skill',
   'skills.loading': 'Loading skills…',
   'skills.loadFailed': 'Unable to load skills',
+  'skills.diagnosticsAvailable':
+    'Some skill details could not be loaded completely. Refresh and try again.',
   'skills.retry': 'Retry',
   'skills.refresh': 'Refresh skills',
   'skills.truncated': 'There are many skills. Only the results returned by the backend are shown.',
@@ -609,6 +611,31 @@ export const enUSTranslations = {
   'skills.back': 'Back',
   'skills.inspecting': 'Reading and inspecting the skill package…',
   'skills.operationFailed': 'Operation failed',
+  'skills.error.networkUnavailable':
+    'Unable to reach the skill source. Check your network and try again.',
+  'skills.error.rateLimited': 'The skill source is receiving too many requests. Try again later.',
+  'skills.error.repositoryTooLarge': 'This repository is too large to process as a skill source.',
+  'skills.error.unsafePackage': 'This skill package did not pass the safety check.',
+  'skills.error.invalidPackage': 'This folder is not a valid skill package.',
+  'skills.error.invalidSource':
+    'The skill source could not be recognized. Check the address or choose the folder again.',
+  'skills.error.unsupportedHost': 'Only public GitHub sources are supported.',
+  'skills.error.sourceNotFound':
+    'The requested repository, revision, or skill directory was not found.',
+  'skills.error.sourceNotAccessible':
+    'The skill source could not be read. Confirm that it is still accessible.',
+  'skills.error.noSkillsFound': 'No installable skills were found in this source.',
+  'skills.error.tooManySkills':
+    'This source contains too many skills. Use a more specific directory URL.',
+  'skills.error.incompatible': 'This skill is not compatible with this version.',
+  'skills.error.sourceChanged': 'The skill source changed during inspection. Inspect it again.',
+  'skills.error.sourceAuthorityExpired':
+    'This skill source selection expired. Resolve the source again.',
+  'skills.error.acknowledgementRequired': 'Confirm all required safety notices before continuing.',
+  'skills.error.notManageable': 'This skill cannot be managed on this page.',
+  'skills.error.operationConflict': 'The operation state changed. Start the operation again.',
+  'skills.error.cancelled': 'The operation was cancelled.',
+  'skills.error.unavailable': 'The skill service is temporarily unavailable. Try again later.',
   'skills.inspectAgain': 'Inspect again',
   'skills.editUrl': 'Edit URL',
   'skills.localOperationFailed': 'The local skill operation failed. Choose the folder again.',
@@ -865,6 +892,8 @@ export const enUSTranslations = {
   'chat.guidanceQueued': 'Queued',
   'chat.guidanceSubmittingStatus': 'Sending',
   'chat.guidanceFailed': 'Guidance could not be sent. Edit it and try again.',
+  'chat.attachmentOperationFailed': 'Unable to process the attachment. Try again.',
+  'chat.editMessageFailed': 'Unable to resend this message. Try again.',
   'chat.guidanceInterrupted': 'The previous run was interrupted. Message restored to the queue.',
   'chat.guidanceRecoveryAttachmentFailed':
     'The previous run was interrupted. Reattach the missing attachments before retrying.',

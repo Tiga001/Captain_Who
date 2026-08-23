@@ -15,6 +15,7 @@ import {
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useProjectSettings } from '../../../config/ProjectSettingsProvider'
+import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import {
@@ -411,7 +412,7 @@ export function ChatComposer({
       inputAttachments = await buildAgentInputAttachments(attachments)
       setAttachmentError(null)
     } catch (error) {
-      setAttachmentError(error instanceof Error ? error.message : String(error))
+      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
       return
     }
 
@@ -540,7 +541,7 @@ export function ChatComposer({
       nextAttachments = await selectComposerAttachments(kind)
       setAttachmentError(null)
     } catch (error) {
-      setAttachmentError(error instanceof Error ? error.message : String(error))
+      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
       setIsAttachmentMenuOpen(false)
       return
     }
@@ -563,7 +564,7 @@ export function ChatComposer({
       appendAttachments(nextAttachments)
       setAttachmentError(null)
     } catch (error) {
-      setAttachmentError(error instanceof Error ? error.message : String(error))
+      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
     }
   }
 

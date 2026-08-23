@@ -185,9 +185,8 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       setHydrationStatus('failed')
       markStartupFailed(lastError)
       console.error('Failed to load model settings from SQLite', lastError)
-      const detail = lastError instanceof Error ? lastError.message : String(lastError)
       const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
-      presentToast(`${translate('configuration.loadFailed')}: ${detail}`, { durationMs: 5000 })
+      presentToast(translate('configuration.loadFailed'), { durationMs: 5000 })
     }
 
     void hydrate()

@@ -440,7 +440,8 @@ describe('Skills settings navigation and management inventory', () => {
       .mockRejectedValueOnce(new Error('management unavailable'))
       .mockResolvedValueOnce(managementOutput([]))
     const screen = await render(<SkillsSettingsPage />)
-    await expect.element(screen.getByText('management unavailable')).toBeVisible()
+    await expect.element(screen.getByRole('alert')).toHaveTextContent('skills.loadFailed')
+    await expect.element(screen.getByText('management unavailable')).not.toBeInTheDocument()
     await screen.getByRole('button', { name: 'skills.retry' }).click()
     await expect.element(screen.getByText('skills.empty', { exact: true })).toBeVisible()
   })
@@ -1179,7 +1180,7 @@ describe('Skill installation and update workflow', () => {
       .getByRole('textbox', { name: 'skills.githubUrl' })
       .fill('https://github.com/openai/skills')
     await screen.getByRole('button', { name: 'skills.continue' }).click()
-    await expect.element(screen.getByText('GitHub is temporarily unavailable')).toBeVisible()
+    await expect.element(screen.getByText('skills.error.networkUnavailable')).toBeVisible()
     const firstInput = service.resolveInstallationSource.mock.calls[0]?.[0]
     await screen.getByRole('button', { name: 'skills.retry' }).click()
     await expect.poll(() => service.resolveInstallationSource.mock.calls.length).toBe(2)
@@ -1209,7 +1210,7 @@ describe('Skill installation and update workflow', () => {
       .getByRole('textbox', { name: 'skills.githubUrl' })
       .fill('https://github.com/openai/skills')
     await screen.getByRole('button', { name: 'skills.continue' }).click()
-    await expect.element(screen.getByText('Candidate authority was consumed')).toBeVisible()
+    await expect.element(screen.getByText('skills.error.sourceAuthorityExpired')).toBeVisible()
     const firstResolutionId = service.resolveInstallationSource.mock.calls[0]?.[0].resolutionId
     const firstPreparationId = service.inspectInstallation.mock.calls[0]?.[0].preparationId
 

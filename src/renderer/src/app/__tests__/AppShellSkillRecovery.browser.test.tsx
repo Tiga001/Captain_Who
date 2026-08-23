@@ -3163,7 +3163,8 @@ describe('activation failure recovery', () => {
     const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
 
-    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
     await expect
       .element(screen.getByTestId('draft-skills'))
       .not.toHaveTextContent(skillSelection.id)
@@ -3192,7 +3193,8 @@ describe('activation failure recovery', () => {
     const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
 
-    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
     await expect.element(screen.getByTestId('draft-skills')).toHaveTextContent(skillSelection.id)
     await expect.element(screen.getByTestId('skill-catalog-refresh-token')).toHaveTextContent('1')
   })
@@ -3224,7 +3226,8 @@ describe('activation failure recovery', () => {
       })
     )
 
-    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
     await expect
       .element(screen.getByTestId('draft-skills'))
       .toHaveTextContent(latestSkillSelection.revision)
@@ -3253,7 +3256,8 @@ describe('activation failure recovery', () => {
       })
     )
 
-    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
     await expect
       .element(screen.getByTestId('draft-skills'))
       .not.toHaveTextContent(skillSelection.id)

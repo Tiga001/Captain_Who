@@ -9,7 +9,7 @@ function assistant(
   return {
     id: 'assistant-1',
     role: 'assistant',
-    content: '正在思考...',
+    content: '',
     createdAt: 1,
     status,
     ...(runStatus === undefined

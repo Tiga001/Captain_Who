@@ -18,6 +18,7 @@ import type {
   SkillSourceResolutionCandidate
 } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import type { TranslationKey } from '../../../config/languageRegistry'
 import type {
   SkillInstallationWorkflowState,
   useSkillInstallationWorkflow
@@ -205,7 +206,7 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
             <SkillPreview
               acceptedIssueIds={state.acceptedIssueIds}
               committing={state.status === 'committing'}
-              errorMessage={state.status === 'preview' ? state.errorMessage : null}
+              errorKey={state.status === 'preview' ? state.errorKey : null}
               now={now}
               operationLabel={operationLabel}
               onBack={workflow.returnToPreviousStep}
@@ -217,7 +218,7 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
 
           {state.status === 'error' && (
             <SkillWorkflowError
-              message={state.message}
+              errorKey={state.errorKey}
               onCancel={workflow.close}
               onRecover={() => void workflow.recover()}
               recovery={state.details.recovery}
@@ -336,7 +337,7 @@ function SkillCandidateSelection({
 function SkillPreview({
   acceptedIssueIds,
   committing,
-  errorMessage,
+  errorKey,
   now,
   onBack,
   onCommit,
@@ -346,7 +347,7 @@ function SkillPreview({
 }: {
   acceptedIssueIds: readonly string[]
   committing: boolean
-  errorMessage: string | null
+  errorKey: TranslationKey | null
   now: number
   onBack: () => void
   onCommit: () => void
@@ -509,9 +510,9 @@ function SkillPreview({
             {t('skills.previewExpiredDescription')}
           </p>
         )}
-        {errorMessage && (
+        {errorKey && (
           <p className="skill-form-error" role="alert">
-            {errorMessage}
+            {t(errorKey)}
           </p>
         )}
       </div>
@@ -552,12 +553,12 @@ function SkillPreview({
 }
 
 function SkillWorkflowError({
-  message,
+  errorKey,
   onCancel,
   onRecover,
   recovery
 }: {
-  message: string | null
+  errorKey: TranslationKey
   onCancel: () => void
   onRecover: () => void
   recovery?: string
@@ -570,7 +571,7 @@ function SkillWorkflowError({
     ? t('skills.freeCapacityDescription')
     : isSupport
       ? t('skills.contactSupportDescription')
-      : (message ?? t('skills.localOperationFailed'))
+      : t(errorKey)
 
   return (
     <div className="skill-dialog-error" role="alert">

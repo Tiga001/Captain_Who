@@ -4458,8 +4458,8 @@ fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
     assert_eq!(persisted_pair, (1, 1));
 }
 
-#[test]
-fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace() {
+#[tokio::test]
+async fn builtin_capability_approval_waits_past_its_proposal_window_and_can_still_be_approved() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("builtin-capability-expiry.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -4475,8 +4475,11 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
     let conversation_id = "builtin-capability-expiry-conversation";
     let assistant_message_id = "builtin-capability-expiry-assistant";
     let action_id = uuid::Uuid::new_v4().to_string();
-    let expiry_now_ms = mycopilot_core::storage::now_ms().saturating_add(1_000);
+    let expiry_now_ms = mycopilot_core::storage::now_ms();
     let expiry_now_seconds = u64::try_from(expiry_now_ms).unwrap() / 1_000;
+    let provider = auto_activation_test_provider();
+    let runtime =
+        mycopilot_core::BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap();
     let call = AgentToolCall {
         id: "builtin-capability-expiry-call".to_string(),
         tool: "activate_capability".to_string(),
@@ -4496,7 +4499,7 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
             capability_id: "browser_automation".to_string(),
             display_name: "Browser automation".to_string(),
             reason: "Inspect the task page".to_string(),
-            manifest_digest: format!("sha256:{}", "1".repeat(64)),
+            manifest_digest: provider.manifest.manifest_digest.clone(),
             policy_revision: 1,
             created_at: expiry_now_seconds.saturating_sub(901),
             expires_at: expiry_now_seconds.saturating_sub(1),
@@ -4522,8 +4525,19 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
             tool_name: "activate_capability".to_string(),
         },
     ));
-    let service =
-        AgentService::new(Arc::clone(&storage)).with_mcp_approval_clock(move || expiry_now_ms);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    input.context = Some(run_context.clone());
+    input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_builtin_capabilities(runtime)
+        .with_mcp_approval_clock(move || expiry_now_ms);
     seed_durable_pending_owner(
         &storage,
         conversation_id,
@@ -4556,19 +4570,19 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
         service
             .reconcile_expired_builtin_capability_approvals()
             .unwrap(),
-        1
+        0
     );
-    assert!(service.list_pending_actions().is_empty());
+    assert_eq!(service.list_pending_actions().len(), 1);
     assert_eq!(
         service
             .reconcile_expired_builtin_capability_approvals()
             .unwrap(),
         0,
-        "terminal expiry must be idempotent"
+        "the periodic reconciler must leave human approval pending"
     );
 
     let storage_id = pending_action_storage_id(run_id, &action_id);
-    let retired: (String, String, String) = rusqlite::Connection::open(&database_path)
+    let pending: (String, String, String) = rusqlite::Connection::open(&database_path)
         .unwrap()
         .query_row(
             "SELECT status, action_json, agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
@@ -4576,17 +4590,16 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(
-        retired,
-        ("failed".to_string(), "{}".to_string(), "{}".to_string())
-    );
+    assert_eq!(pending.0, "pending");
+    assert_ne!(pending.1, "{}");
+    assert_ne!(pending.2, "{}");
     let trace = storage
         .get_conversation_turn_trace(assistant_message_id)
         .unwrap()
         .unwrap();
     assert_eq!(
         trace.terminal_status,
-        ConversationTurnTraceTerminalStatus::Failed
+        ConversationTurnTraceTerminalStatus::InProgress
     );
     assert_eq!(
         trace
@@ -4597,16 +4610,28 @@ fn expired_builtin_capability_approval_atomically_terminalizes_its_durable_trace
                 ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
             ))
             .count(),
-        1,
-        "expiry must settle the original activation call exactly once"
+        0,
+        "waiting past the proposal window must not synthesize a failure result"
     );
-    let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
-    let assistant = conversation
-        .messages
-        .iter()
-        .find(|message| message.id == assistant_message_id)
+
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output = service
+        .queue_action_continuation(
+            run_id,
+            &action_id,
+            AgentApprovalDecisionStatus::Approved,
+            None,
+            notifications,
+        )
         .unwrap();
-    assert_eq!(assistant.status.as_deref(), Some("error"));
+    assert_eq!(output.status, "approved");
+    assert_eq!(
+        provider.approvals.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let grant = provider.grant.lock().unwrap().clone().unwrap();
+    assert_eq!(grant.created_at, expiry_now_seconds);
+    assert!(grant.created_at > expiry_now_seconds.saturating_sub(1));
 }
 
 fn store_builtin_sensitive_test_pending(

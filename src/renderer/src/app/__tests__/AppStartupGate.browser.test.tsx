@@ -23,7 +23,8 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 
 const { AppStartupGate } = await import('../../features/startup/AppStartupGate')
 const { AppStartupProvider } = await import('../../features/startup/AppStartupProvider')
-const { useAppStartupStage } = await import('../../features/startup/AppStartupContext')
+const { useAppStartupStage, useAppStartupStatus } =
+  await import('../../features/startup/AppStartupContext')
 
 type DataStageId = Exclude<AppStartupStageId, 'core'>
 
@@ -59,6 +60,11 @@ function FlakyStage({ stageId }: { stageId: DataStageId }) {
   return null
 }
 
+function StartupStateProbe() {
+  const status = useAppStartupStatus()
+  return <output data-testid="startup-state">{JSON.stringify(status?.stages ?? {})}</output>
+}
+
 function StartupHarness({ flakyStage }: { flakyStage?: DataStageId }) {
   return (
     <AppStartupProvider>
@@ -72,6 +78,7 @@ function StartupHarness({ flakyStage }: { flakyStage?: DataStageId }) {
           )
         )}
       </AppStartupGate>
+      <StartupStateProbe />
     </AppStartupProvider>
   )
 }
@@ -132,6 +139,9 @@ describe('AppStartupGate', () => {
 
     await expect.element(screen.getByRole('alert')).toBeInTheDocument()
     await expect.element(screen.getByText('startup.failedTitle')).toBeInTheDocument()
+    await expect
+      .element(screen.getByTestId('startup-state'))
+      .not.toHaveTextContent('stage unavailable')
 
     await screen.getByRole('button', { name: 'startup.retry' }).click()
 

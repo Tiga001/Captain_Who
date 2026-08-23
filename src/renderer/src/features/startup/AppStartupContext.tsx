@@ -11,12 +11,7 @@ export interface AppStartupState {
 
 export interface AppStartupReporterContextValue {
   attempt: number
-  reportStage(
-    attempt: number,
-    stageId: AppStartupStageId,
-    status: AppStartupStageStatus,
-    error?: string
-  ): void
+  reportStage(attempt: number, stageId: AppStartupStageId, status: AppStartupStageStatus): void
 }
 
 export interface AppStartupStatusContextValue extends AppStartupState {
@@ -30,10 +25,6 @@ export const AppStartupStatusContext = createContext<AppStartupStatusContextValu
 
 const NOOP_REPORT_STAGE: AppStartupReporterContextValue['reportStage'] = () => undefined
 
-export function getStartupErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 export function useAppStartupStage(stageId: AppStartupStageId) {
   const context = useContext(AppStartupReporterContext)
   const attempt = context?.attempt ?? 0
@@ -42,8 +33,12 @@ export function useAppStartupStage(stageId: AppStartupStageId) {
   return useMemo(
     () => ({
       attempt,
-      markFailed: (error: unknown) =>
-        reportStage(attempt, stageId, 'failed', getStartupErrorMessage(error)),
+      // Startup state records only lifecycle status. Product copy is selected by the gate from the
+      // translation catalog, so raw backend or exception text never becomes renderer state.
+      markFailed: (error?: unknown) => {
+        void error
+        reportStage(attempt, stageId, 'failed')
+      },
       markPending: () => reportStage(attempt, stageId, 'pending'),
       markReady: () => reportStage(attempt, stageId, 'ready')
     }),

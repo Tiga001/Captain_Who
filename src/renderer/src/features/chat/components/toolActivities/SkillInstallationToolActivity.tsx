@@ -1,5 +1,4 @@
 import { CircleCheckBig, CircleStop, CircleX, PackageSearch, WandSparkles } from 'lucide-react'
-import { useEffect, useState } from 'react'
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ChatAgentRunView } from '../../chatTypes'
@@ -32,16 +31,6 @@ export function SkillInstallationToolActivity({
 }: SkillInstallationToolActivityProps) {
   const { t } = useFrontendConfig()
   const installation = run.skillInstallations?.find((item) => item.action.id === call.id)
-  const [now, setNow] = useState(() => Date.now())
-  const expired =
-    installation?.status === 'waiting_for_approval' && installation.action.expiresAt <= now
-
-  useEffect(() => {
-    if (!installation || installation.status !== 'waiting_for_approval' || expired) return
-    const delay = Math.max(0, installation.action.expiresAt - Date.now())
-    const timer = window.setTimeout(() => setNow(Date.now()), delay + 10)
-    return () => window.clearTimeout(timer)
-  }, [expired, installation])
 
   if (call.tool === 'skills_prepare_install') {
     const output = record(result?.result)
@@ -94,7 +83,7 @@ export function SkillInstallationToolActivity({
     )
   }
 
-  const status = expired ? 'expired' : installation?.status
+  const status = installation?.status
   const failed =
     result?.ok === false ||
     settledStatus === 'failed' ||

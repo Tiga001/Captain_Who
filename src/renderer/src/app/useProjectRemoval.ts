@@ -4,7 +4,6 @@ import {
   getAgentActionApprovalStatus,
   getAgentActionId
 } from '../features/agentRun/agentActionUtils'
-import { THINKING_PLACEHOLDER } from '../features/agentRun/constants'
 import {
   ensureAgentRun,
   settleAgentRunToolActivities
@@ -138,10 +137,7 @@ export function useProjectRemoval({
               )
               const cancelledMessage: ChatMessage = {
                 ...message,
-                content:
-                  message.content && message.content !== THINKING_PLACEHOLDER
-                    ? message.content
-                    : '',
+                content: message.content,
                 status: 'sent',
                 agentRun: settleAgentRunToolActivities(
                   {

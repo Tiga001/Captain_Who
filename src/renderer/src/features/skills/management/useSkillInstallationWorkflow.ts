@@ -9,8 +9,10 @@ import type {
   SkillsInspectInstallationInput,
   SkillsResolveInstallationSourceOutput
 } from '@mycopilot/protocol'
+import type { TranslationKey } from '../../../config/languageRegistry'
 import {
   getSkillOperationErrorDetails,
+  getSkillOperationErrorKey,
   type SkillOperationErrorDetails
 } from './skillManagementErrors'
 import {
@@ -41,7 +43,7 @@ interface InspectionTransaction {
 
 interface PreviewSession {
   acceptedIssueIds: readonly string[]
-  errorMessage: string | null
+  errorKey: TranslationKey | null
   inspection: InspectionTransaction
   preview: SkillInstallationPreview
 }
@@ -49,8 +51,8 @@ interface PreviewSession {
 interface WorkflowErrorState {
   context: SkillInstallationContext
   details: SkillOperationErrorDetails
+  errorKey: TranslationKey
   inspection?: InspectionTransaction
-  message: string | null
   phase: 'resolve' | 'inspect' | 'commit'
   previewSession?: PreviewSession
   resolution?: ResolutionTransaction
@@ -139,7 +141,7 @@ export function useSkillInstallationWorkflow({
         }
         publish({
           acceptedIssueIds: [],
-          errorMessage: null,
+          errorKey: null,
           inspection,
           preview,
           status: 'preview'
@@ -150,8 +152,8 @@ export function useSkillInstallationWorkflow({
         publish({
           context: inspection.context,
           details,
+          errorKey: publicErrorKey(inspection.origin, details),
           inspection,
-          message: publicErrorMessage(inspection.origin, details.message),
           phase: 'inspect',
           status: 'error'
         })
@@ -198,7 +200,7 @@ export function useSkillInstallationWorkflow({
         publish({
           context,
           details,
-          message: details.message,
+          errorKey: getSkillOperationErrorKey(details),
           phase: 'resolve',
           resolution,
           status: 'error'
@@ -330,7 +332,7 @@ export function useSkillInstallationWorkflow({
       const accepted = new Set(current.acceptedIssueIds)
       if (accepted.has(issueId)) accepted.delete(issueId)
       else accepted.add(issueId)
-      publish({ ...current, acceptedIssueIds: [...accepted], errorMessage: null })
+      publish({ ...current, acceptedIssueIds: [...accepted], errorKey: null })
     },
     [publish]
   )
@@ -354,7 +356,7 @@ export function useSkillInstallationWorkflow({
         previewRevision: session.preview.previewRevision
       }
       const epoch = ++operationEpochRef.current
-      publish({ ...session, errorMessage: null, status: 'committing' })
+      publish({ ...session, errorKey: null, status: 'committing' })
 
       try {
         const output = await commitSkillInstallation(input)
@@ -373,14 +375,18 @@ export function useSkillInstallationWorkflow({
           return
         }
         if (details.recovery === 'acknowledgeWarnings') {
-          publish({ ...session, errorMessage: details.message, status: 'preview' })
+          publish({
+            ...session,
+            errorKey: getSkillOperationErrorKey(details),
+            status: 'preview'
+          })
           return
         }
         publish({
           context: session.inspection.context,
           details,
+          errorKey: publicErrorKey(session.inspection.origin, details),
           inspection: session.inspection,
-          message: publicErrorMessage(session.inspection.origin, details.message),
           phase: 'commit',
           previewSession: session,
           status: 'error'
@@ -519,7 +525,7 @@ export function useSkillInstallationWorkflow({
       return
     }
     if (recovery === 'acknowledgeWarnings' && current.previewSession) {
-      publish({ ...current.previewSession, errorMessage: current.message, status: 'preview' })
+      publish({ ...current.previewSession, errorKey: current.errorKey, status: 'preview' })
       return
     }
     returnToPreviousStep()
@@ -654,6 +660,11 @@ function cancelPreparationBestEffort(preparationId: string): void {
   void cancelSkillPreparation({ preparationId }).catch(() => undefined)
 }
 
-function publicErrorMessage(origin: InspectionOrigin, message: string): string | null {
-  return origin.kind === 'local' ? null : message
+function publicErrorKey(
+  origin: InspectionOrigin,
+  details: SkillOperationErrorDetails
+): TranslationKey {
+  return origin.kind === 'local'
+    ? 'skills.localOperationFailed'
+    : getSkillOperationErrorKey(details)
 }

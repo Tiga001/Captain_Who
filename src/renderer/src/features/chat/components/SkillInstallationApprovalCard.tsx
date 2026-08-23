@@ -7,14 +7,22 @@ import {
   SkillInstallationPreviewDetails,
   skillInstallationPlainText
 } from './SkillInstallationPreviewDetails'
+import {
+  resetApprovalSubmissionOnFailure,
+  type ApprovalSubmissionResult
+} from './approvalSubmission'
 
 type SkillInstallationAction = Extract<AgentProposedAction, { type: 'skill_installation' }>
 
 interface SkillInstallationApprovalCardProps {
   action: SkillInstallationAction
   messageId: string
-  onApprove?: (messageId: string, action: AgentProposedAction) => void
-  onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onApprove?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
+  onReject?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
 }
 
 export function SkillInstallationApprovalCard({
@@ -26,43 +34,31 @@ export function SkillInstallationApprovalCard({
   const { t } = useFrontendConfig()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [rejectMessage, setRejectMessage] = useState('')
-  const [now, setNow] = useState(() => Date.now())
   const preview = action.installation.preview
-  const expired = now >= action.installation.expiresAt
 
   useEffect(() => {
     setIsSubmitting(false)
     setRejectMessage('')
-    setNow(Date.now())
   }, [action.installation.id, messageId])
 
-  useEffect(() => {
-    if (expired) return
-    const delay = Math.max(0, action.installation.expiresAt - Date.now())
-    const timer = window.setTimeout(() => setNow(Date.now()), delay + 10)
-    return () => window.clearTimeout(timer)
-  }, [action.installation.expiresAt, expired])
-
-  const submit = (operation: () => void, allowExpired = false) => {
-    if (isSubmitting || (expired && !allowExpired)) return
+  const submit = (operation: () => ApprovalSubmissionResult) => {
+    if (isSubmitting) return
     setIsSubmitting(true)
-    operation()
+    resetApprovalSubmissionOnFailure(operation(), () => setIsSubmitting(false))
   }
 
   return (
     <ApprovalDialogShell
       approvalKind="standard"
-      approveDisabled={expired || !onApprove}
+      approveDisabled={!onApprove}
       approveLabel={t('agent.skillInstallation.approve')}
       details={<SkillInstallationPreviewDetails preview={preview} />}
       isSubmitting={isSubmitting}
       onApprove={() => submit(() => onApprove?.(messageId, action))}
       onReject={(message) =>
-        submit(() => onReject?.(messageId, action, message.trim() || undefined), true)
+        submit(() => onReject?.(messageId, action, message.trim() || undefined))
       }
       onRejectMessageChange={setRejectMessage}
-      policyHint={expired ? t('agent.skillInstallation.expired') : undefined}
-      policyTone={expired ? 'danger' : 'default'}
       rejectDisabled={!onReject}
       rejectLabel={t('agent.skillInstallation.reject')}
       rejectMessage={rejectMessage}

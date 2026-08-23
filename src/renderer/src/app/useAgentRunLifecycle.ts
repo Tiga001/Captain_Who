@@ -32,7 +32,7 @@ import {
   saveConversationMeta
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
-import { DEFAULT_AGENT_MAX_TOKENS, THINKING_PLACEHOLDER } from '../features/agentRun/constants'
+import { DEFAULT_AGENT_MAX_TOKENS } from '../features/agentRun/constants'
 import {
   applyAgentEventToChatMessage,
   applyAgentCommandSessionSnapshotToChatMessage,
@@ -49,6 +49,7 @@ import {
 } from '../features/skills/skillActivationRecovery'
 import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
 import type { Translate } from '../config/translationFormat'
+import { getAgentInterruptionReason } from '../errors/userFacingError'
 import { createComposerDraft, mergeConversationMessageFromBackend } from './chatMessageFactory'
 import type { ActiveRunBinding } from './appTypes'
 import {
@@ -1536,7 +1537,7 @@ export function useAgentRunLifecycle({
                   {
                     id: assistantMessageId,
                     role: 'assistant',
-                    content: THINKING_PLACEHOLDER,
+                    content: '',
                     createdAt: startOutput.assistantMessage.createdAt,
                     status: 'pending'
                   },
@@ -1574,7 +1575,7 @@ export function useAgentRunLifecycle({
                     )
                     resolvedAssistantMessage = {
                       ...mergedMessage,
-                      content: mergedMessage.content || message.content || THINKING_PLACEHOLDER,
+                      content: mergedMessage.content || message.content,
                       status: 'pending' as const,
                       agentRun: {
                         ...ensureAgentRun(mergedMessage.agentRun, startOutput.runId, 'running'),
@@ -1664,10 +1665,7 @@ export function useAgentRunLifecycle({
             assistantMessageId,
             (currentMessage) => ({
               ...currentMessage,
-              content:
-                currentMessage.content && currentMessage.content !== THINKING_PLACEHOLDER
-                  ? currentMessage.content
-                  : '',
+              content: currentMessage.content,
               status: 'sent',
               agentRun: settleAgentRunToolActivities(
                 {
@@ -1684,7 +1682,6 @@ export function useAgentRunLifecycle({
           return false
         }
 
-        const message = error instanceof Error ? error.message : String(error)
         const recovery = planSkillActivationRecovery(error, skills)
         reconcileFailedSkillActivation(conversationId, recovery, {
           modelId,
@@ -1697,15 +1694,26 @@ export function useAgentRunLifecycle({
         updateAssistantMessage(
           conversationId,
           assistantMessageId,
-          (currentMessage) => ({
-            ...currentMessage,
-            content: message,
-            status: 'error',
-            agentRun: {
-              ...ensureAgentRun(currentMessage.agentRun, null, 'failed'),
-              error: message
+          (currentMessage) => {
+            const failedAt = Date.now()
+            return {
+              ...currentMessage,
+              status: 'sent',
+              agentRun: settleAgentRunToolActivities(
+                {
+                  ...ensureAgentRun(currentMessage.agentRun, null, 'failed'),
+                  status: 'failed',
+                  completedAt: failedAt,
+                  todo: undefined,
+                  interruption: { reason: getAgentInterruptionReason(error) },
+                  error: undefined,
+                  llmRetry: undefined
+                },
+                'failed',
+                failedAt
+              )
             }
-          }),
+          },
           { touchConversation: true }
         )
         return false

@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import type { AgentProposedAction, AgentUsage, GitTurnDiffSummary } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView, ChatAgentTimelineItem, ChatMessage } from '../chatTypes'
 import type { ChatGuidanceTimelineItem } from '../chatTypes'
@@ -26,6 +27,7 @@ import {
 } from '../attachmentDisplay'
 import { loadAttachmentImage } from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
+import type { ApprovalSubmissionResult } from './approvalSubmission'
 import {
   copyTextToClipboard,
   formatElapsedDuration,
@@ -124,12 +126,16 @@ interface ChatMessageItemProps {
     messageId: string,
     action: AgentProposedAction,
     options?: { rememberForRun?: boolean }
-  ) => void
-  onCancel?: (messageId: string, action: AgentProposedAction) => void
+  ) => ApprovalSubmissionResult
+  onCancel?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onOpenCollaborationAgent?: (agentId: string) => void
-  onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onReject?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
   onReviewLastTurn?: (filePath?: string) => void
   onTimelineCollapsedChange?: (messageId: string, collapsed: boolean) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
@@ -1033,7 +1039,7 @@ function EditableUserMessage({
     try {
       await onSubmit(content.trim())
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : String(submitError))
+      setError(getUserFacingErrorMessage(submitError, t, 'chat.editMessageFailed'))
       setIsSubmitting(false)
     }
   }

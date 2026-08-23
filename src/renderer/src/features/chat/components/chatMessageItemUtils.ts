@@ -248,12 +248,8 @@ export function isTokenLimitFinishReason(finishReason: string | undefined) {
   )
 }
 
-export function isThinkingPlaceholder(content: string) {
-  return content.trim() === '正在思考...'
-}
-
 export function hasDisplayableContent(content: string) {
-  return Boolean(content.trim()) && !isThinkingPlaceholder(content)
+  return Boolean(content.trim())
 }
 
 export function isTimelineItemRenderable(run: ChatAgentRunView, item: ChatAgentTimelineItem) {

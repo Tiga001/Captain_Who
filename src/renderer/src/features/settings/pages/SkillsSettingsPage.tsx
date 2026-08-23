@@ -9,6 +9,7 @@ import { SkillInstallationDialog } from '../../skills/management/SkillInstallati
 import { SkillManagementList } from '../../skills/management/SkillManagementList'
 import {
   getSkillOperationErrorDetails,
+  getSkillOperationErrorKey,
   shouldRefreshSkillsAfterError,
   type SkillOperationErrorDetails
 } from '../../skills/management/skillManagementErrors'
@@ -59,9 +60,7 @@ export function SkillsSettingsPage() {
       await setEnabled(entry, enabled)
     } catch (error) {
       const details = getSkillOperationErrorDetails(error)
-      showToast(details.code === 'stateConflict' ? t('skills.stateChanged') : details.message, {
-        durationMs: 3200
-      })
+      showToast(t(getSkillOperationErrorKey(details)), { durationMs: 3200 })
     }
   }
 
@@ -74,14 +73,7 @@ export function SkillsSettingsPage() {
     } catch (error) {
       const details = getSkillOperationErrorDetails(error)
       if (shouldRefreshSkillsAfterError(details)) await refresh()
-      showToast(
-        details.commitMayHaveSucceeded
-          ? t('skills.operationNeedsConfirmation')
-          : details.code === 'revisionConflict' || details.code === 'installationNotFound'
-            ? t('skills.stateChanged')
-            : details.message,
-        { durationMs: 3200 }
-      )
+      showToast(t(getSkillOperationErrorKey(details)), { durationMs: 3200 })
     }
   }
 
@@ -122,7 +114,7 @@ export function SkillsSettingsPage() {
           <AlertTriangle aria-hidden="true" />
           <div>
             <strong>{t('skills.loadFailed')}</strong>
-            <p>{state.errorMessage}</p>
+            {state.errorKey && <p>{t(state.errorKey)}</p>}
           </div>
           <button type="button" onClick={() => void refresh()}>
             <RefreshCw aria-hidden="true" />
@@ -136,18 +128,14 @@ export function SkillsSettingsPage() {
           {(output.truncated ||
             output.diagnostics.length > 0 ||
             hasProtocolIssue ||
-            state.errorMessage) && (
+            state.errorKey) && (
             <div className="skills-page-notices" role="status">
               <AlertTriangle aria-hidden="true" />
               <div>
                 {output.truncated && <p>{t('skills.truncated')}</p>}
-                {output.diagnostics.map((diagnostic, index) => (
-                  <p key={`${diagnostic.code}-${diagnostic.skillId ?? index}`}>
-                    {diagnostic.message}
-                  </p>
-                ))}
+                {output.diagnostics.length > 0 && <p>{t('skills.diagnosticsAvailable')}</p>}
                 {hasProtocolIssue && <p>{t('skills.protocolStateIncomplete')}</p>}
-                {state.errorMessage && <p>{state.errorMessage}</p>}
+                {state.errorKey && <p>{t(state.errorKey)}</p>}
               </div>
               <button
                 aria-label={t('skills.refresh')}

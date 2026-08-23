@@ -433,10 +433,10 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
         };
         state
             .consumed_action_ids
-            .insert(approval.action_id.clone(), approval.expires_at);
+            .insert(approval.action_id.clone(), grant.expires_at);
         state
             .consumed_activation_ids
-            .insert(approval.activation_id.clone(), approval.expires_at);
+            .insert(approval.activation_id.clone(), grant.expires_at);
         state.grants.insert(key, grant.clone());
         drop(state);
 
@@ -3080,6 +3080,31 @@ mod tests {
         // A durable settlement failure may retry the exact pending approval; rollback must not
         // leave either one-shot identity consumed.
         assert!(harness.runtime.approve_activation(&approval).is_ok());
+    }
+
+    #[test]
+    fn revoking_a_settled_grant_does_not_reopen_its_activation_identity() {
+        let harness = harness();
+        harness
+            .policies
+            .set_allowed(StoredCapabilityId::BrowserAutomation, 0, true)
+            .unwrap();
+        let approval = approved(&harness, Uuid::new_v4(), Uuid::new_v4());
+        let grant = harness.runtime.approve_activation(&approval).unwrap();
+        {
+            let state = harness.provider.lock_grants().unwrap();
+            assert_eq!(
+                state.consumed_action_ids.get(&approval.action_id),
+                Some(&grant.expires_at)
+            );
+            assert_eq!(
+                state.consumed_activation_ids.get(&approval.activation_id),
+                Some(&grant.expires_at)
+            );
+        }
+
+        harness.runtime.revoke_grants(&grant.capability_id).unwrap();
+        assert!(harness.runtime.approve_activation(&approval).is_err());
     }
 
     #[test]

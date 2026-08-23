@@ -6,6 +6,10 @@ import { formatTranslation } from '../../../config/translationFormat'
 import { getBuiltinCapabilityDisplayName } from '../../mcp/builtinCapabilityPresentation'
 import { toSafeMcpDisplayText } from '../../mcp/mcpSafeDisplay'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
+import {
+  resetApprovalSubmissionOnFailure,
+  type ApprovalSubmissionResult
+} from './approvalSubmission'
 
 type BuiltinMcpToolApprovalAction = Extract<
   AgentProposedAction,
@@ -15,9 +19,13 @@ type BuiltinMcpToolApprovalAction = Extract<
 interface BuiltinMcpToolApprovalCardProps {
   action: BuiltinMcpToolApprovalAction
   messageId: string
-  onApprove?: (messageId: string, action: AgentProposedAction) => void
-  onCancel?: (messageId: string, action: AgentProposedAction) => void
-  onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onApprove?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
+  onCancel?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
+  onReject?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
 }
 
 const toolKeys: Readonly<Record<string, TranslationKey>> = {
@@ -67,10 +75,6 @@ const resourceScopeKeys: Readonly<Record<string, TranslationKey>> = {
   managed_surface: 'agent.builtinMcpApproval.resource.managedSurface'
 }
 
-function currentUnixSeconds(): number {
-  return Math.floor(Date.now() / 1000)
-}
-
 /** Renders only Core's value-free allowlist projection; all values remain React text nodes. */
 export function BuiltinMcpToolApprovalCard({
   action,
@@ -84,31 +88,25 @@ export function BuiltinMcpToolApprovalCard({
   const { approval } = action
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [rejectMessage, setRejectMessage] = useState('')
-  const [expired, setExpired] = useState(() => currentUnixSeconds() >= approval.expiresAt)
 
   useEffect(() => {
     submittingRef.current = false
     setIsSubmitting(false)
     setRejectMessage('')
-    const remainingMs = approval.expiresAt * 1000 - Date.now()
-    if (remainingMs <= 0) {
-      setExpired(true)
-      return
-    }
-    setExpired(false)
-    const timeoutId = window.setTimeout(() => setExpired(true), remainingMs)
-    return () => window.clearTimeout(timeoutId)
-  }, [approval.identity.actionId, approval.expiresAt, messageId])
+  }, [approval.identity.actionId, messageId])
 
   const pending = approval.approvalStatus === 'required'
-  const canApprove = pending && !expired && Boolean(onApprove) && !isSubmitting
+  const canApprove = pending && Boolean(onApprove) && !isSubmitting
   const canReject = pending && Boolean(onReject) && !isSubmitting
   const canCancel = pending && Boolean(onCancel) && !isSubmitting
-  const submitOnce = (operation: (() => void) | undefined) => {
+  const submitOnce = (operation: (() => ApprovalSubmissionResult) | undefined) => {
     if (!operation || submittingRef.current) return
     submittingRef.current = true
     setIsSubmitting(true)
-    operation()
+    resetApprovalSubmissionOnFailure(operation(), () => {
+      submittingRef.current = false
+      setIsSubmitting(false)
+    })
   }
 
   const capability = getBuiltinCapabilityDisplayName(approval.identity.capabilityId, t)
@@ -127,7 +125,6 @@ export function BuiltinMcpToolApprovalCard({
   )
   const risks = approval.riskKinds.map((risk) => t(riskKeys[risk])).join(' · ')
   const createdAt = new Date(approval.createdAt * 1000)
-  const expiresAt = new Date(approval.expiresAt * 1000)
   const formatTime = (value: number) =>
     new Intl.DateTimeFormat(language, { dateStyle: 'short', timeStyle: 'medium' }).format(
       new Date(value * 1000)
@@ -175,12 +172,6 @@ export function BuiltinMcpToolApprovalCard({
               <time dateTime={createdAt.toISOString()}>{formatTime(approval.createdAt)}</time>
             </dd>
           </div>
-          <div>
-            <dt>{t('agent.builtinMcpApproval.expiresAt')}</dt>
-            <dd>
-              <time dateTime={expiresAt.toISOString()}>{formatTime(approval.expiresAt)}</time>
-            </dd>
-          </div>
         </dl>
       }
       isSubmitting={isSubmitting}
@@ -192,12 +183,7 @@ export function BuiltinMcpToolApprovalCard({
         submitOnce(() => onReject?.(messageId, action, guidance || undefined))
       }}
       onRejectMessageChange={setRejectMessage}
-      policyHint={
-        expired
-          ? t('agent.builtinMcpApproval.expired')
-          : t('agent.builtinMcpApproval.exactScopeHint')
-      }
-      policyTone={expired ? 'danger' : 'default'}
+      policyHint={t('agent.builtinMcpApproval.exactScopeHint')}
       rejectDisabled={!canReject}
       rejectLabel={t('agent.approval.dialog.reject')}
       rejectMessage={rejectMessage}

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SkillsListOutput } from '@mycopilot/protocol'
+import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { getUserFacingErrorMessage } from '../../errors/userFacingError'
 import { listSkills } from './skillsClient'
 
 export type SkillCatalogState =
@@ -9,6 +11,7 @@ export type SkillCatalogState =
   | { status: 'error'; projectId: string | null; message: string }
 
 export function useSkillCatalog(projectId: string | null, enabled: boolean, refreshKey: string) {
+  const { t } = useFrontendConfig()
   const requestSequenceRef = useRef(0)
   const [refreshSequence, setRefreshSequence] = useState(0)
   const [state, setState] = useState<SkillCatalogState>({ status: 'idle' })
@@ -39,14 +42,14 @@ export function useSkillCatalog(projectId: string | null, enabled: boolean, refr
         setState({
           status: 'error',
           projectId,
-          message: error instanceof Error ? error.message : String(error)
+          message: getUserFacingErrorMessage(error, t, 'chat.skillsLoadFailed')
         })
       })
 
     return () => {
       cancelled = true
     }
-  }, [enabled, projectId, refreshKey, refreshSequence])
+  }, [enabled, projectId, refreshKey, refreshSequence, t])
 
   return { refresh, state }
 }

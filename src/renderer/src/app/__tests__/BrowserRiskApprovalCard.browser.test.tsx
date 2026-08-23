@@ -101,8 +101,8 @@ describe('BrowserRiskApprovalCard', () => {
     expect(screen.container.textContent).toContain('Loopback address')
     expect(screen.container.textContent).toContain('Non-standard port')
     expect(screen.container.textContent).toContain('Created')
-    expect(screen.container.textContent).toContain('Expires')
-    expect(screen.container.querySelectorAll('time')).toHaveLength(2)
+    expect(screen.container.textContent).not.toContain('Expires')
+    expect(screen.container.querySelectorAll('time')).toHaveLength(1)
     expect(screen.container.querySelector('img')).toBeNull()
     expect(screen.container.querySelector('script')).toBeNull()
     expect(screen.container.querySelector('a')).toBeNull()
@@ -177,18 +177,22 @@ describe('BrowserRiskApprovalCard', () => {
     await screen.unmount()
   })
 
-  it('fails closed after expiry', async () => {
+  it('keeps pending approval actionable despite a legacy client expiry timestamp', async () => {
     const now = Math.floor(Date.now() / 1000)
     const expired = action({ createdAt: now - 901, expiresAt: now - 1 })
+    const onApprove = vi.fn()
     const expiredScreen = await render(
       <AgentApprovalDialog
         target={{ action: expired, messageId: 'assistant-message' }}
-        onApprove={vi.fn()}
+        onApprove={onApprove}
         onReject={vi.fn()}
       />
     )
-    await expect.element(expiredScreen.getByRole('button', { name: 'Yes' })).toBeDisabled()
-    expect(expiredScreen.container.textContent).toContain('browser access request has expired')
+    const approve = expiredScreen.getByRole('button', { name: 'Yes' })
+    await expect.element(approve).toBeEnabled()
+    expect(expiredScreen.container.textContent).not.toContain('browser access request has expired')
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', expired)
     await expiredScreen.unmount()
   })
 })

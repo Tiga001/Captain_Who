@@ -4,7 +4,6 @@ import type {
   AgentMcpToolRisk,
   AgentProposedAction
 } from '@mycopilot/protocol'
-import { act, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { AgentApprovalDialog } from '../../features/chat/components/AgentApprovalDialog'
@@ -130,24 +129,6 @@ function getButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button
 }
 
-function ExpiryHarness({ now }: { now: number }) {
-  const [expiresAt, setExpiresAt] = useState(now + 60_000)
-  return (
-    <>
-      <button onClick={() => setExpiresAt(now + 1_000)} type="button">
-        Arm expiry
-      </button>
-      <AgentApprovalDialog
-        target={{
-          action: createMcpAction({ expiresAt }),
-          messageId: 'assistant-message'
-        }}
-        onApprove={vi.fn()}
-      />
-    </>
-  )
-}
-
 afterEach(() => {
   vi.useRealTimers()
   vi.clearAllMocks()
@@ -243,26 +224,26 @@ describe('McpToolApprovalCard', () => {
     screen.unmount()
   })
 
-  it('disables approval at expiry using the local timer while leaving Host validation authoritative', async () => {
-    const realNow = Date.now()
-    const screen = await render(<ExpiryHarness now={realNow} />)
-
-    vi.useFakeTimers()
-    vi.setSystemTime(realNow)
-    getButton(screen.container, 'Arm expiry').click()
+  it('keeps pending approval actionable despite a legacy client expiry timestamp', async () => {
+    const action = createMcpAction({ expiresAt: Date.now() - 1 })
+    const onApprove = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
 
     const approveButton = getButton(screen.container, 'Yes')
     expect(approveButton.disabled).toBe(false)
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000)
-    })
-    expect(approveButton.disabled).toBe(true)
-    expect(screen.container.textContent).toContain('Expired')
+    expect(screen.container.textContent).not.toContain('Expired')
+    approveButton.click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
     screen.unmount()
-    vi.useRealTimers()
   })
 
   it.each<[AgentMcpToolInvocationState, string]>([
+    ['expired', 'Expired'],
     ['payload_unavailable', 'Approval payload unavailable'],
     ['policy_denied', 'Blocked by policy']
   ])('fails closed for %s', async (invocationState, statusLabel) => {

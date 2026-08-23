@@ -1161,53 +1161,13 @@ impl AgentService {
         Ok(summary)
     }
 
-    /// Expires task-scoped built-in capability approvals without creating a runtime grant.
+    /// Keeps task-scoped built-in capability approvals pending until the user decides.
     ///
-    /// The same injected wall clock used by MCP approval reconciliation is converted to seconds,
-    /// matching the public capability contract. SQLite owns the terminal CAS and complete trace
-    /// settlement; the process map is updated only after that transaction commits.
+    /// The approval decision itself has no wall-clock deadline. On approval, the Host mints a
+    /// fresh bounded activation authorization and still revalidates the live policy/manifest.
+    /// Keep this hook as a no-op so the shared periodic reconciler does not need a special branch.
     pub(crate) fn reconcile_expired_builtin_capability_approvals(&self) -> Result<usize, String> {
-        let now_ms = self.mcp_approval_now_ms();
-        let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
-        let mut pending_actions = self
-            .pending_actions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let candidates = pending_actions
-            .iter()
-            .filter_map(|(storage_id, record)| {
-                if !matches!(
-                    record.snapshot.status,
-                    PendingActionStatus::Pending | PendingActionStatus::Approved
-                ) {
-                    return None;
-                }
-                let AgentProposedAction::BuiltinCapabilityActivation { approval } =
-                    &record.snapshot.action
-                else {
-                    return None;
-                };
-                (approval.expires_at <= now_seconds).then(|| storage_id.clone())
-            })
-            .collect::<Vec<_>>();
-        let mut terminalized = 0_usize;
-        for storage_id in candidates {
-            let Some(record) = pending_actions.get(&storage_id) else {
-                continue;
-            };
-            let expected_status = pending_status_label(record.snapshot.status);
-            let changed = self
-                .storage
-                .expire_builtin_capability_agent_action(&storage_id, expected_status, now_ms)
-                .map_err(|_| {
-                    "failed to expire a built-in capability activation safely".to_string()
-                })?;
-            if changed {
-                pending_actions.remove(&storage_id);
-                terminalized = terminalized.saturating_add(1);
-            }
-        }
-        Ok(terminalized)
+        Ok(0)
     }
 
     /// Expires sensitive built-in MCP Tool approvals before any process-only grant can dispatch.

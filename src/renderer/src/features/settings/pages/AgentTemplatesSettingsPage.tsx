@@ -3,6 +3,7 @@ import { Bot, ChevronLeft, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import type { AppProject } from '../../../config/projectConfig'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
@@ -84,7 +85,7 @@ export function AgentTemplatesSettingsPage({
       setTemplates(sortTemplates(result.templates))
     } catch (loadError) {
       if (projectIdRef.current !== requestProjectId) return
-      setError(loadError instanceof Error ? loadError.message : t('agentTemplates.loadFailed'))
+      setError(getUserFacingErrorMessage(loadError, t, 'agentTemplates.loadFailed'))
     } finally {
       if (projectIdRef.current === requestProjectId) setLoading(false)
     }
@@ -109,7 +110,7 @@ export function AgentTemplatesSettingsPage({
       })
       .catch((loadError) => {
         if (!cancelled && projectIdRef.current === requestProjectId) {
-          setError(loadError instanceof Error ? loadError.message : t('agentTemplates.loadFailed'))
+          setError(getUserFacingErrorMessage(loadError, t, 'agentTemplates.loadFailed'))
         }
       })
       .finally(() => {
@@ -167,9 +168,7 @@ export function AgentTemplatesSettingsPage({
       return result
     } catch (mutationError) {
       if (projectIdRef.current !== mutationProjectId) return null
-      setError(
-        mutationError instanceof Error ? mutationError.message : t('agentTemplates.operationFailed')
-      )
+      setError(getUserFacingErrorMessage(mutationError, t, 'agentTemplates.operationFailed'))
       void reload()
       return null
     } finally {
@@ -466,9 +465,7 @@ export function AgentTemplatesSettingsPage({
               .catch((deleteError) => {
                 if (projectIdRef.current !== projectId) return
                 setError(
-                  deleteError instanceof Error
-                    ? deleteError.message
-                    : t('agentTemplates.operationFailed')
+                  getUserFacingErrorMessage(deleteError, t, 'agentTemplates.operationFailed')
                 )
                 void reload()
               })

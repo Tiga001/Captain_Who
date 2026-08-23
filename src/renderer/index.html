@@ -76,6 +76,18 @@
         user-select: none;
       }
 
+      .app-bootstrap-screen__sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
       @keyframes app-bootstrap-icon-pulse {
         0%,
         100% {
@@ -123,8 +135,8 @@
 
   <body>
     <div id="root">
-      <!-- This zero-JavaScript shell is the first paint. React replaces it with AppStartupGate. -->
-      <div class="app-bootstrap-screen" role="status" aria-label="Starting MyCopilot">
+      <!-- This lightweight shell is localized before React replaces it with AppStartupGate. -->
+      <div class="app-bootstrap-screen" role="status" aria-labelledby="app-bootstrap-status">
         <div class="app-bootstrap-screen__drag-region" aria-hidden="true"></div>
         <div class="app-bootstrap-screen__content">
           <picture>
@@ -140,10 +152,20 @@
               draggable="false"
             />
           </picture>
-          <div class="app-bootstrap-screen__ambient" aria-hidden="true">正在深度思考</div>
+          <div
+            class="app-bootstrap-screen__ambient"
+            data-bootstrap-startup-ambient
+            aria-hidden="true"
+          ></div>
+          <span
+            id="app-bootstrap-status"
+            class="app-bootstrap-screen__sr-only"
+            data-bootstrap-startup-label
+          ></span>
         </div>
       </div>
     </div>
+    <script type="module" src="/src/features/startup/bootstrapStartupEntry.ts"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

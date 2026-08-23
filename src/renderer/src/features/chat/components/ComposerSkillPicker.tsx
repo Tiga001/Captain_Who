@@ -279,11 +279,7 @@ export function ComposerSkillPicker({
                 )}
               </summary>
               <ul>
-                {readyOutput.diagnostics.slice(0, 5).map((diagnostic, index) => (
-                  <li key={`${diagnostic.code}:${diagnostic.skillId ?? 'catalog'}:${index}`}>
-                    {diagnostic.message}
-                  </li>
-                ))}
+                <li>{t('skills.diagnosticsAvailable')}</li>
               </ul>
             </details>
           )}

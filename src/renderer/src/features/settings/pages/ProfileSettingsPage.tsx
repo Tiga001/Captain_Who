@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { UserCircle } from 'lucide-react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import {
   getProfileDisplayName,
   getProfileHandle,
@@ -41,7 +42,7 @@ export function ProfileSettingsPage({
       if (!avatarDataUrl) return
       onUiPreferencesChange({ profileAvatarDataUrl: avatarDataUrl })
     } catch (error) {
-      setAvatarError(error instanceof Error ? error.message : t('profile.avatarUploadFailed'))
+      setAvatarError(getUserFacingErrorMessage(error, t, 'profile.avatarUploadFailed'))
     }
   }
 

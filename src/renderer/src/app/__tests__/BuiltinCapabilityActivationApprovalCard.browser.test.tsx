@@ -147,20 +147,41 @@ describe('BuiltinCapabilityActivationApprovalCard', () => {
     screen.unmount()
   })
 
-  it('uses the Rust seconds-based expiry and fails closed for an expired request', async () => {
+  it('keeps a pending activation approval actionable regardless of its legacy expiry timestamp', async () => {
     const nowSeconds = Math.floor(Date.now() / 1000)
     const action = createAction({ createdAt: nowSeconds - 901, expiresAt: nowSeconds - 1 })
+    const onApprove = vi.fn()
     const screen = await render(
       <AgentApprovalDialog
         target={{ action, messageId: 'assistant-message' }}
-        onApprove={vi.fn()}
+        onApprove={onApprove}
         onReject={vi.fn()}
       />
     )
     const approve = screen.getByRole('button', { name: 'Yes' })
 
-    await expect.element(approve).toBeDisabled()
-    expect(screen.container.textContent).toContain('activation request has expired')
+    await expect.element(approve).toBeEnabled()
+    expect(screen.container.textContent).not.toContain('activation request has expired')
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
+    screen.unmount()
+  })
+
+  it('unlocks the approval after an authoritative submission failure', async () => {
+    const action = createAction()
+    const onApprove = vi.fn(() => Promise.resolve(false))
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
+
+    const approve = screen.getByRole('button', { name: 'Yes' })
+    await approve.click()
+    await vi.waitFor(() => expect(getButton(screen.container, 'Yes').disabled).toBe(false))
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledTimes(2)
     screen.unmount()
   })
 })

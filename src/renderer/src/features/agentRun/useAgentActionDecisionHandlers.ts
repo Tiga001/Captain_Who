@@ -41,12 +41,12 @@ export function useAgentActionDecisionHandlers({
 }: UseAgentActionDecisionHandlersOptions) {
   const handleApproveAgentAction = useCallback(
     (messageId: string, action: AgentProposedAction) => {
-      if (!activeConversationId) return
+      if (!activeConversationId) return false
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
 
-      void applyAuthoritativePendingActionDecision({
+      return applyAuthoritativePendingActionDecision({
         runId,
         invoke: (authoritativeRunId) => approveAgentAction(authoritativeRunId, actionId),
         apply: (execution) => {
@@ -64,19 +64,19 @@ export function useAgentActionDecisionHandlers({
         onMissingRunId: () => {
           console.warn('Cannot approve agent action without a run id', { actionId, messageId })
         }
-      })
+      }).then((outcome) => outcome.status === 'applied')
     },
     [activeConversationId, conversationsRef, updateAssistantMessage]
   )
 
   const handleRejectAgentAction = useCallback(
     (messageId: string, action: AgentProposedAction, message?: string) => {
-      if (!activeConversationId) return
+      if (!activeConversationId) return false
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
 
-      void applyAuthoritativePendingActionDecision({
+      return applyAuthoritativePendingActionDecision({
         runId,
         invoke: (authoritativeRunId) => rejectAgentAction(authoritativeRunId, actionId, message),
         apply: (execution) => {
@@ -94,19 +94,19 @@ export function useAgentActionDecisionHandlers({
         onMissingRunId: () => {
           console.warn('Cannot reject agent action without a run id', { actionId, messageId })
         }
-      })
+      }).then((outcome) => outcome.status === 'applied')
     },
     [activeConversationId, conversationsRef, updateAssistantMessage]
   )
 
   const handleCancelAgentAction = useCallback(
     (messageId: string, action: AgentProposedAction) => {
-      if (!activeConversationId) return
+      if (!activeConversationId) return false
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
 
-      void applyAuthoritativePendingActionDecision({
+      return applyAuthoritativePendingActionDecision({
         runId,
         invoke: (authoritativeRunId) => cancelAgentAction(authoritativeRunId, actionId),
         isAccepted: (cancelled) => cancelled,
@@ -127,7 +127,7 @@ export function useAgentActionDecisionHandlers({
         onNotAccepted: () => {
           console.warn('Agent action cancellation was not accepted', { actionId, runId })
         }
-      })
+      }).then((outcome) => outcome.status === 'applied')
     },
     [activeConversationId, conversationsRef, updateAssistantMessage]
   )

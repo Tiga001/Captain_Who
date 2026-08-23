@@ -3,6 +3,7 @@ import type { FocusEvent, ReactElement } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import type { AgentUsageModelSummary, AgentUsageSummaryOutput } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { clearAgentUsageRecords, getAgentUsageSummary } from '../../agent/agentClient'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import './UsageBillingSettingsPage.css'
@@ -323,7 +324,7 @@ export function UsageBillingSettingsPage({
         if (!isCancelled) {
           setSummary(null)
           setChartBuckets([])
-          setErrorMessage(error instanceof Error ? error.message : t('usageBilling.loadFailed'))
+          setErrorMessage(getUserFacingErrorMessage(error, t, 'usageBilling.loadFailed'))
         }
       } finally {
         if (!isCancelled) setIsLoading(false)
@@ -358,7 +359,7 @@ export function UsageBillingSettingsPage({
       setSummary(nextSummary)
       setChartBuckets(nextChartBuckets)
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t('usageBilling.clearFailed'))
+      setErrorMessage(getUserFacingErrorMessage(error, t, 'usageBilling.clearFailed'))
     } finally {
       setIsClearing(false)
     }

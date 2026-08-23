@@ -14,10 +14,14 @@ import {
 } from '../../features/startup/startupAmbientPhrases'
 
 describe('pickNextStartupPhraseIndex', () => {
-  it('keeps a zero-JavaScript startup phrase in the renderer shell', () => {
+  it('keeps a localizable startup shell before React mounts', () => {
     const rendererShell = readFileSync(resolve('src/renderer/index.html'), 'utf8')
     expect(rendererShell).toContain('class="app-bootstrap-screen__ambient"')
-    expect(rendererShell).toContain('正在深度思考')
+    expect(rendererShell).toContain('data-bootstrap-startup-ambient')
+    expect(rendererShell).toContain('data-bootstrap-startup-label')
+    expect(rendererShell).toContain('/src/features/startup/bootstrapStartupEntry.ts')
+    expect(rendererShell).not.toContain('>正在深度思考<')
+    expect(rendererShell).not.toContain('aria-label="Starting MyCopilot"')
     expect(rendererShell).toContain('background: rgba(244, 244, 242, 0.58)')
     expect(rendererShell).toContain('@media (prefers-reduced-transparency: reduce)')
   })

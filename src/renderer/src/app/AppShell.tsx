@@ -21,6 +21,7 @@ import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
+import { getUserFacingErrorMessage } from '../errors/userFacingError'
 import { featureFlags } from '../config/featureFlags'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
@@ -59,7 +60,6 @@ import {
   saveUiPreferences
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
-import { THINKING_PLACEHOLDER } from '../features/agentRun/constants'
 import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import type { ActiveRunBinding } from './appTypes'
 import {
@@ -659,8 +659,10 @@ export function AppShell() {
         })
         .catch((error) => {
           if (conversationDetailEpochRef.current.get(conversationId) === requestEpoch) {
-            const message = error instanceof Error ? error.message : String(error)
-            setConversationLoadErrors((current) => ({ ...current, [conversationId]: message }))
+            setConversationLoadErrors((current) => ({
+              ...current,
+              [conversationId]: getUserFacingErrorMessage(error, t, 'chat.conversationLoadFailed')
+            }))
             console.error('Failed to load conversation messages', error)
           }
           return null
@@ -674,7 +676,7 @@ export function AppShell() {
       conversationDetailRequestsRef.current.set(conversationId, request)
       return request
     },
-    [setConversationsWithRef]
+    [setConversationsWithRef, t]
   )
 
   useEffect(() => {
@@ -938,7 +940,7 @@ export function AppShell() {
         : Date.now()
       const conversationId = targetConversation?.id ?? createId('conversation')
       const userMessage = createUserMessage(message, options.attachments ?? [])
-      const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
+      const assistantMessage = createAssistantMessage('', 'pending')
       const title = createConversationTitle(message, t('chat.newConversation'))
       const conversationToSave: ChatConversation = targetConversation
         ? {
@@ -1356,7 +1358,7 @@ export function AppShell() {
         const frozenAttachments = attachments.map((attachment) => ({ ...attachment }))
         const frozenSkills = editedSkillSelections.map((selection) => ({ ...selection }))
         rewriteAttempt = {
-          assistantMessage: createAssistantMessage(THINKING_PLACEHOLDER, 'pending'),
+          assistantMessage: createAssistantMessage('', 'pending'),
           attachments: frozenAttachments,
           content,
           modelId,
@@ -1839,12 +1841,11 @@ export function AppShell() {
           window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
         })
         .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error)
           restoreRejectedGuidance(
             conversationId,
             assistantMessage.id,
             queuedMessage.clientMessageId,
-            message || t('chat.guidanceFailed')
+            getUserFacingErrorMessage(error, t, 'chat.guidanceFailed')
           )
           window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
         })

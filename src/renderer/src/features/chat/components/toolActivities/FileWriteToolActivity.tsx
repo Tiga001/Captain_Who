@@ -6,6 +6,7 @@ import type { ChatFileWritePreview } from '../../chatTypes'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
+import { getUserFacingErrorMessage } from '../../../../errors/userFacingError'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -281,7 +282,9 @@ function FileWriteEntry({
         }
       })
       .catch((error) => {
-        if (!cancelled) setPreviewError(error instanceof Error ? error.message : String(error))
+        if (!cancelled) {
+          setPreviewError(getUserFacingErrorMessage(error, t, 'files.preview.error'))
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -289,7 +292,7 @@ function FileWriteEntry({
     return () => {
       cancelled = true
     }
-  }, [expanded, item.draft, item.draftId, observerRootConversationId, previewSource])
+  }, [expanded, item.draft, item.draftId, observerRootConversationId, previewSource, t])
 
   const toggleExpanded = (): void => {
     if (!expanded) {

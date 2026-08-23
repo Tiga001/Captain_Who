@@ -7,6 +7,10 @@ import type {
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { toSafeMcpDisplayText } from '../../mcp/mcpSafeDisplay'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
+import {
+  resetApprovalSubmissionOnFailure,
+  type ApprovalSubmissionResult
+} from './approvalSubmission'
 
 type McpToolCallAction = Extract<AgentProposedAction, { type: 'mcp_tool_call' }>
 
@@ -14,9 +18,13 @@ interface McpToolApprovalCardProps {
   action: McpToolCallAction
   invocationState?: AgentMcpToolInvocationState
   messageId: string
-  onApprove?: (messageId: string, action: AgentProposedAction) => void
-  onCancel?: (messageId: string, action: AgentProposedAction) => void
-  onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onApprove?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
+  onCancel?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
+  onReject?: (
+    messageId: string,
+    action: AgentProposedAction,
+    message?: string
+  ) => ApprovalSubmissionResult
 }
 
 const APPROVABLE_INVOCATION_STATES = new Set<AgentMcpToolInvocationState>(['pending_approval'])
@@ -38,10 +46,8 @@ const stateTranslationKeys = {
 
 function getBlockingState(
   approval: AgentMcpToolApproval,
-  invocationState: AgentMcpToolInvocationState | undefined,
-  expired: boolean
+  invocationState: AgentMcpToolInvocationState | undefined
 ): AgentMcpToolInvocationState | undefined {
-  if (expired) return 'expired'
   if (approval.approvalMode !== 'prompt') return 'policy_denied'
   if (invocationState && !APPROVABLE_INVOCATION_STATES.has(invocationState)) {
     return invocationState
@@ -72,7 +78,6 @@ export function McpToolApprovalCard({
   const { t } = useFrontendConfig()
   const submittingRef = useRef(false)
   const { approval } = action
-  const [expired, setExpired] = useState(() => Date.now() >= approval.expiresAt)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [rejectionMessage, setRejectionMessage] = useState('')
 
@@ -80,30 +85,23 @@ export function McpToolApprovalCard({
     submittingRef.current = false
     setIsSubmitting(false)
     setRejectionMessage('')
-
-    const remainingMs = approval.expiresAt - Date.now()
-    if (remainingMs <= 0) {
-      setExpired(true)
-      return
-    }
-
-    setExpired(false)
-    const timeoutId = window.setTimeout(() => setExpired(true), remainingMs)
-    return () => window.clearTimeout(timeoutId)
-  }, [approval.expiresAt, approval.identity.actionId])
+  }, [approval.identity.actionId, messageId])
 
   const currentState = invocationState ?? 'pending_approval'
-  const blockingState = getBlockingState(approval, invocationState, expired)
+  const blockingState = getBlockingState(approval, invocationState)
   const canApprove =
     !blockingState && approval.approvalMode === 'prompt' && Boolean(onApprove) && !isSubmitting
   const canReject = Boolean(onReject) && !isSubmitting && currentState === 'pending_approval'
   const canCancel = Boolean(onCancel) && !isSubmitting && currentState === 'pending_approval'
 
-  const submitOnce = (submit: (() => void) | undefined) => {
+  const submitOnce = (submit: (() => ApprovalSubmissionResult) | undefined) => {
     if (!submit || submittingRef.current) return
     submittingRef.current = true
     setIsSubmitting(true)
-    submit()
+    resetApprovalSubmissionOnFailure(submit(), () => {
+      submittingRef.current = false
+      setIsSubmitting(false)
+    })
   }
 
   const approve = () => {

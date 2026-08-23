@@ -13,7 +13,6 @@ export type AppStartupStageId = (typeof APP_STARTUP_STAGE_DEFINITIONS)[number]['
 export type AppStartupStageStatus = 'pending' | 'ready' | 'failed'
 
 export interface AppStartupStageState {
-  error?: string
   status: AppStartupStageStatus
 }
 
