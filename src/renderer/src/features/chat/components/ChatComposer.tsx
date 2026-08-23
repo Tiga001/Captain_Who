@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
-import type { LucideIcon } from 'lucide-react'
 import {
   ArrowUp,
   Check,
@@ -11,15 +10,11 @@ import {
   Plus,
   Search,
   Sparkles,
-  ShieldAlert,
-  ShieldCheck,
-  ShieldPlus,
   X
 } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useProjectSettings } from '../../../config/ProjectSettingsProvider'
-import type { TranslationKey } from '../../../config/frontendTranslations'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import {
@@ -57,20 +52,12 @@ import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPick
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
+import {
+  CHAT_PERMISSION_PRESENTATIONS,
+  getChatPermissionPresentation
+} from '../chatPermissionPresentation'
 import './ChatComposer.css'
 import './GuidanceQueue.css'
-
-interface PermissionOption {
-  id: ChatPermissionMode
-  labelKey: TranslationKey
-  icon: LucideIcon
-}
-
-const PERMISSION_OPTIONS: PermissionOption[] = [
-  { id: 'default', labelKey: 'chat.defaultPermission', icon: ShieldPlus },
-  { id: 'full', labelKey: 'chat.fullPermission', icon: ShieldAlert },
-  { id: 'custom', labelKey: 'chat.customPermission', icon: ShieldCheck }
-]
 
 const TEXTAREA_MAX_HEIGHT = 220
 
@@ -150,7 +137,7 @@ export function ChatComposer({
   const lastExternalMessageRef = useRef(draft.message)
   const permissionOptions = useMemo(
     () =>
-      PERMISSION_OPTIONS.filter(
+      CHAT_PERMISSION_PRESENTATIONS.filter(
         (option) =>
           option.id === 'default' ||
           (option.id === 'full' && permissionModeAvailability.full) ||
@@ -168,7 +155,8 @@ export function ChatComposer({
     [draft.attachments]
   )
   const selectedPermission =
-    permissionOptions.find((option) => option.id === permissionMode) ?? PERMISSION_OPTIONS[0]
+    permissionOptions.find((option) => option.id === permissionMode) ??
+    getChatPermissionPresentation('default')
   const SelectedPermissionIcon = selectedPermission.icon
   const selectedModel = useMemo(() => {
     return enabledModels.find((model) => model.id === selectedModelId) ?? enabledModels[0]

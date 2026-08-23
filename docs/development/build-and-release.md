@@ -140,6 +140,7 @@ notarize: false
 2. `pnpm install --frozen-lockfile`。
 3. `pnpm check`。
 4. 按改动域运行专项 gate：
+   - `pnpm test:automation-core-e2e`
    - `pnpm test:multi-agent-release`
    - `pnpm verify:playwright-round3-release`
    - MCP stdio stress/其他明确发布测试
@@ -151,6 +152,28 @@ notarize: false
 10. 只有所有必需证据来自同一最终树时才进入发布；任何失败都应修复后完整重跑。
 
 不要把 `build:unpack` 的 unsigned directory、脚本 unit test、旧 bundle startup 或不同 commit 的 gate 拼接成签名发布证据。
+
+### Scheduled Automation 发布验证
+
+Scheduled Automation 或其协议、Host API、Core Server、SQLite schema、权限/Approval、系统通知链路有变化时，发布证据至少包括：
+
+```bash
+pnpm check
+pnpm test:automation-core-e2e
+pnpm build:<platform>
+```
+
+`pnpm check` 会经 `test:web` 和 `test:rust` 覆盖 Automation 的 unit、Browser、调度/lease、权限、Approval restart 和 durable outbox 测试；独立的 `test:automation-core-e2e` **不在** `test:web`、`test` 或 `check` 内，必须另行记录。它只证明 debug Core Server 上的 durable CRUD、CAS、`runNow` 入队、history 和 attention 跨层调用，不证明真实定时唤醒、Provider 完成、OS 通知、休眠唤醒、重启后的真实进程恢复或 packaged Electron。
+
+如果发行说明声称目标平台支持 Scheduled Automation，应在该平台的最终 package 上另做人工 smoke，并把它明确标记为人工证据：
+
+- 使用隔离的新数据根创建/编辑/暂停任务，验证 active、blocked 与 attention 投影；
+- 以真实短周期任务验证 due Run 只创建一个根 Agent Turn，并检查 Conversation/Run identity；
+- 用默认权限走一次 `waiting_for_approval`，确认批准或拒绝继续同一 Turn；
+- 重启应用后核对 overdue Run 标为 `recovery`、已绑定 Run 不被重复启动；
+- 在系统允许和拒绝原生通知两种状态下核对 durable attention/outbox；允许时再验证通知点击打开精确任务或 Conversation/message。
+
+仓库目前没有自动化 OS/packaged Scheduled Automation E2E，也没有一条脚本完成上述人工验收。不得把 unit 中模拟的 `Notification`、进程内 Electron transport 或 unpacked 启动当作目标平台通知/packaged 验收。子系统边界见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
 ## 8. 产物验收与回滚
 
@@ -186,6 +209,7 @@ pnpm test:officecli
 pnpm test:office-renderer
 pnpm test:artifact-runtime
 pnpm test:playwright-packaged-startup
+pnpm test:automation-core-e2e
 pnpm build:core
 ```
 
@@ -207,7 +231,8 @@ pnpm verify:playwright-packaged-startup
 - afterPack 没有独立校验 packaged OfficeCLI、Artifact Runtime 与全部 Core Server content。
 - packaged startup gate 仅支持 macOS unpacked app，且 supplied bundle freshness 不确定。
 - Packaged Agent → Managed Playwright MCP E2E 为 pending。
-- `pnpm check` 不包含 package、真实签名、Multi-Agent 或 Playwright专项 gate。
+- Scheduled Automation 缺真实时钟、Provider/Approval、OS 通知点击、重启/休眠与 packaged Electron 自动化 E2E。
+- `pnpm check` 不包含 package、真实签名、Automation 真实 Core Server E2E、Multi-Agent 或 Playwright 专项 gate。
 
 ## 12. 变更检查表
 
@@ -218,6 +243,7 @@ pnpm verify:playwright-packaged-startup
 - [ ] macOS 新 executable 是否有稳定 identifier、最小 entitlements、hardened runtime 和实际验签？
 - [ ] 是否明确 signing、notarization、publishing、updating 四种不同状态？
 - [ ] `pnpm check`、专项 gate、目标 package 和 startup 证据是否来自同一最终 commit？
+- [ ] Scheduled Automation 变更是否另跑 `test:automation-core-e2e`，并在目标 package 上记录未自动覆盖的调度、Approval、恢复与通知 smoke？
 - [ ] 是否记录 artifact hash、平台/arch、签名 identity 与所有 pending 项？
 - [ ] schema 变更是否评估旧应用回滚和开发 reset 行为？
 - [ ] 是否同步更新运行时组件、测试矩阵和本文？

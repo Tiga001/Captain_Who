@@ -8,7 +8,10 @@ import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { ModelConfig } from '../../../config/modelConfig'
 import type { AppProject } from '../../../config/projectConfig'
 import type { ChatPermissionMode, ChatConversation } from '../../chat/chatTypes'
+import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
+import type { ModelConfigPickerOption } from '../../modelSelection/ModelConfigPicker'
 import type { AutomationDraft } from '../automationTypes'
+import { withSystemTimeZone } from '../automationSchedule'
 import { validateAutomationDraft as validateProtocolAutomationDraft } from '../automationValidation'
 import { AutomationChatPicker } from './AutomationChatPicker'
 import { AutomationField, AutomationScheduleEditor } from './AutomationScheduleEditor'
@@ -191,8 +194,12 @@ export function AutomationTaskForm({
     timezone: t('automation.validationTimezone'),
     title: t('automation.validationTitleRequired')
   }
+  const normalizedDraft = {
+    ...draft,
+    schedule: withSystemTimeZone(draft.schedule)
+  }
   const validation = validateAutomationFormDraft(
-    draft,
+    normalizedDraft,
     modelIds,
     conversationIds,
     projectIds,
@@ -217,7 +224,8 @@ export function AutomationTaskForm({
     setDraft((current) => ({ ...current, ...patch }))
   }
 
-  const updateSchedule = (schedule: AutomationScheduleInput) => update({ schedule })
+  const updateSchedule = (schedule: AutomationScheduleInput) =>
+    update({ schedule: withSystemTimeZone(schedule) })
 
   const projectOptions: AutomationOption<string>[] = [
     { value: '__none__', label: t('automation.noProject') },
@@ -233,18 +241,26 @@ export function AutomationTaskForm({
       disabled: true
     })
   }
-  const modelOptions: AutomationOption<string>[] = models.map((model) => ({
-    value: model.id,
-    label: model.displayName,
-    disabled: !model.enabled
+  const enabledModels = models.filter((model) => model.enabled)
+  const modelOptions: ModelConfigPickerOption[] = enabledModels.map((model) => ({
+    capabilityLabel: model.supportsImage ? t('configuration.image') : t('configuration.text'),
+    capabilitySupported: model.supportsImage,
+    id: model.id,
+    label: model.displayName
   }))
-  if (
-    taskNewChatDestination &&
-    !modelOptions.some((option) => option.value === taskNewChatDestination.modelId)
-  ) {
+  const selectedModelId = newChatDestination?.modelId
+  if (selectedModelId && !modelOptions.some((option) => option.id === selectedModelId)) {
+    const unavailableModel = models.find((model) => model.id === selectedModelId)
     modelOptions.push({
-      value: taskNewChatDestination.modelId,
-      label: task?.targetSnapshot.modelDisplayName ?? taskNewChatDestination.modelId,
+      capabilityLabel: unavailableModel
+        ? unavailableModel.supportsImage
+          ? t('configuration.image')
+          : t('configuration.text')
+        : undefined,
+      capabilitySupported: unavailableModel?.supportsImage,
+      id: selectedModelId,
+      label:
+        task?.targetSnapshot.modelDisplayName ?? unavailableModel?.displayName ?? selectedModelId,
       disabled: true
     })
   }
@@ -300,8 +316,14 @@ export function AutomationTaskForm({
   }
 
   const submit = async () => {
+    const submissionDraft = {
+      ...draft,
+      // Resolve this at click time so a system timezone change while the drawer
+      // is open cannot leak the previous zone into the request.
+      schedule: withSystemTimeZone(draft.schedule)
+    }
     const nextErrors = validateAutomationFormDraft(
-      draft,
+      submissionDraft,
       modelIds,
       conversationIds,
       projectIds,
@@ -313,8 +335,9 @@ export function AutomationTaskForm({
     setSubmitting(true)
     setSubmitError(null)
     try {
-      await onSubmit(draft)
-      setBaselineFingerprint(currentFingerprint)
+      await onSubmit(submissionDraft)
+      setDraft(submissionDraft)
+      setBaselineFingerprint(JSON.stringify(submissionDraft))
     } catch (error) {
       const presentation = taskErrorPresentation(
         error,
@@ -422,30 +445,39 @@ export function AutomationTaskForm({
                   />
                 </AutomationField>
                 <AutomationField label={t('automation.model')} error={errors.modelId}>
-                  <AutomationSelect
-                    ariaLabel={t('automation.model')}
+                  <ModelConfigPicker
+                    ariaLabel={`${t('automation.model')}: ${
+                      modelOptions.find((option) => option.id === newChatDestination.modelId)
+                        ?.label ?? t('chat.noEnabledModels')
+                    }`}
+                    className="automation-model-picker"
                     disabled={disabled || submitting}
-                    options={modelOptions}
-                    value={newChatDestination.modelId}
+                    emptyLabel={t('chat.noEnabledModels')}
                     onChange={(modelId) =>
                       update({ destination: { ...newChatDestination, modelId } })
                     }
+                    options={modelOptions}
+                    showSelectedCapability
+                    value={newChatDestination.modelId}
+                    variant="settings"
                   />
                 </AutomationField>
-                <AutomationField label={t('automation.reasoning')}>
-                  <span
-                    className="automation-form__readonly"
-                    title={t('automation.reasoningFromModel')}
-                  >
-                    {reasoningProjection?.mode === 'disabled'
-                      ? t('automation.reasoningNone')
-                      : reasoningProjection?.effort === 'max'
-                        ? t('automation.reasoningXHigh')
-                        : reasoningProjection?.effort === 'high'
-                          ? t('automation.reasoningHigh')
-                          : t('automation.reasoningFromModel')}
-                  </span>
-                </AutomationField>
+                {mode === 'edit' && (
+                  <AutomationField label={t('automation.reasoning')}>
+                    <span
+                      className="automation-form__readonly"
+                      title={t('automation.reasoningFromModel')}
+                    >
+                      {reasoningProjection?.mode === 'disabled'
+                        ? t('automation.reasoningNone')
+                        : reasoningProjection?.effort === 'max'
+                          ? t('automation.reasoningXHigh')
+                          : reasoningProjection?.effort === 'high'
+                            ? t('automation.reasoningHigh')
+                            : t('automation.reasoningFromModel')}
+                    </span>
+                  </AutomationField>
+                )}
               </>
             ) : (
               <AutomationField label={t('automation.chat')} error={errors.conversationId}>
@@ -519,7 +551,7 @@ export function AutomationTaskForm({
         <button
           type="button"
           className="automation-button automation-button--secondary"
-          disabled={submitting}
+          disabled={disabled || submitting}
           onClick={onCancel}
         >
           {t('automation.cancel')}

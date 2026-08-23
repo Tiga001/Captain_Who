@@ -207,14 +207,19 @@ vi.mock('../../features/automations/useAutomationAttention', () => ({
 vi.mock('../../features/automations/ScheduledPageLayer', () => ({
   ScheduledPageLayer: ({
     externalNavigationRequest,
-    onClose
+    initialPreferredDrawerWidth,
+    onPreferredDrawerWidthChange
   }: {
     externalNavigationRequest?: { proceed: () => void; requestKey: number }
-    onClose: () => void
+    initialPreferredDrawerWidth?: number
+    onPreferredDrawerWidthChange?: (width: number) => void
   }) => (
     <section data-testid="scheduled-page-layer">
-      <button type="button" onClick={onClose}>
-        close-scheduled
+      <output data-testid="scheduled-drawer-preferred-width">
+        {initialPreferredDrawerWidth ?? 'none'}
+      </output>
+      <button type="button" onClick={() => onPreferredDrawerWidthChange?.(560)}>
+        resize-scheduled-drawer
       </button>
       <output data-testid="external-navigation-request-key">
         {externalNavigationRequest?.requestKey ?? 'none'}
@@ -1052,6 +1057,9 @@ describe('scheduled workspace isolation', () => {
 
     await screen.getByRole('button', { name: 'open-scheduled' }).click()
     await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: 'app.expandLeftSidebar' }))
+      .toBeVisible()
 
     expect(screen.container.querySelector('.main-panel')).toBe(mainPanel)
     expect(screen.container.querySelector('.side-panel--right')).toBe(rightPanel)
@@ -1071,7 +1079,8 @@ describe('scheduled workspace isolation', () => {
     await expect.element(screen.getByTestId('scheduled-selected')).toHaveTextContent('true')
     await expect.element(screen.getByTestId('scheduled-attention')).toHaveTextContent('4')
 
-    await screen.getByRole('button', { name: 'close-scheduled' }).click()
+    await screen.getByRole('button', { name: 'select-conversation-a' }).click()
+    await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
     await expect
       .poll(() => screen.container.querySelector('[data-testid="scheduled-page-layer"]'))
       .toBeNull()
@@ -1111,6 +1120,26 @@ describe('scheduled workspace isolation', () => {
     await expect
       .element(screen.getByTestId('right-sidebar-conversation-id'))
       .toHaveTextContent('none')
+  })
+
+  it('keeps the automation drawer preference for the current app session only', async () => {
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'open-scheduled' }).click()
+    await expect
+      .element(screen.getByTestId('scheduled-drawer-preferred-width'))
+      .toHaveTextContent('440')
+    await screen.getByRole('button', { name: 'resize-scheduled-drawer' }).click()
+    await expect
+      .element(screen.getByTestId('scheduled-drawer-preferred-width'))
+      .toHaveTextContent('560')
+
+    await screen.getByRole('button', { name: 'new-conversation', exact: true }).click()
+    await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
+    await screen.getByRole('button', { name: 'open-scheduled' }).click()
+    await expect
+      .element(screen.getByTestId('scheduled-drawer-preferred-width'))
+      .toHaveTextContent('560')
   })
 })
 

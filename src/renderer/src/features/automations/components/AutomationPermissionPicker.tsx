@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { AutomationPermissionMode } from '@mycopilot/protocol'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { CHAT_PERMISSION_PRESENTATIONS } from '../../chat/chatPermissionPresentation'
 import { AutomationSelect, type AutomationOption } from './AutomationControls'
 
 interface AutomationPermissionPickerProps {
@@ -21,24 +22,27 @@ export function AutomationPermissionPicker({
 }: AutomationPermissionPickerProps) {
   const { t } = useFrontendConfig()
   const [confirmingFull, setConfirmingFull] = useState(false)
-  const options: AutomationOption<AutomationPermissionMode>[] = [
-    { value: 'default', label: t('automation.permissionDefault') },
-    {
-      value: 'full',
-      label: t('automation.permissionFull'),
-      disabled: !availability.full
-    },
-    {
-      value: 'custom',
-      label: t('automation.permissionCustom'),
-      disabled: !availability.custom
-    }
-  ]
+  const options: AutomationOption<AutomationPermissionMode>[] = CHAT_PERMISSION_PRESENTATIONS.map(
+    (presentation) => ({
+      value: presentation.id,
+      label: t(
+        presentation.id === 'default'
+          ? 'automation.permissionDefault'
+          : presentation.id === 'full'
+            ? 'automation.permissionFull'
+            : 'automation.permissionCustom'
+      ),
+      icon: presentation.icon,
+      disabled:
+        (presentation.id === 'full' && !availability.full) ||
+        (presentation.id === 'custom' && !availability.custom)
+    })
+  )
   const unavailable =
     (value === 'full' && !availability.full) || (value === 'custom' && !availability.custom)
 
   return (
-    <>
+    <div className="automation-permission-picker">
       <AutomationSelect
         ariaLabel={t('automation.permission')}
         disabled={disabled}
@@ -52,15 +56,6 @@ export function AutomationPermissionPicker({
         options={options}
         value={value}
       />
-      <p className="automation-permission-picker__description">
-        {t(
-          value === 'default'
-            ? 'general.defaultPermissionDescription'
-            : value === 'full'
-              ? 'general.fullPermissionDescription'
-              : 'general.customPermissionDescription'
-        )}
-      </p>
       {unavailable && (
         <div className="automation-permission-picker__warning" role="alert">
           <p>{t('automation.permissionDisabled')}</p>
@@ -85,6 +80,6 @@ export function AutomationPermissionPicker({
           title={t('chat.fullPermissionConfirmTitle')}
         />
       )}
-    </>
+    </div>
   )
 }

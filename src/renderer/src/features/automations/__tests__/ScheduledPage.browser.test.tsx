@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { page } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
@@ -116,11 +116,32 @@ const props = {
   defaultPermissionMode: 'default' as const,
   defaultProjectId: 'project-1',
   models: [testModel],
-  onClose: vi.fn(),
   onOpenConversation: vi.fn(),
   onOpenPermissionSettings: vi.fn(),
   permissionModeAvailability: { custom: true, full: true },
   projects: [{ id: 'project-1', name: 'Project One', createdAt: 1 }]
+}
+
+function ScheduledWidthHarness() {
+  const [width, setWidth] = useState(700)
+  return (
+    <>
+      <button type="button" onClick={() => setWidth(1_000)}>
+        expand scheduled container
+      </button>
+      <div data-testid="scheduled-width-container" style={{ height: 720, width }}>
+        <ScheduledPage {...props} />
+      </div>
+    </>
+  )
+}
+
+function ScheduledSplitHarness() {
+  return (
+    <div style={{ height: 720, width: 1_000 }}>
+      <ScheduledPage {...props} />
+    </div>
+  )
 }
 
 describe('ScheduledPage', () => {
@@ -157,12 +178,12 @@ describe('ScheduledPage', () => {
     expect(document.querySelector('.app-confirm-dialog__backdrop')).toBeNull()
   })
 
-  it('confirms before discarding a dirty create draft', async () => {
+  it('routes the static drawer collapse control through dirty-draft confirmation', async () => {
     service.tasks = [makeAutomationTask()]
     const screen = await render(<ScheduledPage {...props} />)
     await screen.getByRole('button', { name: 'automation.create', exact: true }).click()
     await screen.getByPlaceholder('automation.taskNamePlaceholder').fill('Unsaved title')
-    await screen.getByRole('button', { name: 'automation.close', exact: true }).click()
+    await screen.getByRole('button', { name: 'automation.collapseDrawer' }).click()
     await expect.element(screen.getByRole('dialog')).toBeVisible()
     await expect.element(screen.getByText('automation.unsavedTitle')).toBeVisible()
     await screen
@@ -238,7 +259,9 @@ describe('ScheduledPage', () => {
       .getByRole('button', { name: 'automation.createTask' })
       .click()
 
-    const close = screen.getByRole('button', { name: 'automation.close', exact: true })
+    const close = screen
+      .getByRole('complementary')
+      .getByRole('button', { name: 'automation.cancel', exact: true })
     await expect.element(close).toBeDisabled()
     await close.click({ force: true })
     await expect.element(screen.getByRole('complementary')).toBeVisible()
@@ -249,16 +272,170 @@ describe('ScheduledPage', () => {
     await expect.element(screen.getByRole('heading', { name: 'New task' })).toBeVisible()
   })
 
-  it('keeps the dedicated page close control available at narrow widths', async () => {
-    await page.viewport(500, 720)
-    try {
-      const screen = await render(<ScheduledPage {...props} />)
-      await expect
-        .element(screen.getByRole('button', { name: 'automation.closePage' }))
-        .toBeVisible()
-    } finally {
-      await page.viewport(1280, 720)
-    }
+  it('uses navigation to leave the page and gives the drawer a maximize control', async () => {
+    const screen = await render(<ScheduledPage {...props} />)
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.closePage' }))
+      .not.toBeInTheDocument()
+
+    await screen.getByRole('button', { name: 'automation.create', exact: true }).click()
+    await expect
+      .element(
+        screen
+          .getByRole('complementary')
+          .getByRole('button', { name: /automation\.(?:maximize|restore)Drawer/ })
+      )
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('complementary').getByRole('button', { name: 'automation.close' }))
+      .not.toBeInTheDocument()
+  })
+
+  it('hides duplicate create entry points while the drawer is open and restores them on close', async () => {
+    const screen = await render(<ScheduledPage {...props} />)
+    const headerCreate = screen.getByRole('button', { name: 'automation.create', exact: true })
+    const emptyCreate = screen.getByRole('button', { name: 'automation.createTask', exact: true })
+    const pageDescription = screen.getByText('automation.pageDescription')
+
+    await expect.element(headerCreate).toBeVisible()
+    await expect.element(emptyCreate).toBeVisible()
+    await expect.element(pageDescription).toBeVisible()
+    expect(getComputedStyle(headerCreate.element()).whiteSpace).toBe('nowrap')
+    const emptyCreateElement = emptyCreate.element()
+
+    await headerCreate.click()
+    await expect.element(headerCreate).not.toBeInTheDocument()
+    await expect.poll(() => emptyCreateElement.isConnected).toBe(false)
+    expect(getComputedStyle(pageDescription.element()).display).toBe('none')
+
+    await screen
+      .getByRole('complementary')
+      .getByRole('button', { name: 'automation.cancel', exact: true })
+      .click()
+    await expect.element(headerCreate).toBeVisible()
+    await expect.element(pageDescription).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.createTask', exact: true }))
+      .toBeVisible()
+    await expect.poll(() => document.activeElement).toBe(headerCreate.element())
+  })
+
+  it('animates the task drawer between docked and maximized without losing a dirty draft', async () => {
+    const screen = await render(<ScheduledSplitHarness />)
+    const pageElement = screen.container.querySelector<HTMLElement>('.scheduled-page')!
+    const listPane = screen.container.querySelector<HTMLElement>('.scheduled-page__list-pane')!
+
+    await screen.getByRole('button', { name: 'automation.create', exact: true }).click()
+    await expect.poll(() => pageElement.dataset.layout).toBe('split')
+    const drawer = screen.container.querySelector<HTMLElement>('.automation-drawer')!
+    const title = screen.getByPlaceholder('automation.taskNamePlaceholder')
+    await title.fill('Keep this draft')
+
+    const maximize = screen.getByRole('button', { name: 'automation.maximizeDrawer' })
+    await expect.element(maximize).toHaveAttribute('aria-pressed', 'false')
+    expect(getComputedStyle(drawer).transitionProperty).toContain('width')
+    await maximize.click()
+
+    await expect.poll(() => pageElement.dataset.drawerMaximized).toBe('true')
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.restoreDrawer' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(listPane.inert).toBe(true)
+    expect(listPane.getAttribute('aria-hidden')).toBe('true')
+    await expect
+      .element(screen.getByRole('separator', { name: 'automation.resizeDrawer' }))
+      .not.toBeInTheDocument()
+    await expect
+      .poll(() => Math.abs(drawer.getBoundingClientRect().width - pageElement.clientWidth))
+      .toBeLessThanOrEqual(1)
+    await expect.element(title).toHaveValue('Keep this draft')
+
+    await screen.getByRole('button', { name: 'automation.restoreDrawer' }).click()
+    await expect.poll(() => pageElement.dataset.drawerMaximized).toBeUndefined()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.maximizeDrawer' }))
+      .toHaveAttribute('aria-pressed', 'false')
+    expect(listPane.inert).toBe(false)
+    await expect
+      .element(screen.getByRole('separator', { name: 'automation.resizeDrawer' }))
+      .toBeVisible()
+    await expect
+      .poll(() => drawer.getBoundingClientRect().width < pageElement.clientWidth)
+      .toBe(true)
+    await expect.element(title).toHaveValue('Keep this draft')
+
+    await screen
+      .getByRole('complementary')
+      .getByRole('button', { name: 'automation.cancel', exact: true })
+      .click()
+    await expect.element(screen.getByText('automation.unsavedTitle')).toBeVisible()
+  })
+
+  it('keeps a long task title on one drawer-toolbar line', async () => {
+    const longTitle =
+      'A very long automation title that must never overlap the drawer toolbar controls or wrap'
+    service.tasks = [makeAutomationTask({ title: longTitle })]
+    const screen = await render(<ScheduledSplitHarness />)
+
+    screen.container.querySelector<HTMLButtonElement>('.automation-task-row__main')!.click()
+    await expect.element(screen.getByRole('complementary')).toBeVisible()
+    const heading = screen.getByRole('heading', { name: longTitle }).element()
+    const actions = screen.container.querySelector<HTMLElement>(
+      '.automation-drawer__header-actions'
+    )!
+    const headingStyle = getComputedStyle(heading)
+
+    expect(headingStyle.whiteSpace).toBe('nowrap')
+    expect(headingStyle.overflow).toBe('hidden')
+    expect(heading.getBoundingClientRect().right).toBeLessThanOrEqual(
+      actions.getBoundingClientRect().left + 1
+    )
+    expect(heading.scrollWidth).toBeGreaterThan(heading.clientWidth)
+  })
+
+  it('uses the scheduled container width for compact layout and restores the split drawer', async () => {
+    const screen = await render(<ScheduledWidthHarness />)
+    const pageElement = screen.container.querySelector<HTMLElement>('.scheduled-page')!
+    const listPane = screen.container.querySelector<HTMLElement>('.scheduled-page__list-pane')!
+
+    await screen.getByRole('button', { name: 'automation.create', exact: true }).click()
+    await expect.poll(() => pageElement.dataset.layout).toBe('compact')
+    expect(listPane.inert).toBe(true)
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.restoreDrawer' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.restoreDrawer' }))
+      .toBeDisabled()
+    await expect
+      .element(screen.getByRole('separator', { name: 'automation.resizeDrawer' }))
+      .not.toBeInTheDocument()
+    expect(
+      Math.abs(
+        screen.container.querySelector<HTMLElement>('.automation-drawer')!.clientWidth -
+          pageElement.clientWidth
+      )
+    ).toBeLessThanOrEqual(1)
+    expect(pageElement.scrollWidth).toBeLessThanOrEqual(pageElement.clientWidth + 1)
+
+    await screen.getByRole('button', { name: 'expand scheduled container' }).click()
+    await expect.poll(() => pageElement.dataset.layout).toBe('split')
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.maximizeDrawer' }))
+      .toHaveAttribute('aria-pressed', 'false')
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.maximizeDrawer' }))
+      .toBeEnabled()
+    expect(listPane.inert).toBe(false)
+    await expect
+      .element(screen.getByRole('separator', { name: 'automation.resizeDrawer' }))
+      .toBeVisible()
+    expect(listPane.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
+    expect(
+      screen.container.querySelector<HTMLElement>('.automation-drawer')!.getBoundingClientRect()
+        .right
+    ).toBeLessThanOrEqual(pageElement.getBoundingClientRect().right + 1)
+    expect(pageElement.scrollWidth).toBeLessThanOrEqual(pageElement.clientWidth + 1)
   })
 
   it('makes the covered narrow list inert and restores focus when the drawer closes', async () => {
@@ -281,7 +458,7 @@ describe('ScheduledPage', () => {
 
       await screen
         .getByRole('complementary')
-        .getByRole('button', { name: 'automation.close' })
+        .getByRole('button', { name: 'automation.cancel', exact: true })
         .click()
       await expect.poll(() => document.activeElement).toBe(opener)
     } finally {
@@ -316,6 +493,17 @@ describe('ScheduledPage', () => {
     await expect.element(screen.getByText('automation.emptyTitle')).not.toBeInTheDocument()
     await screen.getByRole('button', { name: 'automation.clearSearch' }).last().click()
     await expect.element(screen.getByText('Daily brief')).toBeVisible()
+  })
+
+  it('keeps the task search focus treatment inside its rounded field', async () => {
+    const screen = await render(<ScheduledPage {...props} />)
+    const search = screen.getByRole('searchbox')
+    const input = search.element() as HTMLInputElement
+    input.focus()
+    const field = input.closest<HTMLElement>('.automation-search')
+    expect(field).not.toBeNull()
+    expect(getComputedStyle(field!).boxShadow).toBe('none')
+    expect(getComputedStyle(input).outlineStyle).toBe('none')
   })
 
   it('renders non-empty large/light and narrow/dark visual captures without horizontal overflow', async () => {
@@ -365,13 +553,15 @@ describe('ScheduledPage', () => {
       const darkCapture = await page.screenshot({ element: narrowVisual, save: false })
       expect(darkCapture.length).toBeGreaterThan(100)
       expect(narrowPage.scrollWidth).toBeLessThanOrEqual(narrowPage.clientWidth + 1)
-      expect(
-        Math.abs(narrowDrawer.getBoundingClientRect().width - narrowPage.clientWidth)
-      ).toBeLessThanOrEqual(1)
+      await expect
+        .poll(() => Math.abs(narrowDrawer.getBoundingClientRect().width - narrowPage.clientWidth))
+        .toBeLessThanOrEqual(1)
       expect(getComputedStyle(narrowPage).backgroundColor).not.toBe(lightBackground)
       await expect
         .element(
-          screen.getByRole('complementary').getByRole('button', { name: 'automation.close' })
+          screen
+            .getByRole('complementary')
+            .getByRole('button', { name: 'automation.restoreDrawer' })
         )
         .toBeVisible()
     } finally {

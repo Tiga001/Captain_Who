@@ -24,6 +24,7 @@ import type {
   AutomationRunsQuery,
   AutomationUpdateDraft
 } from './automationTypes'
+import { withSystemTimeZone } from './automationSchedule'
 
 const DEFAULT_PAGE_SIZE = 50
 const MAX_PAGE_SIZE = 100
@@ -165,7 +166,7 @@ export async function createAutomation(
     destination: draft.destination,
     permissionMode: draft.permissionMode,
     permissionModeVersion: AUTOMATION_PERMISSION_MODE_VERSION,
-    schedule: draft.schedule,
+    schedule: withSystemTimeZone(draft.schedule),
     notificationPolicy: draft.notificationPolicy
   }
   return invoke(() => hostClient.automations.create(input))
@@ -185,7 +186,7 @@ export async function updateAutomation(
       destination: draft.destination,
       permissionMode: draft.permissionMode,
       permissionModeVersion: AUTOMATION_PERMISSION_MODE_VERSION,
-      schedule: draft.schedule,
+      schedule: withSystemTimeZone(draft.schedule),
       notificationPolicy: draft.notificationPolicy
     })
   )

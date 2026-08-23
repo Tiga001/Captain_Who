@@ -7,7 +7,7 @@ last_verified: 2026-08-23
 
 # Tool 体系、权限与审批
 
-本文说明 Agent Tool 如何注册、暴露、授权、审批、执行、投影和恢复。具体 Tool 输出字段见[Tool Result 消费者矩阵](./tool-result-consumer-matrix.md)，大小限制见[Tool Result 上限、分页与恢复](./tool-result-limits.md)。
+本文说明 Agent Tool 如何注册、暴露、授权、审批、执行、投影和恢复。具体 Tool 输出字段见[Tool Result 消费者矩阵](./tool-result-consumer-matrix.md)，大小限制见[Tool Result 上限、分页与恢复](./tool-result-limits.md)，后台任务的完整状态机见[Scheduled Automation 子系统](./scheduled-automations.md)。
 
 ## 职责边界
 
@@ -38,6 +38,7 @@ last_verified: 2026-08-23
 - Office 与图像：三个 Office Tool、`image_generation`；
 - Skills：resource list/read/materialize、script preflight/run、install prepare/commit，以及运行扩展 `skills_activate`；
 - 历史与协作：`conversation_history`、spawn/send/followup/wait/list/interrupt；
+- Scheduled Automation：仅在已原子 admission 的 Automation HumanRoot Run 中追加 `automation_report`；
 - 内置能力：`activate_capability` 和激活后的 Managed Playwright Browser Tool；
 - 外部扩展：MCP Server Tool 与其他 Runtime Extension。
 
@@ -56,6 +57,18 @@ last_verified: 2026-08-23
 | patch          | `require_approval` / `auto_approve` | 结构化文件/Office 写入是否弹窗，仍保留路径与 revision 校验        |
 
 模板、项目、父 Agent 和动态 policy 之间使用逐维 `meet`，只能收紧不能扩权。Tool 用 `AgentToolPermissionPolicy::Default` 或 `FileWrite(ReadWrite|WriteOnly)` 声明权限域；禁止在 Runtime 中维护第二份按 Tool 名判断的易漂移 allowlist。
+
+### Scheduled Automation 权限快照
+
+Automation 的 `permissionModeVersion` 当前为 1。Core Server 在创建/更新时把 Composer 的三种模式解析成完整 `AgentPermissions`，同时保存安全 DTO；Run 入队时再把这份权限冻结进 `config_snapshot_json`：
+
+| 模式      | 当前解析                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------- |
+| `default` | workspace read/write；command、patch 需审批；`guarded`                                                  |
+| `full`    | read/write all；command、patch auto approve；`full_access`，且用户设置必须仍启用 Full                   |
+| `custom`  | 复制当前自定义 read/write/command/patch，但无条件把 command safety 收紧为 `guarded`，且 Custom 必须启用 |
+
+未来 Run 使用冻结权限，当前用户偏好只作为撤销上限，绝不能重新解析出更宽权限。Full/Custom 会在 scheduler precheck 和 HumanRoot `BEGIN IMMEDIATE` admission 事务中再次检查；若权限在两个检查之间被关闭，Task 与未 admission Run 在该事务内变为 blocked/failed，Conversation、message 和 Trace 不会写入。重新开启偏好不会自动修复已 blocked Task，用户必须提交一次有效更新。
 
 ## 文件与 URI 授权
 
@@ -95,6 +108,18 @@ model ToolCall
 当前 typed proposed action 包括普通 ToolCall、外部 MCP Server Tool、内置 Capability 激活、内置 MCP 敏感调用、Browser risk、Diff、FileWrite、Command、Skill materialization/script/installation 和 Office operation。
 
 “无需弹窗”不一定等于“直接执行”。自动 MCP Server 调用或需要冻结资源的动作仍必须先 prepare，以便 Core Server 获得一次性的权威 payload、TOCTOU 校验和审计身份。
+
+### 后台 Automation Approval 与报告
+
+Scheduled Automation 复用普通 HumanRoot pending action、audit、Checkpoint 和审批恢复，不建立第二套审批系统：
+
+- 默认/自定义权限要求审批时，Run 从 `running` 投影为 `waiting_for_approval`，写入 Run attention，并在持久 outbox 中请求 `approval_required` 原生通知；Renderer 不必保持打开。
+- 用户批准或拒绝仍通过原 pending-action CAS。进程重启后，Scheduler 从 in-progress Trace 与 durable pending action 恢复 observer；公开状态中的 `waiting_for_approval` 不是新的执行授权。
+- 离开等待态会确认对应 attention，并 suppress 尚未展示的 stale approval notification；Main 在真正展示通知前还必须调用 Host-only validation。
+- `automation_report` 仅通过 `automation_run.agent_run_id` 解析出的 run-scoped sink 注册。普通 HumanRoot、子 Agent和 admission 前的 Run 都得不到该 Tool；approval continuation/restart 则可从相同绑定恢复。
+- `automation_report` 是 `Stable`、`ReadOnly`、`approval_mode=Never`，只能首次成功写入 `no_change|important_update|completed` 与最多 2048 UTF-8 字节的安全 summary。它只能更新当前 Run 的报告/预览，不能修改 Task、schedule、权限或通知策略。
+
+若模型未成功调用该 Tool，终态报告为 `unknown`；`important_updates` 通知策略会把 `unknown` 当作应通知结果。要可靠抑制“无变化”的成功通知，模型必须显式写入 `no_change`。
 
 ## MCP Server 与内置 Capability
 
@@ -143,6 +168,8 @@ Tool 声明两类 settlement：
 - Pending action：`crates/core/src/storage/service/pending_actions.rs`
 - Core Server 执行：`crates/core-server/src/application/agent/action_execution/`
 - MCP Server/Capability：`crates/core/src/tools/mcp.rs`、`builtin_capability.rs`、`crates/core-server/src/application/mcp/`
+- Automation 权限/报告：`crates/core-server/src/application/automation/permissions.rs`、`crates/core/src/tools/automation_report.rs`、`crates/core-server/src/application/agent/automation_turn.rs`
+- Automation 原子 admission：`crates/core/src/storage/service/conversations.rs`、`crates/core/src/storage/automation_repository.rs`
 
 ## 测试
 
@@ -155,6 +182,10 @@ Tool 声明两类 settlement：
 - `crates/core-server/src/application/agent/tests/pending_actions.rs`
 - `crates/core-server/src/application/agent/tests/mcp_approval_lifecycle.rs`
 - `crates/core-server/src/application/agent/tests/cancellation.rs`
+- `crates/core-server/src/application/automation/permissions.rs`
+- `crates/core-server/src/application/automation/scheduler/tests.rs`
+- `crates/core-server/src/application/agent/tests/automation_turn.rs`
+- `crates/core/src/tools/automation_report.rs`
 
 ## 变更检查表
 
@@ -164,6 +195,7 @@ Tool 声明两类 settlement：
 - [ ] 覆盖 denied、auto-approved、approved、rejected、expired、cancelled、crash-resume、unknown outcome。
 - [ ] 实现 Model/Event/Trace/Archive/Checkpoint 投影并更新 projection fixture。
 - [ ] Tool 列表/能力变更更新自动化 inventory，而不是仅更新文档表。
+- [ ] Automation Tool/权限变更覆盖 frozen snapshot、设置撤销 TOCTOU、后台 approval restart 和 `automation_report` 单次写入。
 - [ ] 文件/命令/MCP Server 路径无 symlink、TOCTOU、secret 和跨会话授权绕过。
 - [ ] 更新 Tool Result matrix/limits 和受影响子系统文档。
 
@@ -173,4 +205,6 @@ Tool 声明两类 settlement：
 - 外部 MCP Server 原始结果不进入 Exact Archive；重试审批调用可能产生新的外部副作用。
 - 文件系统无法完全消除批准后到执行前的外部竞争，只能通过 identity/revision/no-follow 尽量 fail closed。
 - 内置 Capability 当前使用 Run-bound、Core Server 进程内存 grant，不是永久授权；应用重启后必须重新取得 live grant，持久 pending/audit 只负责未完成审批的恢复。
+- Automation 没有独立审批超时；Run 可以持续停在 `waiting_for_approval`，直到用户决定、删除/资源失效或正常关停恢复流程使其收敛。
+- Automation 当前不支持独立 Tool allowlist、附件/显式 Skill 选择或逐任务 reasoning override；它复用目标 Conversation/模型与普通 Agent Toolset。
 - 完整 Tool inventory 尚以 Rust 注册代码和测试为真源，文档中的族列表不应被机器消费。

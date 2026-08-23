@@ -7,7 +7,7 @@ last_verified: 2026-08-23
 
 # Tool Result 消费者矩阵
 
-本文记录 canonical Tool Call/Tool Result 到各消费者的职责映射。它是评审指南，不是运行时 allowlist；机器可校验的字段契约以 `ToolRegistry` 投影函数和 `crates/core/tests/fixtures/tool_result_projection_contract_v1.json` 为准。权限与审批见[Tool 体系、权限与审批](./tools-permissions-and-approvals.md)，大小边界见[Tool Result 上限、分页与恢复](./tool-result-limits.md)。
+本文记录 canonical Tool Call/Tool Result 到各消费者的职责映射。它是评审指南，不是运行时 allowlist；机器可校验的字段契约以 `ToolRegistry` 投影函数和 `crates/core/tests/fixtures/tool_result_projection_contract_v1.json` 为准。权限与审批见[Tool 体系、权限与审批](./tools-permissions-and-approvals.md)，大小边界见[Tool Result 上限、分页与恢复](./tool-result-limits.md)，后台报告的业务消费者见[Scheduled Automation 子系统](./scheduled-automations.md)。
 
 ## 职责边界
 
@@ -70,6 +70,7 @@ Raw Tool/Core Server/Main result
 | `skills_commit_install`                                          | installed/updated/conflict/recovery                                 | E 显示审批与结果                            | T/C 保存 frozen install ref/provenance/CAS；必要内容由 Skill store 管理 | 总是显式审批                                                  |
 | `skills_activate`                                                | status、Skill name、资源/能力摘要                                   | E/R 产生 `SkillActivated` 与 Toolset change | T/C 保存 activation 与 revision                                         | 同一 Turn 激活后更新 dynamic Toolset                          |
 | `conversation_history`                                           | view、目录/正文页、open/navigation、完整性                          | E 可展示查询状态                            | T/C 只记 query/ref/range/hash；**不再次 A**                             | 防递归归档                                                    |
+| `automation_report`                                              | `recorded`、kind、用户可见 summary 的一次性确认                     | E 可展示小型 Tool receipt；无配置编辑能力   | T/A/C 保存安全 receipt；另由 run-scoped sink 原子写 `automation_runs`   | 仅 Automation HumanRoot；每 Run 最多首次成功一次；无需审批    |
 | `activate_capability`                                            | capability/status/恢复建议                                          | E/R 展示批准并触发 toolset change           | T/C 绑定 activation/manifest/policy                                     | 激活本身不授予未列出的工具                                    |
 | Managed Playwright/Capability Tool                               | 安全操作结果、截图 readPath、Browser Artifact refs、分类错误        | E 展示 Main/Core Server-owned 活动          | T/C 使用 value-free 安全投影；**不进普通 A**                            | 敏感 Tool 绑定 surface/origin 与风险审批                      |
 | 外部 MCP Server Tool                                             | 有界 text/structured 结果、binary omitted、outcome                  | E/T/C 只接收安全投影                        | 原始参数/结果不进普通 A；Checkpoint 使用专用授权边界                    | OutcomeUnknown 不自动 retry                                   |
@@ -105,6 +106,17 @@ Raw Tool/Core Server/Main result
 - 模型生成理由可能包含敏感数据；Managed Playwright Event/Trace 使用 Main-owned value-free reason。
 - Managed Playwright screenshot 可同时返回经验证的 `image-artifact://` readPath；download 等产物返回 Run 生命周期的 Browser Artifact ref。外部 MCP Server 的原始 resource/binary block 不穿过 Core Server/Main 安全投影边界。
 
+### Scheduled Automation 报告
+
+`automation_report` 的 Tool Result 与业务报告是两条相关但不同的投影：
+
+- canonical Tool Result 是很小的 `recorded/kind/summary` receipt，按默认安全 hooks 进入 M/E/T/A/C，并继续通过共享 10K gate；
+- 真正驱动 Automation attention、终态通知和 Run history 的唯一业务消费是 run-scoped `AutomationReportSink` 写入的 `automation_runs.report_kind/result_preview`，不是 Renderer Event、Trace 文本或 Exact Archive 的二次解析；
+- repository 只接受绑定了 `agent_run_id`、仍为 `running|waiting_for_approval` 且 `report_kind IS NULL` 的 Run，因此重放 Tool Call 不能覆盖第一次成功报告；
+- terminal settlement 保留已写报告和 summary；未报告时才以 assistant 内容生成最多 8192 字节预览，并把 report kind 收敛为 `unknown`。失败文案另限制为 4096 字节。
+
+报告 summary 是用户可见安全文本，不是通知 policy、Task revision 或执行授权。任何消费者都不得根据 summary 关键词推断 `important_update`；只读取闭合的 report kind。
+
 ## 不变量
 
 1. Canonical result 只能由执行边界生成；任何 consumer projection 都无执行权。
@@ -113,6 +125,7 @@ Raw Tool/Core Server/Main result
 4. T 与持久 model-context 分开，未来代码变化不能改写“模型当时看到什么”。
 5. 不归档的 Tool 必须显式 `archives_result=false` 并说明替代权威来源。
 6. 未知 Tool 调用持久化时参数 fail closed，不保留任意模型 JSON。
+7. Automation 通知与 attention 只消费持久 `report_kind`，不能从 Tool receipt、assistant 文案或 Event 展示字段反推报告语义。
 
 ## 代码真源与自动校验
 
@@ -123,6 +136,7 @@ Raw Tool/Core Server/Main result
 - 契约 fixture：`crates/core/tests/fixtures/tool_result_projection_contract_v1.json`
 - 主要断言：`major_tool_result_projections_match_consumer_contract_fixture`
 - 各 Tool 的 `*_model_projection`、`*_persistence_projection` 和单元测试
+- Automation 报告：`crates/core/src/tools/automation_report.rs`、`crates/core-server/src/application/agent/automation_turn.rs`、`crates/core/src/storage/automation_repository.rs`
 
 ## 测试
 
@@ -131,6 +145,9 @@ Raw Tool/Core Server/Main result
 - `crates/core/src/runtime/tests/trace_and_projection.rs`
 - `crates/core/src/tools/mcp/tests/`
 - `crates/core-server/src/application/agent/tests/context_history.rs`
+- `crates/core/src/tools/automation_report.rs`
+- `crates/core/src/storage/automation_repository/tests.rs`
+- `crates/core-server/src/application/automation/scheduler/tests.rs`
 - 对应 Renderer/Protocol consumer 测试；字段删除前必须先检索真实消费方
 
 ## 变更检查表
@@ -141,6 +158,7 @@ Raw Tool/Core Server/Main result
 - [ ] 明确 source truncation、consumer projection 和 model truncation。
 - [ ] 需要恢复的字段进入 C；仅展示字段不得误入 C。
 - [ ] 不归档 Tool 有一次性权威存储和防递归测试。
+- [ ] `automation_report` 变更同时覆盖 receipt 投影、单次 sink 写入、终态 fallback 和通知 policy，不以文案关键词分类。
 - [ ] 更新 JSON fixture 与 Renderer/Protocol 消费测试。
 
 ## 当前限制
@@ -149,3 +167,4 @@ Raw Tool/Core Server/Main result
 - 动态 MCP Server/Managed Playwright/Runtime Extension 名称依赖运行时 catalog，本文只维护族级边界。
 - 历史旧记录可能缺少新字段；读取兼容不得伪造当时不存在的完整性证明。
 - Renderer 仍有少量兼容字段；删除前必须先检索真实消费方并更新协议测试。
+- `automation_report` 当前使用默认 Tool projection hooks，尚未进入主要 Tool Result projection fixture 的独立字段族；其 closed schema、单次持久化和通知语义由 Automation 专项测试守护。

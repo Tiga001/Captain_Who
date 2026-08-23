@@ -4,6 +4,7 @@ import { render } from 'vitest-browser-react'
 import { AutomationDrawer } from '../components/AutomationDrawer'
 import {
   makeAutomationDraft,
+  makeAutomationRun,
   makeAutomationTask,
   testConversation,
   testModel
@@ -23,21 +24,20 @@ const commonProps = {
   historyHasMore: false,
   historyLoading: false,
   historyLoadingMore: false,
+  maximized: false,
   mode: 'task' as const,
   models: [testModel],
   onAcknowledgeAttention: vi.fn(),
   onClose: vi.fn(),
-  onDelete: vi.fn(),
   onDirtyChange: vi.fn(),
   onHistoryLoadMore: vi.fn(),
   onHistoryRetry: vi.fn(),
   onOpenConversation: vi.fn(),
   onOpenPermissionSettings: vi.fn(),
   onRetryDetail: vi.fn(),
-  onRunNow: vi.fn(),
-  onSetEnabled: vi.fn(),
   onSubmittingChange: vi.fn(),
   onSubmit: vi.fn(async () => undefined),
+  onToggleMaximized: vi.fn(),
   permissionModeAvailability: { custom: true, full: true },
   projects: [{ id: 'project-1', name: 'Project One', createdAt: 1 }],
   runs: []
@@ -54,7 +54,36 @@ const existingTask = makeAutomationTask({
 })
 
 describe('AutomationDrawer', () => {
-  it('focuses its heading and closes nested menus before the drawer', async () => {
+  it('uses the right-sidebar maximize and restore control semantics', async () => {
+    const onToggleMaximized = vi.fn()
+    const screen = await render(
+      <AutomationDrawer
+        {...commonProps}
+        maximized={false}
+        onToggleMaximized={onToggleMaximized}
+        task={existingTask}
+      />
+    )
+
+    const maximize = screen.getByRole('button', { name: 'automation.maximizeDrawer' })
+    await expect.element(maximize).toHaveAttribute('aria-pressed', 'false')
+    await maximize.click()
+    expect(onToggleMaximized).toHaveBeenCalledOnce()
+
+    await screen.rerender(
+      <AutomationDrawer
+        {...commonProps}
+        maximized
+        onToggleMaximized={onToggleMaximized}
+        task={existingTask}
+      />
+    )
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.restoreDrawer' }))
+      .toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('keeps the edit header focused on editing and provides static collapse plus maximize controls', async () => {
     const onClose = vi.fn()
     const screen = await render(
       <AutomationDrawer {...commonProps} onClose={onClose} task={existingTask} />
@@ -62,16 +91,49 @@ describe('AutomationDrawer', () => {
 
     const heading = screen.getByRole('heading', { name: 'Daily brief' })
     await expect.element(heading).toBeVisible()
-    expect(document.activeElement).toBe(heading.element())
+    await expect.poll(() => document.activeElement).toBe(heading.element())
 
-    await screen.getByRole('button', { name: 'automation.moreActions' }).click()
-    await expect.element(screen.getByRole('menu')).toBeVisible()
-    await userEvent.keyboard('{Escape}')
-    await expect.element(screen.getByRole('menu')).not.toBeInTheDocument()
-    expect(onClose).not.toHaveBeenCalled()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.moreActions' }))
+      .not.toBeInTheDocument()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.runNow' }))
+      .not.toBeInTheDocument()
+    await expect.element(screen.getByText('automation.statusActive')).not.toBeInTheDocument()
 
-    await userEvent.keyboard('{Escape}')
+    const collapse = screen.getByRole('button', { name: 'automation.collapseDrawer' })
+    await expect.element(collapse).toBeVisible()
+    expect(collapse.element().querySelector('.panel-toggle__icon')).not.toBeNull()
+    await collapse.click()
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('keeps only the precise run-history chat action when a run has a conversation', async () => {
+    const onOpenConversation = vi.fn()
+    const screen = await render(
+      <AutomationDrawer
+        {...commonProps}
+        onOpenConversation={onOpenConversation}
+        runs={[makeAutomationRun()]}
+        task={existingTask}
+      />
+    )
+
+    const openChat = screen.getByRole('button', { name: 'automation.openChat' })
+    expect(openChat.elements()).toHaveLength(1)
+    await openChat.click()
+    expect(onOpenConversation).toHaveBeenCalledWith('conversation-1', 'message-assistant-1')
+  })
+
+  it('waits for run history before deciding whether the generic chat fallback is needed', async () => {
+    const screen = await render(
+      <AutomationDrawer {...commonProps} historyLoading task={existingTask} />
+    )
+
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.openChat' }))
+      .not.toBeInTheDocument()
+    await expect.element(screen.getByText('automation.loading')).toBeVisible()
   })
 
   it('keeps an existing chat openable when an unrelated permission is blocked', async () => {
@@ -127,7 +189,15 @@ describe('AutomationDrawer', () => {
       <AutomationDrawer {...commonProps} mutationPending onClose={onClose} task={existingTask} />
     )
 
-    await expect.element(screen.getByRole('button', { name: 'automation.close' })).toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.cancel', exact: true }))
+      .toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.maximizeDrawer' }))
+      .toBeEnabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'automation.collapseDrawer' }))
+      .toBeDisabled()
     await userEvent.keyboard('{Escape}')
     expect(onClose).not.toHaveBeenCalled()
   })

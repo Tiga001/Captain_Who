@@ -93,6 +93,7 @@ import {
   HAS_MACOS_WINDOW_CONTROLS,
   MainPanelToolbar,
   MaximizedSidebarControls,
+  PanelToggleButton,
   SUPPORTS_NATIVE_FONT_SMOOTHING
 } from './AppShellSupport'
 import type { PendingMessageDelta } from './AppShellSupport'
@@ -108,6 +109,7 @@ import { AgentObserverConversationSurface } from '../features/agentCollaboration
 import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
 import { hostClient } from '../host/hostClient'
 import { ScheduledPageLayer } from '../features/automations/ScheduledPageLayer'
+import { AUTOMATION_DRAWER_DEFAULT_WIDTH } from '../features/automations/automationLayout'
 import { useAutomationAttention } from '../features/automations/useAutomationAttention'
 import {
   AppShellCoveredRegion,
@@ -201,6 +203,9 @@ export function AppShell() {
   const conversationsRef = useRef<ChatConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [primaryView, setPrimaryView] = useState<PrimaryView>('conversation')
+  const [scheduledDrawerPreferredWidth, setScheduledDrawerPreferredWidth] = useState(
+    AUTOMATION_DRAWER_DEFAULT_WIDTH
+  )
   const [scheduledOpenRequest, setScheduledOpenRequest] = useState<ScheduledOpenRequest | null>(
     null
   )
@@ -1547,13 +1552,6 @@ export function AppShell() {
     setPrimaryView('scheduled')
   }, [])
 
-  const closeScheduled = useCallback(() => {
-    conversationOpenRequestKeyRef.current += 1
-    setScheduledExternalNavigationRequest(null)
-    setScheduledOpenRequest(null)
-    setPrimaryView('conversation')
-  }, [])
-
   const commitOpenConversationFromScheduled = useCallback(
     (conversationId: string, messageId?: string | null) => {
       const requestKey = conversationOpenRequestKeyRef.current + 1
@@ -2087,20 +2085,33 @@ export function AppShell() {
         />
       </AppShellCoveredRegion>
       {primaryView === 'scheduled' && (
-        <ScheduledPageLayer
-          conversations={conversations}
-          defaultModelId={activeDraftSelectedModel?.id ?? activeDraft.modelId ?? null}
-          defaultPermissionMode={activeDraft.permissionMode}
-          defaultProjectId={activeDraft.projectId}
-          externalNavigationRequest={scheduledExternalNavigationRequest ?? undefined}
-          models={enabledModels}
-          openRequest={scheduledOpenRequest ?? undefined}
-          permissionModeAvailability={permissionModeAvailability}
-          projects={projects}
-          onClose={closeScheduled}
-          onOpenConversation={commitOpenConversationFromScheduled}
-          onOpenPermissionSettings={() => openSettings('general')}
-        />
+        <>
+          <ScheduledPageLayer
+            conversations={conversations}
+            defaultModelId={activeDraftSelectedModel?.id ?? activeDraft.modelId ?? null}
+            defaultPermissionMode={activeDraft.permissionMode}
+            defaultProjectId={activeDraft.projectId}
+            externalNavigationRequest={scheduledExternalNavigationRequest ?? undefined}
+            initialPreferredDrawerWidth={scheduledDrawerPreferredWidth}
+            models={enabledModels}
+            openRequest={scheduledOpenRequest ?? undefined}
+            onPreferredDrawerWidthChange={setScheduledDrawerPreferredWidth}
+            permissionModeAvailability={permissionModeAvailability}
+            projects={projects}
+            onOpenConversation={commitOpenConversationFromScheduled}
+            onOpenPermissionSettings={() => openSettings('general')}
+          />
+          {!leftOpen && (
+            <PanelToggleButton
+              className="panel-toggle panel-toggle--left scheduled-view__left-toggle"
+              hasUnread={hasUnreadConversations}
+              onClick={toggleLeftSidebar}
+              open={false}
+              side="left"
+              t={t}
+            />
+          )}
+        </>
       )}
       {settingsOpen &&
         createPortal(

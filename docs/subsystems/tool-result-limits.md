@@ -7,7 +7,7 @@ last_verified: 2026-08-23
 
 # Tool Result 上限、分页与恢复
 
-本文定义 Tool Result 从来源捕获到模型投影的统一大小契约。具体数值的代码真源是各模块常量与测试；本文记录当前公共边界和修改原则。各投影字段见[Tool Result 消费者矩阵](./tool-result-consumer-matrix.md)，权限边界见[Tool 体系、权限与审批](./tools-permissions-and-approvals.md)。
+本文定义 Tool Result 从来源捕获到模型投影的统一大小契约。具体数值的代码真源是各模块常量与测试；本文记录当前公共边界和修改原则。各投影字段见[Tool Result 消费者矩阵](./tool-result-consumer-matrix.md)，权限边界见[Tool 体系、权限与审批](./tools-permissions-and-approvals.md)，后台 Run 的业务语义见[Scheduled Automation 子系统](./scheduled-automations.md)。
 
 ## 职责边界
 
@@ -66,6 +66,7 @@ Tool / Provider / OS process
 | 外部 MCP Server              | raw result 4 MiB；128 blocks；文本 16 KiB、结构 JSON 8 KiB；结构深度 32/节点 4,096；encoded media 合计 2 MiB | 安全投影 + 10K                           | 通常重新调用且重新审批；unknown 禁止自动重放             |
 | 内置 Capability Tool         | 参数 64 KiB、raw result 4 MiB、model projection 64 KiB，并有 JSON 深度/节点限                                | Core Server/Main 安全投影 + 10K          | 按 Tool/Artifact 契约；unknown 禁止自动重放              |
 | `conversation_history`       | Archive chunk/page 限                                                                                        | 预算感知历史页 + 10K                     | `open`/navigation；不再归档                              |
+| `automation_report`          | summary 2 KiB；Run result preview 8 KiB；error message 4 KiB                                                 | 小型确认 receipt + 10K                   | 无分页；首次报告持久化，终态 fallback 按 UTF-8 安全裁剪  |
 | 协作 Tool                    | mailbox/wait/result 各有协议上限                                                                             | 有界 receipt + 10K                       | 后续 wait/read；不进 Exact Archive                       |
 
 表中数字是当前核验快照。修改任何一项时必须以常量和测试为准，并同步本文；不要从文档生成安全配置。
@@ -81,6 +82,16 @@ Gate 使用当前模型/API style 的 `ContextTextBudget` 估算完整 Tool mess
 5. 超限且没有安全恢复入口时 fail closed，不能把无标记的半截 JSON 交给模型。
 
 中央 Gate 只改变 M，不得回写 canonical/E/T/A/C，也不得把 projection truncation 标成 source truncation。
+
+## Scheduled Automation 报告与终态预览
+
+Automation 有三层不同的文本上限，不能合并成一个“Tool Result 限制”：
+
+- `automation_report.summary` 最多 **2048 UTF-8 字节**，必须 trim 后非空，只允许换行而拒绝其他控制字符；这是模型主动提交、每 Run 最多首次成功一次的用户可见报告。
+- `automation_runs.result_preview` 最多 **8192 UTF-8 字节**。成功调用 `automation_report` 时实际内容不会超过 2048；未报告时，Scheduler 可从 terminal assistant message 生成最多 8192 字节的安全 fallback preview。
+- `automation_runs.error_message` 最多 **4096 UTF-8 字节**；错误 code 最多 128 字节。Agent start/Trace 失败内容会移除不安全控制字符并按 Unicode 边界裁剪。
+
+这些上限发生在 Automation 的持久业务投影中；随后返回给模型的 `automation_report` receipt 仍经过共享 10K token gate。8 KiB/4 KiB 裁剪没有 cursor 或 Exact Archive 恢复承诺，不能标成“完整归档后可继续读取”；完整 Conversation message/Trace 是否仍可访问由 Conversation 生命周期决定。
 
 ## Opaque cursor 契约
 
@@ -116,6 +127,7 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - MCP 限制：`crates/core/src/tools/mcp/contracts.rs`、`crates/mcp-client/src/limits.rs`
 - 命令 capture：`crates/core/src/command/output_capture.rs`、`command/types.rs`
 - Artifact 限制：`crates/core/src/browser_artifacts.rs`、`image_generation/artifact.rs`
+- Automation 报告/预览：`crates/core/src/tools/automation_report.rs`、`crates/core-server/src/application/agent/automation_turn.rs`、`crates/core/src/storage/automation_repository.rs`
 - 契约 fixture：`crates/core/tests/fixtures/tool_result_projection_contract_v1.json`
 
 ## 测试
@@ -127,6 +139,9 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - `crates/core/src/tools/mcp/tests/`
 - `crates/core/src/tools/run_command/tests/`
 - `crates/core-server/src/application/agent/tests/context_history.rs`
+- `crates/core/src/tools/automation_report.rs`
+- `crates/core/src/storage/automation_repository/tests.rs`
+- `crates/core-server/src/application/agent/tests/automation_turn.rs`
 - `crates/core/tests/fixtures/tool_result_projection_contract_v1.json`
 
 分页工具还应在各自模块覆盖 Unicode 边界、预算最小页、cursor 篡改、revision 变化和无恢复入口失败。
@@ -139,6 +154,7 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - [ ] 分页 cursor 绑定 query/scope/revision，覆盖篡改和跨会话测试。
 - [ ] 10K Gate 覆盖成功、错误、Unicode、结构 JSON 和无恢复入口失败。
 - [ ] 进程/网络取消不会因重试造成重复副作用。
+- [ ] Automation 报告覆盖 2048/8192/4096 的 ASCII、Unicode 和控制字符边界，并验证首次写入不可覆盖。
 - [ ] 同步消费者矩阵、常量测试和 Renderer 兼容字段。
 
 ## 当前限制
@@ -148,3 +164,4 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - 某些外部 Provider 只提供 unknown completeness，系统不能证明其结果完整。
 - 文档/网页解析在进入 capture 前可能有格式库或 Provider 自身安全限。
 - 动态 MCP Server/Capability 可进一步收紧限制，但不得超过已审计的 Core Server/Main 最大值。
+- Automation 的终态 preview/error 裁剪当前没有独立分页或 Archive recovery ref；需要完整内容时应从仍存在的 Conversation/Trace 读取，而不是重放后台 Run。

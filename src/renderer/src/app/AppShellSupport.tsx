@@ -70,7 +70,7 @@ interface PanelToggleButtonProps {
   t: (key: TranslationKey) => string
 }
 
-function PanelToggleButton({
+export function PanelToggleButton({
   className,
   hasUnread = false,
   onClick,

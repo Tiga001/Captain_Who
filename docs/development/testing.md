@@ -53,13 +53,14 @@ pnpm check
 
 ## 3. Vitest 项目
 
-`vitest.config.ts` 定义三个项目：
+`vitest.config.ts` 定义四个项目：
 
-| project                  | 环境                             | 范围                                                                          | 并发特点                                 |
-| ------------------------ | -------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------- |
-| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`                  | 常规并行；排除真实 Electron managed test |
-| `browser`                | Vitest Browser + locked Chromium | App、Chat、Skill、MCP、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                          |
-| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                    | 文件串行                                 |
+| project                  | 环境                             | 范围                                                                                      | 并发特点                                   |
+| ------------------------ | -------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`                              | 常规并行；排除两个独立 E2E project         |
+| `browser`                | Vitest Browser + locked Chromium | App、Chat、Automation、Skill、MCP、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                            |
+| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                                | 文件串行                                   |
+| `automation-core-e2e`    | Node + 真实 Core Server 进程     | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation | 文件串行；不启动真实 Electron/系统原生通知 |
 
 执行：
 
@@ -68,6 +69,7 @@ pnpm test:web
 pnpm exec vitest run --project unit
 pnpm exec vitest run --project browser
 pnpm exec vitest run --project managed-playwright-e2e
+pnpm exec vitest run --project automation-core-e2e
 ```
 
 修改 Main/Preload/Renderer 跨层功能时，不能只运行 Node unit；至少补 browser 或真实 Electron 边界测试。
@@ -116,11 +118,37 @@ cargo test --workspace
 4. Core Server transport tests；
 5. 必要时 Preload/Renderer allowlist 与 UI scenario。
 
-当前 `packages/protocol/fixtures` 包含 Agent、Collaboration、MCP、Skill 等版本化 JSON fixture。fixture 是代表性 wire contract，不替代所有 DTO 的双端生成；新增字段必须遵守 required/nullable/default 和 unknown-field 策略。
+当前 `packages/protocol/fixtures` 包含 Agent、Automation、Collaboration、MCP、Skill 等版本化 JSON
+fixture。fixture 是代表性 wire contract，不替代所有 DTO 的双端生成；新增字段必须遵守
+required/nullable/default 和 unknown-field 策略。
 
 协议方法名应由 `packages/protocol` 与 `crates/protocol-rs/src/methods.rs` 维护。Main 尚有部分重复字符串，因此相关 test 必须断言精确方法名，直到所有权完全收敛。
 
 ## 7. 专项 gate
+
+### Scheduled Automation
+
+默认测试已经覆盖 Scheduled Automation 的大部分分层测试：`unit` 包含协议、Main、Preload、通知协调器和 Renderer 状态逻辑，`browser` 包含 Scheduled 页面、表单、Run 历史、导航和 attention，`cargo test --workspace` 包含 schedule、权限投影、SQLite queue/outbox、lease、重启与 Approval 恢复。它们分别经 `test:web` 或 `test:rust` 进入 `pnpm test` 和 `pnpm check`。
+
+真实 Core Server 跨层测试是独立 project，必须显式运行：
+
+```bash
+pnpm test:automation-core-e2e
+```
+
+**`test:automation-core-e2e` 不在 `test:web`、`test` 或 `check` 中。** 它会构建 debug Core Server，使用临时数据根，并通过生产 Preload bridge、Main IPC registrar 与 Core Server 完成 durable CRUD、revision CAS、`runNow` 入队、Run history 和 attention 调用。其 Electron transport 是进程内适配器，原生通知被模拟为不支持；它不驱动真实定时唤醒、模型完成、Approval 循环、OS 原生通知、进程重启恢复或 packaged Electron。
+
+修改该子系统时可按层定位：
+
+```bash
+pnpm exec vitest run --project unit packages/protocol/src/automations.test.ts src/main/core/coreServer.automation.test.ts src/main/core/ipc.automation.test.ts src/main/core/automationNotificationCoordinator.test.ts src/preload/AutomationIpcBridge.test.ts src/renderer/src/features/automations/__tests__
+pnpm exec vitest run --project browser src/renderer/src/features/automations/__tests__ src/renderer/src/app/__tests__/LeftSidebarScheduled.browser.test.tsx
+cargo test -p mycopilot-core automation_repository
+cargo test -p mycopilot-core-server application::automation
+pnpm test:automation-core-e2e
+```
+
+发布声明和恢复边界见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
 ### Multi-Agent
 
@@ -159,15 +187,16 @@ stress 包含 100 次 connect/close、重启、并发 fixture、refresh、call �
 
 ## 8. 当前 `pnpm check` 未覆盖
 
-| 项目                           | 当前状态                                    |
-| ------------------------------ | ------------------------------------------- |
-| Multi-Agent release gate       | 独立命令，不在 `check`                      |
-| Managed Playwright release组合 | 独立命令，不在 `check`                      |
-| `electron-builder` package     | 不在 `check`                                |
-| 实际 Developer ID 签名/验签    | 仅真实 `build:mac` 发生；普通 test 只测逻辑 |
-| notarization                   | 未配置                                      |
-| packaged Agent→browser E2E     | pending                                     |
-| Windows/Linux 目标平台验收     | 无仓库 CI 自动运行                          |
+| 项目                            | 当前状态                                    |
+| ------------------------------- | ------------------------------------------- |
+| Automation 真实 Core Server E2E | 独立命令，不在 `check`                      |
+| Multi-Agent release gate        | 独立命令，不在 `check`                      |
+| Managed Playwright release组合  | 独立命令，不在 `check`                      |
+| `electron-builder` package      | 不在 `check`                                |
+| 实际 Developer ID 签名/验签     | 仅真实 `build:mac` 发生；普通 test 只测逻辑 |
+| notarization                    | 未配置                                      |
+| packaged Agent→browser E2E      | pending                                     |
+| Windows/Linux 目标平台验收      | 无仓库 CI 自动运行                          |
 
 维护者不能因为 `pnpm check` 绿色就声称已完成 release acceptance。
 
@@ -190,6 +219,8 @@ pnpm check
 ```
 
 再按改动域运行专项 gate：Multi-Agent、MCP/Playwright、storage reset、真实组件或目标平台 package。
+
+Scheduled Automation 或其共享 Electron Host/协议/存储链路有变化时，还必须运行 `pnpm test:automation-core-e2e`；不能用默认 `pnpm check` 的绿色替代这条证据。
 
 ### 发布前
 
@@ -214,6 +245,8 @@ pnpm check
 - Vitest projects：`vitest.config.ts`
 - Rust targets：workspace `Cargo.toml` 与各 crate `Cargo.toml`
 - Multi-Agent runner：`scripts/run-multi-agent-release-gate.mjs`
+- Scheduled Automation project：`vitest.config.ts`、`src/main/core/automationHostRealCore.integration.test.ts`
+- Scheduled Automation Rust tests：`crates/core-server/src/application/automation`、`crates/core/src/storage/automation_repository/tests.rs`
 - Playwright report/gates：`scripts/playwright-conformance-report.mjs`、`verify-packaged-playwright-startup.mjs`
 - package hooks tests：`scripts/*.test.mjs`
 - cross-language fixtures：`packages/protocol/fixtures`、`packages/protocol/src`、`crates/protocol-rs/src/tests.rs`
@@ -240,6 +273,7 @@ pnpm check
 - ignored real-component tests 依赖本地 prepared component，不在默认 Cargo 测试中。
 - packaged startup verifier 不确认 supplied bundle 与当前源码的新鲜度。
 - Managed Playwright 仍缺完整 69-Tool 行为矩阵、重复真实 Electron 压力/RSS gate 和 packaged Agent E2E。
+- Scheduled Automation 没有自动化的真实时钟唤醒、真实 Provider/Approval、OS 通知点击、休眠唤醒或 packaged Electron E2E。
 - 官方 MCP conformance 未接入锁定 runner。
 
 ## 14. 变更检查表
@@ -250,5 +284,6 @@ pnpm check
 - [ ] 跨语言协议是否同时覆盖 Rust、TypeScript、Main/Preload/Renderer？
 - [ ] 并发/恢复测试是否使用确定性 barrier 而非放宽 sleep？
 - [ ] 新 package/runtime 依赖是否有 prepare、verify、afterPack/afterSign 或 startup 证据？
+- [ ] Scheduled Automation 变更是否运行独立 `test:automation-core-e2e`，并将未覆盖的定时、通知和 packaged 场景保留为限制？
 - [ ] 是否明确它属于 `pnpm check`、专项 gate、发布必需或仅诊断？
 - [ ] 是否更新 `package.json`、本矩阵和相关发布文档，避免命令漂移？

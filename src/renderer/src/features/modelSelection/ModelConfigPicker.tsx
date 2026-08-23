@@ -19,6 +19,7 @@ interface ModelConfigPickerProps {
   emptyLabel: string
   onChange: (modelConfigId: string) => void
   options: readonly ModelConfigPickerOption[]
+  showSelectedCapability?: boolean
   value: string | null
   variant: 'composer' | 'settings'
 }
@@ -34,6 +35,7 @@ export function ModelConfigPicker({
   emptyLabel,
   onChange,
   options,
+  showSelectedCapability = false,
   value,
   variant
 }: ModelConfigPickerProps) {
@@ -157,7 +159,17 @@ export function ModelConfigPicker({
         ref={triggerRef}
         type="button"
       >
-        <span>{selectedOption?.label ?? emptyLabel}</span>
+        <span className="model-config-picker__selected-name">
+          {selectedOption?.label ?? emptyLabel}
+        </span>
+        {showSelectedCapability && selectedOption?.capabilityLabel ? (
+          <span
+            className="model-config-picker__capability model-config-picker__selected-capability"
+            data-supported={selectedOption.capabilitySupported || undefined}
+          >
+            {selectedOption.capabilityLabel}
+          </span>
+        ) : null}
         <ChevronDown aria-hidden="true" />
       </button>
 
@@ -197,11 +209,11 @@ export function ModelConfigPicker({
                 </span>
                 {option.capabilityLabel ? (
                   <span
-                    className={
+                    className={`model-config-picker__capability ${
                       variant === 'composer'
                         ? 'composer-model-option__capability'
                         : 'model-config-picker__option-capability'
-                    }
+                    }`}
                     data-supported={option.capabilitySupported || undefined}
                   >
                     {option.capabilityLabel}

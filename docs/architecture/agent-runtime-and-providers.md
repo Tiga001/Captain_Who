@@ -19,6 +19,11 @@ last_verified: 2026-08-23
 | LLM transport           | HTTP、流式读取、错误归类、退避、超时和 Usage 合并                                                             | 修改 Provider 语义或补造 Tool Result                           |
 | ToolRegistry            | Tool 身份、暴露、输入 schema、权限声明、执行和消费者投影                                                      | 持久 pending action 的生命周期                                 |
 
+Scheduled Automation 不实现第二套 Runtime。AutomationScheduler 在持久 admission 后启动普通 HumanRoot Turn，
+复用本表全部 Provider、Tool、Approval、Trace、Checkpoint、Usage 和取消语义；差异仅在 Host 冻结的执行上下文、
+目标 Conversation 选择，以及该 Run 专用的 `automation_report` Tool。详见
+[Scheduled Automation](../subsystems/scheduled-automations.md)。
+
 Rust Core 与 Core Server 的边界是有意的：Runtime 可以提出动作并生成可恢复状态，但文件写入、命令、Office、Skill 安装、MCP Server 审批等权威副作用必须由 Core Server 编排。
 
 ## 关键对象
@@ -47,7 +52,7 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
 ## 一次 Run 的主流程
 
 ```text
-Core Server 预留 conversation Turn
+用户请求或 AutomationScheduler 预留 Conversation Turn
   -> 读取会话、模型、权限和可用服务
   -> 构造 Runtime input 与 Provider-neutral 历史
   -> 恢复可选 Checkpoint / Provider continuation
@@ -110,6 +115,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 5. Provider 私有 continuation 不进入公开 Trace、Renderer 或普通历史 archive。
 6. 模型响应已返回后，诊断/观测写入失败不能触发模型重放。
 7. frozen toolset、Provider policy 与 checkpoint identity 必须共同校验，不能只比较 Tool 名。
+8. Automation Run 的配置与权限在入队/admission 边界冻结；普通 UI 设置变化不得重写已开始的 Turn。
 
 ## 代码真源
 
@@ -121,6 +127,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 - Core Server 生命周期：`crates/core-server/src/application/agent.rs`、`application/agent/`
 - Provider 切换：`crates/core-server/src/application/agent/provider_transition.rs`
 - 工具集冻结：`crates/core/src/tools/tool_set.rs`
+- Automation HumanRoot Turn：`crates/core-server/src/application/agent/automation_turn.rs`
 
 ## 测试
 
@@ -132,6 +139,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 - `crates/core-server/src/application/agent/tests/provider_runtime_capability_boundary.rs`
 - `crates/core-server/src/application/agent/tests/provider_transition.rs`
 - `crates/core-server/src/application/agent/tests/pending_actions.rs`
+- `crates/core-server/src/application/agent/tests/automation_turn.rs`
 
 建议最小验证：
 

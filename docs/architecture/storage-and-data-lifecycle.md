@@ -7,7 +7,7 @@ last_verified: 2026-08-23
 
 # SQLite 存储与数据生命周期
 
-本文说明 Rust Core 的本地 SQLite 权威存储、schema 发布策略、事务边界、文件型数据和启动恢复。本文不复制完整 DDL；`canonical_schema.sql` 及其 fingerprint 测试是唯一 schema 真源。Trace 与上下文的逻辑契约分别见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)和[上下文管理](./context-management.md)。
+本文说明 Rust Core 的本地 SQLite 权威存储、schema 发布策略、事务边界、文件型数据和启动恢复。本文不复制完整 DDL；`canonical_schema.sql` 及其 fingerprint 测试是唯一 schema 真源。Trace、上下文和 Scheduled Automation 的逻辑契约分别见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)、[上下文管理](./context-management.md)和[Scheduled Automation 子系统](../subsystems/scheduled-automations.md)。
 
 ## 职责边界
 
@@ -51,9 +51,25 @@ DDL 按领域大致分为：
 | Skills                | enablement override、安装/来源相关持久快照                                                                | Skill 包内容寻址；安装发布 CAS 与 tombstone          |
 | Artifacts/图像        | managed Artifacts/grants、generation execution/Artifact/config staging                                    | 内容寻址；授权与私有路径分开；启动清理               |
 | 多 Agent              | nodes、mailbox、wake/interrupt、delivery receipt/replay、context snapshot、collaboration event            | 图和队列限制在事务内复核；cursor/receipt 幂等        |
+| Scheduled Automation  | Task、Run、Event、原生通知 outbox                                                                         | CAS、非重叠 Run、lease、Trace 恢复与 tombstone       |
 | 搜索索引              | message/archive FTS 等                                                                                    | 可重建，不是权威内容                                 |
 
 新增表前先确定领域 owner、父对象、删除策略、敏感级别、幂等键和恢复行为。不要把跨领域工作流塞进单个 repository。
+
+## Scheduled Automation 表组
+
+Automation 在 canonical schema v18 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+
+| 表                               | 权威内容                                                                  | 关键不变量                                                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `automations`                    | Task 配置、状态/健康、目标快照、权限/推理/schedule JSON、next/last、CAS   | `active` / `paused` 与 `ok` / `blocked` 正交；revision 单调；paused/blocked/tombstone 时没有未来 `next_run_at`      |
+| `automation_runs`                | 不可变配置快照、trigger、admission lease、Agent/消息绑定、报告与终态      | 同 Task 只允许一个非终态 Run；scheduled occurrence 和 manual request 各自唯一；内部 `admitting` 对外为 `starting`   |
+| `automation_events`              | 全局有序的失效/refetch 事件                                               | AUTOINCREMENT sequence；Task/Run revision 与事件绑定；公开通知不携带内部 payload JSON                               |
+| `automation_notification_outbox` | `run_result`、`approval_required`、`configuration_blocked` 的持久投递状态 | `pending` / `delivered` / `suppressed`；claim lease 可恢复；按 Run/Task revision 去重；展示前必须再次验证语义仍有效 |
+
+Task 的权限、destination、schedule 和 reasoning 使用版本化 JSON；Run 在排队时保存最多 128 KiB 的 `config_snapshot_json`，worker 不得从更新后的 Task 重建 authority。数据库唯一索引负责 manual request 幂等、同一 scheduled occurrence 去重和每 Task 单非终态 Run，进程内集合或 Renderer 缓存不承担这些约束。
+
+Automation 删除当前是 tombstone，不物理删除 Task/Run/Event；pending 原生通知被 suppress。Conversation/project/model 删除或归档/禁用通过 canonical trigger 将仍存在的 Task 变成可修复的 `blocked`；Agent-tree 删除事务会暂时禁用 trigger，因此必须调用 `invalidate_automations_before_trigger_disabled_*` 和 `terminalize_automation_runs_before_*` 在父消息/Trace 消失前投影等价效果。
 
 ## 事务原则
 
@@ -64,6 +80,11 @@ DDL 按领域大致分为：
 5. **幂等 identity。** `request_id`、`run_id`、`call_id`、`action_id`、execution fingerprint 等必须在数据库约束/CAS 下判定，不靠内存去重。
 6. **文件采用 staging + fsync/原子发布。** 数据库记录和最终文件路径必须有明确提交顺序及启动清理策略。
 7. **调用方事务。** 标注 `*_in_transaction` 的 repository 函数不自行 begin/commit；事务所有权属于组合业务操作。
+
+Automation 还要求两个专用原子边界：
+
+- scheduled enqueue 在一个 `BEGIN IMMEDIATE` 中写入冻结 Run snapshot、记录事件，并把 Task 的 `last_scheduled_at`/`next_run_at` 推进到严格未来；stale scheduler 不能覆盖较新的 Task revision；
+- HumanRoot admission 在同一个调用方事务中写 Conversation、user/assistant message、空的 in-progress Trace、delivery binding，并把 `automation_runs.admitting` 绑定为 `running`。Full/Custom 权限的当前启用状态也在这个线性化点复核；stale token、取消或权限撤销不能留下孤立消息。
 
 ## 启动与崩溃恢复
 
@@ -78,6 +99,9 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 - image generation/admitted execution 的 succeeded、failed 或 indeterminate；
 - Artifact staging、临时文件、过期 grant/安装 session；
 - collaboration delivery、wake/interrupt 和子 Agent snapshot receipt。
+- Automation 的 `admitting` lease、已绑定 `running`/`waiting_for_approval` Run、删除取消请求、Trace 终态和 durable pending action。
+
+Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admitting` 立即回到 `queued`（已 tombstone Task 则取消），不等待旧 60 秒 lease；已经原子绑定的 `running`/`waiting_for_approval` 不重建消息，只从准确的 Conversation Trace 和 pending action 恢复 observer。多个离线 missed occurrence 合并为一个 `recovery` Run，而不是逐条补跑。进程内 scheduler wake 和 Agent event 只降延迟，不能代替这些行。
 
 当外部副作用可能已发生但数据库没有成功确认时，恢复结果必须使用 `outcome_indeterminate`/`commit_indeterminate` 等保守状态，不能自动重放付费生成、写文件或命令。
 
@@ -105,6 +129,8 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 5. FTS、Renderer JSON 和缓存均不是权威数据。
 6. 内容寻址对象的 hash 针对发布后不可变字节；mutable head/grant 单独更新。
 7. 删除、rewrite、fork 和 startup reconciliation 必须保持跨表/文件引用完整。
+8. Automation 的 Task revision、Run status revision、admission token 和 Event sequence 只能在 repository 事务中推进；公开 `starting` 不得反向写成新的持久状态。
+9. 已绑定 Automation Run 只能由匹配的 durable Trace 结算；admission 前失败不得伪造 Conversation/Trace 身份。
 
 ## 代码真源
 
@@ -114,6 +140,7 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 - 快照：`crates/core/src/storage/database_snapshot.rs`
 - Repositories：`crates/core/src/storage/*_repository.rs`
 - 领域组合事务：`crates/core/src/storage/service/`
+- Automation：`crates/core/src/storage/automation_repository.rs`、`storage/service/automations.rs`
 - Bootstrap：`crates/core-server/src/transport/bootstrap.rs`
 
 ## 测试
@@ -124,6 +151,9 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 - `crates/core/src/storage/service/tests/reconciliation.rs`
 - `crates/core/src/storage/service/tests/trace_reconciliation.rs`
 - `crates/core/src/storage/agent_command_session_repository/tests.rs`
+- `crates/core/src/storage/automation_repository/tests.rs`
+- `crates/core-server/src/application/automation/scheduler/tests.rs`
+- `crates/core-server/src/application/agent/tests/automation_turn.rs`
 - Core Server 的 pending action、Provider transition、Command Session、image generation 和 collaboration 测试
 
 ## 变更检查表
@@ -135,6 +165,7 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 - [ ] 外部工作在事务外执行，提交时重新校验 revision/CAS。
 - [ ] 新文件目录采用受管根、staging、原子发布与 orphan cleanup。
 - [ ] startup reconciliation 覆盖进程在每个提交边界崩溃的状态。
+- [ ] Automation schema 变更覆盖 occurrence/manual/nonterminal 唯一索引、父资源 trigger、Event/outbox 去重和 admission 崩溃窗口。
 - [ ] fork/rewrite/delete/backup 行为同步更新相关领域文档。
 
 ## 当前限制
@@ -142,5 +173,6 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 - 当前没有面向用户数据的原地 schema 升级承诺，旧开发库需要整根重置。
 - 单连接 Mutex 设计偏向桌面本地一致性，不适合多进程或高并发服务端部署。
 - 自动保留期限、跨设备同步、在线增量备份和用户级导出策略尚未形成统一公共契约。
+- Automation 当前没有 history/Event/outbox retention 或物理 GC 公共流程；tombstone 与事件日志会随使用增长。
 - 物理文件和 SQLite 无法共享单个 ACID 事务，依赖 staging、原子改名和 reconciliation 收敛。
 - SQLite FTS/索引损坏时需要重建；索引不可替代原始消息或 Archive。

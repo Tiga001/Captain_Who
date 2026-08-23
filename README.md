@@ -13,6 +13,7 @@ MyCopilot 是一个本地优先的桌面 AI 工作助手。界面由 Electron、
 - 内置终端、手动浏览器、Managed Playwright 自动化、用量统计和本地费用估算
 - 用户配置的 stdio MCP Server、内部 HostBridge Capability、bundled/installed/workspace Skill
 - 多智能体协作、只读子 Agent 观察、审批转交和崩溃恢复
+- Scheduled Automation：按结构化计划启动 Agent Run、保留历史与 attention，并通过原生通知提醒
 - Word、表格、演示文稿、PDF 与图片生成的受管 Artifact 工作流
 - 跨轮 Agent 工具轨迹、上下文压缩、Exact Archive 与长期使用量提示
 
@@ -61,21 +62,22 @@ pnpm dev
 
 ## 常用命令
 
-| 命令                | 用途                                           |
-| ------------------- | ---------------------------------------------- |
-| `pnpm dev`          | 启动 Electron 开发环境与 Core Server           |
-| `pnpm format`       | 格式化 TypeScript、CSS、文档与 Rust            |
-| `pnpm check:docs`   | 检查文档元数据、链接、路径、命令与版本真源     |
-| `pnpm lint`         | 运行 ESLint                                    |
-| `pnpm typecheck`    | 检查 Main、Preload 与 Renderer 类型            |
-| `pnpm lint:rust`    | 对整个 Rust workspace 运行严格 Clippy          |
-| `pnpm test:web`     | Vitest unit、browser 与 Managed Playwright E2E |
-| `pnpm test:rust`    | 运行 Rust workspace 测试                       |
-| `pnpm test`         | 运行脚本、Web/Browser 与 Rust 常规测试         |
-| `pnpm check`        | 执行格式、文档、lint、类型、Clippy 和测试      |
-| `pnpm build`        | 类型检查并生成 Electron 的 `out/` 产物         |
-| `pnpm build:core`   | 构建并校验 release Core Server binary          |
-| `pnpm build:unpack` | 生成当前平台的未封装应用，用于打包冒烟测试     |
+| 命令                            | 用途                                            |
+| ------------------------------- | ----------------------------------------------- |
+| `pnpm dev`                      | 启动 Electron 开发环境与 Core Server            |
+| `pnpm format`                   | 格式化 TypeScript、CSS、文档与 Rust             |
+| `pnpm check:docs`               | 检查文档元数据、链接、路径、命令与版本真源      |
+| `pnpm lint`                     | 运行 ESLint                                     |
+| `pnpm typecheck`                | 检查 Main、Preload 与 Renderer 类型             |
+| `pnpm lint:rust`                | 对整个 Rust workspace 运行严格 Clippy           |
+| `pnpm test:web`                 | Vitest unit、browser 与 Managed Playwright E2E  |
+| `pnpm test:automation-core-e2e` | Automation Host API 与真实 Core Server 专项 E2E |
+| `pnpm test:rust`                | 运行 Rust workspace 测试                        |
+| `pnpm test`                     | 运行脚本、Web/Browser 与 Rust 常规测试          |
+| `pnpm check`                    | 执行格式、文档、lint、类型、Clippy 和测试       |
+| `pnpm build`                    | 类型检查并生成 Electron 的 `out/` 产物          |
+| `pnpm build:core`               | 构建并校验 release Core Server binary           |
+| `pnpm build:unpack`             | 生成当前平台的未封装应用，用于打包冒烟测试      |
 
 ## 打包
 
@@ -125,7 +127,8 @@ pnpm storage:reset-dev -- --confirm-reset
 重建会先在数据根的 `storage-backups/` 中创建权限受限、经过 SQLite 校验的时间戳备份，
 再原子发布 fresh canonical database。模型与搜索配置、UI/Prompt 偏好、Skill 启用状态、
 MCP Server 配置和有效的图片生成 Profile 会通过当前严格写入路径恢复；对话、项目、草稿、
-Usage、审批、Continuation、Compaction、Fork 等会话派生状态不会恢复。附件、已安装 Skill、
+Automation 任务/Run/event/outbox、Usage、审批、Continuation、Compaction、Fork 等状态不会恢复。
+附件、已安装 Skill、
 生成图片和凭据目录不会在重建事务中被删除或搬移；与已清理对话绑定的附件记录不会恢复，
 其文件会在应用后续正常启动时按现有孤立附件策略清理。命令只输出路径和计数，不输出 Token
 或配置值。

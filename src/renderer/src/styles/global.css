@@ -435,6 +435,16 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   left: var(--left-panel-render-width);
 }
 
+/* The scheduled layer starts at this same boundary. Keep the existing left-sidebar
+ * resize policy, but restore the handle's hit area above that cover layer. */
+.app-shell[data-primary-view='scheduled'] > .resize-handle--left {
+  z-index: 49;
+}
+
+.scheduled-view__left-toggle {
+  z-index: 49;
+}
+
 .resize-handle--right {
   right: var(--right-panel-render-width);
   transform: translateX(50%);

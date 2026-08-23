@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type -- Documentation checker is runtime-validated JavaScript. */
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -277,6 +278,87 @@ if (
     mcpDocument,
     `must match Managed Playwright bridge schema v${managedPlaywrightBridgeVersion ?? 'unknown'}`
   )
+}
+
+const automationProtocolSource = readFileSync(
+  path.join(repositoryRoot, 'packages/protocol/src/automations.ts'),
+  'utf8'
+)
+const automationSchemaVersion = /AUTOMATION_SCHEMA_VERSION\s*=\s*(\d+)/.exec(
+  automationProtocolSource
+)?.[1]
+const automationPermissionModeVersion = /AUTOMATION_PERMISSION_MODE_VERSION\s*=\s*(\d+)/.exec(
+  automationProtocolSource
+)?.[1]
+const automationErrorCode = /AUTOMATION_ERROR_CODE\s*=\s*(-?\d+)/.exec(
+  automationProtocolSource
+)?.[1]
+const automationRustProtocolSource = readFileSync(
+  path.join(repositoryRoot, 'crates/protocol-rs/src/automations.rs'),
+  'utf8'
+)
+const rustAutomationFacts = {
+  schema: /AUTOMATION_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/.exec(automationRustProtocolSource)?.[1],
+  permission: /AUTOMATION_PERMISSION_MODE_VERSION:\s*u32\s*=\s*(\d+)/.exec(
+    automationRustProtocolSource
+  )?.[1],
+  error: /AUTOMATION_ERROR_CODE:\s*i32\s*=\s*(-?\d+)/.exec(automationRustProtocolSource)?.[1]
+}
+const automationDocument = path.join(docsRoot, 'subsystems/scheduled-automations.md')
+if (!automationSchemaVersion || !automationPermissionModeVersion || !automationErrorCode) {
+  failures.push('packages/protocol/src/automations.ts: could not read Automation protocol versions')
+} else {
+  const automationMarkdown = readFileSync(automationDocument, 'utf8')
+  for (const expected of [
+    `Automation DTO`,
+    `schemaVersion\` 各为 **v${automationSchemaVersion}**`,
+    `permission mode v${automationPermissionModeVersion}`,
+    `automation-contract-v${automationSchemaVersion}.json`,
+    `\`${automationErrorCode}\``
+  ]) {
+    if (!automationMarkdown.includes(expected)) {
+      fail(automationDocument, `missing Automation protocol fact: ${expected}`)
+    }
+  }
+  for (const [fact, typescriptValue, rustValue] of [
+    ['schema version', automationSchemaVersion, rustAutomationFacts.schema],
+    ['permission mode version', automationPermissionModeVersion, rustAutomationFacts.permission],
+    ['error code', automationErrorCode, rustAutomationFacts.error]
+  ]) {
+    if (rustValue !== typescriptValue) {
+      failures.push(
+        `crates/protocol-rs/src/automations.rs: Automation ${fact} ${rustValue ?? 'unknown'} does not match TypeScript ${typescriptValue}`
+      )
+    }
+  }
+
+  const automationIpcDocument = path.join(docsRoot, 'architecture/ipc-and-protocol.md')
+  const automationIpcMarkdown = readFileSync(automationIpcDocument, 'utf8')
+  for (const expected of [
+    `AUTOMATION_SCHEMA_VERSION = ${automationSchemaVersion}`,
+    `AUTOMATION_PERMISSION_MODE_VERSION = ${automationPermissionModeVersion}`,
+    `\`${automationErrorCode}\``
+  ]) {
+    if (!automationIpcMarkdown.includes(expected)) {
+      fail(automationIpcDocument, `missing Automation protocol fact: ${expected}`)
+    }
+  }
+}
+
+const automationE2eScript = 'test:automation-core-e2e'
+if (!packageJson.scripts[automationE2eScript]) {
+  failures.push(`package.json: missing pnpm script ${automationE2eScript}`)
+} else {
+  for (const documentPath of [
+    'README.md',
+    'docs/subsystems/scheduled-automations.md',
+    'docs/development/testing.md'
+  ]) {
+    const file = path.join(repositoryRoot, documentPath)
+    if (!readFileSync(file, 'utf8').includes(`pnpm ${automationE2eScript}`)) {
+      fail(file, `missing Automation E2E command: pnpm ${automationE2eScript}`)
+    }
+  }
 }
 
 const forbiddenCurrentClaims = [

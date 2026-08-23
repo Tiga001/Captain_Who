@@ -7,7 +7,11 @@ last_verified: 2026-08-23
 
 # 浏览器与自动化
 
-该子系统让用户手动浏览网页，并让 Agent 在同一组受管 Browser surfaces 上调用内置 Managed Playwright MCP Tool。两条路径共享 guest、Session 和 Main 安全策略，但授权语义不同。右侧栏页面生命周期见 [右侧栏平台](./right-sidebar.md)，MCP Server 管理见 [MCP 子系统](./mcp.md)。
+该子系统让用户手动浏览网页，并让 Agent 在同一组受管 Browser surfaces 上调用内置 Managed Playwright
+MCP Tool。这里的“自动化”只指浏览器控制，不是 Scheduled 中的 Agent 定时任务；后者见
+[Scheduled Automation](./scheduled-automations.md)。两条浏览器路径共享 guest、Session 和 Main 安全
+策略，但授权语义不同。右侧栏页面生命周期见 [右侧栏平台](./right-sidebar.md)，MCP Server 管理见
+[MCP 子系统](./mcp.md)。
 
 ## 职责边界
 

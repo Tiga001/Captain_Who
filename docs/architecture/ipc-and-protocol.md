@@ -13,10 +13,10 @@ last_verified: 2026-08-23
 
 跨进程接口分为两个 workspace package：
 
-| 包                    | 职责                                                                    | 典型内容                                                                            |
-| --------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `@mycopilot/protocol` | 与传输无关的 DTO、schema version、解析器、限制常量和 JSON-RPC method 名 | Agent、MCP、Skill、Browser、Git、Terminal、workspace files、image generation 等协议 |
-| `@mycopilot/host-api` | Electron Renderer 可见的 API 形状和 IPC channel 名                      | `HOST_CHANNELS`、领域 HostApi、`HostInvocationResult`、`getHostApi()`               |
+| 包                    | 职责                                                                    | 典型内容                                                                                        |
+| --------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `@mycopilot/protocol` | 与传输无关的 DTO、schema version、解析器、限制常量和 JSON-RPC method 名 | Agent、Automation、MCP、Skill、Browser、Git、Terminal、workspace files、image generation 等协议 |
+| `@mycopilot/host-api` | Electron Renderer 可见的 API 形状和 IPC channel 名                      | `HOST_CHANNELS`、领域 HostApi、`HostInvocationResult`、`getHostApi()`                           |
 
 Main、Preload、Renderer 应导入这两个包，而不是复制字符串或重新声明近似类型。Rust 侧同一 JSON-RPC 契约由 Rust Core/Core Server 类型和 serde 校验实现；涉及双运行时排序、digest 或枚举时，代码注释和测试必须保持字节级一致。
 
@@ -59,6 +59,7 @@ Rust Core notification 或 Main service event
 - `app`
 - `agent`
 - `attachments`
+- `automations`
 - `browser`
 - `git`
 - `imageGeneration`
@@ -77,7 +78,7 @@ Rust Core notification 或 Main service event
 
 `src/preload/index.ts` 构造完整 `HostApi`，并仅在 `process.contextIsolated` 时通过 `contextBridge.exposeInMainWorld('mycopilot', { host })` 暴露。否则 Preload 直接失败。
 
-领域较复杂时使用独立 bridge，例如 `AgentIpcBridge`、`BrowserIpcBridge`、`McpIpcBridge` 和 `TerminalIpcBridge`。简单只读调用可以内联，但仍必须使用 `HOST_CHANNELS` 和共享类型。
+领域较复杂时使用独立 bridge，例如 `AgentIpcBridge`、`AutomationIpcBridge`、`BrowserIpcBridge`、`McpIpcBridge` 和 `TerminalIpcBridge`。简单只读调用可以内联，但仍必须使用 `HOST_CHANNELS` 和共享类型。
 
 Preload 的职责包括：
 
@@ -132,9 +133,50 @@ Main 通过 `captureHostInvocation()` 保留 Core Server JSON-RPC 的 code/data�
 - `invoke/handle`：需要唯一结果或结构化错误的请求。
 - `send/on`：允许丢弃或无需应答的高频命令，例如 terminal 输入与 ACK。
 - Main → Renderer event：窗口状态、Agent、MCP changed、Skill changed、Terminal output/exit、Browser surface command。
-- Main ↔ Core Server JSON-RPC notification：长任务事件和 Managed Playwright 反向桥命令。
+- Main → Renderer event：Automation event/resync 和原生通知点击产生的导航 intent。
+- Main ↔ Core Server JSON-RPC notification：长任务事件、Automation event/resync 和 Managed Playwright 反向桥命令。
 
 选用单向传输不等于不需要校验。必须有 owner、session/Run/request id、序列或 generation，并定义服务退出时如何终止。
+
+## Automation 协议边界
+
+Automation 在 UI 中名为 `Scheduled`，协议、代码和本文均使用 Automation；一次执行称 Automation Run。
+业务状态机见 [Scheduled Automation](../subsystems/scheduled-automations.md)。当前共享 DTO 使用：
+
+- `AUTOMATION_SCHEMA_VERSION = 1`；
+- `AUTOMATION_PERMISSION_MODE_VERSION = 1`；
+- Automation JSON-RPC error code `-32045`，结构化 `data.type = automation`。
+
+这些都是 transport/domain envelope 版本，不是 SQLite schema。当前 canonical SQLite schema 是 v18，由 Rust Core storage 独立校验；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
+
+Renderer-facing `AutomationsHostApi` 暴露十个 request：
+
+```text
+list / get / create / update / setEnabled / runNow / delete
+listRuns / attentionSummary / acknowledgeAttention
+```
+
+它还暴露三个可解除订阅的输入面：`onEvent`、`onResync` 和 `onOpenRequested`。对应 Electron channel 统一定义在 `HOST_CHANNELS.automations`；Preload 只转发固定 invoke/event，并在 listener ready 后发送 `resyncReady` 握手，不提供任意 automation method 或通用 IPC。
+
+Main ↔ Core Server 使用同名的十个业务 JSON-RPC method，并额外定义四个 **Host-only** 原生通知投递 method：
+
+```text
+automation.notifications.claim
+automation.notifications.validate
+automation.notifications.acknowledge
+automation.notifications.release
+```
+
+Host-only method 只供 Main 的 `AutomationNotificationCoordinator` 使用，不得加入 Renderer Host API 或 Electron invoke allowlist。claim token、lease、最终 validation 和 ACK/release 都由 Core Server/Rust Core 持久状态校验；Renderer 的 attention 或点击行为不是投递授权。
+
+Core Server 主动发送两类 notification：
+
+- `automation.event`：包含 `sequence`、`eventId`、kind、`automationId`、可选 `runId`/`resourceRevision`。它是有序失效通知，不携带完整 Automation task/Run 真相。
+- `automation.resync`：当前 reason 为 `core_started`，携带冻结的 `lastSequence`。Main 缓存启动 resync，Preload 完成 `resyncReady` 后重放；Renderer 收到后重新读取权威 snapshot。
+
+Main 另以 `host:automation.openRequested` 发送经 parser 校验的 `AutomationOpenRequest`。这是原生通知点击后的导航 intent，只允许打开精确 Automation task 或 Conversation/message；它既不是 Core Server JSON-RPC notification，也不能证明 Automation Run 已成功。
+
+事件正确性依赖 identity 与排序：Renderer 必须丢弃重复/倒序 `sequence`，发现 resync 或不能证明连续性时重新 list/get/listRuns/attention；不能通过 event 文案、到达时间或 `resourceRevision` 猜测缺失状态。update/enable/delete 使用 Automation task revision/CAS，create/runNow 使用稳定 request identity，结构化冲突必须保留到 UI recovery。
 
 ## 原生能力
 
@@ -167,20 +209,30 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 5. 权限字段、revision、digest、owner 和 instance identity 只能由权威一侧生成或验证。
 6. 绝对托管路径和 process-only capability 不得进入 Renderer、持久会话消息或模型 JSON。
 7. 订阅必须可解除，迟到事件必须通过身份和 generation 拒绝。
+8. Automation Host-only 通知投递 RPC 永远不进入 Renderer allowlist；`resyncReady` 只声明 listener ready，不授予业务权限。
+9. Automation event/resync 不是状态或系统通知送达 receipt；业务消费者必须回读 SQLite 派生的权威 snapshot。
+10. Automation DTO schema v1、permission mode v1 和 SQLite schema v18 必须分别命名、分别验证。
 
 ## 代码真源
 
 - Electron channel：`packages/host-api/src/channels.ts`
 - Renderer Host API 类型与错误：`packages/host-api/src/index.ts`
 - 共享协议与 parser：`packages/protocol/src/`
+- Automation TypeScript 协议：`packages/protocol/src/automations.ts`
+- Automation 跨语言 fixture：`packages/protocol/fixtures/automation-contract-v1.json`
+- Automation Rust DTO/method：`crates/protocol-rs/src/automations.rs`、`crates/protocol-rs/src/methods.rs`
 - Preload 组合：`src/preload/index.ts`
 - Preload 领域桥：`src/preload/*IpcBridge.ts`
+- Automation Preload bridge：`src/preload/AutomationIpcBridge.ts`
 - Main IPC 组合：`src/main/ipc.ts`
 - Main 领域 registrar：`src/main/ipc/*.ts`
+- Automation Main registrar：`src/main/ipc/automationIpc.ts`
+- Automation 原生通知 owner：`src/main/automation/automationNotificationCoordinator.ts`
 - 发送方信任包装：`src/main/ipc/trustedIpc.ts`
 - Renderer Host 客户端：`src/renderer/src/host/hostClient.ts`
 - Main/Core Server JSON-RPC：`src/main/core/jsonRpcClient.ts`、`src/main/core/coreServer.ts`
 - Rust transport：`crates/core-server/src/transport/`
+- Automation Rust transport：`crates/core-server/src/transport/automation_rpc.rs`
 
 ## 测试与验证
 
@@ -192,6 +244,7 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 - Preload 事件解析失败时 fail closed。
 - Core Server 返回结构化错误时 code/data 能到达 Renderer recovery。
 - unsubscribe、WebContents 销毁和迟到通知。
+- Automation 的跨语言 method/fixture、Host-only method 隔离、event sequence/resync replay、revision conflict 和原生通知 claim/validate/ACK/release。
 
 常规命令：
 
@@ -200,7 +253,10 @@ pnpm typecheck
 pnpm lint
 pnpm test:web
 pnpm test:rust
+pnpm test:automation-core-e2e
 ```
+
+Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`、`src/preload/AutomationIpcBridge.test.ts`、`src/main/core/ipc.automation.test.ts`、`src/main/core/coreServer.automation.test.ts`、`src/main/core/automationNotificationCoordinator.test.ts` 和 `src/main/core/automationHostRealCore.integration.test.ts`。最后一项启动真实 Core Server，当前是独立 project，不包含在 `pnpm test:web` 或 `pnpm check` 中。
 
 ## 变更检查表
 
@@ -211,6 +267,8 @@ pnpm test:rust
 - [ ] 原生路径和敏感 identity 没有进入 Renderer payload。
 - [ ] 事件有稳定 owner/sequence/generation，并可解除订阅。
 - [ ] schema version、Rust/TypeScript 枚举顺序和 digest 规则保持一致。
+- [ ] Automation 变更同步核对 DTO schema、permission mode version、Electron channel、十个 Renderer request、四个 Host-only method 和双语言 fixture。
+- [ ] Automation event/resync 的 sequence、startup replay、unsubscribe、Renderer ready handshake 和 authoritative reload 均有测试。
 - [ ] 对应架构或子系统文档已更新。
 
 ## 当前限制
@@ -219,3 +277,6 @@ pnpm test:rust
 - Main ↔ Core Server 使用本机进程管道，没有跨版本远程协商；桌面包必须携带匹配的 Main 与 Rust Core。
 - 目前没有从 HostApi 自动生成 Main registrar/Preload bridge 的机制，完整性依靠类型检查、测试和检查表。
 - 部分早期协议只在 Rust Core 或消费端完成深度校验；修改这些接口时应补齐共享 parser，而不是继续复制验证逻辑。
+- Automation 的真实 Core Server E2E 不在默认 `pnpm check` 内，跨层变更必须显式运行专项命令。
+- 当前没有由单一 IDL 自动生成 TypeScript/Rust Automation DTO；schema v1、method 和限制依赖 fixture、严格 parser 与双端测试防漂移。
+- Main 当前按单主 Renderer 产品形态缓存 startup resync 和最新 pending Automation navigation；多窗口广播 event，但原生通知点击只交付给最近 listener-ready 的受信 Renderer。

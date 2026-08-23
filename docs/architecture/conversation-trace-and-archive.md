@@ -39,6 +39,12 @@ Turn created
 
 最终 assistant message、Trace terminal、model-context projection、Usage 和 UI 终态由 Core Server 在同一结算边界提交。进程崩溃后，startup reconciliation 只在已持久证据明确证明 Run 已取消时结算为 `cancelled`；其他孤立的 `in_progress` Trace 结算为 `failed`。Trace 没有 `interrupted` 终态，也不从 Renderer 看似完成的状态推断成功。
 
+Automation Run 在原子 HumanRoot admission 时绑定 `agent_run_id`、Conversation 和 user/assistant message。
+Automation observer 以持久 Trace terminal 和 pending action 判断 `running`、`waiting_for_approval` 与终态，
+不能从 assistant 文案或进程内 worker 状态猜测成功。Automation 专用 `automation_report` 另写入 Run-scoped
+结构化结果，最终通知 policy 使用其 `no_change`/`important_update`/`completed`/`unknown` 投影；它不改变
+Trace 的权威终态。详见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
+
 ## 消费者投影
 
 同一个 canonical Tool Result 可能包含模型行动信息、UI 展示字段、审计身份和恢复凭据。每个 Tool 通过 `ToolRegistry` 明确定义：
@@ -93,6 +99,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - 分叉复制选中边界内的终态消息、Trace、model-context、摘要链、附件和相关 Artifact grant。Archive chunk 可复用内容，但目标必须获得新归属/ref，并重写目标 Trace 引用。
 - Usage、普通请求 Observation、运行中 Checkpoint、Command Session 活动状态和 mutable world state 不作为历史内容复制。
 - 会话删除通过外键/服务事务清理内容和授权；审计表是否保留由其数据生命周期定义，不能仅依赖级联猜测。
+- 删除 Automation 绑定的 Conversation/message/project 前，服务事务先 terminalize 相关活动 Run 并请求
+  Agent 取消，再删除 Trace；不得让外键级联先抹去恢复证据。
 
 协作 `fork_turns=all|N|none` 只选择完整 settled Turn。被选择的 settled assistant 缺少必需 Durable Trace 时应失败，而不是创建无法验证的历史快照。
 
@@ -117,6 +125,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - Rewrite/fork：`storage/conversation_turn_rewrite_repository.rs`、`conversation_fork_repository.rs`
 - 终态与修复：`crates/core/src/storage/service/messages.rs`、`trace_reconciliation.rs`
 - Tool 投影入口：`crates/core/src/tools/mod.rs`
+- Automation Trace observer/admission：`crates/core-server/src/application/automation/scheduler.rs`、
+  `crates/core-server/src/application/agent/automation_turn.rs`
 
 ## 测试
 
@@ -128,6 +138,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - `crates/core-server/src/application/agent/tests/context_history.rs`
 - `crates/core/src/runtime/tests/trace_and_projection.rs`
 - `crates/core/tests/fixtures/tool_result_projection_contract_v1.json`
+- `crates/core-server/src/application/automation/scheduler/tests.rs`
+- `crates/core-server/src/application/agent/tests/automation_turn.rs`
 
 ## 变更检查表
 
@@ -136,6 +148,7 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - [ ] 新正文捕获路径使用共享 capture/spool，声明 source completeness。
 - [ ] history ref 在读取、分叉、删除、重写和会话隔离测试中均被校验。
 - [ ] startup reconciliation 对新 `in_progress` 状态有保守结算规则。
+- [ ] Automation Run 绑定、Approval 恢复与资源删除是否仍由持久 Trace 驱动且原子收口。
 - [ ] FTS/schema 变化保持索引可重建，权威内容不依赖索引。
 - [ ] 防止 `conversation_history` 结果递归归档。
 

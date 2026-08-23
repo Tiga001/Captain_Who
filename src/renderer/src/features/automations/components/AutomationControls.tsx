@@ -1,10 +1,12 @@
 import { Check, ChevronDown } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 
 export interface AutomationOption<Value extends string = string> {
   disabled?: boolean
+  icon?: LucideIcon
   label: string
   value: Value
 }
@@ -34,6 +36,7 @@ export function AutomationSelect<Value extends string>({
     options.findIndex((option) => option.value === value)
   )
   const selected = options[selectedIndex]
+  const SelectedIcon = selected?.icon
   const close = useCallback(() => setOpen(false), [])
   useDismissOnOutsidePointer(rootRef, open, close)
 
@@ -88,6 +91,8 @@ export function AutomationSelect<Value extends string>({
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label={`${ariaLabel}: ${selected.label}`}
+        data-has-icon={SelectedIcon ? 'true' : undefined}
+        data-value={selected.value}
         disabled={disabled}
         onClick={() => (open ? close() : openAndFocus())}
         onKeyDown={(event) => {
@@ -104,7 +109,8 @@ export function AutomationSelect<Value extends string>({
           }
         }}
       >
-        <span>{selected.label}</span>
+        {SelectedIcon && <SelectedIcon aria-hidden="true" />}
+        <span title={selected.label}>{selected.label}</span>
         <ChevronDown aria-hidden="true" />
       </button>
       {open && (
@@ -116,6 +122,7 @@ export function AutomationSelect<Value extends string>({
         >
           {options.map((option, index) => {
             const isSelected = option.value === value
+            const OptionIcon = option.icon
             return (
               <button
                 key={option.value}
@@ -128,12 +135,15 @@ export function AutomationSelect<Value extends string>({
                 aria-disabled={option.disabled || undefined}
                 aria-selected={isSelected}
                 disabled={option.disabled}
+                data-has-icon={OptionIcon ? 'true' : undefined}
                 data-selected={isSelected || undefined}
+                data-value={option.value}
                 tabIndex={isSelected ? 0 : -1}
                 onClick={() => select(option)}
                 onKeyDown={(event) => onOptionKeyDown(event, index)}
               >
-                <span>{option.label}</span>
+                {OptionIcon && <OptionIcon aria-hidden="true" />}
+                <span title={option.label}>{option.label}</span>
                 {isSelected && <Check aria-hidden="true" />}
               </button>
             )

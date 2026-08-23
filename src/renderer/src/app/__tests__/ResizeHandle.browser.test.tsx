@@ -4,6 +4,7 @@ import { render } from 'vitest-browser-react'
 import { ResizeHandle } from '../../components/layout/ResizeHandle'
 import { SIDEBAR_COLLAPSE_THRESHOLD_RATIO, type SidebarSide } from '../../lib/sidebarResize'
 import '../../styles/global.css'
+import '../../features/automations/ScheduledPage.css'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => key })
@@ -116,7 +117,65 @@ function RightSidebarGeometryHarness() {
   )
 }
 
+function ScheduledLeftResizeHarness() {
+  const targetRef = useRef<HTMLDivElement>(null)
+  return (
+    <div
+      ref={targetRef}
+      className="app-shell"
+      data-primary-view="scheduled"
+      data-testid="scheduled-resize-shell"
+      style={
+        {
+          '--left-panel-width': '300px',
+          '--right-panel-width': '360px',
+          height: '320px',
+          minWidth: 0,
+          width: '1000px'
+        } as CSSProperties
+      }
+    >
+      <aside className="side-panel side-panel--left" />
+      <div className="scheduled-page-layer" data-testid="scheduled-resize-cover" />
+      <ResizeHandle
+        metrics={{ maximum: 500, minimum: 220, width: 300 }}
+        onCollapse={() => undefined}
+        onResizeCommit={() => undefined}
+        resizeTargetRef={targetRef}
+        side="left"
+      />
+    </div>
+  )
+}
+
 describe('ResizeHandle', () => {
+  it('keeps the conversation left-sidebar metrics reachable above the scheduled cover', async () => {
+    const screen = await render(<ScheduledLeftResizeHarness />)
+    const handle = screen.getByRole('separator', { name: 'app.resizeLeftSidebar' })
+
+    await expect.element(handle).toHaveAttribute('aria-valuemin', '220')
+    await expect.element(handle).toHaveAttribute('aria-valuemax', '500')
+    await expect.element(handle).toHaveAttribute('aria-valuenow', '300')
+    expect(getComputedStyle(handle.element()).zIndex).toBe('49')
+
+    const handleElement = handle.element()
+    const shell = screen.getByTestId('scheduled-resize-shell').element()
+    const cover = screen.getByTestId('scheduled-resize-cover').element()
+    vi.spyOn(handleElement, 'setPointerCapture').mockImplementation(() => undefined)
+    vi.spyOn(handleElement, 'hasPointerCapture').mockReturnValue(true)
+    vi.spyOn(handleElement, 'releasePointerCapture').mockImplementation(() => undefined)
+    dispatchPointerEvent(handleElement, 'pointerdown', 300)
+    dispatchPointerEvent(handleElement, 'pointermove', 360)
+    await waitForAnimationFrame()
+
+    expect(shell.style.getPropertyValue('--left-panel-live-width')).toBe('360px')
+    expect(cover.getBoundingClientRect().left - shell.getBoundingClientRect().left).toBeCloseTo(
+      360,
+      0
+    )
+    dispatchPointerEvent(handleElement, 'pointerup', 360)
+  })
+
   it('uses a wider transparent hit target while keeping the divider one pixel wide', async () => {
     const screen = await render(
       <ResizeHarness onCommit={() => undefined} onRender={() => undefined} side="left" />

@@ -55,6 +55,11 @@
   white-space: nowrap;
 }
 
+.model-config-picker__button > .model-config-picker__selected-capability {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .model-config-picker__button > svg {
   flex: 0 0 auto;
   width: var(--mc-icon-size-sm);
@@ -87,7 +92,7 @@
 
 .model-config-picker__option {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--mc-icon-size-md);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-height: 38px;
   padding: 0 9px;
@@ -117,10 +122,24 @@
   height: var(--mc-icon-size-md);
 }
 
-.model-config-picker__option-capability {
-  overflow: hidden;
+.model-config-picker__capability {
+  display: inline-flex;
+  min-width: 36px;
+  height: 20px;
+  padding: 0 7px;
+  align-items: center;
+  justify-content: center;
   color: var(--mc-color-text-muted);
+  background: var(--mc-color-surface-neutral-subtle);
+  border-radius: var(--mc-radius-pill);
   font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--mc-line-height-none);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.model-config-picker__capability[data-supported='true'] {
+  color: var(--mc-color-text-accent);
+  background: var(--mc-color-surface-info-subtle);
 }

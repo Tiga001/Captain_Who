@@ -28,20 +28,23 @@ last_verified: 2026-08-23
 
 ## Agent 运行
 
-| 规范名称            | 含义                                                           |
-| ------------------- | -------------------------------------------------------------- |
-| Agent               | 持有模型上下文、工具能力和生命周期的运行实体                   |
-| 根 Agent / 子 Agent | 持久 Agent 树中的 root/child；不要使用“主智能体/从智能体”      |
-| Subagents           | 仅指设置页或 UI 中的产品名称                                   |
-| Conversation        | 持久对话容器；不等同于一次模型请求                             |
-| Turn                | 一次用户或 Wake 驱动的 Agent 执行周期                          |
-| Run                 | Turn 的可执行/可观察运行实例；引用 DTO 时保留具体 `runId` 语义 |
-| Agent Runtime       | Provider、上下文、Tool Loop、Checkpoint 和结算的运行边界       |
-| Wake                | 使子 Agent 可被 Dispatcher 调度的持久事实                      |
-| Mailbox             | Agent 间任务、消息、跟进和结果的持久投递域                     |
-| Dispatcher          | 领取 Wake、获取并发许可并启动子 Agent Turn 的进程级调度器      |
-| Approval            | 对一项冻结 action 的用户决定；不是一般配置权限                 |
-| Permission          | 当前任务/工作区允许的能力范围和自动审批策略                    |
+| 规范名称            | 含义                                                                         |
+| ------------------- | ---------------------------------------------------------------------------- |
+| Agent               | 持有模型上下文、工具能力和生命周期的运行实体                                 |
+| 根 Agent / 子 Agent | 持久 Agent 树中的 root/child；不要使用“主智能体/从智能体”                    |
+| Subagents           | 仅指设置页或 UI 中的产品名称                                                 |
+| Conversation        | 持久对话容器；不等同于一次模型请求                                           |
+| Turn                | 一次用户或 Wake 驱动的 Agent 执行周期                                        |
+| Run                 | Turn 的可执行/可观察运行实例；引用 DTO 时保留具体 `runId` 语义               |
+| Agent Runtime       | Provider、上下文、Tool Loop、Checkpoint 和结算的运行边界                     |
+| Wake                | 使子 Agent 可被 Dispatcher 调度的持久事实                                    |
+| Mailbox             | Agent 间任务、消息、跟进和结果的持久投递域                                   |
+| Dispatcher          | 领取 Wake、获取并发许可并启动子 Agent Turn 的进程级调度器                    |
+| Approval            | 对一项冻结 action 的用户决定；不是一般配置权限                               |
+| Permission          | 当前任务/工作区允许的能力范围和自动审批策略                                  |
+| Automation          | 用户配置并由 Core Server 持久调度的 Agent 定时任务；不要用它泛指浏览器自动化 |
+| Automation Run      | 一次计划、手动或恢复触发的 Automation 执行实例                               |
+| Attention           | Automation 中需要用户查看或处理的持久提醒投影，不等同于原生通知              |
 
 中文正文统一写 `Agent`、`Turn`、`Run`，不交替使用“智能体”“轮次”“回合”“执行任务”来指代同一
 领域对象。“多智能体”可作为产品能力名称，具体实体仍写根 Agent/子 Agent。
@@ -84,21 +87,23 @@ Artifact 首次出现可写“Artifact（制品）”，之后保持 `Artifact`�
 
 ## UI 与测试
 
-| 规范名称          | 含义                                                       |
-| ----------------- | ---------------------------------------------------------- |
-| surface           | 可被 Host 或 Renderer 识别的交互表面，例如 Browser surface |
-| page              | 右侧栏平台中的页面实例                                     |
-| transient preview | 可被下一次文件预览替换的临时 Files page                    |
-| stable page       | 已固定、不会被下一次 preview 替换的 Files page             |
-| gate              | 必须通过的组合验证；应明确是否属于 `pnpm check` 或发布门禁 |
-| smoke             | 验证关键链路能启动/完成的有限测试，不代表完整行为覆盖      |
-| profile           | 固定规模、可复现的压力或性能观测配置，不是生产容量承诺     |
-| pending           | 尚无足够验证证据；不得在发布说明中改写为“支持”             |
+| 规范名称          | 含义                                                            |
+| ----------------- | --------------------------------------------------------------- |
+| surface           | 可被 Host 或 Renderer 识别的交互表面，例如 Browser surface      |
+| page              | 右侧栏平台中的页面实例                                          |
+| transient preview | 可被下一次文件预览替换的临时 Files page                         |
+| stable page       | 已固定、不会被下一次 preview 替换的 Files page                  |
+| gate              | 必须通过的组合验证；应明确是否属于 `pnpm check` 或发布门禁      |
+| smoke             | 验证关键链路能启动/完成的有限测试，不代表完整行为覆盖           |
+| profile           | 固定规模、可复现的压力或性能观测配置，不是生产容量承诺          |
+| pending           | 尚无足够验证证据；不得在发布说明中改写为“支持”                  |
+| Scheduled         | 左侧栏中管理 Automation 的产品入口名；架构正文仍使用 Automation |
 
 ## 写作规则
 
 - 标题和正文使用 `Agent`、`Tool`、`Skill`、`Artifact`、`Provider`、`Renderer`、`Preload`、`Main`、
-  `Core Server`、`Rust Core`、`MCP Server`、`Managed Playwright` 的固定大小写。
+  `Core Server`、`Rust Core`、`MCP Server`、`Managed Playwright`、`Automation` 和 `Automation Run` 的固定
+  大小写；`Scheduled` 只作为 UI 名称。
 - 引用代码枚举、方法、字段和状态时使用反引号并保持原值，例如 `outcome_unknown`、`schemaVersion`。
 - “当前”“已支持”“发布可用”必须有代码和测试证据；计划能力放 ADR proposal 或历史文档。
 - 数值、版本和协议名同时给出代码/manifest 真源，不能只依赖本文。

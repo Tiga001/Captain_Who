@@ -149,6 +149,15 @@ export function getSystemTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
 
+/**
+ * Automation schedules are persisted with an explicit IANA zone for the backend,
+ * while the UI deliberately follows the current computer zone without exposing a
+ * second setting.
+ */
+export function withSystemTimeZone(schedule: AutomationScheduleInput): AutomationScheduleInput {
+  return { ...schedule, timezone: getSystemTimeZone() } as AutomationScheduleInput
+}
+
 export function nextQuarterHourAnchor(now = Date.now()): number {
   const quarterHour = 15 * 60 * 1_000
   return Math.ceil((now + 1) / quarterHour) * quarterHour

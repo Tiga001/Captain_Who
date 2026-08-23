@@ -18,7 +18,7 @@ const automations = vi.hoisted(() => ({
 
 vi.mock('../../../host/hostClient', () => ({ hostClient: { automations } }))
 
-const { createAutomation, listAutomations, setAutomationEnabled } =
+const { createAutomation, listAutomations, setAutomationEnabled, updateAutomation } =
   await import('../automationClient')
 
 const task = {
@@ -94,8 +94,9 @@ describe('automation renderer client', () => {
     })
   })
 
-  it('submits only permission mode/version and structured schedule on create', async () => {
+  it('submits only permission mode/version and captures the computer timezone on create', async () => {
     automations.create.mockResolvedValue({ ok: true, value: task })
+    const staleSchedule = { ...task.schedule, timezone: 'Etc/GMT+12' }
     await createAutomation(
       {
         title: task.title,
@@ -109,7 +110,7 @@ describe('automation renderer client', () => {
         },
         permissionMode: 'default',
         permissionModeVersion: 1,
-        schedule: task.schedule,
+        schedule: staleSchedule,
         notificationPolicy: 'all_runs'
       },
       'request-1'
@@ -128,10 +129,47 @@ describe('automation renderer client', () => {
       },
       permissionMode: 'default',
       permissionModeVersion: 1,
-      schedule: task.schedule,
+      schedule: {
+        ...staleSchedule,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      },
       notificationPolicy: 'all_runs'
     })
     expect(automations.create.mock.calls[0]?.[0]).not.toHaveProperty('resolvedPermissions')
+  })
+
+  it('captures the computer timezone again at the update transport boundary', async () => {
+    automations.update.mockResolvedValue({ ok: true, value: task })
+    const staleSchedule = { ...task.schedule, timezone: 'Etc/GMT+12' }
+
+    await updateAutomation(
+      { automationId: task.automationId, revision: task.revision },
+      {
+        title: task.title,
+        prompt: task.prompt,
+        destination: {
+          kind: 'new_chat',
+          projectBinding: 'none',
+          projectId: null,
+          modelId: 'model-1'
+        },
+        permissionMode: 'default',
+        permissionModeVersion: 1,
+        schedule: staleSchedule,
+        notificationPolicy: 'all_runs'
+      }
+    )
+
+    expect(automations.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        automationId: task.automationId,
+        expectedRevision: task.revision,
+        schedule: {
+          ...staleSchedule,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+        }
+      })
+    )
   })
 
   it('preserves structured revision conflict details for the UI', async () => {

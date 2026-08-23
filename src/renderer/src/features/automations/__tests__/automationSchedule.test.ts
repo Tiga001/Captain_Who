@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { AutomationScheduleInput } from '@mycopilot/protocol'
 import {
+  createDefaultAutomationSchedule,
   formatTimeMinutes,
   generateQuarterHourOptions,
   protocolScheduleToStructured,
   structuredScheduleToProtocol,
-  validateSchedule
+  validateSchedule,
+  withSystemTimeZone
 } from '../automationSchedule'
 
 const common = { anchorAt: 1_777_777_777_000, timezone: 'Asia/Shanghai' }
@@ -83,6 +85,23 @@ describe('automation schedule form protocol adapter', () => {
       ...common
     } satisfies AutomationScheduleInput
     expect(protocolScheduleToStructured(schedule).timezone).toBe('Asia/Shanghai')
+  })
+
+  it('uses the system IANA timezone for a newly created schedule', () => {
+    expect(createDefaultAutomationSchedule().timezone).toBe(
+      Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    )
+  })
+
+  it('replaces a saved timezone with the current computer timezone before submission', () => {
+    expect(
+      withSystemTimeZone({
+        kind: 'daily',
+        timeMinutes: 540,
+        anchorAt: common.anchorAt,
+        timezone: 'Etc/GMT+12'
+      }).timezone
+    ).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
   })
 
   it('rejects invalid schedule fields at their specific form paths', () => {

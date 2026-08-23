@@ -1,13 +1,12 @@
-import { MoreHorizontal, PauseCircle, Play, Trash2, X } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Maximize } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 import type { AutomationRun, AutomationTask } from '@mycopilot/protocol'
 import type { ModelConfig } from '../../../config/modelConfig'
 import type { AppProject } from '../../../config/projectConfig'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { ChatConversation } from '../../chat/chatTypes'
-import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import type { AutomationDraft } from '../automationTypes'
-import { healthMessage, isTaskRunActive } from '../automationPresentation'
+import { healthMessage } from '../automationPresentation'
 import { AutomationTaskForm } from './AutomationTaskForm'
 import { AutomationRunHistory } from './AutomationRunHistory'
 
@@ -24,22 +23,22 @@ interface AutomationDrawerProps {
   historyHasMore?: boolean
   historyLoading?: boolean
   historyLoadingMore?: boolean
+  maximizeDisabled?: boolean
   mode: 'create' | 'task'
   models: readonly ModelConfig[]
   mutationPending?: boolean
+  maximized: boolean
   onAcknowledgeAttention: (attentionId: string) => void
   onClose: () => void
-  onDelete: (task: AutomationTask) => void
   onDirtyChange: (dirty: boolean) => void
   onHistoryLoadMore: () => void
   onHistoryRetry: () => void
   onOpenConversation: (conversationId: string, messageId?: string | null) => void
   onOpenPermissionSettings?: () => void
   onRetryDetail: () => void
-  onRunNow: (task: AutomationTask) => void
-  onSetEnabled: (task: AutomationTask, enabled: boolean) => void
   onSubmittingChange: (submitting: boolean) => void
   onSubmit: (draft: AutomationDraft) => Promise<void>
+  onToggleMaximized: () => void
   permissionModeAvailability: { custom: boolean; full: boolean }
   projects: readonly AppProject[]
   runs: readonly AutomationRun[]
@@ -56,36 +55,34 @@ export function AutomationDrawer({
   historyHasMore = false,
   historyLoading = false,
   historyLoadingMore = false,
+  maximizeDisabled = false,
   mode,
   models,
   mutationPending = false,
+  maximized,
   onAcknowledgeAttention,
   onClose,
-  onDelete,
   onDirtyChange,
   onHistoryLoadMore,
   onHistoryRetry,
   onOpenConversation,
   onOpenPermissionSettings,
   onRetryDetail,
-  onRunNow,
-  onSetEnabled,
   onSubmittingChange,
   onSubmit,
+  onToggleMaximized,
   permissionModeAvailability,
   projects,
   runs,
   task
 }: AutomationDrawerProps) {
   const { t } = useFrontendConfig()
-  const [menuOpen, setMenuOpen] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
-  const closeMenu = useCallback(() => setMenuOpen(false), [])
-  useDismissOnOutsidePointer(menuRef, menuOpen, closeMenu)
-  const activeRun = task ? isTaskRunActive(task) : false
   const existingChatDestination =
     task?.destination.kind === 'existing_chat' ? task.destination : null
+  const hasOpenableRun = runs.some((run) => Boolean(run.conversationId))
+  const maximizeLabel = maximized ? t('automation.restoreDrawer') : t('automation.maximizeDrawer')
+  const collapseLabel = t('automation.collapseDrawer')
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => headingRef.current?.focus())
@@ -95,10 +92,6 @@ export function AutomationDrawer({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
-      if (menuOpen) {
-        closeMenu()
-        return
-      }
       if (
         document.querySelector(
           '[role="dialog"][aria-modal="true"], .automation-select[data-open], .automation-multiselect[data-open], .automation-chat-picker[data-open]'
@@ -111,7 +104,7 @@ export function AutomationDrawer({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeMenu, menuOpen, mutationPending, onClose])
+  }, [mutationPending, onClose])
 
   return (
     <aside
@@ -123,90 +116,36 @@ export function AutomationDrawer({
     >
       <header className="automation-drawer__header" data-drag-region>
         <div className="automation-drawer__heading">
-          {mode === 'task' && task && (
-            <span
-              className="automation-drawer__status"
-              data-status={task.health.state === 'blocked' ? 'blocked' : task.status}
-            >
-              {task.health.state === 'blocked'
-                ? t('automation.statusBlocked')
-                : task.status === 'active'
-                  ? t('automation.statusActive')
-                  : t('automation.statusPaused')}
-            </span>
-          )}
           <h2 ref={headingRef} tabIndex={-1}>
             {mode === 'create' ? t('automation.newTask') : (task?.title ?? t('automation.details'))}
           </h2>
         </div>
         <div className="automation-drawer__header-actions" data-no-drag-region>
-          {mode === 'task' && task && (
-            <>
-              <div className="automation-drawer__menu-root" ref={menuRef}>
-                <button
-                  type="button"
-                  className="automation-icon-button"
-                  aria-label={t('automation.moreActions')}
-                  aria-expanded={menuOpen}
-                  aria-haspopup="menu"
-                  disabled={mutationPending}
-                  onClick={() => setMenuOpen((open) => !open)}
-                >
-                  <MoreHorizontal aria-hidden="true" />
-                </button>
-                {menuOpen && (
-                  <div className="automation-task-menu automation-task-menu--drawer" role="menu">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        closeMenu()
-                        onSetEnabled(task, task.status === 'paused')
-                      }}
-                    >
-                      {task.status === 'paused' ? (
-                        <Play aria-hidden="true" />
-                      ) : (
-                        <PauseCircle aria-hidden="true" />
-                      )}
-                      <span>
-                        {task.status === 'paused' ? t('automation.resume') : t('automation.pause')}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="automation-task-menu__danger"
-                      onClick={() => {
-                        closeMenu()
-                        onDelete(task)
-                      }}
-                    >
-                      <Trash2 aria-hidden="true" />
-                      <span>{t('automation.delete')}</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                className="automation-icon-button"
-                aria-label={activeRun ? t('automation.runningAction') : t('automation.runNow')}
-                disabled={activeRun || mutationPending || task.health.state === 'blocked'}
-                onClick={() => onRunNow(task)}
-              >
-                <Play aria-hidden="true" />
-              </button>
-            </>
-          )}
           <button
             type="button"
             className="automation-icon-button"
-            aria-label={t('automation.close')}
+            aria-label={collapseLabel}
             disabled={mutationPending}
             onClick={onClose}
+            title={collapseLabel}
           >
-            <X aria-hidden="true" />
+            <span
+              aria-hidden="true"
+              className="panel-toggle__icon"
+              data-open="true"
+              data-side="right"
+            />
+          </button>
+          <button
+            type="button"
+            className="automation-icon-button"
+            aria-label={maximizeLabel}
+            aria-pressed={maximized}
+            disabled={maximizeDisabled}
+            onClick={onToggleMaximized}
+            title={maximizeLabel}
+          >
+            {maximized ? <RestoreFromMaximizedIcon /> : <Maximize aria-hidden="true" />}
           </button>
         </div>
       </header>
@@ -270,7 +209,7 @@ export function AutomationDrawer({
                 onRetry={onHistoryRetry}
                 runs={runs}
               />
-              {existingChatDestination && (
+              {existingChatDestination && !historyLoading && !hasOpenableRun && (
                 <div className="automation-drawer__open-chat">
                   <button
                     type="button"
@@ -286,5 +225,23 @@ export function AutomationDrawer({
         </div>
       )}
     </aside>
+  )
+}
+
+function RestoreFromMaximizedIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M10 4v6H4" />
+      <path d="M14 4v6h6" />
+      <path d="M10 20v-6H4" />
+      <path d="M14 20v-6h6" />
+    </svg>
   )
 }

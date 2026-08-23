@@ -85,6 +85,12 @@ trace terminal record
 
 后端 `ContinuityIndexV2` 用于定位与审计，默认不作为主模型消息发送。附件、Skill Resource 和 Artifact 必须先通过各自的引用与授权解析，模型字符串本身不是文件系统权限。
 
+Automation HumanRoot Turn 还会追加 `automation_execution` 来源的 retained、Run-scoped system item，包含
+Host 从持久 Run 绑定构造的任务/Run identity、计划时间、上次运行时间和 trigger kind。它不修改用户
+Prompt，也不参与可复用 Conversation configuration revision；Approval/Checkpoint 恢复保留同一上下文。
+普通 Turn 不含该 item。完整调度边界见
+[Scheduled Automation](../subsystems/scheduled-automations.md)。
+
 组装器应保持确定性：相同持久日志、active head、权限/工具集版本和请求输入应产生相同的逻辑帧。增量缓存只是优化；删除、重写、回退、分叉或摘要变化后，全量重建必须得到相同结果。
 
 ## 容量判断
@@ -176,6 +182,7 @@ Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文�
 5. 模型无权选择 coveredThrough、sourceRevision、Continuity ref 或 active head。
 6. `run_transient` 在主模型成功观察前不可压缩。
 7. Provider 私有 continuation 不得伪装成公开上下文文本。
+8. Automation execution context 只能由 Host 从持久 Run 构造，Renderer 或 Prompt 不能声明该身份。
 
 ## 代码真源
 
@@ -186,6 +193,7 @@ Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文�
 - 摘要存储：`crates/core/src/storage/context_compaction_repository.rs`
 - Observation：`crates/core/src/model_request_observation.rs`、`storage/model_request_observation_repository.rs`
 - 逻辑 Trace：`crates/core/src/conversation_trace.rs`
+- Automation system context：`crates/core/src/protocol.rs`、`crates/core/src/runtime/preparation.rs`
 
 ## 测试
 

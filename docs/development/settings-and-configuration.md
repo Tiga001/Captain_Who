@@ -11,16 +11,17 @@ last_verified: 2026-08-23
 
 设置界面只是编辑器，不是权威存储。不同设置有不同所有者：
 
-| 配置                           | 权威位置                  | 说明                                |
-| ------------------------------ | ------------------------- | ----------------------------------- |
-| 语言、颜色模式、主题           | Renderer `localStorage`   | 启动前即可读取，不包含敏感值        |
-| UI、Prompt、用量显示偏好       | SQLite                    | 通过 Host API 由 Rust Core 读写     |
-| 项目与项目元数据               | SQLite                    | 目录选择由 Main 原生对话框授权      |
-| Provider、Model、Tavily        | SQLite                    | 保存前由 Rust Core 严格校验         |
-| 图片生成 Profile               | SQLite + Credential Store | 配置与凭据分离                      |
-| MCP Server                     | Core Server Registry      | launch authorization 与启用状态独立 |
-| Skill 启用/安装状态            | SQLite + 受管 Skill 目录  | package revision 与来源受约束       |
-| 子 Agent 模板（UI：Subagents） | SQLite                    | 可有全局或项目作用域                |
+| 配置                           | 权威位置                  | 说明                                                       |
+| ------------------------------ | ------------------------- | ---------------------------------------------------------- |
+| 语言、颜色模式、主题           | Renderer `localStorage`   | 启动前即可读取，不包含敏感值                               |
+| UI、Prompt、用量显示偏好       | SQLite                    | 通过 Host API 由 Rust Core 读写                            |
+| 项目与项目元数据               | SQLite                    | 目录选择由 Main 原生对话框授权                             |
+| Provider、Model、Tavily        | SQLite                    | 保存前由 Rust Core 严格校验                                |
+| 图片生成 Profile               | SQLite + Credential Store | 配置与凭据分离                                             |
+| MCP Server                     | Core Server Registry      | launch authorization 与启用状态独立                        |
+| Skill 启用/安装状态            | SQLite + 受管 Skill 目录  | package revision 与来源受约束                              |
+| 子 Agent 模板（UI：Subagents） | SQLite                    | 可有全局或项目作用域                                       |
+| Automation 任务配置            | SQLite                    | 在 Scheduled 编辑；包含 revision、目标、调度与冻结权限投影 |
 
 对应入口见 [`SettingsPage.tsx`](../../src/renderer/src/features/settings/SettingsPage.tsx)、
 [`FrontendConfigProvider.tsx`](../../src/renderer/src/config/FrontendConfigProvider.tsx)、
@@ -43,6 +44,20 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 - MCP 的“保存配置”“授权启动”“启用连接”“调用审批”是独立操作；离开未保存表单前必须确认。
 - Skill 安装使用 prepare/commit 两阶段并绑定冻结候选，不把 UI 草稿当安装授权。
 - 图片生成凭据遵循 keep/replace/clear 意图，不能用空字符串隐式覆盖未知密钥。
+
+### Automation 与当前设置
+
+Automation 不是 Settings 页面中的第二份模型/权限配置。保存任务时，Core Server 根据 permission mode v1
+把 `default`、`full` 或 `custom` 解析为完整权限 snapshot；新 Conversation 的 reasoning 只投影自所选
+模型配置。后续 Run 使用已冻结权限，而当前 `full`/`custom` enablement 仅作为撤销上限，不能自动扩宽
+旧 snapshot。修改自定义权限、模型配置、项目路径或当前电脑 timezone 后，必须理解以下边界：
+
+- 只有有效的 Automation update 才会重建任务配置 snapshot 或解除 `blocked`；
+- 关闭 `full`/`custom` 会阻止对应任务后续 admission，重新开启不会自动解除 block；
+- 同一 model id 的 Provider 配置变化会影响执行，Automation v1 不持有独立 reasoning override；
+- Scheduled UI 保存时用当前电脑 IANA timezone 重建 schedule，当前没有独立时区选择器。
+
+完整契约见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
 ## 敏感值
 
@@ -69,5 +84,6 @@ Subagents、MCP、Environment 和 Archived Conversations。增加页面时需同
 - 默认值是在 Renderer、Main、Core Server 还是 Rust Core 定义，是否只有一个权威来源；
 - revision/CAS、重复提交和重启后的行为是否有测试；
 - reset/backup 是否应保留该配置；删除项目是否应删除该配置；
+- Automation 是否需要重建冻结 snapshot、阻断后续 Run 或使现有任务进入 blocked；
 - 敏感字段是否避开日志、Trace、IPC event 和 model projection；
 - 是否更新相关子系统文档与恢复 Runbook。

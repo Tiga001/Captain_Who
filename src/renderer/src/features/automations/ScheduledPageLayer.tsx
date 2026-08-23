@@ -14,10 +14,11 @@ export interface ScheduledPageLayerProps {
   defaultPermissionMode: ChatPermissionMode
   defaultProjectId: string | null
   externalNavigationRequest?: ScheduledExternalNavigationRequest
+  initialPreferredDrawerWidth?: number
   models: readonly ModelConfig[]
-  onClose: () => void
   onOpenConversation: (conversationId: string, messageId?: string | null) => void
   onOpenPermissionSettings?: () => void
+  onPreferredDrawerWidthChange?: (width: number) => void
   openRequest?: ScheduledOpenRequest
   permissionModeAvailability: { custom: boolean; full: boolean }
   projects: readonly AppProject[]

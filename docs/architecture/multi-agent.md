@@ -24,6 +24,11 @@ last_verified: 2026-08-23
 9. Turn 的 completed/failed/interrupted 不会删除 Agent；后续 `followup_task` 可再次唤醒。长期生命周期另由 active/disabled/archived 表示。
 10. 对未知外部副作用绝不自动重放；恢复无法证明安全时必须得到 `outcome_unknown`。
 
+Scheduled Automation 与 Multi-Agent 共用 Agent Runtime 和进程级 Turn gate，但不是 Agent 树调度器。
+`existing_chat` destination 只接受活跃根 Agent Conversation，不能直接绑定或唤醒子 Agent；需要协作时，
+Automation 启动的根 Agent Turn 必须通过现有六个协作 Tool 创建或跟进子 Agent。详见
+[Scheduled Automation](../subsystems/scheduled-automations.md)。
+
 ## 2. 运行时组成
 
 ```text
@@ -143,7 +148,9 @@ Host 给每个 Turn 冻结脱敏模板/模型目录：每类最多 32 项，总�
 | durable fallback scan |   1 秒 | `DEFAULT_DISPATCH_IDLE_POLL_INTERVAL`     |
 | 单阶段关停 grace      |   5 秒 | `DEFAULT_DISPATCH_SHUTDOWN_GRACE`         |
 
-Dispatcher 先取得共享 gate reservation，再 claim SQLite Wake；无工作时不会伪装为活跃 Turn。根 Agent Human Turn、子 Agent Wake 和重启恢复都计入同一 gate。
+Dispatcher 先取得共享 gate reservation，再 claim SQLite Wake；无工作时不会伪装为活跃 Turn。交互式根
+Agent Human Turn、Automation HumanRoot Turn、子 Agent Wake 和重启恢复都计入同一 gate；Automation
+自身另有 2 个 Run 的并发上限。
 
 关停算法最多可使用两个 5 秒阶段：先等待 manager 自行完成；第一次超时后请求取消非 Approval Run，并在第二个 deadline 前反复扫描 Approval 恢复竞态。因此不能把表中的 5 秒理解为完整 shutdown 的绝对上限。Main 当前 6 秒 Core Server watchdog 更短，超时后的未收口事实必须依赖 SQLite 启动恢复。
 
@@ -217,6 +224,7 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 ## 11. 当前限制
 
 - 不支持通用 DAG、条件边、图形工作流、自动规划器或把 MCP/Tool/Skill 做成节点。
+- 不支持把 Automation destination 直接设为子 Agent Conversation。
 - 用户不能直接编辑或启动子 Agent Conversation；observer 是只读投影。
 - Agent-bound tree 的完整归档/物理删除需要专用生命周期事务，不能借旧单 Conversation 删除入口实现。
 - 并发 4、树深 8、节点 64 是产品默认硬边界，不是生产容量承诺。

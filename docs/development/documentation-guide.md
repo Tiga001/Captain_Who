@@ -62,8 +62,9 @@ last_verified: YYYY-MM-DD
 
 跨文档名称以[术语表](glossary.md)为准。普通叙述统一使用 `Agent`、根 Agent/子 Agent、`Turn`、`Run`、
 `Tool`、`Skill`、`Provider`、`Artifact`、`Renderer`、`Preload`、`Main`、`Core Server`、`Rust Core`、
-`MCP Server` 和 `Managed Playwright`。代码标识、协议字段与 UI 产品名称保持原始拼写；`Subagents` 仅指
-UI 名称，不替代架构中的“子 Agent”。
+`MCP Server`、`Managed Playwright`、`Automation` 和 `Automation Run`。代码标识、协议字段与 UI
+产品名称保持原始拼写；`Subagents` 仅指设置 UI 名称，不替代架构中的“子 Agent”，`Scheduled` 仅指
+Automation 的产品入口名。
 
 首次出现的少数术语可以补充中文解释，例如“Artifact（制品）”，之后不要交替使用多个名称。SQLite
 schema version、DTO `schemaVersion`、领域 `revision` 是不同概念，必须明确限定。

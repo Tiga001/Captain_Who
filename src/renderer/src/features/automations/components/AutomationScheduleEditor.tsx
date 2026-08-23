@@ -11,6 +11,7 @@ import {
   AutomationSelect,
   type AutomationOption
 } from './AutomationControls'
+import { getSystemTimeZone } from '../automationSchedule'
 
 type RepeatKind = AutomationScheduleInput['kind']
 
@@ -49,7 +50,7 @@ function createScheduleForKind(
   kind: RepeatKind,
   current: AutomationScheduleInput
 ): AutomationScheduleInput {
-  const timezone = current.timezone
+  const timezone = getSystemTimeZone()
   const anchorAt = current.anchorAt
   const timeMinutes =
     'timeMinutes' in current && current.timeMinutes !== undefined
@@ -73,13 +74,6 @@ function createScheduleForKind(
     anchorAt,
     timezone
   }
-}
-
-function updateCommon(
-  schedule: AutomationScheduleInput,
-  common: Pick<AutomationScheduleInput, 'anchorAt' | 'timezone'>
-): AutomationScheduleInput {
-  return { ...schedule, ...common } as AutomationScheduleInput
 }
 
 export function AutomationScheduleEditor({
@@ -184,23 +178,6 @@ export function AutomationScheduleEditor({
             schedule={schedule}
           />
         )}
-
-        <AutomationField label={t('automation.timezone')} error={errors.timezone}>
-          <input
-            aria-label={t('automation.timezone')}
-            disabled={disabled}
-            type="text"
-            value={schedule.timezone}
-            onChange={(event) =>
-              onChange(
-                updateCommon(schedule, {
-                  anchorAt: schedule.anchorAt,
-                  timezone: event.currentTarget.value
-                })
-              )
-            }
-          />
-        </AutomationField>
       </div>
     </section>
   )

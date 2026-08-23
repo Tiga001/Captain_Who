@@ -1,5 +1,5 @@
 import { Clock3, Plus, RefreshCw, Search, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { AutomationTask } from '@mycopilot/protocol'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { useToast } from '../../components/toast/ToastContext'
@@ -8,13 +8,15 @@ import { formatTranslation, type Translate } from '../../config/translationForma
 import type { ModelConfig } from '../../config/modelConfig'
 import type { AppProject } from '../../config/projectConfig'
 import type { ChatConversation, ChatPermissionMode } from '../chat/chatTypes'
-import { createDefaultAutomationSchedule } from './automationSchedule'
+import { createDefaultAutomationSchedule, withSystemTimeZone } from './automationSchedule'
 import type { AutomationDraft, AutomationFilter, AutomationMutationInput } from './automationTypes'
 import { useAutomations } from './useAutomations'
 import { useAutomationAttention } from './useAutomationAttention'
 import { useAutomationDetail } from './useAutomationDetail'
 import { useAutomationRuns } from './useAutomationRuns'
+import { useAutomationLayout } from './useAutomationLayout'
 import { AutomationDrawer } from './components/AutomationDrawer'
+import { AutomationDrawerResizeHandle } from './components/AutomationDrawerResizeHandle'
 import { AutomationTaskRow } from './components/AutomationTaskRow'
 
 export interface ScheduledOpenRequest {
@@ -34,10 +36,11 @@ export interface ScheduledPageProps {
   defaultPermissionMode: ChatPermissionMode
   defaultProjectId: string | null
   externalNavigationRequest?: ScheduledExternalNavigationRequest
+  initialPreferredDrawerWidth?: number
   models: readonly ModelConfig[]
-  onClose: () => void
   onOpenConversation: (conversationId: string, messageId?: string | null) => void
   onOpenPermissionSettings?: () => void
+  onPreferredDrawerWidthChange?: (width: number) => void
   openRequest?: ScheduledOpenRequest
   permissionModeAvailability: { custom: boolean; full: boolean }
   projects: readonly AppProject[]
@@ -51,24 +54,6 @@ type DrawerState =
 interface PendingNavigation {
   key: number
   action: () => void
-}
-
-const COMPACT_DRAWER_QUERY = '(max-width: 820px)'
-
-function useCompactDrawer(): boolean {
-  const [compact, setCompact] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia(COMPACT_DRAWER_QUERY).matches
-  )
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia(COMPACT_DRAWER_QUERY)
-    const update = () => setCompact(mediaQuery.matches)
-    update()
-    mediaQuery.addEventListener('change', update)
-    return () => mediaQuery.removeEventListener('change', update)
-  }, [])
-
-  return compact
 }
 
 function createDraft({
@@ -117,6 +102,8 @@ function taskToDraft(task: AutomationTask): AutomationDraft {
         : { kind: 'existing_chat', conversationId: task.destination.conversationId },
     permissionMode: task.permissionMode,
     permissionModeVersion: task.permissionModeVersion,
+    // Keep the authoritative saved zone while merely viewing a task. An actual
+    // edit submission is normalized to the computer zone at the request boundary.
     schedule: task.schedule,
     notificationPolicy: task.notificationPolicy
   }
@@ -129,7 +116,7 @@ function draftToMutation(draft: AutomationDraft): AutomationMutationInput {
     destination: draft.destination,
     permissionMode: draft.permissionMode,
     permissionModeVersion: draft.permissionModeVersion,
-    schedule: draft.schedule,
+    schedule: withSystemTimeZone(draft.schedule),
     notificationPolicy: draft.notificationPolicy
   }
 }
@@ -152,10 +139,11 @@ export function ScheduledPage({
   defaultPermissionMode,
   defaultProjectId,
   externalNavigationRequest,
+  initialPreferredDrawerWidth,
   models,
-  onClose,
   onOpenConversation,
   onOpenPermissionSettings,
+  onPreferredDrawerWidthChange,
   openRequest,
   permissionModeAvailability,
   projects
@@ -165,11 +153,12 @@ export function ScheduledPage({
   const [filter, setFilter] = useState<AutomationFilter>('all')
   const [query, setQuery] = useState('')
   const [drawer, setDrawer] = useState<DrawerState>({ mode: 'closed' })
+  const [drawerMaximized, setDrawerMaximized] = useState(false)
   const [drawerDirty, setDrawerDirty] = useState(false)
   const [formSubmitting, setFormSubmitting] = useState(false)
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<AutomationTask | null>(null)
-  const compactDrawer = useCompactDrawer()
+  const pageRef = useRef<HTMLElement>(null)
   const createButtonRef = useRef<HTMLButtonElement>(null)
   const drawerOpenerRef = useRef<HTMLElement | null>(null)
   const previousDrawerModeRef = useRef<DrawerState['mode']>('closed')
@@ -187,17 +176,25 @@ export function ScheduledPage({
   const mutationPending = selectedTaskId ? Boolean(automations.pendingById[selectedTaskId]) : false
   const drawerMutationPending = drawer.mode === 'create' ? automations.isCreating : mutationPending
   const navigationBusy = drawerMutationPending || formSubmitting
-  const drawerCoversList = compactDrawer && drawer.mode !== 'closed'
+  const layout = useAutomationLayout({
+    containerRef: pageRef,
+    drawerOpen: drawer.mode !== 'closed',
+    initialPreferredDrawerWidth,
+    onPreferredDrawerWidthChange
+  })
+  const drawerEffectivelyMaximized = layout.drawerCoversList || drawerMaximized
+  const drawerCoversList = drawer.mode !== 'closed' && drawerEffectivelyMaximized
 
   useEffect(() => {
     const previousMode = previousDrawerModeRef.current
     previousDrawerModeRef.current = drawer.mode
     if (previousMode === 'closed' || drawer.mode !== 'closed') return
 
-    const opener = drawerOpenerRef.current ?? createButtonRef.current
+    const opener = drawerOpenerRef.current
     drawerOpenerRef.current = null
     const frame = window.requestAnimationFrame(() => {
-      if (opener?.isConnected) opener.focus()
+      const focusTarget = opener?.isConnected ? opener : createButtonRef.current
+      focusTarget?.focus()
     })
     return () => window.cancelAnimationFrame(frame)
   }, [drawer.mode])
@@ -231,6 +228,7 @@ export function ScheduledPage({
         taskId: openRequest.automationId,
         focusRunId: openRequest.runId
       })
+      setDrawerMaximized(false)
       setDrawerDirty(false)
     })
     if (accepted) handledOpenRequestRef.current = openRequest.requestKey
@@ -252,6 +250,7 @@ export function ScheduledPage({
     const stillListed = automations.tasks.some((task) => task.automationId === drawer.taskId)
     if (!stillListed) {
       setDrawer({ mode: 'closed' })
+      setDrawerMaximized(false)
       setDrawerDirty(false)
       showToast(t('automation.updatedElsewhere'))
     }
@@ -270,6 +269,7 @@ export function ScheduledPage({
           models
         })
       })
+      setDrawerMaximized(false)
       setDrawerDirty(false)
     })
   }
@@ -279,6 +279,7 @@ export function ScheduledPage({
     requestNavigation(() => {
       drawerOpenerRef.current = opener
       setDrawer({ mode: 'task', taskId: task.automationId, focusRunId: null })
+      setDrawerMaximized(false)
       setDrawerDirty(false)
     })
   }
@@ -286,10 +287,13 @@ export function ScheduledPage({
   const closeDrawer = () =>
     requestNavigation(() => {
       setDrawer({ mode: 'closed' })
+      setDrawerMaximized(false)
       setDrawerDirty(false)
     })
 
-  const closePage = () => requestNavigation(onClose)
+  const toggleDrawerMaximized = () => {
+    setDrawerMaximized((maximized) => (layout.compact ? false : !maximized))
+  }
 
   const openConversation = (conversationId: string, messageId?: string | null) =>
     requestNavigation(() => onOpenConversation(conversationId, messageId))
@@ -326,6 +330,7 @@ export function ScheduledPage({
       await automations.remove(target)
       if (drawer.mode === 'task' && drawer.taskId === target.automationId) {
         setDrawer({ mode: 'closed' })
+        setDrawerMaximized(false)
         setDrawerDirty(false)
       }
       setDeleteTarget(null)
@@ -337,7 +342,10 @@ export function ScheduledPage({
 
   const submitDrawer = async (draft: AutomationDraft) => {
     if (drawer.mode === 'create') {
-      const created = await automations.create(draft)
+      const created = await automations.create({
+        ...draft,
+        schedule: withSystemTimeZone(draft.schedule)
+      })
       setDrawer({ mode: 'task', taskId: created.automationId, focusRunId: null })
       setDrawerDirty(false)
       return
@@ -384,7 +392,19 @@ export function ScheduledPage({
   }, [defaultModelId, defaultPermissionMode, defaultProjectId, drawer, models, selectedTask])
 
   return (
-    <section className="scheduled-page" aria-labelledby="scheduled-page-heading">
+    <section
+      ref={pageRef}
+      className="scheduled-page"
+      aria-labelledby="scheduled-page-heading"
+      data-drawer-open={drawer.mode !== 'closed' || undefined}
+      data-drawer-maximized={drawerCoversList || undefined}
+      data-layout={layout.compact ? 'compact' : 'split'}
+      style={
+        {
+          '--automation-drawer-width': `${layout.drawerWidth}px`
+        } as CSSProperties
+      }
+    >
       <div
         className="scheduled-page__list-pane"
         aria-hidden={drawerCoversList || undefined}
@@ -396,23 +416,17 @@ export function ScheduledPage({
             <p>{t('automation.pageDescription')}</p>
           </div>
           <div className="scheduled-page__header-actions" data-no-drag-region>
-            <button
-              ref={createButtonRef}
-              type="button"
-              className="automation-button automation-button--primary"
-              onClick={openCreate}
-            >
-              <Plus aria-hidden="true" />
-              <span>{t('automation.create')}</span>
-            </button>
-            <button
-              type="button"
-              className="automation-icon-button scheduled-page__close"
-              aria-label={t('automation.closePage')}
-              onClick={closePage}
-            >
-              <X aria-hidden="true" />
-            </button>
+            {drawer.mode === 'closed' && (
+              <button
+                ref={createButtonRef}
+                type="button"
+                className="automation-button automation-button--primary"
+                onClick={openCreate}
+              >
+                <Plus aria-hidden="true" />
+                <span>{t('automation.create')}</span>
+              </button>
+            )}
           </div>
         </header>
 
@@ -506,9 +520,9 @@ export function ScheduledPage({
             />
           ) : automations.tasks.length === 0 ? (
             <AutomationPageState
-              action={t('automation.createTask')}
+              action={drawer.mode === 'closed' ? t('automation.createTask') : undefined}
               icon={<Clock3 aria-hidden="true" />}
-              onAction={openCreate}
+              onAction={drawer.mode === 'closed' ? openCreate : undefined}
               title={t('automation.emptyTitle')}
               description={t('automation.emptyDescription')}
             />
@@ -545,37 +559,47 @@ export function ScheduledPage({
       </div>
 
       {drawer.mode !== 'closed' && (
-        <AutomationDrawer
-          conversations={conversations}
-          detailError={detail.error ? new Error(detail.error.message) : null}
-          detailLoading={detail.status === 'loading'}
-          draft={drawerDraft}
-          focusRunId={drawer.mode === 'task' ? drawer.focusRunId : null}
-          historyError={history.error ? new Error(history.error.message) : null}
-          historyHasMore={Boolean(history.nextCursor)}
-          historyLoading={history.status === 'loading'}
-          historyLoadingMore={history.isLoadingMore}
-          mode={drawer.mode}
-          models={models}
-          mutationPending={navigationBusy}
-          onAcknowledgeAttention={(attentionId) => void acknowledge(attentionId)}
-          onClose={closeDrawer}
-          onDelete={setDeleteTarget}
-          onDirtyChange={setDrawerDirty}
-          onHistoryLoadMore={() => void history.loadMore()}
-          onHistoryRetry={() => void history.refresh()}
-          onOpenConversation={openConversation}
-          onOpenPermissionSettings={onOpenPermissionSettings}
-          onRetryDetail={() => void detail.refresh()}
-          onRunNow={(task) => void runNow(task)}
-          onSetEnabled={(task, enabled) => void setEnabled(task, enabled)}
-          onSubmittingChange={setFormSubmitting}
-          onSubmit={submitDrawer}
-          permissionModeAvailability={permissionModeAvailability}
-          projects={projects}
-          runs={history.runs}
-          task={selectedTask}
-        />
+        <>
+          {!drawerEffectivelyMaximized && layout.drawerResizeMetrics && (
+            <AutomationDrawerResizeHandle
+              ariaLabel={t('automation.resizeDrawer')}
+              metrics={layout.drawerResizeMetrics}
+              onResizeCommit={layout.commitDrawerWidth}
+              resizeTargetRef={pageRef}
+            />
+          )}
+          <AutomationDrawer
+            conversations={conversations}
+            detailError={detail.error ? new Error(detail.error.message) : null}
+            detailLoading={detail.status === 'loading'}
+            draft={drawerDraft}
+            focusRunId={drawer.mode === 'task' ? drawer.focusRunId : null}
+            historyError={history.error ? new Error(history.error.message) : null}
+            historyHasMore={Boolean(history.nextCursor)}
+            historyLoading={history.status === 'loading'}
+            historyLoadingMore={history.isLoadingMore}
+            maximizeDisabled={layout.compact}
+            maximized={drawerEffectivelyMaximized}
+            mode={drawer.mode}
+            models={models}
+            mutationPending={navigationBusy}
+            onAcknowledgeAttention={(attentionId) => void acknowledge(attentionId)}
+            onClose={closeDrawer}
+            onDirtyChange={setDrawerDirty}
+            onHistoryLoadMore={() => void history.loadMore()}
+            onHistoryRetry={() => void history.refresh()}
+            onOpenConversation={openConversation}
+            onOpenPermissionSettings={onOpenPermissionSettings}
+            onRetryDetail={() => void detail.refresh()}
+            onSubmittingChange={setFormSubmitting}
+            onSubmit={submitDrawer}
+            onToggleMaximized={toggleDrawerMaximized}
+            permissionModeAvailability={permissionModeAvailability}
+            projects={projects}
+            runs={history.runs}
+            task={selectedTask}
+          />
+        </>
       )}
 
       {deleteTarget && (
@@ -615,10 +639,10 @@ function AutomationPageState({
   onAction,
   title
 }: {
-  action: string
+  action?: string
   description?: string
   icon: React.ReactNode
-  onAction: () => void
+  onAction?: () => void
   title: string
 }) {
   return (
@@ -626,13 +650,15 @@ function AutomationPageState({
       <span className="automation-page-state__icon">{icon}</span>
       <h2>{title}</h2>
       {description && <p>{description}</p>}
-      <button
-        type="button"
-        className="automation-button automation-button--secondary"
-        onClick={onAction}
-      >
-        {action}
-      </button>
+      {action && onAction && (
+        <button
+          type="button"
+          className="automation-button automation-button--secondary"
+          onClick={onAction}
+        >
+          {action}
+        </button>
+      )}
     </div>
   )
 }

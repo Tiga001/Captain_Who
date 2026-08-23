@@ -41,6 +41,7 @@ fixture 和测试为准。
 | 文档                                                              | 内容                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------- |
 | [工具、权限与审批](subsystems/tools-permissions-and-approvals.md) | 工具注册、权限、审批、取消和恢复                         |
+| [Scheduled Automation](subsystems/scheduled-automations.md)       | 定时任务、调度、Run、恢复、attention 与原生通知          |
 | [Tool Result 消费矩阵](subsystems/tool-result-consumer-matrix.md) | Model、Event、Trace、Archive 等投影消费者                |
 | [Tool Result 上限](subsystems/tool-result-limits.md)              | 截断、分页、归档和恢复契约                               |
 | [MCP](subsystems/mcp.md)                                          | 用户配置的 stdio MCP Server 与内部 HostBridge Capability |
