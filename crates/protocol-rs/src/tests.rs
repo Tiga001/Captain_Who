@@ -62,6 +62,22 @@ fn automation_contract_matches_typescript_and_rejects_unknown_union_fields() {
         AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD
     );
     assert_eq!(
+        fixture["methods"]["claimNotifications"],
+        AUTOMATION_NOTIFICATIONS_CLAIM_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["validateNotification"],
+        AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["acknowledgeNotification"],
+        AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["releaseNotification"],
+        AUTOMATION_NOTIFICATIONS_RELEASE_METHOD
+    );
+    assert_eq!(
         fixture["notifications"]["event"],
         AUTOMATION_EVENT_NOTIFICATION_METHOD
     );
@@ -82,6 +98,19 @@ fn automation_contract_matches_typescript_and_rejects_unknown_union_fields() {
     let event: AutomationEventDto = serde_json::from_value(fixture["event"].clone()).unwrap();
     assert_eq!(event.sequence, 7);
     let _: AutomationResyncDto = serde_json::from_value(fixture["resync"].clone()).unwrap();
+    let notification_claim: AutomationNotificationsClaimOutputDto =
+        serde_json::from_value(fixture["notificationClaimOutput"].clone()).unwrap();
+    assert_eq!(notification_claim.notifications.len(), 1);
+    let notification_validation: AutomationNotificationValidateOutputDto =
+        serde_json::from_value(fixture["notificationValidateOutput"].clone()).unwrap();
+    assert_eq!(
+        notification_validation.notification_id,
+        notification_validation
+            .notification
+            .as_ref()
+            .unwrap()
+            .notification_id
+    );
 
     let mut unknown_schedule = fixture["createInput"]["schedule"].clone();
     unknown_schedule["cron"] = serde_json::json!("* * * * *");

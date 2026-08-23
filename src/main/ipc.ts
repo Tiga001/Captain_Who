@@ -298,6 +298,11 @@ function expandSystemPathAlias(rawFilePath: string): string | null {
   return rest.length > 0 ? join(root, ...rest) : root
 }
 
+export interface HostIpcRegistration {
+  (): void
+  beginAutomationShutdown(): void
+}
+
 export function registerHostIpc(
   coreServer: CoreServer,
   terminalBridge: TerminalBridge,
@@ -305,7 +310,7 @@ export function registerHostIpc(
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean,
   browserSurfaceManager?: BrowserSurfaceManager,
   browserArtifactBroker?: BrowserArtifactBroker
-): () => void {
+): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
     getProjectPath(coreServer, projectId)
@@ -356,8 +361,10 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )
-  return () => {
+  const dispose = (): void => {
     disposeAutomationIpc()
     disposeMcpIpc()
   }
+  dispose.beginAutomationShutdown = (): void => disposeAutomationIpc.beginShutdown()
+  return dispose
 }

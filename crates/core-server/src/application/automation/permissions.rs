@@ -157,6 +157,39 @@ pub(crate) fn permissions_projection(
     }
 }
 
+/// Restores the exact Agent authority frozen in one automation configuration snapshot.
+/// Current UI preferences are only a revocation ceiling and never broaden or re-resolve this
+/// value at execution time.
+pub(crate) fn permissions_from_projection(
+    projection: AutomationResolvedPermissionsDto,
+) -> AgentPermissions {
+    AgentPermissions {
+        read: match projection.read {
+            AutomationReadPermissionDto::WorkspaceOnly => AgentReadPermission::WorkspaceOnly,
+            AutomationReadPermissionDto::All => AgentReadPermission::All,
+        },
+        write: match projection.write {
+            AutomationWritePermissionDto::Denied => AgentWritePermission::Denied,
+            AutomationWritePermissionDto::WorkspaceOnly => AgentWritePermission::WorkspaceOnly,
+            AutomationWritePermissionDto::All => AgentWritePermission::All,
+        },
+        command: match projection.command {
+            AutomationCommandPermissionDto::RequireApproval => {
+                AgentCommandPermission::RequireApproval
+            }
+            AutomationCommandPermissionDto::AutoApprove => AgentCommandPermission::AutoApprove,
+        },
+        command_safety: match projection.command_safety {
+            AutomationCommandSafetyPolicyDto::Guarded => AgentCommandSafetyPolicy::Guarded,
+            AutomationCommandSafetyPolicyDto::FullAccess => AgentCommandSafetyPolicy::FullAccess,
+        },
+        patch: match projection.patch {
+            AutomationPatchPermissionDto::RequireApproval => AgentPatchPermission::RequireApproval,
+            AutomationPatchPermissionDto::AutoApprove => AgentPatchPermission::AutoApprove,
+        },
+    }
+}
+
 /// Read-only projection used by new-chat automation DTOs. Reasoning remains model-owned in v1;
 /// there is deliberately no independent automation override.
 pub(crate) fn reasoning_projection(model: &ModelConfigRecord) -> AutomationReasoningProjectionDto {

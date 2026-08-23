@@ -15,6 +15,7 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) agent_collaboration_enabled: bool,
+    pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
 }
 
 pub(super) struct DurableConversationTimeline {
@@ -45,6 +46,7 @@ pub(super) fn prepare_runtime_capabilities(
             mcp_tools: None,
             builtin_capabilities: None,
             agent_collaboration_enabled: false,
+            automation_report_sink: None,
         },
     )
 }
@@ -66,6 +68,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         mcp_tools,
         builtin_capabilities,
         agent_collaboration_enabled,
+        automation_report_sink,
     } = services;
     let runtime_extensions = RuntimeExtensions::for_run_with_capabilities(
         run_id,
@@ -91,6 +94,9 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     tool_registry.register_conversation_history();
     if agent_collaboration_enabled {
         tool_registry.register_agent_collaboration_tools();
+    }
+    if let Some(sink) = automation_report_sink {
+        tool_registry.register_automation_report(sink);
     }
     runtime_extensions.register_tools(&mut tool_registry)?;
     if let Some(mcp_tools) = mcp_tools.as_ref() {
@@ -276,6 +282,10 @@ pub(super) fn build_llm_request(
     )?;
     let shared_context_baseline = shared_context_baseline
         .filter(|baseline| baseline.matches_configuration(&configuration_revision));
+    let automation_execution_context = input
+        .prompt_preferences
+        .as_ref()
+        .and_then(|preferences| preferences.automation_execution_context.clone());
     let (
         context,
         next_model_request_index,
@@ -307,7 +317,7 @@ pub(super) fn build_llm_request(
             let skill_activation = input.skill_activation;
             let skill_discovery = input.skill_discovery;
             let world_state_records = input.world_state_records;
-            let context = match shared_context_baseline {
+            let mut context = match shared_context_baseline {
                 Some(baseline) => {
                     let mut context = baseline.into_frame();
                     ContextAssembler::append_initial_run_world_state(
@@ -339,6 +349,10 @@ pub(super) fn build_llm_request(
                     tool_definitions,
                 )?,
             };
+            append_automation_execution_context(
+                &mut context,
+                automation_execution_context.as_ref(),
+            );
             (
                 context,
                 0,
@@ -357,6 +371,22 @@ pub(super) fn build_llm_request(
         conversation_trace,
         provider_continuation_refs,
     })
+}
+
+fn append_automation_execution_context(
+    frame: &mut ContextFrame,
+    execution: Option<&AgentAutomationExecutionContext>,
+) {
+    let Some(execution) = execution else {
+        return;
+    };
+    frame.push(ContextItem::text(
+        LlmMessageRole::System,
+        execution.system_context(),
+        ContextSource::AutomationExecution,
+        ContextScope::Run,
+        ContextRetention::Retained,
+    ));
 }
 
 pub(super) fn append_attachment_context(
@@ -636,6 +666,7 @@ mod approval_identity_tests {
             mcp_tools: None,
             builtin_capabilities: None,
             agent_collaboration_enabled,
+            automation_report_sink: None,
         }
     }
 

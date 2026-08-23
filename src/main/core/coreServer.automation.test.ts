@@ -2,14 +2,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const rpcStart = vi.hoisted(() => vi.fn())
 const rpcStop = vi.hoisted(() => vi.fn())
+const rpcBeginShutdown = vi.hoisted(() => vi.fn())
+const rpcIsRunning = vi.hoisted(() => vi.fn())
 const rpcRequest = vi.hoisted(() => vi.fn())
+const rpcRequestDuringShutdown = vi.hoisted(() => vi.fn())
 const onNotification = vi.hoisted(() => vi.fn())
 
 vi.mock('./jsonRpcClient', () => ({
   CoreJsonRpcClient: class {
     readonly start = rpcStart
     readonly stop = rpcStop
+    readonly beginShutdown = rpcBeginShutdown
+    readonly isRunning = rpcIsRunning
     readonly request = rpcRequest
+    readonly requestDuringShutdown = rpcRequestDuringShutdown
     readonly onNotification = onNotification
   }
 }))
@@ -20,7 +26,10 @@ describe('CoreServer Automation notifications', () => {
   beforeEach(() => {
     rpcStart.mockReset()
     rpcStop.mockReset()
+    rpcBeginShutdown.mockReset()
+    rpcIsRunning.mockReset().mockReturnValue(false)
     rpcRequest.mockReset()
+    rpcRequestDuringShutdown.mockReset()
     onNotification.mockReset().mockReturnValue(() => undefined)
   })
 
@@ -113,5 +122,72 @@ describe('CoreServer Automation notifications', () => {
         requestId: 'request-1'
       })
     ).rejects.toThrow('Invalid Automation run response identity')
+  })
+
+  it('strictly fences Host-only notification claims, validation, and acknowledgements', async () => {
+    rpcRequest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      claimToken: 'another-claim',
+      notifications: []
+    })
+    const server = new CoreServer()
+    await expect(
+      server.claimAutomationNotifications({
+        schemaVersion: 1,
+        claimToken: 'claim-1',
+        leaseDurationMs: 60_000,
+        limit: 10
+      })
+    ).rejects.toThrow('Invalid Automation notification claim response identity')
+
+    rpcRequest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      notificationId: 'notification-other',
+      notification: null
+    })
+    await expect(
+      server.validateAutomationNotification({
+        schemaVersion: 1,
+        notificationId: 'notification-1',
+        claimToken: 'claim-1'
+      })
+    ).rejects.toThrow('Invalid Automation notification validation response identity')
+
+    rpcRequest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      notificationId: 'notification-other',
+      status: 'delivered',
+      deliveredAt: 100
+    })
+    await expect(
+      server.acknowledgeAutomationNotification({
+        schemaVersion: 1,
+        notificationId: 'notification-1',
+        claimToken: 'claim-1'
+      })
+    ).rejects.toThrow('Invalid Automation notification acknowledge response identity')
+  })
+
+  it('closes lazy Core request admission even when shutdown finds no live child', async () => {
+    const server = new CoreServer()
+
+    await server.shutdown()
+
+    expect(rpcBeginShutdown).toHaveBeenCalledOnce()
+    expect(rpcIsRunning).toHaveBeenCalledOnce()
+    expect(rpcRequest).not.toHaveBeenCalled()
+  })
+
+  it('uses the no-restart request path to gracefully stop an already-running Core', async () => {
+    rpcIsRunning.mockReturnValue(true)
+    rpcRequestDuringShutdown.mockResolvedValue({ stopped: true, timedOut: false })
+    const server = new CoreServer()
+
+    await server.shutdown()
+
+    expect(rpcBeginShutdown).toHaveBeenCalledOnce()
+    expect(rpcRequestDuringShutdown).toHaveBeenCalledOnce()
+    expect(rpcRequest).not.toHaveBeenCalled()
+    expect(rpcStop).toHaveBeenCalledOnce()
   })
 })

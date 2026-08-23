@@ -3,6 +3,7 @@ mod apply_patch;
 mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
 mod attachments;
+mod automation_report;
 mod builtin_capability;
 mod command_session;
 mod context;
@@ -47,6 +48,8 @@ use crate::protocol::{
 use agent_collaboration::{AgentCollaborationTool, AgentCollaborationToolKind};
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
+use automation_report::AutomationReportTool;
+pub use automation_report::{AutomationReportKind, AutomationReportSink};
 pub use builtin_capability::builtin_capability_tool_result_persistence_projection;
 pub(crate) use builtin_capability::{
     tool_capability_id as builtin_tool_capability_id, ActivateCapabilityTool,
@@ -1126,6 +1129,12 @@ impl ToolRegistry {
     ) {
         if !self.contains_tool("skills_commit_install") {
             self.register(SkillsCommitInstallTool::new(preparer));
+        }
+    }
+
+    pub(crate) fn register_automation_report(&mut self, sink: Arc<dyn AutomationReportSink>) {
+        if !self.contains_tool("automation_report") {
+            self.register(AutomationReportTool::new(sink));
         }
     }
 

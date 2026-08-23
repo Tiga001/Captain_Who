@@ -466,6 +466,18 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         outbound_tx.clone(),
         automation_event_startup_cursor,
     ));
+    // The scheduler is constructed only after the final MCP-injected AgentService has completed
+    // startup reconciliation and the authoritative resync cut has been published.
+    let automation_scheduler_wake =
+        crate::application::automation::AutomationSchedulerWake::default();
+    let mut automation_scheduler = crate::application::automation::AutomationScheduler::start(
+        Arc::clone(&bootstrap.storage),
+        agent_service.clone(),
+        outbound_tx.clone(),
+        automation_scheduler_wake.clone(),
+    )
+    .await
+    .map_err(io::Error::other)?;
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let skill_acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -484,6 +496,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         BufReader::new(io::stdin()),
         CoreRequestServices {
             storage: Arc::clone(&bootstrap.storage),
+            automation_scheduler_wake,
             image_generation_configuration: Arc::clone(&bootstrap.image_generation_configuration),
             image_generation_artifacts: Arc::clone(&bootstrap.image_generation_artifacts),
             image_generation_artifact_read_admission: Arc::new(Semaphore::new(
@@ -513,6 +526,10 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     )
     .await;
 
+    // Stop future Automation claims before any shared Agent or MCP shutdown begins. Already
+    // admitted HumanRoot turns continue through the normal AgentService shutdown path below.
+    automation_scheduler.stop_admissions().await;
+
     // `core.shutdown` settles the managed runtime inside the request loop while reverse bridge
     // completions can still arrive from Main. EOF or a request-loop failure means that responder
     // is no longer available, so close the bridge first and then perform the same idempotent,
@@ -529,8 +546,6 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let _ = mcp_changed_notifier.await;
     collaboration_event_notifier.abort();
     let _ = collaboration_event_notifier.await;
-    automation_event_notifier.abort();
-    let _ = automation_event_notifier.await;
     // Optional connection discovery must never delay admission or outlive Host shutdown.
     // Aborting this coordinator does not replace Manager cleanup; stop_all below remains the
     // process-owned close authority for every connection that reached the Manager.
@@ -566,6 +581,10 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         mcp_management_tasks.shutdown(Duration::from_secs(2)),
         mcp_manager.shutdown(Duration::from_secs(2))
     );
+
+    automation_scheduler.finish_shutdown().await;
+    automation_event_notifier.abort();
+    let _ = automation_event_notifier.await;
 
     if let Err(error) = collaboration_dispatcher_shutdown {
         eprintln!("collaboration dispatcher shutdown failed: {error}");

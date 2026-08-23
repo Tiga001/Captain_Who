@@ -370,6 +370,21 @@ impl AgentService {
         }
     }
 
+    fn cancel_runs_for_destructive_mutation(
+        &self,
+        run_ids: &[String],
+        automation_run_ids: &HashSet<String>,
+    ) -> Result<(), String> {
+        for run_id in run_ids {
+            if automation_run_ids.contains(run_id) {
+                self.cancel_automation_agent_run(run_id)?;
+            } else {
+                self.cancel_run_internal(run_id);
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
         // Agent-bound projects are deletable: after this layer drains live execution and file
         // effects, StorageService removes every owned Agent tree in the same deletion transaction.
@@ -388,6 +403,22 @@ impl AgentService {
             }
         }
 
+        let automation_run_ids = match self
+            .storage
+            .list_nonterminal_automation_agent_run_ids_for_project(project_id)
+        {
+            Ok(run_ids) => run_ids.into_iter().collect::<HashSet<_>>(),
+            Err(error) => {
+                self.deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .projects
+                    .remove(project_id);
+                return Err(error);
+            }
+        };
+        let mut automation_wait_run_ids = automation_run_ids.iter().cloned().collect::<Vec<_>>();
+        automation_wait_run_ids.sort();
         let mut run_ids = {
             let usage_contexts = self
                 .usage_contexts
@@ -401,10 +432,17 @@ impl AgentService {
         };
         let scope = FileEffectScope::Project(project_id.to_string());
         run_ids.extend(self.file_effects.active_run_ids(&scope));
+        run_ids.extend(automation_run_ids.iter().cloned());
         run_ids.sort();
         run_ids.dedup();
-        for run_id in &run_ids {
-            self.cancel_run_internal(run_id);
+        if let Err(error) = self.cancel_runs_for_destructive_mutation(&run_ids, &automation_run_ids)
+        {
+            self.deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .projects
+                .remove(project_id);
+            return Err(error);
         }
         // A handed-off command is no longer owned by its Agent Run. Project deletion is an
         // explicit process-lifecycle boundary and therefore terminates those Sessions directly.
@@ -435,6 +473,17 @@ impl AgentService {
             return Err(format!(
                 "project `{project_id}` was not deleted because file-producing actions have effects without a confirmed durable terminal receipt: {}",
                 unsettled_effects.join(", ")
+            ));
+        }
+        if !self.wait_until_runs_inactive(&automation_wait_run_ids, FILE_EFFECT_DRAIN_TIMEOUT) {
+            self.deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .projects
+                .remove(project_id);
+            return Err(format!(
+                "project `{project_id}` was not deleted because cancelled agent runs did not reach a safe terminal boundary within {} ms; deletion may be retried",
+                FILE_EFFECT_DRAIN_TIMEOUT.as_millis()
             ));
         }
 
@@ -522,6 +571,14 @@ impl AgentService {
             project_id.as_deref(),
         )?;
 
+        let automation_run_ids = self
+            .storage
+            .list_nonterminal_automation_agent_run_ids_for_conversation(conversation_id)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut automation_wait_run_ids = automation_run_ids.iter().cloned().collect::<Vec<_>>();
+        automation_wait_run_ids.sort();
+
         let mut run_ids = {
             let usage_contexts = self
                 .usage_contexts
@@ -535,11 +592,10 @@ impl AgentService {
         };
         let scope = FileEffectScope::Conversation(conversation_id.to_string());
         run_ids.extend(self.file_effects.active_run_ids(&scope));
+        run_ids.extend(automation_run_ids.iter().cloned());
         run_ids.sort();
         run_ids.dedup();
-        for run_id in &run_ids {
-            self.cancel_run_internal(run_id);
-        }
+        self.cancel_runs_for_destructive_mutation(&run_ids, &automation_run_ids)?;
         // Agent cancellation deliberately does not reach handed-off Sessions; conversation
         // deletion does, and waits below for their terminal file-effect settlement.
         self.command_sessions
@@ -560,6 +616,12 @@ impl AgentService {
             return Err(format!(
                 "conversation `{conversation_id}` was not deleted because file-producing actions have effects without a confirmed durable terminal receipt: {}",
                 unsettled_effects.join(", ")
+            ));
+        }
+        if !self.wait_until_runs_inactive(&automation_wait_run_ids, FILE_EFFECT_DRAIN_TIMEOUT) {
+            return Err(format!(
+                "conversation `{conversation_id}` was not deleted because cancelled agent runs did not reach a safe terminal boundary within {} ms; deletion may be retried",
+                FILE_EFFECT_DRAIN_TIMEOUT.as_millis()
             ));
         }
 
@@ -612,6 +674,11 @@ impl AgentService {
             project_id.as_deref(),
         )?;
         let message_id_set = message_ids.iter().cloned().collect::<HashSet<_>>();
+        let automation_run_ids = self
+            .storage
+            .list_nonterminal_automation_agent_run_ids_for_messages(conversation_id, message_ids)?
+            .into_iter()
+            .collect::<HashSet<_>>();
 
         let (mut run_ids, mut retired_run_ids) = {
             let usage_contexts = self
@@ -656,11 +723,10 @@ impl AgentService {
         });
         let scope = FileEffectScope::Conversation(conversation_id.to_string());
         run_ids.extend(self.file_effects.active_run_ids(&scope));
+        run_ids.extend(automation_run_ids.iter().cloned());
         run_ids.sort();
         run_ids.dedup();
-        for run_id in &run_ids {
-            self.cancel_run_internal(run_id);
-        }
+        self.cancel_runs_for_destructive_mutation(&run_ids, &automation_run_ids)?;
         self.command_sessions
             .terminate_messages(conversation_id, &message_id_set);
 

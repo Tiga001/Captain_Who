@@ -145,6 +145,85 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
 }
 
 #[test]
+fn automation_execution_is_a_host_only_retained_run_system_context() {
+    const PROMPT: &str = "Inspect the existing conversation for material changes.";
+    let mut input = conversation_context_input(vec![message("user", PROMPT)]);
+    let mut without_automation = input.clone();
+    input.prompt_preferences = Some(AgentPromptPreferences {
+        work_mode: None,
+        tone: None,
+        detail_level: None,
+        custom_instructions: None,
+        updated_at: Some(42),
+        automation_execution_context: Some(
+            AgentAutomationExecutionContext::new(
+                "automation-context-test",
+                "automation-run-context-test",
+                1_725_000_000_000,
+                Some(1_724_000_000_000),
+                "scheduled",
+            )
+            .unwrap(),
+        ),
+    });
+    without_automation.prompt_preferences = input.prompt_preferences.clone();
+    without_automation
+        .prompt_preferences
+        .as_mut()
+        .unwrap()
+        .automation_execution_context = None;
+
+    assert_eq!(
+        conversation_context_configuration_revision(&input).unwrap(),
+        conversation_context_configuration_revision(&without_automation).unwrap(),
+        "run identity must not rotate the reusable conversation configuration"
+    );
+
+    let capabilities =
+        prepare_runtime_capabilities(&input, "automation-context", &[], true, None).unwrap();
+    let prepared =
+        build_llm_request(input, &capabilities.tool_definitions, None, None, None).unwrap();
+    let manifest = prepared.context.manifest();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.sources == vec!["automation_execution"])
+        .expect("Automation execution context is present in the model frame");
+    assert_eq!(entry.role, "system");
+    assert_eq!(entry.scope, "run");
+    assert_eq!(entry.retention, "retained");
+
+    let messages = prepared.context.to_messages();
+    let automation_system = messages
+        .iter()
+        .find(|message| {
+            message
+                .content()
+                .contains("AUTOMATION_EXECUTION_CONTEXT_V1")
+        })
+        .expect("provider projection contains Automation execution metadata");
+    assert_eq!(automation_system.role(), LlmMessageRole::System);
+    assert!(automation_system
+        .content()
+        .contains(r#""automationId":"automation-context-test""#));
+    assert!(automation_system
+        .content()
+        .contains(r#""automationRunId":"automation-run-context-test""#));
+    assert!(automation_system
+        .content()
+        .contains(r#""lastRunAt":1724000000000"#));
+    assert!(automation_system
+        .content()
+        .contains(r#""triggerKind":"scheduled""#));
+    let user_messages = messages
+        .iter()
+        .filter(|message| message.role() == LlmMessageRole::User)
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages.len(), 1);
+    assert_eq!(user_messages[0].content(), PROMPT);
+}
+
+#[test]
 fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     const INSTRUCTIONS: &str = "SKILL_DYNAMIC_MARKER: inspect evidence before editing.";
     let mut input = conversation_context_input(vec![

@@ -201,11 +201,13 @@ pub enum AutomationHealthDto {
 pub enum AutomationBlockedCodeDto {
     TargetMissing,
     TargetArchived,
+    TargetInvalid,
     ProjectMissing,
     ProjectPathMissing,
     ModelMissing,
     ModelDisabled,
     PermissionDisabled,
+    ConfigurationInvalid,
     ScheduleInvalid,
 }
 
@@ -516,6 +518,117 @@ pub struct AutomationDeleteOutputDto {
     pub schema_version: u32,
     pub automation_id: String,
     pub deleted_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationNotificationKindDto {
+    RunResult,
+    ApprovalRequired,
+    ConfigurationBlocked,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationDeliveryDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub automation_id: String,
+    pub run_id: Option<String>,
+    pub kind: AutomationNotificationKindDto,
+    pub title: String,
+    pub body: String,
+    pub conversation_id: Option<String>,
+    pub user_message_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationsClaimInputDto {
+    pub schema_version: u32,
+    pub claim_token: String,
+    pub lease_duration_ms: u64,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationsClaimOutputDto {
+    pub schema_version: u32,
+    pub claim_token: String,
+    pub notifications: Vec<AutomationNotificationDeliveryDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationValidateInputDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub claim_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationValidateOutputDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub notification: Option<AutomationNotificationDeliveryDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationAcknowledgeInputDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub claim_token: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationNotificationDeliveredStatusDto {
+    Delivered,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationAcknowledgeOutputDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub status: AutomationNotificationDeliveredStatusDto,
+    pub delivered_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationNotificationDeliveryErrorCodeDto {
+    NativeNotificationFailed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationReleaseInputDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub claim_token: String,
+    pub retry_at: i64,
+    pub error_code: AutomationNotificationDeliveryErrorCodeDto,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationNotificationPendingStatusDto {
+    Pending,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationNotificationReleaseOutputDto {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub status: AutomationNotificationPendingStatusDto,
+    pub retry_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

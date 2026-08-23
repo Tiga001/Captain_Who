@@ -49,12 +49,13 @@ use crate::model_request_observation::{
 };
 use crate::prompts::{build_system_prompt_with_collaboration, collaboration_harness_section};
 use crate::protocol::{
-    AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
-    AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowSnapshot,
-    AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences,
-    AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus,
-    AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSteerInput, AgentToolApprovalMode,
-    AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
+    AgentApprovalStatus, AgentAutomationExecutionContext, AgentChatInput, AgentChatMessage,
+    AgentChatOutput, AgentCommandPermission, AgentCommandSafetyPolicy,
+    AgentContextCompactionEventOutcome, AgentContextWindowSnapshot, AgentError, AgentEvent,
+    AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences, AgentProposedAction,
+    AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus, AgentSkillActivation,
+    AgentSkillScriptPreflightStatus, AgentSteerInput, AgentToolApprovalMode, AgentToolCall,
+    AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
 use crate::provider_profile::{
     ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
@@ -403,6 +404,7 @@ impl AgentRuntime {
             steer_input,
             collaboration_inbox,
             mut agent_collaboration,
+            automation_report_sink,
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -529,6 +531,7 @@ impl AgentRuntime {
                 mcp_tools,
                 builtin_capabilities,
                 agent_collaboration_enabled: agent_collaboration.is_some(),
+                automation_report_sink,
             },
         )
         .map_err(|error| {

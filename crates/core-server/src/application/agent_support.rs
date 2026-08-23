@@ -18,9 +18,9 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
-    AgentApprovalDecisionStatus, AgentChatInput, AgentChatMessage, AgentChatOutput,
-    AgentCollaborationIdentity, AgentCommandRequest, AgentContextWindowSnapshot, AgentEvent,
-    AgentFileDraftSnapshot, AgentFileWriteProposal, AgentFileWriteResult,
+    AgentApprovalDecisionStatus, AgentAutomationExecutionContext, AgentChatInput, AgentChatMessage,
+    AgentChatOutput, AgentCollaborationIdentity, AgentCommandRequest, AgentContextWindowSnapshot,
+    AgentEvent, AgentFileDraftSnapshot, AgentFileWriteProposal, AgentFileWriteResult,
     AgentFileWriteResultStatus, AgentInputAttachment, AgentInputAttachmentEncoding,
     AgentInputAttachmentKind, AgentModelSelectionSnapshot, AgentPatchResult,
     AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,

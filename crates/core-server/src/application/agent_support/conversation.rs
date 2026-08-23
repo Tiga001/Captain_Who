@@ -93,6 +93,8 @@ pub(crate) fn prepare_conversation_turn(
         existing,
         expected_revision,
         None,
+        None,
+        None,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -103,6 +105,7 @@ pub(crate) fn prepare_conversation_turn(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_reserved_human_turn(
     storage: &StorageService,
     skills_service: &SkillsService,
@@ -110,6 +113,10 @@ pub(crate) fn prepare_reserved_human_turn(
     run_id: &str,
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
+    automation_admission: Option<
+        &mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
+    >,
+    automation_execution_context: Option<AgentAutomationExecutionContext>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
         storage,
@@ -121,6 +128,8 @@ pub(crate) fn prepare_reserved_human_turn(
         existing,
         expected_revision,
         None,
+        automation_admission,
+        automation_execution_context,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -150,6 +159,8 @@ pub(crate) fn prepare_reserved_human_rewrite_turn(
         existing,
         expected_revision,
         Some(rewrite),
+        None,
+        None,
     )
 }
 
@@ -205,6 +216,8 @@ pub(crate) fn prepare_agent_wake_turn(
         Some(existing),
         Some(expected_revision),
         None,
+        None,
+        None,
     )? {
         PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
         PreparedConversationTurnOutcome::Replayed(_) => {
@@ -226,7 +239,16 @@ fn prepare_conversation_turn_from_source(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     rewrite: Option<HumanConversationTurnRewrite>,
+    automation_admission: Option<
+        &mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
+    >,
+    automation_execution_context: Option<AgentAutomationExecutionContext>,
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
+    if rewrite.is_some() && automation_admission.is_some() {
+        return Err("an automation Turn cannot be admitted as a rewrite"
+            .to_string()
+            .into());
+    }
     let content = input.content.trim().to_string();
     if content.is_empty() {
         return Err("消息内容不能为空。".to_string().into());
@@ -311,10 +333,11 @@ fn prepare_conversation_turn_from_source(
         .into());
     }
 
-    let prompt_preferences = match input.prompt_preferences.clone() {
+    let mut prompt_preferences = match input.prompt_preferences.clone() {
         Some(preferences) => preferences,
         None => agent_prompt_preferences_from_record(storage.load_agent_prompt_preferences()?),
     };
+    prompt_preferences.automation_execution_context = automation_execution_context;
 
     let timestamp = now_ms();
     let conversation_id = normalized_optional(input.conversation_id.as_deref())
@@ -588,6 +611,31 @@ fn prepare_conversation_turn_from_source(
                     return Ok(PreparedConversationTurnOutcome::Replayed(Box::new(output)));
                 }
                 permissions
+            } else if let Some(automation_admission) = automation_admission {
+                match storage
+                    .save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(
+                        conversation,
+                        expected_revision,
+                        permission_source,
+                        &preloaded_agent_message_ids,
+                        &initial_trace,
+                        assistant_created_at,
+                        now_ms().max(assistant_created_at),
+                        automation_admission,
+                    )
+                {
+                    Ok((_, permissions, _)) => permissions,
+                    Err(error)
+                        if error
+                            == mycopilot_core::storage::automation_repository::AUTOMATION_PERMISSION_DISABLED_AT_ADMISSION =>
+                    {
+                        return Err(AgentServiceError::structured(
+                            mycopilot_core::storage::automation_repository::AUTOMATION_PERMISSION_DISABLED_MESSAGE,
+                            serde_json::json!({ "code": "permission_disabled" }),
+                        ));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             } else {
                 storage
                     .save_conversation_and_begin_turn_with_preloaded_agent_messages(
@@ -605,6 +653,18 @@ fn prepare_conversation_turn_from_source(
             // Child authority is resolved only inside durable Turn admission. The placeholder on
             // AgentConversationTurnInput never reaches RunContext or a model/tool boundary.
             input.permissions = effective_permissions;
+            #[cfg(test)]
+            if automation_admission.is_some_and(|admission| {
+                crate::application::agent::take_automation_post_admission_preparation_failure(
+                    &admission.automation_run_id,
+                )
+            }) {
+                return Err(
+                    "injected post-admission Automation Turn preparation failure"
+                        .to_string()
+                        .into(),
+                );
+            }
         }
     }
     if matches!(&source, ConversationTurnInputSource::Human) && rewrite.is_none() {

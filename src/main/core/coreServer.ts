@@ -70,6 +70,14 @@ import type {
   AutomationGetInput,
   AutomationListInput,
   AutomationListOutput,
+  AutomationNotificationAcknowledgeInput,
+  AutomationNotificationAcknowledgeOutput,
+  AutomationNotificationReleaseInput,
+  AutomationNotificationReleaseOutput,
+  AutomationNotificationValidateInput,
+  AutomationNotificationValidateOutput,
+  AutomationNotificationsClaimInput,
+  AutomationNotificationsClaimOutput,
   AutomationResync,
   AutomationRun,
   AutomationRunNowInput,
@@ -175,6 +183,10 @@ import {
   AUTOMATION_EVENT_NOTIFICATION_METHOD,
   AUTOMATION_GET_METHOD,
   AUTOMATION_LIST_METHOD,
+  AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
+  AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
+  AUTOMATION_NOTIFICATIONS_RELEASE_METHOD,
+  AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
   AUTOMATION_RESYNC_NOTIFICATION_METHOD,
   AUTOMATION_RUN_NOW_METHOD,
   AUTOMATION_RUNS_LIST_METHOD,
@@ -212,6 +224,14 @@ import {
   parseAutomationGetInput,
   parseAutomationListInput,
   parseAutomationListOutput,
+  parseAutomationNotificationAcknowledgeInput,
+  parseAutomationNotificationAcknowledgeOutput,
+  parseAutomationNotificationReleaseInput,
+  parseAutomationNotificationReleaseOutput,
+  parseAutomationNotificationValidateInput,
+  parseAutomationNotificationValidateOutput,
+  parseAutomationNotificationsClaimInput,
+  parseAutomationNotificationsClaimOutput,
   parseAutomationResync,
   parseAutomationRun,
   parseAutomationRunNowInput,
@@ -714,6 +734,10 @@ export class CoreServer {
   }
 
   async shutdown(): Promise<void> {
+    // Fence lazy process restart before inspecting the current child. Notification delivery and
+    // other late Host producers may still have an in-flight promise, but none can start a fresh
+    // scheduler after the shutdown sequence has begun.
+    this.rpc.beginShutdown()
     if (!this.rpc.isRunning()) return
 
     // Core first gives the managed Playwright bridge up to two seconds to settle, then shuts down
@@ -727,7 +751,7 @@ export class CoreServer {
       timeoutId.unref()
     })
     const shutdown = this.rpc
-      .request<CoreShutdownResponse>(CORE_SHUTDOWN_METHOD)
+      .requestDuringShutdown<CoreShutdownResponse>(CORE_SHUTDOWN_METHOD)
       .then((response) => {
         if (response.timedOut) {
           console.warn('core-server shutdown timed out while waiting for active agent runs')
@@ -867,6 +891,94 @@ export class CoreServer {
         const output = parseAutomationAttentionAcknowledgeOutput(value)
         if (output.attention.attentionId !== request.attentionId)
           throw new Error('Invalid Automation attention response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  /** Host-only durable native-notification delivery; never exposed as a Renderer invoke. */
+  claimAutomationNotifications(
+    input: AutomationNotificationsClaimInput
+  ): Promise<AutomationNotificationsClaimOutput> {
+    const request = parseAutomationNotificationsClaimInput(input)
+    return this.rpc
+      .request<unknown, AutomationNotificationsClaimInput>(
+        AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAutomationNotificationsClaimOutput(value)
+        if (output.claimToken !== request.claimToken) {
+          throw new Error('Invalid Automation notification claim response identity')
+        }
+        const notificationIds = new Set(
+          output.notifications.map((notification) => notification.notificationId)
+        )
+        if (notificationIds.size !== output.notifications.length) {
+          throw new Error('Invalid duplicate Automation notification claim response')
+        }
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  /** Host-only final authority check immediately before Electron native display. */
+  validateAutomationNotification(
+    input: AutomationNotificationValidateInput
+  ): Promise<AutomationNotificationValidateOutput> {
+    const request = parseAutomationNotificationValidateInput(input)
+    return this.rpc
+      .request<unknown, AutomationNotificationValidateInput>(
+        AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAutomationNotificationValidateOutput(value)
+        if (
+          output.notificationId !== request.notificationId ||
+          (output.notification !== null &&
+            output.notification.notificationId !== request.notificationId)
+        ) {
+          throw new Error('Invalid Automation notification validation response identity')
+        }
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  acknowledgeAutomationNotification(
+    input: AutomationNotificationAcknowledgeInput
+  ): Promise<AutomationNotificationAcknowledgeOutput> {
+    const request = parseAutomationNotificationAcknowledgeInput(input)
+    return this.rpc
+      .request<unknown, AutomationNotificationAcknowledgeInput>(
+        AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAutomationNotificationAcknowledgeOutput(value)
+        if (output.notificationId !== request.notificationId) {
+          throw new Error('Invalid Automation notification acknowledge response identity')
+        }
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  releaseAutomationNotification(
+    input: AutomationNotificationReleaseInput
+  ): Promise<AutomationNotificationReleaseOutput> {
+    const request = parseAutomationNotificationReleaseInput(input)
+    return this.rpc
+      .request<unknown, AutomationNotificationReleaseInput>(
+        AUTOMATION_NOTIFICATIONS_RELEASE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAutomationNotificationReleaseOutput(value)
+        if (output.notificationId !== request.notificationId || output.retryAt < request.retryAt) {
+          throw new Error('Invalid Automation notification release response identity')
+        }
         return output
       })
       .catch(rethrowValidatedAutomationError)

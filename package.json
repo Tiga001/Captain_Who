@@ -25,6 +25,7 @@
     "test:artifact-runtime": "node --test scripts/prepare-artifact-runtime.test.mjs scripts/pptxgenjs-notes-order.test.mjs scripts/presentation-sdk.test.mjs",
     "test:rust": "cargo test --workspace",
     "test:web": "pnpm prepare:office-renderer && vitest run --project unit --project browser && vitest run --project managed-playwright-e2e",
+    "test:automation-core-e2e": "vitest run --project automation-core-e2e",
     "test:multi-agent-release": "node scripts/run-multi-agent-release-gate.mjs",
     "generate:playwright-conformance-report": "node scripts/playwright-conformance-report.mjs --write",
     "generate:agent-avatars": "node scripts/generate-agent-avatars.mjs",

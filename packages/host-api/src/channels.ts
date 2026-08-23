@@ -65,7 +65,8 @@ export const HOST_CHANNELS = {
     acknowledgeAttention: 'host:automation.attention.acknowledge',
     event: 'host:automation.event',
     resync: 'host:automation.resync',
-    resyncReady: 'host:automation.resyncReady'
+    resyncReady: 'host:automation.resyncReady',
+    openRequested: 'host:automation.openRequested'
   },
   browser: {
     artifactExport: 'host:browser.artifact.export',

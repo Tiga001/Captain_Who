@@ -3917,11 +3917,27 @@ impl AgentService {
             }
         };
         let mcp_tools = self.capture_mcp_tool_runtime(&record.agent_input);
+        let automation_report_sink = match self.automation_report_sink_for_agent_run_id(&run_id) {
+            Ok(sink) => sink,
+            Err(error) => {
+                self.finish_pre_runtime_action_continuation_failure(
+                    &record,
+                    &notifications,
+                    &steer_input,
+                    &cancellation_token,
+                    final_pending_status,
+                    "automation_report_capability_unavailable",
+                    error,
+                );
+                return;
+            }
+        };
         let initial_context_window_tool_projection = match self
-            .context_window_tool_projection_with_mcp(
+            .context_window_tool_projection_with_mcp_and_automation_report(
                 &record.agent_input,
                 skill_resources.clone(),
                 mcp_tools.clone(),
+                automation_report_sink.clone(),
             ) {
             Ok(projection) => projection,
             Err(error) => {
@@ -3972,6 +3988,7 @@ impl AgentService {
                     agent_input,
                     skill_resources,
                     mcp_tools,
+                    automation_report_sink,
                     context_window_tool_projection,
                     cancellation_token: cancellation_token.clone(),
                     steer_input,

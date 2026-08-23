@@ -27,6 +27,11 @@ export const AUTOMATION_DELETE_METHOD = 'automation.delete'
 export const AUTOMATION_RUNS_LIST_METHOD = 'automation.runs.list'
 export const AUTOMATION_ATTENTION_SUMMARY_METHOD = 'automation.attention.summary'
 export const AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD = 'automation.attention.acknowledge'
+/** Host-only durable delivery methods. They are intentionally not exposed as Renderer invokes. */
+export const AUTOMATION_NOTIFICATIONS_CLAIM_METHOD = 'automation.notifications.claim'
+export const AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD = 'automation.notifications.validate'
+export const AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD = 'automation.notifications.acknowledge'
+export const AUTOMATION_NOTIFICATIONS_RELEASE_METHOD = 'automation.notifications.release'
 export const AUTOMATION_EVENT_NOTIFICATION_METHOD = 'automation.event'
 export const AUTOMATION_RESYNC_NOTIFICATION_METHOD = 'automation.resync'
 
@@ -150,11 +155,13 @@ export type AutomationHealth =
       code:
         | 'target_missing'
         | 'target_archived'
+        | 'target_invalid'
         | 'project_missing'
         | 'project_path_missing'
         | 'model_missing'
         | 'model_disabled'
         | 'permission_disabled'
+        | 'configuration_invalid'
         | 'schedule_invalid'
       message: string
     }
@@ -329,6 +336,86 @@ export interface AutomationDeleteOutput {
   deletedAt: number
 }
 
+export type AutomationNotificationKind =
+  'run_result' | 'approval_required' | 'configuration_blocked'
+
+/** A bounded, safe projection of a claimed native-notification delivery. */
+export interface AutomationNotificationDelivery {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  automationId: string
+  runId: string | null
+  kind: AutomationNotificationKind
+  title: string
+  body: string
+  conversationId: string | null
+  userMessageId: string | null
+  assistantMessageId: string | null
+  createdAt: number
+}
+
+export interface AutomationNotificationsClaimInput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  claimToken: string
+  leaseDurationMs: number
+  limit: number
+}
+
+export interface AutomationNotificationsClaimOutput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  claimToken: string
+  notifications: AutomationNotificationDelivery[]
+}
+
+export interface AutomationNotificationValidateInput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  claimToken: string
+}
+
+export interface AutomationNotificationValidateOutput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  notification: AutomationNotificationDelivery | null
+}
+
+export interface AutomationNotificationAcknowledgeInput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  claimToken: string
+}
+
+export interface AutomationNotificationAcknowledgeOutput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  status: 'delivered'
+  deliveredAt: number
+}
+
+export interface AutomationNotificationReleaseInput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  claimToken: string
+  retryAt: number
+  errorCode: 'native_notification_failed'
+}
+
+export interface AutomationNotificationReleaseOutput {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  notificationId: string
+  status: 'pending'
+  retryAt: number
+}
+
+/** Main-to-Renderer intent emitted after a user clicks a native notification. */
+export interface AutomationOpenRequest {
+  schemaVersion: typeof AUTOMATION_SCHEMA_VERSION
+  automationId: string
+  runId: string | null
+  destination:
+    { kind: 'task' } | { kind: 'conversation'; conversationId: string; messageId: string | null }
+}
+
 export type AutomationEventKind =
   'created' | 'updated' | 'deleted' | 'run_updated' | 'attention_changed' | 'notification_requested'
 export interface AutomationEvent {
@@ -376,6 +463,9 @@ const CURSOR_MAX = 2_048
 const RRULE_MAX = 4_096
 const ZONE_MAX = 255
 const LIST_MAX = 100
+const NOTIFICATION_BATCH_MAX = 10
+const NOTIFICATION_LEASE_MIN_MS = 5_000
+const NOTIFICATION_LEASE_MAX_MS = 300_000
 const WEEKDAYS = [
   'monday',
   'tuesday',
@@ -683,11 +773,13 @@ function parseHealth(value: unknown): AutomationHealth {
       [
         'target_missing',
         'target_archived',
+        'target_invalid',
         'project_missing',
         'project_path_missing',
         'model_missing',
         'model_disabled',
         'permission_disabled',
+        'configuration_invalid',
         'schedule_invalid'
       ] as const,
       `${context}.code`
@@ -1212,6 +1304,268 @@ export function parseAutomationDeleteOutput(value: unknown): AutomationDeleteOut
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
     automationId: boundedString(record.automationId, `${context}.automationId`, ID_MAX),
     deletedAt: expectSafeInteger(record.deletedAt, `${context}.deletedAt`, 0)
+  }
+}
+
+export function parseAutomationNotificationDelivery(
+  value: unknown
+): AutomationNotificationDelivery {
+  const context = 'Automation notification delivery'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'notificationId',
+      'automationId',
+      'runId',
+      'kind',
+      'title',
+      'body',
+      'conversationId',
+      'userMessageId',
+      'assistantMessageId',
+      'createdAt'
+    ],
+    context
+  )
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  const conversationId = nullableNonEmptyString(
+    record.conversationId,
+    `${context}.conversationId`,
+    ID_MAX
+  )
+  const userMessageId = nullableNonEmptyString(
+    record.userMessageId,
+    `${context}.userMessageId`,
+    ID_MAX
+  )
+  const assistantMessageId = nullableNonEmptyString(
+    record.assistantMessageId,
+    `${context}.assistantMessageId`,
+    ID_MAX
+  )
+  if (conversationId === null && (userMessageId !== null || assistantMessageId !== null)) {
+    throw invalidProtocolValue(context, 'message identities require a conversation identity')
+  }
+  const runId = nullableNonEmptyString(record.runId, `${context}.runId`, ID_MAX)
+  const kind = expectEnum(
+    record.kind,
+    ['run_result', 'approval_required', 'configuration_blocked'] as const,
+    `${context}.kind`
+  )
+  if ((kind === 'configuration_blocked') !== (runId === null)) {
+    throw invalidProtocolValue(
+      context,
+      'configuration notifications must not identify a run; run notifications must identify one'
+    )
+  }
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId: boundedString(record.notificationId, `${context}.notificationId`, ID_MAX),
+    automationId: boundedString(record.automationId, `${context}.automationId`, ID_MAX),
+    runId,
+    kind,
+    title: boundedString(record.title, `${context}.title`, TITLE_MAX),
+    body: boundedString(record.body, `${context}.body`, SAFE_TEXT_MAX, false, true),
+    conversationId,
+    userMessageId,
+    assistantMessageId,
+    createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
+  }
+}
+
+export function parseAutomationNotificationsClaimInput(
+  value: unknown
+): AutomationNotificationsClaimInput {
+  const context = 'Automation notifications claim input'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'claimToken', 'leaseDurationMs', 'limit'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    claimToken: boundedString(record.claimToken, `${context}.claimToken`, ID_MAX),
+    leaseDurationMs: intInRange(
+      record.leaseDurationMs,
+      `${context}.leaseDurationMs`,
+      NOTIFICATION_LEASE_MIN_MS,
+      NOTIFICATION_LEASE_MAX_MS
+    ),
+    limit: intInRange(record.limit, `${context}.limit`, 1, NOTIFICATION_BATCH_MAX)
+  }
+}
+
+export function parseAutomationNotificationsClaimOutput(
+  value: unknown
+): AutomationNotificationsClaimOutput {
+  const context = 'Automation notifications claim output'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'claimToken', 'notifications'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  const notifications = expectArray(record.notifications, `${context}.notifications`).map(
+    parseAutomationNotificationDelivery
+  )
+  if (notifications.length > NOTIFICATION_BATCH_MAX) {
+    throw invalidProtocolValue(
+      `${context}.notifications`,
+      `must not exceed ${NOTIFICATION_BATCH_MAX} entries`
+    )
+  }
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    claimToken: boundedString(record.claimToken, `${context}.claimToken`, ID_MAX),
+    notifications
+  }
+}
+
+export function parseAutomationNotificationValidateInput(
+  value: unknown
+): AutomationNotificationValidateInput {
+  const context = 'Automation notification validate input'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'notificationId', 'claimToken'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId: boundedString(record.notificationId, `${context}.notificationId`, ID_MAX),
+    claimToken: boundedString(record.claimToken, `${context}.claimToken`, ID_MAX)
+  }
+}
+
+export function parseAutomationNotificationValidateOutput(
+  value: unknown
+): AutomationNotificationValidateOutput {
+  const context = 'Automation notification validate output'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'notificationId', 'notification'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  const notificationId = boundedString(record.notificationId, `${context}.notificationId`, ID_MAX)
+  const notification =
+    record.notification === null ? null : parseAutomationNotificationDelivery(record.notification)
+  if (notification !== null && notification.notificationId !== notificationId) {
+    throw invalidProtocolValue(
+      `${context}.notification.notificationId`,
+      'must match notificationId'
+    )
+  }
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId,
+    notification
+  }
+}
+
+export function parseAutomationNotificationAcknowledgeInput(
+  value: unknown
+): AutomationNotificationAcknowledgeInput {
+  const context = 'Automation notification acknowledge input'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'notificationId', 'claimToken'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId: boundedString(record.notificationId, `${context}.notificationId`, ID_MAX),
+    claimToken: boundedString(record.claimToken, `${context}.claimToken`, ID_MAX)
+  }
+}
+
+export function parseAutomationNotificationAcknowledgeOutput(
+  value: unknown
+): AutomationNotificationAcknowledgeOutput {
+  const context = 'Automation notification acknowledge output'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'notificationId', 'status', 'deliveredAt'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  if (record.status !== 'delivered') {
+    throw invalidProtocolValue(`${context}.status`, 'must be delivered')
+  }
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId: boundedString(record.notificationId, `${context}.notificationId`, ID_MAX),
+    status: 'delivered',
+    deliveredAt: expectSafeInteger(record.deliveredAt, `${context}.deliveredAt`, 0)
+  }
+}
+
+export function parseAutomationNotificationReleaseInput(
+  value: unknown
+): AutomationNotificationReleaseInput {
+  const context = 'Automation notification release input'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['schemaVersion', 'notificationId', 'claimToken', 'retryAt', 'errorCode'],
+    context
+  )
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  if (record.errorCode !== 'native_notification_failed') {
+    throw invalidProtocolValue(`${context}.errorCode`, 'must be native_notification_failed')
+  }
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId: boundedString(record.notificationId, `${context}.notificationId`, ID_MAX),
+    claimToken: boundedString(record.claimToken, `${context}.claimToken`, ID_MAX),
+    retryAt: expectSafeInteger(record.retryAt, `${context}.retryAt`, 0),
+    errorCode: 'native_notification_failed'
+  }
+}
+
+export function parseAutomationNotificationReleaseOutput(
+  value: unknown
+): AutomationNotificationReleaseOutput {
+  const context = 'Automation notification release output'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'notificationId', 'status', 'retryAt'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  if (record.status !== 'pending') {
+    throw invalidProtocolValue(`${context}.status`, 'must be pending')
+  }
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    notificationId: boundedString(record.notificationId, `${context}.notificationId`, ID_MAX),
+    status: 'pending',
+    retryAt: expectSafeInteger(record.retryAt, `${context}.retryAt`, 0)
+  }
+}
+
+export function parseAutomationOpenRequest(value: unknown): AutomationOpenRequest {
+  const context = 'Automation open request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'automationId', 'runId', 'destination'], context)
+  expectSchemaVersion(record, AUTOMATION_SCHEMA_VERSION, context)
+  const destination = expectRecord(record.destination, `${context}.destination`)
+  const kind = expectEnum(
+    destination.kind,
+    ['task', 'conversation'] as const,
+    `${context}.destination.kind`
+  )
+  if (kind === 'task') {
+    expectOnlyKeys(destination, ['kind'], `${context}.destination`)
+    return {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      automationId: boundedString(record.automationId, `${context}.automationId`, ID_MAX),
+      runId: nullableNonEmptyString(record.runId, `${context}.runId`, ID_MAX),
+      destination: { kind }
+    }
+  }
+  expectOnlyKeys(destination, ['kind', 'conversationId', 'messageId'], `${context}.destination`)
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    automationId: boundedString(record.automationId, `${context}.automationId`, ID_MAX),
+    runId: nullableNonEmptyString(record.runId, `${context}.runId`, ID_MAX),
+    destination: {
+      kind,
+      conversationId: boundedString(
+        destination.conversationId,
+        `${context}.destination.conversationId`,
+        ID_MAX
+      ),
+      messageId: nullableNonEmptyString(
+        destination.messageId,
+        `${context}.destination.messageId`,
+        ID_MAX
+      )
+    }
   }
 }
 export function parseAutomationEvent(value: unknown): AutomationEvent {

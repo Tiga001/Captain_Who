@@ -106,6 +106,7 @@ import { CollaborationApprovalPanel } from '../features/agentCollaboration/Colla
 import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
 import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
+import { hostClient } from '../host/hostClient'
 
 interface EditRewriteAttempt {
   assistantMessage: ChatMessage
@@ -1403,6 +1404,15 @@ export function AppShell() {
     showToast,
     waitForConversationSaves
   })
+
+  useEffect(() => {
+    // Older isolated Renderer test hosts do not expose the additive Automation surface.
+    if (!hostClient.automations?.onOpenRequested) return
+    return hostClient.automations.onOpenRequested((request) => {
+      if (request.destination.kind !== 'conversation') return
+      selectConversation(request.destination.conversationId, request.destination.messageId)
+    })
+  }, [selectConversation])
 
   const activeProviderTransitionConversationId = activeConversation?.id
   const activeProviderTransitionMessagesLoaded = activeConversation?.messagesLoaded

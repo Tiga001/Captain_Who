@@ -232,6 +232,8 @@ fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServic
         .expect("test image Artifact temporary directory should initialize")
         .keep();
     CoreRequestServices {
+        automation_scheduler_wake: crate::application::automation::AutomationSchedulerWake::default(
+        ),
         image_generation_configuration: Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
             Arc::new(InMemoryCredentialStore::default()),

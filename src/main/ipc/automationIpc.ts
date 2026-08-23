@@ -1,4 +1,4 @@
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, type WebContents } from 'electron'
 import { captureHostInvocation, HOST_CHANNELS } from '@mycopilot/host-api'
 import {
   parseAutomationAttentionAcknowledgeInput,
@@ -12,6 +12,7 @@ import {
   parseAutomationGetInput,
   parseAutomationListInput,
   parseAutomationListOutput,
+  parseAutomationOpenRequest,
   parseAutomationResync,
   parseAutomationRun,
   parseAutomationRunNowInput,
@@ -21,9 +22,15 @@ import {
   parseAutomationTask,
   parseAutomationUpdateInput
 } from '@mycopilot/protocol'
-import type { AutomationResync } from '@mycopilot/protocol'
+import type { AutomationOpenRequest, AutomationResync } from '@mycopilot/protocol'
 import type { CoreServer } from '../core/coreServer'
+import { AutomationNotificationCoordinator } from '../automation/automationNotificationCoordinator'
 import type { TrustedIpcMain } from './trustedIpc'
+
+export interface AutomationIpcRegistration {
+  (): void
+  beginShutdown(): void
+}
 
 function broadcast(channel: string, payload: unknown): void {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -37,18 +44,67 @@ function broadcast(channel: string, payload: unknown): void {
   }
 }
 
-export function registerAutomationIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer): () => void {
+export function registerAutomationIpc(
+  ipcMain: TrustedIpcMain,
+  coreServer: CoreServer
+): AutomationIpcRegistration {
   let latestResync: AutomationResync | null = null
+  let pendingOpenRequest: AutomationOpenRequest | null = null
+  const readyRenderers: WebContents[] = []
+
+  const sendOpenRequest = (value: AutomationOpenRequest): void => {
+    const request = parseAutomationOpenRequest(value)
+    while (readyRenderers.length > 0) {
+      const target = readyRenderers.at(-1)
+      if (!target || target.isDestroyed()) {
+        readyRenderers.pop()
+        continue
+      }
+      const window = BrowserWindow.fromWebContents(target)
+      if (window && !window.isDestroyed()) {
+        try {
+          if (window.isMinimized()) window.restore()
+          window.show()
+          window.focus()
+        } catch {
+          // Navigation delivery is still useful if native focus loses a close race.
+        }
+      }
+      try {
+        target.send(HOST_CHANNELS.automations.openRequested, request)
+        return
+      } catch {
+        readyRenderers.pop()
+        console.warn('Failed to deliver Automation notification navigation to a window')
+      }
+    }
+    pendingOpenRequest = request
+  }
+  const notificationCoordinator = new AutomationNotificationCoordinator({
+    coreServer,
+    onOpenRequested: sendOpenRequest
+  })
   const unsubscribeEvent = coreServer.onAutomationEvent((value) => {
-    broadcast(HOST_CHANNELS.automations.event, parseAutomationEvent(value))
+    const event = parseAutomationEvent(value)
+    broadcast(HOST_CHANNELS.automations.event, event)
+    if (event.kind === 'notification_requested') notificationCoordinator.requestDrain()
   })
   const unsubscribeResync = coreServer.onAutomationResync((value) => {
     latestResync = parseAutomationResync(value)
     broadcast(HOST_CHANNELS.automations.resync, latestResync)
+    notificationCoordinator.requestDrain()
   })
   ipcMain.on(HOST_CHANNELS.automations.resyncReady, (event) => {
+    const existingIndex = readyRenderers.indexOf(event.sender)
+    if (existingIndex >= 0) readyRenderers.splice(existingIndex, 1)
+    readyRenderers.push(event.sender)
     if (latestResync !== null && !event.sender.isDestroyed()) {
       event.sender.send(HOST_CHANNELS.automations.resync, latestResync)
+    }
+    if (pendingOpenRequest !== null && !event.sender.isDestroyed()) {
+      const request = pendingOpenRequest
+      pendingOpenRequest = null
+      sendOpenRequest(request)
     }
   })
 
@@ -115,8 +171,17 @@ export function registerAutomationIpc(ipcMain: TrustedIpcMain, coreServer: CoreS
     )
   )
 
-  return () => {
+  let disposed = false
+  const beginShutdown = (): void => notificationCoordinator.stop()
+  const dispose = (): void => {
+    if (disposed) return
+    disposed = true
+    notificationCoordinator.stop()
+    readyRenderers.length = 0
+    pendingOpenRequest = null
     unsubscribeEvent()
     unsubscribeResync()
   }
+  dispose.beginShutdown = beginShutdown
+  return dispose
 }

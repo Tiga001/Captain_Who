@@ -107,6 +107,7 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
                 detail_level: Some(mycopilot_core::AgentPromptDetailLevel::High),
                 custom_instructions: None,
                 updated_at: Some(42),
+                automation_execution_context: None,
             }),
             permissions: AgentPermissions {
                 write: AgentWritePermission::All,

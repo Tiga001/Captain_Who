@@ -59,7 +59,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | cross-language protocol                | Rust 消费协作 fixture，与 TypeScript 契约对齐                                                        |
 | AppShell browser scenarios             | activity、Approval、observer、live stream、重启和根 Agent switching                                  |
 
-脚本的 storage step 当前明确标为 “canonical v17”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
+脚本的 storage step 当前明确标为 “canonical v18”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
 
 ## 3. 固定压力阈值
 
@@ -116,14 +116,14 @@ Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.getTree`、`ag
 
 ## 6. Schema 与 reset 门禁
 
-当前 canonical storage 为 **v17**，且只有 normalized SQLite catalog fingerprint 完全匹配才接受。以下输入必须 fail closed 且不修改源库：
+当前 canonical storage 为 **v18**，且只有 normalized SQLite catalog fingerprint 完全匹配才接受。以下输入必须 fail closed 且不修改源库：
 
 - v15 或更早的开发库；
 - 非空但 `user_version=0` 的库；
 - 当前版本但 schema object 缺失/额外/被篡改；
 - foreign key violation。
 
-稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v17、恢复 allowlisted 配置、执行 `quick_check`/`foreign_key_check` 后原子发布。详见 [恢复 Runbook](recovery-runbook.md)。
+稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v18、恢复 allowlisted 配置、执行 `quick_check`/`foreign_key_check` 后原子发布。详见 [恢复 Runbook](recovery-runbook.md)。
 
 ## 7. 发布所需的组合证据
 

@@ -412,6 +412,86 @@ fn resource_deletion_blocks_tasks_without_deleting_tasks_or_chat_history() {
 }
 
 #[test]
+fn trigger_disabled_resource_invalidation_keeps_important_updates_notifications() {
+    let mut connection = connection();
+    connection
+        .execute_batch(
+            "INSERT INTO conversations (
+                id, project_id, model_id, title, created_at, updated_at,
+                pinned_at, archived_at, unread_at
+             ) VALUES (
+                'conversation-trigger-disabled', NULL, 'model-a', 'Target chat',
+                1, 1, NULL, NULL, NULL
+             );",
+        )
+        .unwrap();
+    let mut task_config = config();
+    task_config.destination_kind = "existing_chat".to_string();
+    task_config.target_conversation_id = Some("conversation-trigger-disabled".to_string());
+    task_config.project_binding_kind = "inherit".to_string();
+    task_config.model_id = None;
+    task_config.reasoning_json = None;
+    task_config.target_model_snapshot = None;
+    task_config.target_model_id_snapshot = None;
+    task_config.target_conversation_snapshot = Some("Target chat".to_string());
+    task_config.notification_policy = "important_updates".to_string();
+    let task = match create_automation(
+        &mut connection,
+        &NewAutomationRecord {
+            id: "automation-trigger-disabled".to_string(),
+            create_request_id: "request-trigger-disabled".to_string(),
+            status: StoredAutomationStatus::Active,
+            config: task_config,
+        },
+    )
+    .unwrap()
+    {
+        AutomationCreateOutcome::Created(record) => record,
+        outcome => panic!("unexpected create outcome: {outcome:?}"),
+    };
+    let timestamp = now_ms() + 1_000;
+    let triggers_were_enabled = connection
+        .db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+        .unwrap();
+    connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+            false,
+        )
+        .unwrap();
+    {
+        let transaction = connection.transaction().unwrap();
+        invalidate_automations_before_trigger_disabled_conversation_delete(
+            &transaction,
+            &["conversation-trigger-disabled".to_string()],
+            timestamp,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    }
+    connection
+        .set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+            triggers_were_enabled,
+        )
+        .unwrap();
+
+    let blocked = get_automation(&connection, &task.id).unwrap().unwrap();
+    assert_eq!(blocked.config.health_state, "blocked");
+    let notifications = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-trigger-disabled",
+        timestamp,
+        30_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_kind, "configuration_blocked");
+    assert_eq!(notifications[0].resource_revision, blocked.revision);
+}
+
+#[test]
 fn tombstone_hides_task_without_deleting_an_existing_target_chat() {
     let mut connection = connection();
     connection
@@ -505,6 +585,65 @@ fn notification_outbox_supports_deduplicated_configuration_attention_without_a_r
             [],
         )
         .is_err());
+}
+
+#[test]
+fn configuration_block_notifications_follow_all_user_visible_policies() {
+    for policy in ["all_runs", "unsuccessful_only", "important_updates"] {
+        let mut connection = connection();
+        let mut task_config = config();
+        task_config.notification_policy = policy.to_string();
+        let task = match create_automation(
+            &mut connection,
+            &NewAutomationRecord {
+                id: format!("automation-{policy}"),
+                create_request_id: format!("request-{policy}"),
+                status: StoredAutomationStatus::Active,
+                config: task_config,
+            },
+        )
+        .unwrap()
+        {
+            AutomationCreateOutcome::Created(record) => record,
+            outcome => panic!("unexpected create outcome: {outcome:?}"),
+        };
+
+        let blocked = match block_automation(
+            &mut connection,
+            &task.id,
+            task.revision,
+            "permission_disabled",
+            "The selected permission mode is disabled.",
+        )
+        .unwrap()
+        {
+            AutomationCompareAndSetOutcome::Updated(record) => record,
+            outcome => panic!("unexpected block outcome: {outcome:?}"),
+        };
+        let notifications = claim_pending_automation_notifications(
+            &mut connection,
+            &format!("claim-{policy}"),
+            blocked.updated_at,
+            30_000,
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(notifications.len(), 1, "policy {policy}");
+        assert_eq!(
+            notifications[0].notification_kind, "configuration_blocked",
+            "policy {policy}"
+        );
+        assert_eq!(notifications[0].automation_id, task.id, "policy {policy}");
+        assert!(
+            notifications[0].automation_run_id.is_none(),
+            "configuration attention is task-scoped for policy {policy}"
+        );
+        assert_eq!(
+            notifications[0].resource_revision, blocked.revision,
+            "policy {policy}"
+        );
+    }
 }
 
 #[test]
@@ -752,4 +891,1364 @@ fn existing_chat_is_blocked_when_its_inherited_project_is_deleted() {
                 && event.automation_id == task.id
                 && event.resource_revision == Some(blocked.revision)
         }));
+}
+
+fn enqueue_and_claim_manual_run(
+    connection: &mut Connection,
+    task: &AutomationRecord,
+    run_id: &str,
+    request_id: &str,
+    now: i64,
+) -> AutomationRunRecord {
+    enqueue_manual_automation_run(
+        connection,
+        &NewManualAutomationRunRecord {
+            id: run_id.to_string(),
+            automation_id: task.id.clone(),
+            manual_request_id: request_id.to_string(),
+            scheduled_for: now,
+            config_revision: task.revision,
+            config_snapshot_json: serde_json::json!({
+                "schemaVersion": 1,
+                "title": "Daily brief",
+                "notificationPolicy": &task.config.notification_policy,
+            })
+            .to_string(),
+            expected_revision: task.revision,
+        },
+    )
+    .unwrap();
+    let mut claimed = claim_ready_automation_runs(connection, now, 30_000, 3).unwrap();
+    assert_eq!(claimed.len(), 1);
+    claimed.remove(0)
+}
+
+fn insert_admitted_turn_projection(
+    transaction: &Transaction<'_>,
+    conversation_id: &str,
+    user_message_id: &str,
+    assistant_message_id: &str,
+    agent_run_id: &str,
+    timestamp: i64,
+) {
+    transaction
+        .execute(
+            "INSERT INTO conversations (
+                id, project_id, model_id, title, created_at, updated_at,
+                pinned_at, archived_at, unread_at
+             ) VALUES (?1, NULL, 'model-a', 'Automation chat', ?2, ?2, NULL, NULL, NULL)",
+            params![conversation_id, timestamp],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO messages (
+                id, conversation_id, role, content, status, input_origin_kind,
+                created_at, position
+             ) VALUES
+                (?1, ?3, 'user', 'Run it', 'sent', 'human', ?5, 0),
+                (?2, ?3, 'assistant', '', 'pending', NULL, ?5, 1)",
+            params![
+                user_message_id,
+                assistant_message_id,
+                conversation_id,
+                agent_run_id,
+                timestamp,
+            ],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO conversation_turn_traces (
+                assistant_message_id, conversation_id, run_id, schema_version,
+                terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
+             ) VALUES (?1, ?2, ?3, 4, 'in_progress', NULL, 0, ?4, ?4, NULL)",
+            params![
+                assistant_message_id,
+                conversation_id,
+                agent_run_id,
+                timestamp
+            ],
+        )
+        .unwrap();
+}
+
+#[test]
+fn due_claim_is_fair_bounded_and_merges_missed_occurrences() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let due = list_due_automations(
+        &connection,
+        task.config.next_run_at.unwrap() + 86_400_000,
+        3,
+    )
+    .unwrap();
+    assert_eq!(
+        due.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+        ["automation-a"]
+    );
+
+    let claimed_at = task.config.next_run_at.unwrap() + 86_400_000;
+    let next_future = claimed_at + 60_000;
+    let input = NewScheduledAutomationRunRecord {
+        id: "scheduled-run-a".to_string(),
+        automation_id: task.id.clone(),
+        trigger_kind: "recovery".to_string(),
+        scheduled_for: task.config.next_run_at.unwrap(),
+        config_revision: task.revision,
+        config_snapshot_json: r#"{"schemaVersion":1,"title":"Daily brief"}"#.to_string(),
+        expected_revision: task.revision,
+        next_run_at: next_future,
+        claimed_at,
+    };
+    let run = match enqueue_scheduled_automation_run(&mut connection, &input).unwrap() {
+        ScheduledAutomationRunEnqueueOutcome::Enqueued(run) => run,
+        outcome => panic!("unexpected claim outcome: {outcome:?}"),
+    };
+    assert_eq!(run.scheduled_for, task.config.next_run_at.unwrap());
+    assert_eq!(run.trigger_kind, "recovery");
+    assert_eq!(
+        get_automation(&connection, &task.id)
+            .unwrap()
+            .unwrap()
+            .config
+            .next_run_at,
+        Some(next_future)
+    );
+    assert_eq!(
+        enqueue_scheduled_automation_run(&mut connection, &input).unwrap(),
+        ScheduledAutomationRunEnqueueOutcome::Existing(run)
+    );
+}
+
+#[test]
+fn admission_token_and_outer_transaction_make_turn_admission_exactly_once() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let timestamp = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-a",
+        "manual-request-a",
+        timestamp,
+    );
+    let token = claimed.admission_token.clone().unwrap();
+
+    {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let stale = admit_automation_run_in_transaction(
+            &transaction,
+            &AutomationRunAdmissionInput {
+                automation_run_id: claimed.id.clone(),
+                admission_token: "stale-token".to_string(),
+                config_revision: task.revision,
+                permission_mode: "default".to_string(),
+                agent_run_id: "agent-run-a".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                user_message_id: "user-a".to_string(),
+                assistant_message_id: "assistant-a".to_string(),
+                admitted_at: timestamp,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            stale,
+            AutomationRunAdmissionOutcome::Stale(Some(_))
+        ));
+        transaction.rollback().unwrap();
+    }
+
+    {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        insert_admitted_turn_projection(
+            &transaction,
+            "conversation-a",
+            "user-a",
+            "assistant-a",
+            "agent-run-a",
+            timestamp,
+        );
+        let outcome = admit_automation_run_in_transaction(
+            &transaction,
+            &AutomationRunAdmissionInput {
+                automation_run_id: claimed.id.clone(),
+                admission_token: token.clone(),
+                config_revision: task.revision,
+                permission_mode: "default".to_string(),
+                agent_run_id: "agent-run-a".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                user_message_id: "user-a".to_string(),
+                assistant_message_id: "assistant-a".to_string(),
+                admitted_at: timestamp,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            AutomationRunAdmissionOutcome::Admitted(_)
+        ));
+        transaction.rollback().unwrap();
+    }
+
+    let after_rollback = get_automation_run(&connection, &claimed.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_rollback.status, StoredAutomationRunStatus::Admitting);
+    assert_eq!(
+        after_rollback.admission_token.as_deref(),
+        Some(token.as_str())
+    );
+    assert!(after_rollback.agent_run_id.is_none());
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM conversation_turn_traces", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn startup_reclaims_unexpired_admission_and_retry_backoff_is_respected() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let now = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-a",
+        "manual-request-a",
+        now,
+    );
+    assert!(claimed.admission_expires_at.unwrap() > now);
+    let recoverable = list_recoverable_automation_runs(&connection).unwrap();
+    assert_eq!(recoverable.len(), 1);
+    assert_eq!(recoverable[0].run.id, claimed.id);
+    assert!(recoverable[0].trace_terminal_status.is_none());
+    let recovered =
+        recover_automation_admission_leases_on_startup(&mut connection, now + 1).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, StoredAutomationRunStatus::Queued);
+
+    let claimed_again = claim_ready_automation_runs(&mut connection, now + 1, 30_000, 3)
+        .unwrap()
+        .remove(0);
+    let retry_at = now + 60_000;
+    assert!(matches!(
+        defer_automation_run(
+            &mut connection,
+            &claimed_again.id,
+            claimed_again.admission_token.as_deref().unwrap(),
+            retry_at,
+            now + 2,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(_)
+    ));
+    assert!(
+        claim_ready_automation_runs(&mut connection, retry_at - 1, 30_000, 3)
+            .unwrap()
+            .is_empty()
+    );
+    let final_claim = claim_ready_automation_runs(&mut connection, retry_at, 30_000, 3)
+        .unwrap()
+        .remove(0);
+    let terminated = terminate_unadmitted_automation_run(
+        &mut connection,
+        &final_claim.id,
+        final_claim.admission_token.as_deref().unwrap(),
+        StoredAutomationRunStatus::Failed,
+        "admission_failed",
+        "The Agent turn could not be started.",
+        retry_at + 1,
+    )
+    .unwrap();
+    assert!(matches!(
+        terminated,
+        AutomationRunMutationOutcome::Updated(AutomationRunRecord {
+            status: StoredAutomationRunStatus::Failed,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn terminal_trace_settlement_persists_unknown_report_attention_and_deduplicated_outbox() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let timestamp = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-a",
+        "manual-request-a",
+        timestamp,
+    );
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    insert_admitted_turn_projection(
+        &transaction,
+        "conversation-a",
+        "user-a",
+        "assistant-a",
+        "agent-run-a",
+        timestamp,
+    );
+    assert!(matches!(
+        admit_automation_run_in_transaction(
+            &transaction,
+            &AutomationRunAdmissionInput {
+                automation_run_id: claimed.id.clone(),
+                admission_token: claimed.admission_token.clone().unwrap(),
+                config_revision: task.revision,
+                permission_mode: "default".to_string(),
+                agent_run_id: "agent-run-a".to_string(),
+                conversation_id: "conversation-a".to_string(),
+                user_message_id: "user-a".to_string(),
+                assistant_message_id: "assistant-a".to_string(),
+                admitted_at: timestamp,
+            },
+        )
+        .unwrap(),
+        AutomationRunAdmissionOutcome::Admitted(_)
+    ));
+    transaction.commit().unwrap();
+    connection
+        .execute(
+            "UPDATE conversation_turn_traces
+             SET terminal_status = 'completed', updated_at = ?1, completed_at = ?1
+             WHERE run_id = 'agent-run-a'",
+            [timestamp + 100],
+        )
+        .unwrap();
+    let settlement = AutomationRunSettlementInput {
+        automation_run_id: claimed.id.clone(),
+        agent_run_id: "agent-run-a".to_string(),
+        terminal_status: StoredAutomationRunStatus::Completed,
+        report_kind: None,
+        result_preview: Some("Finished safely".to_string()),
+        error_code: None,
+        error_message: None,
+        settled_at: timestamp + 100,
+    };
+    let settled = match settle_automation_run_from_trace(&mut connection, &settlement).unwrap() {
+        AutomationRunMutationOutcome::Updated(run) => run,
+        outcome => panic!("unexpected settlement: {outcome:?}"),
+    };
+    assert_eq!(settled.report_kind.as_deref(), Some("unknown"));
+    assert_eq!(settled.status, StoredAutomationRunStatus::Completed);
+    assert_eq!(
+        settle_automation_run_from_trace(&mut connection, &settlement).unwrap(),
+        AutomationRunMutationOutcome::Updated(settled.clone())
+    );
+    let notifications = claim_pending_automation_notifications(
+        &mut connection,
+        "notification-claim-a",
+        timestamp + 101,
+        30_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0].conversation_id.as_deref(),
+        Some("conversation-a")
+    );
+    assert_eq!(notifications[0].user_message_id.as_deref(), Some("user-a"));
+    assert_eq!(
+        notifications[0].assistant_message_id.as_deref(),
+        Some("assistant-a")
+    );
+    assert!(acknowledge_automation_notification_delivered(
+        &mut connection,
+        &notifications[0].id,
+        "notification-claim-a",
+        timestamp + 102,
+    )
+    .unwrap()
+    .is_some());
+    assert!(claim_pending_automation_notifications(
+        &mut connection,
+        "notification-claim-b",
+        timestamp + 103,
+        30_000,
+        10,
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn terminal_notification_uses_the_run_snapshot_after_task_edits() {
+    let mut connection = connection();
+    let task = create(
+        &mut connection,
+        "automation-frozen-notification",
+        "request-frozen",
+    );
+    let timestamp = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-frozen-notification",
+        "manual-request-frozen-notification",
+        timestamp,
+    );
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    insert_admitted_turn_projection(
+        &transaction,
+        "conversation-frozen-notification",
+        "user-frozen-notification",
+        "assistant-frozen-notification",
+        "agent-run-frozen-notification",
+        timestamp,
+    );
+    assert!(matches!(
+        admit_automation_run_in_transaction(
+            &transaction,
+            &AutomationRunAdmissionInput {
+                automation_run_id: claimed.id.clone(),
+                admission_token: claimed.admission_token.clone().unwrap(),
+                config_revision: task.revision,
+                permission_mode: "default".to_string(),
+                agent_run_id: "agent-run-frozen-notification".to_string(),
+                conversation_id: "conversation-frozen-notification".to_string(),
+                user_message_id: "user-frozen-notification".to_string(),
+                assistant_message_id: "assistant-frozen-notification".to_string(),
+                admitted_at: timestamp,
+            },
+        )
+        .unwrap(),
+        AutomationRunAdmissionOutcome::Admitted(_)
+    ));
+    transaction.commit().unwrap();
+
+    let mut edited_config = task.config.clone();
+    edited_config.title = "Edited task title".to_string();
+    edited_config.notification_policy = "unsuccessful_only".to_string();
+    assert!(matches!(
+        replace_automation_config(&mut connection, &task.id, task.revision, &edited_config,)
+            .unwrap(),
+        AutomationCompareAndSetOutcome::Updated(_)
+    ));
+    connection
+        .execute(
+            "UPDATE conversation_turn_traces
+             SET terminal_status = 'completed', updated_at = ?1, completed_at = ?1
+             WHERE run_id = 'agent-run-frozen-notification'",
+            [timestamp + 100],
+        )
+        .unwrap();
+    let settled = match settle_automation_run_from_trace(
+        &mut connection,
+        &AutomationRunSettlementInput {
+            automation_run_id: claimed.id,
+            agent_run_id: "agent-run-frozen-notification".to_string(),
+            terminal_status: StoredAutomationRunStatus::Completed,
+            report_kind: Some("no_change".to_string()),
+            result_preview: Some("No material change.".to_string()),
+            error_code: None,
+            error_message: None,
+            settled_at: timestamp + 100,
+        },
+    )
+    .unwrap()
+    {
+        AutomationRunMutationOutcome::Updated(run) => run,
+        outcome => panic!("unexpected settlement outcome: {outcome:?}"),
+    };
+    assert_eq!(settled.status, StoredAutomationRunStatus::Completed);
+
+    let notifications = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-frozen-notification",
+        timestamp + 101,
+        30_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title, "Daily brief");
+    assert_eq!(notifications[0].notification_kind, "run_result");
+    assert_eq!(
+        get_automation(&connection, &task.id)
+            .unwrap()
+            .unwrap()
+            .config
+            .notification_policy,
+        "unsuccessful_only"
+    );
+}
+
+#[test]
+fn blocking_a_task_terminalizes_unadmitted_work_and_tombstone_suppresses_notifications() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let now = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-a",
+        "manual-request-a",
+        now,
+    );
+    let blocked = match block_automation(
+        &mut connection,
+        &task.id,
+        task.revision,
+        "permission_disabled",
+        "The selected permission mode is disabled.",
+    )
+    .unwrap()
+    {
+        AutomationCompareAndSetOutcome::Updated(task) => task,
+        outcome => panic!("unexpected block outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        get_automation_run(&connection, &claimed.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        StoredAutomationRunStatus::Failed
+    );
+    assert!(list_nonterminal_automation_runs(&connection)
+        .unwrap()
+        .is_empty());
+    tombstone_automation(&mut connection, &task.id, blocked.revision).unwrap();
+    assert!(claim_pending_automation_notifications(
+        &mut connection,
+        "notification-claim-a",
+        now + 1,
+        30_000,
+        10,
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn blocking_queued_work_notifies_important_updates_and_does_not_strand_the_run() {
+    let mut connection = connection();
+    let mut task_config = config();
+    task_config.notification_policy = "important_updates".to_string();
+    let task = match create_automation(
+        &mut connection,
+        &NewAutomationRecord {
+            id: "automation-important-block".to_string(),
+            create_request_id: "request-important-block".to_string(),
+            status: StoredAutomationStatus::Active,
+            config: task_config,
+        },
+    )
+    .unwrap()
+    {
+        AutomationCreateOutcome::Created(record) => record,
+        outcome => panic!("unexpected create outcome: {outcome:?}"),
+    };
+    let now = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-important-block",
+        "manual-request-important-block",
+        now,
+    );
+
+    let blocked = match block_automation(
+        &mut connection,
+        &task.id,
+        task.revision,
+        "permission_disabled",
+        "The selected permission mode is disabled.",
+    )
+    .unwrap()
+    {
+        AutomationCompareAndSetOutcome::Updated(record) => record,
+        outcome => panic!("unexpected block outcome: {outcome:?}"),
+    };
+    let failed_run = get_automation_run(&connection, &claimed.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed_run.status, StoredAutomationRunStatus::Failed);
+    assert_eq!(
+        failed_run.error_code.as_deref(),
+        Some("permission_disabled")
+    );
+    assert!(list_nonterminal_automation_runs(&connection)
+        .unwrap()
+        .is_empty());
+
+    let notifications = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-important-block",
+        blocked.updated_at,
+        30_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_kind, "configuration_blocked");
+    assert!(notifications[0].automation_run_id.is_none());
+}
+
+#[test]
+fn failed_unadmitted_work_emits_a_run_notification_for_important_updates() {
+    let mut connection = connection();
+    let mut task_config = config();
+    task_config.notification_policy = "important_updates".to_string();
+    let task = match create_automation(
+        &mut connection,
+        &NewAutomationRecord {
+            id: "automation-important-failure".to_string(),
+            create_request_id: "request-important-failure".to_string(),
+            status: StoredAutomationStatus::Active,
+            config: task_config,
+        },
+    )
+    .unwrap()
+    {
+        AutomationCreateOutcome::Created(record) => record,
+        outcome => panic!("unexpected create outcome: {outcome:?}"),
+    };
+    let now = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-important-failure",
+        "manual-request-important-failure",
+        now,
+    );
+    let failed = match terminate_unadmitted_automation_run(
+        &mut connection,
+        &claimed.id,
+        claimed.admission_token.as_deref().unwrap(),
+        StoredAutomationRunStatus::Failed,
+        "admission_failed",
+        "The Agent turn could not be started.",
+        now + 1,
+    )
+    .unwrap()
+    {
+        AutomationRunMutationOutcome::Updated(record) => record,
+        outcome => panic!("unexpected termination outcome: {outcome:?}"),
+    };
+
+    let notifications = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-important-failure",
+        now + 1,
+        30_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_kind, "run_result");
+    assert_eq!(
+        notifications[0].automation_run_id.as_deref(),
+        Some(failed.id.as_str())
+    );
+}
+
+#[test]
+fn structured_report_is_bounded_and_notification_policy_is_not_keyword_based() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let now = now_ms() + 1_000;
+    let claimed = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-a",
+        "manual-request-a",
+        now,
+    );
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'running', status_revision = status_revision + 1,
+                 admission_token = NULL, admission_expires_at = NULL,
+                 agent_run_id = 'agent-run-a', started_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now, claimed.id],
+        )
+        .unwrap();
+    let reported = match record_automation_report(
+        &mut connection,
+        &claimed.id,
+        "important_update",
+        "A structured update, independent of wording.",
+        now + 1,
+    )
+    .unwrap()
+    {
+        AutomationRunMutationOutcome::Updated(run) => run,
+        outcome => panic!("unexpected report outcome: {outcome:?}"),
+    };
+    assert_eq!(reported.report_kind.as_deref(), Some("important_update"));
+    assert_eq!(
+        reported.result_preview.as_deref(),
+        Some("A structured update, independent of wording.")
+    );
+    assert!(matches!(
+        record_automation_report(
+            &mut connection,
+            &claimed.id,
+            "no_change",
+            "A later tool call cannot downgrade the first durable report.",
+            now + 2,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Stale(Some(_))
+    ));
+    assert!(record_automation_report(
+        &mut connection,
+        &claimed.id,
+        "unknown_kind",
+        "not accepted",
+        now + 3,
+    )
+    .is_err());
+
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'waiting_for_approval', attention_required_at = ?1,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now + 4, claimed.id],
+        )
+        .unwrap();
+    let attentions = list_automation_attentions(&connection, None, 20).unwrap();
+    assert_eq!(attentions.items.len(), 1);
+    assert_eq!(attentions.items[0].attention_kind, "waiting_for_approval");
+    assert_eq!(
+        attentions.items[0].message.as_deref(),
+        Some("A structured update, independent of wording.")
+    );
+
+    assert!(!terminal_notification_requested(
+        "important_updates",
+        StoredAutomationRunStatus::Completed,
+        "no_change"
+    ));
+    assert!(terminal_notification_requested(
+        "important_updates",
+        StoredAutomationRunStatus::Completed,
+        "important_update"
+    ));
+    assert!(terminal_notification_requested(
+        "important_updates",
+        StoredAutomationRunStatus::Completed,
+        "completed"
+    ));
+    assert!(terminal_notification_requested(
+        "important_updates",
+        StoredAutomationRunStatus::Completed,
+        "unknown"
+    ));
+}
+
+#[test]
+fn notification_claim_release_and_ack_are_idempotent_across_restart_style_retries() {
+    let mut connection = connection();
+    let task = create(&mut connection, "automation-a", "request-a");
+    let now = now_ms() + 1_000;
+    let notification = enqueue_automation_notification(
+        &mut connection,
+        &NewAutomationNotificationRecord {
+            automation_id: task.id.clone(),
+            automation_run_id: None,
+            resource_revision: task.revision,
+            notification_kind: "configuration_blocked".to_string(),
+            title: "Needs attention".to_string(),
+            body: "Choose a valid target.".to_string(),
+            created_at: now,
+        },
+    )
+    .unwrap();
+    let replay = enqueue_automation_notification(
+        &mut connection,
+        &NewAutomationNotificationRecord {
+            automation_id: task.id,
+            automation_run_id: None,
+            resource_revision: task.revision,
+            notification_kind: "configuration_blocked".to_string(),
+            title: "Ignored duplicate title".to_string(),
+            body: "Ignored duplicate body".to_string(),
+            created_at: now + 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(replay.id, notification.id);
+
+    let first = claim_pending_automation_notifications(&mut connection, "claim-a", now, 30_000, 10)
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        claim_pending_automation_notifications(&mut connection, "claim-a", now + 1, 30_000, 10,)
+            .unwrap()[0]
+            .id,
+        notification.id
+    );
+    let retry_at = now + 60_000;
+    assert!(release_automation_notification(
+        &mut connection,
+        &notification.id,
+        "claim-a",
+        retry_at,
+        "native_notification_unavailable",
+    )
+    .unwrap()
+    .is_some());
+    assert!(claim_pending_automation_notifications(
+        &mut connection,
+        "claim-b",
+        retry_at - 1,
+        30_000,
+        10,
+    )
+    .unwrap()
+    .is_empty());
+    let second =
+        claim_pending_automation_notifications(&mut connection, "claim-b", retry_at, 30_000, 10)
+            .unwrap();
+    assert_eq!(second[0].id, notification.id);
+    assert_eq!(second[0].attempt_count, 2);
+    assert!(acknowledge_automation_notification_delivered(
+        &mut connection,
+        &notification.id,
+        "claim-b",
+        retry_at + 1,
+    )
+    .unwrap()
+    .is_some());
+    assert!(acknowledge_automation_notification_delivered(
+        &mut connection,
+        &notification.id,
+        "claim-b",
+        retry_at + 2,
+    )
+    .unwrap()
+    .is_some());
+}
+
+#[test]
+fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims() {
+    let mut connection = connection();
+    let base = now_ms() + 10_000;
+
+    let deleted_task = create(
+        &mut connection,
+        "automation-notification-deleted",
+        "request-notification-deleted",
+    );
+    let deleted_task = match block_automation(
+        &mut connection,
+        &deleted_task.id,
+        deleted_task.revision,
+        "target_invalid",
+        "Choose a valid target.",
+    )
+    .unwrap()
+    {
+        AutomationCompareAndSetOutcome::Updated(record) => record,
+        outcome => panic!("unexpected block outcome: {outcome:?}"),
+    };
+    let deleted_claim =
+        claim_pending_automation_notifications(&mut connection, "claim-deleted", base, 60_000, 10)
+            .unwrap();
+    assert_eq!(deleted_claim.len(), 1);
+    assert!(validate_claimed_automation_notification(
+        &mut connection,
+        &deleted_claim[0].id,
+        "claim-deleted",
+        base + 1,
+    )
+    .unwrap()
+    .is_some());
+    assert!(matches!(
+        tombstone_automation(&mut connection, &deleted_task.id, deleted_task.revision,).unwrap(),
+        AutomationCompareAndSetOutcome::Updated(_)
+    ));
+    assert!(validate_claimed_automation_notification(
+        &mut connection,
+        &deleted_claim[0].id,
+        "claim-deleted",
+        base + 2,
+    )
+    .unwrap()
+    .is_none());
+
+    let repaired_task = create(
+        &mut connection,
+        "automation-notification-repaired",
+        "request-notification-repaired",
+    );
+    let blocked_task = match block_automation(
+        &mut connection,
+        &repaired_task.id,
+        repaired_task.revision,
+        "target_invalid",
+        "Choose a valid target.",
+    )
+    .unwrap()
+    {
+        AutomationCompareAndSetOutcome::Updated(record) => record,
+        outcome => panic!("unexpected block outcome: {outcome:?}"),
+    };
+    let repaired_claim = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-repaired",
+        base + 3,
+        60_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(repaired_claim.len(), 1);
+    assert_eq!(
+        repaired_claim[0].resource_revision, blocked_task.revision,
+        "the claim must identify the exact blocked task revision"
+    );
+    let mut repaired_config = blocked_task.config.clone();
+    repaired_config.health_state = "ok".to_string();
+    repaired_config.blocked_code = None;
+    repaired_config.blocked_message = None;
+    repaired_config.next_run_at = Some(base + 120_000);
+    assert!(matches!(
+        replace_automation_config(
+            &mut connection,
+            &blocked_task.id,
+            blocked_task.revision,
+            &repaired_config,
+        )
+        .unwrap(),
+        AutomationCompareAndSetOutcome::Updated(_)
+    ));
+    assert!(validate_claimed_automation_notification(
+        &mut connection,
+        &repaired_claim[0].id,
+        "claim-repaired",
+        base + 4,
+    )
+    .unwrap()
+    .is_none());
+    let repaired_status: String = connection
+        .query_row(
+            "SELECT status FROM automation_notification_outbox WHERE id = ?1",
+            [&repaired_claim[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repaired_status, "suppressed");
+
+    let approval_task = create(
+        &mut connection,
+        "automation-notification-approval",
+        "request-notification-approval",
+    );
+    let approval_claim = enqueue_and_claim_manual_run(
+        &mut connection,
+        &approval_task,
+        "automation-run-notification-approval",
+        "manual-request-notification-approval",
+        base + 5,
+    );
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'running', status_revision = status_revision + 1,
+                 admission_token = NULL, admission_expires_at = NULL,
+                 agent_run_id = 'agent-run-notification-approval',
+                 started_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![base + 5, approval_claim.id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_pending_actions (
+                action_id, run_id, conversation_id, assistant_message_id,
+                action_type, tool_name, tool_call_id, status, target_status,
+                action_json, agent_input_json, created_at, updated_at
+             ) VALUES (
+                'action-notification-approval', 'agent-run-notification-approval', NULL, NULL,
+                'command', 'run_command', 'call-notification-approval', 'pending', NULL,
+                '{}', '{}', ?1, ?1
+             )",
+            [base + 5],
+        )
+        .unwrap();
+    assert!(matches!(
+        set_automation_run_waiting_for_approval(
+            &mut connection,
+            &approval_claim.id,
+            "agent-run-notification-approval",
+            true,
+            base + 6,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(AutomationRunRecord {
+            status: StoredAutomationRunStatus::WaitingForApproval,
+            ..
+        })
+    ));
+    let waiting_claim = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-approval",
+        base + 7,
+        60_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(waiting_claim.len(), 1);
+    assert_eq!(waiting_claim[0].notification_kind, "approval_required");
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'running', status_revision = status_revision + 1, updated_at = ?1
+             WHERE id = ?2 AND status = 'waiting_for_approval'",
+            params![base + 8, approval_claim.id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'waiting_for_approval', status_revision = status_revision + 1,
+                 updated_at = ?1
+             WHERE id = ?2 AND status = 'running'",
+            params![base + 9, approval_claim.id],
+        )
+        .unwrap();
+    let second_waiting = get_automation_run(&connection, &approval_claim.id)
+        .unwrap()
+        .expect("second waiting state");
+    enqueue_automation_notification(
+        &mut connection,
+        &NewAutomationNotificationRecord {
+            automation_id: approval_task.id,
+            automation_run_id: Some(approval_claim.id.clone()),
+            resource_revision: second_waiting.status_revision,
+            notification_kind: "approval_required".to_string(),
+            title: "Daily brief".to_string(),
+            body: "This scheduled task is waiting for your approval.".to_string(),
+            created_at: base + 9,
+        },
+    )
+    .unwrap();
+    assert!(validate_claimed_automation_notification(
+        &mut connection,
+        &waiting_claim[0].id,
+        "claim-approval",
+        base + 10,
+    )
+    .unwrap()
+    .is_none());
+    let approval_status: String = connection
+        .query_row(
+            "SELECT status FROM automation_notification_outbox WHERE id = ?1",
+            [&waiting_claim[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(approval_status, "suppressed");
+}
+
+#[test]
+fn approval_notification_validation_requires_a_still_pending_durable_action() {
+    let mut connection = connection();
+    let base = now_ms() + 10_000;
+    let task = create(
+        &mut connection,
+        "automation-notification-approved",
+        "request-notification-approved",
+    );
+    let claimed_run = enqueue_and_claim_manual_run(
+        &mut connection,
+        &task,
+        "automation-run-notification-approved",
+        "manual-request-notification-approved",
+        base,
+    );
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'running', status_revision = status_revision + 1,
+                 admission_token = NULL, admission_expires_at = NULL,
+                 agent_run_id = 'agent-run-notification-approved',
+                 started_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![base, claimed_run.id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_pending_actions (
+                action_id, run_id, conversation_id, assistant_message_id,
+                action_type, tool_name, tool_call_id, status, target_status,
+                action_json, agent_input_json, created_at, updated_at
+             ) VALUES (
+                'action-notification-approved', 'agent-run-notification-approved', NULL, NULL,
+                'command', 'run_command', 'call-notification-approved', 'pending', NULL,
+                '{}', '{}', ?1, ?1
+             )",
+            [base],
+        )
+        .unwrap();
+    assert!(matches!(
+        set_automation_run_waiting_for_approval(
+            &mut connection,
+            &claimed_run.id,
+            "agent-run-notification-approved",
+            true,
+            base + 1,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(AutomationRunRecord {
+            status: StoredAutomationRunStatus::WaitingForApproval,
+            ..
+        })
+    ));
+    let claimed_notification = claim_pending_automation_notifications(
+        &mut connection,
+        "claim-approved",
+        base + 2,
+        60_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(claimed_notification.len(), 1);
+    assert!(validate_claimed_automation_notification(
+        &mut connection,
+        &claimed_notification[0].id,
+        "claim-approved",
+        base + 3,
+    )
+    .unwrap()
+    .is_some());
+
+    connection
+        .execute(
+            "UPDATE agent_pending_actions
+             SET status = 'approved', updated_at = ?1
+             WHERE action_id = 'action-notification-approved' AND status = 'pending'",
+            [base + 4],
+        )
+        .unwrap();
+    let run = get_automation_run(&connection, &claimed_run.id)
+        .unwrap()
+        .expect("waiting run remains projected until the observer catches up");
+    assert_eq!(run.status, StoredAutomationRunStatus::WaitingForApproval);
+    assert!(validate_claimed_automation_notification(
+        &mut connection,
+        &claimed_notification[0].id,
+        "claim-approved",
+        base + 5,
+    )
+    .unwrap()
+    .is_none());
+    let notification_status: String = connection
+        .query_row(
+            "SELECT status FROM automation_notification_outbox WHERE id = ?1",
+            [&claimed_notification[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(notification_status, "suppressed");
+}
+
+#[test]
+fn attention_acknowledgement_covers_all_kinds_with_revisioned_idempotency() {
+    let mut connection = connection();
+    let base = now_ms() + 1_000;
+
+    let blocked_task = create(
+        &mut connection,
+        "automation-attention-blocked",
+        "request-attention-blocked",
+    );
+    assert!(matches!(
+        block_automation(
+            &mut connection,
+            &blocked_task.id,
+            blocked_task.revision,
+            "target_invalid",
+            "Choose a valid target.",
+        )
+        .unwrap(),
+        AutomationCompareAndSetOutcome::Updated(_)
+    ));
+
+    let failed_task = create(
+        &mut connection,
+        "automation-attention-failed",
+        "request-attention-failed",
+    );
+    let failed_claim = enqueue_and_claim_manual_run(
+        &mut connection,
+        &failed_task,
+        "automation-run-attention-failed",
+        "manual-request-attention-failed",
+        base,
+    );
+    assert!(matches!(
+        terminate_unadmitted_automation_run(
+            &mut connection,
+            &failed_claim.id,
+            failed_claim.admission_token.as_deref().unwrap(),
+            StoredAutomationRunStatus::Failed,
+            "admission_failed",
+            "The Agent turn could not be started.",
+            base + 1,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(_)
+    ));
+
+    let waiting_task = create(
+        &mut connection,
+        "automation-attention-waiting",
+        "request-attention-waiting",
+    );
+    let waiting_claim = enqueue_and_claim_manual_run(
+        &mut connection,
+        &waiting_task,
+        "automation-run-attention-waiting",
+        "manual-request-attention-waiting",
+        base + 2,
+    );
+    connection
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'running', status_revision = status_revision + 1,
+                 admission_token = NULL, admission_expires_at = NULL,
+                 agent_run_id = 'agent-run-attention-waiting',
+                 started_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![base + 2, waiting_claim.id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_pending_actions (
+                action_id, run_id, conversation_id, assistant_message_id,
+                action_type, tool_name, tool_call_id, status, target_status,
+                action_json, agent_input_json, created_at, updated_at
+             ) VALUES (
+                'action-attention-waiting', 'agent-run-attention-waiting', NULL, NULL,
+                'command', 'run_command', 'call-attention-waiting', 'pending', NULL,
+                '{}', '{}', ?1, ?1
+             )",
+            [base + 2],
+        )
+        .unwrap();
+    assert!(matches!(
+        set_automation_run_waiting_for_approval(
+            &mut connection,
+            &waiting_claim.id,
+            "agent-run-attention-waiting",
+            true,
+            base + 3,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(AutomationRunRecord {
+            status: StoredAutomationRunStatus::WaitingForApproval,
+            ..
+        })
+    ));
+
+    let attention_page = list_automation_attentions(&connection, None, 10).unwrap();
+    assert_eq!(attention_page.items.len(), 3);
+    assert!(attention_page.items.iter().any(|record| {
+        record.attention_id == format!("task:{}", blocked_task.id)
+            && record.attention_kind == "configuration_blocked"
+    }));
+    assert!(attention_page.items.iter().any(|record| {
+        record.attention_id == format!("run:{}", failed_claim.id)
+            && record.attention_kind == "run_failed"
+    }));
+    assert!(attention_page.items.iter().any(|record| {
+        record.attention_id == format!("run:{}", waiting_claim.id)
+            && record.attention_kind == "waiting_for_approval"
+    }));
+
+    for attention in &attention_page.items {
+        let acknowledged_at = attention.required_at + 10;
+        let acknowledged = acknowledge_automation_attention_record(
+            &mut connection,
+            &attention.attention_id,
+            acknowledged_at,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(acknowledged.read_at.unwrap() >= acknowledged.required_at);
+
+        let resource_revision = if let Some(run_id) = attention.automation_run_id.as_deref() {
+            get_automation_run(&connection, run_id)
+                .unwrap()
+                .unwrap()
+                .status_revision
+        } else {
+            get_automation(&connection, &attention.automation_id)
+                .unwrap()
+                .unwrap()
+                .revision
+        };
+        assert!(get_latest_automation_event_for(
+            &connection,
+            &attention.automation_id,
+            attention.automation_run_id.as_deref(),
+            "attention_changed",
+            Some(resource_revision),
+        )
+        .unwrap()
+        .is_some());
+
+        let sequence_after_first_ack = latest_automation_event_sequence(&connection).unwrap();
+        let replay = acknowledge_automation_attention_record(
+            &mut connection,
+            &attention.attention_id,
+            acknowledged_at + 1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay, acknowledged);
+        assert_eq!(
+            latest_automation_event_sequence(&connection).unwrap(),
+            sequence_after_first_ack,
+            "an ACK replay must not create another event"
+        );
+        let revision_after_replay = if let Some(run_id) = attention.automation_run_id.as_deref() {
+            get_automation_run(&connection, run_id)
+                .unwrap()
+                .unwrap()
+                .status_revision
+        } else {
+            get_automation(&connection, &attention.automation_id)
+                .unwrap()
+                .unwrap()
+                .revision
+        };
+        assert_eq!(revision_after_replay, resource_revision);
+    }
+    assert_eq!(
+        automation_attention_summary(&connection)
+            .unwrap()
+            .total_count,
+        0
+    );
 }

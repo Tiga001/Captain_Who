@@ -108,6 +108,7 @@ pub(crate) struct RequestOutbounds<'a> {
 #[derive(Clone)]
 pub(crate) struct CoreRequestServices {
     pub(crate) storage: Arc<StorageService>,
+    pub(crate) automation_scheduler_wake: crate::application::automation::AutomationSchedulerWake,
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
     pub(crate) image_generation_artifacts: Arc<ManagedImageGenerationArtifactStore>,
     pub(crate) image_generation_artifact_read_admission: Arc<Semaphore>,
@@ -172,6 +173,7 @@ where
     R: AsyncBufRead + Unpin,
 {
     let storage = services.storage;
+    let automation_scheduler_wake = services.automation_scheduler_wake;
     let image_generation_configuration = services.image_generation_configuration;
     let image_generation_artifacts = services.image_generation_artifacts;
     let image_generation_artifact_read_admission =
@@ -497,10 +499,15 @@ where
             if is_automation_request_method(&request.method) {
                 let request_id = request.id.clone();
                 let request_storage = Arc::clone(&storage);
+                let request_scheduler_wake = automation_scheduler_wake.clone();
                 let request_outbound = outbound.clone();
                 tokio::spawn(async move {
                     let response = match tokio::task::spawn_blocking(move || {
-                        handle_automation_request(&request_storage, request)
+                        handle_automation_request_with_wake(
+                            &request_storage,
+                            Some(&request_scheduler_wake),
+                            request,
+                        )
                     })
                     .await
                     {

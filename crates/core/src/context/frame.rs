@@ -112,6 +112,7 @@ impl ContextRetention {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
+    AutomationExecution,
     ConversationSummary,
     WorldStateSnapshot,
     WorldStateDiff,
@@ -136,6 +137,7 @@ impl ContextSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
+            Self::AutomationExecution => "automation_execution",
             Self::ConversationSummary => "conversation_summary",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
@@ -160,6 +162,7 @@ impl ContextSource {
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
+            "automation_execution" => Some(Self::AutomationExecution),
             "conversation_summary" => Some(Self::ConversationSummary),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
@@ -440,7 +443,9 @@ impl ContextMetadata {
     }
 
     pub(crate) fn message_placement(&self) -> LlmMessagePlacement {
-        if self.sources.contains(&ContextSource::BackendSystemPrompt) {
+        if self.sources.contains(&ContextSource::BackendSystemPrompt)
+            || self.sources.contains(&ContextSource::AutomationExecution)
+        {
             return LlmMessagePlacement::StableSystemPolicy;
         }
         if self.sources.contains(&ContextSource::ConversationSummary)

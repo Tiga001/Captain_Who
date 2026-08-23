@@ -70,6 +70,7 @@ import type {
   AutomationGetInput,
   AutomationListInput,
   AutomationListOutput,
+  AutomationOpenRequest,
   AutomationResync,
   AutomationRun,
   AutomationRunNowInput,
@@ -196,6 +197,7 @@ export interface AutomationsHostApi {
   ): Promise<HostInvocationResult<AutomationAttentionAcknowledgeOutput>>
   onEvent(handler: (event: AutomationEvent) => void): () => void
   onResync(handler: (event: AutomationResync) => void): () => void
+  onOpenRequested(handler: (request: AutomationOpenRequest) => void): () => void
 }
 
 export interface BrowserHostApi {

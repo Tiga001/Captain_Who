@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
 
+mod automation_turn;
 mod cancellation;
 mod collaboration_harness;
 mod command_sessions;

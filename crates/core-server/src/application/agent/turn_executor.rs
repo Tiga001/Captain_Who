@@ -182,6 +182,7 @@ pub(super) struct PreparedRuntimeTurnSegment {
     pub(super) agent_input: AgentChatInput,
     pub(super) skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
     pub(super) mcp_tools: Option<McpToolRuntime>,
+    pub(super) automation_report_sink: Option<Arc<dyn AutomationReportSink>>,
     pub(super) context_window_tool_projection: RunContextToolProjection,
     pub(super) cancellation_token: AgentCancellationToken,
     pub(super) steer_input: AgentSteerInputQueue,
@@ -211,6 +212,9 @@ pub(super) enum PreparedTurnRollback {
     },
     Rewrite {
         request_id: String,
+    },
+    Automation {
+        automation_run_id: String,
     },
     AgentWake,
 }
@@ -350,6 +354,9 @@ impl AgentService {
                 *previous_world_state_was_empty,
             ),
             PreparedTurnRollback::AgentWake => Ok(()),
+            PreparedTurnRollback::Automation { automation_run_id } => {
+                self.settle_automation_start_failure(automation_run_id, &cause)
+            }
             PreparedTurnRollback::Rewrite { request_id } => self
                 .settle_prepared_rewrite_failure(
                     conversation_id,
@@ -367,6 +374,201 @@ impl AgentService {
                     .into()
             }
         }
+    }
+
+    /// Terminalizes a Turn whose automation admission transaction already committed.
+    ///
+    /// Deleting its provisional messages would erase the exactly-once receipt and allow restart
+    /// recovery to create a duplicate user message. The automation watcher subsequently observes
+    /// this durable failed Trace and atomically settles the owning `automation_runs` row.
+    pub(crate) fn settle_automation_start_failure(
+        &self,
+        automation_run_id: &str,
+        cause: &str,
+    ) -> Result<(), String> {
+        let durable_run = self
+            .storage
+            .get_automation_run(automation_run_id)?
+            .ok_or_else(|| "admitted automation run disappeared".to_string())?;
+        let agent_run_id = durable_run.agent_run_id.as_deref().ok_or_else(|| {
+            "admitted automation run is missing its Agent run identity".to_string()
+        })?;
+        let conversation_id = durable_run.conversation_id.as_deref().ok_or_else(|| {
+            "admitted automation run is missing its Conversation identity".to_string()
+        })?;
+        let user_message_id = durable_run.user_message_id.as_deref().ok_or_else(|| {
+            "admitted automation run is missing its user message identity".to_string()
+        })?;
+        let assistant_message_id =
+            durable_run.assistant_message_id.as_deref().ok_or_else(|| {
+                "admitted automation run is missing its assistant message identity".to_string()
+            })?;
+        let reverse_bound = self
+            .storage
+            .get_automation_run_by_agent_run_id(agent_run_id)?
+            .ok_or_else(|| "admitted Agent run has no Automation owner".to_string())?;
+        if reverse_bound.id != durable_run.id
+            || reverse_bound.config_revision != durable_run.config_revision
+            || reverse_bound.conversation_id != durable_run.conversation_id
+            || reverse_bound.user_message_id != durable_run.user_message_id
+            || reverse_bound.assistant_message_id != durable_run.assistant_message_id
+        {
+            return Err(
+                "automation start-failure reverse identity does not match its durable admission"
+                    .to_string(),
+            );
+        }
+
+        let conversation = self
+            .storage
+            .load_conversation(conversation_id)?
+            .ok_or_else(|| "admitted automation Conversation disappeared".to_string())?;
+        let exact_user = conversation
+            .messages
+            .iter()
+            .filter(|message| message.id == user_message_id)
+            .collect::<Vec<_>>();
+        let exact_assistant = conversation
+            .messages
+            .iter()
+            .filter(|message| message.id == assistant_message_id)
+            .collect::<Vec<_>>();
+        if exact_user.len() != 1
+            || exact_user[0].role != "user"
+            || exact_assistant.len() != 1
+            || exact_assistant[0].role != "assistant"
+        {
+            return Err(
+                "automation start-failure identity does not match its durable message pair"
+                    .to_string(),
+            );
+        }
+        let current_trace = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)?
+            .ok_or_else(|| "automation trace disappeared before failure settlement".to_string())?;
+        if current_trace.conversation_id != conversation_id
+            || current_trace.run_id != agent_run_id
+            || !current_trace.items.is_empty()
+        {
+            return Err(
+                "automation start-failure identity does not match its exact empty trace"
+                    .to_string(),
+            );
+        }
+        match current_trace.terminal_status {
+            mycopilot_core::ConversationTurnTraceTerminalStatus::Failed => {
+                if durable_run.status
+                    != mycopilot_core::storage::automation_repository::StoredAutomationRunStatus::Failed
+                    && !matches!(
+                        durable_run.status,
+                        mycopilot_core::storage::automation_repository::StoredAutomationRunStatus::Running
+                            | mycopilot_core::storage::automation_repository::StoredAutomationRunStatus::WaitingForApproval
+                    )
+                {
+                    return Err(
+                        "failed Automation trace is bound to an incompatible run state"
+                            .to_string(),
+                    );
+                }
+                // The first caller may have committed and lost its return value. Treat the exact
+                // failed identity as success so scheduler recovery never tries to create or alter
+                // a second Turn.
+                self.notify_durable_turn_observers(assistant_message_id);
+                return Ok(());
+            }
+            mycopilot_core::ConversationTurnTraceTerminalStatus::InProgress => {
+                if !matches!(
+                    durable_run.status,
+                    mycopilot_core::storage::automation_repository::StoredAutomationRunStatus::Running
+                        | mycopilot_core::storage::automation_repository::StoredAutomationRunStatus::WaitingForApproval
+                ) {
+                    return Err(
+                        "in-progress Automation trace is bound to an incompatible run state"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "automation start-failure settlement cannot overwrite a terminal Turn"
+                        .to_string(),
+                );
+            }
+        }
+        let created_at = self
+            .storage
+            .get_assistant_message_created_at(conversation_id, assistant_message_id)?
+            .ok_or_else(|| {
+                "automation assistant disappeared before failure settlement".to_string()
+            })?;
+        let completed_at = now_ms().max(created_at);
+        let trace = failed_conversation_trace_without_items(
+            agent_run_id,
+            conversation_id,
+            assistant_message_id,
+            cause,
+        );
+        let mut settled = false;
+        for delay_ms in TERMINAL_PERSISTENCE_RETRY_DELAYS_MS {
+            match self.persist_automation_start_failure(
+                automation_run_id,
+                conversation_id,
+                assistant_message_id,
+                cause,
+                &trace,
+                created_at,
+                completed_at,
+            ) {
+                Ok(()) => {
+                    settled = true;
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(delay_ms)),
+            }
+        }
+        if !settled {
+            self.persist_automation_start_failure(
+                automation_run_id,
+                conversation_id,
+                assistant_message_id,
+                cause,
+                &trace,
+                created_at,
+                completed_at,
+            )?;
+        }
+        self.notify_durable_turn_observers(assistant_message_id);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_automation_start_failure(
+        &self,
+        _automation_run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        cause: &str,
+        trace: &ConversationTurnTrace,
+        created_at: i64,
+        completed_at: i64,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if crate::application::agent::take_automation_start_failure_settlement_failure(
+            _automation_run_id,
+        ) {
+            return Err("injected Automation start-failure trace settlement failure".to_string());
+        }
+        self.storage.finalize_chat_message_with_conversation_trace(
+            conversation_id,
+            assistant_message_id,
+            cause,
+            Some("error"),
+            "failed",
+            trace,
+            created_at,
+            completed_at,
+        )
     }
 
     /// Once the immutable rewrite receipt exists, a pre-runtime fault is an accepted Turn whose
@@ -465,12 +667,22 @@ impl AgentService {
         let assistant_message_id = prepared.output.assistant_message_id.clone();
         let mcp_tools = self.capture_mcp_tool_runtime(&prepared.agent_input);
         self.invalidate_conversation_context_state(&conversation_id);
-        let context_window_tool_projection = match self.context_window_tool_projection_with_mcp(
-            &prepared.agent_input,
-            prepared.skill_resources.as_ref().map(Arc::clone),
-            mcp_tools.clone(),
-        ) {
-            Ok(projection) => RunContextToolProjection::new(projection),
+        let projected_runtime = self
+            .automation_report_sink_for_agent_run_id(&run_id)
+            .and_then(|automation_report_sink| {
+                self.context_window_tool_projection_with_mcp_and_automation_report(
+                    &prepared.agent_input,
+                    prepared.skill_resources.as_ref().map(Arc::clone),
+                    mcp_tools.clone(),
+                    automation_report_sink.clone(),
+                )
+                .map(|projection| (projection, automation_report_sink))
+            });
+        let (context_window_tool_projection, automation_report_sink) = match projected_runtime {
+            Ok((projection, automation_report_sink)) => (
+                RunContextToolProjection::new(projection),
+                automation_report_sink,
+            ),
             Err(error) => {
                 if let PreparedTurnRollback::Rewrite { request_id } = &rollback {
                     let cause = error.to_string();
@@ -581,6 +793,7 @@ impl AgentService {
             agent_input: prepared.agent_input,
             skill_resources: prepared.skill_resources,
             mcp_tools,
+            automation_report_sink,
             context_window_tool_projection,
             cancellation_token: cancellation_token.clone(),
             steer_input,
@@ -893,11 +1106,17 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(active) = active_turns.get(conversation_id) {
-            return Err(format!(
-                "当前会话已有进行中的 agent 运行（runId={}），请等待其完成。",
-                active.run_id
-            )
-            .into());
+            return Err(AgentServiceError::structured(
+                format!(
+                    "当前会话已有进行中的 agent 运行（runId={}），请等待其完成。",
+                    active.run_id
+                ),
+                serde_json::json!({
+                    "domain": "agent_turn",
+                    "code": "conversation_busy",
+                    "retryable": true
+                }),
+            ));
         }
         if let Some(active) = self
             .storage
@@ -905,11 +1124,17 @@ impl AgentService {
             .into_iter()
             .find(|trace| trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress)
         {
-            return Err(format!(
-                "当前会话已有持久化的进行中 agent 运行（runId={}），请先完成或恢复它。",
-                active.run_id
-            )
-            .into());
+            return Err(AgentServiceError::structured(
+                format!(
+                    "当前会话已有持久化的进行中 agent 运行（runId={}），请先完成或恢复它。",
+                    active.run_id
+                ),
+                serde_json::json!({
+                    "domain": "agent_turn",
+                    "code": "conversation_busy",
+                    "retryable": true
+                }),
+            ));
         }
         active_turns.insert(
             conversation_id.to_string(),
@@ -1171,6 +1396,7 @@ impl AgentService {
             agent_input,
             skill_resources,
             mcp_tools,
+            automation_report_sink,
             context_window_tool_projection,
             cancellation_token,
             steer_input,
@@ -1328,6 +1554,9 @@ impl AgentService {
             .with_trace_observer(trace_observer)
             .with_model_request_observer(model_request_observer)
             .with_context_compaction(context_compaction_services);
+        if let Some(sink) = automation_report_sink {
+            host_services = host_services.with_automation_report_sink(sink);
+        }
         if let Some(builtin_capabilities) = self.builtin_capabilities.clone() {
             host_services = host_services.with_builtin_capabilities(builtin_capabilities);
         }

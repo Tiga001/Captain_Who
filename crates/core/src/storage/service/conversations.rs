@@ -93,15 +93,26 @@ fn ensure_deletion_scope_has_no_active_execution(
         .join(", ");
     let sql = format!(
         "SELECT EXISTS(
-             SELECT 1 FROM conversation_turn_traces
-             WHERE conversation_id IN ({placeholders}) AND terminal_status = 'in_progress'
+             SELECT 1 FROM conversation_turn_traces AS trace
+             WHERE trace.conversation_id IN ({placeholders})
+               AND trace.terminal_status = 'in_progress'
+               AND NOT EXISTS (
+                   SELECT 1 FROM automation_runs AS run
+                   WHERE run.agent_run_id = trace.run_id
+                     AND run.status IN ('completed', 'failed', 'cancelled')
+               )
              UNION ALL
              SELECT 1 FROM agent_command_sessions
              WHERE conversation_id IN ({placeholders}) AND status IN ('starting', 'running')
              UNION ALL
-             SELECT 1 FROM agent_pending_actions
-             WHERE conversation_id IN ({placeholders})
-               AND status IN ('pending', 'approved', 'executing')
+             SELECT 1 FROM agent_pending_actions AS pending
+             WHERE pending.conversation_id IN ({placeholders})
+               AND pending.status IN ('pending', 'approved', 'executing')
+               AND NOT EXISTS (
+                   SELECT 1 FROM automation_runs AS run
+                   WHERE run.agent_run_id = pending.run_id
+                     AND run.status IN ('completed', 'failed', 'cancelled')
+               )
          )"
     );
     let mut values = Vec::with_capacity(conversation_ids.len() * 3);
@@ -151,6 +162,154 @@ fn cleanup_conversation_owned_records(
             .map_err(storage_error)?;
     }
     Ok(())
+}
+
+fn message_deletion_has_protected_model_batch_receipts(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> Result<bool, String> {
+    if message_ids.is_empty() {
+        return Ok(false);
+    }
+    let placeholders = std::iter::repeat_n("?", message_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut values = Vec::with_capacity(1 + message_ids.len());
+    values.push(conversation_id.to_string());
+    values.extend(message_ids.iter().cloned());
+    connection
+        .query_row(
+            &format!(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_model_batch_receipts
+                     WHERE conversation_id = ?
+                       AND assistant_message_id IN ({placeholders})
+                 )"
+            ),
+            rusqlite::params_from_iter(values),
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage_error)
+}
+
+fn delete_protected_model_batch_receipts_for_messages(
+    transaction: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> Result<(), String> {
+    let placeholders = std::iter::repeat_n("?", message_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let receipt_filter = format!(
+        "SELECT receipt_id FROM agent_model_batch_receipts
+         WHERE conversation_id = ? AND assistant_message_id IN ({placeholders})"
+    );
+    let mut values = Vec::with_capacity(1 + message_ids.len());
+    values.push(conversation_id.to_string());
+    values.extend(message_ids.iter().cloned());
+    let mut replay_values = values.clone();
+    replay_values.extend(values.iter().cloned());
+    transaction
+        .execute(
+            &format!(
+                "DELETE FROM agent_model_batch_receipt_replays
+                 WHERE receipt_id IN ({receipt_filter})
+                    OR source_receipt_id IN ({receipt_filter})"
+            ),
+            rusqlite::params_from_iter(replay_values),
+        )
+        .map_err(storage_error)?;
+    for table in [
+        "agent_model_batch_receipt_items",
+        "agent_model_batch_receipt_targets",
+    ] {
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE receipt_id IN ({receipt_filter})"),
+                rusqlite::params_from_iter(values.iter()),
+            )
+            .map_err(storage_error)?;
+    }
+    transaction
+        .execute(
+            &format!(
+                "DELETE FROM agent_model_batch_receipts WHERE receipt_id IN ({receipt_filter})"
+            ),
+            rusqlite::params_from_iter(values.iter()),
+        )
+        .map_err(storage_error)?;
+
+    // The deletion transaction disables immutable coordination triggers. Reproduce the two FTS
+    // delete projections which would otherwise have been emitted by messages and trace items.
+    let fts_placeholders = std::iter::repeat_n("?", message_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut fts_values = Vec::with_capacity(1 + message_ids.len() * 2);
+    fts_values.push(conversation_id.to_string());
+    fts_values.extend(message_ids.iter().cloned());
+    fts_values.extend(message_ids.iter().cloned());
+    transaction
+        .execute(
+            &format!(
+                "DELETE FROM conversation_history_fts
+                 WHERE conversation_id = ?
+                   AND (message_id IN ({fts_placeholders})
+                        OR assistant_message_id IN ({fts_placeholders}))"
+            ),
+            rusqlite::params_from_iter(fts_values),
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn delete_chat_message_records_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+    message_ids: &[String],
+    delete_protected_receipts: bool,
+) -> Result<Vec<AttachmentRecord>, String> {
+    automation_repository::terminalize_automation_runs_before_message_delete(
+        transaction,
+        conversation_id,
+        message_ids,
+        now_ms(),
+    )
+    .map_err(storage_error)?;
+    usage_repository::roll_up_deleted_usage_for_messages(
+        transaction,
+        conversation_id,
+        message_ids,
+        now_ms(),
+    )
+    .map_err(storage_error)?;
+    let attachments =
+        attachment_repository::list_message_attachments(transaction, conversation_id, message_ids)
+            .map_err(storage_error)?;
+    attachment_repository::delete_message_attachments(transaction, conversation_id, message_ids)
+        .map_err(storage_error)?;
+    pending_action_repository::delete_pending_actions_for_messages(
+        transaction,
+        conversation_id,
+        message_ids,
+    )
+    .map_err(storage_error)?;
+    agent_action_audit_repository::delete_action_audit_for_messages(
+        transaction,
+        conversation_id,
+        message_ids,
+    )
+    .map_err(storage_error)?;
+    if delete_protected_receipts {
+        delete_protected_model_batch_receipts_for_messages(
+            transaction,
+            conversation_id,
+            message_ids,
+        )?;
+    }
+    chat_repository::delete_messages_in_transaction(transaction, conversation_id, message_ids)
+        .map_err(storage_error)?;
+    Ok(attachments)
 }
 
 fn delete_agent_tree_records(
@@ -406,8 +565,16 @@ impl StorageService {
             attachment_repository::list_project_deletion_attachments(&connection, project_id)
                 .map_err(storage_error)?;
         let tree_scopes = project_agent_tree_deletion_scopes(&connection, project_id)?;
+        let conversation_ids = project_conversation_ids(&connection, project_id)?;
         if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
+            automation_repository::terminalize_automation_runs_before_project_delete(
+                &transaction,
+                project_id,
+                &conversation_ids,
+                now_ms(),
+            )
+            .map_err(storage_error)?;
             usage_repository::roll_up_deleted_usage_for_project(&transaction, project_id, now_ms())
                 .map_err(storage_error)?;
             pending_action_repository::delete_pending_actions_for_project(&transaction, project_id)
@@ -422,9 +589,22 @@ impl StorageService {
             project_repository::delete_project(&transaction, project_id).map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
         } else {
-            let conversation_ids = project_conversation_ids(&connection, project_id)?;
-            ensure_deletion_scope_has_no_active_execution(&connection, &conversation_ids)?;
             with_agent_deletion_transaction(&mut connection, |transaction| {
+                automation_repository::terminalize_automation_runs_before_project_delete(
+                    transaction,
+                    project_id,
+                    &conversation_ids,
+                    now_ms(),
+                )
+                .map_err(storage_error)?;
+                ensure_deletion_scope_has_no_active_execution(transaction, &conversation_ids)?;
+                automation_repository::invalidate_automations_before_trigger_disabled_project_delete(
+                    transaction,
+                    project_id,
+                    &conversation_ids,
+                    now_ms(),
+                )
+                .map_err(storage_error)?;
                 usage_repository::roll_up_deleted_usage_for_project(
                     transaction,
                     project_id,
@@ -1209,24 +1389,84 @@ impl StorageService {
         trace_created_at: i64,
         trace_updated_at: i64,
     ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
-        let (conversation, permissions, outcome) = self.save_conversation_and_begin_turn_internal(
-            conversation,
-            expected_revision,
-            trusted_wake,
-            permission_source,
-            preloaded_agent_message_ids,
-            trace,
-            trace_created_at,
-            trace_updated_at,
-            None,
-            None,
-        )?;
+        let (conversation, permissions, outcome, automation_outcome) = self
+            .save_conversation_and_begin_turn_internal(
+                conversation,
+                expected_revision,
+                trusted_wake,
+                permission_source,
+                preloaded_agent_message_ids,
+                trace,
+                trace_created_at,
+                trace_updated_at,
+                None,
+                None,
+                None,
+            )?;
         if !matches!(outcome, super::ConversationTurnRewriteBeginOutcome::Started) {
             return Err(
                 "ordinary Turn admission unexpectedly replayed an edit request".to_string(),
             );
         }
+        if automation_outcome.is_some() {
+            return Err(
+                "ordinary Turn admission unexpectedly consumed an automation claim".to_string(),
+            );
+        }
         Ok((conversation, permissions))
+    }
+
+    /// Atomically admits a scheduler-owned HumanRoot Turn.
+    ///
+    /// Conversation metadata, the user/assistant messages, the empty in-progress Trace, delivery
+    /// bindings, and the `automation_runs` admitting->running transition share one
+    /// `BEGIN IMMEDIATE` transaction. A caller may launch model/MCP work only after this method
+    /// returns `Admitted`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        automation_admission: &automation_repository::AutomationRunAdmissionInput,
+    ) -> Result<
+        (
+            ChatConversationRecord,
+            crate::AgentPermissions,
+            automation_repository::AutomationRunAdmissionOutcome,
+        ),
+        String,
+    > {
+        let (conversation, permissions, rewrite_outcome, automation_outcome) = self
+            .save_conversation_and_begin_turn_internal(
+                conversation,
+                expected_revision,
+                None,
+                permission_source,
+                preloaded_agent_message_ids,
+                trace,
+                trace_created_at,
+                trace_updated_at,
+                None,
+                None,
+                Some(automation_admission),
+            )?;
+        if !matches!(
+            rewrite_outcome,
+            super::ConversationTurnRewriteBeginOutcome::Started
+        ) {
+            return Err(
+                "automation Turn admission unexpectedly replayed an edit request".to_string(),
+            );
+        }
+        let automation_outcome = automation_outcome.ok_or_else(|| {
+            "automation Turn admission did not consume its durable claim".to_string()
+        })?;
+        Ok((conversation, permissions, automation_outcome))
     }
 
     /// Atomically records an immutable logical replacement and starts its new root Turn.
@@ -1253,18 +1493,24 @@ impl StorageService {
         ),
         String,
     > {
-        self.save_conversation_and_begin_turn_internal(
-            conversation,
-            expected_revision,
-            None,
-            permission_source,
-            preloaded_agent_message_ids,
-            trace,
-            trace_created_at,
-            trace_updated_at,
-            Some(rewrite),
-            Some(prepared_attachments),
-        )
+        let (conversation, permissions, outcome, automation_outcome) = self
+            .save_conversation_and_begin_turn_internal(
+                conversation,
+                expected_revision,
+                None,
+                permission_source,
+                preloaded_agent_message_ids,
+                trace,
+                trace_created_at,
+                trace_updated_at,
+                Some(rewrite),
+                Some(prepared_attachments),
+                None,
+            )?;
+        if automation_outcome.is_some() {
+            return Err("rewrite admission unexpectedly consumed an automation claim".to_string());
+        }
+        Ok((conversation, permissions, outcome))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1280,11 +1526,13 @@ impl StorageService {
         trace_updated_at: i64,
         rewrite: Option<&conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission>,
         prepared_attachments: Option<&super::PreparedConversationTurnRewriteAttachments>,
+        automation_admission: Option<&automation_repository::AutomationRunAdmissionInput>,
     ) -> Result<
         (
             ChatConversationRecord,
             crate::AgentPermissions,
             super::ConversationTurnRewriteBeginOutcome,
+            Option<automation_repository::AutomationRunAdmissionOutcome>,
         ),
         String,
     > {
@@ -1372,6 +1620,7 @@ impl StorageService {
                     conversation,
                     effective_permissions,
                     super::ConversationTurnRewriteBeginOutcome::Replayed(Box::new(existing)),
+                    None,
                 ));
             }
             if rewrite.conversation_id != conversation.id
@@ -1491,6 +1740,26 @@ impl StorageService {
                 "conversation already has an active durable Turn ({active_run})"
             ));
         }
+        if let Some(admission) = automation_admission {
+            match automation_repository::revalidate_automation_permission_for_admission_in_transaction(
+                &transaction,
+                admission,
+            )
+            .map_err(storage_error)?
+            {
+                automation_repository::AutomationPermissionAdmissionOutcome::Enabled => {}
+                automation_repository::AutomationPermissionAdmissionOutcome::Blocked => {
+                    // No Conversation, message, Trace, attachment, or delivery write has happened
+                    // yet. Commit only the task/run block and its trigger-owned attention/outbox
+                    // effects, then surface the stable Host-only sentinel to the Agent adapter.
+                    transaction.commit().map_err(storage_error)?;
+                    return Err(
+                        automation_repository::AUTOMATION_PERMISSION_DISABLED_AT_ADMISSION
+                            .to_string(),
+                    );
+                }
+            }
+        }
         chat_repository::save_conversation_in_connection(&transaction, &conversation)
             .map_err(storage_error)?;
         if let Some(prepared) = prepared_attachments {
@@ -1573,11 +1842,52 @@ impl StorageService {
             conversation_turn_rewrite_repository::insert_in_transaction(&transaction, rewrite)
                 .map_err(storage_error)?;
         }
+        let automation_outcome = if let Some(admission) = automation_admission {
+            if trusted_wake.is_some() || rewrite.is_some() {
+                return Err(
+                    "automation admission cannot be combined with a Wake or rewrite".to_string(),
+                );
+            }
+            if admission.agent_run_id != trace.run_id
+                || admission.conversation_id != conversation.id
+                || admission.assistant_message_id != trace.assistant_message_id
+                || !conversation.messages.iter().any(|message| {
+                    message.id == admission.user_message_id && message.role == "user"
+                })
+            {
+                return Err(
+                    "automation admission identity does not match the prepared HumanRoot Turn"
+                        .to_string(),
+                );
+            }
+            let outcome =
+                automation_repository::admit_automation_run_in_transaction(&transaction, admission)
+                    .map_err(storage_error)?;
+            match &outcome {
+                automation_repository::AutomationRunAdmissionOutcome::Admitted(_) => {}
+                automation_repository::AutomationRunAdmissionOutcome::Replayed(_) => {
+                    return Err(
+                        "automation Turn was already admitted; recover it from the durable trace"
+                            .to_string(),
+                    );
+                }
+                automation_repository::AutomationRunAdmissionOutcome::Stale(_) => {
+                    return Err("automation Turn admission claim is stale".to_string());
+                }
+                automation_repository::AutomationRunAdmissionOutcome::Cancelled(_) => {
+                    return Err("automation Turn admission was cancelled".to_string());
+                }
+            }
+            Some(outcome)
+        } else {
+            None
+        };
         transaction.commit().map_err(storage_error)?;
         Ok((
             conversation,
             effective_permissions,
             super::ConversationTurnRewriteBeginOutcome::Started,
+            automation_outcome,
         ))
     }
 
@@ -1842,13 +2152,34 @@ impl StorageService {
                 .map_err(storage_error)?
         };
         if let Some(scope) = tree_scope {
-            ensure_deletion_scope_has_no_active_execution(&connection, &scope.conversation_ids)?;
             with_agent_deletion_transaction(&mut connection, |transaction| {
+                automation_repository::terminalize_automation_runs_before_conversation_delete(
+                    transaction,
+                    &scope.conversation_ids,
+                    now_ms(),
+                )
+                .map_err(storage_error)?;
+                ensure_deletion_scope_has_no_active_execution(
+                    transaction,
+                    &scope.conversation_ids,
+                )?;
+                automation_repository::invalidate_automations_before_trigger_disabled_conversation_delete(
+                    transaction,
+                    &scope.conversation_ids,
+                    now_ms(),
+                )
+                .map_err(storage_error)?;
                 cleanup_conversation_owned_records(transaction, &scope.conversation_ids)?;
                 delete_agent_tree_records(transaction, &scope)
             })?;
         } else {
             let transaction = connection.transaction().map_err(storage_error)?;
+            automation_repository::terminalize_automation_runs_before_conversation_delete(
+                &transaction,
+                &[conversation_id.to_string()],
+                now_ms(),
+            )
+            .map_err(storage_error)?;
             usage_repository::roll_up_deleted_usage_for_conversation(
                 &transaction,
                 conversation_id,
@@ -1892,41 +2223,31 @@ impl StorageService {
         }
 
         let mut connection = self.state.connection()?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        usage_repository::roll_up_deleted_usage_for_messages(
-            &transaction,
+        let has_protected_receipts = message_deletion_has_protected_model_batch_receipts(
+            &connection,
             conversation_id,
             message_ids,
-            now_ms(),
-        )
-        .map_err(storage_error)?;
-        let attachments = attachment_repository::list_message_attachments(
-            &transaction,
-            conversation_id,
-            message_ids,
-        )
-        .map_err(storage_error)?;
-        attachment_repository::delete_message_attachments(
-            &transaction,
-            conversation_id,
-            message_ids,
-        )
-        .map_err(storage_error)?;
-        pending_action_repository::delete_pending_actions_for_messages(
-            &transaction,
-            conversation_id,
-            message_ids,
-        )
-        .map_err(storage_error)?;
-        agent_action_audit_repository::delete_action_audit_for_messages(
-            &transaction,
-            conversation_id,
-            message_ids,
-        )
-        .map_err(storage_error)?;
-        chat_repository::delete_messages_in_transaction(&transaction, conversation_id, message_ids)
-            .map_err(storage_error)?;
-        transaction.commit().map_err(storage_error)?;
+        )?;
+        let attachments = if has_protected_receipts {
+            with_agent_deletion_transaction(&mut connection, |transaction| {
+                delete_chat_message_records_in_transaction(
+                    transaction,
+                    conversation_id,
+                    message_ids,
+                    true,
+                )
+            })?
+        } else {
+            let transaction = connection.transaction().map_err(storage_error)?;
+            let attachments = delete_chat_message_records_in_transaction(
+                &transaction,
+                conversation_id,
+                message_ids,
+                false,
+            )?;
+            transaction.commit().map_err(storage_error)?;
+            attachments
+        };
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted message attachment files: {error}");
         }

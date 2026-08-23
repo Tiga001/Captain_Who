@@ -19,7 +19,7 @@ import {
   initializeManagedWebviewSessions
 } from './webviews/managedWebviewSecurity'
 import { CoreServer } from './core/coreServer'
-import { openExternalUrl, registerHostIpc } from './ipc'
+import { openExternalUrl, registerHostIpc, type HostIpcRegistration } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { MainWindowLifecycleController } from './mainWindowLifecycle'
@@ -53,7 +53,7 @@ const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
-let disposeHostIpc: (() => void) | null = null
+let disposeHostIpc: HostIpcRegistration | null = null
 let mainWindow: BrowserWindow | null = null
 let browserSurfaceManager: BrowserSurfaceManager | null = null
 let browserNetworkGuard: BrowserNetworkGuard | null = null
@@ -375,6 +375,10 @@ app.on('before-quit', (event) => {
 
   event.preventDefault()
   isQuittingAfterServiceShutdown = true
+  // Stop the native Automation notification producer before any await in the shutdown path. Keep
+  // the remaining IPC and MCP reverse bridge registered until Core has completed its own bounded
+  // shutdown; only this producer could otherwise issue a lazy request that respawns Core.
+  disposeHostIpc?.beginAutomationShutdown()
   mainWindowLifecycle.prepareForQuit()
   void (async () => {
     // Keep the exact Main reverse bridge and BrowserSurface alive until Core has stopped the

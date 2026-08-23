@@ -698,8 +698,11 @@ impl AgentService {
         let skill_resources = self
             .restore_skill_resource_session(&record.agent_input)
             .map_err(|error| error.to_string())?;
-        let tool_projection =
-            self.context_window_tool_projection(&record.agent_input, skill_resources)?;
+        let tool_projection = self.context_window_tool_projection_for_agent_run(
+            run_id,
+            &record.agent_input,
+            skill_resources,
+        )?;
         self.persist_in_progress_trace_snapshot(
             run_id,
             conversation_id,
@@ -823,8 +826,11 @@ impl AgentService {
         let skill_resources = self
             .restore_skill_resource_session(&record.agent_input)
             .map_err(|error| error.to_string())?;
-        let tool_projection =
-            self.context_window_tool_projection(&record.agent_input, skill_resources)?;
+        let tool_projection = self.context_window_tool_projection_for_agent_run(
+            run_id,
+            &record.agent_input,
+            skill_resources,
+        )?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let model_context_items = snapshot.committed_prefix().model_context_items;
         let trace_changed = if decision == "rejected" {
@@ -1013,7 +1019,11 @@ impl AgentService {
                             .restore_skill_resource_session(&record.agent_input)
                             .map_err(|error| error.to_string())
                             .and_then(|resources| {
-                                self.context_window_tool_projection(&record.agent_input, resources)
+                                self.context_window_tool_projection_for_agent_run(
+                                    run_id,
+                                    &record.agent_input,
+                                    resources,
+                                )
                             });
                         let Ok(tool_projection) = tool_projection else {
                             self.invalidate_conversation_context_state(conversation_id);

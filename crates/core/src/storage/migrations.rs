@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 17;
+pub const STORAGE_SCHEMA_VERSION: i32 = 18;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:4e381d06079a9ebce059c4814b7e725c160c26e73faf6497ebb8be34ea07a51a";
+    "sha256:31f7d2e087d9f9bcd7b3a731c9b458fe13e9b62688bc45f7101e0733a98eb882";
 
 /// Opens the single supported development schema.
 ///
@@ -308,6 +308,7 @@ mod tests {
             "automation_runs_one_nonterminal_per_task",
             "automation_runs_history_idx",
             "automation_runs_recovery_idx",
+            "automation_runs_cancellation_idx",
             "automation_runs_attention_idx",
             "automation_events",
             "automation_events_task_sequence_idx",
@@ -323,6 +324,8 @@ mod tests {
             "block_automations_before_model_delete",
             "block_automations_after_model_disable",
             "emit_automation_attention_event_after_block",
+            "emit_automation_blocked_notification_after_block",
+            "terminate_unadmitted_automation_run_after_block",
         ] {
             let exists = connection
                 .query_row(
@@ -943,17 +946,17 @@ mod tests {
     }
 
     #[test]
-    fn the_previous_v16_baseline_requires_reset_without_mutation() {
+    fn the_previous_v17_baseline_requires_reset_without_mutation() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE preserved_v16_data (
+                "CREATE TABLE preserved_v17_data (
                     id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL
                  );
-                 INSERT INTO preserved_v16_data (id, payload)
+                 INSERT INTO preserved_v17_data (id, payload)
                  VALUES ('sentinel', 'preserve-on-reset-required');
-                 PRAGMA user_version = 16;",
+                 PRAGMA user_version = 17;",
             )
             .unwrap();
         let before_fingerprint = schema_fingerprint(&connection).unwrap();
@@ -965,13 +968,13 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 17, found 16"));
-        assert_eq!(read_schema_version(&connection).unwrap(), 16);
+            .contains("expected schema version 18, found 17"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 17);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT payload FROM preserved_v16_data WHERE id = 'sentinel'",
+                    "SELECT payload FROM preserved_v17_data WHERE id = 'sentinel'",
                     [],
                     |row| row.get::<_, String>(0),
                 )

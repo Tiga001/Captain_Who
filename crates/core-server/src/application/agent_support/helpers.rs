@@ -201,6 +201,7 @@ pub(crate) fn agent_prompt_preferences_from_record(
         }),
         custom_instructions: normalized_optional(Some(&record.custom_instructions)),
         updated_at: Some(record.updated_at),
+        automation_execution_context: None,
     }
 }
 

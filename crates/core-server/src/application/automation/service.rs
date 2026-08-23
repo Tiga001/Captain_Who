@@ -2,6 +2,7 @@ use super::permissions::{
     ensure_automation_permission_mode_enabled, reasoning_projection, resolve_automation_permissions,
 };
 use super::schedule::{normalize_schedule, AutomationScheduleError};
+use super::scheduler::AutomationSchedulerWake;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use mycopilot_core::storage::automation_repository::{
@@ -29,7 +30,6 @@ use mycopilot_protocol_rs::{
     AutomationTaskDto, AutomationUpdateInputDto, AUTOMATION_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use std::path::Path;
 
 const MAX_ID_BYTES: usize = 256;
@@ -38,14 +38,75 @@ const MAX_PROMPT_BYTES: usize = 65_536;
 const MAX_QUERY_BYTES: usize = 512;
 const MAX_PAGE_SIZE: u32 = 100;
 
+/// Immutable execution authority captured when a run is enqueued. This is intentionally distinct
+/// from the Renderer task DTO: workers never reconstruct authority from a later task revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AutomationConfigSnapshot {
+    pub(crate) schema_version: u32,
+    pub(crate) automation_id: String,
+    pub(crate) config_revision: i64,
+    pub(crate) title: String,
+    pub(crate) prompt: String,
+    pub(crate) destination_kind: String,
+    pub(crate) target_conversation_id: Option<String>,
+    pub(crate) project_binding_kind: String,
+    pub(crate) project_id: Option<String>,
+    pub(crate) model_id: Option<String>,
+    pub(crate) permission_mode: String,
+    pub(crate) permission_mode_version: i64,
+    pub(crate) permissions: mycopilot_protocol_rs::AutomationResolvedPermissionsDto,
+    pub(crate) reasoning: Option<mycopilot_protocol_rs::AutomationReasoningProjectionDto>,
+    pub(crate) schedule: mycopilot_protocol_rs::AutomationScheduleDto,
+    pub(crate) rrule: String,
+    pub(crate) timezone: String,
+    pub(crate) notification_policy: String,
+}
+
+impl AutomationConfigSnapshot {
+    pub(crate) fn parse(value: &str) -> Result<Self, AutomationServiceError> {
+        let snapshot: Self = serde_json::from_str(value)
+            .map_err(|_| AutomationServiceError::internal("Stored run snapshot is invalid"))?;
+        validate_schema(snapshot.schema_version)?;
+        validate_id(&snapshot.automation_id, "automationId")?;
+        if snapshot.config_revision <= 0 {
+            return Err(AutomationServiceError::internal(
+                "Stored run snapshot revision is invalid",
+            ));
+        }
+        validate_title_prompt(&snapshot.title, &snapshot.prompt)?;
+        Ok(snapshot)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct AutomationService<'a> {
     storage: &'a StorageService,
+    scheduler_wake: Option<&'a AutomationSchedulerWake>,
 }
 
 impl<'a> AutomationService<'a> {
     pub(crate) fn new(storage: &'a StorageService) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            scheduler_wake: None,
+        }
+    }
+
+    pub(crate) fn with_scheduler_wake(
+        storage: &'a StorageService,
+        scheduler_wake: &'a AutomationSchedulerWake,
+    ) -> Self {
+        Self {
+            storage,
+            scheduler_wake: Some(scheduler_wake),
+        }
+    }
+
+    fn wake_scheduler(&self) {
+        if let Some(wake) = self.scheduler_wake {
+            wake.wake();
+        }
     }
 
     pub(crate) fn list(
@@ -147,6 +208,7 @@ impl<'a> AutomationService<'a> {
             AutomationCreateOutcome::Created(record)
             | AutomationCreateOutcome::Existing(record) => record,
         };
+        self.wake_scheduler();
         self.task_dto(&record)
     }
 
@@ -181,7 +243,9 @@ impl<'a> AutomationService<'a> {
             .storage
             .replace_automation_config(&input.automation_id, expected_revision, &config)
             .map_err(AutomationServiceError::internal)?;
-        self.cas_task(outcome, &input.automation_id)
+        let task = self.cas_task(outcome, &input.automation_id)?;
+        self.wake_scheduler();
+        Ok(task)
     }
 
     pub(crate) fn set_enabled(
@@ -219,7 +283,9 @@ impl<'a> AutomationService<'a> {
             .storage
             .set_automation_status(&input.automation_id, expected_revision, status, next_run_at)
             .map_err(AutomationServiceError::internal)?;
-        self.cas_task(outcome, &input.automation_id)
+        let task = self.cas_task(outcome, &input.automation_id)?;
+        self.wake_scheduler();
+        Ok(task)
     }
 
     pub(crate) fn delete(
@@ -234,11 +300,14 @@ impl<'a> AutomationService<'a> {
             .tombstone_automation(&input.automation_id, expected_revision)
             .map_err(AutomationServiceError::internal)?;
         match outcome {
-            AutomationCompareAndSetOutcome::Updated(record) => Ok(AutomationDeleteOutputDto {
-                schema_version: AUTOMATION_SCHEMA_VERSION,
-                automation_id: record.id,
-                deleted_at: record.deleted_at.unwrap_or(record.updated_at),
-            }),
+            AutomationCompareAndSetOutcome::Updated(record) => {
+                self.wake_scheduler();
+                Ok(AutomationDeleteOutputDto {
+                    schema_version: AUTOMATION_SCHEMA_VERSION,
+                    automation_id: record.id,
+                    deleted_at: record.deleted_at.unwrap_or(record.updated_at),
+                })
+            }
             AutomationCompareAndSetOutcome::RevisionConflict(record) => {
                 Err(AutomationServiceError::revision_conflict(&record))
             }
@@ -275,12 +344,17 @@ impl<'a> AutomationService<'a> {
             .ok_or_else(|| AutomationServiceError::not_found(Some(input.automation_id.clone())))?;
         let expected_revision = task.revision;
         if task.config.health_state != "ok" {
-            return Err(AutomationServiceError::target_invalid(
-                Some(task.id),
-                task.config
-                    .blocked_message
-                    .unwrap_or_else(|| "The automation configuration is blocked.".to_string()),
-            ));
+            let message = task
+                .config
+                .blocked_message
+                .unwrap_or_else(|| "The automation configuration is blocked.".to_string());
+            return Err(
+                if task.config.blocked_code.as_deref() == Some("permission_disabled") {
+                    AutomationServiceError::permission_disabled(message)
+                } else {
+                    AutomationServiceError::target_invalid(Some(task.id), message)
+                },
+            );
         }
         if let Some(block) = self.current_target_block(&task)? {
             let outcome = self
@@ -303,11 +377,28 @@ impl<'a> AutomationService<'a> {
             .storage
             .load_ui_preferences()
             .map_err(AutomationServiceError::internal)?;
-        ensure_automation_permission_mode_enabled(
+        if let Err(error) = ensure_automation_permission_mode_enabled(
             parse_permission_mode(&task.config.permission_mode)?,
             &preferences,
-        )
-        .map_err(|error| AutomationServiceError::permission_disabled(error.to_string()))?;
+        ) {
+            let message = error.to_string();
+            let outcome = self
+                .storage
+                .block_automation(&task.id, task.revision, "permission_disabled", &message)
+                .map_err(AutomationServiceError::internal)?;
+            self.wake_scheduler();
+            return Err(match outcome {
+                AutomationCompareAndSetOutcome::Updated(_) => {
+                    AutomationServiceError::permission_disabled(message)
+                }
+                AutomationCompareAndSetOutcome::RevisionConflict(record) => {
+                    AutomationServiceError::revision_conflict(&record)
+                }
+                AutomationCompareAndSetOutcome::NotFound => {
+                    AutomationServiceError::not_found(Some(task.id))
+                }
+            });
+        }
         let snapshot = config_snapshot(&task)?;
         let outcome = self
             .storage
@@ -323,7 +414,10 @@ impl<'a> AutomationService<'a> {
             .map_err(AutomationServiceError::internal)?;
         match outcome {
             AutomationRunEnqueueOutcome::Enqueued(run)
-            | AutomationRunEnqueueOutcome::Existing(run) => run_dto(&run),
+            | AutomationRunEnqueueOutcome::Existing(run) => {
+                self.wake_scheduler();
+                run_dto(&run)
+            }
             AutomationRunEnqueueOutcome::ActiveConflict(run) => {
                 Err(AutomationServiceError::active_run(&task.id, &run.id))
             }
@@ -535,7 +629,7 @@ impl<'a> AutomationService<'a> {
         automation_task_dto(record, latest_run)
     }
 
-    fn current_target_block(
+    pub(crate) fn current_target_block(
         &self,
         task: &AutomationRecord,
     ) -> Result<Option<TargetBlock>, AutomationServiceError> {
@@ -632,9 +726,9 @@ impl<'a> AutomationService<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct TargetBlock {
-    code: &'static str,
-    message: &'static str,
+pub(crate) struct TargetBlock {
+    pub(crate) code: &'static str,
+    pub(crate) message: &'static str,
 }
 
 impl TargetBlock {
@@ -1028,11 +1122,10 @@ fn run_attention(record: &AutomationRunRecord) -> Option<AutomationAttentionDto>
 
 fn attention_dto(record: &AutomationAttentionRecord) -> AutomationAttentionDto {
     let kind = match record.attention_kind.as_str() {
-        "task" => AutomationAttentionKindDto::ConfigurationBlocked,
-        "run" if record.code.as_deref() == Some("waiting_for_approval") => {
-            AutomationAttentionKindDto::WaitingForApproval
-        }
-        "run" if record.code.is_some() => AutomationAttentionKindDto::RunFailed,
+        "configuration_blocked" => AutomationAttentionKindDto::ConfigurationBlocked,
+        "waiting_for_approval" => AutomationAttentionKindDto::WaitingForApproval,
+        "run_failed" => AutomationAttentionKindDto::RunFailed,
+        "important_update" => AutomationAttentionKindDto::ImportantUpdate,
         _ => AutomationAttentionKindDto::ImportantUpdate,
     };
     AutomationAttentionDto {
@@ -1088,11 +1181,13 @@ fn health_dto(record: &AutomationRecord) -> Result<AutomationHealthDto, Automati
             code: match record.config.blocked_code.as_deref() {
                 Some("target_missing") => AutomationBlockedCodeDto::TargetMissing,
                 Some("target_archived") => AutomationBlockedCodeDto::TargetArchived,
+                Some("target_invalid") => AutomationBlockedCodeDto::TargetInvalid,
                 Some("project_missing") => AutomationBlockedCodeDto::ProjectMissing,
                 Some("project_path_missing") => AutomationBlockedCodeDto::ProjectPathMissing,
                 Some("model_missing") => AutomationBlockedCodeDto::ModelMissing,
                 Some("model_disabled") => AutomationBlockedCodeDto::ModelDisabled,
                 Some("permission_disabled") => AutomationBlockedCodeDto::PermissionDisabled,
+                Some("configuration_invalid") => AutomationBlockedCodeDto::ConfigurationInvalid,
                 Some("schedule_invalid") => AutomationBlockedCodeDto::ScheduleInvalid,
                 _ => {
                     return Err(AutomationServiceError::internal(
@@ -1196,42 +1291,44 @@ fn decode_attention_cursor(
     }
 }
 
-fn config_snapshot(task: &AutomationRecord) -> Result<String, AutomationServiceError> {
-    let permissions: Value = serde_json::from_str(&task.config.permissions_json)
-        .map_err(|_| AutomationServiceError::internal("Stored permissions are invalid"))?;
-    let reasoning: Option<Value> = task
+pub(crate) fn config_snapshot(task: &AutomationRecord) -> Result<String, AutomationServiceError> {
+    let permissions: mycopilot_protocol_rs::AutomationResolvedPermissionsDto =
+        serde_json::from_str(&task.config.permissions_json)
+            .map_err(|_| AutomationServiceError::internal("Stored permissions are invalid"))?;
+    let reasoning: Option<mycopilot_protocol_rs::AutomationReasoningProjectionDto> = task
         .config
         .reasoning_json
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
         .map_err(|_| AutomationServiceError::internal("Stored reasoning is invalid"))?;
-    let schedule: Value = serde_json::from_str(&task.config.schedule_json)
-        .map_err(|_| AutomationServiceError::internal("Stored schedule is invalid"))?;
-    serde_json::to_string(&json!({
-        "schemaVersion": AUTOMATION_SCHEMA_VERSION,
-        "automationId": task.id,
-        "configRevision": task.revision,
-        "title": task.config.title,
-        "prompt": task.config.prompt,
-        "destinationKind": task.config.destination_kind,
-        "targetConversationId": task.config.target_conversation_id,
-        "projectBindingKind": task.config.project_binding_kind,
-        "projectId": task.config.project_id,
-        "modelId": task.config.model_id,
-        "permissionMode": task.config.permission_mode,
-        "permissionModeVersion": task.config.permission_mode_version,
-        "permissions": permissions,
-        "reasoning": reasoning,
-        "schedule": schedule,
-        "rrule": task.config.rrule,
-        "timezone": task.config.timezone,
-        "notificationPolicy": task.config.notification_policy
-    }))
+    let schedule: mycopilot_protocol_rs::AutomationScheduleDto =
+        serde_json::from_str(&task.config.schedule_json)
+            .map_err(|_| AutomationServiceError::internal("Stored schedule is invalid"))?;
+    serde_json::to_string(&AutomationConfigSnapshot {
+        schema_version: AUTOMATION_SCHEMA_VERSION,
+        automation_id: task.id.clone(),
+        config_revision: task.revision,
+        title: task.config.title.clone(),
+        prompt: task.config.prompt.clone(),
+        destination_kind: task.config.destination_kind.clone(),
+        target_conversation_id: task.config.target_conversation_id.clone(),
+        project_binding_kind: task.config.project_binding_kind.clone(),
+        project_id: task.config.project_id.clone(),
+        model_id: task.config.model_id.clone(),
+        permission_mode: task.config.permission_mode.clone(),
+        permission_mode_version: task.config.permission_mode_version,
+        permissions,
+        reasoning,
+        schedule,
+        rrule: task.config.rrule.clone(),
+        timezone: task.config.timezone.clone(),
+        notification_policy: task.config.notification_policy.clone(),
+    })
     .map_err(|_| AutomationServiceError::internal("Configuration snapshot serialization failed"))
 }
 
-fn validate_schema(version: u32) -> Result<(), AutomationServiceError> {
+pub(crate) fn validate_schema(version: u32) -> Result<(), AutomationServiceError> {
     if version == AUTOMATION_SCHEMA_VERSION {
         Ok(())
     } else {
@@ -1251,7 +1348,7 @@ fn validate_limit(limit: u32) -> Result<(), AutomationServiceError> {
         ))
     }
 }
-fn validate_id(value: &str, field: &'static str) -> Result<(), AutomationServiceError> {
+pub(crate) fn validate_id(value: &str, field: &'static str) -> Result<(), AutomationServiceError> {
     validate_bounded(value, MAX_ID_BYTES, false, field)
 }
 fn validate_title_prompt(title: &str, prompt: &str) -> Result<(), AutomationServiceError> {
@@ -1347,7 +1444,7 @@ fn permission_mode_string(value: AutomationPermissionModeDto) -> &'static str {
         AutomationPermissionModeDto::Custom => "custom",
     }
 }
-fn parse_permission_mode(
+pub(crate) fn parse_permission_mode(
     value: &str,
 ) -> Result<AutomationPermissionModeDto, AutomationServiceError> {
     match value {
@@ -1423,7 +1520,7 @@ pub(crate) struct AutomationServiceError {
 }
 
 impl AutomationServiceError {
-    fn validation(message: impl Into<String>, field: Option<&str>) -> Self {
+    pub(crate) fn validation(message: impl Into<String>, field: Option<&str>) -> Self {
         Self {
             kind: AutomationErrorKindDto::Validation,
             message: message.into(),

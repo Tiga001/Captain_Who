@@ -4795,8 +4795,19 @@ CREATE TABLE automation_runs (
             'completed', 'failed', 'cancelled'
         )
     ),
+    status_revision INTEGER NOT NULL DEFAULT 1 CHECK (status_revision > 0),
     retry_at INTEGER CHECK (retry_at IS NULL OR retry_at >= 0),
     admission_attempt INTEGER NOT NULL DEFAULT 0 CHECK (admission_attempt >= 0),
+    admission_token TEXT CHECK (
+        admission_token IS NULL
+        OR length(CAST(admission_token AS BLOB)) BETWEEN 1 AND 256
+    ),
+    admission_expires_at INTEGER CHECK (
+        admission_expires_at IS NULL OR admission_expires_at >= 0
+    ),
+    cancellation_requested_at INTEGER CHECK (
+        cancellation_requested_at IS NULL OR cancellation_requested_at >= 0
+    ),
     agent_run_id TEXT UNIQUE,
     conversation_id TEXT,
     user_message_id TEXT,
@@ -4844,6 +4855,22 @@ CREATE TABLE automation_runs (
         OR status NOT IN ('queued', 'admitting')
     ),
     CHECK (
+        (
+            status = 'admitting'
+            AND admission_token IS NOT NULL
+            AND admission_expires_at IS NOT NULL
+        )
+        OR (
+            status != 'admitting'
+            AND admission_token IS NULL
+            AND admission_expires_at IS NULL
+        )
+    ),
+    CHECK (
+        cancellation_requested_at IS NULL
+        OR status IN ('running', 'waiting_for_approval', 'cancelled')
+    ),
+    CHECK (
         attention_read_at IS NULL
         OR attention_required_at IS NULL
         OR attention_read_at >= attention_required_at
@@ -4851,7 +4878,7 @@ CREATE TABLE automation_runs (
 );
 CREATE UNIQUE INDEX automation_runs_scheduled_occurrence
     ON automation_runs (automation_id, scheduled_for)
-    WHERE trigger_kind = 'scheduled';
+    WHERE trigger_kind IN ('scheduled', 'recovery');
 CREATE UNIQUE INDEX automation_runs_manual_request
     ON automation_runs (manual_request_id)
     WHERE manual_request_id IS NOT NULL;
@@ -4861,8 +4888,12 @@ CREATE UNIQUE INDEX automation_runs_one_nonterminal_per_task
 CREATE INDEX automation_runs_history_idx
     ON automation_runs (automation_id, created_at DESC, id DESC);
 CREATE INDEX automation_runs_recovery_idx
-    ON automation_runs (status, retry_at, created_at, id)
+    ON automation_runs (status, retry_at, admission_expires_at, scheduled_for, id)
     WHERE status IN ('queued', 'admitting', 'running', 'waiting_for_approval');
+CREATE INDEX automation_runs_cancellation_idx
+    ON automation_runs (cancellation_requested_at, id)
+    WHERE cancellation_requested_at IS NOT NULL
+      AND status IN ('running', 'waiting_for_approval');
 CREATE INDEX automation_runs_attention_idx
     ON automation_runs (attention_required_at, id)
     WHERE attention_required_at IS NOT NULL
@@ -4920,6 +4951,19 @@ CREATE TABLE automation_notification_outbox (
         length(CAST(body AS BLOB)) BETWEEN 1 AND 4096
     ),
     status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'suppressed')),
+    retry_at INTEGER NOT NULL DEFAULT 0 CHECK (retry_at >= 0),
+    claim_token TEXT CHECK (
+        claim_token IS NULL
+        OR length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256
+    ),
+    claim_expires_at INTEGER CHECK (
+        claim_expires_at IS NULL OR claim_expires_at >= 0
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error_code TEXT CHECK (
+        last_error_code IS NULL
+        OR length(CAST(last_error_code AS BLOB)) BETWEEN 1 AND 128
+    ),
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
     delivered_at INTEGER CHECK (delivered_at IS NULL OR delivered_at >= created_at),
     FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
@@ -4929,18 +4973,26 @@ CREATE TABLE automation_notification_outbox (
         OR (status != 'delivered' AND delivered_at IS NULL)
     ),
     CHECK (
+        status = 'pending'
+        OR (claim_token IS NULL AND claim_expires_at IS NULL)
+    ),
+    CHECK (
+        (claim_token IS NULL AND claim_expires_at IS NULL)
+        OR (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
+    ),
+    CHECK (
         (notification_kind = 'configuration_blocked' AND automation_run_id IS NULL)
         OR (notification_kind != 'configuration_blocked' AND automation_run_id IS NOT NULL)
     )
 );
 CREATE UNIQUE INDEX automation_notification_outbox_run_kind
-    ON automation_notification_outbox (automation_run_id, notification_kind)
+    ON automation_notification_outbox (automation_run_id, notification_kind, resource_revision)
     WHERE automation_run_id IS NOT NULL;
 CREATE UNIQUE INDEX automation_notification_outbox_task_configuration_kind
     ON automation_notification_outbox (automation_id, notification_kind, resource_revision)
     WHERE automation_run_id IS NULL AND notification_kind = 'configuration_blocked';
 CREATE INDEX automation_notification_outbox_pending_idx
-    ON automation_notification_outbox (created_at, id)
+    ON automation_notification_outbox (retry_at, claim_expires_at, created_at, id)
     WHERE status = 'pending';
 
 -- Parent resources may be removed by existing product flows. Preserve the scheduled task as a
@@ -5102,4 +5154,136 @@ BEGIN
         json_object('blockedCode', NEW.blocked_code),
         NEW.updated_at
     );
+END;
+
+-- Configuration invalidation can originate from legacy project/model/conversation mutation paths.
+-- Persist the notification in the same transaction as the blocking update so a process crash
+-- cannot lose it. The unique task/revision key makes repeated reconciliation idempotent.
+CREATE TRIGGER emit_automation_blocked_notification_after_block
+AFTER UPDATE OF health_state, blocked_code, blocked_message, attention_required_at ON automations
+WHEN NEW.deleted_at IS NULL
+ AND NEW.health_state = 'blocked'
+ AND NEW.notification_policy IN ('all_runs', 'unsuccessful_only', 'important_updates')
+ AND (
+    OLD.health_state != 'blocked'
+    OR OLD.blocked_code IS NOT NEW.blocked_code
+    OR OLD.blocked_message IS NOT NEW.blocked_message
+    OR OLD.attention_required_at IS NOT NEW.attention_required_at
+ )
+BEGIN
+    INSERT OR IGNORE INTO automation_notification_outbox (
+        id, schema_version, automation_id, automation_run_id, resource_revision,
+        notification_kind, title, body, status, retry_at, claim_token,
+        claim_expires_at, attempt_count, last_error_code, created_at, delivered_at
+    ) VALUES (
+        'automation-notification:' || lower(hex(randomblob(16))),
+        1,
+        NEW.id,
+        NULL,
+        NEW.revision,
+        'configuration_blocked',
+        NEW.title,
+        COALESCE(NEW.blocked_message, 'This scheduled task needs attention.'),
+        'pending',
+        NEW.updated_at,
+        NULL,
+        NULL,
+        0,
+        NULL,
+        NEW.updated_at,
+        NULL
+    );
+    INSERT INTO automation_events (
+        schema_version, event_id, event_kind, automation_id, automation_run_id,
+        resource_revision, payload_json, occurred_at
+    ) VALUES (
+        1,
+        'automation-event:' || lower(hex(randomblob(16))),
+        'notification_requested',
+        NEW.id,
+        NULL,
+        NEW.revision,
+        json_object('notificationKind', 'configuration_blocked'),
+        NEW.updated_at
+    );
+END;
+
+-- A configuration block must not strand work in queued/admitting forever. Runs that have already
+-- crossed atomic HumanRoot admission keep executing from their frozen snapshot; only unadmitted
+-- work is terminalized here.
+CREATE TRIGGER terminate_unadmitted_automation_run_after_block
+AFTER UPDATE OF health_state, blocked_code, blocked_message ON automations
+WHEN NEW.deleted_at IS NULL
+ AND NEW.health_state = 'blocked'
+ AND (
+    OLD.health_state != 'blocked'
+    OR OLD.blocked_code IS NOT NEW.blocked_code
+    OR OLD.blocked_message IS NOT NEW.blocked_message
+ )
+BEGIN
+    UPDATE automation_runs
+    SET
+        status = 'failed',
+        status_revision = status_revision + 1,
+        retry_at = NULL,
+        admission_token = NULL,
+        admission_expires_at = NULL,
+        report_kind = COALESCE(report_kind, 'unknown'),
+        error_code = COALESCE(NEW.blocked_code, 'configuration_blocked'),
+        error_message = COALESCE(
+            NEW.blocked_message,
+            'The scheduled task configuration needs attention.'
+        ),
+        attention_required_at = MAX(COALESCE(attention_required_at, 0), NEW.updated_at),
+        completed_at = MAX(created_at, NEW.updated_at),
+        updated_at = MAX(updated_at, NEW.updated_at)
+    WHERE automation_id = NEW.id AND status IN ('queued', 'admitting');
+
+    INSERT INTO automation_events (
+        schema_version, event_id, event_kind, automation_id, automation_run_id,
+        resource_revision, payload_json, occurred_at
+    )
+    SELECT
+        1,
+        'automation-event:' || lower(hex(randomblob(16))),
+        'run_updated',
+        NEW.id,
+        run.id,
+        run.status_revision,
+        json_object('status', 'failed'),
+        NEW.updated_at
+    FROM automation_runs AS run
+    WHERE run.automation_id = NEW.id
+      AND run.status = 'failed'
+      AND run.completed_at = NEW.updated_at
+      AND run.error_code = COALESCE(NEW.blocked_code, 'configuration_blocked');
+
+    INSERT INTO automation_events (
+        schema_version, event_id, event_kind, automation_id, automation_run_id,
+        resource_revision, payload_json, occurred_at
+    )
+    SELECT
+        1,
+        'automation-event:' || lower(hex(randomblob(16))),
+        'attention_changed',
+        NEW.id,
+        run.id,
+        run.status_revision,
+        json_object('errorCode', run.error_code),
+        NEW.updated_at
+    FROM automation_runs AS run
+    WHERE run.automation_id = NEW.id
+      AND run.status = 'failed'
+      AND run.completed_at = NEW.updated_at
+      AND run.error_code = COALESCE(NEW.blocked_code, 'configuration_blocked');
+
+    UPDATE automations
+    SET last_run_at = MAX(COALESCE(last_run_at, 0), NEW.updated_at)
+    WHERE id = NEW.id
+      AND EXISTS (
+          SELECT 1 FROM automation_runs
+          WHERE automation_id = NEW.id
+            AND status = 'failed'
+            AND completed_at = NEW.updated_at
+      );
 END;

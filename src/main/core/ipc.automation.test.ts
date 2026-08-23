@@ -4,8 +4,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TrustedIpcMain } from '../ipc/trustedIpc'
 
 const getAllWindows = vi.hoisted(() => vi.fn())
+const fromWebContents = vi.hoisted(() => vi.fn())
+const isNotificationSupported = vi.hoisted(() => vi.fn())
+const createNativeNotification = vi.hoisted(() => vi.fn())
 
-vi.mock('electron', () => ({ BrowserWindow: { getAllWindows } }))
+vi.mock('electron', () => ({
+  BrowserWindow: { getAllWindows, fromWebContents },
+  Notification: class {
+    static isSupported(): boolean {
+      return isNotificationSupported()
+    }
+
+    constructor(options: unknown) {
+      return createNativeNotification(options)
+    }
+  }
+}))
 
 import { registerAutomationIpc } from '../ipc/automationIpc'
 
@@ -66,12 +80,23 @@ function createCore(overrides: Record<string, unknown> = {}) {
     listAutomationRuns: vi.fn(),
     getAutomationAttentionSummary: vi.fn(),
     acknowledgeAutomationAttention: vi.fn(),
+    claimAutomationNotifications: vi.fn((input: { claimToken: string }) =>
+      Promise.resolve({ schemaVersion: 1, claimToken: input.claimToken, notifications: [] })
+    ),
+    validateAutomationNotification: vi.fn(),
+    acknowledgeAutomationNotification: vi.fn(),
+    releaseAutomationNotification: vi.fn(),
     ...overrides
   }
 }
 
 describe('Main Automation IPC', () => {
-  beforeEach(() => getAllWindows.mockReset().mockReturnValue([]))
+  beforeEach(() => {
+    getAllWindows.mockReset().mockReturnValue([])
+    fromWebContents.mockReset().mockReturnValue(null)
+    isNotificationSupported.mockReset().mockReturnValue(false)
+    createNativeNotification.mockReset()
+  })
 
   it('registers the exact invocation allowlist and parses both sides strictly', async () => {
     const trusted = createTrustedIpc()
@@ -189,5 +214,88 @@ describe('Main Automation IPC', () => {
     ready?.({ sender: { isDestroyed: () => false, send } })
 
     expect(send).toHaveBeenCalledWith(HOST_CHANNELS.automations.resync, payload)
+  })
+
+  it('focuses only a trusted ready Renderer and sends exact run navigation after a click', async () => {
+    isNotificationSupported.mockReturnValue(true)
+    const listeners = new Map<string, () => void>()
+    const nativeNotification = {
+      on: vi.fn((name: string, listener: () => void) => {
+        listeners.set(name, listener)
+        return nativeNotification
+      }),
+      show: vi.fn(() => listeners.get('show')?.()),
+      close: vi.fn()
+    }
+    createNativeNotification.mockReturnValue(nativeNotification)
+    const notification = {
+      schemaVersion: 1,
+      notificationId: 'notification-1',
+      automationId: 'automation-1',
+      runId: 'run-1',
+      kind: 'run_result',
+      title: 'Daily brief',
+      body: 'Completed',
+      conversationId: 'conversation-1',
+      userMessageId: 'message-user-1',
+      assistantMessageId: 'message-assistant-1',
+      createdAt: 100
+    }
+    const core = createCore({
+      claimAutomationNotifications: vi.fn((input: { claimToken: string }) =>
+        Promise.resolve({
+          schemaVersion: 1,
+          claimToken: input.claimToken,
+          notifications: [notification]
+        })
+      ),
+      validateAutomationNotification: vi.fn(
+        (input: { notificationId: string; claimToken: string }) =>
+          Promise.resolve({
+            schemaVersion: 1,
+            notificationId: input.notificationId,
+            notification
+          })
+      ),
+      acknowledgeAutomationNotification: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        notificationId: 'notification-1',
+        status: 'delivered',
+        deliveredAt: 101
+      })
+    })
+    const trusted = createTrustedIpc()
+    const cleanup = registerAutomationIpc(trusted.ipc, core as never)
+    for (let index = 0; index < 8; index += 1) await Promise.resolve()
+    expect(nativeNotification.show).toHaveBeenCalledOnce()
+
+    // A click before Renderer readiness is retained instead of sent to an arbitrary window.
+    listeners.get('click')?.()
+    const send = vi.fn()
+    const sender = { isDestroyed: () => false, send }
+    const owner = {
+      isDestroyed: () => false,
+      isMinimized: () => true,
+      restore: vi.fn(),
+      show: vi.fn(),
+      focus: vi.fn()
+    }
+    fromWebContents.mockReturnValue(owner)
+    trusted.listeners.get(HOST_CHANNELS.automations.resyncReady)?.({ sender })
+
+    expect(owner.restore).toHaveBeenCalledOnce()
+    expect(owner.show).toHaveBeenCalledOnce()
+    expect(owner.focus).toHaveBeenCalledOnce()
+    expect(send).toHaveBeenCalledWith(HOST_CHANNELS.automations.openRequested, {
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runId: 'run-1',
+      destination: {
+        kind: 'conversation',
+        conversationId: 'conversation-1',
+        messageId: 'message-assistant-1'
+      }
+    })
+    cleanup()
   })
 })

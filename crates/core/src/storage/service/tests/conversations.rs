@@ -1360,6 +1360,133 @@ fn graph_bound_root_conversation_and_project_deletes_remove_owned_agent_trees() 
 }
 
 #[test]
+fn graph_bound_deletes_preserve_and_block_referencing_automations() {
+    use crate::storage::automation_repository::{
+        AutomationConfigRecord, AutomationCreateOutcome, NewAutomationRecord,
+        StoredAutomationStatus,
+    };
+
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let create_referencing_automation =
+        |automation_id: &str, request_id: &str, conversation_id: &str, project_id: &str| {
+            match service
+                .create_automation(&NewAutomationRecord {
+                    id: automation_id.to_string(),
+                    create_request_id: request_id.to_string(),
+                    status: StoredAutomationStatus::Active,
+                    config: AutomationConfigRecord {
+                        title: format!("Follow {conversation_id}"),
+                        prompt: "Report important changes.".to_string(),
+                        health_state: "ok".to_string(),
+                        blocked_code: None,
+                        blocked_message: None,
+                        destination_kind: "existing_chat".to_string(),
+                        target_conversation_id: Some(conversation_id.to_string()),
+                        project_binding_kind: "inherit".to_string(),
+                        project_id: None,
+                        model_id: None,
+                        permission_mode: "default".to_string(),
+                        permission_mode_version: 1,
+                        permissions_json: "{}".to_string(),
+                        reasoning_json: None,
+                        schedule_kind: "daily".to_string(),
+                        schedule_json:
+                            r#"{"kind":"daily","timeMinutes":540,"timezone":"Asia/Shanghai"}"#
+                                .to_string(),
+                        rrule: "FREQ=DAILY;INTERVAL=1".to_string(),
+                        timezone: "Asia/Shanghai".to_string(),
+                        anchor_at: 1_700_000_000_000,
+                        next_run_at: Some(1_700_000_100_000),
+                        notification_policy: "important_updates".to_string(),
+                        target_project_snapshot: Some(project_id.to_string()),
+                        target_conversation_snapshot: Some(conversation_id.to_string()),
+                        target_model_snapshot: Some("model-1".to_string()),
+                        target_project_id_snapshot: Some(project_id.to_string()),
+                        target_conversation_id_snapshot: Some(conversation_id.to_string()),
+                        target_model_id_snapshot: Some("model-1".to_string()),
+                    },
+                })
+                .unwrap()
+            {
+                AutomationCreateOutcome::Created(record) => record,
+                outcome => panic!("unexpected create outcome: {outcome:?}"),
+            }
+        };
+
+    for (project_id, suffix) in [
+        ("project-1", "referenced-conversation"),
+        ("project-2", "referenced-project"),
+    ] {
+        let conversation_id = format!("conversation-graph-{suffix}");
+        service
+            .save_conversation(conversation(
+                &conversation_id,
+                Some(project_id),
+                &format!("message-{suffix}"),
+            ))
+            .unwrap();
+        service
+            .ensure_root_agent(&EnsureRootAgentInput {
+                agent_id: format!("agent-graph-{suffix}"),
+                conversation_id: conversation_id.clone(),
+                creation_request_id: format!("ensure-agent-graph-{suffix}"),
+                task_name: "Root".to_string(),
+            })
+            .unwrap();
+        create_referencing_automation(
+            &format!("automation-{suffix}"),
+            &format!("automation-request-{suffix}"),
+            &conversation_id,
+            project_id,
+        );
+    }
+
+    service
+        .delete_conversation("conversation-graph-referenced-conversation")
+        .unwrap();
+    let conversation_blocked = service
+        .get_automation("automation-referenced-conversation")
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation_blocked.status, StoredAutomationStatus::Active);
+    assert_eq!(conversation_blocked.config.health_state, "blocked");
+    assert_eq!(
+        conversation_blocked.config.blocked_code.as_deref(),
+        Some("target_missing")
+    );
+    assert!(conversation_blocked.config.target_conversation_id.is_none());
+    assert!(conversation_blocked.config.next_run_at.is_none());
+
+    service.delete_project("project-2").unwrap();
+    let project_blocked = service
+        .get_automation("automation-referenced-project")
+        .unwrap()
+        .unwrap();
+    assert_eq!(project_blocked.status, StoredAutomationStatus::Active);
+    assert_eq!(project_blocked.config.health_state, "blocked");
+    assert_eq!(
+        project_blocked.config.blocked_code.as_deref(),
+        Some("project_missing")
+    );
+    assert!(project_blocked.config.target_conversation_id.is_none());
+    assert!(project_blocked.config.next_run_at.is_none());
+    assert!(service
+        .load_conversation("conversation-graph-referenced-project")
+        .unwrap()
+        .is_none());
+
+    let connection = service.state.connection().unwrap();
+    let violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .unwrap()
+        .query_map([], |_| Ok(()))
+        .unwrap()
+        .count();
+    assert_eq!(violations, 0);
+}
+
+#[test]
 fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

@@ -402,6 +402,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) steer_input: Option<AgentSteerInputQueue>,
     pub(super) collaboration_inbox: Option<Arc<dyn AgentSamplingBoundaryInbox>>,
     pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
+    pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
 }
 
 impl AgentRuntimeHostServices {
@@ -480,6 +481,15 @@ impl AgentRuntimeHostServices {
     /// Supplies Host-owned manifests, policy and process-memory grants for built-in capabilities.
     pub fn with_builtin_capabilities(mut self, runtime: crate::BuiltinCapabilityRuntime) -> Self {
         self.builtin_capabilities = Some(runtime);
+        self
+    }
+
+    /// Enables the closed, side-effect-free report channel for one automation-owned logical run.
+    pub fn with_automation_report_sink(
+        mut self,
+        sink: Arc<dyn crate::AutomationReportSink>,
+    ) -> Self {
+        self.automation_report_sink = Some(sink);
         self
     }
 
@@ -761,6 +771,7 @@ pub fn prepare_context_window_tool_projection(
             mcp_tools: host_services.mcp_tools.clone(),
             builtin_capabilities: host_services.builtin_capabilities.clone(),
             agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
+            automation_report_sink: host_services.automation_report_sink.clone(),
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(

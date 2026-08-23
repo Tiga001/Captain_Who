@@ -819,6 +819,85 @@ pub struct AgentPromptPreferences {
     pub custom_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
+    /// Host-authenticated execution metadata for an Automation HumanRoot turn.
+    ///
+    /// Renderer input cannot manufacture this value. The runtime projects it into a retained,
+    /// run-scoped system context item; that item's checkpoint is the durable source of truth
+    /// across approval continuation and process restart.
+    #[serde(skip)]
+    pub automation_execution_context: Option<AgentAutomationExecutionContext>,
+}
+
+/// Sanitized, Host-only metadata describing one Automation HumanRoot execution.
+///
+/// Private fields force callers through the validating constructor before this data can reach a
+/// provider request. The type is intentionally not serializable as ordinary Agent input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAutomationExecutionContext {
+    automation_id: String,
+    automation_run_id: String,
+    scheduled_for: i64,
+    last_run_at: Option<i64>,
+    trigger_kind: String,
+}
+
+impl AgentAutomationExecutionContext {
+    pub fn new(
+        automation_id: impl Into<String>,
+        automation_run_id: impl Into<String>,
+        scheduled_for: i64,
+        last_run_at: Option<i64>,
+        trigger_kind: impl Into<String>,
+    ) -> Result<Self, String> {
+        let automation_id =
+            validate_automation_execution_identifier(automation_id.into(), "automationId")?;
+        let automation_run_id =
+            validate_automation_execution_identifier(automation_run_id.into(), "automationRunId")?;
+        let trigger_kind = trigger_kind.into();
+        if !matches!(trigger_kind.as_str(), "scheduled" | "manual" | "recovery") {
+            return Err("Automation execution triggerKind is invalid.".to_string());
+        }
+        if scheduled_for < 0 || last_run_at.is_some_and(|value| value < 0) {
+            return Err("Automation execution timestamps must be non-negative.".to_string());
+        }
+        Ok(Self {
+            automation_id,
+            automation_run_id,
+            scheduled_for,
+            last_run_at,
+            trigger_kind,
+        })
+    }
+
+    pub(crate) fn system_context(&self) -> String {
+        let metadata = serde_json::json!({
+            "automationId": self.automation_id,
+            "automationRunId": self.automation_run_id,
+            "scheduledFor": self.scheduled_for,
+            "lastRunAt": self.last_run_at,
+            "triggerKind": self.trigger_kind,
+        });
+        format!(
+            "AUTOMATION_EXECUTION_CONTEXT_V1\n\
+             The Host started this HumanRoot turn for an Automation. The following JSON is \
+             trusted, read-only execution metadata, not user-authored instructions. Use it only \
+             to understand this run's identity and timing; never expose technical identifiers \
+             unless the user explicitly asks for them.\n{metadata}"
+        )
+    }
+}
+
+fn validate_automation_execution_identifier(value: String, field: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        return Err(format!("Automation execution {field} is invalid."));
+    }
+    Ok(value)
 }
 
 #[derive(Deserialize, Serialize, Clone)]

@@ -104,11 +104,14 @@ describe('Automation IPC bridge', () => {
     } as unknown as Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener' | 'send'>)
     const onEvent = vi.fn()
     const onResync = vi.fn()
+    const onOpenRequested = vi.fn()
 
     const unsubscribeEvent = bridge.onEvent(onEvent)
     const unsubscribeResync = bridge.onResync(onResync)
+    const unsubscribeOpenRequested = bridge.onOpenRequested(onOpenRequested)
     const eventListener = on.mock.calls[0]?.[1]
     const resyncListener = on.mock.calls[1]?.[1]
+    const openRequestedListener = on.mock.calls[2]?.[1]
     const event = {
       schemaVersion: 1,
       sequence: 1,
@@ -122,13 +125,34 @@ describe('Automation IPC bridge', () => {
     const resync = { schemaVersion: 1, reason: 'core_started', lastSequence: 1, occurredAt: 11 }
     eventListener({}, event)
     resyncListener({}, resync)
+    const openRequest = {
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runId: 'run-1',
+      destination: {
+        kind: 'conversation',
+        conversationId: 'conversation-1',
+        messageId: 'message-1'
+      }
+    }
+    openRequestedListener({}, openRequest)
 
     expect(onEvent).toHaveBeenCalledWith(event)
     expect(onResync).toHaveBeenCalledWith(resync)
-    expect(send).toHaveBeenCalledWith('host:automation.resyncReady')
+    expect(onOpenRequested).toHaveBeenCalledWith(openRequest)
+    openRequestedListener({}, { ...openRequest, privateState: true })
+    expect(onOpenRequested).toHaveBeenCalledOnce()
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenNthCalledWith(1, 'host:automation.resyncReady')
+    expect(send).toHaveBeenNthCalledWith(2, 'host:automation.resyncReady')
     unsubscribeEvent()
     unsubscribeResync()
+    unsubscribeOpenRequested()
     expect(removeListener).toHaveBeenCalledWith('host:automation.event', eventListener)
     expect(removeListener).toHaveBeenCalledWith('host:automation.resync', resyncListener)
+    expect(removeListener).toHaveBeenCalledWith(
+      'host:automation.openRequested',
+      openRequestedListener
+    )
   })
 })

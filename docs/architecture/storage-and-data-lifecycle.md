@@ -24,10 +24,10 @@ last_verified: 2026-08-23
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v17**（SQLite `PRAGMA user_version = 17`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v18**（SQLite `PRAGMA user_version = 18`）：
 
-- `STORAGE_SCHEMA_VERSION = 17`；
-- canonical schema fingerprint 为 `sha256:4e381d06079a9ebce059c4814b7e725c160c26e73faf6497ebb8be34ea07a51a`，由编译期常量和测试固定；
+- `STORAGE_SCHEMA_VERSION = 18`；
+- canonical schema fingerprint 为 `sha256:31f7d2e087d9f9bcd7b3a731c9b458fe13e9b62688bc45f7101e0733a98eb882`，由编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - 非空的旧版、未知版或结构被篡改的开发数据库返回 `development_storage_schema_reset_required`；
 - 当前没有受支持的原地升级链。
@@ -67,7 +67,7 @@ DDL 按领域大致分为：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v17、构造 repositories/services、加载 MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v18、构造 repositories/services、加载 MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -98,7 +98,7 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v17 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v18 的 version 与 fingerprint 必须一致。
 2. 非空非当前 schema fail closed，不自动执行未审计迁移。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -128,7 +128,7 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v17，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v18，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

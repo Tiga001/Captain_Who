@@ -56,6 +56,7 @@ export class CoreJsonRpcError extends Error {
 export class CoreJsonRpcClient {
   private readonly appDataRoot: string
   private child: ChildProcessWithoutNullStreams | null = null
+  private acceptingRequests = true
   private nextId = 1
   private readonly notificationHandlers = new Map<string, Set<NotificationHandler>>()
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>()
@@ -69,6 +70,9 @@ export class CoreJsonRpcClient {
   }
 
   start(): void {
+    if (!this.acceptingRequests) {
+      throw new Error('core-server request admission is closed')
+    }
     if (this.child) {
       return
     }
@@ -100,6 +104,16 @@ export class CoreJsonRpcClient {
     return this.child !== null
   }
 
+  /**
+   * Permanently fences this Host-owned client before application shutdown. Ordinary child-process
+   * exits do not close admission, so the next user request can still restart Core while the app is
+   * running. Once shutdown begins, however, a notifier or other late producer must not spawn a new
+   * Core process behind the shutdown coordinator.
+   */
+  beginShutdown(): void {
+    this.acceptingRequests = false
+  }
+
   stop(): void {
     if (!this.child) {
       return
@@ -111,8 +125,32 @@ export class CoreJsonRpcClient {
   }
 
   async request<TResult, TParams = unknown>(method: string, params?: TParams): Promise<TResult> {
+    if (!this.acceptingRequests) {
+      throw new Error('core-server request admission is closed')
+    }
     this.start()
 
+    return this.requestOnRunningChild<TResult, TParams>(method, params)
+  }
+
+  /**
+   * Sends the bounded Core shutdown RPC after request admission has closed. This method never
+   * starts a child, so an exit race can only reject the shutdown request; it cannot resurrect Core.
+   */
+  async requestDuringShutdown<TResult, TParams = unknown>(
+    method: string,
+    params?: TParams
+  ): Promise<TResult> {
+    if (this.acceptingRequests) {
+      throw new Error('core-server shutdown request requires closed admission')
+    }
+    return this.requestOnRunningChild<TResult, TParams>(method, params)
+  }
+
+  private async requestOnRunningChild<TResult, TParams = unknown>(
+    method: string,
+    params?: TParams
+  ): Promise<TResult> {
     if (!this.child) {
       throw new Error('core-server is not running')
     }

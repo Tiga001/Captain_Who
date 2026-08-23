@@ -95,8 +95,8 @@ use mycopilot_core::{
     AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
     AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolCall,
     AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
-    BuiltinCapabilityRuntime, CapabilityActivationId, ContextJournalCursor,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, AutomationReportKind,
+    AutomationReportSink, BuiltinCapabilityRuntime, CapabilityActivationId, ContextJournalCursor,
     ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
     ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, McpApprovedToolInvocation,
     McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker, McpToolRuntime,
@@ -113,6 +113,7 @@ use tokio::sync::{mpsc::UnboundedSender, Notify};
 mod access;
 mod action_execution;
 mod approval;
+mod automation_turn;
 mod collaboration_protocol;
 mod command_sessions;
 mod completion;
@@ -129,6 +130,11 @@ mod usage;
 
 use action_execution::*;
 pub(crate) use approval::ProjectedApprovalDecision;
+use automation_turn::AutomationHumanRootAdmission;
+pub(crate) use automation_turn::{
+    AutomationExecutionContext, AutomationHumanRootDestination, AutomationHumanRootStartError,
+    AutomationHumanRootTurnStart, AutomationTurnObservation,
+};
 pub(crate) use collaboration_protocol::event_dto as collaboration_event_dto;
 #[cfg(test)]
 use command_sessions::AgentCommandSessionHandoffGuard;
@@ -170,6 +176,63 @@ pub(crate) const AGENT_EVENT_NAME: &str = "agent.event";
 pub(crate) const THINKING_PLACEHOLDER: &str = "正在思考...";
 
 pub(crate) static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+// Test-only fault queues are keyed by the durable Automation run identity so concurrently running
+// tests cannot consume one another's failure windows. Keeping these outside production dependency
+// injection also prevents a test seam from becoming a Host API surface.
+#[cfg(test)]
+static AUTOMATION_POST_ADMISSION_PREPARATION_FAILURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static AUTOMATION_START_FAILURE_SETTLEMENT_FAILURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn inject_automation_post_admission_preparation_failure(automation_run_id: &str) {
+    AUTOMATION_POST_ADMISSION_PREPARATION_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(automation_run_id.to_string());
+}
+
+#[cfg(test)]
+pub(crate) fn take_automation_post_admission_preparation_failure(automation_run_id: &str) -> bool {
+    let mut failures = AUTOMATION_POST_ADMISSION_PREPARATION_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(index) = failures
+        .iter()
+        .position(|candidate| candidate == automation_run_id)
+    else {
+        return false;
+    };
+    failures.swap_remove(index);
+    true
+}
+
+#[cfg(test)]
+pub(crate) fn inject_automation_start_failure_settlement_failures(
+    automation_run_id: &str,
+    attempts: usize,
+) {
+    AUTOMATION_START_FAILURE_SETTLEMENT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .extend(std::iter::repeat_n(automation_run_id.to_string(), attempts));
+}
+
+#[cfg(test)]
+pub(crate) fn take_automation_start_failure_settlement_failure(automation_run_id: &str) -> bool {
+    let mut failures = AUTOMATION_START_FAILURE_SETTLEMENT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(index) = failures
+        .iter()
+        .position(|candidate| candidate == automation_run_id)
+    else {
+        return false;
+    };
+    failures.swap_remove(index);
+    true
+}
 
 const MAX_CONVERSATION_CONTEXT_STATE_CACHE_ENTRIES: usize = 32;
 

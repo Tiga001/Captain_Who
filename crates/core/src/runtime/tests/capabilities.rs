@@ -195,6 +195,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
         detail_level: None,
         custom_instructions: Some("Use concise domain terminology.".to_string()),
         updated_at: Some(10),
+        automation_execution_context: None,
     });
     assert_ne!(
         baseline_revision,

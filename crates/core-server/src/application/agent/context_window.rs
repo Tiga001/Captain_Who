@@ -227,15 +227,56 @@ impl AgentService {
         self.context_window_tool_projection_with_mcp(agent_input, skill_resources, mcp_tools)
     }
 
+    /// Rebuilds a durable in-flight run projection, restoring Automation-only capability from the
+    /// run's persisted ownership when appropriate. Approval settlement/recovery uses this instead
+    /// of the ordinary preview helper so its frozen Tool set cannot silently lose
+    /// `automation_report` across a process restart.
+    pub(super) fn context_window_tool_projection_for_agent_run(
+        &self,
+        agent_run_id: &str,
+        agent_input: &AgentChatInput,
+        skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
+    ) -> Result<AgentContextWindowToolProjection, String> {
+        let mcp_tools = self.capture_mcp_tool_runtime(agent_input);
+        let automation_report_sink = self.automation_report_sink_for_agent_run_id(agent_run_id)?;
+        self.context_window_tool_projection_with_mcp_and_automation_report(
+            agent_input,
+            skill_resources,
+            mcp_tools,
+            automation_report_sink,
+        )
+    }
+
     pub(super) fn context_window_tool_projection_with_mcp(
         &self,
         agent_input: &AgentChatInput,
         skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
         mcp_tools: Option<McpToolRuntime>,
     ) -> Result<AgentContextWindowToolProjection, String> {
+        self.context_window_tool_projection_with_mcp_and_automation_report(
+            agent_input,
+            skill_resources,
+            mcp_tools,
+            None,
+        )
+    }
+
+    /// Builds the exact provider Tool projection for one started Automation run. The explicit
+    /// run-scoped sink is deliberately absent from the general context-preview entry point so an
+    /// ordinary HumanRoot can never acquire the Automation-only report capability.
+    pub(super) fn context_window_tool_projection_with_mcp_and_automation_report(
+        &self,
+        agent_input: &AgentChatInput,
+        skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
+        mcp_tools: Option<McpToolRuntime>,
+        automation_report_sink: Option<Arc<dyn AutomationReportSink>>,
+    ) -> Result<AgentContextWindowToolProjection, String> {
         let mut host_services = self
             .context_window_provider_host_services()
             .with_office_engine(Arc::clone(&self.office_engine));
+        if let Some(sink) = automation_report_sink {
+            host_services = host_services.with_automation_report_sink(sink);
+        }
         if let Some(execution) = self.image_generation_execution.as_ref() {
             host_services = host_services.with_image_generation_execution(Arc::clone(execution));
         }

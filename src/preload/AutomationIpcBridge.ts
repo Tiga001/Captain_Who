@@ -1,6 +1,10 @@
 import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS, type AutomationsHostApi } from '@mycopilot/host-api'
-import type { AutomationEvent, AutomationResync } from '@mycopilot/protocol'
+import {
+  parseAutomationOpenRequest,
+  type AutomationEvent,
+  type AutomationResync
+} from '@mycopilot/protocol'
 
 type AutomationIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener' | 'send'>
 
@@ -31,6 +35,19 @@ export function createAutomationIpcBridge(ipcRenderer: AutomationIpcRenderer): A
       ipcRenderer.on(HOST_CHANNELS.automations.resync, listener)
       ipcRenderer.send(HOST_CHANNELS.automations.resyncReady)
       return () => ipcRenderer.removeListener(HOST_CHANNELS.automations.resync, listener)
+    },
+    onOpenRequested: (handler) => {
+      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+        try {
+          handler(parseAutomationOpenRequest(payload))
+        } catch {
+          // A malformed Main-to-Renderer navigation intent must not mutate Renderer state.
+        }
+      }
+      ipcRenderer.on(HOST_CHANNELS.automations.openRequested, listener)
+      // Main records only trusted, listener-ready renderers as native-notification targets.
+      ipcRenderer.send(HOST_CHANNELS.automations.resyncReady)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.automations.openRequested, listener)
     }
   }
 }

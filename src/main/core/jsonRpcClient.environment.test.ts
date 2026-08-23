@@ -142,4 +142,50 @@ describe('CoreJsonRpcClient application data root', () => {
     )
     expect(spawnProcess).not.toHaveBeenCalled()
   })
+
+  it('restarts Core after an unexpected exit while request admission remains open', async () => {
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'active-restart') })
+    client.start()
+    const first = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+    first.emit('exit', 1, null)
+
+    const response = client.request<{ alive: boolean }>('core.ping', {})
+    const second = spawnProcess.mock.results[1]?.value as FakeCoreProcess
+    second.stdout.write('{"jsonrpc":"2.0","id":1,"result":{"alive":true}}\n')
+
+    await expect(response).resolves.toEqual({ alive: true })
+    expect(spawnProcess).toHaveBeenCalledTimes(2)
+    client.stop()
+  })
+
+  it('never lazily restarts Core after explicit shutdown admission closes', async () => {
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'shutdown-fence') })
+    client.start()
+    client.beginShutdown()
+    client.stop()
+
+    expect(() => client.start()).toThrow('core-server request admission is closed')
+    await expect(client.request('automation.notifications.claim', {})).rejects.toThrow(
+      'core-server request admission is closed'
+    )
+    expect(spawnProcess).toHaveBeenCalledOnce()
+  })
+
+  it('can send the graceful shutdown RPC only to the already-running child', async () => {
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'graceful-shutdown') })
+    client.start()
+    client.beginShutdown()
+
+    const response = client.requestDuringShutdown<{ stopped: boolean }>('core.shutdown')
+    const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+    child.stdout.write('{"jsonrpc":"2.0","id":1,"result":{"stopped":true}}\n')
+
+    await expect(response).resolves.toEqual({ stopped: true })
+    expect(spawnProcess).toHaveBeenCalledOnce()
+    client.stop()
+    await expect(client.requestDuringShutdown('core.shutdown')).rejects.toThrow(
+      'core-server is not running'
+    )
+    expect(spawnProcess).toHaveBeenCalledOnce()
+  })
 })

@@ -555,6 +555,7 @@ mod tests {
             detail_level: Some(AgentPromptDetailLevel::Low),
             custom_instructions: Some("请多用比喻。".to_string()),
             updated_at: Some(1),
+            automation_execution_context: None,
         };
 
         let prompt = build_system_prompt(Some(&preferences), &[tool_definition("read_file")]);

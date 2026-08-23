@@ -20,7 +20,7 @@ impl AgentService {
         input: AgentConversationTurnInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
-        self.start_human_root_turn_internal(input, None, notifications)
+        self.start_human_root_turn_internal(input, None, None, notifications)
     }
 
     pub fn rewrite_conversation_turn(
@@ -106,16 +106,31 @@ impl AgentService {
                 source_user_message_id,
                 source_assistant_message_id,
             }),
+            None,
             notifications,
         )
     }
 
-    fn start_human_root_turn_internal(
+    pub(super) fn start_human_root_turn_internal(
         &self,
         mut input: AgentConversationTurnInput,
         rewrite: Option<HumanConversationTurnRewrite>,
+        mut automation: Option<AutomationHumanRootAdmission>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        let automation_execution_context = automation
+            .as_ref()
+            .map(|automation| {
+                mycopilot_core::AgentAutomationExecutionContext::new(
+                    automation.context.automation_id.clone(),
+                    automation.context.automation_run_id.clone(),
+                    automation.context.scheduled_for,
+                    automation.context.last_run_at,
+                    automation.context.trigger_kind.clone(),
+                )
+            })
+            .transpose()
+            .map_err(AgentServiceError::from)?;
         // Normalize all identities before admission. In particular, a new Conversation must be
         // visible to the same one-Turn reservation used by an existing Conversation.
         let conversation_id = normalized_optional(input.conversation_id.as_deref())
@@ -235,15 +250,34 @@ impl AgentService {
             .is_empty();
 
         let run_id = next_run_id();
-        let global_permit = self
-            .turn_concurrency_gate()
-            .try_acquire()
-            .map_err(AgentServiceError::from)?;
+        let global_permit = match automation
+            .as_mut()
+            .and_then(|automation| automation.global_permit.take())
+        {
+            Some(permit) => permit,
+            None => self
+                .turn_concurrency_gate()
+                .try_acquire()
+                .map_err(AgentServiceError::from)?,
+        };
         self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
         self.register_turn_concurrency_permit(&run_id, global_permit)?;
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
 
+        let automation_admission = automation.as_ref().map(|automation| {
+            mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput {
+                automation_run_id: automation.context.automation_run_id.clone(),
+                admission_token: automation.admission_token.clone(),
+                config_revision: automation.config_revision,
+                permission_mode: automation.permission_mode.clone(),
+                agent_run_id: run_id.clone(),
+                conversation_id: conversation_id.clone(),
+                user_message_id: user_message_id.clone(),
+                assistant_message_id: assistant_message_id.clone(),
+                admitted_at: now_ms(),
+            }
+        });
         let prepared_outcome = match rewrite.clone() {
             Some(rewrite) => prepare_reserved_human_rewrite_turn(
                 &self.storage,
@@ -261,6 +295,8 @@ impl AgentService {
                 &run_id,
                 previous_conversation.clone(),
                 expected_revision,
+                automation_admission.as_ref(),
+                automation_execution_context,
             )
             .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
         };
@@ -294,6 +330,58 @@ impl AgentService {
                         .into()),
                     };
                 }
+                if let Some(automation) = &automation {
+                    if error.data().and_then(|data| data["code"].as_str())
+                        == Some("permission_disabled")
+                    {
+                        // Atomic storage admission committed only the task/run block; it wrote no
+                        // provisional Conversation facts. Preserve the structured code so the
+                        // scheduler classifies this as a repairable permission block, and avoid a
+                        // generic rollback that could obscure that durable outcome.
+                        self.release_turn_concurrency_permit(&run_id);
+                        self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                        return Err(error);
+                    }
+                    let admitted = match self
+                        .storage
+                        .get_automation_run(&automation.context.automation_run_id)
+                    {
+                        Ok(candidate) => candidate.is_some_and(|candidate| {
+                            candidate.agent_run_id.as_deref() == Some(run_id.as_str())
+                        }),
+                        Err(inspect_error) => {
+                            // Once the admission transaction may have committed, an inspection
+                            // failure must never fall through to ordinary HumanRoot rollback: that
+                            // could erase the exactly-once message receipt. Durable recovery can
+                            // safely decide the run/trace relationship on the next pass.
+                            self.release_turn_concurrency_permit(&run_id);
+                            self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                            return Err(format!(
+                                "{error}; could not inspect Automation admission after preparation failure: {inspect_error}"
+                            )
+                            .into());
+                        }
+                    };
+                    if admitted {
+                        let cause = error.to_string();
+                        let settlement = self.settle_automation_start_failure(
+                            &automation.context.automation_run_id,
+                            &cause,
+                        );
+                        self.release_turn_concurrency_permit(&run_id);
+                        self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                        return Err(match settlement {
+                            Ok(()) => cause.into(),
+                            Err(settlement_error) => format!(
+                                "{cause}; failed to settle admitted automation Turn: {settlement_error}"
+                            )
+                            .into(),
+                        });
+                    }
+                }
                 self.release_turn_concurrency_permit(&run_id);
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
@@ -315,6 +403,10 @@ impl AgentService {
         let rollback = if let Some(rewrite) = &rewrite {
             PreparedTurnRollback::Rewrite {
                 request_id: rewrite.request_id.clone(),
+            }
+        } else if let Some(automation) = automation {
+            PreparedTurnRollback::Automation {
+                automation_run_id: automation.context.automation_run_id,
             }
         } else {
             PreparedTurnRollback::Human {
