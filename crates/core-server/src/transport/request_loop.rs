@@ -494,6 +494,23 @@ where
                 }
                 continue;
             }
+            if is_automation_request_method(&request.method) {
+                let request_id = request.id.clone();
+                let request_storage = Arc::clone(&storage);
+                let request_outbound = outbound.clone();
+                tokio::spawn(async move {
+                    let response = match tokio::task::spawn_blocking(move || {
+                        handle_automation_request(&request_storage, request)
+                    })
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => automation_internal_error_response(request_id),
+                    };
+                    let _ = enqueue_outbound(&request_outbound, response);
+                });
+                continue;
+            }
             if request.method == OFFICE_GET_STATUS_METHOD {
                 let request_outbound = outbound.clone();
                 let request_service = agent_service.clone();

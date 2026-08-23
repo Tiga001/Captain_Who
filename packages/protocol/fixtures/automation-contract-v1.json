@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "permissionModeVersion": 1,
+  "permissionModes": ["default", "full", "custom"],
+  "permissionGolden": {
+    "customPermissions": {
+      "read": "all",
+      "write": "denied",
+      "command": "auto_approve",
+      "commandSafety": "full_access",
+      "patch": "auto_approve"
+    },
+    "resolved": {
+      "default": {
+        "read": "workspace_only",
+        "write": "workspace_only",
+        "command": "require_approval",
+        "commandSafety": "guarded",
+        "patch": "require_approval"
+      },
+      "full": {
+        "read": "all",
+        "write": "all",
+        "command": "auto_approve",
+        "commandSafety": "full_access",
+        "patch": "auto_approve"
+      },
+      "custom": {
+        "read": "all",
+        "write": "denied",
+        "command": "auto_approve",
+        "commandSafety": "guarded",
+        "patch": "auto_approve"
+      }
+    }
+  },
+  "methods": {
+    "list": "automation.list",
+    "get": "automation.get",
+    "create": "automation.create",
+    "update": "automation.update",
+    "setEnabled": "automation.setEnabled",
+    "runNow": "automation.runNow",
+    "delete": "automation.delete",
+    "listRuns": "automation.runs.list",
+    "attentionSummary": "automation.attention.summary",
+    "acknowledgeAttention": "automation.attention.acknowledge"
+  },
+  "notifications": {
+    "event": "automation.event",
+    "resync": "automation.resync"
+  },
+  "nullableListInput": {
+    "schemaVersion": 1,
+    "status": null,
+    "query": null,
+    "cursor": null,
+    "limit": 20
+  },
+  "nullableCustomSchedule": {
+    "kind": "custom",
+    "frequency": "hourly",
+    "interval": 2,
+    "minuteOfHour": 30,
+    "timeMinutes": null,
+    "weekdays": null,
+    "monthDays": null,
+    "months": null,
+    "anchorAt": 1787414400000,
+    "timezone": "Asia/Shanghai"
+  },
+  "createInput": {
+    "schemaVersion": 1,
+    "requestId": "request-create-1",
+    "status": "active",
+    "title": "Daily brief",
+    "prompt": "Summarize the current project status.",
+    "destination": {
+      "kind": "new_chat",
+      "projectBinding": "project",
+      "projectId": "project-1",
+      "modelId": "model-1"
+    },
+    "permissionMode": "default",
+    "permissionModeVersion": 1,
+    "schedule": {
+      "kind": "weekly",
+      "weekdays": ["monday", "friday"],
+      "timeMinutes": 540,
+      "anchorAt": 1787414400000,
+      "timezone": "Asia/Shanghai"
+    },
+    "notificationPolicy": "all_runs"
+  },
+  "task": {
+    "schemaVersion": 1,
+    "automationId": "automation-1",
+    "title": "Daily brief",
+    "prompt": "Summarize the current project status.",
+    "status": "active",
+    "health": { "state": "ok" },
+    "destination": {
+      "kind": "new_chat",
+      "projectBinding": "project",
+      "projectId": "project-1",
+      "modelId": "model-1",
+      "reasoning": {
+        "source": "model_config",
+        "mode": "enabled",
+        "effort": "high"
+      }
+    },
+    "permissionMode": "default",
+    "permissionModeVersion": 1,
+    "resolvedPermissions": {
+      "read": "workspace_only",
+      "write": "workspace_only",
+      "command": "require_approval",
+      "commandSafety": "guarded",
+      "patch": "require_approval"
+    },
+    "schedule": {
+      "kind": "weekly",
+      "weekdays": ["monday", "friday"],
+      "timeMinutes": 540,
+      "anchorAt": 1787414400000,
+      "timezone": "Asia/Shanghai"
+    },
+    "scheduleSummary": "Every week on Mon, Fri at 09:00 (Asia/Shanghai)",
+    "rrule": "FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,FR;BYHOUR=9;BYMINUTE=0",
+    "timezone": "Asia/Shanghai",
+    "notificationPolicy": "all_runs",
+    "targetSnapshot": {
+      "projectName": "mycopilot-next",
+      "conversationTitle": null,
+      "modelDisplayName": "Model 1"
+    },
+    "nextRunAt": 1787658000000,
+    "lastScheduledAt": null,
+    "lastRunAt": null,
+    "latestRun": null,
+    "attention": null,
+    "revision": 1,
+    "createdAt": 1787414400000,
+    "updatedAt": 1787414400000
+  },
+  "event": {
+    "schemaVersion": 1,
+    "sequence": 7,
+    "eventId": "automation-event-7",
+    "kind": "created",
+    "automationId": "automation-1",
+    "runId": null,
+    "resourceRevision": 1,
+    "occurredAt": 1787414400000
+  },
+  "resync": {
+    "schemaVersion": 1,
+    "reason": "core_started",
+    "lastSequence": 7,
+    "occurredAt": 1787414400000
+  }
+}

@@ -1,4 +1,5 @@
 mod agent_collaboration;
+mod automations;
 mod git;
 mod image_generation;
 mod managed_playwright_bridge;
@@ -13,6 +14,7 @@ mod skill_mutation;
 mod storage;
 
 pub use agent_collaboration::*;
+pub use automations::*;
 pub use git::*;
 pub use image_generation::*;
 pub use managed_playwright_bridge::*;

@@ -4597,3 +4597,509 @@ AFTER DELETE ON conversation_history_blobs
 BEGIN
     DELETE FROM conversation_history_fts WHERE ref_key = 'archive:' || OLD.archive_ref;
 END;
+
+-- User-authored scheduled automations. SQLite is the sole durable authority for both task
+-- configuration and execution admission; Renderer state is only a projection of these rows.
+CREATE TABLE automations (
+    id TEXT PRIMARY KEY CHECK (
+        typeof(id) = 'text'
+        AND length(CAST(id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    create_request_id TEXT NOT NULL UNIQUE CHECK (
+        typeof(create_request_id) = 'text'
+        AND length(CAST(create_request_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    title TEXT NOT NULL CHECK (
+        title = trim(title)
+        AND length(CAST(title AS BLOB)) BETWEEN 1 AND 512
+    ),
+    prompt TEXT NOT NULL CHECK (
+        prompt = trim(prompt)
+        AND length(CAST(prompt AS BLOB)) BETWEEN 1 AND 65536
+    ),
+    status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+    health_state TEXT NOT NULL CHECK (health_state IN ('ok', 'blocked')),
+    blocked_code TEXT CHECK (
+        blocked_code IS NULL
+        OR length(CAST(blocked_code AS BLOB)) BETWEEN 1 AND 128
+    ),
+    blocked_message TEXT CHECK (
+        blocked_message IS NULL
+        OR length(CAST(blocked_message AS BLOB)) BETWEEN 1 AND 2048
+    ),
+    destination_kind TEXT NOT NULL CHECK (
+        destination_kind IN ('new_chat', 'existing_chat')
+    ),
+    target_conversation_id TEXT,
+    project_binding_kind TEXT NOT NULL CHECK (
+        project_binding_kind IN ('none', 'project', 'inherit')
+    ),
+    project_id TEXT,
+    model_id TEXT,
+    permission_mode TEXT NOT NULL CHECK (
+        permission_mode IN ('default', 'full', 'custom')
+    ),
+    permission_mode_version INTEGER NOT NULL CHECK (permission_mode_version > 0),
+    permissions_json TEXT NOT NULL CHECK (
+        json_valid(permissions_json)
+        AND json_type(permissions_json) = 'object'
+        AND length(CAST(permissions_json AS BLOB)) BETWEEN 2 AND 65536
+    ),
+    reasoning_json TEXT CHECK (
+        reasoning_json IS NULL
+        OR (
+            json_valid(reasoning_json)
+            AND json_type(reasoning_json) = 'object'
+            AND length(CAST(reasoning_json AS BLOB)) BETWEEN 2 AND 65536
+        )
+    ),
+    schedule_kind TEXT NOT NULL CHECK (
+        schedule_kind IN ('interval', 'daily', 'weekdays', 'weekly', 'custom')
+    ),
+    schedule_json TEXT NOT NULL CHECK (
+        json_valid(schedule_json)
+        AND json_type(schedule_json) = 'object'
+        AND length(CAST(schedule_json AS BLOB)) BETWEEN 2 AND 65536
+    ),
+    rrule TEXT NOT NULL CHECK (
+        rrule = trim(rrule)
+        AND length(CAST(rrule AS BLOB)) BETWEEN 1 AND 8192
+    ),
+    timezone TEXT NOT NULL CHECK (
+        timezone = trim(timezone)
+        AND length(CAST(timezone AS BLOB)) BETWEEN 1 AND 128
+    ),
+    anchor_at INTEGER NOT NULL CHECK (anchor_at >= 0),
+    next_run_at INTEGER CHECK (next_run_at IS NULL OR next_run_at >= 0),
+    last_scheduled_at INTEGER CHECK (last_scheduled_at IS NULL OR last_scheduled_at >= 0),
+    last_run_at INTEGER CHECK (last_run_at IS NULL OR last_run_at >= 0),
+    notification_policy TEXT NOT NULL CHECK (
+        notification_policy IN ('all_runs', 'unsuccessful_only', 'important_updates')
+    ),
+    target_project_snapshot TEXT CHECK (
+        target_project_snapshot IS NULL
+        OR length(CAST(target_project_snapshot AS BLOB)) BETWEEN 1 AND 512
+    ),
+    target_conversation_snapshot TEXT CHECK (
+        target_conversation_snapshot IS NULL
+        OR length(CAST(target_conversation_snapshot AS BLOB)) BETWEEN 1 AND 512
+    ),
+    target_model_snapshot TEXT CHECK (
+        target_model_snapshot IS NULL
+        OR length(CAST(target_model_snapshot AS BLOB)) BETWEEN 1 AND 512
+    ),
+    target_project_id_snapshot TEXT CHECK (
+        target_project_id_snapshot IS NULL
+        OR length(CAST(target_project_id_snapshot AS BLOB)) BETWEEN 1 AND 512
+    ),
+    target_conversation_id_snapshot TEXT CHECK (
+        target_conversation_id_snapshot IS NULL
+        OR length(CAST(target_conversation_id_snapshot AS BLOB)) BETWEEN 1 AND 512
+    ),
+    target_model_id_snapshot TEXT CHECK (
+        target_model_id_snapshot IS NULL
+        OR length(CAST(target_model_id_snapshot AS BLOB)) BETWEEN 1 AND 512
+    ),
+    attention_required_at INTEGER CHECK (
+        attention_required_at IS NULL OR attention_required_at >= 0
+    ),
+    attention_read_at INTEGER CHECK (
+        attention_read_at IS NULL OR attention_read_at >= 0
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+    deleted_at INTEGER CHECK (deleted_at IS NULL OR deleted_at >= created_at),
+    FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+    FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE SET NULL,
+    CHECK (
+        (health_state = 'ok' AND blocked_code IS NULL AND blocked_message IS NULL)
+        OR
+        (health_state = 'blocked' AND blocked_code IS NOT NULL AND blocked_message IS NOT NULL)
+    ),
+    CHECK (
+        (destination_kind = 'new_chat' AND target_conversation_id IS NULL)
+        OR destination_kind = 'existing_chat'
+    ),
+    CHECK (destination_kind = 'new_chat' OR model_id IS NULL),
+    CHECK (
+        health_state = 'blocked'
+        OR (destination_kind = 'new_chat' AND model_id IS NOT NULL)
+        OR (destination_kind = 'existing_chat' AND target_conversation_id IS NOT NULL)
+    ),
+    CHECK (
+        (destination_kind = 'new_chat' AND project_binding_kind IN ('none', 'project'))
+        OR (destination_kind = 'existing_chat' AND project_binding_kind = 'inherit')
+    ),
+    CHECK (
+        (destination_kind = 'new_chat' AND reasoning_json IS NOT NULL)
+        OR (destination_kind = 'existing_chat' AND reasoning_json IS NULL)
+    ),
+    CHECK (
+        project_binding_kind = 'project'
+        OR project_id IS NULL
+    ),
+    CHECK (
+        health_state = 'blocked'
+        OR project_binding_kind != 'project'
+        OR project_id IS NOT NULL
+    ),
+    CHECK (status = 'active' OR next_run_at IS NULL),
+    CHECK (
+        attention_read_at IS NULL
+        OR attention_required_at IS NULL
+        OR attention_read_at >= attention_required_at
+    )
+);
+CREATE INDEX automations_list_idx
+    ON automations (status, updated_at DESC, id)
+    WHERE deleted_at IS NULL;
+CREATE INDEX automations_due_idx
+    ON automations (next_run_at, id)
+    WHERE deleted_at IS NULL
+      AND status = 'active'
+      AND health_state = 'ok'
+      AND next_run_at IS NOT NULL;
+CREATE INDEX automations_attention_idx
+    ON automations (attention_required_at, id)
+    WHERE deleted_at IS NULL
+      AND attention_required_at IS NOT NULL
+      AND (attention_read_at IS NULL OR attention_read_at < attention_required_at);
+
+CREATE TABLE automation_runs (
+    id TEXT PRIMARY KEY CHECK (
+        typeof(id) = 'text'
+        AND length(CAST(id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    automation_id TEXT NOT NULL,
+    config_revision INTEGER NOT NULL CHECK (config_revision > 0),
+    config_snapshot_json TEXT NOT NULL CHECK (
+        json_valid(config_snapshot_json)
+        AND json_type(config_snapshot_json) = 'object'
+        AND length(CAST(config_snapshot_json AS BLOB)) BETWEEN 2 AND 131072
+    ),
+    trigger_kind TEXT NOT NULL CHECK (
+        trigger_kind IN ('scheduled', 'manual', 'recovery')
+    ),
+    scheduled_for INTEGER NOT NULL CHECK (scheduled_for >= 0),
+    manual_request_id TEXT CHECK (
+        manual_request_id IS NULL
+        OR length(CAST(manual_request_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'queued', 'admitting', 'running', 'waiting_for_approval',
+            'completed', 'failed', 'cancelled'
+        )
+    ),
+    retry_at INTEGER CHECK (retry_at IS NULL OR retry_at >= 0),
+    admission_attempt INTEGER NOT NULL DEFAULT 0 CHECK (admission_attempt >= 0),
+    agent_run_id TEXT UNIQUE,
+    conversation_id TEXT,
+    user_message_id TEXT,
+    assistant_message_id TEXT,
+    report_kind TEXT CHECK (
+        report_kind IS NULL
+        OR report_kind IN ('no_change', 'important_update', 'completed', 'unknown')
+    ),
+    result_preview TEXT CHECK (
+        result_preview IS NULL
+        OR length(CAST(result_preview AS BLOB)) <= 8192
+    ),
+    error_code TEXT CHECK (
+        error_code IS NULL
+        OR length(CAST(error_code AS BLOB)) BETWEEN 1 AND 128
+    ),
+    error_message TEXT CHECK (
+        error_message IS NULL
+        OR length(CAST(error_message AS BLOB)) BETWEEN 1 AND 4096
+    ),
+    attention_required_at INTEGER CHECK (
+        attention_required_at IS NULL OR attention_required_at >= 0
+    ),
+    attention_read_at INTEGER CHECK (
+        attention_read_at IS NULL OR attention_read_at >= 0
+    ),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    started_at INTEGER CHECK (started_at IS NULL OR started_at >= created_at),
+    completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= created_at),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+    FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
+    FOREIGN KEY (user_message_id) REFERENCES messages(id) ON DELETE SET NULL,
+    FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE SET NULL,
+    CHECK (
+        (trigger_kind = 'manual' AND manual_request_id IS NOT NULL)
+        OR (trigger_kind != 'manual' AND manual_request_id IS NULL)
+    ),
+    CHECK (
+        (status IN ('completed', 'failed', 'cancelled') AND completed_at IS NOT NULL)
+        OR (status NOT IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL)
+    ),
+    CHECK (
+        (status IN ('queued', 'admitting') AND started_at IS NULL)
+        OR status NOT IN ('queued', 'admitting')
+    ),
+    CHECK (
+        attention_read_at IS NULL
+        OR attention_required_at IS NULL
+        OR attention_read_at >= attention_required_at
+    )
+);
+CREATE UNIQUE INDEX automation_runs_scheduled_occurrence
+    ON automation_runs (automation_id, scheduled_for)
+    WHERE trigger_kind = 'scheduled';
+CREATE UNIQUE INDEX automation_runs_manual_request
+    ON automation_runs (manual_request_id)
+    WHERE manual_request_id IS NOT NULL;
+CREATE UNIQUE INDEX automation_runs_one_nonterminal_per_task
+    ON automation_runs (automation_id)
+    WHERE status IN ('queued', 'admitting', 'running', 'waiting_for_approval');
+CREATE INDEX automation_runs_history_idx
+    ON automation_runs (automation_id, created_at DESC, id DESC);
+CREATE INDEX automation_runs_recovery_idx
+    ON automation_runs (status, retry_at, created_at, id)
+    WHERE status IN ('queued', 'admitting', 'running', 'waiting_for_approval');
+CREATE INDEX automation_runs_attention_idx
+    ON automation_runs (attention_required_at, id)
+    WHERE attention_required_at IS NOT NULL
+      AND (attention_read_at IS NULL OR attention_read_at < attention_required_at);
+
+CREATE TABLE automation_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    event_id TEXT NOT NULL UNIQUE CHECK (
+        length(CAST(event_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN (
+            'created', 'updated', 'deleted', 'run_updated',
+            'attention_changed', 'notification_requested'
+        )
+    ),
+    automation_id TEXT NOT NULL,
+    automation_run_id TEXT,
+    resource_revision INTEGER CHECK (resource_revision IS NULL OR resource_revision > 0),
+    payload_json TEXT NOT NULL CHECK (
+        json_valid(payload_json)
+        AND json_type(payload_json) = 'object'
+        AND length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 65536
+    ),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0),
+    FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
+    FOREIGN KEY (automation_run_id) REFERENCES automation_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX automation_events_task_sequence_idx
+    ON automation_events (automation_id, sequence);
+CREATE INDEX automation_events_run_sequence_idx
+    ON automation_events (automation_run_id, sequence)
+    WHERE automation_run_id IS NOT NULL;
+CREATE INDEX automation_events_lookup_idx
+    ON automation_events (
+        automation_id, automation_run_id, event_kind, resource_revision, sequence DESC
+    );
+
+CREATE TABLE automation_notification_outbox (
+    id TEXT PRIMARY KEY CHECK (
+        length(CAST(id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    automation_id TEXT NOT NULL,
+    automation_run_id TEXT,
+    resource_revision INTEGER NOT NULL CHECK (resource_revision > 0),
+    notification_kind TEXT NOT NULL CHECK (
+        notification_kind IN ('run_result', 'approval_required', 'configuration_blocked')
+    ),
+    title TEXT NOT NULL CHECK (
+        length(CAST(title AS BLOB)) BETWEEN 1 AND 512
+    ),
+    body TEXT NOT NULL CHECK (
+        length(CAST(body AS BLOB)) BETWEEN 1 AND 4096
+    ),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'suppressed')),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    delivered_at INTEGER CHECK (delivered_at IS NULL OR delivered_at >= created_at),
+    FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
+    FOREIGN KEY (automation_run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
+    CHECK (
+        (status = 'delivered' AND delivered_at IS NOT NULL)
+        OR (status != 'delivered' AND delivered_at IS NULL)
+    ),
+    CHECK (
+        (notification_kind = 'configuration_blocked' AND automation_run_id IS NULL)
+        OR (notification_kind != 'configuration_blocked' AND automation_run_id IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX automation_notification_outbox_run_kind
+    ON automation_notification_outbox (automation_run_id, notification_kind)
+    WHERE automation_run_id IS NOT NULL;
+CREATE UNIQUE INDEX automation_notification_outbox_task_configuration_kind
+    ON automation_notification_outbox (automation_id, notification_kind, resource_revision)
+    WHERE automation_run_id IS NULL AND notification_kind = 'configuration_blocked';
+CREATE INDEX automation_notification_outbox_pending_idx
+    ON automation_notification_outbox (created_at, id)
+    WHERE status = 'pending';
+
+-- Parent resources may be removed by existing product flows. Preserve the scheduled task as a
+-- repairable active+blocked record instead of cascading deletion or silently changing targets.
+CREATE TRIGGER block_automations_before_conversation_delete
+BEFORE DELETE ON conversations
+BEGIN
+    UPDATE automations
+    SET
+        health_state = 'blocked',
+        blocked_code = 'target_missing',
+        blocked_message = 'The target conversation no longer exists.',
+        target_conversation_snapshot = COALESCE(target_conversation_snapshot, OLD.title),
+        next_run_at = NULL,
+        attention_required_at = MAX(
+            COALESCE(attention_required_at, 0),
+            CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        ),
+        revision = revision + 1,
+        updated_at = MAX(
+            updated_at + 1,
+            CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        )
+    WHERE deleted_at IS NULL
+      AND destination_kind = 'existing_chat'
+      AND target_conversation_id = OLD.id;
+END;
+CREATE TRIGGER block_automations_after_conversation_archive
+AFTER UPDATE OF archived_at ON conversations
+WHEN NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL
+BEGIN
+    UPDATE automations
+    SET
+        health_state = 'blocked',
+        blocked_code = 'target_archived',
+        blocked_message = 'The target conversation is archived.',
+        target_conversation_snapshot = COALESCE(target_conversation_snapshot, NEW.title),
+        next_run_at = NULL,
+        attention_required_at = MAX(COALESCE(attention_required_at, 0), NEW.archived_at),
+        revision = revision + 1,
+        updated_at = MAX(updated_at + 1, NEW.archived_at)
+    WHERE deleted_at IS NULL
+      AND destination_kind = 'existing_chat'
+      AND target_conversation_id = NEW.id;
+END;
+CREATE TRIGGER block_automations_before_project_delete
+BEFORE DELETE ON projects
+BEGIN
+    UPDATE automations
+    SET
+        health_state = 'blocked',
+        blocked_code = 'project_missing',
+        blocked_message = 'The target project no longer exists.',
+        target_project_snapshot = COALESCE(target_project_snapshot, OLD.name),
+        target_project_id_snapshot = COALESCE(target_project_id_snapshot, OLD.id),
+        next_run_at = NULL,
+        attention_required_at = MAX(
+            COALESCE(attention_required_at, 0),
+            CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        ),
+        revision = revision + 1,
+        updated_at = MAX(
+            updated_at + 1,
+            CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        )
+    WHERE deleted_at IS NULL
+      AND (
+          (project_binding_kind = 'project' AND project_id = OLD.id)
+          OR (
+              destination_kind = 'existing_chat'
+              AND target_conversation_id IN (
+                  SELECT id FROM conversations WHERE project_id = OLD.id
+              )
+          )
+      );
+END;
+CREATE TRIGGER block_automations_before_model_delete
+BEFORE DELETE ON models
+BEGIN
+    UPDATE automations
+    SET
+        health_state = 'blocked',
+        blocked_code = 'model_missing',
+        blocked_message = 'The selected model no longer exists.',
+        target_model_snapshot = COALESCE(target_model_snapshot, OLD.display_name),
+        target_model_id_snapshot = COALESCE(target_model_id_snapshot, OLD.id),
+        next_run_at = NULL,
+        attention_required_at = MAX(
+            COALESCE(attention_required_at, 0),
+            CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        ),
+        revision = revision + 1,
+        updated_at = MAX(
+            updated_at + 1,
+            CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        )
+    WHERE deleted_at IS NULL
+      AND (
+          (destination_kind = 'new_chat' AND model_id = OLD.id)
+          OR (
+              destination_kind = 'existing_chat'
+              AND target_conversation_id IN (
+                  SELECT id FROM conversations WHERE model_id = OLD.id
+              )
+          )
+      );
+END;
+CREATE TRIGGER block_automations_after_model_disable
+AFTER UPDATE OF enabled ON models
+WHEN NEW.enabled = 0 AND OLD.enabled != 0
+BEGIN
+    UPDATE automations
+    SET
+        health_state = 'blocked',
+        blocked_code = 'model_disabled',
+        blocked_message = 'The selected model is disabled.',
+        target_model_snapshot = COALESCE(target_model_snapshot, NEW.display_name),
+        target_model_id_snapshot = COALESCE(target_model_id_snapshot, NEW.id),
+        next_run_at = NULL,
+        attention_required_at = MAX(COALESCE(attention_required_at, 0), NEW.updated_at),
+        revision = revision + 1,
+        updated_at = MAX(updated_at + 1, NEW.updated_at)
+    WHERE deleted_at IS NULL
+      AND (
+          (destination_kind = 'new_chat' AND model_id = NEW.id)
+          OR (
+              destination_kind = 'existing_chat'
+              AND target_conversation_id IN (
+                  SELECT id FROM conversations WHERE model_id = NEW.id
+              )
+          )
+      );
+END;
+
+-- Parent-resource mutations happen through long-established project/model/conversation flows that
+-- do not call AutomationService. Project a durable attention event from the task-row transition so
+-- every Renderer can invalidate and refetch the affected task without polling or split authority.
+CREATE TRIGGER emit_automation_attention_event_after_block
+AFTER UPDATE OF health_state, blocked_code, blocked_message, attention_required_at ON automations
+WHEN NEW.deleted_at IS NULL
+ AND NEW.health_state = 'blocked'
+ AND (
+    OLD.health_state != 'blocked'
+    OR OLD.blocked_code IS NOT NEW.blocked_code
+    OR OLD.blocked_message IS NOT NEW.blocked_message
+    OR OLD.attention_required_at IS NOT NEW.attention_required_at
+ )
+BEGIN
+    INSERT INTO automation_events (
+        schema_version, event_id, event_kind, automation_id, automation_run_id,
+        resource_revision, payload_json, occurred_at
+    ) VALUES (
+        1,
+        'automation-event:' || lower(hex(randomblob(16))),
+        'attention_changed',
+        NEW.id,
+        NULL,
+        NEW.revision,
+        json_object('blockedCode', NEW.blocked_code),
+        NEW.updated_at
+    );
+END;

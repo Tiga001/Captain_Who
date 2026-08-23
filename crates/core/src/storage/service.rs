@@ -19,8 +19,8 @@ use crate::storage::{
     agent_action_audit_repository, agent_collaboration_event_repository,
     agent_command_session_repository, agent_delivery_repository, agent_graph_repository,
     agent_prompt_preferences_repository, agent_template_repository, attachment_repository,
-    chat_repository, chat_search_repository, composer_draft_repository, config_repository,
-    context_compaction_receipt_repository, context_compaction_repository,
+    automation_repository, chat_repository, chat_search_repository, composer_draft_repository,
+    config_repository, context_compaction_receipt_repository, context_compaction_repository,
     conversation_context_adaptation_repository, conversation_fork_repository,
     conversation_history_archive_repository, conversation_history_repository,
     conversation_model_context_repository, conversation_trace_repository,
@@ -50,6 +50,7 @@ mod agent_delivery;
 mod agent_graph;
 mod agent_templates;
 mod attachments;
+mod automations;
 mod child_agents;
 mod command_sessions;
 mod compaction;

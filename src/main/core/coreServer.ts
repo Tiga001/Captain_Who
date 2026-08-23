@@ -59,6 +59,25 @@ import type {
   AgentUsageSummaryOutput,
   PendingAgentActionSnapshot,
   OfficeEngineStatus,
+  AutomationAttentionAcknowledgeInput,
+  AutomationAttentionAcknowledgeOutput,
+  AutomationAttentionSummaryInput,
+  AutomationAttentionSummaryOutput,
+  AutomationCreateInput,
+  AutomationDeleteInput,
+  AutomationDeleteOutput,
+  AutomationEvent,
+  AutomationGetInput,
+  AutomationListInput,
+  AutomationListOutput,
+  AutomationResync,
+  AutomationRun,
+  AutomationRunNowInput,
+  AutomationRunsListInput,
+  AutomationRunsListOutput,
+  AutomationSetEnabledInput,
+  AutomationTask,
+  AutomationUpdateInput,
   CorePingRequest,
   CorePingResponse,
   CoreShutdownResponse,
@@ -148,6 +167,19 @@ import type {
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
 import {
+  AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD,
+  AUTOMATION_ATTENTION_SUMMARY_METHOD,
+  AUTOMATION_CREATE_METHOD,
+  AUTOMATION_DELETE_METHOD,
+  AUTOMATION_ERROR_CODE,
+  AUTOMATION_EVENT_NOTIFICATION_METHOD,
+  AUTOMATION_GET_METHOD,
+  AUTOMATION_LIST_METHOD,
+  AUTOMATION_RESYNC_NOTIFICATION_METHOD,
+  AUTOMATION_RUN_NOW_METHOD,
+  AUTOMATION_RUNS_LIST_METHOD,
+  AUTOMATION_SET_ENABLED_METHOD,
+  AUTOMATION_UPDATE_METHOD,
   AGENT_APPROVE_ACTION_METHOD,
   AGENT_CANCEL_ACTION_METHOD,
   AGENT_CANCEL_RUN_METHOD,
@@ -168,6 +200,26 @@ import {
   AGENT_START_CONVERSATION_TURN_METHOD,
   AGENT_STEER_RUN_METHOD,
   parseAgentActionExecutionOutputForHost,
+  parseAutomationAttentionAcknowledgeInput,
+  parseAutomationAttentionAcknowledgeOutput,
+  parseAutomationAttentionSummaryInput,
+  parseAutomationAttentionSummaryOutput,
+  parseAutomationCreateInput,
+  parseAutomationDeleteInput,
+  parseAutomationDeleteOutput,
+  parseAutomationErrorData,
+  parseAutomationEvent,
+  parseAutomationGetInput,
+  parseAutomationListInput,
+  parseAutomationListOutput,
+  parseAutomationResync,
+  parseAutomationRun,
+  parseAutomationRunNowInput,
+  parseAutomationRunsListInput,
+  parseAutomationRunsListOutput,
+  parseAutomationSetEnabledInput,
+  parseAutomationTask,
+  parseAutomationUpdateInput,
   parseAgentCommandSessionGetInput,
   parseAgentCommandSessionGetOutput,
   parseAgentCommandSessionListInput,
@@ -484,6 +536,25 @@ function rethrowValidatedMcpManagementError(error: unknown): never {
   })
 }
 
+function rethrowValidatedAutomationError(error: unknown): never {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    Array.isArray(error) ||
+    !('code' in error) ||
+    error.code !== AUTOMATION_ERROR_CODE
+  ) {
+    throw error
+  }
+
+  const data = parseAutomationErrorData('data' in error ? error.data : undefined)
+  throw Object.assign(new Error(data.message), {
+    name: 'AutomationError',
+    code: AUTOMATION_ERROR_CODE,
+    data
+  })
+}
+
 function validatedImageGenerationArtifactContent(
   output: ImageGenerationArtifactReadOutput,
   expected: ManagedArtifactReadIdentity
@@ -604,6 +675,9 @@ export interface CoreServerOptions {
 export class CoreServer {
   private readonly rpc: CoreJsonRpcClient
   private readonly agentObserverWarningCounts = new Map<string, number>()
+  private readonly automationResyncHandlers = new Set<(event: AutomationResync) => void>()
+  private automationResyncSubscription: (() => void) | null = null
+  private latestAutomationResync: AutomationResync | null = null
 
   private warnAgentObserverEvent(
     category: AgentObserverWarning['category'],
@@ -630,11 +704,13 @@ export class CoreServer {
   }
 
   start(): void {
+    this.ensureAutomationResyncSubscription()
     this.rpc.start()
   }
 
   stop(): void {
     this.rpc.stop()
+    this.latestAutomationResync = null
   }
 
   async shutdown(): Promise<void> {
@@ -668,6 +744,187 @@ export class CoreServer {
 
   ping(input?: CorePingRequest): Promise<CorePingResponse> {
     return this.rpc.request<CorePingResponse, CorePingRequest>(CORE_PING_METHOD, input ?? {})
+  }
+
+  listAutomations(input: AutomationListInput): Promise<AutomationListOutput> {
+    const request = parseAutomationListInput(input)
+    return this.rpc
+      .request<unknown, AutomationListInput>(AUTOMATION_LIST_METHOD, request)
+      .then(parseAutomationListOutput)
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  getAutomation(input: AutomationGetInput): Promise<AutomationTask> {
+    const request = parseAutomationGetInput(input)
+    return this.rpc
+      .request<unknown, AutomationGetInput>(AUTOMATION_GET_METHOD, request)
+      .then((value) => {
+        const output = parseAutomationTask(value)
+        if (output.automationId !== request.automationId)
+          throw new Error('Invalid Automation task response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  createAutomation(input: AutomationCreateInput): Promise<AutomationTask> {
+    const request = parseAutomationCreateInput(input)
+    return this.rpc
+      .request<unknown, AutomationCreateInput>(AUTOMATION_CREATE_METHOD, request)
+      .then(parseAutomationTask)
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  updateAutomation(input: AutomationUpdateInput): Promise<AutomationTask> {
+    const request = parseAutomationUpdateInput(input)
+    return this.rpc
+      .request<unknown, AutomationUpdateInput>(AUTOMATION_UPDATE_METHOD, request)
+      .then((value) => {
+        const output = parseAutomationTask(value)
+        if (output.automationId !== request.automationId)
+          throw new Error('Invalid Automation task response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  setAutomationEnabled(input: AutomationSetEnabledInput): Promise<AutomationTask> {
+    const request = parseAutomationSetEnabledInput(input)
+    return this.rpc
+      .request<unknown, AutomationSetEnabledInput>(AUTOMATION_SET_ENABLED_METHOD, request)
+      .then((value) => {
+        const output = parseAutomationTask(value)
+        if (output.automationId !== request.automationId)
+          throw new Error('Invalid Automation task response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  runAutomationNow(input: AutomationRunNowInput): Promise<AutomationRun> {
+    const request = parseAutomationRunNowInput(input)
+    return this.rpc
+      .request<unknown, AutomationRunNowInput>(AUTOMATION_RUN_NOW_METHOD, request)
+      .then((value) => {
+        const output = parseAutomationRun(value)
+        if (output.automationId !== request.automationId) {
+          throw new Error('Invalid Automation run response identity')
+        }
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  deleteAutomation(input: AutomationDeleteInput): Promise<AutomationDeleteOutput> {
+    const request = parseAutomationDeleteInput(input)
+    return this.rpc
+      .request<unknown, AutomationDeleteInput>(AUTOMATION_DELETE_METHOD, request)
+      .then((value) => {
+        const output = parseAutomationDeleteOutput(value)
+        if (output.automationId !== request.automationId)
+          throw new Error('Invalid Automation delete response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  listAutomationRuns(input: AutomationRunsListInput): Promise<AutomationRunsListOutput> {
+    const request = parseAutomationRunsListInput(input)
+    return this.rpc
+      .request<unknown, AutomationRunsListInput>(AUTOMATION_RUNS_LIST_METHOD, request)
+      .then((value) => {
+        const output = parseAutomationRunsListOutput(value)
+        if (output.automationId !== request.automationId)
+          throw new Error('Invalid Automation runs response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  getAutomationAttentionSummary(
+    input: AutomationAttentionSummaryInput
+  ): Promise<AutomationAttentionSummaryOutput> {
+    const request = parseAutomationAttentionSummaryInput(input)
+    return this.rpc
+      .request<unknown, AutomationAttentionSummaryInput>(
+        AUTOMATION_ATTENTION_SUMMARY_METHOD,
+        request
+      )
+      .then(parseAutomationAttentionSummaryOutput)
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  acknowledgeAutomationAttention(
+    input: AutomationAttentionAcknowledgeInput
+  ): Promise<AutomationAttentionAcknowledgeOutput> {
+    const request = parseAutomationAttentionAcknowledgeInput(input)
+    return this.rpc
+      .request<unknown, AutomationAttentionAcknowledgeInput>(
+        AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAutomationAttentionAcknowledgeOutput(value)
+        if (output.attention.attentionId !== request.attentionId)
+          throw new Error('Invalid Automation attention response identity')
+        return output
+      })
+      .catch(rethrowValidatedAutomationError)
+  }
+
+  onAutomationEvent(handler: (event: AutomationEvent) => void): () => void {
+    return this.rpc.onNotification(AUTOMATION_EVENT_NOTIFICATION_METHOD, (params) => {
+      let event: AutomationEvent
+      try {
+        event = parseAutomationEvent(params)
+      } catch {
+        console.warn('Ignored invalid Automation event')
+        return
+      }
+      try {
+        handler(event)
+      } catch {
+        console.warn('Automation event handler failed')
+      }
+    })
+  }
+
+  onAutomationResync(handler: (event: AutomationResync) => void): () => void {
+    this.ensureAutomationResyncSubscription()
+    this.automationResyncHandlers.add(handler)
+    const latest = this.latestAutomationResync
+    if (latest !== null) {
+      try {
+        handler(latest)
+      } catch {
+        console.warn('Automation resync handler failed')
+      }
+    }
+    return () => this.automationResyncHandlers.delete(handler)
+  }
+
+  private ensureAutomationResyncSubscription(): void {
+    if (this.automationResyncSubscription !== null) return
+    this.automationResyncSubscription = this.rpc.onNotification(
+      AUTOMATION_RESYNC_NOTIFICATION_METHOD,
+      (params) => {
+        let event: AutomationResync
+        try {
+          event = parseAutomationResync(params)
+        } catch {
+          console.warn('Ignored invalid Automation resync')
+          return
+        }
+        this.latestAutomationResync = event
+        for (const handler of [...this.automationResyncHandlers]) {
+          try {
+            handler(event)
+          } catch {
+            console.warn('Automation resync handler failed')
+          }
+        }
+      }
+    )
   }
 
   getOfficeStatus(): Promise<OfficeEngineStatus> {

@@ -1,5 +1,17 @@
 pub const CORE_PING_METHOD: &str = "core.ping";
 pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
+pub const AUTOMATION_LIST_METHOD: &str = "automation.list";
+pub const AUTOMATION_GET_METHOD: &str = "automation.get";
+pub const AUTOMATION_CREATE_METHOD: &str = "automation.create";
+pub const AUTOMATION_UPDATE_METHOD: &str = "automation.update";
+pub const AUTOMATION_SET_ENABLED_METHOD: &str = "automation.setEnabled";
+pub const AUTOMATION_RUN_NOW_METHOD: &str = "automation.runNow";
+pub const AUTOMATION_DELETE_METHOD: &str = "automation.delete";
+pub const AUTOMATION_RUNS_LIST_METHOD: &str = "automation.runs.list";
+pub const AUTOMATION_ATTENTION_SUMMARY_METHOD: &str = "automation.attention.summary";
+pub const AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD: &str = "automation.attention.acknowledge";
+pub const AUTOMATION_EVENT_NOTIFICATION_METHOD: &str = "automation.event";
+pub const AUTOMATION_RESYNC_NOTIFICATION_METHOD: &str = "automation.resync";
 pub const MCP_SERVER_LIST_METHOD: &str = "mcp.server.list";
 pub const MCP_SERVER_GET_METHOD: &str = "mcp.server.get";
 pub const MCP_SERVER_ADD_METHOD: &str = "mcp.server.add";

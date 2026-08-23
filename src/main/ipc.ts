@@ -20,6 +20,7 @@ import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
 import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 import { registerAgentIpc } from './ipc/agentIpc'
+import { registerAutomationIpc } from './ipc/automationIpc'
 import { registerGitIpc } from './ipc/gitIpc'
 import { registerSkillsIpc } from './ipc/skillsIpc'
 import { registerMcpIpc } from './ipc/mcpIpc'
@@ -313,6 +314,7 @@ export function registerHostIpc(
 
   registerCoreServiceIpc(ipcMain, coreServer)
   registerAgentIpc(ipcMain, coreServer)
+  const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer)
   registerSkillsIpc(ipcMain, coreServer, selectInstallationDirectory)
   const disposeMcpIpc = registerMcpIpc(ipcMain, coreServer)
   registerGitIpc(ipcMain, coreServer)
@@ -354,5 +356,8 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )
-  return disposeMcpIpc
+  return () => {
+    disposeAutomationIpc()
+    disposeMcpIpc()
+  }
 }

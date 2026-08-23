@@ -3,6 +3,95 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[test]
+fn automation_contract_matches_typescript_and_rejects_unknown_union_fields() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/automation-contract-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["schemaVersion"], AUTOMATION_SCHEMA_VERSION);
+    assert_eq!(
+        fixture["permissionModeVersion"],
+        AUTOMATION_PERMISSION_MODE_VERSION
+    );
+    let permission_modes: Vec<AutomationPermissionModeDto> =
+        serde_json::from_value(fixture["permissionModes"].clone()).unwrap();
+    assert_eq!(
+        permission_modes,
+        vec![
+            AutomationPermissionModeDto::Default,
+            AutomationPermissionModeDto::Full,
+            AutomationPermissionModeDto::Custom,
+        ]
+    );
+    let nullable_list: AutomationListInputDto =
+        serde_json::from_value(fixture["nullableListInput"].clone()).unwrap();
+    assert_eq!(nullable_list.status, None);
+    assert_eq!(nullable_list.query, None);
+    assert_eq!(nullable_list.cursor, None);
+    let nullable_schedule: AutomationScheduleInputDto =
+        serde_json::from_value(fixture["nullableCustomSchedule"].clone()).unwrap();
+    match nullable_schedule {
+        AutomationScheduleInputDto::Custom {
+            frequency: AutomationCustomFrequencyDto::Hourly,
+            minute_of_hour: Some(30),
+            time_minutes: None,
+            weekdays: None,
+            month_days: None,
+            months: None,
+            ..
+        } => {}
+        other => panic!("unexpected nullable schedule normalization: {other:?}"),
+    }
+    assert_eq!(fixture["methods"]["list"], AUTOMATION_LIST_METHOD);
+    assert_eq!(fixture["methods"]["get"], AUTOMATION_GET_METHOD);
+    assert_eq!(fixture["methods"]["create"], AUTOMATION_CREATE_METHOD);
+    assert_eq!(fixture["methods"]["update"], AUTOMATION_UPDATE_METHOD);
+    assert_eq!(
+        fixture["methods"]["setEnabled"],
+        AUTOMATION_SET_ENABLED_METHOD
+    );
+    assert_eq!(fixture["methods"]["runNow"], AUTOMATION_RUN_NOW_METHOD);
+    assert_eq!(fixture["methods"]["delete"], AUTOMATION_DELETE_METHOD);
+    assert_eq!(fixture["methods"]["listRuns"], AUTOMATION_RUNS_LIST_METHOD);
+    assert_eq!(
+        fixture["methods"]["attentionSummary"],
+        AUTOMATION_ATTENTION_SUMMARY_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["acknowledgeAttention"],
+        AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD
+    );
+    assert_eq!(
+        fixture["notifications"]["event"],
+        AUTOMATION_EVENT_NOTIFICATION_METHOD
+    );
+    assert_eq!(
+        fixture["notifications"]["resync"],
+        AUTOMATION_RESYNC_NOTIFICATION_METHOD
+    );
+
+    let input: AutomationCreateInputDto =
+        serde_json::from_value(fixture["createInput"].clone()).unwrap();
+    assert_eq!(input.permission_mode, AutomationPermissionModeDto::Default);
+    let task: AutomationTaskDto = serde_json::from_value(fixture["task"].clone()).unwrap();
+    assert_eq!(task.automation_id, "automation-1");
+    assert_eq!(
+        task.schedule_summary,
+        "Every week on Mon, Fri at 09:00 (Asia/Shanghai)"
+    );
+    let event: AutomationEventDto = serde_json::from_value(fixture["event"].clone()).unwrap();
+    assert_eq!(event.sequence, 7);
+    let _: AutomationResyncDto = serde_json::from_value(fixture["resync"].clone()).unwrap();
+
+    let mut unknown_schedule = fixture["createInput"]["schedule"].clone();
+    unknown_schedule["cron"] = serde_json::json!("* * * * *");
+    assert!(serde_json::from_value::<AutomationScheduleInputDto>(unknown_schedule).is_err());
+    let mut unknown_destination = fixture["task"]["destination"].clone();
+    unknown_destination["providerSecret"] = serde_json::json!("must-not-cross");
+    assert!(serde_json::from_value::<AutomationDestinationDto>(unknown_destination).is_err());
+}
+
+#[test]
 fn provider_profile_ui_descriptor_method_is_stable() {
     assert_eq!(
         STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD,

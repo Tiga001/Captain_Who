@@ -20,6 +20,7 @@ use mycopilot_core::BuiltinCapabilityRuntime;
 
 const MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60);
 const AGENT_COLLABORATION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const AUTOMATION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 struct McpApprovalExpiryReconciler {
     cancellation: Option<oneshot::Sender<()>>,
@@ -422,12 +423,21 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .storage
         .latest_global_agent_collaboration_event_sequence()
         .map_err(io::Error::other)?;
+    let automation_event_startup_cursor = bootstrap
+        .storage
+        .latest_automation_event_sequence()
+        .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     managed_playwright_bridge
         .attach_outbound(outbound_tx.clone())
         .map_err(|_| io::Error::other("failed to attach managed Playwright Host bridge"))?;
     outbound_tx
         .send(collaboration_resync_notification())
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
+    outbound_tx
+        .send(automation_resync_notification(
+            automation_event_startup_cursor,
+        )?)
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
     agent_service
         .start_collaboration_dispatcher(outbound_tx.clone())
@@ -450,6 +460,11 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         Arc::clone(&bootstrap.storage),
         outbound_tx.clone(),
         collaboration_event_startup_cursor,
+    ));
+    let automation_event_notifier = tokio::spawn(run_automation_event_notifier(
+        Arc::clone(&bootstrap.storage),
+        outbound_tx.clone(),
+        automation_event_startup_cursor,
     ));
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -514,6 +529,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let _ = mcp_changed_notifier.await;
     collaboration_event_notifier.abort();
     let _ = collaboration_event_notifier.await;
+    automation_event_notifier.abort();
+    let _ = automation_event_notifier.await;
     // Optional connection discovery must never delay admission or outlive Host shutdown.
     // Aborting this coordinator does not replace Manager cleanup; stop_all below remains the
     // process-owned close authority for every connection that reached the Manager.
@@ -675,6 +692,56 @@ async fn run_collaboration_event_notifier(
             }
         }
     }
+}
+
+pub(crate) async fn run_automation_event_notifier(
+    storage: Arc<StorageService>,
+    outbound: mpsc::UnboundedSender<Value>,
+    initial_cursor: i64,
+) {
+    let mut cursor = initial_cursor;
+    let mut interval = tokio::time::interval(AUTOMATION_EVENT_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let request_storage = Arc::clone(&storage);
+        let page = tokio::task::spawn_blocking(move || {
+            request_storage.list_automation_events_after(cursor, 256)
+        })
+        .await;
+        let Ok(Ok(events)) = page else {
+            continue;
+        };
+        for event in events {
+            cursor = event.sequence;
+            let Ok(params) = application::automation::automation_event_dto(event) else {
+                continue;
+            };
+            let notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": mycopilot_protocol_rs::AUTOMATION_EVENT_NOTIFICATION_METHOD,
+                "params": params,
+            });
+            if outbound.send(notification).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+fn automation_resync_notification(last_sequence: i64) -> io::Result<Value> {
+    let last_sequence = u64::try_from(last_sequence)
+        .map_err(|_| io::Error::other("automation event sequence is negative"))?;
+    Ok(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": mycopilot_protocol_rs::AUTOMATION_RESYNC_NOTIFICATION_METHOD,
+        "params": mycopilot_protocol_rs::AutomationResyncDto {
+            schema_version: mycopilot_protocol_rs::AUTOMATION_SCHEMA_VERSION,
+            reason: mycopilot_protocol_rs::AutomationResyncReasonDto::CoreStarted,
+            last_sequence,
+            occurred_at: mycopilot_core::storage::now_ms(),
+        },
+    }))
 }
 
 fn collaboration_resync_notification() -> Value {
@@ -912,6 +979,20 @@ mod mcp_payload_bootstrap_tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn automation_startup_resync_carries_the_frozen_event_cut() {
+        let notification = automation_resync_notification(7).unwrap();
+        assert_eq!(
+            notification["method"],
+            mycopilot_protocol_rs::AUTOMATION_RESYNC_NOTIFICATION_METHOD
+        );
+        assert_eq!(notification["params"]["schemaVersion"], 1);
+        assert_eq!(notification["params"]["reason"], "core_started");
+        assert_eq!(notification["params"]["lastSequence"], 7);
+        assert!(notification["params"]["occurredAt"].as_i64().is_some());
+        assert!(automation_resync_notification(-1).is_err());
     }
 
     #[tokio::test]

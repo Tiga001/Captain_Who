@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 16;
+pub const STORAGE_SCHEMA_VERSION: i32 = 17;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:78a36d4183ab5a93699faaa300fff3c3016bda199974f50cc0ebd094173eefd0";
+    "sha256:4e381d06079a9ebce059c4814b7e725c160c26e73faf6497ebb8be34ea07a51a";
 
 /// Opens the single supported development schema.
 ///
@@ -298,6 +298,31 @@ mod tests {
             "emit_agent_turn_updated_collaboration_event",
             "emit_agent_approval_projected_collaboration_event",
             "emit_agent_approval_updated_collaboration_event",
+            "automations",
+            "automations_list_idx",
+            "automations_due_idx",
+            "automations_attention_idx",
+            "automation_runs",
+            "automation_runs_scheduled_occurrence",
+            "automation_runs_manual_request",
+            "automation_runs_one_nonterminal_per_task",
+            "automation_runs_history_idx",
+            "automation_runs_recovery_idx",
+            "automation_runs_attention_idx",
+            "automation_events",
+            "automation_events_task_sequence_idx",
+            "automation_events_run_sequence_idx",
+            "automation_events_lookup_idx",
+            "automation_notification_outbox",
+            "automation_notification_outbox_run_kind",
+            "automation_notification_outbox_task_configuration_kind",
+            "automation_notification_outbox_pending_idx",
+            "block_automations_before_conversation_delete",
+            "block_automations_after_conversation_archive",
+            "block_automations_before_project_delete",
+            "block_automations_before_model_delete",
+            "block_automations_after_model_disable",
+            "emit_automation_attention_event_after_block",
         ] {
             let exists = connection
                 .query_row(
@@ -915,6 +940,53 @@ mod tests {
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert_eq!(read_schema_version(&connection).unwrap(), 999);
+    }
+
+    #[test]
+    fn the_previous_v16_baseline_requires_reset_without_mutation() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE preserved_v16_data (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                 );
+                 INSERT INTO preserved_v16_data (id, payload)
+                 VALUES ('sentinel', 'preserve-on-reset-required');
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error
+            .to_string()
+            .contains("expected schema version 17, found 16"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 16);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload FROM preserved_v16_data WHERE id = 'sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "preserve-on-reset-required"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE name = 'automations'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
     }
 
     #[test]

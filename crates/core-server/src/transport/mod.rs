@@ -3,6 +3,7 @@ pub(crate) use crate::adapters::image_generation_dispatcher::image_generation_co
 use crate::application::agent;
 
 mod agent_rpc;
+mod automation_rpc;
 mod bootstrap;
 mod git_rpc;
 mod image_generation_rpc;
@@ -17,6 +18,7 @@ mod storage_root;
 mod tests;
 
 pub(crate) use agent_rpc::*;
+pub(crate) use automation_rpc::*;
 pub(crate) use bootstrap::*;
 pub(crate) use git_rpc::*;
 pub(crate) use image_generation_rpc::*;

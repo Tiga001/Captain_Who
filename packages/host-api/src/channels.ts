@@ -52,6 +52,21 @@ export const HOST_CHANNELS = {
   attachments: {
     selectInputAttachments: 'host:attachments.selectInputAttachments'
   },
+  automations: {
+    list: 'host:automation.list',
+    get: 'host:automation.get',
+    create: 'host:automation.create',
+    update: 'host:automation.update',
+    setEnabled: 'host:automation.setEnabled',
+    runNow: 'host:automation.runNow',
+    delete: 'host:automation.delete',
+    listRuns: 'host:automation.runs.list',
+    attentionSummary: 'host:automation.attention.summary',
+    acknowledgeAttention: 'host:automation.attention.acknowledge',
+    event: 'host:automation.event',
+    resync: 'host:automation.resync',
+    resyncReady: 'host:automation.resyncReady'
+  },
   browser: {
     artifactExport: 'host:browser.artifact.export',
     artifactReadPreview: 'host:browser.artifact.readPreview',

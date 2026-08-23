@@ -59,6 +59,25 @@ import type {
   AgentUsageSummaryOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
+  AutomationAttentionAcknowledgeInput,
+  AutomationAttentionAcknowledgeOutput,
+  AutomationAttentionSummaryInput,
+  AutomationAttentionSummaryOutput,
+  AutomationCreateInput,
+  AutomationDeleteInput,
+  AutomationDeleteOutput,
+  AutomationEvent,
+  AutomationGetInput,
+  AutomationListInput,
+  AutomationListOutput,
+  AutomationResync,
+  AutomationRun,
+  AutomationRunNowInput,
+  AutomationRunsListInput,
+  AutomationRunsListOutput,
+  AutomationSetEnabledInput,
+  AutomationTask,
+  AutomationUpdateInput,
   BrowserArtifactExportInput,
   BrowserArtifactExportOutput,
   BrowserArtifactReadInput,
@@ -158,6 +177,25 @@ export { HOST_CHANNELS } from './channels'
 
 export interface AttachmentsHostApi {
   selectInputAttachments(request: AttachmentSelectInputRequest): Promise<AttachmentInputPayload[]>
+}
+
+export interface AutomationsHostApi {
+  list(input: AutomationListInput): Promise<HostInvocationResult<AutomationListOutput>>
+  get(input: AutomationGetInput): Promise<HostInvocationResult<AutomationTask>>
+  create(input: AutomationCreateInput): Promise<HostInvocationResult<AutomationTask>>
+  update(input: AutomationUpdateInput): Promise<HostInvocationResult<AutomationTask>>
+  setEnabled(input: AutomationSetEnabledInput): Promise<HostInvocationResult<AutomationTask>>
+  runNow(input: AutomationRunNowInput): Promise<HostInvocationResult<AutomationRun>>
+  delete(input: AutomationDeleteInput): Promise<HostInvocationResult<AutomationDeleteOutput>>
+  listRuns(input: AutomationRunsListInput): Promise<HostInvocationResult<AutomationRunsListOutput>>
+  attentionSummary(
+    input: AutomationAttentionSummaryInput
+  ): Promise<HostInvocationResult<AutomationAttentionSummaryOutput>>
+  acknowledgeAttention(
+    input: AutomationAttentionAcknowledgeInput
+  ): Promise<HostInvocationResult<AutomationAttentionAcknowledgeOutput>>
+  onEvent(handler: (event: AutomationEvent) => void): () => void
+  onResync(handler: (event: AutomationResync) => void): () => void
 }
 
 export interface BrowserHostApi {
@@ -455,6 +493,7 @@ export interface HostApi {
   }
   agent: AgentHostApi
   attachments: AttachmentsHostApi
+  automations: AutomationsHostApi
   browser: BrowserHostApi
   git: GitHostApi
   imageGeneration: ImageGenerationHostApi

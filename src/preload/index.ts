@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { HOST_CHANNELS, type HostApi } from '@mycopilot/host-api'
 import { createAgentIpcBridge } from './AgentIpcBridge'
+import { createAutomationIpcBridge } from './AutomationIpcBridge'
 import { createAppIpcBridge } from './AppIpcBridge'
 import { createBrowserIpcBridge } from './BrowserIpcBridge'
 import { createGitIpcBridge } from './GitIpcBridge'
@@ -18,6 +19,7 @@ const host: HostApi = {
   },
   app: createAppIpcBridge(ipcRenderer),
   agent: createAgentIpcBridge(ipcRenderer),
+  automations: createAutomationIpcBridge(ipcRenderer),
   attachments: {
     selectInputAttachments: (request) =>
       ipcRenderer.invoke(HOST_CHANNELS.attachments.selectInputAttachments, request)

@@ -10,5 +10,6 @@ pub(crate) mod agent_support;
 #[allow(dead_code)]
 // Reliable collaboration wait kernel; its model Tool adapter belongs to round 4.
 pub(crate) mod agent_wait;
+pub(crate) mod automation;
 pub(crate) mod collaboration_authorization;
 pub(crate) mod mcp;

@@ -3,7 +3,7 @@ use crate::storage::now_ms;
 use crate::{ProviderProfileConfig, ProviderProtocolDialect};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 const MODEL_SETTINGS_REVISION_PREFIX: &str = "model-settings-v1:";
@@ -104,6 +104,26 @@ pub fn save_model_settings(
     settings: ModelSettingsRecord,
 ) -> rusqlite::Result<()> {
     let previous = load_model_settings_snapshot(connection)?;
+    let incoming_model_ids = settings
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if incoming_model_ids.len() != settings.models.len() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let removed_model_ids = previous
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .settings
+                .models
+                .iter()
+                .filter(|model| !incoming_model_ids.contains(model.id.as_str()))
+                .map(|model| model.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let timestamp = now_ms();
     let configuration_revision = new_model_settings_revision();
     let search_connection_revision = previous
@@ -201,8 +221,6 @@ pub fn save_model_settings(
         ],
     )?;
 
-    transaction.execute("DELETE FROM models", [])?;
-
     for (index, model) in settings.models.iter().enumerate() {
         transaction.execute(
             "
@@ -225,6 +243,21 @@ pub fn save_model_settings(
                 updated_at
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+            ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                api_url_override = excluded.api_url_override,
+                api_token_override = excluded.api_token_override,
+                supports_image = excluded.supports_image,
+                context_window_tokens = excluded.context_window_tokens,
+                provider_profile_config_json = excluded.provider_profile_config_json,
+                provider_connection_revision = excluded.provider_connection_revision,
+                provider_protocol_revision = excluded.provider_protocol_revision,
+                input_price = excluded.input_price,
+                cached_input_price = excluded.cached_input_price,
+                output_price = excluded.output_price,
+                enabled = excluded.enabled,
+                position = excluded.position,
+                updated_at = excluded.updated_at
             ",
             params![
                 &model.id,
@@ -248,6 +281,10 @@ pub fn save_model_settings(
                 timestamp,
             ],
         )?;
+    }
+
+    for model_id in removed_model_ids {
+        transaction.execute("DELETE FROM models WHERE id = ?1", params![model_id])?;
     }
 
     transaction.commit()
