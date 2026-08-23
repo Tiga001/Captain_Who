@@ -879,6 +879,19 @@ fn resolve_target(
                     "The selected conversation is archived.",
                 ));
             }
+            if let Some(agent) = storage
+                .get_agent_node_by_conversation(&conversation_id)
+                .map_err(|error| AutomationServiceError::internal(error.to_string()))?
+            {
+                if agent.parent_agent_id.is_some()
+                    || agent.lifecycle != mycopilot_core::AgentLifecycle::Active
+                {
+                    return Err(AutomationServiceError::target_invalid(
+                        None,
+                        "The selected conversation is not an active root chat.",
+                    ));
+                }
+            }
             let project = match conversation.project_id.as_deref() {
                 Some(id) => {
                     let project = projects

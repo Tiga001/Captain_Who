@@ -8,6 +8,11 @@ vi.mock('electron', () => ({
     fromWebContents: vi.fn(() => undefined),
     getAllWindows: vi.fn(() => [])
   },
+  Notification: class {
+    static isSupported(): boolean {
+      return false
+    }
+  },
   clipboard: { writeText: vi.fn() },
   dialog: { showOpenDialog: vi.fn() },
   ipcMain: { handle: ipcMainHandle, on: vi.fn() },
@@ -32,6 +37,13 @@ function findHandler(channel: string): (...args: unknown[]) => Promise<unknown> 
   return handler as (...args: unknown[]) => Promise<unknown>
 }
 
+function automationCoreStubs() {
+  return {
+    onAutomationEvent: vi.fn(() => vi.fn()),
+    onAutomationResync: vi.fn(() => vi.fn())
+  }
+}
+
 describe('Image generation configuration IPC registration', () => {
   beforeEach(() => ipcMainHandle.mockReset())
 
@@ -40,6 +52,7 @@ describe('Image generation configuration IPC registration', () => {
     const input = { expectedRevision: 'image-generation:v1:1', enabled: true }
     const artifactInput = { schemaVersion: 1, artifact: { artifactId: 'opaque' } }
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
@@ -97,6 +110,7 @@ describe('Image generation configuration IPC registration', () => {
       })
     )
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
@@ -117,6 +131,7 @@ describe('Image generation configuration IPC registration', () => {
   it('does not let an untrusted Renderer read private Artifact bytes', () => {
     const readImageGenerationArtifact = vi.fn()
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),

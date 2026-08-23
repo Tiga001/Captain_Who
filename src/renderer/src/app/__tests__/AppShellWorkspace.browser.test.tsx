@@ -2,7 +2,11 @@
 import { useEffect, useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import { AppShellWorkspace } from '../AppShellWorkspace'
+import {
+  AppShellCoveredRegion,
+  AppShellWorkspace,
+  getVisibleActiveConversationId
+} from '../AppShellWorkspace'
 import '../../styles/global.css'
 
 describe('AppShellWorkspace', () => {
@@ -43,6 +47,66 @@ describe('AppShellWorkspace', () => {
     expect(restoredWorkspace && getComputedStyle(restoredWorkspace).visibility).toBe('visible')
     expect(screen.container.querySelector('button')?.textContent).toBe('count 1')
     expect(lifecycleSpy.mock.calls).toEqual([['mount']])
+  })
+
+  it('isolates only the covered chat and right-sidebar regions for the scheduled view', async () => {
+    const mainLifecycle = vi.fn()
+    const rightLifecycle = vi.fn()
+    const renderShell = (covered: boolean) => (
+      <div>
+        <button type="button">scheduled navigation</button>
+        <AppShellCoveredRegion
+          as="main"
+          covered={covered}
+          className="main-panel"
+          data-testid="main-workspace"
+        >
+          <StatefulWorkspaceChild onLifecycle={mainLifecycle} />
+        </AppShellCoveredRegion>
+        <AppShellCoveredRegion
+          as="aside"
+          covered={covered}
+          className="side-panel--right"
+          data-testid="right-workspace"
+        >
+          <StatefulWorkspaceChild onLifecycle={rightLifecycle} />
+        </AppShellCoveredRegion>
+        {covered ? <div data-testid="scheduled-page">scheduled page</div> : null}
+      </div>
+    )
+    const screen = await render(renderShell(false))
+    const workspaceButtons = screen.container.querySelectorAll<HTMLElement>(
+      '.main-panel button, .side-panel--right button'
+    )
+    workspaceButtons.forEach((button) => button.click())
+
+    await screen.rerender(renderShell(true))
+
+    const main = screen.getByTestId('main-workspace').element() as HTMLElement
+    const right = screen.getByTestId('right-workspace').element() as HTMLElement
+    expect(main.inert).toBe(true)
+    expect(right.inert).toBe(true)
+    expect(main.getAttribute('aria-hidden')).toBe('true')
+    expect(right.getAttribute('aria-hidden')).toBe('true')
+    expect(main.querySelector('button')?.textContent).toBe('count 1')
+    expect(right.querySelector('button')?.textContent).toBe('count 1')
+    expect(mainLifecycle.mock.calls).toEqual([['mount']])
+    expect(rightLifecycle.mock.calls).toEqual([['mount']])
+    await expect.element(screen.getByRole('button', { name: 'scheduled navigation' })).toBeEnabled()
+
+    await screen.rerender(renderShell(false))
+
+    expect(main.inert).toBe(false)
+    expect(right.inert).toBe(false)
+    expect(main.hasAttribute('aria-hidden')).toBe(false)
+    expect(right.hasAttribute('aria-hidden')).toBe(false)
+    expect(mainLifecycle.mock.calls).toEqual([['mount']])
+    expect(rightLifecycle.mock.calls).toEqual([['mount']])
+  })
+
+  it('suppresses only the visual conversation selection while scheduled is selected', () => {
+    expect(getVisibleActiveConversationId('conversation', 'conversation-1')).toBe('conversation-1')
+    expect(getVisibleActiveConversationId('scheduled', 'conversation-1')).toBeNull()
   })
 })
 

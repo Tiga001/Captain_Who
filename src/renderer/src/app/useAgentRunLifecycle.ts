@@ -1150,6 +1150,43 @@ export function useAgentRunLifecycle({
     ]
   )
 
+  useEffect(() => {
+    // Automation turns are admitted by core-server, so this Renderer never receives the local
+    // startConversationTurn response that normally establishes the Run-to-message binding. When
+    // an authoritative conversation refresh reveals such a non-terminal Run, bind it here and
+    // replay any events that arrived before the conversation metadata/detail refresh completed.
+    for (const conversation of conversations) {
+      if (conversation.messagesLoaded === false) continue
+      for (const message of conversation.messages) {
+        const run = message.agentRun
+        const runId = run?.runId
+        if (
+          !runId ||
+          (run.status !== 'queued' &&
+            run.status !== 'starting' &&
+            run.status !== 'running' &&
+            run.status !== 'waiting_for_approval')
+        ) {
+          continue
+        }
+
+        const expectedBinding = {
+          conversationId: conversation.id,
+          pendingMessageId: message.id
+        }
+        if (!isSameRunBinding(activeRunBindingMap.get(runId), expectedBinding)) {
+          activeRunBindingMap.set(runId, expectedBinding)
+        }
+        const bufferedEvents = bufferedAgentEventMap.get(runId)
+        if (!bufferedEvents?.length) continue
+        bufferedAgentEventMap.delete(runId)
+        for (const agentEvent of bufferedEvents) {
+          handleBoundAgentEvent(conversation.id, message.id, agentEvent)
+        }
+      }
+    }
+  }, [activeRunBindingMap, bufferedAgentEventMap, conversations, handleBoundAgentEvent])
+
   const markStoppedRunStatusUnknown = useCallback(
     (runId: string, binding: ActiveRunBinding) => {
       if (!isSameRunBinding(activeRunBindingMap.get(runId), binding)) return

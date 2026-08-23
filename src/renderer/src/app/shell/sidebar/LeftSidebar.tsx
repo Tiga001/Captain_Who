@@ -1,4 +1,12 @@
-import { ChevronDown, Folder, FolderOpen, MoreHorizontal, Search, SquarePen } from 'lucide-react'
+import {
+  ChevronDown,
+  Clock3,
+  Folder,
+  FolderOpen,
+  MoreHorizontal,
+  Search,
+  SquarePen
+} from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -55,12 +63,15 @@ export function LeftSidebar({
   onRemoveProject,
   onRenameConversation,
   onRenameProject,
+  onOpenScheduled,
   onSelectConversation,
   onShowProjectInFolder,
   onTogglePinConversation,
   onTogglePinProject,
   onUiPreferencesChange,
   projects,
+  scheduledAttentionCount,
+  scheduledSelected,
   uiPreferences
 }: LeftSidebarProps) {
   const { language, t } = useFrontendConfig()
@@ -897,6 +908,26 @@ export function LeftSidebar({
         <button className="left-sidebar__search-action" type="button" onClick={openSearchDialog}>
           <Search aria-hidden="true" />
           <span>{t('sidebar.search')}</span>
+        </button>
+        <button
+          className="left-sidebar__scheduled-action"
+          type="button"
+          aria-current={scheduledSelected ? 'page' : undefined}
+          aria-label={
+            scheduledAttentionCount > 0
+              ? `${t('sidebar.scheduled')} (${Math.min(scheduledAttentionCount, 99)}${scheduledAttentionCount > 99 ? '+' : ''})`
+              : t('sidebar.scheduled')
+          }
+          data-selected={scheduledSelected || undefined}
+          onClick={onOpenScheduled}
+        >
+          <Clock3 aria-hidden="true" />
+          <span>{t('sidebar.scheduled')}</span>
+          {scheduledAttentionCount > 0 && (
+            <span className="left-sidebar__scheduled-badge" aria-hidden="true">
+              {scheduledAttentionCount > 99 ? '99+' : scheduledAttentionCount}
+            </span>
+          )}
         </button>
       </div>
 

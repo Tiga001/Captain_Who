@@ -8,6 +8,9 @@ import type {
   AgentEvent,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
+  AutomationEvent,
+  AutomationOpenRequest,
+  AutomationResync,
   PendingAgentActionSnapshot,
   AgentSteerRunOutput,
   SkillSelection,
@@ -25,6 +28,9 @@ import type {
 } from '../../features/chat/chatTypes'
 
 const testState = vi.hoisted(() => ({
+  automationEventListeners: new Set<(event: AutomationEvent) => void>(),
+  automationOpenRequestListeners: new Set<(request: AutomationOpenRequest) => void>(),
+  automationResyncListeners: new Set<(event: AutomationResync) => void>(),
   cancelAgentRun: vi.fn(),
   collaborationRootIds: [] as Array<string | null>,
   deleteChatMessages: vi.fn(),
@@ -123,6 +129,20 @@ vi.mock('../../host/hostClient', () => ({
     app: {
       getWindowState: vi.fn().mockResolvedValue({ isFullScreen: false, isMaximized: false }),
       onWindowStateChange: vi.fn(() => () => undefined)
+    },
+    automations: {
+      onEvent: vi.fn((listener: (event: AutomationEvent) => void) => {
+        testState.automationEventListeners.add(listener)
+        return () => testState.automationEventListeners.delete(listener)
+      }),
+      onOpenRequested: vi.fn((listener: (request: AutomationOpenRequest) => void) => {
+        testState.automationOpenRequestListeners.add(listener)
+        return () => testState.automationOpenRequestListeners.delete(listener)
+      }),
+      onResync: vi.fn((listener: (event: AutomationResync) => void) => {
+        testState.automationResyncListeners.add(listener)
+        return () => testState.automationResyncListeners.delete(listener)
+      })
     }
   }
 }))
@@ -181,24 +201,62 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
 })
 
 vi.mock('../../components/layout/ResizeHandle', () => ({ ResizeHandle: () => null }))
+vi.mock('../../features/automations/useAutomationAttention', () => ({
+  useAutomationAttention: () => ({ unreadCount: 4 })
+}))
+vi.mock('../../features/automations/ScheduledPageLayer', () => ({
+  ScheduledPageLayer: ({
+    externalNavigationRequest,
+    onClose
+  }: {
+    externalNavigationRequest?: { proceed: () => void; requestKey: number }
+    onClose: () => void
+  }) => (
+    <section data-testid="scheduled-page-layer">
+      <button type="button" onClick={onClose}>
+        close-scheduled
+      </button>
+      <output data-testid="external-navigation-request-key">
+        {externalNavigationRequest?.requestKey ?? 'none'}
+      </output>
+      <button type="button" onClick={() => externalNavigationRequest?.proceed()}>
+        confirm-external-navigation
+      </button>
+    </section>
+  )
+}))
 vi.mock('../shell/sidebar/LeftSidebar', () => ({
   LeftSidebar: ({
+    activeConversationId,
     conversations,
     onArchiveConversation,
     onNewConversation,
+    onOpenScheduled,
     onRenameConversation,
     onSelectConversation,
+    scheduledAttentionCount,
+    scheduledSelected,
     uiPreferences
   }: {
+    activeConversationId: string | null
     conversations: ChatConversation[]
     onArchiveConversation: (conversationId: string) => void
     onNewConversation: (projectId?: string | null) => void
+    onOpenScheduled: () => void
     onRenameConversation: (conversationId: string, title: string) => void
     onSelectConversation: (conversationId: string) => void
+    scheduledAttentionCount: number
+    scheduledSelected: boolean
     uiPreferences: { translucentSidebar: boolean }
   }) => (
     <div>
       <output data-testid="sidebar-translucent">{String(uiPreferences.translucentSidebar)}</output>
+      <output data-testid="sidebar-active-conversation">{activeConversationId ?? 'none'}</output>
+      <output data-testid="scheduled-selected">{String(scheduledSelected)}</output>
+      <output data-testid="scheduled-attention">{scheduledAttentionCount}</output>
+      <button type="button" onClick={onOpenScheduled}>
+        open-scheduled
+      </button>
       <button type="button" onClick={() => onNewConversation(null)}>
         new-conversation
       </button>
@@ -271,6 +329,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onSubmitMessage,
     modelTransitionConfirmation,
     modelTransitionOperations,
+    scrollTargetMessageId,
     skillCatalogRefreshToken
   }: {
     composerDraft: ChatComposerDraft
@@ -287,6 +346,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onSubmitMessage: (message: string, options: ChatSubmitOptions) => void | Promise<boolean | void>
     modelTransitionConfirmation?: { reason: string }
     modelTransitionOperations?: AgentProviderTransitionOperation[]
+    scrollTargetMessageId?: string | null
     skillCatalogRefreshToken?: number
   }) => (
     <div>
@@ -310,6 +370,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
         {conversation.messages.at(-1)?.agentRun?.approvals.length ?? 0}
       </output>
       <output data-testid="active-conversation-id">{conversation.id}</output>
+      <output data-testid="scroll-target-message-id">{scrollTargetMessageId ?? 'none'}</output>
       <output data-testid="conversation-updated-at">{conversation.updatedAt}</output>
       <output data-testid="draft-model-id">{composerDraft.modelId}</output>
       <output data-testid="draft-updated-at">{composerDraft.updatedAt}</output>
@@ -852,6 +913,9 @@ function queuedMessage(id: string, content: string, createdAt: number): ChatQueu
 }
 
 beforeEach(() => {
+  testState.automationEventListeners.clear()
+  testState.automationOpenRequestListeners.clear()
+  testState.automationResyncListeners.clear()
   testState.cancelAgentRun.mockReset().mockResolvedValue(true)
   testState.collaborationRootIds.length = 0
   testState.deleteChatMessages.mockReset().mockResolvedValue(undefined)
@@ -966,6 +1030,325 @@ async function renderSelectedConversation() {
   await expect.element(screen.getByRole('button', { name: 'submit-with-skill' })).toBeVisible()
   return screen
 }
+
+describe('scheduled workspace isolation', () => {
+  it('keeps the selected conversation, composer draft, and right workspace mounted while covered', async () => {
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
+
+    const mainPanel = screen.container.querySelector<HTMLElement>('.main-panel')
+    const rightPanel = screen.container.querySelector<HTMLElement>('.side-panel--right')
+    const chatSurface = screen.getByTestId('active-conversation-id').element()
+    const draftSurface = screen.getByTestId('draft-model-id').element()
+    const rightSurface = screen.getByTestId('right-sidebar-conversation-id').element()
+    expect(mainPanel).not.toBeNull()
+    expect(rightPanel).not.toBeNull()
+    expect(chatSurface.textContent).toBe('conversation-a')
+    expect(rightSurface.textContent).toBe('conversation-a')
+    await expect
+      .element(screen.getByTestId('sidebar-active-conversation'))
+      .toHaveTextContent('conversation-a')
+
+    await screen.getByRole('button', { name: 'open-scheduled' }).click()
+    await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+
+    expect(screen.container.querySelector('.main-panel')).toBe(mainPanel)
+    expect(screen.container.querySelector('.side-panel--right')).toBe(rightPanel)
+    expect(screen.getByTestId('active-conversation-id').element()).toBe(chatSurface)
+    expect(screen.getByTestId('draft-model-id').element()).toBe(draftSurface)
+    expect(screen.getByTestId('right-sidebar-conversation-id').element()).toBe(rightSurface)
+    expect(mainPanel?.inert).toBe(true)
+    expect(rightPanel?.inert).toBe(true)
+    expect(mainPanel?.getAttribute('aria-hidden')).toBe('true')
+    expect(rightPanel?.getAttribute('aria-hidden')).toBe('true')
+    expect(chatSurface.textContent).toBe('conversation-a')
+    expect(draftSurface.textContent).toBe('model-2')
+    expect(rightSurface.textContent).toBe('conversation-a')
+    await expect
+      .element(screen.getByTestId('sidebar-active-conversation'))
+      .toHaveTextContent('none')
+    await expect.element(screen.getByTestId('scheduled-selected')).toHaveTextContent('true')
+    await expect.element(screen.getByTestId('scheduled-attention')).toHaveTextContent('4')
+
+    await screen.getByRole('button', { name: 'close-scheduled' }).click()
+    await expect
+      .poll(() => screen.container.querySelector('[data-testid="scheduled-page-layer"]'))
+      .toBeNull()
+
+    expect(mainPanel?.inert).toBe(false)
+    expect(rightPanel?.inert).toBe(false)
+    expect(mainPanel?.hasAttribute('aria-hidden')).toBe(false)
+    expect(rightPanel?.hasAttribute('aria-hidden')).toBe(false)
+    expect(chatSurface.textContent).toBe('conversation-a')
+    expect(draftSurface.textContent).toBe('model-2')
+    expect(rightSurface.textContent).toBe('conversation-a')
+    await expect
+      .element(screen.getByTestId('sidebar-active-conversation'))
+      .toHaveTextContent('conversation-a')
+  })
+
+  it('defers sidebar navigation until the scheduled page accepts the external request', async () => {
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'open-scheduled' }).click()
+    await screen.getByRole('button', { name: 'new-conversation', exact: true }).click()
+
+    await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+    await expect
+      .element(screen.getByTestId('external-navigation-request-key'))
+      .not.toHaveTextContent('none')
+    await expect
+      .element(screen.getByTestId('right-sidebar-conversation-id'))
+      .toHaveTextContent('conversation-a')
+
+    await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
+
+    await expect
+      .poll(() => screen.container.querySelector('[data-testid="scheduled-page-layer"]'))
+      .toBeNull()
+    await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
+    await expect
+      .element(screen.getByTestId('right-sidebar-conversation-id'))
+      .toHaveTextContent('none')
+  })
+})
+
+describe('automation conversation navigation', () => {
+  it('refreshes conversation metadata when an Automation run creates a new chat', async () => {
+    const screen = await render(<AppShell />)
+    await expect
+      .element(screen.getByRole('button', { name: 'select-conversation-a' }))
+      .toBeVisible()
+    await expect.poll(() => testState.automationEventListeners.size).toBe(1)
+    const initialMetaLoadCount = testState.loadConversationMetas.mock.calls.length
+    const automationConversation: ChatConversation = {
+      ...storedConversation(),
+      id: 'automation-conversation',
+      title: 'Automation output',
+      updatedAt: 20
+    }
+    testState.persistedConversations.set(automationConversation.id, automationConversation)
+
+    const event: AutomationEvent = {
+      schemaVersion: 1,
+      sequence: 1,
+      eventId: 'automation-event-1',
+      kind: 'run_updated',
+      automationId: 'automation-1',
+      runId: 'automation-run-1',
+      resourceRevision: 1,
+      occurredAt: 20
+    }
+    for (const listener of testState.automationEventListeners) listener(event)
+
+    await expect
+      .poll(() => testState.loadConversationMetas.mock.calls.length)
+      .toBe(initialMetaLoadCount + 1)
+    await expect
+      .element(screen.getByRole('button', { name: 'select-automation-conversation' }))
+      .toBeVisible()
+    expect(testState.loadConversation).not.toHaveBeenCalledWith('automation-conversation')
+    await expect
+      .element(screen.getByTestId('sidebar-active-conversation'))
+      .toHaveTextContent('none')
+  })
+
+  it('reloads an open Automation chat and binds events that arrived before its run projection', async () => {
+    const screen = await renderSelectedConversation()
+    await expect.poll(() => testState.automationEventListeners.size).toBe(1)
+    const initialPendingActionLoads = testState.listPendingAgentActions.mock.calls.length
+    const stored = storedConversation()
+    const automationAssistant: ChatMessage = {
+      id: 'assistant-automation',
+      role: 'assistant',
+      content: '',
+      createdAt: 20,
+      status: 'pending',
+      agentRun: {
+        runId: 'automation-agent-run',
+        status: 'running',
+        toolDefinitions: [],
+        toolCalls: [],
+        toolResults: [],
+        approvals: [],
+        diffs: [],
+        timeline: []
+      }
+    }
+    testState.persistedConversations.set(stored.id, {
+      ...stored,
+      messages: [...stored.messages, automationAssistant],
+      updatedAt: 20
+    })
+
+    const agentEvent: AgentEvent = {
+      type: 'message',
+      runId: 'automation-agent-run',
+      content: 'live automation answer'
+    }
+    for (const listener of testState.agentEventListeners) listener(agentEvent)
+    const automationEvent: AutomationEvent = {
+      schemaVersion: 1,
+      sequence: 2,
+      eventId: 'automation-event-2',
+      kind: 'run_updated',
+      automationId: 'automation-1',
+      runId: 'automation-run-1',
+      resourceRevision: 2,
+      occurredAt: 20
+    }
+    for (const listener of testState.automationEventListeners) listener(automationEvent)
+
+    await expect
+      .poll(() => testState.loadConversation.mock.calls.filter(([id]) => id === stored.id).length)
+      .toBeGreaterThan(1)
+    await expect
+      .element(screen.getByTestId('conversation-message-ids'))
+      .toHaveTextContent('assistant-automation')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('live automation answer')
+    await expect
+      .poll(() => testState.listPendingAgentActions.mock.calls.length)
+      .toBeGreaterThan(initialPendingActionLoads)
+  })
+
+  it('hydrates a conversation missing from the local catalog before opening its target message', async () => {
+    const screen = await render(<AppShell />)
+    await expect
+      .element(screen.getByRole('button', { name: 'select-conversation-a' }))
+      .toBeVisible()
+    await expect.poll(() => testState.automationOpenRequestListeners.size).toBe(1)
+    const automationConversation: ChatConversation = {
+      ...storedConversation(),
+      id: 'automation-conversation',
+      title: 'Automation output',
+      updatedAt: 20
+    }
+    testState.persistedConversations.set(automationConversation.id, automationConversation)
+
+    const openRequest: AutomationOpenRequest = {
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runId: 'automation-run-1',
+      destination: {
+        kind: 'conversation',
+        conversationId: automationConversation.id,
+        messageId: 'assistant-old'
+      }
+    }
+    for (const listener of testState.automationOpenRequestListeners) listener(openRequest)
+
+    await expect
+      .poll(() => testState.loadConversation.mock.calls)
+      .toContainEqual([automationConversation.id])
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent(automationConversation.id)
+    await expect
+      .element(screen.getByTestId('right-sidebar-conversation-id'))
+      .toHaveTextContent(automationConversation.id)
+    await expect
+      .element(screen.getByTestId('scroll-target-message-id'))
+      .toHaveTextContent('assistant-old')
+    await expect
+      .element(screen.getByRole('button', { name: 'select-automation-conversation' }))
+      .toBeVisible()
+  })
+
+  it('keeps the scheduled page mounted while a native chat request is guarded and hydrated', async () => {
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'open-scheduled' }).click()
+    await expect.poll(() => testState.automationOpenRequestListeners.size).toBe(1)
+    const automationConversation: ChatConversation = {
+      ...storedConversation(),
+      id: 'automation-conversation',
+      title: 'Automation output',
+      updatedAt: 20
+    }
+    const detail = deferred<ChatConversation | undefined>()
+    testState.loadConversation.mockImplementationOnce(() => detail.promise)
+
+    const openRequest: AutomationOpenRequest = {
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runId: 'automation-run-1',
+      destination: {
+        kind: 'conversation',
+        conversationId: automationConversation.id,
+        messageId: 'assistant-old'
+      }
+    }
+    for (const listener of testState.automationOpenRequestListeners) listener(openRequest)
+
+    await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+    expect(testState.loadConversation).not.toHaveBeenCalledWith(automationConversation.id)
+    await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
+    await expect
+      .poll(() => testState.loadConversation.mock.calls)
+      .toContainEqual([automationConversation.id])
+    await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+
+    detail.resolve(automationConversation)
+    await expect
+      .poll(() => screen.container.querySelector('[data-testid="scheduled-page-layer"]'))
+      .toBeNull()
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent(automationConversation.id)
+    await expect
+      .element(screen.getByTestId('scroll-target-message-id'))
+      .toHaveTextContent('assistant-old')
+  })
+
+  it('does not let a stale native chat load override a newer scheduled task intent', async () => {
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'open-scheduled' }).click()
+    await expect.poll(() => testState.automationOpenRequestListeners.size).toBe(1)
+    const detail = deferred<ChatConversation | undefined>()
+    testState.loadConversation.mockImplementationOnce(() => detail.promise)
+    const conversationRequest: AutomationOpenRequest = {
+      schemaVersion: 1,
+      automationId: 'automation-1',
+      runId: 'automation-run-1',
+      destination: {
+        kind: 'conversation',
+        conversationId: 'automation-conversation',
+        messageId: 'assistant-old'
+      }
+    }
+    for (const listener of testState.automationOpenRequestListeners) listener(conversationRequest)
+    await screen.getByRole('button', { name: 'confirm-external-navigation' }).click()
+    await expect
+      .poll(() => testState.loadConversation.mock.calls)
+      .toContainEqual(['automation-conversation'])
+
+    const taskRequest: AutomationOpenRequest = {
+      schemaVersion: 1,
+      automationId: 'automation-2',
+      runId: 'automation-run-2',
+      destination: { kind: 'task' }
+    }
+    for (const listener of testState.automationOpenRequestListeners) listener(taskRequest)
+    detail.resolve({
+      ...storedConversation(),
+      id: 'automation-conversation',
+      updatedAt: 20
+    })
+
+    await expect
+      .element(screen.getByRole('button', { name: 'select-automation-conversation' }))
+      .toBeVisible()
+    await expect.element(screen.getByTestId('scheduled-page-layer')).toBeVisible()
+    await expect
+      .element(screen.getByTestId('right-sidebar-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    await expect
+      .element(screen.getByTestId('sidebar-active-conversation'))
+      .toHaveTextContent('none')
+  })
+})
 
 describe('provider transition guard', () => {
   it('keeps model selection in the draft and preflights only when the user sends', async () => {

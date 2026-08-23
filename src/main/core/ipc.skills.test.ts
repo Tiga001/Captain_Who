@@ -12,6 +12,11 @@ vi.mock('electron', () => ({
     fromWebContents,
     getAllWindows: vi.fn(() => [])
   },
+  Notification: class {
+    static isSupported(): boolean {
+      return false
+    }
+  },
   clipboard: { writeText: vi.fn() },
   dialog: { showOpenDialog },
   ipcMain: { handle: ipcMainHandle, on: vi.fn() },
@@ -31,6 +36,13 @@ vi.mock('../webviews/managedWebviewSecurity', () => ({ clearManagedWebviewData: 
 import { registerHostIpc, selectInstallationDirectory } from '../ipc'
 
 const event = { sender: {} } as IpcMainInvokeEvent
+
+function automationCoreStubs() {
+  return {
+    onAutomationEvent: vi.fn(() => vi.fn()),
+    onAutomationResync: vi.fn(() => vi.fn())
+  }
+}
 
 describe('Skill installation directory selection', () => {
   beforeEach(() => {
@@ -88,6 +100,7 @@ describe('Skill management IPC registration', () => {
       })
     )
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
@@ -118,6 +131,7 @@ describe('Skill management IPC registration', () => {
     const output = { schemaVersion: 2, resolutionId: input.resolutionId, outcome: 'cancelled' }
     const cancelSkillSourceResolution = vi.fn().mockResolvedValue(output)
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
@@ -160,6 +174,7 @@ describe('Skill management IPC registration', () => {
       })
     )
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
@@ -195,6 +210,7 @@ describe('Office status IPC registration', () => {
     const output = { schemaVersion: 1, providerId: 'officecli', availability: 'unavailable' }
     const getOfficeStatus = vi.fn().mockResolvedValue(output)
     const coreServer = {
+      ...automationCoreStubs(),
       onAgentEvent: vi.fn(),
       onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),

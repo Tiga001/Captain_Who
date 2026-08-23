@@ -3,7 +3,7 @@
   --left-sidebar-footer-height: 64px;
   --left-sidebar-header-height: calc(
     var(--titlebar-height) + var(--mc-layout-sidebar-action-height) +
-      var(--mc-layout-sidebar-action-height) + 26px
+      var(--mc-layout-sidebar-action-height) + var(--mc-layout-sidebar-action-height) + 30px
   );
   --left-sidebar-popover-z-index: 1100;
   position: relative;
@@ -85,6 +85,7 @@
 
 .left-sidebar__primary-action,
 .left-sidebar__search-action,
+.left-sidebar__scheduled-action,
 .left-sidebar__conversation-title-button,
 .left-sidebar__section-title-button {
   display: flex;
@@ -106,11 +107,38 @@
 
 .left-sidebar__primary-action:hover,
 .left-sidebar__search-action:hover,
+.left-sidebar__scheduled-action:hover,
 .left-sidebar__conversation-header:hover,
 .left-sidebar__conversation-header:focus-within,
 .left-sidebar__section-header:hover,
 .left-sidebar__section-header:focus-within {
   background: var(--mc-color-state-hover);
+}
+
+.left-sidebar__scheduled-action[data-selected='true'] {
+  color: var(--mc-color-sidebar-text-active);
+  background: var(--mc-color-state-active);
+}
+
+.left-sidebar__scheduled-action > span:not(.left-sidebar__scheduled-badge) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.left-sidebar__scheduled-badge {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  margin-left: auto;
+  place-items: center;
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-text-danger);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: var(--mc-font-weight-strong);
+  line-height: 1;
 }
 
 .left-sidebar__account-button {
@@ -242,6 +270,7 @@
 
 .left-sidebar__primary-action:focus-visible,
 .left-sidebar__search-action:focus-visible,
+.left-sidebar__scheduled-action:focus-visible,
 .left-sidebar__account-button:focus-visible,
 .left-sidebar__account-menu-item:focus-visible,
 .left-sidebar__conversation-title-button:focus-visible,
@@ -260,6 +289,7 @@
 
 .left-sidebar__primary-action svg,
 .left-sidebar__search-action svg,
+.left-sidebar__scheduled-action svg,
 .left-sidebar__account-menu-item svg,
 .left-sidebar__conversation-title-button svg,
 .left-sidebar__section-title-button svg,

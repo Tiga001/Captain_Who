@@ -35,11 +35,14 @@ export interface LeftSidebarProps {
   onRemoveProject: (projectId: string) => Promise<boolean>
   onRenameConversation: (conversationId: string, title: string) => void
   onRenameProject: (projectId: string, name: string) => void
+  onOpenScheduled: () => void
   onSelectConversation: (conversationId: string, messageId?: string | null) => void
   onShowProjectInFolder: (projectId: string) => void
   onTogglePinConversation: (conversationId: string) => void
   onTogglePinProject: (projectId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   projects: AppProject[]
+  scheduledAttentionCount: number
+  scheduledSelected: boolean
   uiPreferences: UiPreferencesSnapshot
 }

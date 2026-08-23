@@ -90,8 +90,30 @@ describe('Automation Renderer Host API to real core-server', () => {
     if (appDataRoot) await rm(appDataRoot, { force: true, recursive: true })
   })
 
-  it('lists durable automations through the preload bridge, Main parser, JSON-RPC, and Rust', async () => {
+  it('performs durable CRUD, CAS, runNow, history, and attention calls through the real stack', async () => {
     coreServer = new CoreServer({ appDataRoot })
+    await coreServer.saveModelSettings({
+      apiUrl: 'https://example.invalid/v1/chat/completions',
+      apiToken: 'automation-e2e-token',
+      searchMode: 'auto',
+      tavilyApiKey: '',
+      models: [
+        {
+          id: 'automation-e2e-model',
+          displayName: 'Automation E2E Model',
+          previousModelId: null,
+          apiUrlOverride: null,
+          apiTokenOverride: null,
+          supportsImage: false,
+          contextWindowTokens: 128_000,
+          providerProfileUpdate: { kind: 'select_generic' },
+          inputPrice: '0',
+          cachedInputPrice: '',
+          outputPrice: '0',
+          enabled: true
+        }
+      ]
+    })
     const trustedIpc = {} as TrustedIpcMain
     const ipcRenderer = rendererTransport(trustedIpc)
     disposeAutomationIpc = registerAutomationIpc(trustedIpc, coreServer)
@@ -107,6 +129,133 @@ describe('Automation Renderer Host API to real core-server', () => {
         attentionCount: 0,
         lastSequence: 0
       }
+    })
+
+    const createResult = await automations.create({
+      schemaVersion: 1,
+      requestId: 'automation-e2e-create',
+      status: 'paused',
+      title: 'Durable frontend E2E',
+      prompt: 'Return a short status update.',
+      destination: {
+        kind: 'new_chat',
+        projectBinding: 'none',
+        projectId: null,
+        modelId: 'automation-e2e-model'
+      },
+      permissionMode: 'default',
+      permissionModeVersion: 1,
+      schedule: {
+        kind: 'daily',
+        timeMinutes: 9 * 60,
+        anchorAt: Date.now(),
+        timezone: 'Asia/Shanghai'
+      },
+      notificationPolicy: 'all_runs'
+    })
+    expect(createResult.ok).toBe(true)
+    if (!createResult.ok) throw new Error(createResult.error.message)
+    expect(createResult.value).toMatchObject({
+      schemaVersion: 1,
+      status: 'paused',
+      title: 'Durable frontend E2E'
+    })
+    const created = createResult.value
+
+    const updateResult = await automations.update({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      expectedRevision: created.revision,
+      title: 'Durable frontend E2E updated',
+      prompt: created.prompt,
+      destination: {
+        kind: 'new_chat',
+        projectBinding: 'none',
+        projectId: null,
+        modelId: 'automation-e2e-model'
+      },
+      permissionMode: 'default',
+      permissionModeVersion: 1,
+      schedule: created.schedule,
+      notificationPolicy: 'all_runs'
+    })
+    expect(updateResult.ok).toBe(true)
+    if (!updateResult.ok) throw new Error(updateResult.error.message)
+    expect(updateResult.value.revision).toBeGreaterThan(created.revision)
+
+    const activeResult = await automations.setEnabled({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      expectedRevision: updateResult.value.revision,
+      enabled: true
+    })
+    expect(activeResult.ok).toBe(true)
+    if (!activeResult.ok) throw new Error(activeResult.error.message)
+    expect(activeResult.value.status).toBe('active')
+
+    const pausedResult = await automations.setEnabled({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      expectedRevision: activeResult.value.revision,
+      enabled: false
+    })
+    expect(pausedResult.ok).toBe(true)
+    if (!pausedResult.ok) throw new Error(pausedResult.error.message)
+    expect(pausedResult.value.status).toBe('paused')
+
+    const runNowResult = await automations.runNow({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      requestId: 'automation-e2e-run-now'
+    })
+    expect(runNowResult.ok).toBe(true)
+    if (!runNowResult.ok) throw new Error(runNowResult.error.message)
+    expect(runNowResult.value).toMatchObject({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      triggerKind: 'manual'
+    })
+
+    const runsResult = await automations.listRuns({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      limit: 20
+    })
+    expect(runsResult.ok).toBe(true)
+    if (!runsResult.ok) throw new Error(runsResult.error.message)
+    expect(runsResult.value.runs.map((run) => run.runId)).toContain(runNowResult.value.runId)
+
+    const attentionResult = await automations.attentionSummary({
+      schemaVersion: 1,
+      limit: 20
+    })
+    expect(attentionResult.ok).toBe(true)
+
+    const latestTaskResult = await automations.get({
+      schemaVersion: 1,
+      automationId: created.automationId
+    })
+    expect(latestTaskResult.ok).toBe(true)
+    if (!latestTaskResult.ok) throw new Error(latestTaskResult.error.message)
+
+    const deleteResult = await automations.delete({
+      schemaVersion: 1,
+      automationId: created.automationId,
+      expectedRevision: latestTaskResult.value.revision
+    })
+    expect(deleteResult).toEqual({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        automationId: created.automationId,
+        deletedAt: expect.any(Number)
+      }
+    })
+
+    const finalList = await automations.list({ schemaVersion: 1, limit: 20 })
+    expect(finalList).toMatchObject({
+      ok: true,
+      value: { tasks: [], counts: { all: 0, active: 0, paused: 0 } }
     })
   }, 120_000)
 })

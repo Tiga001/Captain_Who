@@ -53,6 +53,7 @@ import {
 import {
   defaultUiPreferences,
   loadConversation,
+  loadConversationMetas,
   loadInputAttachments,
   saveComposerDraft,
   saveUiPreferences
@@ -86,7 +87,6 @@ import { usePersistedShellHydration } from './usePersistedShellHydration'
 import { useProjectRemoval } from './useProjectRemoval'
 import { useAppWindowSettings } from './useAppWindowSettings'
 import { AppShellSettingsView } from './AppShellSettingsView'
-import { AppShellWorkspace } from './AppShellWorkspace'
 import {
   getAppShellPanelStyle,
   getPermissionModeAvailability,
@@ -107,6 +107,14 @@ import { useCollaborationApprovals } from '../features/agentCollaboration/useCol
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
 import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
 import { hostClient } from '../host/hostClient'
+import { ScheduledPageLayer } from '../features/automations/ScheduledPageLayer'
+import { useAutomationAttention } from '../features/automations/useAutomationAttention'
+import {
+  AppShellCoveredRegion,
+  AppShellWorkspace,
+  getVisibleActiveConversationId,
+  type PrimaryView
+} from './AppShellWorkspace'
 
 interface EditRewriteAttempt {
   assistantMessage: ChatMessage
@@ -119,6 +127,17 @@ interface EditRewriteAttempt {
   skills: SkillSelection[]
   title?: string
   userMessage: ChatMessage
+}
+
+interface ScheduledOpenRequest {
+  automationId: string
+  requestKey: number
+  runId: string | null
+}
+
+interface ScheduledExternalNavigationRequest {
+  proceed: () => void
+  requestKey: number
 }
 
 export function AppShell() {
@@ -181,6 +200,16 @@ export function AppShell() {
   const [conversations, setConversations] = useState<ChatConversation[]>([])
   const conversationsRef = useRef<ChatConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
+  const [primaryView, setPrimaryView] = useState<PrimaryView>('conversation')
+  const [scheduledOpenRequest, setScheduledOpenRequest] = useState<ScheduledOpenRequest | null>(
+    null
+  )
+  const scheduledOpenRequestKeyRef = useRef(0)
+  const [scheduledExternalNavigationRequest, setScheduledExternalNavigationRequest] =
+    useState<ScheduledExternalNavigationRequest | null>(null)
+  const scheduledExternalNavigationRequestKeyRef = useRef(0)
+  const conversationOpenRequestKeyRef = useRef(0)
+  const { unreadCount: scheduledAttentionCount } = useAutomationAttention()
   const [activeConversationInitialScrollTop, setActiveConversationInitialScrollTop] = useState<
     number | null
   >(null)
@@ -191,6 +220,7 @@ export function AppShell() {
     new Map()
   )
   const conversationDetailEpochRef = useRef<Map<string, number>>(new Map())
+  const automationConversationMetaRefreshEpochRef = useRef(0)
   const [conversationLoadErrors, setConversationLoadErrors] = useState<Record<string, string>>({})
   const conversationScrollPositionsRef = useRef<Map<string, number>>(new Map())
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
@@ -438,6 +468,76 @@ export function AppShell() {
     setConversations(nextConversations)
   }, [])
 
+  const refreshConversationMetasFromAutomation = useCallback(async () => {
+    const requestEpoch = automationConversationMetaRefreshEpochRef.current + 1
+    automationConversationMetaRefreshEpochRef.current = requestEpoch
+    try {
+      const storedConversations = await loadConversationMetas()
+      if (automationConversationMetaRefreshEpochRef.current !== requestEpoch) return
+
+      const currentById = new Map(
+        conversationsRef.current.map((conversation) => [conversation.id, conversation])
+      )
+      const conversationsToReload = storedConversations.filter((storedConversation) => {
+        const current = currentById.get(storedConversation.id)
+        if (!current) return false
+        return current.messagesLoaded !== false && storedConversation.updatedAt > current.updatedAt
+      })
+      const reloadedConversations = new Map<string, ChatConversation>()
+      await Promise.all(
+        conversationsToReload.map(async (conversation) => {
+          try {
+            const reloaded = await loadConversation(conversation.id)
+            if (reloaded) reloadedConversations.set(conversation.id, reloaded)
+          } catch (error) {
+            console.error('Failed to refresh Automation conversation messages', error)
+          }
+        })
+      )
+      if (automationConversationMetaRefreshEpochRef.current !== requestEpoch) return
+
+      // A newly admitted Automation turn can introduce both a new Agent Run binding and a new
+      // durable approval. Let the lifecycle re-project pending actions for every authoritative
+      // detail we replace below instead of treating an older hydration as final.
+      for (const conversationId of reloadedConversations.keys()) {
+        pendingActionsHydratedRef.current.delete(conversationId)
+      }
+      setConversationsWithRef((currentConversations) => {
+        const latestCurrentById = new Map(
+          currentConversations.map((conversation) => [conversation.id, conversation])
+        )
+        const storedIds = new Set(storedConversations.map((conversation) => conversation.id))
+        return [
+          ...storedConversations.map((conversation) => {
+            const reloaded = reloadedConversations.get(conversation.id)
+            if (reloaded) return { ...reloaded, messagesLoaded: true as const }
+            const current = latestCurrentById.get(conversation.id)
+            return current && current.messagesLoaded !== false ? current : conversation
+          }),
+          ...currentConversations.filter((conversation) => !storedIds.has(conversation.id))
+        ]
+      })
+    } catch (error) {
+      console.error('Failed to refresh conversation metadata after Automation event', error)
+    }
+  }, [setConversationsWithRef])
+
+  useEffect(() => {
+    const automations = hostClient.automations
+    if (!automations?.onEvent || !automations.onResync) return
+    const unsubscribeEvent = automations.onEvent((event) => {
+      if (event.kind === 'run_updated') void refreshConversationMetasFromAutomation()
+    })
+    const unsubscribeResync = automations.onResync(() => {
+      void refreshConversationMetasFromAutomation()
+    })
+    return () => {
+      unsubscribeEvent()
+      unsubscribeResync()
+      automationConversationMetaRefreshEpochRef.current += 1
+    }
+  }, [refreshConversationMetasFromAutomation])
+
   const setDraftsWithRef = useCallback(
     (value: SetStateAction<Record<string, ChatComposerDraft>>) => {
       const nextDrafts =
@@ -490,8 +590,8 @@ export function AppShell() {
       const currentConversation = conversationsRef.current.find(
         (conversation) => conversation.id === conversationId
       )
-      if (currentConversation?.messagesLoaded !== false) {
-        return Promise.resolve(currentConversation ?? null)
+      if (currentConversation && currentConversation.messagesLoaded !== false) {
+        return Promise.resolve(currentConversation)
       }
 
       const pendingRequest = conversationDetailRequestsRef.current.get(conversationId)
@@ -514,9 +614,11 @@ export function AppShell() {
           }
 
           let hydratedConversation: ChatConversation | null = null
-          setConversationsWithRef((currentConversations) =>
-            currentConversations.map((conversation) => {
+          setConversationsWithRef((currentConversations) => {
+            let foundConversation = false
+            const nextConversations = currentConversations.map((conversation) => {
               if (conversation.id !== conversationId) return conversation
+              foundConversation = true
               // Metadata may have changed while SQLite loaded the message history. Keep the latest
               // sidebar fields and attach only the lazily fetched message payload.
               if (conversation.messagesLoaded !== false) {
@@ -538,7 +640,16 @@ export function AppShell() {
               }
               return hydratedConversation
             })
-          )
+
+            if (!foundConversation) {
+              hydratedConversation = {
+                ...storedConversation,
+                messagesLoaded: true
+              }
+              return [hydratedConversation, ...nextConversations]
+            }
+            return nextConversations
+          })
           return hydratedConversation
         })
         .catch((error) => {
@@ -1347,28 +1458,52 @@ export function AppShell() {
     setActiveConversationInitialScrollTop(null)
   }, [])
 
+  const requestScheduledExit = useCallback(
+    (proceed: () => void) => {
+      if (primaryView !== 'scheduled') {
+        proceed()
+        return
+      }
+
+      scheduledExternalNavigationRequestKeyRef.current += 1
+      setScheduledExternalNavigationRequest({
+        proceed: () => {
+          setScheduledExternalNavigationRequest(null)
+          proceed()
+        },
+        requestKey: scheduledExternalNavigationRequestKeyRef.current
+      })
+    },
+    [primaryView]
+  )
+
   const openNewConversation = useCallback(
     (projectId: string | null = null) => {
-      activeConversationIdRef.current = null
-      setActiveConversationId(null)
-      setScrollTargetMessageId(null)
-      setActiveConversationInitialScrollTop(null)
+      requestScheduledExit(() => {
+        conversationOpenRequestKeyRef.current += 1
+        setPrimaryView('conversation')
+        setScheduledOpenRequest(null)
+        activeConversationIdRef.current = null
+        setActiveConversationId(null)
+        setScrollTargetMessageId(null)
+        setActiveConversationInitialScrollTop(null)
 
-      // Returning through the global New Conversation entry restores the existing draft verbatim.
-      // A project-specific entry is an explicit scope change, so only that scope is updated; the
-      // user's text, model, attachments and other draft choices remain intact.
-      if (projectId !== null) {
-        const currentDraft = draftsRef.current[NEW_CONVERSATION_DRAFT_ID]
-        if (currentDraft?.projectId !== projectId) {
-          mutateDraft(NEW_CONVERSATION_DRAFT_ID, (draft) => ({
-            ...draft,
-            projectId,
-            skills: retainGlobalSkillSelections(draft.skills)
-          }))
+        // Returning through the global New Conversation entry restores the existing draft
+        // verbatim. A project-specific entry is an explicit scope change, so only that scope is
+        // updated; the user's text, model, attachments and other draft choices remain intact.
+        if (projectId !== null) {
+          const currentDraft = draftsRef.current[NEW_CONVERSATION_DRAFT_ID]
+          if (currentDraft?.projectId !== projectId) {
+            mutateDraft(NEW_CONVERSATION_DRAFT_ID, (draft) => ({
+              ...draft,
+              projectId,
+              skills: retainGlobalSkillSelections(draft.skills)
+            }))
+          }
         }
-      }
+      })
     },
-    [mutateDraft]
+    [mutateDraft, requestScheduledExit]
   )
 
   const {
@@ -1405,14 +1540,82 @@ export function AppShell() {
     waitForConversationSaves
   })
 
+  const openScheduled = useCallback(() => {
+    conversationOpenRequestKeyRef.current += 1
+    setScheduledExternalNavigationRequest(null)
+    setScheduledOpenRequest(null)
+    setPrimaryView('scheduled')
+  }, [])
+
+  const closeScheduled = useCallback(() => {
+    conversationOpenRequestKeyRef.current += 1
+    setScheduledExternalNavigationRequest(null)
+    setScheduledOpenRequest(null)
+    setPrimaryView('conversation')
+  }, [])
+
+  const commitOpenConversationFromScheduled = useCallback(
+    (conversationId: string, messageId?: string | null) => {
+      const requestKey = conversationOpenRequestKeyRef.current + 1
+      conversationOpenRequestKeyRef.current = requestKey
+      const currentConversation = conversationsRef.current.find(
+        (conversation) => conversation.id === conversationId
+      )
+      const loadSelectedConversation =
+        currentConversation && currentConversation.messagesLoaded !== false
+          ? Promise.resolve(currentConversation)
+          : hydrateConversation(conversationId)
+
+      void loadSelectedConversation.then((loadedConversation) => {
+        if (conversationOpenRequestKeyRef.current !== requestKey) return
+        if (!loadedConversation) {
+          showToast(t('chat.conversationLoadFailed'))
+          return
+        }
+
+        setScheduledExternalNavigationRequest(null)
+        setScheduledOpenRequest(null)
+        setPrimaryView('conversation')
+        selectConversation(conversationId, messageId, loadedConversation)
+      })
+    },
+    [hydrateConversation, selectConversation, showToast, t]
+  )
+
+  const requestOpenConversationFromScheduled = useCallback(
+    (conversationId: string, messageId?: string | null) => {
+      if (primaryView !== 'scheduled') {
+        selectConversation(conversationId, messageId)
+        return
+      }
+      requestScheduledExit(() => commitOpenConversationFromScheduled(conversationId, messageId))
+    },
+    [commitOpenConversationFromScheduled, primaryView, requestScheduledExit, selectConversation]
+  )
+
   useEffect(() => {
     // Older isolated Renderer test hosts do not expose the additive Automation surface.
     if (!hostClient.automations?.onOpenRequested) return
     return hostClient.automations.onOpenRequested((request) => {
-      if (request.destination.kind !== 'conversation') return
-      selectConversation(request.destination.conversationId, request.destination.messageId)
+      if (request.destination.kind === 'conversation') {
+        requestOpenConversationFromScheduled(
+          request.destination.conversationId,
+          request.destination.messageId
+        )
+        return
+      }
+
+      scheduledOpenRequestKeyRef.current += 1
+      conversationOpenRequestKeyRef.current += 1
+      setScheduledExternalNavigationRequest(null)
+      setScheduledOpenRequest({
+        automationId: request.automationId,
+        requestKey: scheduledOpenRequestKeyRef.current,
+        runId: request.runId
+      })
+      setPrimaryView('scheduled')
     })
-  }, [selectConversation])
+  }, [requestOpenConversationFromScheduled])
 
   const activeProviderTransitionConversationId = activeConversation?.id
   const activeProviderTransitionMessagesLoaded = activeConversation?.messagesLoaded
@@ -1667,6 +1870,7 @@ export function AppShell() {
       data-native-font-smoothing={
         SUPPORTS_NATIVE_FONT_SMOOTHING && uiPreferences.nativeFontSmoothing ? 'true' : undefined
       }
+      data-primary-view={primaryView}
       data-right-maximized={rightMaximized ? 'true' : undefined}
       data-right-open={rightOpen ? 'true' : 'false'}
       data-translucent-sidebar={uiPreferences.translucentSidebar ? 'true' : undefined}
@@ -1679,7 +1883,7 @@ export function AppShell() {
       <aside className="side-panel side-panel--left">
         <div className="side-panel__surface">
           <LeftSidebar
-            activeConversationId={activeConversationId}
+            activeConversationId={getVisibleActiveConversationId(primaryView, activeConversationId)}
             conversations={conversations}
             projects={projects}
             uiPreferences={uiPreferences}
@@ -1710,7 +1914,8 @@ export function AppShell() {
               patchConversation(conversationId, { title })
             }
             onRenameProject={renameProject}
-            onSelectConversation={selectConversation}
+            onOpenScheduled={openScheduled}
+            onSelectConversation={requestOpenConversationFromScheduled}
             onShowProjectInFolder={showProjectInFolder}
             onTogglePinConversation={(conversationId) => {
               const conversation = conversations.find(
@@ -1722,6 +1927,8 @@ export function AppShell() {
             }}
             onTogglePinProject={togglePinProject}
             onUiPreferencesChange={updateUiPreferences}
+            scheduledAttentionCount={scheduledAttentionCount}
+            scheduledSelected={primaryView === 'scheduled'}
           />
         </div>
       </aside>
@@ -1736,7 +1943,12 @@ export function AppShell() {
         />
       )}
 
-      <main className="main-panel" aria-label={t('app.mainWorkspace')}>
+      <AppShellCoveredRegion
+        as="main"
+        className="main-panel"
+        aria-label={t('app.mainWorkspace')}
+        covered={primaryView === 'scheduled'}
+      >
         <MainPanelToolbar
           hasUnreadConversations={hasUnreadConversations}
           leftOpen={leftOpen}
@@ -1836,9 +2048,9 @@ export function AppShell() {
             />
           )}
         </div>
-      </main>
+      </AppShellCoveredRegion>
 
-      {rightOpen && !rightMaximized && (
+      {primaryView === 'conversation' && rightOpen && !rightMaximized && (
         <ResizeHandle
           metrics={rightResizeMetrics}
           onCollapse={toggleRightSidebar}
@@ -1848,7 +2060,11 @@ export function AppShell() {
         />
       )}
 
-      <aside className="side-panel side-panel--right">
+      <AppShellCoveredRegion
+        as="aside"
+        className="side-panel side-panel--right"
+        covered={primaryView === 'scheduled'}
+      >
         <RightSidebar
           activeConversationId={activeConversation?.id}
           agentNavigationRequest={rightSidebarAgentNavigationRequest}
@@ -1869,7 +2085,23 @@ export function AppShell() {
           renderAgentObserver={renderAgentObserver}
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
         />
-      </aside>
+      </AppShellCoveredRegion>
+      {primaryView === 'scheduled' && (
+        <ScheduledPageLayer
+          conversations={conversations}
+          defaultModelId={activeDraftSelectedModel?.id ?? activeDraft.modelId ?? null}
+          defaultPermissionMode={activeDraft.permissionMode}
+          defaultProjectId={activeDraft.projectId}
+          externalNavigationRequest={scheduledExternalNavigationRequest ?? undefined}
+          models={enabledModels}
+          openRequest={scheduledOpenRequest ?? undefined}
+          permissionModeAvailability={permissionModeAvailability}
+          projects={projects}
+          onClose={closeScheduled}
+          onOpenConversation={commitOpenConversationFromScheduled}
+          onOpenPermissionSettings={() => openSettings('general')}
+        />
+      )}
       {settingsOpen &&
         createPortal(
           <AppShellSettingsView

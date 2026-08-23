@@ -167,7 +167,9 @@ mod tests {
     use mycopilot_core::storage::models::{
         ChatConversationRecord, ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
     };
-    use mycopilot_core::{ProviderProfileConfig, ProviderProtocolDialect};
+    use mycopilot_core::{
+        AgentLifecycle, EnsureRootAgentInput, ProviderProfileConfig, ProviderProtocolDialect,
+    };
     use mycopilot_protocol_rs::{
         AutomationDestinationInputDto, AutomationNotificationAcknowledgeInputDto,
         AutomationNotificationAcknowledgeOutputDto, AutomationNotificationDeliveryErrorCodeDto,
@@ -970,6 +972,62 @@ mod tests {
         let mut input = create_input("unused-project", "create-existing-disabled");
         input.destination = AutomationDestinationInputDto::ExistingChat {
             conversation_id: "conversation-disabled-model".to_string(),
+        };
+        input.notification_policy = AutomationNotificationPolicyDto::ImportantUpdates;
+
+        let response = request(
+            &storage,
+            mycopilot_protocol_rs::AUTOMATION_CREATE_METHOD,
+            &input,
+        );
+        assert_eq!(response["error"]["data"]["code"], "target_invalid");
+        assert_eq!(
+            response["error"]["data"]["field"],
+            serde_json::json!("destination")
+        );
+    }
+
+    #[test]
+    fn existing_chat_create_rejects_an_inactive_root_agent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temporary.path().join("storage.sqlite")).unwrap();
+        storage.save_model_settings(model_settings()).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-inactive-root".to_string(),
+                project_id: None,
+                model_id: Some("model-automation".to_string()),
+                title: "Inactive root conversation".to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let root = storage
+            .ensure_root_agent(&EnsureRootAgentInput {
+                agent_id: "agent-inactive-root".to_string(),
+                conversation_id: "conversation-inactive-root".to_string(),
+                creation_request_id: "create-inactive-root-agent".to_string(),
+                task_name: "Inactive root".to_string(),
+            })
+            .unwrap()
+            .record()
+            .clone();
+        storage
+            .transition_agent_lifecycle(
+                &root.agent_id,
+                root.revision,
+                AgentLifecycle::Active,
+                AgentLifecycle::Disabled,
+            )
+            .unwrap();
+
+        let mut input = create_input("unused-project", "create-existing-inactive-root");
+        input.destination = AutomationDestinationInputDto::ExistingChat {
+            conversation_id: "conversation-inactive-root".to_string(),
         };
         input.notification_policy = AutomationNotificationPolicyDto::ImportantUpdates;
 

@@ -62,7 +62,12 @@ export function ConfirmationDialog({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isConfirming) onCancel()
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        if (!isConfirming) onCancel()
+        return
+      }
       if (event.key !== 'Tab') return
 
       const focusable = Array.from(
