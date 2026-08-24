@@ -54,6 +54,21 @@ const SYSTEM_NOTIFICATION_TEMPLATE_KEYS = [
   'notification.system.batchUpdatesTitle'
 ] as const satisfies readonly TranslationKey[]
 
+const ORDINARY_NOTIFICATION_SETTING_KEYS = [
+  'notification.ordinaryModeLabel',
+  'notification.ordinaryModeDescription',
+  'notification.ordinaryModeAria',
+  'notification.ordinaryModeNever',
+  'notification.ordinaryModeAll',
+  'notification.ordinaryModeNecessary',
+  'notification.ordinaryModeCustom',
+  'notification.ordinaryModeNeverDescription',
+  'notification.ordinaryModeAllDescription',
+  'notification.ordinaryModeNecessaryDescription',
+  'notification.ordinaryModeCustomDescription',
+  'notification.ordinaryCustomAria'
+] as const satisfies readonly TranslationKey[]
+
 type SystemNotificationTemplateKey = (typeof SYSTEM_NOTIFICATION_TEMPLATE_KEYS)[number]
 
 const EXPECTED_SYSTEM_NOTIFICATION_PLACEHOLDERS = {
@@ -132,6 +147,29 @@ describe('languageRegistry', () => {
           placeholders(languageRegistry[language].translations[key]),
           `${language}:${key}`
         ).toEqual(EXPECTED_SYSTEM_NOTIFICATION_PLACEHOLDERS[key])
+      }
+    }
+  })
+
+  it('keeps the ordinary-task notification mode contract translated in every catalog', () => {
+    const canonicalOrdinaryNotificationKeys = Object.keys(languageRegistry['zh-CN'].translations)
+      .filter((key): key is (typeof ORDINARY_NOTIFICATION_SETTING_KEYS)[number] =>
+        key.startsWith('notification.ordinary')
+      )
+      .sort()
+    expect(canonicalOrdinaryNotificationKeys).toEqual(
+      [...ORDINARY_NOTIFICATION_SETTING_KEYS].sort()
+    )
+
+    for (const language of Object.keys(languageRegistry) as AppLanguage[]) {
+      for (const key of ORDINARY_NOTIFICATION_SETTING_KEYS) {
+        expect(languageRegistry[language].translations[key].trim(), `${language}:${key}`).not.toBe(
+          ''
+        )
+        expect(
+          placeholders(languageRegistry[language].translations[key]),
+          `${language}:${key}`
+        ).toEqual([])
       }
     }
   })

@@ -2240,6 +2240,20 @@ export const enUSTranslations = {
   'notification.settingEnabled': 'System notifications',
   'notification.settingEnabledDescription':
     'Show system notifications while the app is not in the foreground.',
+  'notification.ordinaryModeLabel': 'Regular task notifications',
+  'notification.ordinaryModeDescription': 'Choose when regular tasks send system notifications.',
+  'notification.ordinaryModeAria': 'Select the regular task notification mode',
+  'notification.ordinaryModeNever': 'Never',
+  'notification.ordinaryModeAll': 'Allow notifications',
+  'notification.ordinaryModeNecessary': 'Only when needed',
+  'notification.ordinaryModeCustom': 'Custom',
+  'notification.ordinaryModeNeverDescription': 'Regular tasks will not send system notifications.',
+  'notification.ordinaryModeAllDescription':
+    'Notify when a regular task completes, fails, is cancelled, or needs approval.',
+  'notification.ordinaryModeNecessaryDescription':
+    'Notify only when a regular task fails, is cancelled, or needs approval.',
+  'notification.ordinaryModeCustomDescription': 'Notify for the task states selected below.',
+  'notification.ordinaryCustomAria': 'Customise regular task notifications',
   'notification.settingSound': 'Notification sound',
   'notification.settingSoundDescription':
     'Play the system sound when a notification group first appears.',

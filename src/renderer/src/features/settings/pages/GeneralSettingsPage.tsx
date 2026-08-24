@@ -6,6 +6,11 @@ import { featureFlags } from '../../../config/featureFlags'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { appLanguageOptions } from '../../../config/languageRegistry'
 import { hasNotificationHostApi } from '../../notifications/notificationClient'
+import {
+  deriveOrdinaryNotificationMode,
+  ordinaryNotificationPatchForMode,
+  type OrdinaryNotificationMode
+} from '../../notifications/ordinaryNotificationMode'
 import { useNotificationSettings } from '../../notifications/useNotificationSettings'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import './GeneralSettingsPage.css'
@@ -77,11 +82,76 @@ function NotificationSettingsSection() {
   const { t } = useFrontendConfig()
   const available = hasNotificationHostApi()
   const { settings, status, error, refresh, update, saving } = useNotificationSettings(available)
+  const [isModeMenuOpen, setModeMenuOpen] = useState(false)
+  const [isCustomModeSelected, setCustomModeSelected] = useState(false)
 
   if (!available) return null
 
-  const updateSetting = (patch: Parameters<typeof update>[0]) => {
-    void update(patch).catch(() => undefined)
+  const updateSetting = async (patch: Parameters<typeof update>[0]) => {
+    try {
+      await update(patch)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const modeOptions: Array<{
+    description: Parameters<typeof t>[0]
+    label: Parameters<typeof t>[0]
+    value: OrdinaryNotificationMode
+  }> = [
+    {
+      value: 'never',
+      label: 'notification.ordinaryModeNever',
+      description: 'notification.ordinaryModeNeverDescription'
+    },
+    {
+      value: 'all',
+      label: 'notification.ordinaryModeAll',
+      description: 'notification.ordinaryModeAllDescription'
+    },
+    {
+      value: 'necessary',
+      label: 'notification.ordinaryModeNecessary',
+      description: 'notification.ordinaryModeNecessaryDescription'
+    },
+    {
+      value: 'custom',
+      label: 'notification.ordinaryModeCustom',
+      description: 'notification.ordinaryModeCustomDescription'
+    }
+  ]
+
+  const derivedMode = settings ? deriveOrdinaryNotificationMode(settings) : 'never'
+  const selectedMode = isCustomModeSelected ? 'custom' : derivedMode
+  const selectedModeOption =
+    modeOptions.find((option) => option.value === selectedMode) ?? modeOptions[0]
+
+  const closeModeMenuOnBlur = (event: FocusEvent<HTMLSpanElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      setModeMenuOpen(false)
+    }
+  }
+
+  const selectMode = (mode: OrdinaryNotificationMode) => {
+    setModeMenuOpen(false)
+    if (!settings || saving) return
+
+    if (mode === 'custom') {
+      setCustomModeSelected(true)
+      if (!settings.enabled) {
+        void updateSetting(ordinaryNotificationPatchForMode('never')).then((updated) => {
+          if (!updated) setCustomModeSelected(false)
+        })
+      }
+      return
+    }
+
+    if (mode === selectedMode && settings.enabled) return
+    void updateSetting(ordinaryNotificationPatchForMode(mode)).then((updated) => {
+      if (updated) setCustomModeSelected(false)
+    })
   }
 
   const renderToggleRow = (
@@ -101,7 +171,12 @@ function NotificationSettingsSection() {
           checked={settings[key] as boolean}
           disabled={saving || disabled}
           label={t(title)}
-          onChange={(checked) => updateSetting({ [key]: checked })}
+          onChange={(checked) =>
+            void updateSetting({
+              ...(settings.enabled ? { enabled: true } : ordinaryNotificationPatchForMode('never')),
+              [key]: checked
+            })
+          }
         />
       </div>
     )
@@ -110,49 +185,119 @@ function NotificationSettingsSection() {
   return (
     <section className="settings-list-section" aria-labelledby="notifications-section-heading">
       <h2 id="notifications-section-heading">{t('general.sectionNotifications')}</h2>
-      <div className="settings-list general-settings-list" aria-busy={status === 'loading'}>
+      <div
+        className="settings-list general-settings-list general-notification-settings-list"
+        aria-busy={status === 'loading'}
+      >
         {settings ? (
           <>
-            {renderToggleRow(
-              'enabled',
-              'notification.settingEnabled',
-              'notification.settingEnabledDescription'
-            )}
+            <div className="settings-list-row general-notification-mode-row">
+              <span className="settings-list-row__text">
+                <span className="settings-list-row__title" id="ordinary-notification-mode-heading">
+                  {t('notification.ordinaryModeLabel')}
+                </span>
+                <p className="settings-list-row__description" aria-live="polite">
+                  {t(selectedModeOption.description)}
+                </p>
+              </span>
+
+              <span
+                className="settings-list-row__control general-notification-mode-control"
+                onBlur={closeModeMenuOnBlur}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    setModeMenuOpen(false)
+                    event.stopPropagation()
+                  }
+                }}
+              >
+                <button
+                  aria-controls="ordinary-notification-mode-menu"
+                  aria-expanded={isModeMenuOpen}
+                  aria-haspopup="listbox"
+                  aria-label={t('notification.ordinaryModeAria')}
+                  className="general-notification-mode-button"
+                  disabled={saving}
+                  onClick={() => setModeMenuOpen((current) => !current)}
+                  type="button"
+                >
+                  <span>{t(selectedModeOption.label)}</span>
+                  <ChevronDown aria-hidden="true" />
+                </button>
+
+                {isModeMenuOpen && (
+                  <div
+                    aria-label={t('notification.ordinaryModeAria')}
+                    className="general-notification-mode-menu"
+                    id="ordinary-notification-mode-menu"
+                    role="listbox"
+                  >
+                    {modeOptions.map((option) => {
+                      const isSelected = option.value === selectedMode
+                      return (
+                        <button
+                          aria-selected={isSelected}
+                          className="general-notification-mode-option"
+                          data-selected={isSelected || undefined}
+                          key={option.value}
+                          onClick={() => selectMode(option.value)}
+                          onMouseDown={(event) => event.preventDefault()}
+                          role="option"
+                          type="button"
+                        >
+                          <span>{t(option.label)}</span>
+                          {isSelected && <Check aria-hidden="true" />}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </span>
+            </div>
+
+            <div
+              aria-hidden={selectedMode !== 'custom'}
+              className="general-notification-drawer"
+              data-open={selectedMode === 'custom' ? 'true' : 'false'}
+              inert={selectedMode !== 'custom'}
+            >
+              <div
+                aria-label={t('notification.ordinaryCustomAria')}
+                className="general-notification-drawer__inner"
+                role="group"
+              >
+                {renderToggleRow(
+                  'humanCompletedEnabled',
+                  'notification.settingCompleted',
+                  'notification.settingCompletedDescription'
+                )}
+                {renderToggleRow(
+                  'humanFailedEnabled',
+                  'notification.settingFailed',
+                  'notification.settingFailedDescription'
+                )}
+                {renderToggleRow(
+                  'humanApprovalEnabled',
+                  'notification.settingApproval',
+                  'notification.settingApprovalDescription'
+                )}
+                {renderToggleRow(
+                  'humanCancelledEnabled',
+                  'notification.settingCancelled',
+                  'notification.settingCancelledDescription'
+                )}
+              </div>
+            </div>
+
             {renderToggleRow(
               'soundEnabled',
               'notification.settingSound',
-              'notification.settingSoundDescription',
-              !settings.enabled
+              'notification.settingSoundDescription'
             )}
             {renderToggleRow(
               'showTaskContent',
               'notification.settingPreview',
-              'notification.settingPreviewDescription',
-              !settings.enabled
-            )}
-            {renderToggleRow(
-              'humanCompletedEnabled',
-              'notification.settingCompleted',
-              'notification.settingCompletedDescription',
-              !settings.enabled
-            )}
-            {renderToggleRow(
-              'humanFailedEnabled',
-              'notification.settingFailed',
-              'notification.settingFailedDescription',
-              !settings.enabled
-            )}
-            {renderToggleRow(
-              'humanApprovalEnabled',
-              'notification.settingApproval',
-              'notification.settingApprovalDescription',
-              !settings.enabled
-            )}
-            {renderToggleRow(
-              'humanCancelledEnabled',
-              'notification.settingCancelled',
-              'notification.settingCancelledDescription',
-              !settings.enabled
+              'notification.settingPreviewDescription'
             )}
             {error && (
               <div className="settings-list-row" role="alert">
@@ -284,8 +429,6 @@ export function GeneralSettingsPage({
           </div>
         </div>
       </section>
-
-      <NotificationSettingsSection />
 
       <section className="settings-list-section" aria-labelledby="permission-modes-heading">
         <h2 id="permission-modes-heading">{t('general.sectionPermissions')}</h2>
@@ -464,6 +607,8 @@ export function GeneralSettingsPage({
           </div>
         </section>
       )}
+
+      <NotificationSettingsSection />
     </article>
   )
 }

@@ -2281,6 +2281,22 @@ export const ruRUTranslations = {
   'notification.settingEnabled': 'Системные уведомления',
   'notification.settingEnabledDescription':
     'Показывать системные уведомления, когда приложение не на переднем плане.',
+  'notification.ordinaryModeLabel': 'Уведомления об обычных задачах',
+  'notification.ordinaryModeDescription':
+    'Выберите, когда обычные задачи должны отправлять системные уведомления.',
+  'notification.ordinaryModeAria': 'Выбрать режим уведомлений об обычных задачах',
+  'notification.ordinaryModeNever': 'Никогда',
+  'notification.ordinaryModeAll': 'Разрешить уведомления',
+  'notification.ordinaryModeNecessary': 'Только при необходимости',
+  'notification.ordinaryModeCustom': 'Настроить',
+  'notification.ordinaryModeNeverDescription':
+    'Системные уведомления об обычных задачах отправляться не будут.',
+  'notification.ordinaryModeAllDescription':
+    'Уведомлять, когда обычная задача завершена, завершилась с ошибкой, отменена или требует одобрения.',
+  'notification.ordinaryModeNecessaryDescription':
+    'Уведомлять только тогда, когда обычная задача завершилась с ошибкой, отменена или требует одобрения.',
+  'notification.ordinaryModeCustomDescription': 'Уведомлять о состояниях задач, выбранных ниже.',
+  'notification.ordinaryCustomAria': 'Настройка уведомлений об обычных задачах',
   'notification.settingSound': 'Звук уведомлений',
   'notification.settingSoundDescription': 'Воспроизводить системный звук при первом показе группы.',
   'notification.settingPreview': 'Показывать содержимое задачи',

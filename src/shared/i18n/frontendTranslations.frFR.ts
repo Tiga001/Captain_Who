@@ -2333,6 +2333,23 @@ export const frFRTranslations = {
   'notification.settingEnabled': 'Notifications système',
   'notification.settingEnabledDescription':
     "Afficher les notifications système lorsque l'application n'est pas au premier plan.",
+  'notification.ordinaryModeLabel': 'Notifications des tâches ordinaires',
+  'notification.ordinaryModeDescription':
+    'Choisissez quand les tâches ordinaires envoient des notifications système.',
+  'notification.ordinaryModeAria': 'Sélectionner le mode de notification des tâches ordinaires',
+  'notification.ordinaryModeNever': 'Jamais',
+  'notification.ordinaryModeAll': 'Autoriser les notifications',
+  'notification.ordinaryModeNecessary': 'Uniquement si nécessaire',
+  'notification.ordinaryModeCustom': 'Personnalisé',
+  'notification.ordinaryModeNeverDescription':
+    'Les tâches ordinaires n’enverront pas de notifications système.',
+  'notification.ordinaryModeAllDescription':
+    'Notifier lorsqu’une tâche ordinaire est terminée, échoue, est annulée ou nécessite une approbation.',
+  'notification.ordinaryModeNecessaryDescription':
+    'Notifier uniquement lorsqu’une tâche ordinaire échoue, est annulée ou nécessite une approbation.',
+  'notification.ordinaryModeCustomDescription':
+    'Notifier pour les états de tâche sélectionnés ci-dessous.',
+  'notification.ordinaryCustomAria': 'Personnaliser les notifications des tâches ordinaires',
   'notification.settingSound': 'Son des notifications',
   'notification.settingSoundDescription':
     "Lire le son système lors de l'affichage initial d'un groupe.",

@@ -2355,6 +2355,23 @@ export const itITTranslations = {
   'notification.settingEnabled': 'Notifiche di sistema',
   'notification.settingEnabledDescription':
     "Mostra notifiche di sistema quando l'app non è in primo piano.",
+  'notification.ordinaryModeLabel': 'Notifiche delle attività ordinarie',
+  'notification.ordinaryModeDescription':
+    'Scegli quando le attività ordinarie inviano notifiche di sistema.',
+  'notification.ordinaryModeAria': 'Seleziona la modalità di notifica delle attività ordinarie',
+  'notification.ordinaryModeNever': 'Mai',
+  'notification.ordinaryModeAll': 'Consenti notifiche',
+  'notification.ordinaryModeNecessary': 'Solo quando necessario',
+  'notification.ordinaryModeCustom': 'Personalizzato',
+  'notification.ordinaryModeNeverDescription':
+    'Le attività ordinarie non invieranno notifiche di sistema.',
+  'notification.ordinaryModeAllDescription':
+    'Invia una notifica quando un’attività ordinaria viene completata, non riesce, viene annullata o richiede approvazione.',
+  'notification.ordinaryModeNecessaryDescription':
+    'Invia una notifica solo quando un’attività ordinaria non riesce, viene annullata o richiede approvazione.',
+  'notification.ordinaryModeCustomDescription':
+    'Invia notifiche per gli stati selezionati qui sotto.',
+  'notification.ordinaryCustomAria': 'Personalizza le notifiche delle attività ordinarie',
   'notification.settingSound': 'Suono di notifica',
   'notification.settingSoundDescription': 'Riproduci il suono di sistema quando appare un gruppo.',
   'notification.settingPreview': 'Mostra contenuto attività',

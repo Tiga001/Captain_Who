@@ -2279,6 +2279,20 @@ export const jaJPTranslations = {
   'notification.attachmentTask': '添付ファイルのタスク',
   'notification.settingEnabled': 'システム通知',
   'notification.settingEnabledDescription': 'アプリが前面にないときにシステム通知を表示します。',
+  'notification.ordinaryModeLabel': '通常タスクの通知',
+  'notification.ordinaryModeDescription': '通常タスクについてシステム通知を送る条件を選択します。',
+  'notification.ordinaryModeAria': '通常タスクの通知モードを選択',
+  'notification.ordinaryModeNever': 'しない',
+  'notification.ordinaryModeAll': '通知を許可',
+  'notification.ordinaryModeNecessary': '必要な場合のみ',
+  'notification.ordinaryModeCustom': 'カスタム',
+  'notification.ordinaryModeNeverDescription': '通常タスクのシステム通知は送信されません。',
+  'notification.ordinaryModeAllDescription':
+    '通常タスクが完了、失敗、キャンセル、または承認待ちになったときに通知します。',
+  'notification.ordinaryModeNecessaryDescription':
+    '通常タスクが失敗、キャンセル、または承認待ちになった場合のみ通知します。',
+  'notification.ordinaryModeCustomDescription': '下で選択したタスク状態を通知します。',
+  'notification.ordinaryCustomAria': '通常タスクの通知をカスタマイズ',
   'notification.settingSound': '通知音',
   'notification.settingSoundDescription':
     '通知グループを初めて表示するときにシステム音を鳴らします。',
