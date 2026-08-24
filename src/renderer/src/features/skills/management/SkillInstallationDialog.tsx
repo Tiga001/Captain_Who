@@ -37,25 +37,11 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
   const descriptionId = useId()
   const githubUrlInputId = useId()
   const githubUrlHintId = useId()
-  const [now, setNow] = useState(0)
   const isOpen = state.status !== 'idle'
   const isBusy =
     state.status === 'resolving' || state.status === 'inspecting' || state.status === 'committing'
   const isCommitting = state.status === 'committing'
   const isPreview = state.status === 'preview' || state.status === 'committing'
-
-  useEffect(() => {
-    if (
-      state.status !== 'candidates' &&
-      state.status !== 'preview' &&
-      state.status !== 'committing'
-    ) {
-      return undefined
-    }
-    setNow(Date.now())
-    const interval = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(interval)
-  }, [state.status])
 
   useEffect(() => {
     if (!isOpen) return undefined
@@ -194,7 +180,6 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
           {state.status === 'candidates' && (
             <SkillCandidateSelection
               candidates={state.output.candidates}
-              expired={now >= state.output.expiresAtUnixMs}
               onBack={workflow.returnToPreviousStep}
               onChoose={(candidate) => void workflow.chooseCandidate(candidate)}
             />
@@ -207,7 +192,6 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
               acceptedIssueIds={state.acceptedIssueIds}
               committing={state.status === 'committing'}
               errorKey={state.status === 'preview' ? state.errorKey : null}
-              now={now}
               operationLabel={operationLabel}
               onBack={workflow.returnToPreviousStep}
               onCommit={() => void workflow.commit()}
@@ -276,12 +260,10 @@ function SkillSourceChoice({
 
 function SkillCandidateSelection({
   candidates,
-  expired,
   onBack,
   onChoose
 }: {
   candidates: readonly SkillSourceResolutionCandidate[]
-  expired: boolean
   onBack: () => void
   onChoose: (candidate: SkillSourceResolutionCandidate) => void
 }) {
@@ -299,7 +281,6 @@ function SkillCandidateSelection({
               name: candidate.package.name
             })}
             className="skill-candidate-card"
-            disabled={expired}
             key={candidate.candidateId}
             onClick={() => onChoose(candidate)}
             type="button"
@@ -320,14 +301,9 @@ function SkillCandidateSelection({
           </button>
         ))}
       </div>
-      {expired && (
-        <p className="skill-preview-expired" role="alert">
-          {t('skills.candidateExpired')}
-        </p>
-      )}
       <DialogActions>
         <button className="skill-dialog-button" onClick={onBack} type="button">
-          {expired ? t('skills.resolveAgain') : t('skills.back')}
+          {t('skills.back')}
         </button>
       </DialogActions>
     </div>
@@ -338,7 +314,6 @@ function SkillPreview({
   acceptedIssueIds,
   committing,
   errorKey,
-  now,
   onBack,
   onCommit,
   onToggleAcknowledgement,
@@ -348,7 +323,6 @@ function SkillPreview({
   acceptedIssueIds: readonly string[]
   committing: boolean
   errorKey: TranslationKey | null
-  now: number
   onBack: () => void
   onCommit: () => void
   onToggleAcknowledgement: (issueId: string) => void
@@ -357,7 +331,6 @@ function SkillPreview({
 }) {
   const { t } = useFrontendConfig()
   const [technicalDetailsOpen, setTechnicalDetailsOpen] = useState(false)
-  const expired = now >= preview.expiresAtUnixMs
   const requiredIssues = preview.compatibility.issues.filter(
     (issue) => issue.requiresAcknowledgement
   )
@@ -497,19 +470,10 @@ function SkillPreview({
                   })}
                 </dd>
               </div>
-              <div>
-                <dt>{t('skills.previewExpires')}</dt>
-                <dd>{new Date(preview.expiresAtUnixMs).toLocaleTimeString()}</dd>
-              </div>
             </dl>
           )}
         </div>
 
-        {expired && (
-          <p className="skill-preview-expired" role="alert">
-            {t('skills.previewExpiredDescription')}
-          </p>
-        )}
         {errorKey && (
           <p className="skill-form-error" role="alert">
             {t(errorKey)}
@@ -540,7 +504,7 @@ function SkillPreview({
           </button>
           <button
             className="skill-dialog-button skill-dialog-button--primary"
-            disabled={committing || expired || incompatible || !acknowledged}
+            disabled={committing || incompatible || !acknowledged}
             onClick={onCommit}
             type="button"
           >

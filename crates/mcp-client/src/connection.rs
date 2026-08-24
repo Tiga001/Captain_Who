@@ -92,6 +92,13 @@ pub trait McpPeer: Send + Sync {
     fn server_id(&self) -> McpServerId;
     fn connection_state(&self) -> McpConnectionState;
     fn protocol_snapshot(&self) -> &McpProtocolSnapshot;
+    /// Whether this trusted peer enforces the Tool execution budget at its execution boundary.
+    ///
+    /// Ordinary MCP peers keep the Manager's hard deadline. A Host-owned peer may opt in when it
+    /// must pause that budget around a human approval without weakening the execution timeout.
+    fn owns_tool_timeout(&self) -> bool {
+        false
+    }
     fn list_tools<'a>(&'a self, cursor: Option<String>) -> BoxMcpFuture<'a, McpToolPage>;
     fn call_tool<'a>(
         &'a self,

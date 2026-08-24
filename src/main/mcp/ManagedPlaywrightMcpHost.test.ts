@@ -3134,6 +3134,132 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(risk.finish).toHaveBeenCalledOnce()
   })
 
+  it('pauses the tool deadline only while BrowserRisk waits for a human decision', async () => {
+    vi.useFakeTimers()
+    try {
+      let approveFirst!: () => void
+      let approveSecond!: () => void
+      let markApprovalStarted!: () => void
+      const approvalStarted = new Promise<void>((resolve) => {
+        markApprovalStarted = resolve
+      })
+      let markFirstApprovalSettled!: () => void
+      const firstApprovalSettled = new Promise<void>((resolve) => {
+        markFirstApprovalSettled = resolve
+      })
+      let markUpstreamStarted!: () => void
+      const upstreamStarted = new Promise<void>((resolve) => {
+        markUpstreamStarted = resolve
+      })
+      const callTool = vi.fn(
+        async (
+          _input: unknown,
+          _schema: undefined,
+          options?: { signal?: AbortSignal }
+        ): Promise<unknown> => {
+          markUpstreamStarted()
+          return await new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+              once: true
+            })
+          })
+        }
+      )
+      const beginNetworkOperation = vi.fn(async (input) => {
+        const risk = riskLease({
+          check: async () => {
+            input.onApprovalWaitChange?.(true)
+            input.onApprovalWaitChange?.(true)
+            markApprovalStarted()
+            try {
+              await new Promise<void>((resolve) => {
+                approveFirst = resolve
+              })
+              input.onApprovalWaitChange?.(false)
+              markFirstApprovalSettled()
+              await new Promise<void>((resolve) => {
+                approveSecond = resolve
+              })
+            } finally {
+              input.onApprovalWaitChange?.(false)
+            }
+          }
+        })
+        return risk.lease
+      })
+      const host = fakeHost({ beginNetworkOperation, callTool, toolTimeoutMs: 50 })
+
+      const pending = host.callTool(
+        'browser_navigate',
+        { url: 'http://127.0.0.1:3000/', call_reason: 'Open the fixture.' },
+        { authorizationContext: RISK_CONTEXT, parentRequestId: PARENT_REQUEST_ID }
+      )
+      await approvalStarted
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(callTool).not.toHaveBeenCalled()
+
+      approveFirst()
+      await firstApprovalSettled
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(callTool).not.toHaveBeenCalled()
+
+      approveSecond()
+      await upstreamStarted
+      await vi.advanceTimersByTimeAsync(51)
+
+      // The resumed timeout fires after upstream dispatch, so the Host must conservatively expose
+      // an outcome-unknown BrowserRisk error rather than claiming a definite timeout result.
+      await expect(pending).rejects.toMatchObject({ code: 'browser.risk_outcome_unknown' })
+      expect(callTool).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still honors caller cancellation while BrowserRisk waits for a human decision', async () => {
+    let markApprovalStarted!: () => void
+    const approvalStarted = new Promise<void>((resolve) => {
+      markApprovalStarted = resolve
+    })
+    const beginNetworkOperation = vi.fn(async (input) => {
+      const risk = riskLease({
+        check: async () => {
+          input.onApprovalWaitChange?.(true)
+          markApprovalStarted()
+          try {
+            await new Promise<void>((_resolve, reject) => {
+              input.signal.addEventListener('abort', () => reject(new Error('cancelled')), {
+                once: true
+              })
+            })
+          } finally {
+            input.onApprovalWaitChange?.(false)
+          }
+        }
+      })
+      return risk.lease
+    })
+    const callTool = vi.fn(async () => ({ content: [], isError: false }))
+    const host = fakeHost({ beginNetworkOperation, callTool, toolTimeoutMs: 50 })
+    const controller = new AbortController()
+
+    const pending = host.callTool(
+      'browser_navigate',
+      { url: 'http://127.0.0.1:3000/', call_reason: 'Open the fixture.' },
+      {
+        authorizationContext: RISK_CONTEXT,
+        parentRequestId: PARENT_REQUEST_ID,
+        signal: controller.signal
+      }
+    )
+    await approvalStarted
+    controller.abort('task_cancelled')
+
+    await expect(pending).rejects.toMatchObject({ code: 'mcp.builtin_playwright.cancelled' })
+    expect(callTool).not.toHaveBeenCalled()
+  })
+
   it('returns a rejected risk decision as a normal tool-level result without dispatch', async () => {
     const failure: BrowserRiskFailure = {
       code: 'browser.risk_rejected',

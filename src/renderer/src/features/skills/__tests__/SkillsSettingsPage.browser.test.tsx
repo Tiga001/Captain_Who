@@ -800,7 +800,7 @@ describe('Skill installation and update workflow', () => {
     await expect.element(screen.getByText('skills.previewExactSource')).toBeVisible()
     await expect.element(screen.getByText('openai/skills · main · skills/reviewer')).toBeVisible()
     await expect.element(screen.getByText('skills.previewFormat')).toBeVisible()
-    await expect.element(screen.getByText('skills.previewExpires')).toBeVisible()
+    expect(document.body.textContent).not.toContain('skills.previewExpires')
   })
 
   it('keeps preview identity and actions fixed while technical details scroll independently', async () => {
@@ -912,7 +912,7 @@ describe('Skill installation and update workflow', () => {
     })
   })
 
-  it('renders multiple candidates and inspects the selected opaque acquisition', async () => {
+  it('keeps legacy-expired candidates selectable and inspects the chosen acquisition', async () => {
     const resolutionId = '33333333-3333-4333-8333-333333333333'
     const firstAcquisition = {
       candidateId: 'candidate-first',
@@ -924,8 +924,8 @@ describe('Skill installation and update workflow', () => {
       kind: 'resolvedCandidate' as const,
       resolutionId
     }
-    service.resolveInstallationSource.mockResolvedValueOnce(
-      resolutionOutput([
+    service.resolveInstallationSource.mockResolvedValueOnce({
+      ...resolutionOutput([
         sourceCandidate({ acquisition: firstAcquisition, candidateId: 'candidate-first' }),
         sourceCandidate({
           acquisition: secondAcquisition,
@@ -947,8 +947,9 @@ describe('Skill installation and update workflow', () => {
             subdirectory: 'skills/release'
           }
         })
-      ])
-    )
+      ]),
+      expiresAtUnixMs: Date.now() - 1
+    })
     const screen = await render(<SkillsSettingsPage />)
     await expect.element(screen.getByText(installedSkill.name)).toBeVisible()
     await screen.getByRole('button', { name: 'skills.install' }).click()
@@ -959,7 +960,10 @@ describe('Skill installation and update workflow', () => {
     await screen.getByRole('button', { name: 'skills.continue' }).click()
 
     await expect.element(screen.getByText('Release checker')).toBeVisible()
-    await screen.getByRole('button', { name: 'skills.chooseCandidateNamed' }).nth(1).click()
+    const candidate = screen.getByRole('button', { name: 'skills.chooseCandidateNamed' }).nth(1)
+    await expect.element(candidate).toBeEnabled()
+    expect(screen.container.textContent).not.toContain('skills.candidateExpired')
+    await candidate.click()
     await expect.poll(() => service.inspectInstallation.mock.calls.length).toBe(1)
     expect(service.inspectInstallation.mock.calls[0]?.[0].source).toEqual(secondAcquisition)
   })
@@ -1296,7 +1300,7 @@ describe('Skill installation and update workflow', () => {
       .toContainEqual(['skills.commitConfirmedByInventory', { durationMs: 3200 }])
   })
 
-  it('does not allow an expired frozen preview to be committed', async () => {
+  it('lets an expired legacy preview reach authoritative commit validation', async () => {
     service.inspectInstallation.mockResolvedValueOnce(
       installationPreview({ expiresAtUnixMs: Date.now() - 1 })
     )
@@ -1305,10 +1309,12 @@ describe('Skill installation and update workflow', () => {
     await screen.getByRole('button', { name: 'skills.install' }).click()
     await screen.getByRole('button', { name: /skills.installLocal/ }).click()
     await screen.getByRole('checkbox', { name: /This package contains scripts/ }).click()
-    await expect
-      .element(screen.getByRole('button', { name: 'skills.installOperation' }))
-      .toBeDisabled()
-    expect(service.commitInstallation).not.toHaveBeenCalled()
+    const commit = screen.getByRole('button', { name: 'skills.installOperation' })
+    await expect.element(commit).toBeEnabled()
+    expect(screen.container.textContent).not.toContain('skills.previewExpiredDescription')
+    expect(screen.container.textContent).not.toContain('skills.previewExpires')
+    await commit.click()
+    expect(service.commitInstallation).toHaveBeenCalledTimes(1)
   })
 
   it('never applies an older list response over a newer invalidation refresh', async () => {

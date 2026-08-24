@@ -377,7 +377,7 @@ fn store_action(
 }
 
 #[test]
-fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_payloads() {
+fn expiry_tick_preserves_human_approval_tickets_and_does_not_touch_payloads() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let cutoff = now_ms().saturating_add(120_000);
@@ -390,7 +390,7 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
             move || now.load(Ordering::SeqCst)
         });
 
-    let (pending_id, pending_invocation) = store_action(
+    let (pending_id, _pending_invocation) = store_action(
         &service,
         &storage,
         "run-expired-pending",
@@ -398,7 +398,7 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
         cutoff - 60_001,
         cutoff - 1,
     );
-    let (approved_id, approved_invocation) = store_action(
+    let (approved_id, _approved_invocation) = store_action(
         &service,
         &storage,
         "run-expired-approved",
@@ -406,7 +406,7 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
         cutoff - 60_000,
         cutoff,
     );
-    let (executing_id, executing_invocation) = store_action(
+    let (executing_id, _executing_invocation) = store_action(
         &service,
         &storage,
         "run-expired-executing",
@@ -414,7 +414,7 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
         cutoff - 60_001,
         cutoff - 1,
     );
-    let (future_id, future_invocation) = store_action(
+    let (future_id, _future_invocation) = store_action(
         &service,
         &storage,
         "run-future-pending",
@@ -425,18 +425,24 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
 
     let summary = service.reconcile_expired_mcp_approvals().unwrap();
     assert_eq!(summary.cutoff_ms, cutoff);
-    assert_eq!(summary.candidates, 2);
-    assert_eq!(summary.terminalized, 2);
+    assert_eq!(summary.candidates, 0);
+    assert_eq!(summary.terminalized, 0);
     assert_eq!(summary.status_cas_conflicts, 0);
-    assert_eq!(summary.payload_invalidation_attempts, 2);
+    assert_eq!(summary.payload_invalidation_attempts, 0);
     assert_eq!(summary.payload_invalidation_failures, 0);
 
     let pending = service
         .pending_actions
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    assert!(!pending.contains_key(&pending_id));
-    assert!(!pending.contains_key(&approved_id));
+    assert_eq!(
+        pending[&pending_id].snapshot.status,
+        PendingActionStatus::Pending
+    );
+    assert_eq!(
+        pending[&approved_id].snapshot.status,
+        PendingActionStatus::Approved
+    );
     assert_eq!(
         pending[&executing_id].snapshot.status,
         PendingActionStatus::Executing
@@ -446,22 +452,16 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
         PendingActionStatus::Pending
     );
     drop(pending);
-    assert!(!service
+    assert!(service
         .startup_recoverable_mcp_approvals
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .contains(&approved_id));
-    let mut invalidated = invoker.invalidated();
-    invalidated.sort();
-    let mut expected = vec![pending_invocation, approved_invocation];
-    expected.sort();
-    assert_eq!(invalidated, expected);
-    assert!(!invoker.invalidated().contains(&executing_invocation));
-    assert!(!invoker.invalidated().contains(&future_invocation));
+    assert!(invoker.invalidated().is_empty());
 }
 
 #[test]
-fn expiry_tick_loses_a_durable_status_cas_without_invalidating_or_removing_memory() {
+fn expiry_tick_does_not_arbitrate_or_rewrite_durable_action_status() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let now = 2_000_000;
@@ -494,9 +494,9 @@ fn expiry_tick_loses_a_durable_status_cas_without_invalidating_or_removing_memor
         .unwrap();
 
     let summary = service.reconcile_expired_mcp_approvals().unwrap();
-    assert_eq!(summary.candidates, 1);
+    assert_eq!(summary.candidates, 0);
     assert_eq!(summary.terminalized, 0);
-    assert_eq!(summary.status_cas_conflicts, 1);
+    assert_eq!(summary.status_cas_conflicts, 0);
     assert_eq!(summary.payload_invalidation_attempts, 0);
     assert!(invoker.invalidated().is_empty());
     assert_eq!(

@@ -1924,12 +1924,7 @@ impl AgentService {
             let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
             return;
         };
-        let Some(invoker) = self.mcp_tool_invoker.clone() else {
-            self.invalidate_mcp_pending_payload(&record.snapshot.action);
-            let _ = self.persist_pending_target_status(&record, PendingActionStatus::Failed);
-            let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
-            return;
-        };
+        let invoker = self.mcp_tool_invoker.clone();
         if self.is_agent_input_scope_deleting(&record.agent_input) {
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
             let _ = self.persist_pending_target_status(&record, PendingActionStatus::Cancelled);
@@ -1949,8 +1944,10 @@ impl AgentService {
         let cancelled_before_dispatch = cancellation.is_cancelled();
         let preflight_result = if cancelled_before_dispatch {
             Err(AgentError::cancelled())
-        } else {
+        } else if let Some(invoker) = invoker.as_ref() {
             invoker.revalidate_approved(&approval)
+        } else {
+            Err(AgentError::new("MCP invocation Host is unavailable."))
         };
         if preflight_result.is_err() {
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
@@ -1999,6 +1996,7 @@ impl AgentService {
             Err(error) => Err(error),
             Ok(()) => {
                 invoker
+                    .expect("successful MCP preflight requires a live invocation Host")
                     .invoke_approved(
                         McpApprovedToolInvocation {
                             approval: approval.as_ref().clone(),

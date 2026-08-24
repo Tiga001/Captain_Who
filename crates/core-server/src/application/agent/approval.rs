@@ -793,13 +793,13 @@ impl AgentService {
             let conversation_id = record.snapshot.conversation_id.as_deref().ok_or_else(|| {
                 "Skill installation approval has no conversation identity.".to_string()
             })?;
-            let service = self
-                .skill_installation
-                .as_ref()
-                .ok_or_else(|| "Skill installation Host is unavailable.".to_string())?;
-            service
-                .reject_action(installation, conversation_id, &record.snapshot.run_id)
-                .map_err(|error| error.to_string())?;
+            // The user cancellation is authoritative even when the short-lived frozen package
+            // was already pruned. Host cleanup is idempotent best effort and must not reopen or
+            // strand the approval ticket.
+            if let Some(service) = self.skill_installation.as_ref() {
+                let _ =
+                    service.reject_action(installation, conversation_id, &record.snapshot.run_id);
+            }
         }
         if let Err(error) = self.finalize_cancelled_pending_action(&record, call) {
             if cancelled_file_write_outcome_is_durable_or_unknown(&self.storage, &record) {
@@ -1133,6 +1133,7 @@ impl AgentService {
             approved_materialization_guard,
             inline_continuation_guard,
             precommitted_builtin_rejection,
+            provider_continuation_error,
         ) = {
             let mut pending_actions = self
                 .pending_actions
@@ -1177,113 +1178,13 @@ impl AgentService {
             {
                 return Err("项目或会话正在移除，无法处理待审批操作。".to_string());
             }
-            if decision_status == AgentApprovalDecisionStatus::Approved {
-                if let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action {
-                    let now = self.mcp_approval_now_ms();
-                    if approval.expires_at <= now {
-                        let retired = self
-                            .storage
-                            .terminalize_mcp_agent_action_on_startup(
-                                &record.storage_id,
-                                "pending",
-                                McpStartupActionTerminalOutcome::Expired,
-                                now,
-                            )
-                            .map_err(|_| {
-                                "MCP approval expiry could not be persisted safely.".to_string()
-                            })?;
-                        if !retired {
-                            return Err("MCP approval changed while its expiry was being settled."
-                                .to_string());
-                        }
-                        record.snapshot.status = PendingActionStatus::Failed;
-                        self.invalidate_mcp_pending_payload(&record.snapshot.action);
-                        return Err(
-                            "MCP approval expired before dispatch; the tool was not invoked."
-                                .to_string(),
-                        );
-                    }
-                }
-                if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
-                    &record.snapshot.action
-                {
-                    let now_ms = self.mcp_approval_now_ms();
-                    let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
-                    if approval.expires_at <= now_seconds {
-                        let retired = self
-                            .storage
-                            .terminalize_builtin_mcp_tool_agent_action_on_startup(
-                                &record.storage_id,
-                                pending_status_label(record.snapshot.status),
-                                McpStartupActionTerminalOutcome::Expired,
-                                now_ms,
-                            )
-                            .map_err(|_| {
-                                "Built-in MCP Tool approval expiry could not be persisted safely."
-                                    .to_string()
-                            })?;
-                        if !retired {
-                            return Err(
-                                "Built-in MCP Tool approval changed while its expiry was being settled."
-                                    .to_string(),
-                            );
-                        }
-                        record.snapshot.status = PendingActionStatus::Failed;
-                        let expired_record = record.clone();
-                        pending_actions.remove(&storage_id);
-                        self.startup_recoverable_mcp_approvals
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .remove(&storage_id);
-                        drop(pending_actions);
-                        drop(deletion_lifecycle.take());
-                        self.invalidate_mcp_pending_payload(&expired_record.snapshot.action);
-                        if let Some(conversation_id) =
-                            expired_record.snapshot.conversation_id.as_deref()
-                        {
-                            self.release_conversation_turn_if_current(
-                                conversation_id,
-                                &expired_record.snapshot.run_id,
-                            );
-                            self.release_turn_concurrency_permit(&expired_record.snapshot.run_id);
-                        }
-                        return Err(
-                            "Built-in MCP Tool approval expired before dispatch; the Tool was not invoked."
-                                .to_string(),
-                        );
-                    }
-                }
-                if let Err(error) = self.validate_provider_continuations_before_dispatch(record) {
-                    // Publish the durable terminal intent before replacing the resume payload.
-                    // A crash between these writes leaves a non-dispatchable pending row that
-                    // startup reconciliation can finish; it can never fall back to approval.
-                    self.storage.set_pending_agent_action_target_status(
-                        &record.storage_id,
-                        pending_status_label(PendingActionStatus::Pending),
-                        pending_status_label(PendingActionStatus::Cancelled),
-                        now_ms(),
-                    )?;
-                    self.persist_pending_status(
-                        record,
-                        PendingActionStatus::Pending,
-                        PendingActionStatus::Cancelled,
-                    )?;
-                    record.snapshot.status = PendingActionStatus::Cancelled;
-                    self.invalidate_mcp_pending_payload(&record.snapshot.action);
-                    self.record_action_audit(
-                        record,
-                        Some("blocked"),
-                        "cancelled",
-                        None,
-                        None,
-                        None,
-                        Some("Provider continuation validation failed before dispatch."),
-                        Some(now_ms()),
-                        Some(now_ms()),
-                    );
-                    return Err(error);
-                }
-            }
+            let provider_continuation_error = (decision_status
+                == AgentApprovalDecisionStatus::Approved)
+                .then(|| {
+                    self.validate_provider_continuations_before_dispatch(record)
+                        .err()
+                })
+                .flatten();
             let call = tool_call_for_pending_record(record)?;
             // A sensitive built-in rejection must win the durable decision CAS before its
             // process-only payload is mutated. Otherwise an approve thread can transition the
@@ -1338,7 +1239,9 @@ impl AgentService {
                 } else {
                     None
                 };
-            if decision_status == AgentApprovalDecisionStatus::Approved {
+            if decision_status == AgentApprovalDecisionStatus::Approved
+                && provider_continuation_error.is_none()
+            {
                 authorize_structured_file_write(
                     &record.agent_input,
                     &record.snapshot.action,
@@ -1347,6 +1250,7 @@ impl AgentService {
                 .map_err(|error| error.to_string())?;
             }
             let is_approved_process = decision_status == AgentApprovalDecisionStatus::Approved
+                && provider_continuation_error.is_none()
                 && matches!(
                     record.snapshot.action,
                     AgentProposedAction::Command { .. }
@@ -1356,12 +1260,14 @@ impl AgentService {
                         | AgentProposedAction::BuiltinMcpToolApproval { .. }
                 );
             let is_approved_skill_script = decision_status == AgentApprovalDecisionStatus::Approved
+                && provider_continuation_error.is_none()
                 && matches!(
                     record.snapshot.action,
                     AgentProposedAction::SkillScript { .. }
                 );
             let is_approved_materialization = decision_status
                 == AgentApprovalDecisionStatus::Approved
+                && provider_continuation_error.is_none()
                 && matches!(
                     record.snapshot.action,
                     AgentProposedAction::SkillMaterialization { .. }
@@ -1460,8 +1366,10 @@ impl AgentService {
                 approved_materialization_guard,
                 inline_continuation_guard,
                 precommitted_builtin_rejection,
+                provider_continuation_error,
             )
         };
+        let mut approved_process_guard = approved_process_guard;
         let mut approved_materialization_guard = approved_materialization_guard;
         let mut inline_continuation_guard = inline_continuation_guard;
 
@@ -1487,6 +1395,7 @@ impl AgentService {
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
         }
         if decision_status == AgentApprovalDecisionStatus::Approved
+            && provider_continuation_error.is_none()
             && matches!(record.snapshot.action, AgentProposedAction::Command { .. })
         {
             self.record_action_audit(
@@ -1509,6 +1418,7 @@ impl AgentService {
             );
         }
         if decision_status == AgentApprovalDecisionStatus::Approved
+            && provider_continuation_error.is_none()
             && matches!(
                 record.snapshot.action,
                 AgentProposedAction::SkillScript { .. }
@@ -1524,6 +1434,7 @@ impl AgentService {
             );
         }
         if decision_status == AgentApprovalDecisionStatus::Approved
+            && provider_continuation_error.is_none()
             && matches!(
                 record.snapshot.action,
                 AgentProposedAction::OfficeOperation { .. }
@@ -1550,6 +1461,7 @@ impl AgentService {
             );
         }
         if decision_status == AgentApprovalDecisionStatus::Approved
+            && provider_continuation_error.is_none()
             && matches!(
                 record.snapshot.action,
                 AgentProposedAction::McpToolCall { .. }
@@ -1575,122 +1487,73 @@ impl AgentService {
                 notifications,
             );
         }
-        if decision_status == AgentApprovalDecisionStatus::Approved && is_builtin_mcp_action {
+        let mut builtin_mcp_grant_error = None;
+        if decision_status == AgentApprovalDecisionStatus::Approved
+            && provider_continuation_error.is_none()
+            && is_builtin_mcp_action
+        {
             let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action
             else {
                 unreachable!("typed built-in MCP action was checked above");
             };
             let mut approved = (**approval).clone();
             approved.approval_status = AgentApprovalStatus::Approved;
-            let runtime = self
+            let grant = self
                 .builtin_capabilities
                 .as_ref()
-                .ok_or_else(|| "Builtin capability Host is unavailable.".to_string())?;
-            let grant = match runtime.approve_builtin_mcp_tool(&approved) {
-                Ok(grant) => grant,
-                Err(_error) => {
-                    let completed_at = now_ms();
-                    let terminalized = self
-                        .storage
-                        .terminalize_builtin_mcp_tool_agent_action_on_startup(
-                            &record.storage_id,
-                            pending_status_label(PendingActionStatus::Approved),
-                            McpStartupActionTerminalOutcome::PayloadUnavailable,
-                            completed_at,
-                        )
-                        .map_err(|_| {
-                            "Built-in MCP Tool approval could not be terminalized safely."
-                                .to_string()
-                        })?;
-                    if !terminalized {
-                        return Err(
-                            "Built-in MCP Tool approval changed while process authority was being retired."
-                                .to_string(),
-                        );
-                    }
-                    self.invalidate_mcp_pending_payload(&record.snapshot.action);
-                    self.pending_actions
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .remove(&record.storage_id);
-                    if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
-                        self.release_conversation_turn_if_current(
-                            conversation_id,
-                            &record.snapshot.run_id,
-                        );
-                        self.release_turn_concurrency_permit(&record.snapshot.run_id);
-                    }
-                    let tool_result = AgentToolResult {
-                        exact_archive_file: None,
-                        call_id: approval.identity.call_id.clone(),
-                        tool: approval.identity.model_name.clone(),
-                        ok: false,
-                        result: Some(serde_json::json!({
-                            "schemaVersion": 1,
-                            "type": "builtin_mcp_tool_approval",
-                            "status": "failed",
-                            "errorCode": "mcp.tool_approval_payload_unavailable",
-                            "dispatchCertainty": "definitely_not_dispatched",
-                            "retryable": false,
-                            "contentOmitted": true,
-                        })),
-                        error: Some(
-                            "The sensitive built-in MCP Tool was not dispatched because its process authority was unavailable."
-                                .to_string(),
-                        ),
-                    };
+                .ok_or_else(|| "Built-in capability Host is unavailable.".to_string())
+                .and_then(|runtime| {
+                    runtime
+                        .approve_builtin_mcp_tool(&approved)
+                        .map(|grant| (runtime, grant))
+                        .map_err(|error| error.to_string())
+                });
+            match grant {
+                Ok((runtime, grant)) => {
+                    self.record_action_audit(
+                        &record,
+                        Some("approved"),
+                        "approved",
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(decided_at),
+                        None,
+                    );
                     drop(deletion_lifecycle);
-                    return Ok(AgentActionExecutionOutput {
-                        action_id: record.snapshot.action_id,
-                        action_type: record.snapshot.action_type,
-                        tool_name: record.snapshot.tool_name,
-                        status: "failed".to_string(),
-                        patch_result: None,
-                        file_write_result: None,
-                        command_result: None,
-                        tool_result: Some(tool_result),
-                        agent_output: AgentChatOutput {
-                            content: String::new(),
-                            status: AgentRunStatus::Failed,
-                            run_id: record.snapshot.run_id,
-                            events: Vec::new(),
-                            tool_definitions: Vec::new(),
-                            todo: None,
-                            usage: None,
-                            finish_reason: None,
-                            proposed_actions: Vec::new(),
-                            conversation_turn_trace: None,
-                        },
-                    });
+                    let queue = self.queue_builtin_mcp_tool_execution(
+                        record,
+                        call,
+                        grant.clone(),
+                        approved_process_guard.take().expect(
+                            "approved built-in MCP invocation registered under pending lock",
+                        ),
+                        notifications,
+                    );
+                    if queue.is_err() {
+                        let _ = runtime
+                            .revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+                    }
+                    return queue;
                 }
-            };
-            self.record_action_audit(
-                &record,
-                Some("approved"),
-                "approved",
-                None,
-                None,
-                None,
-                None,
-                Some(decided_at),
-                None,
-            );
-            drop(deletion_lifecycle);
-            let queue = self.queue_builtin_mcp_tool_execution(
-                record,
-                call,
-                grant.clone(),
-                approved_process_guard
-                    .expect("approved built-in MCP invocation registered under pending lock"),
-                notifications,
-            );
-            if queue.is_err() {
-                let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
+                Err(error) => {
+                    builtin_mcp_grant_error = Some(error);
+                    // This approval already won the durable pending -> approved decision CAS, but
+                    // there is no process authority to dispatch. Convert its process lease into a
+                    // synchronous continuation lease so the ordinary failed ToolResult is paired
+                    // with the original frozen checkpoint before the agent resumes.
+                    drop(approved_process_guard.take());
+                    inline_continuation_guard = Some(
+                        self.process_runs
+                            .register(&record.storage_id, &record.snapshot.run_id),
+                    );
+                }
             }
-            return queue;
         }
 
         let is_approved_materialization = decision_status == AgentApprovalDecisionStatus::Approved
+            && provider_continuation_error.is_none()
             && matches!(
                 record.snapshot.action,
                 AgentProposedAction::SkillMaterialization { .. }
@@ -1710,18 +1573,70 @@ impl AgentService {
                     record.snapshot.conversation_id.as_deref().ok_or_else(|| {
                         "Skill installation approval has no conversation identity.".to_string()
                     })?;
-                let service = self
-                    .skill_installation
-                    .as_ref()
-                    .ok_or_else(|| "Skill installation Host is unavailable.".to_string())?;
-                service
-                    .reject_action(installation, conversation_id, &record.snapshot.run_id)
-                    .map_err(|error| error.to_string())?;
+                // Rejection settles the durable approval even if its temporary installation
+                // preparation has already expired or disappeared.
+                if let Some(service) = self.skill_installation.as_ref() {
+                    let _ = service.reject_action(
+                        installation,
+                        conversation_id,
+                        &record.snapshot.run_id,
+                    );
+                }
             }
         }
         let mut builtin_activation_settlement = None;
-        let execution = if decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action
-        {
+        let execution = if let Some(error) = provider_continuation_error.as_deref() {
+            ActionExecutionDecision {
+                status: "failed".to_string(),
+                final_pending_status: PendingActionStatus::Failed,
+                patch_result: None,
+                file_write_result: None,
+                file_change: None,
+                tool_result: AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: call.id.clone(),
+                    tool: call.tool.clone(),
+                    ok: false,
+                    result: Some(serde_json::json!({
+                        "status": "failed",
+                        "errorCode": "provider_continuation_unavailable",
+                        "dispatchCertainty": "definitely_not_dispatched",
+                        "retryable": false,
+                    })),
+                    error: Some(error.to_string()),
+                },
+            }
+        } else if let Some(error) = builtin_mcp_grant_error.as_deref() {
+            let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action
+            else {
+                unreachable!("built-in MCP grant errors only belong to typed built-in actions");
+            };
+            ActionExecutionDecision {
+                status: "failed".to_string(),
+                final_pending_status: PendingActionStatus::Failed,
+                patch_result: None,
+                file_write_result: None,
+                file_change: None,
+                tool_result: AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: approval.identity.call_id.clone(),
+                    tool: approval.identity.model_name.clone(),
+                    ok: false,
+                    result: Some(serde_json::json!({
+                        "schemaVersion": 1,
+                        "type": "builtin_mcp_tool_approval",
+                        "status": "failed",
+                        "errorCode": "mcp.tool_approval_payload_unavailable",
+                        "dispatchCertainty": "definitely_not_dispatched",
+                        "retryable": false,
+                        "contentOmitted": true,
+                    })),
+                    error: Some(format!(
+                        "The sensitive built-in MCP Tool was not dispatched because its process authority was unavailable: {error}"
+                    )),
+                },
+            }
+        } else if decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action {
             let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
                 unreachable!("typed MCP action was checked above");
             };
@@ -1862,19 +1777,31 @@ impl AgentService {
             {
                 let mut installation = (**installation).clone();
                 installation.approval_status = AgentApprovalStatus::Approved;
-                let conversation_id =
-                    record.snapshot.conversation_id.as_deref().ok_or_else(|| {
-                        "Skill installation approval has no conversation identity.".to_string()
-                    })?;
-                let service = self
-                    .skill_installation
-                    .as_ref()
-                    .ok_or_else(|| "Skill installation Host is unavailable.".to_string())?;
-                let tool_result = service.commit_approved(
-                    &installation,
-                    conversation_id,
-                    &record.snapshot.run_id,
-                );
+                let tool_result = match (
+                    record.snapshot.conversation_id.as_deref(),
+                    self.skill_installation.as_ref(),
+                ) {
+                    (Some(conversation_id), Some(service)) => service.commit_approved(
+                        &installation,
+                        conversation_id,
+                        &record.snapshot.run_id,
+                    ),
+                    _ => AgentToolResult {
+                        exact_archive_file: None,
+                        call_id: call.id.clone(),
+                        tool: call.tool.clone(),
+                        ok: false,
+                        result: Some(serde_json::json!({
+                            "status": "failed",
+                            "code": "installRefNotFound",
+                            "recovery": "prepareAgain",
+                        })),
+                        error: Some(
+                            "The Skill installation preparation is no longer available."
+                                .to_string(),
+                        ),
+                    },
+                };
                 ActionExecutionDecision {
                     status: if tool_result.ok {
                         "installed".to_string()
@@ -2333,47 +2260,45 @@ impl AgentService {
                 );
             }
             record.snapshot.status = PendingActionStatus::Failed;
+            let failed_record = record.clone();
+            pending_actions.remove(&storage_id);
             self.startup_recoverable_mcp_approvals
                 .lock()
                 .unwrap_or_else(|lock_error| lock_error.into_inner())
                 .remove(&storage_id);
-            self.invalidate_mcp_pending_payload(&record.snapshot.action);
-            return Err(error);
-        }
-        let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
-            unreachable!("MCP action was checked above");
-        };
-        let now = self.mcp_approval_now_ms();
-        if approval.expires_at <= now {
-            let retired = self
-                .storage
-                .terminalize_mcp_agent_action_on_startup(
-                    &record.storage_id,
-                    "approved",
-                    McpStartupActionTerminalOutcome::Expired,
-                    now,
-                )
-                .map_err(|_| "MCP approval expiry could not be persisted safely.".to_string())?;
-            if !retired {
-                return Err("MCP approval changed while its expiry was being settled.".to_string());
+            drop(pending_actions);
+            drop(deletion_lifecycle);
+            self.invalidate_mcp_pending_payload(&failed_record.snapshot.action);
+            if let Some(conversation_id) = failed_record.snapshot.conversation_id.as_deref() {
+                self.release_conversation_turn_if_current(
+                    conversation_id,
+                    &failed_record.snapshot.run_id,
+                );
+                self.release_turn_concurrency_permit(&failed_record.snapshot.run_id);
             }
-            record.snapshot.status = PendingActionStatus::Failed;
-            self.startup_recoverable_mcp_approvals
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(&storage_id);
-            self.invalidate_mcp_pending_payload(&record.snapshot.action);
-            return Err(
-                "MCP approval expired before dispatch; the tool was not invoked.".to_string(),
-            );
+            return Ok(Some(AgentActionExecutionOutput {
+                action_id: failed_record.snapshot.action_id,
+                action_type: failed_record.snapshot.action_type,
+                tool_name: failed_record.snapshot.tool_name,
+                status: "failed".to_string(),
+                patch_result: None,
+                file_write_result: None,
+                command_result: None,
+                tool_result: None,
+                agent_output: AgentChatOutput {
+                    content: error,
+                    status: AgentRunStatus::Failed,
+                    run_id: failed_record.snapshot.run_id,
+                    events: Vec::new(),
+                    tool_definitions: Vec::new(),
+                    todo: None,
+                    usage: None,
+                    finish_reason: None,
+                    proposed_actions: Vec::new(),
+                    conversation_turn_trace: None,
+                },
+            }));
         }
-        let invoker = self
-            .mcp_tool_invoker
-            .as_ref()
-            .ok_or_else(|| "MCP invocation Host is unavailable.".to_string())?;
-        invoker
-            .revalidate_approved(approval)
-            .map_err(|error| error.to_string())?;
         // Preserve the frozen Provider ToolCall exactly as it appeared in the checkpoint.
         // Approval is carried by the typed action journal and lifecycle, not by rewriting the
         // append-only call from `required` to `approved` after restart.

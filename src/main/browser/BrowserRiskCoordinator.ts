@@ -98,6 +98,8 @@ export interface BrowserRiskOperationInput {
   authorizationContext: BrowserRiskAuthorizationContext
   parentRequestId: string
   signal?: AbortSignal
+  /** Pauses only the enclosing Tool execution budget while a human decision is outstanding. */
+  onApprovalWaitChange?: (waiting: boolean) => void
 }
 
 /**
@@ -322,7 +324,14 @@ export class BrowserRiskCoordinator {
 
     const key = deduplicationKey(operation, input.destination, input.riskKinds, input.trigger)
     const existing = this.inFlight.get(key)
-    if (existing) return existing
+    if (existing) {
+      operation.onApprovalWaitChange?.(true)
+      try {
+        return await existing
+      } finally {
+        operation.onApprovalWaitChange?.(false)
+      }
+    }
     if (this.inFlight.size >= MAX_PENDING_APPROVALS) {
       throw riskError('browser.risk_busy', input.dispatchCertainty)
     }
@@ -330,7 +339,6 @@ export class BrowserRiskCoordinator {
     const controller = new AbortController()
     const abortFromOperation = (): void => controller.abort(operation.signal?.reason)
     operation.signal?.addEventListener('abort', abortFromOperation, { once: true })
-    const timer = setTimeout(() => controller.abort('approval_timeout'), expiresAt - createdAt)
     this.active.add(controller)
     const request: BrowserRiskAuthorizationRequest = {
       schemaVersion: 1,
@@ -344,20 +352,19 @@ export class BrowserRiskCoordinator {
       createdAt,
       expiresAt
     }
+    operation.onApprovalWaitChange?.(true)
     const pending = raceWithSignal(
       this.authorizer.authorize(request, controller.signal),
       controller.signal
     )
       .catch((error: unknown) => {
         if (controller.signal.aborted) {
-          return {
-            decision: controller.signal.reason === 'approval_timeout' ? 'expired' : 'cancelled'
-          } as const
+          return { decision: 'cancelled' } as const
         }
         throw error
       })
       .finally(() => {
-        clearTimeout(timer)
+        operation.onApprovalWaitChange?.(false)
         operation.signal?.removeEventListener('abort', abortFromOperation)
         this.active.delete(controller)
         if (this.inFlight.get(key) === pending) this.inFlight.delete(key)

@@ -345,6 +345,40 @@ describe('BrowserRiskCoordinator', () => {
     expect(coordinator.snapshot()).toEqual({ active: 0, inFlight: 0 })
   })
 
+  it('does not expire a pending human approval when its runtime binding TTL elapses', async () => {
+    vi.useFakeTimers()
+    try {
+      const authorizer = new Authorizer(
+        () => new Promise<BrowserRiskAuthorizationDecision>(() => undefined)
+      )
+      const coordinator = new BrowserRiskCoordinator({
+        authorizer,
+        now: () => 1_000_000,
+        policy: new BrowserNetworkPolicy({
+          dnsResolver: new SequenceResolver([['127.0.0.1']])
+        }),
+        timeoutMs: 1_000
+      })
+      const controller = new AbortController()
+      const check = operation(coordinator, controller.signal).check({
+        url: 'http://127.0.0.1:3000/',
+        trigger: 'main_frame',
+        dispatchCertainty: 'definitely_not_dispatched'
+      })
+      await vi.waitFor(() => expect(coordinator.snapshot().active).toBe(1))
+
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(coordinator.snapshot()).toEqual({ active: 1, inFlight: 1 })
+      controller.abort('task_cancelled')
+      await expect(check).rejects.toMatchObject({
+        failure: { code: 'browser.risk_cancelled' }
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('maps cancellation during DNS resolution to a typed pre-dispatch cancellation', async () => {
     let release!: (addresses: readonly string[]) => void
     const policy = new BrowserNetworkPolicy({

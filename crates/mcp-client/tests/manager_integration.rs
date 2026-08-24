@@ -43,6 +43,7 @@ struct MockServer {
     tool_result: Mutex<McpToolResult>,
     call_error: Mutex<Option<McpError>>,
     wait_for_call_cancellation: AtomicBool,
+    owns_tool_timeout: AtomicBool,
     registry_at_close: Mutex<Option<Arc<InMemoryMcpRegistry>>>,
     close_saw_registered: AtomicBool,
 }
@@ -87,6 +88,7 @@ impl MockServer {
             }),
             call_error: Mutex::new(None),
             wait_for_call_cancellation: AtomicBool::new(false),
+            owns_tool_timeout: AtomicBool::new(false),
             registry_at_close: Mutex::new(None),
             close_saw_registered: AtomicBool::new(false),
         })
@@ -228,6 +230,10 @@ impl McpPeer for MockPeer {
         } else {
             McpConnectionState::Ready
         }
+    }
+
+    fn owns_tool_timeout(&self) -> bool {
+        self.server.owns_tool_timeout.load(Ordering::SeqCst)
     }
 
     fn protocol_snapshot(&self) -> &McpProtocolSnapshot {
@@ -2251,6 +2257,51 @@ async fn catalog_call_propagates_cancellation_to_the_peer() {
     );
     assert!(manager.active_call(&active_id).unwrap().is_none());
     assert_eq!(manager.active_call_count().unwrap(), 0);
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_owned_tool_timeout_disables_only_the_manager_deadline() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    let mut server_config = config(server_id, "host-owned-timeout", true);
+    server_config.request_timeout_ms = 20;
+    registry.add(server_config).unwrap();
+    let server = MockServer::with_tools(vec![descriptor("slow", "host owns its timeout")]);
+    server
+        .wait_for_call_cancellation
+        .store(true, Ordering::SeqCst);
+    server.owns_tool_timeout.store(true, Ordering::SeqCst);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    let request = catalog_call(&manager, server_id, "slow", json!({}));
+    let cancellation = McpCancellationToken::new();
+    let call_cancellation = cancellation.clone();
+    let call_manager = manager.clone();
+    let call = tokio::spawn(async move {
+        call_manager
+            .call_catalog_tool(request, call_cancellation)
+            .await
+    });
+    wait_until(Duration::from_secs(1), || server.calls().len() == 1).await;
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(
+        !call.is_finished(),
+        "the generic Manager deadline must not cancel a Host-budgeted Tool"
+    );
+
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .expect("explicit cancellation timeout")
+        .expect("host-owned timeout call task")
+        .expect_err("explicit cancellation must still reach the peer");
+    assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
 
     manager.stop_all().await;
 }

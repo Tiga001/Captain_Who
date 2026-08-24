@@ -58,7 +58,7 @@ export interface ManagedPlaywrightBridgeHostOptions {
 
 interface ActiveCommand {
   controller: AbortController
-  timer: ReturnType<typeof setTimeout>
+  timer?: ReturnType<typeof setTimeout>
 }
 
 /**
@@ -119,7 +119,7 @@ export class ManagedPlaywrightBridgeHost {
     this.unsubscribeCancel()
     this.unsubscribeAgentEvent()
     for (const active of this.active.values()) {
-      clearTimeout(active.timer)
+      if (active.timer) clearTimeout(active.timer)
       active.controller.abort('shutdown')
     }
     this.active.clear()
@@ -150,7 +150,12 @@ export class ManagedPlaywrightBridgeHost {
     }
 
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort('timeout'), input.deadlineMs - this.now())
+    // ManagedPlaywrightMcpHost owns CallTool's execution budget because only that boundary knows
+    // when BrowserRisk is waiting for a human. Other bridge commands retain the envelope timer.
+    const timer =
+      input.command.type === 'call_tool'
+        ? undefined
+        : setTimeout(() => controller.abort('timeout'), input.deadlineMs - this.now())
     this.active.set(input.requestId, { controller, timer })
     void this.execute(input, controller)
   }
@@ -173,7 +178,10 @@ export class ManagedPlaywrightBridgeHost {
     let preparedBindingRequestId: string | undefined
     let dispatchCertainty: ManagedPlaywrightDispatchCertainty = 'definitely_not_dispatched'
     try {
-      const timeoutMs = Math.max(1, Math.min(300_000, input.deadlineMs - this.now()))
+      const timeoutMs =
+        input.command.type === 'call_tool'
+          ? input.command.timeoutMs
+          : Math.max(1, Math.min(300_000, input.deadlineMs - this.now()))
       switch (input.command.type) {
         case 'connect': {
           const host = this.currentHost()
@@ -344,7 +352,7 @@ export class ManagedPlaywrightBridgeHost {
       outcome = mapError(error, input.command.type, dispatchCertainty)
     } finally {
       const active = this.active.get(input.requestId)
-      if (active) clearTimeout(active.timer)
+      if (active?.timer) clearTimeout(active.timer)
       this.active.delete(input.requestId)
     }
     const accepted = await this.complete(

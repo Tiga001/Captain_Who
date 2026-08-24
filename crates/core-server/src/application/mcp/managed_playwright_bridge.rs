@@ -533,7 +533,17 @@ impl ManagedPlaywrightHostBridge {
             Cancelled,
             TimedOut,
         }
-        let deadline = tokio::time::sleep(timeout);
+        // Managed Browser Tool execution is bounded in Electron Main, where BrowserRisk human
+        // approval waits can pause (but not reset) the budget. The reverse bridge therefore waits
+        // indefinitely only for CallTool completion or an explicit cancellation/shutdown token;
+        // every other bridge operation retains this transport deadline.
+        let deadline = async {
+            if operation == PendingOperation::CallTool {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep(timeout).await;
+            }
+        };
         tokio::pin!(deadline);
         let wait = if let Some(cancellation) = cancellation {
             tokio::select! {
@@ -844,6 +854,13 @@ impl ManagedPlaywrightHostBridgePeer {
 impl McpPeer for ManagedPlaywrightHostBridgePeer {
     fn server_id(&self) -> McpServerId {
         self.server_id
+    }
+
+    fn owns_tool_timeout(&self) -> bool {
+        // Electron Main owns the managed Browser Tool budget so it can exclude only explicit
+        // BrowserRisk human-wait intervals. Cancellation and shutdown still flow through the
+        // Manager token passed to `call_tool_with_dispatch`.
+        true
     }
 
     fn connection_state(&self) -> McpConnectionState {
@@ -1882,6 +1899,61 @@ mod tests {
             dispatch.certainty(),
             McpDispatchCertainty::DefinitelyNotDispatched
         );
+        assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn reverse_call_tool_wait_has_no_transport_deadline_but_still_cancels() {
+        let bridge = ManagedPlaywrightHostBridge::new(McpServerId::new());
+        let (outbound, mut commands) = mpsc::unbounded_channel();
+        bridge.attach_outbound(outbound).unwrap();
+        let cancellation = McpCancellationToken::new();
+        let request_cancellation = cancellation.clone();
+        let dispatch = McpDispatchTracker::new();
+        dispatch.mark_dispatching();
+        let task = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move {
+                bridge
+                    .request(
+                        test_call_command(),
+                        PendingOperation::CallTool,
+                        Duration::from_millis(20),
+                        Some(request_cancellation),
+                        Some(dispatch),
+                    )
+                    .await
+            })
+        };
+        let command = commands.recv().await.expect("call command");
+        let params: ManagedPlaywrightCommandNotification =
+            serde_json::from_value(command["params"].clone()).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !task.is_finished(),
+            "CallTool bridge wait must outlive its execution budget while Main owns that budget"
+        );
+
+        cancellation.cancel();
+        let _cancel = commands.recv().await.expect("explicit cancel notification");
+        assert!(bridge
+            .complete(ManagedPlaywrightCompletionInput {
+                schema_version: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+                request_id: params.request_id,
+                outcome: ManagedPlaywrightCompletionOutcome::Error {
+                    code: ManagedPlaywrightBridgeErrorCode::Cancelled,
+                    dispatch_certainty: ManagedPlaywrightDispatchCertainty::DefinitelyNotDispatched,
+                },
+            })
+            .unwrap());
+        assert!(matches!(
+            task.await.unwrap().unwrap(),
+            ManagedPlaywrightCompletionOutcome::Error {
+                code: ManagedPlaywrightBridgeErrorCode::Cancelled,
+                ..
+            }
+        ));
         assert_eq!(bridge.pending_request_count(), 0);
     }
 

@@ -936,10 +936,14 @@ impl AgentService {
 
     /// Applies MCP-specific startup semantics before request admission.
     ///
-    /// Pending/approved external invocations are recoverable only when an authenticated durable
-    /// payload is available. Sensitive built-in arguments and grants are intentionally
-    /// process-only, so their pre-dispatch rows always terminalize without replay after restart.
-    /// An `executing` row already crossed the durable dispatch boundary and is outcome unknown.
+    /// Pending manual approvals are durable user-decision tickets. They survive even when their
+    /// short-lived execution payload is expired or process-only; a later approval accepts the
+    /// decision first and reports unavailable execution material as a normal failed ToolResult.
+    /// A prompt-mode external MCP row that was durably approved but had not crossed dispatch is
+    /// already exposed as a recoverable confirmation card. Keep that card independently of the
+    /// original payload TTL as well; its explicit resume path performs live payload validation.
+    /// Process-only built-in approvals and executing rows keep the stricter no-replay crash
+    /// semantics because they are no longer waiting for a human decision.
     pub(crate) fn reconcile_startup_mcp_actions(&self) -> Result<usize, String> {
         let now = self.mcp_approval_now_ms();
         let candidates = {
@@ -976,23 +980,8 @@ impl AgentService {
                             // Auto invocations never become resumable approvals. An `approved`
                             // journal row proves the durable dispatch CAS was not reached.
                             Some(McpStartupActionTerminalOutcome::PolicyDenied)
-                        } else if approval.expires_at <= now {
-                            Some(McpStartupActionTerminalOutcome::Expired)
                         } else {
-                            match self
-                                .mcp_startup_inspector
-                                .as_ref()
-                                .map(|inspector| inspector.inspect_startup_payload(approval))
-                                .unwrap_or(McpApprovalStartupPayloadState::Unavailable)
-                            {
-                                McpApprovalStartupPayloadState::DurableAvailable => None,
-                                McpApprovalStartupPayloadState::Expired => {
-                                    Some(McpStartupActionTerminalOutcome::Expired)
-                                }
-                                McpApprovalStartupPayloadState::Unavailable => {
-                                    Some(McpStartupActionTerminalOutcome::PayloadUnavailable)
-                                }
-                            }
+                            None
                         }
                     }
                     PendingActionStatus::Rejected
@@ -1000,18 +989,17 @@ impl AgentService {
                     | PendingActionStatus::Completed
                     | PendingActionStatus::Failed => None,
                 },
-                AgentProposedAction::BuiltinMcpToolApproval { approval } => {
+                AgentProposedAction::BuiltinMcpToolApproval { .. } => {
                     match record.snapshot.status {
                         PendingActionStatus::Executing => {
                             Some(McpStartupActionTerminalOutcome::OutcomeUnknown)
                         }
-                        PendingActionStatus::Pending | PendingActionStatus::Approved => {
-                            let now_seconds = u64::try_from(now.max(0)).unwrap_or_default() / 1_000;
-                            Some(if approval.expires_at <= now_seconds {
-                                McpStartupActionTerminalOutcome::Expired
-                            } else {
-                                McpStartupActionTerminalOutcome::PayloadUnavailable
-                            })
+                        PendingActionStatus::Pending => None,
+                        // A built-in grant is process-only and cannot be replayed after restart.
+                        // This row represents an already-accepted decision, not a waiting human
+                        // ticket, so retire it using the existing no-replay failure semantics.
+                        PendingActionStatus::Approved => {
+                            Some(McpStartupActionTerminalOutcome::PayloadUnavailable)
                         }
                         PendingActionStatus::Rejected
                         | PendingActionStatus::Cancelled
@@ -1066,99 +1054,18 @@ impl AgentService {
         Ok(reconciled)
     }
 
-    /// Expires pre-dispatch MCP approvals against one injected wall-clock snapshot.
+    /// Advances the payload-expiry clock without expiring durable manual-approval tickets.
     ///
-    /// The in-memory lock serializes this tick with AgentService approval transitions. SQLite
-    /// still performs the authoritative status CAS so another process or a stale service cannot
-    /// retire an action that crossed into `executing`. Payload invalidation runs only after the
-    /// durable terminal transition commits.
+    /// The caller uses the cutoff to prune short-lived sealed payloads. If the user approves
+    /// afterwards, the normal MCP execution path records payload expiry/unavailability as a
+    /// failed ToolResult instead of failing the approval RPC.
     pub(crate) fn reconcile_expired_mcp_approvals(
         &self,
     ) -> Result<McpApprovalExpiryReconciliation, String> {
-        let now = self.mcp_approval_now_ms();
-        let mut summary = McpApprovalExpiryReconciliation {
-            cutoff_ms: now,
+        Ok(McpApprovalExpiryReconciliation {
+            cutoff_ms: self.mcp_approval_now_ms(),
             ..Default::default()
-        };
-        let (retired, storage_error) = {
-            let mut pending_actions = self
-                .pending_actions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let candidates = pending_actions
-                .iter()
-                .filter_map(|(storage_id, record)| {
-                    if !matches!(
-                        record.snapshot.status,
-                        PendingActionStatus::Pending | PendingActionStatus::Approved
-                    ) {
-                        return None;
-                    }
-                    let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action
-                    else {
-                        return None;
-                    };
-                    (approval.expires_at <= now).then(|| storage_id.clone())
-                })
-                .collect::<Vec<_>>();
-            summary.candidates = candidates.len();
-            let mut retired = Vec::with_capacity(candidates.len());
-            let mut storage_error = None;
-            for storage_id in candidates {
-                let Some(record) = pending_actions.get(&storage_id).cloned() else {
-                    continue;
-                };
-                let expected_status = pending_status_label(record.snapshot.status);
-                let changed = match self.storage.terminalize_mcp_agent_action_on_startup(
-                    &storage_id,
-                    expected_status,
-                    McpStartupActionTerminalOutcome::Expired,
-                    now,
-                ) {
-                    Ok(changed) => changed,
-                    Err(_) => {
-                        storage_error = Some(format!(
-                            "failed to expire MCP approval {}",
-                            record.snapshot.action_id
-                        ));
-                        break;
-                    }
-                };
-                if !changed {
-                    summary.status_cas_conflicts = summary.status_cas_conflicts.saturating_add(1);
-                    continue;
-                }
-                pending_actions.remove(&storage_id);
-                self.startup_recoverable_mcp_approvals
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .remove(&storage_id);
-                summary.terminalized = summary.terminalized.saturating_add(1);
-                retired.push(record);
-            }
-            (retired, storage_error)
-        };
-
-        for record in retired {
-            summary.payload_invalidation_attempts =
-                summary.payload_invalidation_attempts.saturating_add(1);
-            let invalidated = self.mcp_tool_invoker.as_ref().is_some_and(|invoker| {
-                let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
-                    return false;
-                };
-                invoker
-                    .invalidate_prepared_approval(&approval.identity)
-                    .is_ok()
-            });
-            if !invalidated {
-                summary.payload_invalidation_failures =
-                    summary.payload_invalidation_failures.saturating_add(1);
-            }
-        }
-        if let Some(error) = storage_error {
-            return Err(error);
-        }
-        Ok(summary)
+        })
     }
 
     /// Keeps task-scoped built-in capability approvals pending until the user decides.
@@ -1170,83 +1077,20 @@ impl AgentService {
         Ok(0)
     }
 
-    /// Expires sensitive built-in MCP Tool approvals before any process-only grant can dispatch.
+    /// Keeps sensitive built-in MCP Tool approval tickets pending until the user decides.
     ///
-    /// The durable terminalization appends the single value-free ToolResult and clears the
-    /// checkpoint payload in one transaction. Only after that CAS commits do we remove the
-    /// process accelerator, release the frozen Host binding, and free the owning conversation
-    /// Turn. This keeps the periodic expiry tick equivalent to an explicit late approval attempt
-    /// and prevents an expired card from retaining a Turn permit indefinitely.
+    /// Process-only arguments and target bindings retain their own TTL. A late approval follows
+    /// the regular execution path and becomes a failed ToolResult if that material was pruned.
     pub(crate) fn reconcile_expired_builtin_mcp_tool_approvals(&self) -> Result<usize, String> {
-        let now_ms = self.mcp_approval_now_ms();
-        let now_seconds = u64::try_from(now_ms.max(0)).unwrap_or_default() / 1_000;
-        let retired = {
-            let mut pending_actions = self
-                .pending_actions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let candidates = pending_actions
-                .iter()
-                .filter_map(|(storage_id, record)| {
-                    if !matches!(
-                        record.snapshot.status,
-                        PendingActionStatus::Pending | PendingActionStatus::Approved
-                    ) {
-                        return None;
-                    }
-                    let AgentProposedAction::BuiltinMcpToolApproval { approval } =
-                        &record.snapshot.action
-                    else {
-                        return None;
-                    };
-                    (approval.expires_at <= now_seconds).then(|| storage_id.clone())
-                })
-                .collect::<Vec<_>>();
-            let mut retired = Vec::with_capacity(candidates.len());
-            for storage_id in candidates {
-                let Some(record) = pending_actions.get(&storage_id).cloned() else {
-                    continue;
-                };
-                let changed = self
-                    .storage
-                    .terminalize_builtin_mcp_tool_agent_action_on_startup(
-                        &storage_id,
-                        pending_status_label(record.snapshot.status),
-                        McpStartupActionTerminalOutcome::Expired,
-                        now_ms,
-                    )
-                    .map_err(|_| {
-                        "failed to expire a sensitive built-in MCP Tool approval safely".to_string()
-                    })?;
-                if !changed {
-                    continue;
-                }
-                pending_actions.remove(&storage_id);
-                self.startup_recoverable_mcp_approvals
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .remove(&storage_id);
-                retired.push(record);
-            }
-            retired
-        };
-
-        for record in &retired {
-            self.invalidate_mcp_pending_payload(&record.snapshot.action);
-            if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
-                self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
-                self.release_turn_concurrency_permit(&record.snapshot.run_id);
-            }
-        }
-        Ok(retired.len())
+        Ok(0)
     }
 
     /// Invalidates every active approval bound to one typed MCP Server/source selector.
     ///
-    /// Pending and approved actions are definitely pre-dispatch and receive the requested safe
-    /// terminal reason. Executing actions have crossed the durable dispatch boundary and are
-    /// always terminalized as outcome-unknown. Durable rows and envelopes commit as one batch;
-    /// process-owned payload deletion is attempted once per action after that commit.
+    /// Pending human-decision tickets survive while their execution payload is invalidated.
+    /// Already-approved actions receive the requested pre-dispatch terminal reason; executing
+    /// actions crossed the durable dispatch boundary and become outcome-unknown. Process-owned
+    /// payload deletion is attempted once per matching action.
     pub(crate) fn invalidate_mcp_actions_for_server(
         &self,
         target: &McpActionInvalidationTarget,
@@ -1310,11 +1154,23 @@ impl AgentService {
             return Err("invalid pre-dispatch MCP invalidation reason".to_string());
         }
         let now = self.mcp_approval_now_ms();
-        let selected = {
+        let (selected, preserved_pending) = {
             let mut pending_actions = self
                 .pending_actions
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            let preserved_pending = pending_actions
+                .values()
+                .filter(|record| record.snapshot.status == PendingActionStatus::Pending)
+                .filter(|record| {
+                    matches!(
+                        &record.snapshot.action,
+                        AgentProposedAction::McpToolCall { approval }
+                            if matches_approval(approval)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let selected = pending_actions
                 .iter()
                 .filter_map(|(storage_id, record)| {
@@ -1326,7 +1182,11 @@ impl AgentService {
                         return None;
                     }
                     let outcome = match record.snapshot.status {
-                        PendingActionStatus::Pending | PendingActionStatus::Approved => reason,
+                        // A pending row is the durable human-decision ticket. Registry or Host
+                        // churn invalidates only its short-lived execution payload; the ticket
+                        // remains available so a later decision can settle normally.
+                        PendingActionStatus::Pending => return None,
+                        PendingActionStatus::Approved => reason,
                         PendingActionStatus::Executing => {
                             McpStartupActionTerminalOutcome::OutcomeUnknown
                         }
@@ -1338,36 +1198,52 @@ impl AgentService {
                     Some((storage_id.clone(), record.clone(), outcome))
                 })
                 .collect::<Vec<_>>();
-            if selected.is_empty() {
-                return Ok(McpActionInvalidationSummary::default());
+            if !selected.is_empty() {
+                let requests = selected
+                    .iter()
+                    .map(
+                        |(storage_id, record, outcome)| McpActionTerminalizationRequest {
+                            action_id: storage_id.clone(),
+                            expected_status: pending_status_label(record.snapshot.status)
+                                .to_string(),
+                            outcome: *outcome,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                self.storage
+                    .terminalize_mcp_agent_actions(&requests, now)
+                    .map_err(|_| storage_error.to_string())?;
+                for (storage_id, _, _) in &selected {
+                    pending_actions.remove(storage_id);
+                }
+                let mut recoverable = self
+                    .startup_recoverable_mcp_approvals
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                for (storage_id, _, _) in &selected {
+                    recoverable.remove(storage_id);
+                }
             }
-            let requests = selected
-                .iter()
-                .map(
-                    |(storage_id, record, outcome)| McpActionTerminalizationRequest {
-                        action_id: storage_id.clone(),
-                        expected_status: pending_status_label(record.snapshot.status).to_string(),
-                        outcome: *outcome,
-                    },
-                )
-                .collect::<Vec<_>>();
-            self.storage
-                .terminalize_mcp_agent_actions(&requests, now)
-                .map_err(|_| storage_error.to_string())?;
-            for (storage_id, _, _) in &selected {
-                pending_actions.remove(storage_id);
-            }
-            let mut recoverable = self
-                .startup_recoverable_mcp_approvals
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            for (storage_id, _, _) in &selected {
-                recoverable.remove(storage_id);
-            }
-            selected
+            (selected, preserved_pending)
         };
 
         let mut summary = McpActionInvalidationSummary::default();
+        for record in preserved_pending {
+            summary.payload_invalidation_attempts =
+                summary.payload_invalidation_attempts.saturating_add(1);
+            let invalidated = self.mcp_tool_invoker.as_ref().is_some_and(|invoker| {
+                let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
+                    return false;
+                };
+                invoker
+                    .invalidate_prepared_approval(&approval.identity)
+                    .is_ok()
+            });
+            if !invalidated {
+                summary.payload_invalidation_failures =
+                    summary.payload_invalidation_failures.saturating_add(1);
+            }
+        }
         for (_, record, outcome) in selected {
             match outcome {
                 McpStartupActionTerminalOutcome::OutcomeUnknown => {
@@ -1410,11 +1286,11 @@ impl AgentService {
         Ok(summary)
     }
 
-    /// Settles process-bound approvals when the Host is about to discard their payload store.
+    /// Invalidates process-bound payloads when the Host is about to discard their payload store.
     ///
     /// A future authenticated durable store reports `DurableAvailable` and is left untouched.
-    /// Groups are narrowed by Server, scope and source digest so one configuration source cannot
-    /// retire another source's pending approvals.
+    /// Pending human-decision tickets remain durable; already-approved actions keep the existing
+    /// no-replay shutdown semantics. Groups are narrowed by Server, scope and source digest.
     pub(crate) fn invalidate_process_bound_mcp_actions_before_shutdown(
         &self,
     ) -> Result<McpActionInvalidationSummary, String> {

@@ -318,7 +318,17 @@ impl McpConnectionManager {
         control.set_state(McpInvocationState::Running);
         let mut protocol_call =
             peer.call_tool_tracked(call, control.cancellation.clone(), control.dispatch.clone());
-        let deadline = tokio::time::sleep_until(control.deadline);
+        // A trusted Host-owned peer can enforce the same execution budget at the actual Tool
+        // boundary, where time spent waiting for a human approval can be excluded. Every ordinary
+        // MCP peer remains protected by this Manager-owned hard deadline.
+        let peer_owns_tool_timeout = peer.owns_tool_timeout();
+        let deadline = async {
+            if peer_owns_tool_timeout {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep_until(control.deadline).await;
+            }
+        };
         tokio::pin!(deadline);
         let result = tokio::select! {
             biased;

@@ -21,6 +21,7 @@ impl McpApprovalStartupInspector for StaticMcpStartupInspector {
 #[derive(Default)]
 struct InvalidatingMcpInvoker {
     invalidations: std::sync::atomic::AtomicUsize,
+    storage: Option<Arc<StorageService>>,
 }
 
 impl McpToolInvoker for InvalidatingMcpInvoker {
@@ -33,10 +34,15 @@ impl McpToolInvoker for InvalidatingMcpInvoker {
 
     fn invalidate_prepared_approval(
         &self,
-        _identity: &mycopilot_core::AgentMcpToolInvocationIdentity,
+        identity: &mycopilot_core::AgentMcpToolInvocationIdentity,
     ) -> AgentResult<()> {
         self.invalidations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(storage) = self.storage.as_ref() {
+            storage
+                .delete_mcp_approval_envelope(&identity.invocation_id)
+                .map_err(AgentError::from)?;
+        }
         Ok(())
     }
 }
@@ -1681,8 +1687,8 @@ fn seed_tampered_provider_continuation(
         .unwrap();
 }
 
-#[test]
-fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatch() {
+#[tokio::test]
+async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatch() {
     for scenario in ["empty", "missing", "tampered"] {
         let fixture = tempdir().unwrap();
         let database_path = fixture
@@ -1726,6 +1732,15 @@ fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatc
         let assistant_message_id = format!("provider-preflight-{scenario}-assistant");
         let action_id = uuid::Uuid::new_v4().to_string();
         let invocation_id = uuid::Uuid::new_v4().to_string();
+        let action = test_mcp_pending_action(
+            &run_id,
+            &action_id,
+            &invocation_id,
+            mycopilot_core::storage::now_ms(),
+        );
+        let AgentProposedAction::McpToolCall { approval } = &action else {
+            unreachable!("fixture always creates an MCP approval");
+        };
         let mut input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "test-token",
@@ -1734,7 +1749,26 @@ fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatc
             "messages": []
         }))
         .unwrap();
-        input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, &run_id, &action_id));
+        let run_context = mycopilot_core::AgentRunContext {
+            conversation_id: Some(conversation_id.clone()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: mycopilot_core::AgentPermissions::default(),
+            collaboration_identity: None,
+        };
+        input.context = Some(run_context.clone());
+        let mut checkpoint = test_pending_resume_checkpoint_for_call(
+            &storage,
+            &run_id,
+            Some(&action_id),
+            &approval.call,
+            AgentToolIdentity::Mcp {
+                provenance: approval.identity.provenance.clone(),
+            },
+        );
+        checkpoint.run_context = Some(run_context);
+        input.resume_checkpoint = Some(checkpoint);
         freeze_test_pending_provider_configuration(&storage, &mut input);
         let refs = if scenario == "empty" {
             Vec::new()
@@ -1754,17 +1788,20 @@ fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatc
                 &checkpoint.pending_tool_call_id,
             );
         }
+        seed_durable_mcp_pending_owner(
+            &storage,
+            &conversation_id,
+            &assistant_message_id,
+            &run_id,
+            &action,
+            mycopilot_core::storage::now_ms(),
+        );
         assert!(service
             .store_pending_action(
                 &run_id,
                 &conversation_id,
                 &assistant_message_id,
-                test_mcp_pending_action(
-                    &run_id,
-                    &action_id,
-                    &invocation_id,
-                    mycopilot_core::storage::now_ms(),
-                ),
+                action,
                 input,
             )
             .unwrap());
@@ -1788,12 +1825,14 @@ fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatc
             .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
 
         let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let error = restarted
+        let output = restarted
             .approve_action(&run_id, &action_id, notifications)
-            .unwrap_err();
-        assert!(
-            error.contains("provider_continuation"),
-            "unexpected preflight error for {scenario}: {error}"
+            .unwrap();
+        assert_eq!(output.status, "failed", "unexpected result for {scenario}");
+        assert_eq!(
+            output.agent_output.status,
+            AgentRunStatus::Running,
+            "the accepted ToolResult continues through the normal settlement chain"
         );
         assert_eq!(
             invoker
@@ -1890,7 +1929,10 @@ fn assert_recovered_approved_cancellation() {
         .unwrap();
     drop(service);
 
-    let invoker = Arc::new(InvalidatingMcpInvoker::default());
+    let invoker = Arc::new(InvalidatingMcpInvoker {
+        storage: Some(Arc::clone(&storage)),
+        ..InvalidatingMcpInvoker::default()
+    });
     let restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
         .unwrap()
         .with_mcp_startup_inspector(Arc::new(StaticMcpStartupInspector(
@@ -2266,7 +2308,7 @@ fn store_test_mcp_action_for_source(
 }
 
 #[test]
-fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelopes() {
+fn startup_preserves_pending_mcp_tickets_while_pruning_expired_and_orphaned_payloads() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -2352,9 +2394,8 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         )
         .unwrap());
 
-    // Headless child Turns do not have a Renderer maintaining `agent_run_json`. Startup
-    // terminalization must create the typed MCP card from the validated frozen approval before
-    // scrubbing it, rather than requiring a pre-existing Renderer projection.
+    // Headless child Turns do not have a Renderer maintaining `agent_run_json`. The durable
+    // approval ticket must survive independently from its short-lived sealed payload envelope.
     {
         let connection = rusqlite::Connection::open(&database_path).unwrap();
         connection
@@ -2397,15 +2438,21 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
 
     let restarted = AgentService::try_new(Arc::clone(&storage))
         .expect("MCP envelope reconciliation must allow safe Agent startup");
-    assert!(restarted.list_pending_actions().is_empty());
-    assert!(storage
-        .list_recoverable_agent_actions_after_reconciliation()
-        .unwrap()
-        .is_empty());
+    let pending = restarted.list_pending_actions();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|action| action.run_id == live_run_id));
+    assert!(pending.iter().any(|action| action.run_id == expired_run_id));
+    assert_eq!(
+        storage
+            .list_recoverable_agent_actions_after_reconciliation()
+            .unwrap()
+            .len(),
+        2
+    );
     assert!(storage
         .load_mcp_approval_envelope(&live_invocation_id)
         .unwrap()
-        .is_none());
+        .is_some());
     assert!(storage
         .load_mcp_approval_envelope(&expired_invocation_id)
         .unwrap()
@@ -2414,19 +2461,6 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         .load_mcp_approval_envelope(&orphan_invocation_id)
         .unwrap()
         .is_none());
-    let recovered = storage
-        .load_conversation("mcp-envelope-live-conversation")
-        .unwrap()
-        .unwrap();
-    let run: Value =
-        serde_json::from_str(recovered.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
-    assert_eq!(run["status"], "failed");
-    assert_eq!(run["mcpInvocations"][0]["state"], "payload_unavailable");
-    assert_eq!(
-        run["mcpInvocations"][0]["dispatchCertainty"],
-        "definitely_not_dispatched"
-    );
-    assert_eq!(run["mcpInvocations"][0]["isError"], true);
 }
 
 #[test]
@@ -2577,7 +2611,13 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
         let storage_id = pending_action_storage_id(&run_id, &action_id);
         let conversation_id = format!("conversation-{label}");
         let assistant_message_id = format!("assistant-{label}");
-        let action = test_mcp_pending_action(&run_id, &action_id, &invocation_id, now);
+        let action_created_at = if status == PendingActionStatus::Approved {
+            now.saturating_sub(120_000)
+        } else {
+            now
+        };
+        let action =
+            test_mcp_pending_action(&run_id, &action_id, &invocation_id, action_created_at);
         seed_durable_mcp_pending_owner(
             &storage,
             &conversation_id,
@@ -2646,7 +2686,7 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
     let restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
         .unwrap()
         .with_mcp_startup_inspector(Arc::new(StaticMcpStartupInspector(
-            McpApprovalStartupPayloadState::DurableAvailable,
+            McpApprovalStartupPayloadState::Expired,
         )));
     assert_eq!(restarted.reconcile_startup_mcp_actions().unwrap(), 1);
 
@@ -2735,8 +2775,8 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
     }
 }
 
-#[test]
-fn expired_mcp_approval_is_atomically_failed_before_concurrent_approval_can_dispatch() {
+#[tokio::test]
+async fn expired_mcp_approval_accepts_one_decision_and_settles_execution_normally() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -2787,59 +2827,48 @@ fn expired_mcp_approval_is_atomically_failed_before_concurrent_approval_can_disp
         )
         .unwrap());
 
-    let barrier = Arc::new(std::sync::Barrier::new(3));
-    let mut joins = Vec::new();
-    for _ in 0..2 {
-        let barrier = Arc::clone(&barrier);
-        let service = service.clone();
-        let action_id = action_id.clone();
-        joins.push(std::thread::spawn(move || {
-            let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            barrier.wait();
-            service.approve_action(run_id, &action_id, notifications)
-        }));
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let accepted = service
+        .approve_action(run_id, &action_id, notifications.clone())
+        .unwrap();
+    assert_eq!(accepted.status, "approved");
+    assert!(service
+        .approve_action(run_id, &action_id, notifications)
+        .is_err());
+
+    for _ in 0..100 {
+        let status = storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .map(|record| record.status);
+        if matches!(status.as_deref(), Some("failed" | "completed")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    barrier.wait();
-    let results = joins
-        .into_iter()
-        .map(|join| join.join().unwrap())
-        .collect::<Vec<_>>();
-    assert!(results.iter().all(Result::is_err));
-    assert_eq!(
+    assert!(
         invoker
             .invalidations
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "results={results:?}, rows={:?}",
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= 1,
+        "payload cleanup is idempotent; rows={:?}",
         storage.list_pending_agent_actions().unwrap()
     );
     assert!(service.list_pending_actions().is_empty());
 
     let connection = rusqlite::Connection::open(database_path).unwrap();
-    let terminal: (String, String, String, String, String) = connection
+    let terminal: (String, Option<String>) = connection
         .query_row(
-            "SELECT pending.status, pending.action_json, pending.agent_input_json,
-                    audit.action_json, audit.error
+            "SELECT pending.status, audit.error
              FROM agent_pending_actions pending
              JOIN agent_action_audit audit ON audit.action_id = pending.action_id
              WHERE pending.action_id = ?1",
             [&storage_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(terminal.0, "failed");
-    assert_eq!(terminal.1, "{}");
-    assert_eq!(terminal.2, "{}");
-    assert_eq!(terminal.3, "{}");
-    assert_eq!(terminal.4, "mcp.approval_payload_expired");
+    assert_ne!(terminal.0, "pending");
+    assert_ne!(terminal.1.as_deref(), Some("mcp.approval_payload_expired"));
 }
 
 #[test]
@@ -2855,7 +2884,10 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
         "disabled",
         "",
     );
-    let invoker = Arc::new(InvalidatingMcpInvoker::default());
+    let invoker = Arc::new(InvalidatingMcpInvoker {
+        storage: Some(Arc::clone(&storage)),
+        ..InvalidatingMcpInvoker::default()
+    });
     let service = AgentService::new(Arc::clone(&storage))
         .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
     let server_uuid = uuid::Uuid::new_v4();
@@ -3011,7 +3043,7 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
     assert_eq!(
         summary,
         McpActionInvalidationSummary {
-            terminalized_before_dispatch: 2,
+            terminalized_before_dispatch: 1,
             terminalized_outcome_unknown: 1,
             payload_invalidation_attempts: 3,
             payload_invalidation_failures: 0,
@@ -3026,7 +3058,7 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
 
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     for (status, (storage_id, invocation_id)) in &selected {
-        let terminal: (String, String, String, String, String) = connection
+        let terminal: (String, String, String, String, Option<String>) = connection
             .query_row(
                 "SELECT pending.status, pending.action_json, pending.agent_input_json,
                         audit.action_json, audit.error
@@ -3045,18 +3077,25 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
                 },
             )
             .unwrap();
-        assert_eq!(terminal.0, "failed");
-        assert_eq!(terminal.1, "{}");
-        assert_eq!(terminal.2, "{}");
-        assert_eq!(terminal.3, "{}");
-        assert_eq!(
-            terminal.4,
-            if *status == PendingActionStatus::Executing {
-                "mcp.tool_outcome_unknown"
-            } else {
-                "mcp.approval_policy_denied"
-            }
-        );
+        if *status == PendingActionStatus::Pending {
+            assert_eq!(terminal.0, "pending");
+            assert_ne!(terminal.1, "{}");
+            assert_ne!(terminal.2, "{}");
+            assert_ne!(terminal.3, "{}");
+        } else {
+            assert_eq!(terminal.0, "failed");
+            assert_eq!(terminal.1, "{}");
+            assert_eq!(terminal.2, "{}");
+            assert_eq!(terminal.3, "{}");
+            assert_eq!(
+                terminal.4.as_deref(),
+                Some(if *status == PendingActionStatus::Executing {
+                    "mcp.tool_outcome_unknown"
+                } else {
+                    "mcp.approval_policy_denied"
+                })
+            );
+        }
         assert!(storage
             .load_mcp_approval_envelope(invocation_id)
             .unwrap()
@@ -3082,18 +3121,18 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
             McpStartupActionTerminalOutcome::PayloadUnavailable,
         )
         .unwrap();
-    assert_eq!(filtered_summary.terminalized_before_dispatch, 1);
+    assert_eq!(filtered_summary.terminalized_before_dispatch, 0);
     assert_eq!(filtered_summary.terminalized_outcome_unknown, 0);
     assert_eq!(filtered_summary.payload_invalidation_attempts, 1);
     assert_eq!(filtered_summary.payload_invalidation_failures, 0);
-    let filtered_error: String = connection
+    let filtered_status: String = connection
         .query_row(
-            "SELECT error FROM agent_action_audit WHERE action_id = ?1",
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
             [&filtered.0],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(filtered_error, "mcp.approval_payload_unavailable");
+    assert_eq!(filtered_status, "pending");
     assert!(storage
         .load_mcp_approval_envelope(&filtered.1)
         .unwrap()
@@ -3103,7 +3142,9 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
         .pending_actions
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    assert_eq!(in_memory.len(), 3);
+    assert_eq!(in_memory.len(), 5);
+    assert!(in_memory.contains_key(&selected[0].1 .0));
+    assert!(in_memory.contains_key(&filtered.0));
     assert!(in_memory.contains_key(&unrelated_mcp.0));
     assert!(in_memory.contains_key(&newer_same_source.0));
     assert!(in_memory.contains_key(&non_mcp_storage_id));
@@ -3141,7 +3182,10 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
         "disabled",
         "",
     );
-    let invoker = Arc::new(InvalidatingMcpInvoker::default());
+    let invoker = Arc::new(InvalidatingMcpInvoker {
+        storage: Some(Arc::clone(&storage)),
+        ..InvalidatingMcpInvoker::default()
+    });
     let service = AgentService::new(Arc::clone(&storage))
         .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
     let server_uuid = uuid::Uuid::new_v4();
@@ -3225,14 +3269,14 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
             McpStartupActionTerminalOutcome::PolicyDenied,
         )
         .unwrap();
-    assert_eq!(summary.terminalized_before_dispatch, 2);
+    assert_eq!(summary.terminalized_before_dispatch, 1);
     assert_eq!(summary.terminalized_outcome_unknown, 1);
     assert_eq!(summary.payload_invalidation_attempts, 3);
     assert_eq!(summary.payload_invalidation_failures, 0);
 
     let connection = rusqlite::Connection::open(database_path).unwrap();
     for (status, (storage_id, invocation_id)) in &prior {
-        let terminal: (String, String) = connection
+        let terminal: (String, Option<String>) = connection
             .query_row(
                 "SELECT pending.status, audit.error
                  FROM agent_pending_actions pending
@@ -3242,15 +3286,19 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(terminal.0, "failed");
-        assert_eq!(
-            terminal.1,
-            if *status == PendingActionStatus::Executing {
-                "mcp.tool_outcome_unknown"
-            } else {
-                "mcp.approval_policy_denied"
-            }
-        );
+        if *status == PendingActionStatus::Pending {
+            assert_eq!(terminal.0, "pending");
+        } else {
+            assert_eq!(terminal.0, "failed");
+            assert_eq!(
+                terminal.1.as_deref(),
+                Some(if *status == PendingActionStatus::Executing {
+                    "mcp.tool_outcome_unknown"
+                } else {
+                    "mcp.approval_policy_denied"
+                })
+            );
+        }
         assert!(storage
             .load_mcp_approval_envelope(invocation_id)
             .unwrap()
@@ -4719,14 +4767,25 @@ fn store_builtin_sensitive_test_pending(
         "messages": []
     }))
     .unwrap();
+    let run_context = mycopilot_core::AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: mycopilot_core::AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    input.context = Some(run_context.clone());
     freeze_test_pending_provider_configuration(storage, &mut input);
-    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+    let mut checkpoint = test_pending_resume_checkpoint_for_call(
         storage,
         run_id,
         Some(&action_id),
         &call,
         provenance.clone(),
-    ));
+    );
+    checkpoint.run_context = Some(run_context);
+    input.resume_checkpoint = Some(checkpoint);
     seed_durable_pending_owner(
         storage,
         conversation_id,
@@ -5164,7 +5223,7 @@ fn builtin_sensitive_post_commit_error_adopts_receipt_and_emits_safe_result() {
 }
 
 #[test]
-fn expired_builtin_sensitive_approval_tick_settles_once_and_releases_the_turn() {
+fn builtin_sensitive_approval_tick_preserves_ticket_and_turn_ownership() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("builtin-sensitive-expiry-tick.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -5190,46 +5249,54 @@ fn expired_builtin_sensitive_approval_tick_settles_once_and_releases_the_turn() 
         assistant_message_id,
         "builtin-sensitive-expiry-tick-call",
     );
+    let had_turn_permit = service
+        .active_turn_permits
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(run_id);
 
     assert_eq!(service.list_pending_actions().len(), 1);
     assert_eq!(
         service
             .reconcile_expired_builtin_mcp_tool_approvals()
             .unwrap(),
-        1
+        0
     );
-    assert!(service.list_pending_actions().is_empty());
+    assert_eq!(service.list_pending_actions().len(), 1);
     assert_eq!(
         service
             .reconcile_expired_builtin_mcp_tool_approvals()
             .unwrap(),
         0,
-        "expiry reconciliation must be idempotent"
+        "ticket reconciliation remains a no-op"
     );
-    assert!(!service
+    assert!(service
         .has_conversation_turn_occupancy(conversation_id)
         .unwrap());
-    assert!(!service
-        .active_turn_permits
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .contains_key(run_id));
+    assert_eq!(
+        service
+            .active_turn_permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(run_id),
+        had_turn_permit
+    );
 
     let storage_id = pending_action_storage_id(run_id, &action_id);
-    let retired = storage
+    let retained = storage
         .get_pending_agent_action(&storage_id)
         .unwrap()
         .unwrap();
-    assert_eq!(retired.status, "failed");
-    assert_eq!(retired.action_json, "{}");
-    assert_eq!(retired.agent_input_json, "{}");
+    assert_eq!(retained.status, "pending");
+    assert_ne!(retained.action_json, "{}");
+    assert_ne!(retained.agent_input_json, "{}");
     let trace = storage
         .get_conversation_turn_trace(assistant_message_id)
         .unwrap()
         .unwrap();
     assert_eq!(
         trace.terminal_status,
-        ConversationTurnTraceTerminalStatus::Failed
+        ConversationTurnTraceTerminalStatus::InProgress
     );
     assert_eq!(
         trace
@@ -5240,15 +5307,12 @@ fn expired_builtin_sensitive_approval_tick_settles_once_and_releases_the_turn() 
                 ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
             ))
             .count(),
-        1
+        0
     );
-    let trace_json = serde_json::to_string(&trace).unwrap();
-    assert!(trace_json.contains("\"status\":\"expired\""));
-    assert!(trace_json.contains("\"dispatchCertainty\":\"definitely_not_dispatched\""));
 }
 
-#[test]
-fn approving_an_expired_builtin_sensitive_action_removes_the_stale_card_and_turn() {
+#[tokio::test]
+async fn approving_an_expired_builtin_sensitive_action_accepts_a_normal_failed_result() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     save_test_pending_provider(
@@ -5275,7 +5339,7 @@ fn approving_an_expired_builtin_sensitive_action_removes_the_stale_card_and_turn
     );
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let error = service
+    let output = service
         .queue_action_continuation(
             run_id,
             &action_id,
@@ -5283,17 +5347,27 @@ fn approving_an_expired_builtin_sensitive_action_removes_the_stale_card_and_turn
             None,
             notifications,
         )
-        .unwrap_err();
-    assert!(error.contains("expired before dispatch"));
+        .unwrap();
+    assert_eq!(output.status, "failed");
+    assert_eq!(output.agent_output.status, AgentRunStatus::Running);
+    assert_eq!(
+        output
+            .tool_result
+            .as_ref()
+            .and_then(|result| result.result.as_ref())
+            .and_then(|result| result.get("errorCode"))
+            .and_then(Value::as_str),
+        Some("mcp.tool_approval_payload_unavailable")
+    );
     assert!(service.list_pending_actions().is_empty());
-    assert!(!service
-        .has_conversation_turn_occupancy(conversation_id)
-        .unwrap());
-    assert!(!service
-        .active_turn_permits
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .contains_key(run_id));
+
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let decided = storage
+        .get_pending_agent_action(&storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(decided.status, "approved");
+    assert_eq!(decided.target_status.as_deref(), Some("failed"));
 
     let trace = storage
         .get_conversation_turn_trace(assistant_message_id)
@@ -5848,7 +5922,7 @@ async fn builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_on
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn builtin_sensitive_approve_claim_blocks_late_reject_and_restart_terminalizes_once() {
+async fn builtin_sensitive_approve_claim_blocks_late_reject_and_settles_once() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     save_test_pending_provider(
@@ -5902,7 +5976,7 @@ async fn builtin_sensitive_approve_claim_blocks_late_reject_and_restart_terminal
         })
     };
     reject_entered.wait();
-    let approve_error = service
+    let approved = service
         .queue_action_continuation(
             run_id,
             &action_id,
@@ -5910,17 +5984,38 @@ async fn builtin_sensitive_approve_claim_blocks_late_reject_and_restart_terminal
             None,
             notifications.clone(),
         )
-        .unwrap_err();
-    assert!(approve_error.contains("Host is unavailable"));
+        .unwrap();
+    assert_eq!(approved.status, "failed");
+    assert_eq!(approved.agent_output.status, AgentRunStatus::Running);
+    assert_eq!(
+        approved
+            .tool_result
+            .as_ref()
+            .and_then(|result| result.result.as_ref())
+            .and_then(|result| result.get("errorCode"))
+            .and_then(Value::as_str),
+        Some("mcp.tool_approval_payload_unavailable")
+    );
     reject_release.wait();
     assert!(reject.await.unwrap().is_err());
+
+    for _ in 0..200 {
+        if storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .is_some_and(|record| record.status == "failed")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert_eq!(
         storage
             .get_pending_agent_action(&storage_id)
             .unwrap()
             .unwrap()
             .status,
-        "approved"
+        "failed"
     );
 
     drop(service);

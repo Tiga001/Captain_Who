@@ -132,6 +132,43 @@ describe('AgentApprovalDialog command approval', () => {
       rememberForRun: false
     })
   })
+
+  it('unlocks a standard approval after an unaccepted or failed submission', async () => {
+    const action: AgentProposedAction = {
+      type: 'command',
+      command: {
+        id: 'retry-command-action',
+        command: 'pnpm test',
+        cwd: null,
+        timeoutMs: null,
+        approvalStatus: 'required',
+        riskLevel: null,
+        reason: '运行测试',
+        observe: null
+      }
+    }
+    const onApprove = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockRejectedValueOnce(new Error('temporarily unavailable'))
+      .mockResolvedValueOnce(true)
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
+
+    const approve = screen.getByRole('button', { name: '批准' })
+    await approve.click()
+    await expect.element(approve).toBeEnabled()
+
+    await approve.click()
+    await expect.element(approve).toBeEnabled()
+
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledTimes(3)
+  })
 })
 
 describe('AgentApprovalDialog Office approval', () => {

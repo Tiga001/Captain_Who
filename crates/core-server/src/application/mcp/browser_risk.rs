@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mycopilot_core::{
     AgentApprovalStatus, AgentBrowserRiskApproval, AgentBuiltinExecutionPermission,
@@ -115,7 +115,6 @@ enum BrowserRiskDecision {
     Approved(String),
     Rejected(Option<String>),
     Cancelled,
-    Expired,
     PolicyDenied,
 }
 
@@ -354,39 +353,26 @@ impl BrowserRiskCoordinator {
             return decision(BrowserRiskAuthorizationDecisionDto::Cancelled, None, None);
         }
 
-        let now = (self.clock)();
-        let wait = Duration::from_secs(approval.expires_at.saturating_sub(now));
-        match tokio::time::timeout(wait, receiver).await {
-            Ok(Ok(BrowserRiskDecision::Approved(grant_id))) => decision(
+        match receiver.await {
+            Ok(BrowserRiskDecision::Approved(grant_id)) => decision(
                 BrowserRiskAuthorizationDecisionDto::Approved,
                 Some(grant_id),
                 None,
             ),
-            Ok(Ok(BrowserRiskDecision::Rejected(reason))) => decision(
+            Ok(BrowserRiskDecision::Rejected(reason)) => decision(
                 BrowserRiskAuthorizationDecisionDto::Rejected,
                 None,
                 reason.as_deref(),
             ),
-            Ok(Ok(BrowserRiskDecision::Cancelled)) => {
+            Ok(BrowserRiskDecision::Cancelled) => {
                 decision(BrowserRiskAuthorizationDecisionDto::Cancelled, None, None)
             }
-            Ok(Ok(BrowserRiskDecision::Expired)) => {
-                decision(BrowserRiskAuthorizationDecisionDto::Expired, None, None)
-            }
-            Ok(Ok(BrowserRiskDecision::PolicyDenied)) => decision(
+            Ok(BrowserRiskDecision::PolicyDenied) => decision(
                 BrowserRiskAuthorizationDecisionDto::PolicyDenied,
                 None,
                 None,
             ),
-            Ok(Err(_)) => decision(BrowserRiskAuthorizationDecisionDto::Cancelled, None, None),
-            Err(_) => {
-                self.settle_without_grant(
-                    &approval.run_id,
-                    &approval.action_id,
-                    BrowserRiskDecision::Expired,
-                );
-                decision(BrowserRiskAuthorizationDecisionDto::Expired, None, None)
-            }
+            Err(_) => decision(BrowserRiskAuthorizationDecisionDto::Cancelled, None, None),
         }
     }
 
@@ -482,7 +468,11 @@ impl BrowserRiskCoordinator {
             }
             Err(_) => {
                 notify_waiters(pending.waiters, BrowserRiskDecision::PolicyDenied);
-                Err("Browser risk approval changed before it could be committed.".to_string())
+                // The human decision is authoritative. Runtime authority (including the
+                // short-lived destination binding) may have expired while the ticket waited;
+                // report that as the original Browser Tool's ordinary failure instead of
+                // rejecting the approval RPC and stranding its card.
+                Ok(Some(execution_output(&pending.approval, "failed")))
             }
         }
     }
@@ -497,9 +487,10 @@ impl BrowserRiskCoordinator {
         let Some(pending) = self.take_pending(run_id, action_id) else {
             return Ok(None);
         };
-        self.runtime
-            .dismiss_browser_risk_approval(&pending.approval)
-            .map_err(|_| "Browser risk approval changed before rejection.".to_string())?;
+        // Rejection is authoritative even after the process-only runtime binding expires.
+        let _ = self
+            .runtime
+            .dismiss_browser_risk_approval(&pending.approval);
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.denied.len() >= MAX_PENDING_BROWSER_RISK_APPROVALS
@@ -531,9 +522,10 @@ impl BrowserRiskCoordinator {
         let Some(pending) = self.take_pending(run_id, action_id) else {
             return Ok(None);
         };
-        self.runtime
-            .dismiss_browser_risk_approval(&pending.approval)
-            .map_err(|_| "Browser risk approval changed before cancellation.".to_string())?;
+        // Cancellation is authoritative even after the process-only runtime binding expires.
+        let _ = self
+            .runtime
+            .dismiss_browser_risk_approval(&pending.approval);
         notify_waiters(pending.waiters, BrowserRiskDecision::Cancelled);
         Ok(Some(true))
     }
@@ -1064,6 +1056,48 @@ mod tests {
             );
             assert!(output.grant_id.is_some());
         }
+        assert!(harness.coordinator.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn late_approval_is_accepted_and_reports_expired_runtime_authority_to_the_waiter() {
+        let harness = harness();
+        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+        let authorization = {
+            let coordinator = Arc::clone(&harness.coordinator);
+            let request = input(&harness, Uuid::new_v4());
+            tokio::spawn(async move {
+                coordinator
+                    .authorize(
+                        request,
+                        "conversation".to_string(),
+                        "assistant".to_string(),
+                        notifications,
+                    )
+                    .await
+            })
+        };
+        let action_id = wait_for_one_pending(&harness.coordinator).await;
+        {
+            let mut state = harness.coordinator.state.lock().unwrap();
+            state
+                .by_action_id
+                .get_mut(&action_id)
+                .expect("approval remains pending for the human decision")
+                .approval
+                .expires_at = unix_timestamp().saturating_sub(1);
+        }
+
+        let approval = harness
+            .coordinator
+            .approve(&harness.grant.run_id, &action_id)
+            .unwrap()
+            .expect("the late decision is accepted");
+        assert_eq!(approval.status, "failed");
+        assert_eq!(
+            authorization.await.unwrap().decision,
+            BrowserRiskAuthorizationDecisionDto::PolicyDenied
+        );
         assert!(harness.coordinator.list_pending().is_empty());
     }
 

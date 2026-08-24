@@ -248,11 +248,13 @@ export interface ManagedPlaywrightMcpHostOptions {
     authorizationContext: BrowserRiskAuthorizationContext
     parentRequestId: string
     signal: AbortSignal
+    onApprovalWaitChange?: (waiting: boolean) => void
   }) => Promise<BrowserNetworkOperationLease>
   beginTargetCreationOperation?: (input: {
     authorizationContext: BrowserRiskAuthorizationContext
     parentRequestId: string
     signal: AbortSignal
+    onApprovalWaitChange?: (waiting: boolean) => void
   }) => Promise<BrowserNetworkOperationLease>
   getBrowserContext: () => Promise<BrowserContext>
   getActiveSurfaceIdentity?: () => { surfaceId: string; generation: number } | null
@@ -468,6 +470,7 @@ export class ManagedPlaywrightMcpHost {
   private readonly toolTimeoutMs: number
 
   private readonly activeCalls = new Set<AbortController>()
+  private readonly callTimeoutBudgets = new WeakMap<AbortSignal, PausableCallTimeout>()
   private readonly activationIds = new Set<string>()
   private readonly consumedSensitiveGrantIds = new Set<string>()
   private readonly frameEditorCandidates = new Map<string, RegisteredFrameEditorCandidate>()
@@ -829,7 +832,9 @@ export class ManagedPlaywrightMcpHost {
                   riskLease = await this.beginNetworkOperation({
                     authorizationContext: options.authorizationContext,
                     parentRequestId: options.parentRequestId,
-                    signal: operationSignal
+                    signal: operationSignal,
+                    onApprovalWaitChange: (waiting) =>
+                      this.setApprovalWait(operationSignal, waiting)
                   })
                   if (name === 'browser_navigate') {
                     const url = serverArguments.url
@@ -1256,7 +1261,8 @@ export class ManagedPlaywrightMcpHost {
     const riskLease = await beginTargetCreationOperation({
       authorizationContext: authorization,
       parentRequestId,
-      signal: input.signal
+      signal: input.signal,
+      onApprovalWaitChange: (waiting) => this.setApprovalWait(input.signal, waiting)
     })
     let authority: BrowserTargetCreationAuthority | undefined
     let finishIntent: (() => void) | undefined
@@ -2622,7 +2628,8 @@ export class ManagedPlaywrightMcpHost {
     }
     const controller = new AbortController()
     const timeoutMs = boundedTimeout(requestedTimeoutMs ?? this.toolTimeoutMs)
-    const timeout = setTimeout(() => controller.abort('timeout'), timeoutMs)
+    const timeout = new PausableCallTimeout(controller, timeoutMs)
+    this.callTimeoutBudgets.set(controller.signal, timeout)
     const abortFromCaller = (): void => controller.abort('caller')
     callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
     this.activeCalls.add(controller)
@@ -2645,10 +2652,15 @@ export class ManagedPlaywrightMcpHost {
       }
       throw mapSafeHostError(error)
     } finally {
-      clearTimeout(timeout)
+      timeout.dispose()
+      this.callTimeoutBudgets.delete(controller.signal)
       callerSignal?.removeEventListener('abort', abortFromCaller)
       this.activeCalls.delete(controller)
     }
+  }
+
+  private setApprovalWait(signal: AbortSignal, waiting: boolean): void {
+    this.callTimeoutBudgets.get(signal)?.setWaiting(waiting)
   }
 
   private async disposeConnection(
@@ -2928,9 +2940,7 @@ function artifactToolResult(
     content: [{ type: 'text', text }],
     structuredContent: { status: 'completed', artifacts },
     isError: false,
-    ...(options.hostImagePublishPath
-      ? { hostImagePublishPath: options.hostImagePublishPath }
-      : {})
+    ...(options.hostImagePublishPath ? { hostImagePublishPath: options.hostImagePublishPath } : {})
   }
 }
 
@@ -3710,6 +3720,50 @@ async function removeOutputDirectory(directory: string): Promise<void> {
 function onceAsync(operation: () => Promise<void>): () => Promise<void> {
   let pending: Promise<void> | undefined
   return () => (pending ??= Promise.resolve().then(operation))
+}
+
+/** Tool execution timeout which excludes time spent waiting for an explicit human decision. */
+class PausableCallTimeout {
+  private disposed = false
+  private remainingMs: number
+  private resumedAt = Date.now()
+  private timer?: ReturnType<typeof setTimeout>
+  private waitingDepth = 0
+
+  constructor(
+    private readonly controller: AbortController,
+    timeoutMs: number
+  ) {
+    this.remainingMs = timeoutMs
+    this.schedule()
+  }
+
+  setWaiting(waiting: boolean): void {
+    if (this.disposed || this.controller.signal.aborted) return
+    if (waiting) {
+      this.waitingDepth += 1
+      if (this.waitingDepth !== 1) return
+      this.remainingMs = Math.max(0, this.remainingMs - (Date.now() - this.resumedAt))
+      if (this.timer) clearTimeout(this.timer)
+      this.timer = undefined
+      return
+    }
+    if (this.waitingDepth === 0) return
+    this.waitingDepth -= 1
+    if (this.waitingDepth === 0) this.schedule()
+  }
+
+  dispose(): void {
+    this.disposed = true
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = undefined
+  }
+
+  private schedule(): void {
+    if (this.disposed || this.controller.signal.aborted || this.waitingDepth > 0) return
+    this.resumedAt = Date.now()
+    this.timer = setTimeout(() => this.controller.abort('timeout'), Math.max(1, this.remainingMs))
+  }
 }
 
 function boundedTimeout(value: number | undefined): number {

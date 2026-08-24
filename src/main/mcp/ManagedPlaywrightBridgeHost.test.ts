@@ -229,6 +229,59 @@ describe('ManagedPlaywrightBridgeHost', () => {
     await bridge.close()
   })
 
+  it('does not apply the bridge envelope deadline to an admitted call_tool', async () => {
+    vi.useFakeTimers()
+    try {
+      const core = new FakeCore()
+      let release!: () => void
+      let markStarted!: () => void
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve
+      })
+      const managedHost = {
+        callTool: vi.fn(async () => {
+          markStarted()
+          await new Promise<void>((resolve) => {
+            release = resolve
+          })
+          return { content: [{ type: 'text', text: 'ok' }], isError: false }
+        }),
+        close: vi.fn(async () => undefined),
+        releaseRun: vi.fn(async () => undefined)
+      } as unknown as ManagedPlaywrightMcpHost
+      const bridge = new ManagedPlaywrightBridgeHost({
+        core,
+        sensitiveTargetBindings: targetBindingBroker(),
+        createHost: () => managedHost
+      })
+      const request = {
+        ...command({
+          type: 'call_tool',
+          name: 'browser_snapshot',
+          arguments: { call_reason: 'Wait at the Host-owned Tool boundary.' },
+          timeoutMs: 1_000,
+          authorizationContext: AUTHORIZATION_CONTEXT
+        }),
+        deadlineMs: Date.now() + 20
+      }
+
+      core.emitCommand(request)
+      await started
+      await vi.advanceTimersByTimeAsync(60)
+      expect(core.completions).toHaveLength(0)
+
+      release()
+      await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+      expect(core.completions[0]).toMatchObject({
+        requestId: request.requestId,
+        outcome: { type: 'tool_called' }
+      })
+      await bridge.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('preserves a sensitive Host rejection as definitely not dispatched', async () => {
     const core = new FakeCore()
     const callTool = vi.fn<ManagedMcpClient['callTool']>()

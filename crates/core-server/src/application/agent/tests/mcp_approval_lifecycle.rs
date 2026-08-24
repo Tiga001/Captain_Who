@@ -1124,7 +1124,7 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
     );
     let restarted =
         AgentService::try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
-            reopened_storage,
+            Arc::clone(&reopened_storage),
             Some(reopened_vault),
         )
         .unwrap()
@@ -1134,16 +1134,70 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
         .into_iter()
         .find(|action| action.run_id == run_ids[0])
         .expect("first swapped approval must remain pending across restart");
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let error = restarted
+    let assistant_message_id = action
+        .assistant_message_id
+        .clone()
+        .expect("pending approval keeps its assistant message identity");
+    let call_id = action
+        .tool_call_id
+        .clone()
+        .expect("pending MCP approval keeps its frozen ToolCall identity");
+    let storage_id = pending_action_storage_id(&run_ids[0], &action.action_id);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output = restarted
         .approve_action(&run_ids[0], &action.action_id, notifications)
-        .unwrap_err();
-    assert!(error.contains("provider_continuation"));
+        .expect("the user's approval decision is authoritative");
+    assert_eq!(output.status, "failed");
+    assert_eq!(output.agent_output.status, AgentRunStatus::Running);
+    assert!(
+        output.tool_result.is_none(),
+        "external MCP results stay on the dedicated lifecycle/continuation contract"
+    );
     assert_eq!(
         invoker.invocation_count.load(Ordering::SeqCst),
         0,
         "swapped but individually valid refs must fail before invoking the MCP executor"
     );
+
+    let (done, seen) = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_notification_matching_with_seen(&mut receiver, |notification| {
+            notification["params"]["type"] == "done"
+        }),
+    )
+    .await
+    .expect("failed approval continuation must settle");
+    assert_eq!(done["params"]["status"], "failed", "events={seen:?}");
+    assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 0);
+
+    let durable = reopened_storage
+        .get_pending_agent_action(&storage_id)
+        .unwrap()
+        .expect("the settled approval journal remains auditable");
+    assert_eq!(durable.status, "failed");
+    let trace = reopened_storage
+        .get_conversation_turn_trace(&assistant_message_id)
+        .unwrap()
+        .expect("the failed ToolResult must be paired with the original turn");
+    trace.validate().unwrap();
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult {
+                    call_id: result_call_id,
+                    success: false,
+                    ..
+                } if result_call_id == &call_id
+            ))
+            .count(),
+        1
+    );
+    assert!(serde_json::to_string(&trace)
+        .unwrap()
+        .contains("provider_continuation_unavailable"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

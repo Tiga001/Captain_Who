@@ -343,7 +343,6 @@ export function useSkillInstallationWorkflow({
         .filter((issue) => issue.requiresAcknowledgement)
         .map((issue) => issue.id)
       if (
-        Date.now() >= session.preview.expiresAtUnixMs ||
         session.preview.compatibility.status === 'incompatible' ||
         !requiredIssueIds.every((issueId) => session.acceptedIssueIds.includes(issueId))
       ) {
