@@ -121,6 +121,7 @@ mod command_sessions;
 mod completion;
 mod context_compaction;
 mod context_window;
+mod human_root_notifications;
 mod pending_action_store;
 mod persisted_resume_input;
 mod provider_transition;

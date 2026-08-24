@@ -144,14 +144,14 @@ ScheduledPage
 - `useAutomations`、`useAutomationDetail`、`useAutomationRuns` 和 `useAutomationAttention` 可以共享缓存，但缓存不是权威事实。列表、详情、Automation Run 历史和 attention 最终以 Host API 返回的快照为准。
 - create 使用可重试的 `requestId`；update、enable/pause 和 delete 使用权威 `revision`/CAS。迟到的旧列表、详情或 mutation 响应不得覆盖更高 revision，已确认删除的 task 不得被在途请求复活。
 - `automation.event` 带全局单调 `sequence`、task/run identity 和可选 `resourceRevision`。Renderer 丢弃重复或倒序事件，并把事件视为失效通知；`automation.resync` 即使没有增量 payload 也要求重新加载权威状态。
-- 原生通知点击产生的 `AutomationOpenRequest` 只表达导航意图。AppShell 按 request key 处理 Automation task 或精确 Conversation/message 导航；Conversation 尚未水合时先从 Storage Host API 加载，不能用通知文案重建消息。
+- 原生通知点击产生的 `NotificationOpenRequest` 只表达导航意图。AppShell 按 request key 处理 Automation task 或精确 Conversation/message 导航；合并通知由 Main 从用户实际看见的快照中选择最高优先级的有效目标。Conversation 尚未水合时先从 Storage Host API 加载，不能用通知文案重建消息。Renderer 不提供独立通知中心或通知 badge。
 - 表单只提交 permission mode 和 `permissionModeVersion`。Renderer 的可用性开关与风险确认是交互门，Core Server 仍会解析模式、冻结有效权限，并在每次 Automation Run admission 时复核撤销上限。
 - Existing Conversation picker 排除已归档或正在乐观归档的项；Core Server 仍负责确认目标是可写的活跃根 Conversation，并在目标、Project 或 Model 失效时阻止执行。
 - 新建和实际保存编辑时，client 在请求边界写入当前电脑识别出的 IANA timezone。只查看 task 时保留服务端已保存 timezone；在另一时区的电脑上保存编辑会按该电脑 timezone 重新规范化，这是当前明确语义。
 
 Scheduled drawer 的展开、最大化、dirty guard、焦点恢复和宽度都是 Renderer 交互状态。布局以 Scheduled 容器自身宽度而非 viewport 为准；当前默认宽度 440 px、可调整范围 380–640 px、列表至少保留 360 px，容器小于 760 px 时 drawer 覆盖列表。宽度偏好只保存在当前 AppShell 会话，应用重启后恢复默认值。
 
-Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v19，Renderer 不读取或协商该数据库版本。
+Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v20，Renderer 不读取或协商该数据库版本。
 
 ## 设置架构
 
@@ -172,7 +172,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 7. 大文本、diff、PDF、图片和流式事件均需先经过领域预算，再进入 DOM/解码器。
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
-10. Automation DTO schema v1、permission mode v2 与 SQLite schema v19 必须分开命名和演进。
+10. Automation DTO schema v1、permission mode v2 与 SQLite schema v20 必须分开命名和演进。
 
 ## 代码真源
 

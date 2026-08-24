@@ -10,6 +10,7 @@ mod attachments;
 mod conversations;
 mod guidance;
 mod message_deletion;
+mod notifications;
 mod reconciliation;
 mod settings;
 mod trace_reconciliation;

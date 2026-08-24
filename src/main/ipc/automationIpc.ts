@@ -24,7 +24,6 @@ import {
 } from '@mycopilot/protocol'
 import type { AutomationOpenRequest, AutomationResync } from '@mycopilot/protocol'
 import type { CoreServer } from '../core/coreServer'
-import { AutomationNotificationCoordinator } from '../automation/automationNotificationCoordinator'
 import type { TrustedIpcMain } from './trustedIpc'
 
 export interface AutomationIpcRegistration {
@@ -80,19 +79,13 @@ export function registerAutomationIpc(
     }
     pendingOpenRequest = request
   }
-  const notificationCoordinator = new AutomationNotificationCoordinator({
-    coreServer,
-    onOpenRequested: sendOpenRequest
-  })
   const unsubscribeEvent = coreServer.onAutomationEvent((value) => {
     const event = parseAutomationEvent(value)
     broadcast(HOST_CHANNELS.automations.event, event)
-    if (event.kind === 'notification_requested') notificationCoordinator.requestDrain()
   })
   const unsubscribeResync = coreServer.onAutomationResync((value) => {
     latestResync = parseAutomationResync(value)
     broadcast(HOST_CHANNELS.automations.resync, latestResync)
-    notificationCoordinator.requestDrain()
   })
   ipcMain.on(HOST_CHANNELS.automations.resyncReady, (event) => {
     const existingIndex = readyRenderers.indexOf(event.sender)
@@ -172,11 +165,10 @@ export function registerAutomationIpc(
   )
 
   let disposed = false
-  const beginShutdown = (): void => notificationCoordinator.stop()
+  const beginShutdown = (): void => undefined
   const dispose = (): void => {
     if (disposed) return
     disposed = true
-    notificationCoordinator.stop()
     readyRenderers.length = 0
     pendingOpenRequest = null
     unsubscribeEvent()

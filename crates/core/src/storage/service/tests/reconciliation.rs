@@ -3527,10 +3527,11 @@ fn pre_runtime_failure_fixture(
     let assistant_message_id = "assistant-pre-runtime-failure";
     let action_id = "action-pre-runtime-failure";
     let mut stored = conversation(conversation_id, Some("project-1"), assistant_message_id);
-    stored.messages[0].role = "assistant".to_string();
-    stored.messages[0].content = "still pending".to_string();
-    stored.messages[0].status = Some("pending".to_string());
-    stored.messages[0].agent_run_json = Some(
+    let mut assistant = stored.messages.remove(0);
+    assistant.role = "assistant".to_string();
+    assistant.content = "still pending".to_string();
+    assistant.status = Some("pending".to_string());
+    assistant.agent_run_json = Some(
         serde_json::json!({
             "runId": "run-1",
             "status": "waiting_for_approval",
@@ -3544,6 +3545,19 @@ fn pre_runtime_failure_fixture(
         })
         .to_string(),
     );
+    stored.messages = vec![
+        ChatMessageRecord {
+            id: "user-pre-runtime-failure".to_string(),
+            role: "user".to_string(),
+            content: "do work".to_string(),
+            created_at: 0,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        assistant,
+    ];
     service.save_conversation(stored).unwrap();
     let mut pending = pending_action(action_id, conversation_id);
     pending.assistant_message_id = Some(assistant_message_id.to_string());
@@ -3587,6 +3601,28 @@ fn pre_runtime_continuation_failure_commits_all_terminal_facts_atomically() {
     );
     usage.status = Some("failed".to_string());
     usage.error = Some("pre-Runtime continuation failed".to_string());
+    service
+        .enqueue_notification_event(
+            &crate::storage::notification_repository::NewNotificationEventRecord {
+                notification_kind: "approval_required".to_string(),
+                source_kind: "human_root".to_string(),
+                source_id: "run-1".to_string(),
+                run_id: Some("run-1".to_string()),
+                automation_id: None,
+                conversation_id: pending.conversation_id.clone(),
+                user_message_id: Some("user-pre-runtime-failure".to_string()),
+                assistant_message_id: pending.assistant_message_id.clone(),
+                approval_action_id: Some(pending.action_id.clone()),
+                subject_kind: "prompt_excerpt".to_string(),
+                subject_text: "do work".to_string(),
+                dedupe_key: "approval-pre-runtime-failure".to_string(),
+                supersession_key: "human-root:run-1".to_string(),
+                resource_revision: Some(1),
+                occurred_at: 1,
+                expires_at: 10_000,
+            },
+        )
+        .unwrap();
 
     service
         .fail_claimed_agent_action_continuation(
@@ -3626,11 +3662,13 @@ fn pre_runtime_continuation_failure_commits_all_terminal_facts_atomically() {
         .load_conversation(pending.conversation_id.as_deref().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(conversation.messages[0].status.as_deref(), Some("error"));
-    assert_eq!(
-        conversation.messages[0].content,
-        "pre-Runtime continuation failed"
-    );
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == "assistant-pre-runtime-failure")
+        .unwrap();
+    assert_eq!(assistant.status.as_deref(), Some("error"));
+    assert_eq!(assistant.content, "pre-Runtime continuation failed");
     assert_eq!(
         service
             .get_conversation_turn_trace(pending.assistant_message_id.as_deref().unwrap())
@@ -3648,6 +3686,22 @@ fn pre_runtime_continuation_failure_commits_all_terminal_facts_atomically() {
         .unwrap()
         .unwrap();
     assert_eq!(usage.status.as_deref(), Some("failed"));
+    let notifications = service.list_notifications(None, 10, false, None).unwrap();
+    assert_eq!(notifications.items.len(), 1);
+    assert_eq!(notifications.items[0].notification_kind, "task_failed");
+    assert_eq!(notifications.items[0].subject_text, "do work");
+    let approval_resolved: (Option<i64>, Option<i64>) = service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT resolved_at, superseded_at FROM notification_events
+             WHERE dedupe_key = 'approval-pre-runtime-failure'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(approval_resolved.0.is_some() && approval_resolved.1.is_some());
 }
 
 #[test]
@@ -3686,8 +3740,13 @@ fn pre_runtime_continuation_failure_cas_conflict_changes_nothing() {
         .load_conversation(pending.conversation_id.as_deref().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
-    assert_eq!(conversation.messages[0].content, "still pending");
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == "assistant-pre-runtime-failure")
+        .unwrap();
+    assert_eq!(assistant.status.as_deref(), Some("pending"));
+    assert_eq!(assistant.content, "still pending");
     assert_eq!(
         service
             .get_conversation_turn_trace(pending.assistant_message_id.as_deref().unwrap())
@@ -3756,7 +3815,12 @@ fn pre_runtime_continuation_failure_rolls_back_when_usage_write_fails() {
         .load_conversation(pending.conversation_id.as_deref().unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == "assistant-pre-runtime-failure")
+        .unwrap();
+    assert_eq!(assistant.status.as_deref(), Some("pending"));
     assert_eq!(
         service
             .get_conversation_turn_trace(pending.assistant_message_id.as_deref().unwrap())

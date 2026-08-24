@@ -5,6 +5,8 @@ import { Check, ChevronDown } from 'lucide-react'
 import { featureFlags } from '../../../config/featureFlags'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { appLanguageOptions } from '../../../config/languageRegistry'
+import { hasNotificationHostApi } from '../../notifications/notificationClient'
+import { useNotificationSettings } from '../../notifications/useNotificationSettings'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import './GeneralSettingsPage.css'
 
@@ -68,6 +70,129 @@ function SettingsToggle({ checked, disabled = false, label, onChange }: Settings
     >
       <span className="settings-switch__thumb" aria-hidden="true" />
     </button>
+  )
+}
+
+function NotificationSettingsSection() {
+  const { t } = useFrontendConfig()
+  const available = hasNotificationHostApi()
+  const { settings, status, error, refresh, update, saving } = useNotificationSettings(available)
+
+  if (!available) return null
+
+  const updateSetting = (patch: Parameters<typeof update>[0]) => {
+    void update(patch).catch(() => undefined)
+  }
+
+  const renderToggleRow = (
+    key: keyof NonNullable<typeof settings>,
+    title: Parameters<typeof t>[0],
+    description: Parameters<typeof t>[0],
+    disabled = false
+  ) => {
+    if (!settings || typeof settings[key] !== 'boolean') return null
+    return (
+      <div className="settings-list-row" key={key}>
+        <span className="settings-list-row__text">
+          <span className="settings-list-row__title">{t(title)}</span>
+          <p className="settings-list-row__description">{t(description)}</p>
+        </span>
+        <SettingsToggle
+          checked={settings[key] as boolean}
+          disabled={saving || disabled}
+          label={t(title)}
+          onChange={(checked) => updateSetting({ [key]: checked })}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <section className="settings-list-section" aria-labelledby="notifications-section-heading">
+      <h2 id="notifications-section-heading">{t('general.sectionNotifications')}</h2>
+      <div className="settings-list general-settings-list" aria-busy={status === 'loading'}>
+        {settings ? (
+          <>
+            {renderToggleRow(
+              'enabled',
+              'notification.settingEnabled',
+              'notification.settingEnabledDescription'
+            )}
+            {renderToggleRow(
+              'soundEnabled',
+              'notification.settingSound',
+              'notification.settingSoundDescription',
+              !settings.enabled
+            )}
+            {renderToggleRow(
+              'showTaskContent',
+              'notification.settingPreview',
+              'notification.settingPreviewDescription',
+              !settings.enabled
+            )}
+            {renderToggleRow(
+              'humanCompletedEnabled',
+              'notification.settingCompleted',
+              'notification.settingCompletedDescription',
+              !settings.enabled
+            )}
+            {renderToggleRow(
+              'humanFailedEnabled',
+              'notification.settingFailed',
+              'notification.settingFailedDescription',
+              !settings.enabled
+            )}
+            {renderToggleRow(
+              'humanApprovalEnabled',
+              'notification.settingApproval',
+              'notification.settingApprovalDescription',
+              !settings.enabled
+            )}
+            {renderToggleRow(
+              'humanCancelledEnabled',
+              'notification.settingCancelled',
+              'notification.settingCancelledDescription',
+              !settings.enabled
+            )}
+            {error && (
+              <div className="settings-list-row" role="alert">
+                <span className="settings-list-row__text">
+                  <span className="settings-list-row__title">
+                    {t('notification.settingsUpdateFailed')}
+                  </span>
+                </span>
+                <button
+                  className="general-settings-retry"
+                  onClick={() => void refresh()}
+                  type="button"
+                >
+                  {t('notification.retry')}
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="settings-list-row" role={status === 'error' ? 'alert' : 'status'}>
+            <span className="settings-list-row__text">
+              <span className="settings-list-row__title">
+                {status === 'error'
+                  ? t('notification.settingsLoadFailed')
+                  : t('notification.loading')}
+              </span>
+            </span>
+            {status === 'error' && (
+              <button
+                className="general-settings-retry"
+                onClick={() => void refresh()}
+                type="button"
+              >
+                {t('notification.retry')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -159,6 +284,8 @@ export function GeneralSettingsPage({
           </div>
         </div>
       </section>
+
+      <NotificationSettingsSection />
 
       <section className="settings-list-section" aria-labelledby="permission-modes-heading">
         <h2 id="permission-modes-heading">{t('general.sectionPermissions')}</h2>

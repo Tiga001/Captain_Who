@@ -160,6 +160,19 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         )
         .unwrap();
 
+    let approval_events = storage.list_notifications(None, 100, false, None).unwrap();
+    let approval_event = approval_events
+        .items
+        .iter()
+        .find(|event| event.notification_kind == "approval_required")
+        .expect("ordinary HumanRoot approval must publish a durable notification");
+    assert_eq!(
+        approval_event.approval_action_id.as_deref(),
+        Some(call.id.as_str())
+    );
+    assert_eq!(approval_event.subject_text, "Keep tracking this objective.");
+    assert!(approval_event.resolved_at.is_none());
+
     assert!(service.cancel_action("run-cancel", &call.id).unwrap());
 
     let trace = storage
@@ -188,6 +201,21 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         .unwrap();
     assert_eq!(conversation.messages[1].content, "");
     assert_eq!(conversation.messages[1].status.as_deref(), Some("sent"));
+
+    let terminal_events = storage.list_notifications(None, 100, false, None).unwrap();
+    let resolved_approval = terminal_events
+        .items
+        .iter()
+        .find(|event| event.notification_kind == "approval_required")
+        .unwrap();
+    assert!(resolved_approval.resolved_at.is_some());
+    let cancelled = terminal_events
+        .items
+        .iter()
+        .find(|event| event.notification_kind == "task_cancelled")
+        .expect("terminal cancellation must publish its replacement notification");
+    assert_eq!(cancelled.subject_text, "Keep tracking this objective.");
+    assert!(cancelled.resolved_at.is_some());
 }
 
 #[test]

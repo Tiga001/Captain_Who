@@ -621,15 +621,19 @@ impl AgentService {
         );
         let mut settled = false;
         for delay_ms in TERMINAL_PERSISTENCE_RETRY_DELAYS_MS {
-            match self.storage.finalize_chat_message_with_conversation_trace(
+            match self.finalize_turn_with_human_root_notification(
+                &rewrite.run_id,
                 conversation_id,
                 assistant_message_id,
+                AgentRunStatus::Failed,
                 cause,
                 Some("error"),
                 "failed",
                 &trace,
+                None,
                 created_at,
                 completed_at,
+                None,
             ) {
                 Ok(()) => {
                     settled = true;
@@ -639,15 +643,19 @@ impl AgentService {
             }
         }
         if !settled {
-            self.storage.finalize_chat_message_with_conversation_trace(
+            self.finalize_turn_with_human_root_notification(
+                &rewrite.run_id,
                 conversation_id,
                 assistant_message_id,
+                AgentRunStatus::Failed,
                 cause,
                 Some("error"),
                 "failed",
                 &trace,
+                None,
                 created_at,
                 completed_at,
+                None,
             )?;
         }
         Ok(Some(active_rewrite_turn_output(&self.storage, &rewrite)?))

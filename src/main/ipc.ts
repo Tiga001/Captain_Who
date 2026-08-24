@@ -21,6 +21,11 @@ import { FaviconResourceCache } from './resources/FaviconResourceCache'
 import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 import { registerAgentIpc } from './ipc/agentIpc'
 import { registerAutomationIpc } from './ipc/automationIpc'
+import { registerNotificationIpc } from './ipc/notificationIpc'
+import {
+  createVolatileNotificationLocaleMirror,
+  type NotificationLocaleMirror
+} from './notifications/notificationLocaleStore'
 import { registerGitIpc } from './ipc/gitIpc'
 import { registerSkillsIpc } from './ipc/skillsIpc'
 import { registerMcpIpc } from './ipc/mcpIpc'
@@ -300,7 +305,9 @@ function expandSystemPathAlias(rawFilePath: string): string | null {
 
 export interface HostIpcRegistration {
   (): void
-  beginAutomationShutdown(): void
+  beginAutomationShutdown(): Promise<void>
+  beginNotificationDelivery(): void
+  beginNotificationShutdown(): Promise<void>
 }
 
 export function registerHostIpc(
@@ -309,7 +316,8 @@ export function registerHostIpc(
   faviconResourceCache: FaviconResourceCache,
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean,
   browserSurfaceManager?: BrowserSurfaceManager,
-  browserArtifactBroker?: BrowserArtifactBroker
+  browserArtifactBroker?: BrowserArtifactBroker,
+  notificationLocaleMirror: NotificationLocaleMirror = createVolatileNotificationLocaleMirror()
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
@@ -320,6 +328,10 @@ export function registerHostIpc(
   registerCoreServiceIpc(ipcMain, coreServer)
   registerAgentIpc(ipcMain, coreServer)
   const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer)
+  const disposeNotificationIpc = registerNotificationIpc(ipcMain, coreServer, {
+    localeMirror: notificationLocaleMirror,
+    startPaused: true
+  })
   registerSkillsIpc(ipcMain, coreServer, selectInstallationDirectory)
   const disposeMcpIpc = registerMcpIpc(ipcMain, coreServer)
   registerGitIpc(ipcMain, coreServer)
@@ -362,9 +374,14 @@ export function registerHostIpc(
     faviconResourceCache.resolveFavicon(input)
   )
   const dispose = (): void => {
+    disposeNotificationIpc()
     disposeAutomationIpc()
     disposeMcpIpc()
   }
-  dispose.beginAutomationShutdown = (): void => disposeAutomationIpc.beginShutdown()
+  dispose.beginNotificationShutdown = (): Promise<void> => disposeNotificationIpc.beginShutdown()
+  dispose.beginNotificationDelivery = (): void => disposeNotificationIpc.beginDelivery()
+  // Retain the old lifecycle name while callers migrate; it now fences the application-wide
+  // notification pump rather than the removed Automation-only pump.
+  dispose.beginAutomationShutdown = dispose.beginNotificationShutdown
   return dispose
 }

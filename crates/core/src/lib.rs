@@ -19,6 +19,7 @@ pub mod git_review;
 pub mod image_generation;
 mod llm;
 mod model_request_observation;
+pub mod notification_subject;
 pub mod office;
 pub mod patch;
 mod prompts;

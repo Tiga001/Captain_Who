@@ -1,0 +1,128 @@
+{
+  "methods": {
+    "claim": "notifications.claim",
+    "validate": "notifications.validate",
+    "acknowledge": "notifications.acknowledge",
+    "release": "notifications.release",
+    "suppress": "notifications.suppress",
+    "list": "notifications.list",
+    "summary": "notifications.summary",
+    "markSeen": "notifications.markSeen",
+    "getSettings": "notifications.settings.get",
+    "updateSettings": "notifications.settings.update"
+  },
+  "notifications": {
+    "event": "notification.event",
+    "resync": "notification.resync"
+  },
+  "batch": {
+    "schemaVersion": 1,
+    "batchId": "notification-batch:1",
+    "revision": 2,
+    "status": "claimed",
+    "highestPriority": "approval_required",
+    "counts": {
+      "completed": 1,
+      "failed": 0,
+      "cancelled": 0,
+      "approvalRequired": 1,
+      "importantUpdate": 0,
+      "configurationBlocked": 0
+    },
+    "itemCount": 2,
+    "items": [
+      {
+        "schemaVersion": 1,
+        "eventId": "notification-event:1",
+        "batchId": "notification-batch:1",
+        "kind": "task_completed",
+        "sourceKind": "human_root",
+        "sourceId": "conversation-1",
+        "runId": "run-1",
+        "automationId": null,
+        "conversationId": "conversation-1",
+        "userMessageId": "user-1",
+        "assistantMessageId": "assistant-1",
+        "approvalActionId": null,
+        "subjectKind": "prompt_excerpt",
+        "subjectText": "Write notification tests",
+        "priority": "completed",
+        "resourceRevision": 1,
+        "seenAt": null,
+        "resolvedAt": 1787414400000,
+        "occurredAt": 1787414400000
+      },
+      {
+        "schemaVersion": 1,
+        "eventId": "notification-event:2",
+        "batchId": "notification-batch:1",
+        "kind": "approval_required",
+        "sourceKind": "human_root",
+        "sourceId": "conversation-2",
+        "runId": "run-2",
+        "automationId": null,
+        "conversationId": "conversation-2",
+        "userMessageId": "user-2",
+        "assistantMessageId": "assistant-2",
+        "approvalActionId": "action-2",
+        "subjectKind": "prompt_excerpt",
+        "subjectText": "Update dependencies",
+        "priority": "approval_required",
+        "resourceRevision": 1,
+        "seenAt": null,
+        "resolvedAt": null,
+        "occurredAt": 1787414400100
+      }
+    ],
+    "collectUntil": 1787414400600,
+    "replaceUntil": 1787414460000,
+    "notificationsEnabled": true,
+    "soundEnabled": true,
+    "showTaskContent": true,
+    "soundLevelPlayed": "none",
+    "deliveredRevision": null,
+    "deliveredPriority": null,
+    "isUpdate": false,
+    "createdAt": 1787414400000,
+    "updatedAt": 1787414400100
+  },
+  "settings": {
+    "schemaVersion": 1,
+    "enabled": true,
+    "soundEnabled": true,
+    "showTaskContent": true,
+    "humanCompletedEnabled": true,
+    "humanFailedEnabled": true,
+    "humanApprovalEnabled": true,
+    "humanCancelledEnabled": true,
+    "revision": 1,
+    "updatedAt": 0
+  },
+  "event": {
+    "schemaVersion": 1,
+    "sequence": 3,
+    "eventId": "notification-change:3",
+    "kind": "created",
+    "notificationId": "notification-event:2",
+    "batchId": "notification-batch:1",
+    "resourceRevision": 1,
+    "occurredAt": 1787414400100
+  },
+  "resync": {
+    "schemaVersion": 1,
+    "reason": "core_started",
+    "lastSequence": 3,
+    "occurredAt": 1787414400200
+  },
+  "openRequest": {
+    "schemaVersion": 1,
+    "batchId": "notification-batch:1",
+    "eventIds": ["notification-event:1", "notification-event:2"],
+    "destination": {
+      "kind": "conversation",
+      "conversationId": "conversation-2",
+      "messageId": "assistant-2",
+      "approvalActionId": "action-2"
+    }
+  }
+}

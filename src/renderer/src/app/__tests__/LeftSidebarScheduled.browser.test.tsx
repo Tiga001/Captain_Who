@@ -74,6 +74,7 @@ describe('LeftSidebar scheduled navigation', () => {
     await expect.element(screen.getByText('3', { exact: true })).toBeVisible()
     await expect.element(screen.getByText('Existing project', { exact: true })).toBeVisible()
     await expect.element(screen.getByText('Existing conversation', { exact: true })).toBeVisible()
+    expect(screen.container.querySelector('.left-sidebar__notification-action')).toBeNull()
 
     await scheduled.click()
     expect(onOpenScheduled).toHaveBeenCalledOnce()

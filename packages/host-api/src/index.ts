@@ -123,6 +123,15 @@ import type {
   McpServerListOutput,
   McpServerMutationInput,
   McpServerUpdateInput,
+  NotificationEvent,
+  NotificationMarkSeenInput,
+  NotificationMarkSeenOutput,
+  NotificationOpenRequest,
+  NotificationResync,
+  NotificationSettingsGetInput,
+  NotificationSettingsGetOutput,
+  NotificationSettingsUpdateInput,
+  NotificationSettingsUpdateOutput,
   ProviderProfileUiDescriptor,
   ResourceFaviconRequest,
   ResourceFaviconResponse,
@@ -216,6 +225,23 @@ export interface BrowserHostApi {
   surfaceSelected(input: BrowserSurfaceSelectedInput): Promise<BrowserSurfaceSelectedOutput>
   /** Receives Host-owned reveal/create/close requests without exposing guest or CDP identity. */
   onSurfaceCommand(handler: (command: BrowserSurfaceCommand) => void): () => void
+}
+
+export interface NotificationsHostApi {
+  /** Mirrors the existing application language into Main for cold-start native notifications. */
+  setLocale(language: string): Promise<void>
+  markSeen(
+    input: NotificationMarkSeenInput
+  ): Promise<HostInvocationResult<NotificationMarkSeenOutput>>
+  getSettings(
+    input: NotificationSettingsGetInput
+  ): Promise<HostInvocationResult<NotificationSettingsGetOutput>>
+  updateSettings(
+    input: NotificationSettingsUpdateInput
+  ): Promise<HostInvocationResult<NotificationSettingsUpdateOutput>>
+  onEvent(handler: (event: NotificationEvent) => void): () => void
+  onResync(handler: (event: NotificationResync) => void): () => void
+  onOpenRequested(handler: (request: NotificationOpenRequest) => void): () => void
 }
 
 export interface OfficeHostApi {
@@ -500,6 +526,7 @@ export interface HostApi {
   git: GitHostApi
   imageGeneration: ImageGenerationHostApi
   mcp: McpHostApi
+  notifications: NotificationsHostApi
   office: OfficeHostApi
   resources: ResourcesHostApi
   search: SearchHostApi

@@ -112,6 +112,10 @@ import { ScheduledPageLayer } from '../features/automations/ScheduledPageLayer'
 import { AUTOMATION_DRAWER_DEFAULT_WIDTH } from '../features/automations/automationLayout'
 import { useAutomationAttention } from '../features/automations/useAutomationAttention'
 import {
+  markNotificationsSeen,
+  onNotificationOpenRequested
+} from '../features/notifications/notificationClient'
+import {
   AppShellCoveredRegion,
   AppShellWorkspace,
   getVisibleActiveConversationId,
@@ -1585,12 +1589,12 @@ export function AppShell() {
   const requestOpenConversationFromScheduled = useCallback(
     (conversationId: string, messageId?: string | null) => {
       if (primaryView !== 'scheduled') {
-        selectConversation(conversationId, messageId)
+        commitOpenConversationFromScheduled(conversationId, messageId)
         return
       }
       requestScheduledExit(() => commitOpenConversationFromScheduled(conversationId, messageId))
     },
-    [commitOpenConversationFromScheduled, primaryView, requestScheduledExit, selectConversation]
+    [commitOpenConversationFromScheduled, primaryView, requestScheduledExit]
   )
 
   useEffect(() => {
@@ -1616,6 +1620,37 @@ export function AppShell() {
       setPrimaryView('scheduled')
     })
   }, [requestOpenConversationFromScheduled])
+
+  useEffect(
+    () =>
+      onNotificationOpenRequested((request) => {
+        void markNotificationsSeen({ kind: 'events', eventIds: request.eventIds }).catch(
+          () => undefined
+        )
+        if (request.destination.kind === 'conversation') {
+          closeSettings()
+          requestOpenConversationFromScheduled(
+            request.destination.conversationId,
+            request.destination.messageId
+          )
+          return
+        }
+
+        if (request.destination.kind === 'automation') {
+          closeSettings()
+          scheduledOpenRequestKeyRef.current += 1
+          conversationOpenRequestKeyRef.current += 1
+          setScheduledExternalNavigationRequest(null)
+          setScheduledOpenRequest({
+            automationId: request.destination.automationId,
+            requestKey: scheduledOpenRequestKeyRef.current,
+            runId: request.destination.runId
+          })
+          setPrimaryView('scheduled')
+        }
+      }),
+    [closeSettings, requestOpenConversationFromScheduled]
+  )
 
   const activeProviderTransitionConversationId = activeConversation?.id
   const activeProviderTransitionMessagesLoaded = activeConversation?.messagesLoaded

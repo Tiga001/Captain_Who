@@ -33,6 +33,7 @@ mod context_runtime;
 mod deletion;
 mod file_write_permissions;
 mod historical_compatibility_boundary;
+mod human_root_notifications;
 mod image_generation;
 mod managed_command_loop;
 mod mcp_approval_expiry;

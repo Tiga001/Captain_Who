@@ -133,6 +133,28 @@ import type {
   McpServerListOutput,
   McpServerMutationInput,
   McpServerUpdateInput,
+  NotificationBatchAcknowledgeInput,
+  NotificationBatchAcknowledgeOutput,
+  NotificationBatchReleaseInput,
+  NotificationBatchReleaseOutput,
+  NotificationBatchSuppressInput,
+  NotificationBatchSuppressOutput,
+  NotificationBatchesClaimInput,
+  NotificationBatchesClaimOutput,
+  NotificationBatchValidateInput,
+  NotificationBatchValidateOutput,
+  NotificationEvent,
+  NotificationListInput,
+  NotificationListOutput,
+  NotificationMarkSeenInput,
+  NotificationMarkSeenOutput,
+  NotificationResync,
+  NotificationSettingsGetInput,
+  NotificationSettingsGetOutput,
+  NotificationSettingsUpdateInput,
+  NotificationSettingsUpdateOutput,
+  NotificationSummaryInput,
+  NotificationSummaryOutput,
   ProviderProfileUiDescriptor,
   ChatSearchInput,
   ChatSearchResult,
@@ -192,6 +214,18 @@ import {
   AUTOMATION_RUNS_LIST_METHOD,
   AUTOMATION_SET_ENABLED_METHOD,
   AUTOMATION_UPDATE_METHOD,
+  NOTIFICATION_BATCH_ACKNOWLEDGE_METHOD,
+  NOTIFICATION_BATCH_RELEASE_METHOD,
+  NOTIFICATION_BATCH_SUPPRESS_METHOD,
+  NOTIFICATION_BATCH_VALIDATE_METHOD,
+  NOTIFICATION_BATCHES_CLAIM_METHOD,
+  NOTIFICATION_EVENT_NOTIFICATION_METHOD,
+  NOTIFICATION_LIST_METHOD,
+  NOTIFICATION_MARK_SEEN_METHOD,
+  NOTIFICATION_RESYNC_NOTIFICATION_METHOD,
+  NOTIFICATION_SETTINGS_GET_METHOD,
+  NOTIFICATION_SETTINGS_UPDATE_METHOD,
+  NOTIFICATION_SUMMARY_METHOD,
   AGENT_APPROVE_ACTION_METHOD,
   AGENT_CANCEL_ACTION_METHOD,
   AGENT_CANCEL_RUN_METHOD,
@@ -240,6 +274,28 @@ import {
   parseAutomationSetEnabledInput,
   parseAutomationTask,
   parseAutomationUpdateInput,
+  parseNotificationBatchAcknowledgeInput,
+  parseNotificationBatchAcknowledgeOutput,
+  parseNotificationBatchReleaseInput,
+  parseNotificationBatchReleaseOutput,
+  parseNotificationBatchSuppressInput,
+  parseNotificationBatchSuppressOutput,
+  parseNotificationBatchesClaimInput,
+  parseNotificationBatchesClaimOutput,
+  parseNotificationBatchValidateInput,
+  parseNotificationBatchValidateOutput,
+  parseNotificationEvent,
+  parseNotificationListInput,
+  parseNotificationListOutput,
+  parseNotificationMarkSeenInput,
+  parseNotificationMarkSeenOutput,
+  parseNotificationResync,
+  parseNotificationSettingsGetInput,
+  parseNotificationSettingsGetOutput,
+  parseNotificationSettingsUpdateInput,
+  parseNotificationSettingsUpdateOutput,
+  parseNotificationSummaryInput,
+  parseNotificationSummaryOutput,
   parseAgentCommandSessionGetInput,
   parseAgentCommandSessionGetOutput,
   parseAgentCommandSessionListInput,
@@ -698,6 +754,9 @@ export class CoreServer {
   private readonly automationResyncHandlers = new Set<(event: AutomationResync) => void>()
   private automationResyncSubscription: (() => void) | null = null
   private latestAutomationResync: AutomationResync | null = null
+  private readonly notificationResyncHandlers = new Set<(event: NotificationResync) => void>()
+  private notificationResyncSubscription: (() => void) | null = null
+  private latestNotificationResync: NotificationResync | null = null
 
   private warnAgentObserverEvent(
     category: AgentObserverWarning['category'],
@@ -725,12 +784,14 @@ export class CoreServer {
 
   start(): void {
     this.ensureAutomationResyncSubscription()
+    this.ensureNotificationResyncSubscription()
     this.rpc.start()
   }
 
   stop(): void {
     this.rpc.stop()
     this.latestAutomationResync = null
+    this.latestNotificationResync = null
   }
 
   async shutdown(): Promise<void> {
@@ -982,6 +1043,219 @@ export class CoreServer {
         return output
       })
       .catch(rethrowValidatedAutomationError)
+  }
+
+  /** Host-only durable batch claim; Renderer cannot mutate native delivery state. */
+  claimNotificationBatches(
+    input: NotificationBatchesClaimInput
+  ): Promise<NotificationBatchesClaimOutput> {
+    const request = parseNotificationBatchesClaimInput(input)
+    return this.rpc
+      .request<unknown, NotificationBatchesClaimInput>(NOTIFICATION_BATCHES_CLAIM_METHOD, request)
+      .then((value) => {
+        const output = parseNotificationBatchesClaimOutput(value)
+        if (output.claimToken !== request.claimToken) {
+          throw new Error('Invalid notification batch claim response identity')
+        }
+        if (output.batches.some((batch) => batch.status !== 'claimed')) {
+          throw new Error('Invalid notification batch claim response status')
+        }
+        const batchIds = new Set(output.batches.map((batch) => batch.batchId))
+        if (batchIds.size !== output.batches.length) {
+          throw new Error('Invalid duplicate notification batch claim response')
+        }
+        return output
+      })
+  }
+
+  /** Host-only final authority check immediately before native presentation. */
+  validateNotificationBatch(
+    input: NotificationBatchValidateInput
+  ): Promise<NotificationBatchValidateOutput> {
+    const request = parseNotificationBatchValidateInput(input)
+    return this.rpc
+      .request<unknown, NotificationBatchValidateInput>(NOTIFICATION_BATCH_VALIDATE_METHOD, request)
+      .then((value) => {
+        const output = parseNotificationBatchValidateOutput(value)
+        if (
+          output.batchId !== request.batchId ||
+          (output.batch !== null && output.batch.batchId !== request.batchId)
+        ) {
+          throw new Error('Invalid notification batch validation response identity')
+        }
+        if (output.batch !== null && output.batch.status !== 'claimed') {
+          throw new Error('Invalid notification batch validation response status')
+        }
+        return output
+      })
+  }
+
+  acknowledgeNotificationBatch(
+    input: NotificationBatchAcknowledgeInput
+  ): Promise<NotificationBatchAcknowledgeOutput> {
+    const request = parseNotificationBatchAcknowledgeInput(input)
+    return this.rpc
+      .request<unknown, NotificationBatchAcknowledgeInput>(
+        NOTIFICATION_BATCH_ACKNOWLEDGE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseNotificationBatchAcknowledgeOutput(value)
+        if (output.batchId !== request.batchId || output.disposition !== request.disposition) {
+          throw new Error('Invalid notification batch acknowledge response identity')
+        }
+        const statusMatchesDisposition =
+          request.disposition === 'delivered'
+            ? output.status === 'pending' ||
+              output.status === 'displayed' ||
+              output.status === 'sealed'
+            : output.status === 'suppressed'
+        if (!statusMatchesDisposition) {
+          throw new Error('Invalid notification batch acknowledge response status')
+        }
+        return output
+      })
+  }
+
+  releaseNotificationBatch(
+    input: NotificationBatchReleaseInput
+  ): Promise<NotificationBatchReleaseOutput> {
+    const request = parseNotificationBatchReleaseInput(input)
+    return this.rpc
+      .request<unknown, NotificationBatchReleaseInput>(NOTIFICATION_BATCH_RELEASE_METHOD, request)
+      .then((value) => {
+        const output = parseNotificationBatchReleaseOutput(value)
+        if (output.batchId !== request.batchId || output.retryAt < request.retryAt) {
+          throw new Error('Invalid notification batch release response identity')
+        }
+        return output
+      })
+  }
+
+  suppressNotificationBatch(
+    input: NotificationBatchSuppressInput
+  ): Promise<NotificationBatchSuppressOutput> {
+    const request = parseNotificationBatchSuppressInput(input)
+    return this.rpc
+      .request<unknown, NotificationBatchSuppressInput>(NOTIFICATION_BATCH_SUPPRESS_METHOD, request)
+      .then((value) => {
+        const output = parseNotificationBatchSuppressOutput(value)
+        if (output.batchId !== request.batchId || output.reason !== request.reason) {
+          throw new Error('Invalid notification batch suppress response identity')
+        }
+        return output
+      })
+  }
+
+  listNotifications(input: NotificationListInput): Promise<NotificationListOutput> {
+    return this.rpc
+      .request<unknown, NotificationListInput>(
+        NOTIFICATION_LIST_METHOD,
+        parseNotificationListInput(input)
+      )
+      .then(parseNotificationListOutput)
+  }
+
+  getNotificationSummary(input: NotificationSummaryInput): Promise<NotificationSummaryOutput> {
+    return this.rpc
+      .request<unknown, NotificationSummaryInput>(
+        NOTIFICATION_SUMMARY_METHOD,
+        parseNotificationSummaryInput(input)
+      )
+      .then(parseNotificationSummaryOutput)
+  }
+
+  markNotificationSeen(input: NotificationMarkSeenInput): Promise<NotificationMarkSeenOutput> {
+    return this.rpc
+      .request<unknown, NotificationMarkSeenInput>(
+        NOTIFICATION_MARK_SEEN_METHOD,
+        parseNotificationMarkSeenInput(input)
+      )
+      .then(parseNotificationMarkSeenOutput)
+  }
+
+  getNotificationSettings(
+    input: NotificationSettingsGetInput
+  ): Promise<NotificationSettingsGetOutput> {
+    return this.rpc
+      .request<unknown, NotificationSettingsGetInput>(
+        NOTIFICATION_SETTINGS_GET_METHOD,
+        parseNotificationSettingsGetInput(input)
+      )
+      .then(parseNotificationSettingsGetOutput)
+  }
+
+  updateNotificationSettings(
+    input: NotificationSettingsUpdateInput
+  ): Promise<NotificationSettingsUpdateOutput> {
+    const request = parseNotificationSettingsUpdateInput(input)
+    return this.rpc
+      .request<unknown, NotificationSettingsUpdateInput>(
+        NOTIFICATION_SETTINGS_UPDATE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseNotificationSettingsUpdateOutput(value)
+        if (output.settings.revision <= request.expectedRevision) {
+          throw new Error('Invalid notification settings revision response')
+        }
+        return output
+      })
+  }
+
+  onNotificationEvent(handler: (event: NotificationEvent) => void): () => void {
+    return this.rpc.onNotification(NOTIFICATION_EVENT_NOTIFICATION_METHOD, (params) => {
+      let event: NotificationEvent
+      try {
+        event = parseNotificationEvent(params)
+      } catch {
+        console.warn('Ignored invalid system notification event')
+        return
+      }
+      try {
+        handler(event)
+      } catch {
+        console.warn('System notification event handler failed')
+      }
+    })
+  }
+
+  onNotificationResync(handler: (event: NotificationResync) => void): () => void {
+    this.ensureNotificationResyncSubscription()
+    this.notificationResyncHandlers.add(handler)
+    const latest = this.latestNotificationResync
+    if (latest !== null) {
+      try {
+        handler(latest)
+      } catch {
+        console.warn('System notification resync handler failed')
+      }
+    }
+    return () => this.notificationResyncHandlers.delete(handler)
+  }
+
+  private ensureNotificationResyncSubscription(): void {
+    if (this.notificationResyncSubscription !== null) return
+    this.notificationResyncSubscription = this.rpc.onNotification(
+      NOTIFICATION_RESYNC_NOTIFICATION_METHOD,
+      (params) => {
+        let event: NotificationResync
+        try {
+          event = parseNotificationResync(params)
+        } catch {
+          console.warn('Ignored invalid system notification resync')
+          return
+        }
+        this.latestNotificationResync = event
+        for (const handler of [...this.notificationResyncHandlers]) {
+          try {
+            handler(event)
+          } catch {
+            console.warn('System notification resync handler failed')
+          }
+        }
+      }
+    )
   }
 
   onAutomationEvent(handler: (event: AutomationEvent) => void): () => void {

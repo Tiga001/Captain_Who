@@ -34,14 +34,14 @@ describe('CoreServer Automation notifications', () => {
   })
 
   it('replays a validated startup resync to a later Main IPC subscriber exactly once', () => {
-    let receive: ((params: unknown) => void) | undefined
-    onNotification.mockImplementation((_method, handler) => {
-      receive = handler
+    const receivers = new Map<string, (params: unknown) => void>()
+    onNotification.mockImplementation((method, handler) => {
+      receivers.set(method, handler)
       return () => undefined
     })
     const server = new CoreServer()
     server.start()
-    receive?.({
+    receivers.get('automation.resync')?.({
       schemaVersion: 1,
       reason: 'core_started',
       lastSequence: 7,
@@ -57,10 +57,10 @@ describe('CoreServer Automation notifications', () => {
       lastSequence: 7,
       occurredAt: 100
     })
-    expect(onNotification).toHaveBeenCalledTimes(1)
+    expect(onNotification).toHaveBeenCalledTimes(2)
 
     unsubscribe()
-    receive?.({
+    receivers.get('automation.resync')?.({
       schemaVersion: 1,
       reason: 'core_started',
       lastSequence: 8,
@@ -70,15 +70,15 @@ describe('CoreServer Automation notifications', () => {
   })
 
   it('does not cache or deliver malformed startup resync payloads', () => {
-    let receive: ((params: unknown) => void) | undefined
-    onNotification.mockImplementation((_method, handler) => {
-      receive = handler
+    const receivers = new Map<string, (params: unknown) => void>()
+    onNotification.mockImplementation((method, handler) => {
+      receivers.set(method, handler)
       return () => undefined
     })
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const server = new CoreServer()
     server.start()
-    receive?.({
+    receivers.get('automation.resync')?.({
       schemaVersion: 1,
       reason: 'core_started',
       lastSequence: 7,

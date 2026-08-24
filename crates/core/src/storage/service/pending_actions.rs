@@ -405,6 +405,41 @@ fn valid_mcp_terminal_transition(
     }
 }
 
+/// Extracts the Renderer/API action id from the framed durable storage identity. This remains
+/// available even when the private action payload is malformed and cannot be decoded at startup.
+fn renderer_action_id_from_pending_record(
+    record: &AgentPendingActionRecord,
+) -> Result<&str, String> {
+    if !record.action_id.starts_with("v2:") {
+        return (!record.action_id.is_empty() && record.action_id.len() <= 256)
+            .then_some(record.action_id.as_str())
+            .ok_or_else(|| "pending action durable identity is malformed".to_string());
+    }
+    let prefix = format!("v2:{}:{}:", record.run_id.len(), record.run_id);
+    let action_id = record
+        .action_id
+        .strip_prefix(&prefix)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "pending action durable identity is malformed".to_string())?;
+    Ok(action_id)
+}
+
+fn resolve_pending_approval_notification_in_transaction(
+    transaction: &rusqlite::Connection,
+    record: &AgentPendingActionRecord,
+    resolved_at: i64,
+) -> Result<(), String> {
+    let renderer_action_id = renderer_action_id_from_pending_record(record)?;
+    notification_repository::resolve_notification_events_by_run_and_approval_action_id_in_transaction(
+        transaction,
+        &record.run_id,
+        renderer_action_id,
+        resolved_at,
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 fn is_valid_pending_successor(
     connection: &rusqlite::Connection,
     interrupted: &AgentPendingActionRecord,
@@ -904,6 +939,7 @@ fn terminalize_mcp_action_in_transaction(
     if affected != 1 {
         return Err("MCP terminalization lost its status CAS".to_string());
     }
+    resolve_pending_approval_notification_in_transaction(transaction, &record, updated_at)?;
 
     transaction
         .execute(
@@ -1057,6 +1093,18 @@ fn terminalize_mcp_action_in_transaction(
             ],
         )
         .map_err(storage_error)?;
+    super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+        transaction,
+        &record.run_id,
+        conversation_id,
+        assistant_message_id,
+        if run_status == "cancelled" {
+            "task_cancelled"
+        } else {
+            "task_failed"
+        },
+        updated_at,
+    )?;
     Ok(Some(record))
 }
 
@@ -1357,6 +1405,7 @@ impl StorageService {
         if affected != 1 {
             return Ok(false);
         }
+        resolve_pending_approval_notification_in_transaction(&transaction, &record, updated_at)?;
         transaction
             .execute(
                 "
@@ -1680,6 +1729,7 @@ impl StorageService {
         if affected != 1 {
             return Ok(false);
         }
+        resolve_pending_approval_notification_in_transaction(&transaction, &record, updated_at)?;
         transaction
             .execute(
                 "
@@ -1738,6 +1788,14 @@ impl StorageService {
                 rusqlite::params![record.run_id, error_code, updated_at],
             )
             .map_err(storage_error)?;
+        super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+            &transaction,
+            &record.run_id,
+            conversation_id,
+            assistant_message_id,
+            "task_failed",
+            updated_at,
+        )?;
         transaction.commit().map_err(storage_error)?;
         Ok(true)
     }
@@ -1841,6 +1899,26 @@ impl StorageService {
         }
     }
 
+    /// Publishes an actionable approval and its user notification as one visibility boundary.
+    pub fn store_pending_agent_action_with_notification(
+        &self,
+        record: AgentPendingActionRecord,
+        notification: &notification_repository::NewNotificationEventRecord,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let outcome = store_pending_action_or_conflict(&transaction, &record)?;
+        notification_repository::enqueue_notification_event_in_transaction(
+            &transaction,
+            notification,
+        )
+        .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
+    }
+
     /// Atomically publishes one built-in capability approval and its initial manual audit.
     ///
     /// A recoverable approval without its audit row is an externally observable split-brain:
@@ -1860,6 +1938,28 @@ impl StorageService {
             .map_err(storage_error)?;
         let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
         ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
+    }
+
+    pub fn store_builtin_capability_pending_action_with_audit_and_notification(
+        &self,
+        pending: AgentPendingActionRecord,
+        audit: AgentActionAuditRecord,
+        notification: &notification_repository::NewNotificationEventRecord,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        validate_builtin_capability_initial_audit(&pending, &audit)?;
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
+        ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
+        notification_repository::enqueue_notification_event_in_transaction(
+            &transaction,
+            notification,
+        )
+        .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(outcome)
     }
@@ -1889,6 +1989,33 @@ impl StorageService {
             predecessor_terminal_agent_input_json,
             updated_at,
             None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_pending_agent_action_with_predecessor_settlement_and_notification(
+        &self,
+        successor: AgentPendingActionRecord,
+        successor_notification: &notification_repository::NewNotificationEventRecord,
+        predecessor_action_id: &str,
+        predecessor_renderer_action_id: &str,
+        predecessor_expected_status: &str,
+        predecessor_terminal_status: &str,
+        predecessor_terminal_agent_input_json: &str,
+        updated_at: i64,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        self.store_pending_agent_action_with_predecessor_settlement_internal(
+            successor,
+            predecessor_action_id,
+            predecessor_expected_status,
+            predecessor_terminal_status,
+            predecessor_terminal_agent_input_json,
+            updated_at,
+            None,
+            Some(successor_notification),
+            Some(predecessor_renderer_action_id),
         )
     }
 
@@ -1914,6 +2041,35 @@ impl StorageService {
             predecessor_terminal_agent_input_json,
             updated_at,
             Some(successor_audit),
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_builtin_capability_pending_action_with_predecessor_settlement_audit_and_notification(
+        &self,
+        successor: AgentPendingActionRecord,
+        successor_audit: AgentActionAuditRecord,
+        successor_notification: &notification_repository::NewNotificationEventRecord,
+        predecessor_action_id: &str,
+        predecessor_renderer_action_id: &str,
+        predecessor_expected_status: &str,
+        predecessor_terminal_status: &str,
+        predecessor_terminal_agent_input_json: &str,
+        updated_at: i64,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        validate_builtin_capability_initial_audit(&successor, &successor_audit)?;
+        self.store_pending_agent_action_with_predecessor_settlement_internal(
+            successor,
+            predecessor_action_id,
+            predecessor_expected_status,
+            predecessor_terminal_status,
+            predecessor_terminal_agent_input_json,
+            updated_at,
+            Some(successor_audit),
+            Some(successor_notification),
+            Some(predecessor_renderer_action_id),
         )
     }
 
@@ -1927,6 +2083,8 @@ impl StorageService {
         predecessor_terminal_agent_input_json: &str,
         updated_at: i64,
         successor_audit: Option<AgentActionAuditRecord>,
+        successor_notification: Option<&notification_repository::NewNotificationEventRecord>,
+        predecessor_renderer_action_id: Option<&str>,
     ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
         if successor.action_id == predecessor_action_id {
             return Err("successor approval must not replace its predecessor".to_string());
@@ -1990,6 +2148,22 @@ impl StorageService {
                     "前置待审批操作终态迁移必须且只能更新一条记录，actionId={predecessor_action_id}，实际更新 {affected} 条。"
                 ));
             }
+        }
+        if let Some(predecessor_renderer_action_id) = predecessor_renderer_action_id {
+            notification_repository::resolve_notification_events_by_run_and_approval_action_id_in_transaction(
+                &transaction,
+                &successor.run_id,
+                predecessor_renderer_action_id,
+                updated_at,
+            )
+            .map_err(storage_error)?;
+        }
+        if let Some(notification) = successor_notification {
+            notification_repository::enqueue_notification_event_in_transaction(
+                &transaction,
+                notification,
+            )
+            .map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)?;
         Ok(outcome)
@@ -2161,6 +2335,7 @@ impl StorageService {
                     record.action_id, record.status
                 ));
             }
+            resolve_pending_approval_notification_in_transaction(&transaction, record, updated_at)?;
             let successor_candidates = pending_successors
                 .iter()
                 .filter(|candidate| {
@@ -2214,6 +2389,11 @@ impl StorageService {
                         candidate.action_id
                     ));
                 }
+                resolve_pending_approval_notification_in_transaction(
+                    &transaction,
+                    candidate,
+                    updated_at,
+                )?;
                 retired_successors.insert(candidate.action_id.clone());
             }
             let valid_successor = valid_successors.first().copied();
@@ -2304,6 +2484,26 @@ impl StorageService {
                         rusqlite::params![record.run_id, durable_run_status, updated_at],
                     )
                     .map_err(storage_error)?;
+                let notification_kind = match durable_run_status.as_deref() {
+                    Some("completed") => "task_completed",
+                    Some("failed") => "task_failed",
+                    Some("cancelled") => "task_cancelled",
+                    _ => unreachable!("terminal status was checked above"),
+                };
+                let conversation_id = record.conversation_id.as_deref().ok_or_else(|| {
+                    format!(
+                        "启动对账发现终态 run {} 缺少 conversation owner。",
+                        record.run_id
+                    )
+                })?;
+                super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+                    &transaction,
+                    &record.run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    notification_kind,
+                    updated_at,
+                )?;
                 continue;
             }
             {
@@ -2368,6 +2568,24 @@ impl StorageService {
                     rusqlite::params![record.run_id, INTERRUPTION_REASON, updated_at],
                 )
                 .map_err(storage_error)?;
+            super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+                &transaction,
+                &record.run_id,
+                record.conversation_id.as_deref().ok_or_else(|| {
+                    format!(
+                        "启动对账无法通知 run {}：缺少 conversation owner。",
+                        record.run_id
+                    )
+                })?,
+                record.assistant_message_id.as_deref().ok_or_else(|| {
+                    format!(
+                        "启动对账无法通知 run {}：缺少 Assistant owner。",
+                        record.run_id
+                    )
+                })?,
+                "task_failed",
+                updated_at,
+            )?;
         }
         transaction.commit().map_err(storage_error)?;
         Ok(interrupted)
@@ -2397,6 +2615,49 @@ impl StorageService {
             ));
         }
         Ok(())
+    }
+
+    /// Resolves the approval notification in the same transaction that makes the approval stop
+    /// being actionable. A crash cannot therefore leave a stale system notification behind.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_pending_agent_action_and_resolve_notification(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        status: &str,
+        agent_input_json: &str,
+        run_id: &str,
+        renderer_action_id: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let affected = pending_action_repository::transition_pending_action(
+            &transaction,
+            action_id,
+            expected_status,
+            status,
+            agent_input_json,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "待审批操作状态迁移必须且只能更新一条记录，actionId={action_id}，实际更新 {affected} 条。"
+            ));
+        }
+        if status != "pending" {
+            notification_repository::resolve_notification_events_by_run_and_approval_action_id_in_transaction(
+                &transaction,
+                run_id,
+                renderer_action_id,
+                updated_at,
+            )
+            .map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)
     }
 
     /// Marks one exact child Wake as approval-paused only while its owning action is still
@@ -2700,6 +2961,18 @@ impl StorageService {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
+        let pending_record =
+            pending_action_repository::load_pending_action(&transaction, action_id)
+                .map_err(storage_error)?
+                .ok_or_else(|| {
+                    "pre-Runtime continuation pending action no longer exists".to_string()
+                })?;
+        if pending_record.run_id != trace.run_id
+            || pending_record.conversation_id.as_deref() != Some(conversation_id)
+            || pending_record.assistant_message_id.as_deref() != Some(assistant_message_id)
+        {
+            return Err("pre-Runtime continuation pending identity changed".to_string());
+        }
         let affected = pending_action_repository::fail_claimed_action_continuation(
             &transaction,
             action_id,
@@ -2716,6 +2989,11 @@ impl StorageService {
                 "pre-Runtime continuation failure lost its pending-action CAS: actionId={action_id}, expectedStatus={expected_status}, expectedTargetStatus={expected_target_status}"
             ));
         }
+        resolve_pending_approval_notification_in_transaction(
+            &transaction,
+            &pending_record,
+            completed_at,
+        )?;
         chat_repository::update_message_status_and_content(
             &transaction,
             conversation_id,
@@ -2763,6 +3041,14 @@ impl StorageService {
         if let Some(usage) = usage {
             usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
         }
+        super::trace_reconciliation::enqueue_reconciled_human_root_notification(
+            &transaction,
+            &trace.run_id,
+            conversation_id,
+            assistant_message_id,
+            "task_failed",
+            completed_at,
+        )?;
         transaction.commit().map_err(storage_error)
     }
 

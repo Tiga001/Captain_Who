@@ -68,6 +68,17 @@ export const HOST_CHANNELS = {
     resyncReady: 'host:automation.resyncReady',
     openRequested: 'host:automation.openRequested'
   },
+  notifications: {
+    markSeen: 'host:notifications.markSeen',
+    setLocale: 'host:notifications.setLocale',
+    getSettings: 'host:notifications.settings.get',
+    updateSettings: 'host:notifications.settings.update',
+    event: 'host:notifications.event',
+    resync: 'host:notifications.resync',
+    resyncReady: 'host:notifications.resyncReady',
+    openRequestedReady: 'host:notifications.openRequestedReady',
+    openRequested: 'host:notifications.openRequested'
+  },
   browser: {
     artifactExport: 'host:browser.artifact.export',
     artifactReadPreview: 'host:browser.artifact.readPreview',

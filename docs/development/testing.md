@@ -141,7 +141,7 @@ pnpm test:automation-core-e2e
 修改该子系统时可按层定位：
 
 ```bash
-pnpm exec vitest run --project unit packages/protocol/src/automations.test.ts src/main/core/coreServer.automation.test.ts src/main/core/ipc.automation.test.ts src/main/core/automationNotificationCoordinator.test.ts src/preload/AutomationIpcBridge.test.ts src/renderer/src/features/automations/__tests__
+pnpm exec vitest run --project unit packages/protocol/src/automations.test.ts src/main/core/coreServer.automation.test.ts src/main/core/ipc.automation.test.ts src/main/core/systemNotificationCoordinator.test.ts src/main/core/ipc.notifications.test.ts src/preload/AutomationIpcBridge.test.ts src/preload/NotificationIpcBridge.test.ts src/renderer/src/features/automations/__tests__
 pnpm exec vitest run --project browser src/renderer/src/features/automations/__tests__ src/renderer/src/app/__tests__/LeftSidebarScheduled.browser.test.tsx
 cargo test -p mycopilot-core automation_repository
 cargo test -p mycopilot-core-server application::automation

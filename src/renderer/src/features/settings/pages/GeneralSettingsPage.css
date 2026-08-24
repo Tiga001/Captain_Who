@@ -253,6 +253,21 @@
   }
 }
 
+.general-settings-retry {
+  min-height: 32px;
+  padding: 0 14px;
+  color: var(--settings-content-text-color);
+  background: var(--mc-color-surface-muted);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-sm);
+  cursor: pointer;
+}
+
+.general-settings-retry:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .general-permission-drawer,
   .general-permission-drawer__inner {

@@ -983,19 +983,20 @@ impl AgentService {
                 None,
                 Some(REASON.to_string()),
             );
-            self.storage
-                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
-                    conversation_id,
-                    assistant_message_id,
-                    "",
-                    status_for_run(AgentRunStatus::Cancelled),
-                    run_status_label(AgentRunStatus::Cancelled),
-                    &terminal.trace,
-                    Some(&terminal.model_context_items),
-                    completed_at,
-                    completed_at,
-                    usage_record.as_ref(),
-                )?;
+            self.finalize_turn_with_human_root_notification(
+                &record.snapshot.run_id,
+                conversation_id,
+                assistant_message_id,
+                AgentRunStatus::Cancelled,
+                "",
+                status_for_run(AgentRunStatus::Cancelled),
+                run_status_label(AgentRunStatus::Cancelled),
+                &terminal.trace,
+                Some(&terminal.model_context_items),
+                completed_at,
+                completed_at,
+                usage_record.as_ref(),
+            )?;
             self.finish_persisted_run_usage(&record.snapshot.run_id, AgentRunStatus::Cancelled);
             self.invalidate_conversation_context_state(conversation_id);
             self.discard_trace_snapshot(&record.snapshot.run_id);

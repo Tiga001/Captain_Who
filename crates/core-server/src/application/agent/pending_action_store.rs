@@ -420,6 +420,13 @@ impl AgentService {
         };
         tool_call_for_pending_record(&pending_record)
             .map_err(|_| "Pending action frozen Tool Call identity is inconsistent.".to_string())?;
+        let approval_notification = self.human_root_approval_notification(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            &action_id,
+            pending_record.snapshot.created_at,
+        )?;
 
         if let Some((predecessor, terminal_status)) = predecessor_settlement {
             let mut pending_actions = self
@@ -466,8 +473,22 @@ impl AgentService {
                     None,
                 )
             });
-            let storage_result = if let Some(audit) = builtin_initial_audit {
-                self.storage
+            let updated_at = now_ms();
+            let storage_result = match (builtin_initial_audit, approval_notification.as_ref()) {
+                (Some(audit), Some(notification)) => self
+                    .storage
+                    .store_builtin_capability_pending_action_with_predecessor_settlement_audit_and_notification(
+                        successor_storage_record,
+                        audit,
+                        notification,
+                        &predecessor.storage_id,
+                        &predecessor.snapshot.action_id,
+                        pending_status_label(predecessor_expected_status),
+                        pending_status_label(terminal_status),
+                        &predecessor_terminal_agent_input_json,
+                        updated_at,
+                    ),
+                (Some(audit), None) => self.storage
                     .store_builtin_capability_pending_action_with_predecessor_settlement_and_audit(
                         successor_storage_record,
                         audit,
@@ -475,18 +496,28 @@ impl AgentService {
                         pending_status_label(predecessor_expected_status),
                         pending_status_label(terminal_status),
                         &predecessor_terminal_agent_input_json,
-                        now_ms(),
-                    )
-            } else {
-                self.storage
+                        updated_at,
+                    ),
+                (None, Some(notification)) => self.storage
+                    .store_pending_agent_action_with_predecessor_settlement_and_notification(
+                        successor_storage_record,
+                        notification,
+                        &predecessor.storage_id,
+                        &predecessor.snapshot.action_id,
+                        pending_status_label(predecessor_expected_status),
+                        pending_status_label(terminal_status),
+                        &predecessor_terminal_agent_input_json,
+                        updated_at,
+                    ),
+                (None, None) => self.storage
                     .store_pending_agent_action_with_predecessor_settlement(
                         successor_storage_record,
                         &predecessor.storage_id,
                         pending_status_label(predecessor_expected_status),
                         pending_status_label(terminal_status),
                         &predecessor_terminal_agent_input_json,
-                        now_ms(),
-                    )
+                        updated_at,
+                    ),
             };
             let storage_outcome = match storage_result {
                 Ok(outcome) => outcome,
@@ -568,10 +599,25 @@ impl AgentService {
                 None,
                 None,
             );
-            self.storage
-                .store_builtin_capability_pending_action_with_audit(pending, audit)
+            if let Some(notification) = approval_notification.as_ref() {
+                self.storage
+                    .store_builtin_capability_pending_action_with_audit_and_notification(
+                        pending,
+                        audit,
+                        notification,
+                    )
+            } else {
+                self.storage
+                    .store_builtin_capability_pending_action_with_audit(pending, audit)
+            }
         } else {
-            self.persist_pending_action(&pending_record)
+            let pending = pending_storage_record(&pending_record, now_ms())?;
+            if let Some(notification) = approval_notification.as_ref() {
+                self.storage
+                    .store_pending_agent_action_with_notification(pending, notification)
+            } else {
+                self.storage.store_pending_agent_action(pending)
+            }
         };
         let storage_outcome = match storage_result {
             Ok(outcome) => outcome,
@@ -684,13 +730,16 @@ impl AgentService {
         {
             return Err(error);
         }
-        self.storage.transition_pending_agent_action(
-            &record.storage_id,
-            pending_status_label(expected_status),
-            pending_status_label(status),
-            &persisted_pending_agent_input_json(&record.agent_input, status)?,
-            now_ms(),
-        )
+        self.storage
+            .transition_pending_agent_action_and_resolve_notification(
+                &record.storage_id,
+                pending_status_label(expected_status),
+                pending_status_label(status),
+                &persisted_pending_agent_input_json(&record.agent_input, status)?,
+                &record.snapshot.run_id,
+                &record.snapshot.action_id,
+                now_ms(),
+            )
     }
 
     pub(super) fn persist_pending_target_status(

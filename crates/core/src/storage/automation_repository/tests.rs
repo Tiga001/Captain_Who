@@ -1,6 +1,10 @@
 use super::*;
 use crate::storage::migrations;
 use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord};
+use crate::storage::notification_repository::{
+    claim_pending_notification_batches, list_notification_batch_items, list_notifications,
+    validate_claimed_notification_batch, NotificationBatchRecord, NotificationEventRecord,
+};
 use crate::{ProviderProfileConfig, ProviderProtocolDialect};
 
 fn connection() -> Connection {
@@ -73,6 +77,27 @@ fn create(connection: &mut Connection, id: &str, request_id: &str) -> Automation
         AutomationCreateOutcome::Created(record) => record,
         AutomationCreateOutcome::Existing(_) => panic!("fixture must create"),
     }
+}
+
+fn application_notifications(connection: &Connection) -> Vec<NotificationEventRecord> {
+    list_notifications(connection, None, 100, false, None)
+        .unwrap()
+        .items
+}
+
+fn claim_application_notifications(
+    connection: &mut Connection,
+    claim_token: &str,
+    now: i64,
+) -> Vec<(NotificationBatchRecord, Vec<NotificationEventRecord>)> {
+    claim_pending_notification_batches(connection, claim_token, now, 60_000, 10)
+        .unwrap()
+        .into_iter()
+        .map(|batch| {
+            let items = list_notification_batch_items(connection, &batch.id, now).unwrap();
+            (batch, items)
+        })
+        .collect()
 }
 
 #[test]
@@ -478,17 +503,13 @@ fn trigger_disabled_resource_invalidation_keeps_important_updates_notifications(
 
     let blocked = get_automation(&connection, &task.id).unwrap().unwrap();
     assert_eq!(blocked.config.health_state, "blocked");
-    let notifications = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-trigger-disabled",
-        timestamp,
-        30_000,
-        10,
-    )
-    .unwrap();
+    let notifications = application_notifications(&connection);
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].notification_kind, "configuration_blocked");
-    assert_eq!(notifications[0].resource_revision, blocked.revision);
+    assert_eq!(
+        notifications[0].notification_kind,
+        "automation_configuration_blocked"
+    );
+    assert_eq!(notifications[0].resource_revision, Some(blocked.revision));
 }
 
 #[test]
@@ -620,27 +641,25 @@ fn configuration_block_notifications_follow_all_user_visible_policies() {
             AutomationCompareAndSetOutcome::Updated(record) => record,
             outcome => panic!("unexpected block outcome: {outcome:?}"),
         };
-        let notifications = claim_pending_automation_notifications(
-            &mut connection,
-            &format!("claim-{policy}"),
-            blocked.updated_at,
-            30_000,
-            10,
-        )
-        .unwrap();
+        let notifications = application_notifications(&connection);
 
         assert_eq!(notifications.len(), 1, "policy {policy}");
         assert_eq!(
-            notifications[0].notification_kind, "configuration_blocked",
+            notifications[0].notification_kind, "automation_configuration_blocked",
             "policy {policy}"
         );
-        assert_eq!(notifications[0].automation_id, task.id, "policy {policy}");
+        assert_eq!(
+            notifications[0].automation_id.as_deref(),
+            Some(task.id.as_str()),
+            "policy {policy}"
+        );
         assert!(
-            notifications[0].automation_run_id.is_none(),
+            notifications[0].run_id.is_none(),
             "configuration attention is task-scoped for policy {policy}"
         );
         assert_eq!(
-            notifications[0].resource_revision, blocked.revision,
+            notifications[0].resource_revision,
+            Some(blocked.revision),
             "policy {policy}"
         );
     }
@@ -1255,14 +1274,7 @@ fn terminal_trace_settlement_persists_unknown_report_attention_and_deduplicated_
         settle_automation_run_from_trace(&mut connection, &settlement).unwrap(),
         AutomationRunMutationOutcome::Updated(settled.clone())
     );
-    let notifications = claim_pending_automation_notifications(
-        &mut connection,
-        "notification-claim-a",
-        timestamp + 101,
-        30_000,
-        10,
-    )
-    .unwrap();
+    let notifications = application_notifications(&connection);
     assert_eq!(notifications.len(), 1);
     assert_eq!(
         notifications[0].conversation_id.as_deref(),
@@ -1273,23 +1285,19 @@ fn terminal_trace_settlement_persists_unknown_report_attention_and_deduplicated_
         notifications[0].assistant_message_id.as_deref(),
         Some("assistant-a")
     );
-    assert!(acknowledge_automation_notification_delivered(
-        &mut connection,
-        &notifications[0].id,
-        "notification-claim-a",
-        timestamp + 102,
-    )
-    .unwrap()
-    .is_some());
-    assert!(claim_pending_automation_notifications(
-        &mut connection,
-        "notification-claim-b",
-        timestamp + 103,
-        30_000,
-        10,
-    )
-    .unwrap()
-    .is_empty());
+    assert_eq!(notifications[0].notification_kind, "automation_completed");
+    assert_eq!(
+        notifications[0].run_id.as_deref(),
+        Some(claimed.id.as_str())
+    );
+    let legacy_statuses = connection
+        .prepare("SELECT status FROM automation_notification_outbox")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(legacy_statuses, vec!["projected"]);
 }
 
 #[test]
@@ -1375,17 +1383,10 @@ fn terminal_notification_uses_the_run_snapshot_after_task_edits() {
     };
     assert_eq!(settled.status, StoredAutomationRunStatus::Completed);
 
-    let notifications = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-frozen-notification",
-        timestamp + 101,
-        30_000,
-        10,
-    )
-    .unwrap();
+    let notifications = application_notifications(&connection);
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].title, "Daily brief");
-    assert_eq!(notifications[0].notification_kind, "run_result");
+    assert_eq!(notifications[0].subject_text, "Daily brief");
+    assert_eq!(notifications[0].notification_kind, "automation_completed");
     assert_eq!(
         get_automation(&connection, &task.id)
             .unwrap()
@@ -1431,15 +1432,7 @@ fn blocking_a_task_terminalizes_unadmitted_work_and_tombstone_suppresses_notific
         .unwrap()
         .is_empty());
     tombstone_automation(&mut connection, &task.id, blocked.revision).unwrap();
-    assert!(claim_pending_automation_notifications(
-        &mut connection,
-        "notification-claim-a",
-        now + 1,
-        30_000,
-        10,
-    )
-    .unwrap()
-    .is_empty());
+    assert!(application_notifications(&connection).is_empty());
 }
 
 #[test]
@@ -1494,17 +1487,14 @@ fn blocking_queued_work_notifies_important_updates_and_does_not_strand_the_run()
         .unwrap()
         .is_empty());
 
-    let notifications = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-important-block",
-        blocked.updated_at,
-        30_000,
-        10,
-    )
-    .unwrap();
+    let notifications = application_notifications(&connection);
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].notification_kind, "configuration_blocked");
-    assert!(notifications[0].automation_run_id.is_none());
+    assert_eq!(
+        notifications[0].notification_kind,
+        "automation_configuration_blocked"
+    );
+    assert!(notifications[0].run_id.is_none());
+    assert_eq!(notifications[0].resource_revision, Some(blocked.revision));
 }
 
 #[test]
@@ -1549,20 +1539,10 @@ fn failed_unadmitted_work_emits_a_run_notification_for_important_updates() {
         outcome => panic!("unexpected termination outcome: {outcome:?}"),
     };
 
-    let notifications = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-important-failure",
-        now + 1,
-        30_000,
-        10,
-    )
-    .unwrap();
+    let notifications = application_notifications(&connection);
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].notification_kind, "run_result");
-    assert_eq!(
-        notifications[0].automation_run_id.as_deref(),
-        Some(failed.id.as_str())
-    );
+    assert_eq!(notifications[0].notification_kind, "automation_failed");
+    assert_eq!(notifications[0].run_id.as_deref(), Some(failed.id.as_str()));
 }
 
 #[test]
@@ -1664,7 +1644,7 @@ fn structured_report_is_bounded_and_notification_policy_is_not_keyword_based() {
 }
 
 #[test]
-fn notification_claim_release_and_ack_are_idempotent_across_restart_style_retries() {
+fn legacy_notification_projection_uses_the_generic_durable_delivery_queue() {
     let mut connection = connection();
     let task = create(&mut connection, "automation-a", "request-a");
     let now = now_ms() + 1_000;
@@ -1695,56 +1675,76 @@ fn notification_claim_release_and_ack_are_idempotent_across_restart_style_retrie
     )
     .unwrap();
     assert_eq!(replay.id, notification.id);
-
-    let first = claim_pending_automation_notifications(&mut connection, "claim-a", now, 30_000, 10)
-        .unwrap();
-    assert_eq!(first.len(), 1);
+    assert_eq!(notification.status, "projected");
     assert_eq!(
-        claim_pending_automation_notifications(&mut connection, "claim-a", now + 1, 30_000, 10,)
-            .unwrap()[0]
-            .id,
-        notification.id
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM automation_notification_outbox WHERE status = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "the retired automation pump must not retain projected pending work",
     );
-    let retry_at = now + 60_000;
-    assert!(release_automation_notification(
+
+    let first = crate::storage::notification_repository::claim_pending_notification_batches(
         &mut connection,
-        &notification.id,
         "claim-a",
-        retry_at,
-        "native_notification_unavailable",
-    )
-    .unwrap()
-    .is_some());
-    assert!(claim_pending_automation_notifications(
-        &mut connection,
-        "claim-b",
-        retry_at - 1,
+        now,
         30_000,
         10,
     )
-    .unwrap()
-    .is_empty());
-    let second =
-        claim_pending_automation_notifications(&mut connection, "claim-b", retry_at, 30_000, 10)
-            .unwrap();
-    assert_eq!(second[0].id, notification.id);
+    .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].highest_priority, "configuration_blocked");
+    let retry_at = now + 60_000;
+    assert!(
+        crate::storage::notification_repository::release_notification_batch(
+            &mut connection,
+            &first[0].id,
+            "claim-a",
+            retry_at,
+            "native_notification_unavailable",
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert!(
+        crate::storage::notification_repository::claim_pending_notification_batches(
+            &mut connection,
+            "claim-b",
+            retry_at - 1,
+            30_000,
+            10,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let second = crate::storage::notification_repository::claim_pending_notification_batches(
+        &mut connection,
+        "claim-b",
+        retry_at,
+        30_000,
+        10,
+    )
+    .unwrap();
+    assert_eq!(second[0].id, first[0].id);
     assert_eq!(second[0].attempt_count, 2);
-    assert!(acknowledge_automation_notification_delivered(
-        &mut connection,
-        &notification.id,
-        "claim-b",
-        retry_at + 1,
-    )
-    .unwrap()
-    .is_some());
-    assert!(acknowledge_automation_notification_delivered(
-        &mut connection,
-        &notification.id,
-        "claim-b",
-        retry_at + 2,
-    )
-    .unwrap()
-    .is_some());
+    assert!(
+        crate::storage::notification_repository::acknowledge_notification_batch(
+            &mut connection,
+            &second[0].id,
+            "claim-b",
+            "delivered",
+            "configuration_blocked",
+            "initial",
+            second[0].revision,
+            retry_at + 1,
+        )
+        .unwrap()
+        .is_some()
+    );
 }
 
 #[test]
@@ -1769,13 +1769,12 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
         AutomationCompareAndSetOutcome::Updated(record) => record,
         outcome => panic!("unexpected block outcome: {outcome:?}"),
     };
-    let deleted_claim =
-        claim_pending_automation_notifications(&mut connection, "claim-deleted", base, 60_000, 10)
-            .unwrap();
+    let deleted_claim = claim_application_notifications(&mut connection, "claim-deleted", base);
     assert_eq!(deleted_claim.len(), 1);
-    assert!(validate_claimed_automation_notification(
+    assert_eq!(deleted_claim[0].1.len(), 1);
+    assert!(validate_claimed_notification_batch(
         &mut connection,
-        &deleted_claim[0].id,
+        &deleted_claim[0].0.id,
         "claim-deleted",
         base + 1,
     )
@@ -1785,9 +1784,9 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
         tombstone_automation(&mut connection, &deleted_task.id, deleted_task.revision,).unwrap(),
         AutomationCompareAndSetOutcome::Updated(_)
     ));
-    assert!(validate_claimed_automation_notification(
+    assert!(validate_claimed_notification_batch(
         &mut connection,
-        &deleted_claim[0].id,
+        &deleted_claim[0].0.id,
         "claim-deleted",
         base + 2,
     )
@@ -1811,17 +1810,13 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
         AutomationCompareAndSetOutcome::Updated(record) => record,
         outcome => panic!("unexpected block outcome: {outcome:?}"),
     };
-    let repaired_claim = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-repaired",
-        base + 3,
-        60_000,
-        10,
-    )
-    .unwrap();
+    let repaired_claim =
+        claim_application_notifications(&mut connection, "claim-repaired", base + 3);
     assert_eq!(repaired_claim.len(), 1);
+    assert_eq!(repaired_claim[0].1.len(), 1);
     assert_eq!(
-        repaired_claim[0].resource_revision, blocked_task.revision,
+        repaired_claim[0].1[0].resource_revision,
+        Some(blocked_task.revision),
         "the claim must identify the exact blocked task revision"
     );
     let mut repaired_config = blocked_task.config.clone();
@@ -1839,9 +1834,9 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
         .unwrap(),
         AutomationCompareAndSetOutcome::Updated(_)
     ));
-    assert!(validate_claimed_automation_notification(
+    assert!(validate_claimed_notification_batch(
         &mut connection,
-        &repaired_claim[0].id,
+        &repaired_claim[0].0.id,
         "claim-repaired",
         base + 4,
     )
@@ -1849,8 +1844,8 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
     .is_none());
     let repaired_status: String = connection
         .query_row(
-            "SELECT status FROM automation_notification_outbox WHERE id = ?1",
-            [&repaired_claim[0].id],
+            "SELECT status FROM notification_batches WHERE id = ?1",
+            [&repaired_claim[0].0.id],
             |row| row.get(0),
         )
         .unwrap();
@@ -1907,52 +1902,36 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
             ..
         })
     ));
-    let waiting_claim = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-approval",
-        base + 7,
-        60_000,
-        10,
-    )
-    .unwrap();
+    let waiting_claim =
+        claim_application_notifications(&mut connection, "claim-approval", base + 7);
     assert_eq!(waiting_claim.len(), 1);
-    assert_eq!(waiting_claim[0].notification_kind, "approval_required");
+    assert_eq!(waiting_claim[0].1.len(), 1);
+    assert_eq!(waiting_claim[0].1[0].notification_kind, "approval_required");
     connection
         .execute(
-            "UPDATE automation_runs
-             SET status = 'running', status_revision = status_revision + 1, updated_at = ?1
-             WHERE id = ?2 AND status = 'waiting_for_approval'",
-            params![base + 8, approval_claim.id],
+            "UPDATE agent_pending_actions
+             SET status = 'approved', updated_at = ?1
+             WHERE action_id = 'action-notification-approval' AND status = 'pending'",
+            [base + 8],
         )
         .unwrap();
-    connection
-        .execute(
-            "UPDATE automation_runs
-             SET status = 'waiting_for_approval', status_revision = status_revision + 1,
-                 updated_at = ?1
-             WHERE id = ?2 AND status = 'running'",
-            params![base + 9, approval_claim.id],
+    assert!(matches!(
+        set_automation_run_waiting_for_approval(
+            &mut connection,
+            &approval_claim.id,
+            "agent-run-notification-approval",
+            false,
+            base + 9,
         )
-        .unwrap();
-    let second_waiting = get_automation_run(&connection, &approval_claim.id)
-        .unwrap()
-        .expect("second waiting state");
-    enqueue_automation_notification(
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(AutomationRunRecord {
+            status: StoredAutomationRunStatus::Running,
+            ..
+        })
+    ));
+    assert!(validate_claimed_notification_batch(
         &mut connection,
-        &NewAutomationNotificationRecord {
-            automation_id: approval_task.id,
-            automation_run_id: Some(approval_claim.id.clone()),
-            resource_revision: second_waiting.status_revision,
-            notification_kind: "approval_required".to_string(),
-            title: "Daily brief".to_string(),
-            body: "This scheduled task is waiting for your approval.".to_string(),
-            created_at: base + 9,
-        },
-    )
-    .unwrap();
-    assert!(validate_claimed_automation_notification(
-        &mut connection,
-        &waiting_claim[0].id,
+        &waiting_claim[0].0.id,
         "claim-approval",
         base + 10,
     )
@@ -1960,8 +1939,8 @@ fn final_notification_validation_suppresses_deleted_repaired_and_settled_claims(
     .is_none());
     let approval_status: String = connection
         .query_row(
-            "SELECT status FROM automation_notification_outbox WHERE id = ?1",
-            [&waiting_claim[0].id],
+            "SELECT status FROM notification_batches WHERE id = ?1",
+            [&waiting_claim[0].0.id],
             |row| row.get(0),
         )
         .unwrap();
@@ -2023,18 +2002,13 @@ fn approval_notification_validation_requires_a_still_pending_durable_action() {
             ..
         })
     ));
-    let claimed_notification = claim_pending_automation_notifications(
-        &mut connection,
-        "claim-approved",
-        base + 2,
-        60_000,
-        10,
-    )
-    .unwrap();
+    let claimed_notification =
+        claim_application_notifications(&mut connection, "claim-approved", base + 2);
     assert_eq!(claimed_notification.len(), 1);
-    assert!(validate_claimed_automation_notification(
+    assert_eq!(claimed_notification[0].1.len(), 1);
+    assert!(validate_claimed_notification_batch(
         &mut connection,
-        &claimed_notification[0].id,
+        &claimed_notification[0].0.id,
         "claim-approved",
         base + 3,
     )
@@ -2049,22 +2023,32 @@ fn approval_notification_validation_requires_a_still_pending_durable_action() {
             [base + 4],
         )
         .unwrap();
-    let run = get_automation_run(&connection, &claimed_run.id)
-        .unwrap()
-        .expect("waiting run remains projected until the observer catches up");
-    assert_eq!(run.status, StoredAutomationRunStatus::WaitingForApproval);
-    assert!(validate_claimed_automation_notification(
+    assert!(matches!(
+        set_automation_run_waiting_for_approval(
+            &mut connection,
+            &claimed_run.id,
+            "agent-run-notification-approved",
+            false,
+            base + 5,
+        )
+        .unwrap(),
+        AutomationRunMutationOutcome::Updated(AutomationRunRecord {
+            status: StoredAutomationRunStatus::Running,
+            ..
+        })
+    ));
+    assert!(validate_claimed_notification_batch(
         &mut connection,
-        &claimed_notification[0].id,
+        &claimed_notification[0].0.id,
         "claim-approved",
-        base + 5,
+        base + 6,
     )
     .unwrap()
     .is_none());
     let notification_status: String = connection
         .query_row(
-            "SELECT status FROM automation_notification_outbox WHERE id = ?1",
-            [&claimed_notification[0].id],
+            "SELECT status FROM notification_batches WHERE id = ?1",
+            [&claimed_notification[0].0.id],
             |row| row.get(0),
         )
         .unwrap();

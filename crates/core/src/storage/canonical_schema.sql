@@ -4940,6 +4940,364 @@ CREATE INDEX automation_events_lookup_idx
         automation_id, automation_run_id, event_kind, resource_revision, sequence DESC
     );
 
+-- Application-wide notification facts and native-delivery batches. Events are immutable facts;
+-- seen/resolved timestamps are user/application projections. Native delivery is intentionally
+-- modeled separately so several facts can share one quiet, incrementally replaceable banner.
+CREATE TABLE notification_settings (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    sound_enabled INTEGER NOT NULL CHECK (sound_enabled IN (0, 1)),
+    show_task_content INTEGER NOT NULL CHECK (show_task_content IN (0, 1)),
+    human_completed_enabled INTEGER NOT NULL CHECK (human_completed_enabled IN (0, 1)),
+    human_failed_enabled INTEGER NOT NULL CHECK (human_failed_enabled IN (0, 1)),
+    human_approval_enabled INTEGER NOT NULL CHECK (human_approval_enabled IN (0, 1)),
+    human_cancelled_enabled INTEGER NOT NULL CHECK (human_cancelled_enabled IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+);
+INSERT INTO notification_settings (
+    singleton_id, schema_version, enabled, sound_enabled, show_task_content,
+    human_completed_enabled, human_failed_enabled, human_approval_enabled,
+    human_cancelled_enabled, revision, updated_at
+) VALUES (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0);
+
+CREATE TABLE notification_batches (
+    id TEXT PRIMARY KEY CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 256),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    status TEXT NOT NULL CHECK (
+        status IN ('collecting', 'pending', 'claimed', 'displayed', 'sealed', 'suppressed')
+    ),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    highest_priority TEXT NOT NULL CHECK (
+        highest_priority IN (
+            'completed', 'cancelled', 'important_update', 'failed',
+            'configuration_blocked', 'approval_required'
+        )
+    ),
+    collect_until INTEGER NOT NULL CHECK (collect_until >= 0),
+    replace_until INTEGER NOT NULL CHECK (replace_until >= collect_until),
+    retry_at INTEGER NOT NULL CHECK (retry_at >= 0),
+    claim_token TEXT CHECK (
+        claim_token IS NULL OR length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256
+    ),
+    claim_expires_at INTEGER CHECK (claim_expires_at IS NULL OR claim_expires_at >= 0),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error_code TEXT CHECK (
+        last_error_code IS NULL OR length(CAST(last_error_code AS BLOB)) BETWEEN 1 AND 128
+    ),
+    delivered_revision INTEGER CHECK (
+        delivered_revision IS NULL OR (delivered_revision > 0 AND delivered_revision <= revision)
+    ),
+    delivered_priority TEXT CHECK (
+        delivered_priority IS NULL OR delivered_priority IN (
+            'completed', 'cancelled', 'important_update', 'failed',
+            'configuration_blocked', 'approval_required'
+        )
+    ),
+    sound_level_played TEXT NOT NULL DEFAULT 'none' CHECK (
+        sound_level_played IN ('none', 'initial', 'upgrade')
+    ),
+    disposition TEXT CHECK (
+        disposition IS NULL OR disposition IN (
+            'delivered', 'suppressed_foreground', 'suppressed_stale',
+            'suppressed_deleted', 'suppressed_resolved', 'suppressed_disabled'
+        )
+    ),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+    displayed_at INTEGER CHECK (displayed_at IS NULL OR displayed_at >= created_at),
+    sealed_at INTEGER CHECK (sealed_at IS NULL OR sealed_at >= created_at),
+    suppressed_at INTEGER CHECK (suppressed_at IS NULL OR suppressed_at >= created_at),
+    CHECK (
+        (claim_token IS NULL AND claim_expires_at IS NULL)
+        OR (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
+    ),
+    CHECK (status = 'claimed' OR (claim_token IS NULL AND claim_expires_at IS NULL)),
+    CHECK (status = 'suppressed' OR suppressed_at IS NULL),
+    CHECK (status != 'suppressed' OR suppressed_at IS NOT NULL)
+);
+CREATE INDEX notification_batches_delivery_idx
+    ON notification_batches (status, collect_until, retry_at, created_at, id)
+    WHERE status IN ('collecting', 'pending', 'claimed');
+CREATE INDEX notification_batches_replace_idx
+    ON notification_batches (replace_until, updated_at, id)
+    WHERE status = 'displayed';
+
+CREATE TABLE notification_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 256),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    notification_kind TEXT NOT NULL CHECK (
+        notification_kind IN (
+            'task_completed', 'task_failed', 'task_cancelled', 'approval_required',
+            'automation_completed', 'automation_failed', 'automation_cancelled',
+            'automation_important_update', 'automation_configuration_blocked'
+        )
+    ),
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('human_root', 'automation')),
+    source_id TEXT NOT NULL CHECK (length(CAST(source_id AS BLOB)) BETWEEN 1 AND 256),
+    run_id TEXT CHECK (run_id IS NULL OR length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+    automation_id TEXT CHECK (
+        automation_id IS NULL OR length(CAST(automation_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    conversation_id TEXT CHECK (
+        conversation_id IS NULL OR length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    user_message_id TEXT CHECK (
+        user_message_id IS NULL OR length(CAST(user_message_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    assistant_message_id TEXT CHECK (
+        assistant_message_id IS NULL OR length(CAST(assistant_message_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    approval_action_id TEXT CHECK (
+        approval_action_id IS NULL OR length(CAST(approval_action_id AS BLOB)) BETWEEN 1 AND 256
+    ),
+    subject_kind TEXT NOT NULL CHECK (
+        subject_kind IN ('prompt_excerpt', 'automation_title', 'attachment_task')
+    ),
+    subject_text TEXT NOT NULL CHECK (length(CAST(subject_text AS BLOB)) BETWEEN 1 AND 512),
+    priority TEXT NOT NULL CHECK (
+        priority IN (
+            'completed', 'cancelled', 'important_update', 'failed',
+            'configuration_blocked', 'approval_required'
+        )
+    ),
+    dedupe_key TEXT NOT NULL UNIQUE CHECK (length(CAST(dedupe_key AS BLOB)) BETWEEN 1 AND 512),
+    supersession_key TEXT NOT NULL CHECK (
+        length(CAST(supersession_key AS BLOB)) BETWEEN 1 AND 512
+    ),
+    resource_revision INTEGER CHECK (resource_revision IS NULL OR resource_revision > 0),
+    seen_at INTEGER CHECK (seen_at IS NULL OR seen_at >= 0),
+    resolved_at INTEGER CHECK (resolved_at IS NULL OR resolved_at >= 0),
+    superseded_at INTEGER CHECK (superseded_at IS NULL OR superseded_at >= 0),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0),
+    expires_at INTEGER NOT NULL CHECK (expires_at >= occurred_at)
+);
+CREATE INDEX notification_events_center_idx
+    ON notification_events (occurred_at DESC, id DESC);
+CREATE INDEX notification_events_unread_idx
+    ON notification_events (seen_at, occurred_at DESC, id DESC)
+    WHERE seen_at IS NULL;
+CREATE INDEX notification_events_supersession_idx
+    ON notification_events (supersession_key, superseded_at, occurred_at DESC);
+CREATE INDEX notification_events_approval_idx
+    ON notification_events (approval_action_id, resolved_at)
+    WHERE approval_action_id IS NOT NULL;
+CREATE INDEX notification_events_conversation_idx
+    ON notification_events (conversation_id, resolved_at)
+    WHERE conversation_id IS NOT NULL;
+
+CREATE TABLE notification_batch_items (
+    batch_id TEXT NOT NULL,
+    notification_event_id TEXT NOT NULL UNIQUE,
+    added_at INTEGER NOT NULL CHECK (added_at >= 0),
+    PRIMARY KEY (batch_id, notification_event_id),
+    FOREIGN KEY (batch_id) REFERENCES notification_batches(id) ON DELETE CASCADE,
+    FOREIGN KEY (notification_event_id) REFERENCES notification_events(id) ON DELETE CASCADE
+);
+CREATE INDEX notification_batch_items_batch_idx
+    ON notification_batch_items (batch_id, added_at, notification_event_id);
+
+CREATE TABLE notification_change_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    event_id TEXT NOT NULL UNIQUE CHECK (length(CAST(event_id AS BLOB)) BETWEEN 1 AND 256),
+    event_kind TEXT NOT NULL CHECK (
+        event_kind IN ('created', 'updated', 'seen', 'resolved', 'settings_updated')
+    ),
+    notification_id TEXT,
+    batch_id TEXT,
+    resource_revision INTEGER CHECK (resource_revision IS NULL OR resource_revision > 0),
+    occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0)
+);
+CREATE INDEX notification_change_events_sequence_idx
+    ON notification_change_events (sequence, event_kind);
+
+CREATE TRIGGER resolve_superseded_notification_before_insert
+BEFORE INSERT ON notification_events
+BEGIN
+    UPDATE notification_events
+    SET
+        superseded_at = MAX(occurred_at, NEW.occurred_at),
+        resolved_at = COALESCE(resolved_at, MAX(occurred_at, NEW.occurred_at))
+    WHERE supersession_key = NEW.supersession_key
+      AND superseded_at IS NULL
+      AND dedupe_key != NEW.dedupe_key
+      AND NOT EXISTS (
+          SELECT 1 FROM notification_events AS replay
+          WHERE replay.dedupe_key = NEW.dedupe_key
+      )
+      AND (
+          COALESCE(NEW.resource_revision, 0) > COALESCE(resource_revision, 0)
+          OR (
+              COALESCE(NEW.resource_revision, 0) = COALESCE(resource_revision, 0)
+              AND NEW.occurred_at > occurred_at
+          )
+          OR (
+              COALESCE(NEW.resource_revision, 0) = COALESCE(resource_revision, 0)
+              AND NEW.occurred_at = occurred_at
+              AND notification_kind = 'approval_required'
+              AND NEW.notification_kind != 'approval_required'
+          )
+      );
+
+    -- Out-of-order inserts remain durable in their upstream authority but must not replace the
+    -- current notification fact or enter native delivery. Repository callers return the current
+    -- fact before inserting; this guard covers legacy trigger producers in the same transaction.
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM notification_events AS current
+        WHERE current.supersession_key = NEW.supersession_key
+          AND current.superseded_at IS NULL
+          AND current.dedupe_key != NEW.dedupe_key
+          AND (
+              COALESCE(current.resource_revision, 0) > COALESCE(NEW.resource_revision, 0)
+              OR (
+                  COALESCE(current.resource_revision, 0) = COALESCE(NEW.resource_revision, 0)
+                  AND current.occurred_at > NEW.occurred_at
+              )
+              OR (
+                  COALESCE(current.resource_revision, 0) = COALESCE(NEW.resource_revision, 0)
+                  AND current.occurred_at = NEW.occurred_at
+                  AND current.notification_kind != 'approval_required'
+                  AND NEW.notification_kind = 'approval_required'
+              )
+          )
+    ) THEN RAISE(IGNORE) END;
+END;
+
+CREATE TRIGGER aggregate_notification_event_after_insert
+AFTER INSERT ON notification_events
+BEGIN
+    INSERT INTO notification_batches (
+        id, schema_version, status, revision, highest_priority, collect_until,
+        replace_until, retry_at, claim_token, claim_expires_at, attempt_count,
+        last_error_code, delivered_revision, delivered_priority, sound_level_played, disposition,
+        created_at, updated_at, displayed_at, sealed_at, suppressed_at
+    )
+    SELECT
+        'notification-batch:' || lower(hex(randomblob(16))),
+        1,
+        'collecting',
+        1,
+        NEW.priority,
+        NEW.occurred_at + CASE
+            WHEN NEW.priority IN ('approval_required', 'configuration_blocked') THEN 500
+            WHEN NEW.priority = 'failed' THEN 1000
+            ELSE 2000
+        END,
+        NEW.occurred_at + 60000,
+        NEW.occurred_at,
+        NULL, NULL, 0, NULL, NULL, NULL, 'none', NULL,
+        NEW.occurred_at, NEW.occurred_at, NULL, NULL, NULL
+    WHERE
+        (SELECT enabled FROM notification_settings WHERE singleton_id = 1) = 1
+        AND (
+            NEW.source_kind = 'automation'
+            OR (NEW.notification_kind = 'task_completed' AND
+                (SELECT human_completed_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+            OR (NEW.notification_kind = 'task_failed' AND
+                (SELECT human_failed_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+            OR (NEW.notification_kind = 'task_cancelled' AND
+                (SELECT human_cancelled_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+            OR (NEW.notification_kind = 'approval_required' AND
+                (SELECT human_approval_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM notification_batches
+            WHERE status IN ('collecting', 'pending', 'claimed', 'displayed')
+              AND replace_until >= NEW.occurred_at
+              AND (
+                  SELECT COUNT(*) FROM notification_batch_items
+                  WHERE batch_id = notification_batches.id
+              ) < 100
+        );
+
+    INSERT INTO notification_batch_items (batch_id, notification_event_id, added_at)
+    SELECT batch.id, NEW.id, NEW.occurred_at
+    FROM notification_batches AS batch
+    WHERE batch.status IN ('collecting', 'pending', 'claimed', 'displayed')
+      AND batch.replace_until >= NEW.occurred_at
+      AND (
+          SELECT COUNT(*) FROM notification_batch_items
+          WHERE batch_id = batch.id
+      ) < 100
+      AND (SELECT enabled FROM notification_settings WHERE singleton_id = 1) = 1
+      AND (
+          NEW.source_kind = 'automation'
+          OR (NEW.notification_kind = 'task_completed' AND
+              (SELECT human_completed_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+          OR (NEW.notification_kind = 'task_failed' AND
+              (SELECT human_failed_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+          OR (NEW.notification_kind = 'task_cancelled' AND
+              (SELECT human_cancelled_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+          OR (NEW.notification_kind = 'approval_required' AND
+              (SELECT human_approval_enabled FROM notification_settings WHERE singleton_id = 1) = 1)
+      )
+    ORDER BY batch.updated_at DESC, batch.id DESC
+    LIMIT 1;
+
+    UPDATE notification_batches
+    SET
+        revision = (
+            SELECT COUNT(*) FROM notification_batch_items
+            WHERE batch_id = notification_batches.id
+        ),
+        highest_priority = COALESCE((
+            SELECT event.priority
+            FROM notification_batch_items AS live_item
+            INNER JOIN notification_events AS event
+                ON event.id = live_item.notification_event_id
+            WHERE live_item.batch_id = notification_batches.id
+              AND event.superseded_at IS NULL
+              AND (
+                  event.notification_kind NOT IN (
+                      'approval_required', 'automation_configuration_blocked'
+                  )
+                  OR event.resolved_at IS NULL
+              )
+            ORDER BY CASE event.priority
+                WHEN 'approval_required' THEN 6
+                WHEN 'configuration_blocked' THEN 5
+                WHEN 'failed' THEN 4
+                WHEN 'important_update' THEN 3
+                WHEN 'cancelled' THEN 2 ELSE 1 END DESC,
+                event.occurred_at DESC,
+                event.id DESC
+            LIMIT 1
+        ), NEW.priority),
+        collect_until = CASE
+            WHEN status = 'displayed' THEN MIN(replace_until, NEW.occurred_at + 2000)
+            ELSE MIN(
+                created_at + 5000,
+                MAX(collect_until, NEW.occurred_at + CASE
+                    WHEN NEW.priority IN ('approval_required', 'configuration_blocked') THEN 500
+                    WHEN NEW.priority = 'failed' THEN 1000
+                    ELSE 2000
+                END)
+            )
+        END,
+        status = CASE WHEN status = 'displayed' THEN 'collecting' ELSE status END,
+        disposition = CASE WHEN status = 'displayed' THEN NULL ELSE disposition END,
+        updated_at = MAX(updated_at, NEW.occurred_at)
+    WHERE id = (
+        SELECT batch_id FROM notification_batch_items WHERE notification_event_id = NEW.id
+    );
+
+    INSERT INTO notification_change_events (
+        schema_version, event_id, event_kind, notification_id, batch_id,
+        resource_revision, occurred_at
+    ) VALUES (
+        1,
+        'notification-change:' || lower(hex(randomblob(16))),
+        'created',
+        NEW.id,
+        (SELECT batch_id FROM notification_batch_items WHERE notification_event_id = NEW.id),
+        NEW.resource_revision,
+        NEW.occurred_at
+    );
+END;
+
 CREATE TABLE automation_notification_outbox (
     id TEXT PRIMARY KEY CHECK (
         length(CAST(id AS BLOB)) BETWEEN 1 AND 256
@@ -4957,7 +5315,7 @@ CREATE TABLE automation_notification_outbox (
     body TEXT NOT NULL CHECK (
         length(CAST(body AS BLOB)) BETWEEN 1 AND 4096
     ),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'suppressed')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'projected', 'delivered', 'suppressed')),
     retry_at INTEGER NOT NULL DEFAULT 0 CHECK (retry_at >= 0),
     claim_token TEXT CHECK (
         claim_token IS NULL
@@ -5001,6 +5359,108 @@ CREATE UNIQUE INDEX automation_notification_outbox_task_configuration_kind
 CREATE INDEX automation_notification_outbox_pending_idx
     ON automation_notification_outbox (retry_at, claim_expires_at, created_at, id)
     WHERE status = 'pending';
+
+-- Temporary compatibility bridge for the existing automation producer. The application-wide
+-- outbox is the new delivery authority; this trigger projects every legacy durable fact into it.
+CREATE TRIGGER project_automation_notification_to_application_outbox
+AFTER INSERT ON automation_notification_outbox
+BEGIN
+    INSERT OR IGNORE INTO notification_events (
+        id, schema_version, notification_kind, source_kind, source_id, run_id, automation_id,
+        conversation_id, user_message_id, assistant_message_id, approval_action_id,
+        subject_kind, subject_text, priority, dedupe_key, supersession_key,
+        resource_revision, seen_at, resolved_at, occurred_at, expires_at
+    ) VALUES (
+        'notification-event:' || NEW.id,
+        1,
+        CASE
+            WHEN NEW.notification_kind = 'approval_required' THEN 'approval_required'
+            WHEN NEW.notification_kind = 'configuration_blocked' THEN 'automation_configuration_blocked'
+            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'failed'
+                THEN 'automation_failed'
+            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'cancelled'
+                THEN 'automation_cancelled'
+            WHEN (SELECT report_kind FROM automation_runs WHERE id = NEW.automation_run_id) = 'important_update'
+                THEN 'automation_important_update'
+            ELSE 'automation_completed'
+        END,
+        'automation',
+        NEW.automation_id,
+        NEW.automation_run_id,
+        NEW.automation_id,
+        (SELECT conversation_id FROM automation_runs WHERE id = NEW.automation_run_id),
+        (SELECT user_message_id FROM automation_runs WHERE id = NEW.automation_run_id),
+        (SELECT assistant_message_id FROM automation_runs WHERE id = NEW.automation_run_id),
+        NULL,
+        'automation_title',
+        NEW.title,
+        CASE
+            WHEN NEW.notification_kind = 'approval_required' THEN 'approval_required'
+            WHEN NEW.notification_kind = 'configuration_blocked' THEN 'configuration_blocked'
+            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'failed'
+                THEN 'failed'
+            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'cancelled'
+                THEN 'cancelled'
+            WHEN (SELECT report_kind FROM automation_runs WHERE id = NEW.automation_run_id) = 'important_update'
+                THEN 'important_update'
+            ELSE 'completed'
+        END,
+        'automation:' || NEW.id,
+        CASE WHEN NEW.automation_run_id IS NULL
+            THEN 'automation-configuration:' || NEW.automation_id
+            ELSE 'automation-run:' || NEW.automation_run_id
+        END,
+        NEW.resource_revision,
+        NULL,
+        CASE
+            WHEN NEW.notification_kind = 'run_result'
+             AND COALESCE((SELECT status FROM automation_runs WHERE id = NEW.automation_run_id), '')
+                 NOT IN ('failed')
+                THEN NEW.created_at
+            WHEN (SELECT report_kind FROM automation_runs WHERE id = NEW.automation_run_id)
+                 = 'important_update'
+                THEN NEW.created_at
+            ELSE NULL
+        END,
+        NEW.created_at,
+        NEW.created_at + CASE
+            WHEN NEW.notification_kind IN ('approval_required', 'configuration_blocked')
+                THEN 2592000000
+            ELSE 604800000
+        END
+    );
+
+    -- Generic notification_batches are the only native-delivery authority. Keep the legacy row
+    -- as a durable compatibility/audit projection without leaving work for the retired pump.
+    UPDATE automation_notification_outbox
+    SET status = 'projected', claim_token = NULL, claim_expires_at = NULL
+    WHERE id = NEW.id AND status = 'pending';
+END;
+
+CREATE TRIGGER resolve_projected_automation_notification_after_legacy_suppress
+AFTER UPDATE OF status ON automation_notification_outbox
+WHEN NEW.status = 'suppressed' AND OLD.status != 'suppressed'
+BEGIN
+    INSERT INTO notification_change_events (
+        schema_version, event_id, event_kind, notification_id, batch_id,
+        resource_revision, occurred_at
+    )
+    SELECT
+        1,
+        'notification-change:' || lower(hex(randomblob(16))),
+        'resolved',
+        event.id,
+        (SELECT batch_id FROM notification_batch_items WHERE notification_event_id = event.id),
+        event.resource_revision,
+        MAX(event.occurred_at, NEW.created_at)
+    FROM notification_events AS event
+    WHERE event.id = 'notification-event:' || NEW.id
+      AND event.resolved_at IS NULL;
+
+    UPDATE notification_events
+    SET resolved_at = COALESCE(resolved_at, MAX(occurred_at, NEW.created_at))
+    WHERE id = 'notification-event:' || NEW.id;
+END;
 
 -- Parent resources may be removed by existing product flows. Preserve the scheduled task as a
 -- repairable active+blocked record instead of cascading deletion or silently changing targets.

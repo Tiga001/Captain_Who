@@ -25,6 +25,7 @@ Core Server（Rust 应用与传输边界）
   ├─ mycopilot-core：Agent Runtime、领域模型、SQLite repository
   ├─ mycopilot-mcp-client：MCP Registry/Manager/Catalog/transport
   ├─ AutomationService / AutomationScheduler：持久定时任务与 HumanRoot Turn
+  ├─ NotificationService：通用通知事实、合并批次、已读/解决与投递恢复
   └─ adapters：Git、Skill、图片生成、MCP Runtime 等集成
        │
        ├─ SQLite 与受管文件目录
@@ -86,7 +87,7 @@ transport/application → adapters → core/protocol
 - Electron 的 `app.getPath('userData')` 是正式应用的数据根；Main 通过 `MYCOPILOT_APP_DATA_ROOT` 把该能力显式交给 Core Server，并移除父环境中的数据库重定向。
 - `storage.sqlite` 是 Conversation、Agent、Mailbox、Wake、Approval、Automation task/Run/event/outbox
   等持久事实来源。
-- 当前 canonical schema 为 **v19**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
+- 当前 canonical schema 为 **v20**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
 - 开发库不做原地迁移。版本、fingerprint 或外键不匹配时 fail closed，返回 `development_storage_schema_reset_required`，再由显式开发重建流程处理。
 

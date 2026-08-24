@@ -1,4 +1,6 @@
 use super::*;
+use crate::notification_subject::human_root_notification_subject;
+use sha2::{Digest, Sha256};
 
 const STARTUP_CANCELLED_TRACE_REASON: &str =
     "Agent run was cancelled before its conversation trace was finalized.";
@@ -191,12 +193,124 @@ impl StorageService {
                     ],
                 )
                 .map_err(storage_error)?;
+            enqueue_reconciled_human_root_notification(
+                &transaction,
+                &candidate.run_id,
+                &candidate.conversation_id,
+                &candidate.assistant_message_id,
+                if was_explicitly_cancelled {
+                    "task_cancelled"
+                } else {
+                    "task_failed"
+                },
+                completed_at,
+            )?;
             reconciled += 1;
         }
 
         transaction.commit().map_err(storage_error)?;
         Ok(reconciled)
     }
+}
+
+pub(super) fn enqueue_reconciled_human_root_notification(
+    connection: &rusqlite::Connection,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    notification_kind: &str,
+    occurred_at: i64,
+) -> Result<(), String> {
+    if connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM automation_runs WHERE agent_run_id = ?1
+             ) OR EXISTS(
+                 SELECT 1 FROM agent_nodes
+                 WHERE conversation_id = ?2 AND parent_agent_id IS NOT NULL
+             )",
+            rusqlite::params![run_id, conversation_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage_error)?
+    {
+        return Ok(());
+    }
+
+    let user_message = connection
+        .query_row(
+            "SELECT user.id, user.content, user.input_origin_kind
+             FROM messages AS user
+             WHERE user.conversation_id = ?1 AND user.role = 'user'
+               AND user.position < (
+                   SELECT position FROM messages
+                   WHERE conversation_id = ?1 AND id = ?2 AND role = 'assistant'
+               )
+             ORDER BY user.position DESC LIMIT 1",
+            rusqlite::params![conversation_id, assistant_message_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let Some((user_message_id, content, input_origin_kind)) = user_message else {
+        return Ok(());
+    };
+    if !matches!(input_origin_kind.as_deref(), None | Some("human")) {
+        return Ok(());
+    }
+    let attachment_names = connection
+        .prepare(
+            "SELECT original_name FROM attachments
+             WHERE conversation_id = ?1 AND message_id = ?2
+             ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(storage_error)?
+        .query_map(rusqlite::params![conversation_id, user_message_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(storage_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(storage_error)?;
+    let subject = human_root_notification_subject(&content, &attachment_names);
+    let mut digest = Sha256::new();
+    digest.update(b"human-root-notification-v1\0");
+    digest.update(notification_kind.as_bytes());
+    digest.update(b"\0");
+    digest.update(run_id.as_bytes());
+    let notification = notification_repository::NewNotificationEventRecord {
+        notification_kind: notification_kind.to_string(),
+        source_kind: "human_root".to_string(),
+        source_id: run_id.to_string(),
+        run_id: Some(run_id.to_string()),
+        automation_id: None,
+        conversation_id: Some(conversation_id.to_string()),
+        user_message_id: Some(user_message_id),
+        assistant_message_id: Some(assistant_message_id.to_string()),
+        approval_action_id: None,
+        subject_kind: subject.kind.to_string(),
+        subject_text: subject.text,
+        dedupe_key: format!(
+            "human-root:{notification_kind}:sha256:{:x}",
+            digest.finalize()
+        ),
+        supersession_key: format!("human-root:{run_id}"),
+        resource_revision: Some(occurred_at.max(1)),
+        occurred_at,
+        expires_at: occurred_at.saturating_add(if notification_kind == "task_failed" {
+            7 * 24 * 60 * 60 * 1_000
+        } else {
+            24 * 60 * 60 * 1_000
+        }),
+    };
+    notification_repository::enqueue_notification_event_in_transaction(connection, &notification)
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 fn has_resumable_pending_action(

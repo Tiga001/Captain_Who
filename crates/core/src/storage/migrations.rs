@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 19;
+pub const STORAGE_SCHEMA_VERSION: i32 = 20;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:fa585a63ccc8992265b541faddd5184db1ea78b00a40addc71638da61d821ee4";
+    "sha256:7385f3131673e32908b1f39fc3e47fe524fc07d10692f9bcbd041a77bf992639";
 
 /// Opens the single supported development schema.
 ///
@@ -314,10 +314,28 @@ mod tests {
             "automation_events_task_sequence_idx",
             "automation_events_run_sequence_idx",
             "automation_events_lookup_idx",
+            "notification_settings",
+            "notification_batches",
+            "notification_batches_delivery_idx",
+            "notification_batches_replace_idx",
+            "notification_events",
+            "notification_events_center_idx",
+            "notification_events_unread_idx",
+            "notification_events_supersession_idx",
+            "notification_events_approval_idx",
+            "notification_events_conversation_idx",
+            "notification_batch_items",
+            "notification_batch_items_batch_idx",
+            "notification_change_events",
+            "notification_change_events_sequence_idx",
+            "resolve_superseded_notification_before_insert",
+            "aggregate_notification_event_after_insert",
             "automation_notification_outbox",
             "automation_notification_outbox_run_kind",
             "automation_notification_outbox_task_configuration_kind",
             "automation_notification_outbox_pending_idx",
+            "project_automation_notification_to_application_outbox",
+            "resolve_projected_automation_notification_after_legacy_suppress",
             "block_automations_before_conversation_delete",
             "block_automations_after_conversation_archive",
             "block_automations_before_project_delete",
@@ -968,7 +986,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 19, found 17"));
+            .contains("expected schema version 20, found 17"));
         assert_eq!(read_schema_version(&connection).unwrap(), 17);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(

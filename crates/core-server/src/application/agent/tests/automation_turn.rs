@@ -428,6 +428,12 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
     assert!(existing_context.contains(&format!(r#""scheduledFor":{}"#, existing_run.scheduled_for)));
     assert!(existing_context.contains(&format!(r#""lastRunAt":{existing_last_run_at}"#)));
     assert!(existing_context.contains(r#""triggerKind":"manual""#));
+    assert!(storage
+        .list_notifications(None, 100, false, None)
+        .unwrap()
+        .items
+        .iter()
+        .all(|event| event.source_kind != "human_root"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

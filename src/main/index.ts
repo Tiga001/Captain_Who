@@ -38,6 +38,7 @@ import {
   ManagedPlaywrightBridgeHost
 } from './mcp/ManagedPlaywrightBridgeHost'
 import { ManagedPlaywrightSensitiveTargetBindingBroker } from './mcp/ManagedPlaywrightSensitiveTargetBindingBroker'
+import { NotificationLocaleStore } from './notifications/notificationLocaleStore'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -49,6 +50,7 @@ app.setPath('userData', appDataRoot)
 registerResourceSchemes()
 
 const coreServer = new CoreServer({ appDataRoot })
+const notificationLocaleStore = new NotificationLocaleStore(appDataRoot)
 const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
@@ -188,6 +190,10 @@ function createWindow(): void {
   window.on('ready-to-show', () => {
     window.show()
     sendAppWindowState(window)
+    // A cold-start backlog must not race the window that the user just opened. Native delivery
+    // begins only after the first app window is visible; the final focus check still runs directly
+    // before every OS notification.
+    disposeHostIpc?.beginNotificationDelivery()
   })
 
   rendererWebContents.on('did-finish-load', handleWindowStateChange)
@@ -352,7 +358,8 @@ app.whenReady().then(async () => {
     faviconResourceCache,
     isTrustedRendererEvent,
     browserSurfaceManager,
-    browserArtifactBroker
+    browserArtifactBroker,
+    notificationLocaleStore
   )
 
   createWindow()
@@ -375,17 +382,21 @@ app.on('before-quit', (event) => {
 
   event.preventDefault()
   isQuittingAfterServiceShutdown = true
-  // Stop the native Automation notification producer before any await in the shutdown path. Keep
+  // Stop the native system-notification producer before any await in the shutdown path. Keep
   // the remaining IPC and MCP reverse bridge registered until Core has completed its own bounded
   // shutdown; only this producer could otherwise issue a lazy request that respawns Core.
-  disposeHostIpc?.beginAutomationShutdown()
+  const notificationShutdown = disposeHostIpc?.beginNotificationShutdown()
   mainWindowLifecycle.prepareForQuit()
   void (async () => {
     // Keep the exact Main reverse bridge and BrowserSurface alive until Core has stopped the
     // managed MCP Manager. Core shutdown sends a reviewed close command and awaits its bounded
     // completion; tearing down Main in parallel would turn a graceful close into an unknown
     // outcome and could strand an attachment.
-    await Promise.allSettled([terminalBridge.stop(), coreServer.shutdown()])
+    await Promise.allSettled([
+      notificationShutdown ?? Promise.resolve(),
+      terminalBridge.stop(),
+      coreServer.shutdown()
+    ])
     await managedPlaywrightBridgeHost?.close()
     managedPlaywrightBridgeHost = null
     await browserSurfaceManager?.shutdown().catch(() => undefined)

@@ -968,20 +968,20 @@ impl AgentService {
                 None,
                 Some(REASON.to_string()),
             );
-            let persisted = self
-                .storage
-                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
-                    &context.conversation_id,
-                    &context.assistant_message_id,
-                    "",
-                    status_for_run(AgentRunStatus::Cancelled),
-                    run_status_label(AgentRunStatus::Cancelled),
-                    &terminal.trace,
-                    Some(&terminal.model_context_items),
-                    context.started_at,
-                    completed_at,
-                    usage_record.as_ref(),
-                );
+            let persisted = self.finalize_turn_with_human_root_notification(
+                &context.run_id,
+                &context.conversation_id,
+                &context.assistant_message_id,
+                AgentRunStatus::Cancelled,
+                "",
+                status_for_run(AgentRunStatus::Cancelled),
+                run_status_label(AgentRunStatus::Cancelled),
+                &terminal.trace,
+                Some(&terminal.model_context_items),
+                context.started_at,
+                completed_at,
+                usage_record.as_ref(),
+            );
             if persisted.is_ok() {
                 self.finish_persisted_run_usage(&context.run_id, AgentRunStatus::Cancelled);
                 self.retire_builtin_capability_run(&context.run_id);
@@ -1134,23 +1134,24 @@ impl AgentService {
                 output.finish_reason.clone(),
             );
             let cumulative_usage = self.preview_cumulative_run_usage(&output.run_id, None);
-            self.storage
-                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
-                    conversation_id,
-                    assistant_message_id,
-                    if output.status == AgentRunStatus::Cancelled {
-                        ""
-                    } else {
-                        &output.content
-                    },
-                    status_for_run(output.status),
-                    run_status_label(output.status),
-                    &trace,
-                    model_context_items,
-                    completed_at,
-                    completed_at,
-                    usage_record.as_ref(),
-                )?;
+            self.finalize_turn_with_human_root_notification(
+                &output.run_id,
+                conversation_id,
+                assistant_message_id,
+                output.status,
+                if output.status == AgentRunStatus::Cancelled {
+                    ""
+                } else {
+                    &output.content
+                },
+                status_for_run(output.status),
+                run_status_label(output.status),
+                &trace,
+                model_context_items,
+                completed_at,
+                completed_at,
+                usage_record.as_ref(),
+            )?;
             replace_output_usage(output, cumulative_usage);
             self.finish_persisted_run_usage(&output.run_id, output.status);
             self.retire_builtin_capability_run(&output.run_id);
@@ -1276,19 +1277,20 @@ impl AgentService {
                 Some(diagnostic_message.to_string()),
             )
         });
-        self.storage
-            .finalize_chat_message_with_conversation_trace_model_context_and_usage(
-                conversation_id,
-                assistant_message_id,
-                persisted_content,
-                message_status,
-                run_status_label(AgentRunStatus::Failed),
-                conversation_turn_trace,
-                model_context_items,
-                completed_at,
-                completed_at,
-                usage_record.as_ref(),
-            )?;
+        self.finalize_turn_with_human_root_notification(
+            &conversation_turn_trace.run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentRunStatus::Failed,
+            persisted_content,
+            message_status,
+            run_status_label(AgentRunStatus::Failed),
+            conversation_turn_trace,
+            model_context_items,
+            completed_at,
+            completed_at,
+            usage_record.as_ref(),
+        )?;
         let cumulative_usage = run_id
             .as_deref()
             .and_then(|run_id| self.preview_cumulative_run_usage(run_id, None))

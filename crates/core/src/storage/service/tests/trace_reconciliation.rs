@@ -350,6 +350,10 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
         )
         .unwrap();
     assert_eq!(lifecycle_times, (2, Some(22)));
+    let notifications = service.list_notifications(None, 10, false, None).unwrap();
+    assert_eq!(notifications.items.len(), 1);
+    assert_eq!(notifications.items[0].notification_kind, "task_cancelled");
+    assert_eq!(notifications.items[0].subject_text, "do work");
 
     let forked = service
         .fork_conversation_request_view(assistant_reply_fork_request(
@@ -953,6 +957,10 @@ fn startup_reconciliation_settles_a_crashed_context_compaction_before_reload() {
         recovered.terminal_status,
         crate::ConversationTurnTraceTerminalStatus::Failed
     );
+    let notifications = reopened.list_notifications(None, 10, false, None).unwrap();
+    assert_eq!(notifications.items.len(), 1);
+    assert_eq!(notifications.items[0].notification_kind, "task_failed");
+    assert_eq!(notifications.items[0].subject_text, "do work");
     assert!(matches!(
         recovered.items.as_slice(),
         [
@@ -990,6 +998,254 @@ fn startup_reconciliation_settles_a_crashed_context_compaction_before_reload() {
             "message": "The application exited before the agent run's conversation trace was finalized."
         }])
     );
+}
+
+#[test]
+fn startup_reconciliation_bounds_emoji_heavy_notification_subjects() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-emoji-orphan";
+    let assistant_message_id = "assistant-emoji-orphan";
+    let run_id = "run-emoji-orphan";
+    save_run_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        "running",
+        "pending",
+    );
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET content = ?1 WHERE id = ?2",
+            rusqlite::params!["👨‍👩‍👧‍👦".repeat(200), format!("user-{assistant_message_id}")],
+        )
+        .unwrap();
+    store_in_progress_trace(&service, conversation_id, assistant_message_id, run_id);
+
+    assert_eq!(
+        service
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), 100)
+            .unwrap(),
+        1
+    );
+    let notification = service
+        .list_notifications(None, 10, false, None)
+        .unwrap()
+        .items
+        .pop()
+        .unwrap();
+    assert!(notification.subject_text.ends_with('…'));
+    assert!(notification.subject_text.len() <= 512);
+}
+
+#[test]
+fn startup_reconciliation_excludes_child_and_automation_turns_from_human_notifications() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+
+    service
+        .save_conversation(ChatConversationRecord {
+            id: "root-conversation-notification-exclusion".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "root".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    service
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: "root-agent-notification-exclusion".to_string(),
+            conversation_id: "root-conversation-notification-exclusion".to_string(),
+            creation_request_id: "ensure-root-notification-exclusion".to_string(),
+            task_name: "Notification exclusion".to_string(),
+        })
+        .unwrap();
+    service
+        .save_conversation(ChatConversationRecord {
+            id: "child-conversation-notification-exclusion".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "child".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO agent_nodes (
+                 agent_id, schema_version, root_agent_id, root_conversation_id,
+                 parent_agent_id, conversation_id, project_id, creation_request_id,
+                 task_name, task_path, model_config_id_snapshot, model_display_name_snapshot,
+                 model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                 model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                 provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                 lifecycle, revision, created_at, updated_at
+             ) VALUES (
+                 'child-agent-notification-exclusion', 1,
+                 'root-agent-notification-exclusion', 'root-conversation-notification-exclusion',
+                 'root-agent-notification-exclusion', 'child-conversation-notification-exclusion',
+                 NULL, 'create-child-notification-exclusion',
+                 'child', '/root/child', 'model-1', 'Model 1', 0, 4096,
+                 'settings-v1', 'connection-v1', 'protocol-v1', 'explicit',
+                 'active', 1, 2, 2
+             )",
+            [],
+        )
+        .unwrap();
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO messages (
+                 id, conversation_id, role, content, status, agent_run_json, created_at, position
+             ) VALUES (?1, ?2, 'assistant', 'partial response', 'pending', ?3, 2, 0)",
+            rusqlite::params![
+                "child-assistant-notification-exclusion",
+                "child-conversation-notification-exclusion",
+                serde_json::json!({
+                    "runId": "child-run-notification-exclusion",
+                    "assistantMessageId": "child-assistant-notification-exclusion",
+                    "status": "running",
+                    "state": {
+                        "status": "running",
+                        "activeRunId": "child-run-notification-exclusion",
+                        "updatedAt": 2
+                    }
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    store_in_progress_trace(
+        &service,
+        "child-conversation-notification-exclusion",
+        "child-assistant-notification-exclusion",
+        "child-run-notification-exclusion",
+    );
+
+    let automation_conversation = "automation-conversation-notification-exclusion";
+    let automation_assistant = "automation-assistant-notification-exclusion";
+    let automation_agent_run = "automation-agent-run-notification-exclusion";
+    save_run_conversation(
+        &service,
+        automation_conversation,
+        automation_assistant,
+        automation_agent_run,
+        "running",
+        "pending",
+    );
+    use crate::storage::automation_repository::{
+        AutomationConfigRecord, AutomationCreateOutcome, AutomationRunEnqueueOutcome,
+        NewAutomationRecord, NewManualAutomationRunRecord, StoredAutomationStatus,
+    };
+    assert!(matches!(
+        service
+            .create_automation(&NewAutomationRecord {
+                id: "automation-notification-exclusion".to_string(),
+                create_request_id: "create-automation-notification-exclusion".to_string(),
+                status: StoredAutomationStatus::Active,
+                config: AutomationConfigRecord {
+                    title: "Automation exclusion".to_string(),
+                    prompt: "do work".to_string(),
+                    health_state: "ok".to_string(),
+                    blocked_code: None,
+                    blocked_message: None,
+                    destination_kind: "existing_chat".to_string(),
+                    target_conversation_id: Some(automation_conversation.to_string()),
+                    project_binding_kind: "inherit".to_string(),
+                    project_id: None,
+                    model_id: None,
+                    permission_mode: "default".to_string(),
+                    permission_mode_version: 2,
+                    permissions_json: "{}".to_string(),
+                    reasoning_json: None,
+                    schedule_kind: "daily".to_string(),
+                    schedule_json:
+                        r#"{"kind":"daily","timeMinutes":540,"timezone":"Asia/Shanghai"}"#
+                            .to_string(),
+                    rrule: "FREQ=DAILY;INTERVAL=1".to_string(),
+                    timezone: "Asia/Shanghai".to_string(),
+                    anchor_at: 1,
+                    next_run_at: Some(10_000),
+                    notification_policy: "all_runs".to_string(),
+                    target_project_snapshot: None,
+                    target_conversation_snapshot: Some("Automation chat".to_string()),
+                    target_model_snapshot: Some("Model 1".to_string()),
+                    target_project_id_snapshot: None,
+                    target_conversation_id_snapshot: Some(automation_conversation.to_string()),
+                    target_model_id_snapshot: Some("model-1".to_string()),
+                },
+            })
+            .unwrap(),
+        AutomationCreateOutcome::Created(_)
+    ));
+    assert!(matches!(
+        service
+            .enqueue_manual_automation_run(&NewManualAutomationRunRecord {
+                id: "automation-run-notification-exclusion".to_string(),
+                automation_id: "automation-notification-exclusion".to_string(),
+                manual_request_id: "manual-notification-exclusion".to_string(),
+                scheduled_for: 2,
+                config_revision: 1,
+                config_snapshot_json: "{}".to_string(),
+                expected_revision: 1,
+            })
+            .unwrap(),
+        AutomationRunEnqueueOutcome::Enqueued(_)
+    ));
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE automation_runs
+             SET status = 'running', status_revision = status_revision + 1,
+                 agent_run_id = ?1, conversation_id = ?2, user_message_id = ?3,
+                 assistant_message_id = ?4, started_at = created_at, updated_at = created_at
+             WHERE id = 'automation-run-notification-exclusion'",
+            rusqlite::params![
+                automation_agent_run,
+                automation_conversation,
+                format!("user-{automation_assistant}"),
+                automation_assistant,
+            ],
+        )
+        .unwrap();
+    store_in_progress_trace(
+        &service,
+        automation_conversation,
+        automation_assistant,
+        automation_agent_run,
+    );
+
+    assert_eq!(
+        service
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), 100)
+            .unwrap(),
+        2
+    );
+    assert!(service
+        .list_notifications(None, 10, false, None)
+        .unwrap()
+        .items
+        .is_empty());
 }
 
 #[test]

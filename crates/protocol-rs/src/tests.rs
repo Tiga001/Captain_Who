@@ -129,6 +129,91 @@ fn provider_profile_ui_descriptor_method_is_stable() {
 }
 
 #[test]
+fn notification_contract_fixture_matches_rust_protocol() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/notification-contract-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        fixture["methods"]["claim"],
+        NOTIFICATION_BATCHES_CLAIM_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["validate"],
+        NOTIFICATION_BATCH_VALIDATE_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["acknowledge"],
+        NOTIFICATION_BATCH_ACKNOWLEDGE_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["release"],
+        NOTIFICATION_BATCH_RELEASE_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["suppress"],
+        NOTIFICATION_BATCH_SUPPRESS_METHOD
+    );
+    assert_eq!(fixture["methods"]["list"], NOTIFICATION_LIST_METHOD);
+    assert_eq!(fixture["methods"]["summary"], NOTIFICATION_SUMMARY_METHOD);
+    assert_eq!(
+        fixture["methods"]["markSeen"],
+        NOTIFICATION_MARK_SEEN_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["getSettings"],
+        NOTIFICATION_SETTINGS_GET_METHOD
+    );
+    assert_eq!(
+        fixture["methods"]["updateSettings"],
+        NOTIFICATION_SETTINGS_UPDATE_METHOD
+    );
+    assert_eq!(
+        fixture["notifications"]["event"],
+        NOTIFICATION_EVENT_NOTIFICATION_METHOD
+    );
+    assert_eq!(
+        fixture["notifications"]["resync"],
+        NOTIFICATION_RESYNC_NOTIFICATION_METHOD
+    );
+    let batch: NotificationBatchDto = serde_json::from_value(fixture["batch"].clone()).unwrap();
+    assert_eq!(batch.items.len(), 2);
+    assert_eq!(
+        batch.highest_priority,
+        NotificationPriorityDto::ApprovalRequired
+    );
+    let settings: NotificationSettingsDto =
+        serde_json::from_value(fixture["settings"].clone()).unwrap();
+    assert!(settings.enabled && settings.sound_enabled && settings.show_task_content);
+    let _: NotificationEventDto = serde_json::from_value(fixture["event"].clone()).unwrap();
+    let _: NotificationResyncDto = serde_json::from_value(fixture["resync"].clone()).unwrap();
+    let open: NotificationOpenRequestDto =
+        serde_json::from_value(fixture["openRequest"].clone()).unwrap();
+    assert_eq!(open.event_ids.len(), 2);
+    let focus_only: NotificationOpenRequestDto = serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1,
+        "batchId": "notification-batch:focus-only",
+        "eventIds": ["notification-event:focus-only"],
+        "destination": { "kind": "application" }
+    }))
+    .unwrap();
+    assert_eq!(
+        focus_only.destination,
+        NotificationOpenDestinationDto::Application
+    );
+    let legacy_center = serde_json::json!({
+        "schemaVersion": 1,
+        "batchId": "notification-batch:legacy-center",
+        "eventIds": ["notification-event:legacy-center"],
+        "destination": { "kind": "notification_center" }
+    });
+    assert!(serde_json::from_value::<NotificationOpenRequestDto>(legacy_center).is_err());
+    let mut duplicate_open = fixture["openRequest"].clone();
+    duplicate_open["eventIds"] = serde_json::json!(["event-1", "event-1"]);
+    assert!(serde_json::from_value::<NotificationOpenRequestDto>(duplicate_open).is_err());
+}
+
+#[test]
 fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/agent-collaboration-contract-v1.json"

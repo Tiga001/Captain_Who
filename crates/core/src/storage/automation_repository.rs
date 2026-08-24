@@ -653,6 +653,16 @@ pub fn replace_automation_config(
     )?;
     let updated =
         query_automation(&transaction, automation_id, false)?.expect("updated automation");
+    if existing.config.health_state == "blocked" && updated.config.health_state == "ok" {
+        transaction.execute(
+            "UPDATE automation_notification_outbox
+             SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
+             WHERE automation_id = ?1 AND automation_run_id IS NULL
+               AND notification_kind = 'configuration_blocked'
+               AND status IN ('pending', 'projected')",
+            [automation_id],
+        )?;
+    }
     insert_event(
         &transaction,
         "updated",
@@ -1089,7 +1099,7 @@ fn terminalize_automation_runs_for_resource_deletion(
             "UPDATE automation_notification_outbox
              SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
              WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'
-               AND status = 'pending'",
+               AND status IN ('pending', 'projected')",
             [&run.id],
         )?;
         let task_is_live = transaction
@@ -1354,8 +1364,13 @@ pub fn tombstone_automation(
     transaction.execute(
         "UPDATE automation_notification_outbox
          SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
-         WHERE automation_id = ?1 AND status = 'pending'",
+         WHERE automation_id = ?1 AND status IN ('pending', 'projected')",
         [automation_id],
+    )?;
+    crate::storage::notification_repository::invalidate_notification_events_by_automation_id_in_transaction(
+        &transaction,
+        automation_id,
+        timestamp,
     )?;
     let deleted = query_automation(&transaction, automation_id, true)?.expect("deleted automation");
     insert_event(
@@ -2264,7 +2279,7 @@ pub fn set_automation_run_waiting_for_approval(
             "UPDATE automation_notification_outbox
              SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
              WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'
-               AND status = 'pending'",
+               AND status IN ('pending', 'projected')",
             [&run.id],
         )?;
     }
@@ -2441,7 +2456,7 @@ pub fn settle_automation_run_from_trace(
         "UPDATE automation_notification_outbox
          SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
          WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'
-           AND status = 'pending'",
+           AND status IN ('pending', 'projected')",
         [&run.id],
     )?;
     transaction.commit()?;
@@ -2527,7 +2542,20 @@ pub fn enqueue_automation_notification_in_transaction(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let notification_id = format!("automation-notification:{}", uuid::Uuid::new_v4());
-    let inserted = transaction.execute(
+    // Agent-tree deletion deliberately disables every SQLite trigger for the destructive graph
+    // mutation. Notification projection is nevertheless part of this durable write: enable
+    // triggers only for the outbox INSERT, then restore the caller's connection setting before
+    // any resource row is deleted. This keeps the generic application outbox atomic without
+    // re-enabling the unrelated deletion triggers around the destructive statements.
+    let triggers_were_enabled =
+        transaction.db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)?;
+    if !triggers_were_enabled {
+        transaction.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+            true,
+        )?;
+    }
+    let insert_result = transaction.execute(
         "INSERT OR IGNORE INTO automation_notification_outbox (
             id, schema_version, automation_id, automation_run_id, resource_revision,
             notification_kind, title, body, status, retry_at, claim_token,
@@ -2546,7 +2574,14 @@ pub fn enqueue_automation_notification_in_transaction(
             &input.body,
             input.created_at,
         ],
-    )?;
+    );
+    if !triggers_were_enabled {
+        transaction.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
+            false,
+        )?;
+    }
+    let inserted = insert_result?;
     let record = query_automation_notification_by_identity(transaction, input)?
         .ok_or(rusqlite::Error::InvalidQuery)?;
     if inserted == 1 {
@@ -2787,7 +2822,7 @@ pub fn suppress_automation_notification(
         "UPDATE automation_notification_outbox
          SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL,
              last_error_code = NULL
-         WHERE id = ?1 AND status = 'pending' AND created_at <= ?2",
+         WHERE id = ?1 AND status IN ('pending', 'projected') AND created_at <= ?2",
         params![notification_id, suppressed_at],
     )?;
     let record = query_automation_notification(&transaction, notification_id)?;

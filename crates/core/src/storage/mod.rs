@@ -34,6 +34,7 @@ pub mod mcp_approval_envelope_repository;
 pub mod migrations;
 pub mod model_request_observation_repository;
 pub mod models;
+pub mod notification_repository;
 pub mod pending_action_repository;
 pub mod preferences_repository;
 pub mod project_repository;

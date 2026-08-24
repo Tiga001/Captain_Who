@@ -171,15 +171,17 @@ mod tests {
         AgentLifecycle, EnsureRootAgentInput, ProviderProfileConfig, ProviderProtocolDialect,
     };
     use mycopilot_protocol_rs::{
-        AutomationDestinationInputDto, AutomationNotificationAcknowledgeInputDto,
-        AutomationNotificationAcknowledgeOutputDto, AutomationNotificationDeliveryErrorCodeDto,
-        AutomationNotificationPolicyDto, AutomationNotificationReleaseInputDto,
-        AutomationNotificationReleaseOutputDto, AutomationNotificationValidateInputDto,
-        AutomationNotificationValidateOutputDto, AutomationNotificationsClaimInputDto,
-        AutomationNotificationsClaimOutputDto, AutomationPermissionModeDto,
-        AutomationProjectBindingDto, AutomationRunDto, AutomationScheduleInputDto,
-        AutomationStatusDto, AutomationTaskDto, AUTOMATION_PERMISSION_MODE_VERSION,
-        AUTOMATION_SCHEMA_VERSION,
+        AutomationDestinationInputDto, AutomationNotificationPolicyDto,
+        AutomationPermissionModeDto, AutomationProjectBindingDto, AutomationRunDto,
+        AutomationScheduleInputDto, AutomationStatusDto, AutomationTaskDto,
+        NotificationBatchAcknowledgeInputDto, NotificationBatchAcknowledgeOutputDto,
+        NotificationBatchReleaseInputDto, NotificationBatchReleaseOutputDto,
+        NotificationBatchStatusDto, NotificationBatchValidateInputDto,
+        NotificationBatchValidateOutputDto, NotificationBatchesClaimInputDto,
+        NotificationBatchesClaimOutputDto, NotificationDeliveryDispositionDto,
+        NotificationDeliveryErrorCodeDto, NotificationKindDto, NotificationPriorityDto,
+        NotificationSoundLevelDto, AUTOMATION_PERMISSION_MODE_VERSION, AUTOMATION_SCHEMA_VERSION,
+        NOTIFICATION_SCHEMA_VERSION,
     };
 
     fn request<I: Serialize>(storage: &StorageService, method: &str, input: &I) -> Value {
@@ -188,6 +190,22 @@ mod tests {
             JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 id: JsonRpcId::Number(9),
+                method: method.to_string(),
+                params: Some(serde_json::to_value(input).unwrap()),
+            },
+        )
+    }
+
+    fn notification_request<I: Serialize>(
+        storage: &StorageService,
+        method: &str,
+        input: &I,
+    ) -> Value {
+        super::super::notification_rpc::handle_notification_request(
+            storage,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(10),
                 method: method.to_string(),
                 params: Some(serde_json::to_value(input).unwrap()),
             },
@@ -288,7 +306,7 @@ mod tests {
         )
         .unwrap();
         let created_at = mycopilot_core::storage::now_ms();
-        let pending = storage
+        storage
             .enqueue_automation_notification(&NewAutomationNotificationRecord {
                 automation_id: created.automation_id.clone(),
                 automation_run_id: None,
@@ -300,54 +318,60 @@ mod tests {
             })
             .unwrap();
 
-        let claim_input = AutomationNotificationsClaimInputDto {
-            schema_version: AUTOMATION_SCHEMA_VERSION,
+        let claim_input = NotificationBatchesClaimInputDto {
+            schema_version: NOTIFICATION_SCHEMA_VERSION,
             claim_token: "host-claim-1".to_string(),
             lease_duration_ms: 60_000,
             limit: 10,
         };
-        let claimed: AutomationNotificationsClaimOutputDto = serde_json::from_value(
-            request(
+        let claimed: NotificationBatchesClaimOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
+                mycopilot_protocol_rs::NOTIFICATION_BATCHES_CLAIM_METHOD,
                 &claim_input,
             )["result"]
                 .clone(),
         )
         .unwrap();
         assert_eq!(claimed.claim_token, claim_input.claim_token);
-        assert_eq!(claimed.notifications.len(), 1);
-        assert_eq!(claimed.notifications[0].notification_id, pending.id);
+        assert_eq!(claimed.batches.len(), 1);
+        assert_eq!(claimed.batches[0].items.len(), 1);
         assert_eq!(
-            claimed.notifications[0].automation_id,
-            created.automation_id
+            claimed.batches[0].items[0].kind,
+            NotificationKindDto::AutomationConfigurationBlocked
         );
-        assert!(claimed.notifications[0].conversation_id.is_none());
+        assert_eq!(
+            claimed.batches[0].items[0].automation_id.as_deref(),
+            Some(created.automation_id.as_str())
+        );
+        assert!(claimed.batches[0].items[0].conversation_id.is_none());
 
-        let acknowledged: AutomationNotificationAcknowledgeOutputDto = serde_json::from_value(
-            request(
+        let acknowledged: NotificationBatchAcknowledgeOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
-                &AutomationNotificationAcknowledgeInputDto {
-                    schema_version: AUTOMATION_SCHEMA_VERSION,
-                    notification_id: pending.id,
+                mycopilot_protocol_rs::NOTIFICATION_BATCH_ACKNOWLEDGE_METHOD,
+                &NotificationBatchAcknowledgeInputDto {
+                    schema_version: NOTIFICATION_SCHEMA_VERSION,
+                    batch_id: claimed.batches[0].batch_id.clone(),
                     claim_token: claim_input.claim_token,
+                    disposition: NotificationDeliveryDispositionDto::Delivered,
+                    native_priority: NotificationPriorityDto::ConfigurationBlocked,
+                    sound_level_played: NotificationSoundLevelDto::Initial,
+                    native_revision: claimed.batches[0].revision,
                 },
             )["result"]
                 .clone(),
         )
         .unwrap();
-        assert_eq!(
-            acknowledged.notification_id,
-            claimed.notifications[0].notification_id
-        );
+        assert_eq!(acknowledged.batch_id, claimed.batches[0].batch_id);
+        assert_eq!(acknowledged.status, NotificationBatchStatusDto::Displayed);
 
-        let next_claim: AutomationNotificationsClaimOutputDto = serde_json::from_value(
-            request(
+        let next_claim: NotificationBatchesClaimOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-                &AutomationNotificationsClaimInputDto {
-                    schema_version: AUTOMATION_SCHEMA_VERSION,
+                mycopilot_protocol_rs::NOTIFICATION_BATCHES_CLAIM_METHOD,
+                &NotificationBatchesClaimInputDto {
+                    schema_version: NOTIFICATION_SCHEMA_VERSION,
                     claim_token: "host-claim-2".to_string(),
                     lease_duration_ms: 60_000,
                     limit: 10,
@@ -356,10 +380,10 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        assert!(next_claim.notifications.is_empty());
+        assert!(next_claim.batches.is_empty());
 
         let retry_created_at = mycopilot_core::storage::now_ms();
-        let retry_delivery = storage
+        storage
             .enqueue_automation_notification(&NewAutomationNotificationRecord {
                 automation_id: created.automation_id,
                 automation_run_id: None,
@@ -371,12 +395,12 @@ mod tests {
             })
             .unwrap();
         let retry_claim_token = "host-claim-retry".to_string();
-        let retry_claim: AutomationNotificationsClaimOutputDto = serde_json::from_value(
-            request(
+        let retry_claim: NotificationBatchesClaimOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-                &AutomationNotificationsClaimInputDto {
-                    schema_version: AUTOMATION_SCHEMA_VERSION,
+                mycopilot_protocol_rs::NOTIFICATION_BATCHES_CLAIM_METHOD,
+                &NotificationBatchesClaimInputDto {
+                    schema_version: NOTIFICATION_SCHEMA_VERSION,
                     claim_token: retry_claim_token.clone(),
                     lease_duration_ms: 60_000,
                     limit: 10,
@@ -385,25 +409,26 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        assert_eq!(retry_claim.notifications.len(), 1);
+        assert_eq!(retry_claim.batches.len(), 1);
         let retry_at = retry_created_at + 60_000;
-        let released: AutomationNotificationReleaseOutputDto = serde_json::from_value(
-            request(
+        let released: NotificationBatchReleaseOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_RELEASE_METHOD,
-                &AutomationNotificationReleaseInputDto {
-                    schema_version: AUTOMATION_SCHEMA_VERSION,
-                    notification_id: retry_delivery.id,
+                mycopilot_protocol_rs::NOTIFICATION_BATCH_RELEASE_METHOD,
+                &NotificationBatchReleaseInputDto {
+                    schema_version: NOTIFICATION_SCHEMA_VERSION,
+                    batch_id: retry_claim.batches[0].batch_id.clone(),
                     claim_token: retry_claim_token,
                     retry_at,
-                    error_code:
-                        AutomationNotificationDeliveryErrorCodeDto::NativeNotificationFailed,
+                    error_code: NotificationDeliveryErrorCodeDto::NativeNotificationFailed,
                 },
             )["result"]
                 .clone(),
         )
         .unwrap();
-        assert_eq!(released.retry_at, retry_at);
+        assert_eq!(released.status, NotificationBatchStatusDto::Pending);
+        assert!(released.retry_at >= retry_at);
+        assert!(released.retry_at <= retry_at + 60_000);
     }
 
     #[test]
@@ -440,12 +465,12 @@ mod tests {
             .unwrap();
 
         let claim_token = "host-validation-claim".to_string();
-        let claimed: AutomationNotificationsClaimOutputDto = serde_json::from_value(
-            request(
+        let claimed: NotificationBatchesClaimOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-                &AutomationNotificationsClaimInputDto {
-                    schema_version: AUTOMATION_SCHEMA_VERSION,
+                mycopilot_protocol_rs::NOTIFICATION_BATCHES_CLAIM_METHOD,
+                &NotificationBatchesClaimInputDto {
+                    schema_version: NOTIFICATION_SCHEMA_VERSION,
                     claim_token: claim_token.clone(),
                     lease_duration_ms: 60_000,
                     limit: 10,
@@ -454,28 +479,25 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        assert_eq!(claimed.notifications.len(), 1);
-        let notification_id = claimed.notifications[0].notification_id.clone();
-        let validation_input = AutomationNotificationValidateInputDto {
-            schema_version: AUTOMATION_SCHEMA_VERSION,
-            notification_id: notification_id.clone(),
+        assert_eq!(claimed.batches.len(), 1);
+        let batch_id = claimed.batches[0].batch_id.clone();
+        let validation_input = NotificationBatchValidateInputDto {
+            schema_version: NOTIFICATION_SCHEMA_VERSION,
+            batch_id: batch_id.clone(),
             claim_token: claim_token.clone(),
         };
-        let valid: AutomationNotificationValidateOutputDto = serde_json::from_value(
-            request(
+        let valid: NotificationBatchValidateOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
+                mycopilot_protocol_rs::NOTIFICATION_BATCH_VALIDATE_METHOD,
                 &validation_input,
             )["result"]
                 .clone(),
         )
         .unwrap();
         assert_eq!(
-            valid
-                .notification
-                .as_ref()
-                .map(|item| item.notification_id.as_str()),
-            Some(notification_id.as_str())
+            valid.batch.as_ref().map(|item| item.batch_id.as_str()),
+            Some(batch_id.as_str())
         );
 
         let blocked = storage
@@ -485,16 +507,16 @@ mod tests {
         storage
             .tombstone_automation(&blocked.id, blocked.revision)
             .unwrap();
-        let stale: AutomationNotificationValidateOutputDto = serde_json::from_value(
-            request(
+        let stale: NotificationBatchValidateOutputDto = serde_json::from_value(
+            notification_request(
                 &storage,
-                mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
+                mycopilot_protocol_rs::NOTIFICATION_BATCH_VALIDATE_METHOD,
                 &validation_input,
             )["result"]
                 .clone(),
         )
         .unwrap();
-        assert!(stale.notification.is_none());
+        assert!(stale.batch.is_none());
     }
 
     #[test]

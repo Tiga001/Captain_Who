@@ -4,7 +4,8 @@ import type { RefObject } from 'react'
 export function useDismissOnOutsidePointer<T extends HTMLElement>(
   ref: RefObject<T | null>,
   isOpen: boolean,
-  onDismiss: () => void
+  onDismiss: () => void,
+  ignoreTarget?: (target: Node) => boolean
 ) {
   useEffect(() => {
     if (!isOpen) return
@@ -13,11 +14,12 @@ export function useDismissOnOutsidePointer<T extends HTMLElement>(
       const target = event.target
       if (!(target instanceof Node)) return
       if (ref.current?.contains(target)) return
+      if (ignoreTarget?.(target)) return
 
       onDismiss()
     }
 
     document.addEventListener('pointerdown', handlePointerDown, true)
     return () => document.removeEventListener('pointerdown', handlePointerDown, true)
-  }, [isOpen, onDismiss, ref])
+  }, [ignoreTarget, isOpen, onDismiss, ref])
 }

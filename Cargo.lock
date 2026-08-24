@@ -1479,6 +1479,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "unicode-segmentation",
  "uuid",
  "windows-sys 0.61.2",
  "zeroize",
@@ -1510,6 +1511,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "uuid",
  "zeroize",
  "zip",
@@ -2848,6 +2850,12 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unsafe-libyaml"

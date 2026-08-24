@@ -199,6 +199,71 @@ impl StorageService {
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
     ) -> Result<(), String> {
+        self.finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
+            conversation_id,
+            message_id,
+            content,
+            message_status,
+            run_status,
+            trace,
+            model_context_items,
+            trace_created_at,
+            completed_at,
+            usage,
+            None,
+        )
+    }
+
+    /// Atomically commits a terminal HumanRoot Turn and its structured notification fact.
+    ///
+    /// The notification contains only routing identities and a pre-sanitized subject. Keeping it
+    /// inside the trace transaction closes both crash windows: no banner for a rolled-back Turn,
+    /// and no terminal Turn whose notification enqueue was lost before process exit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_chat_message_with_conversation_turn_notification(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+        trace_created_at: i64,
+        completed_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+        notification: &notification_repository::NewNotificationEventRecord,
+    ) -> Result<(), String> {
+        self.finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
+            conversation_id,
+            message_id,
+            content,
+            message_status,
+            run_status,
+            trace,
+            model_context_items,
+            trace_created_at,
+            completed_at,
+            usage,
+            Some(notification),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+        trace_created_at: i64,
+        completed_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+        notification: Option<&notification_repository::NewNotificationEventRecord>,
+    ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         chat_repository::update_message_status_and_content(
@@ -246,6 +311,13 @@ impl StorageService {
             .map_err(|error| format!("terminal Assistant model context is incomplete: {error}"))?;
         if let Some(usage) = usage {
             usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
+        }
+        if let Some(notification) = notification {
+            notification_repository::enqueue_notification_event_in_transaction(
+                &transaction,
+                notification,
+            )
+            .map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)
     }

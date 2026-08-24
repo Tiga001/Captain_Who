@@ -427,6 +427,10 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .storage
         .latest_automation_event_sequence()
         .map_err(io::Error::other)?;
+    let notification_event_startup_cursor = bootstrap
+        .storage
+        .latest_notification_change_sequence()
+        .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     managed_playwright_bridge
         .attach_outbound(outbound_tx.clone())
@@ -437,6 +441,11 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     outbound_tx
         .send(automation_resync_notification(
             automation_event_startup_cursor,
+        )?)
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
+    outbound_tx
+        .send(notification_resync_notification(
+            notification_event_startup_cursor,
         )?)
         .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
     agent_service
@@ -465,6 +474,11 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         Arc::clone(&bootstrap.storage),
         outbound_tx.clone(),
         automation_event_startup_cursor,
+    ));
+    let notification_event_notifier = tokio::spawn(run_notification_event_notifier(
+        Arc::clone(&bootstrap.storage),
+        outbound_tx.clone(),
+        notification_event_startup_cursor,
     ));
     // The scheduler is constructed only after the final MCP-injected AgentService has completed
     // startup reconciliation and the authoritative resync cut has been published.
@@ -585,6 +599,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     automation_scheduler.finish_shutdown().await;
     automation_event_notifier.abort();
     let _ = automation_event_notifier.await;
+    notification_event_notifier.abort();
+    let _ = notification_event_notifier.await;
 
     if let Err(error) = collaboration_dispatcher_shutdown {
         eprintln!("collaboration dispatcher shutdown failed: {error}");
@@ -748,6 +764,41 @@ pub(crate) async fn run_automation_event_notifier(
     }
 }
 
+pub(crate) async fn run_notification_event_notifier(
+    storage: Arc<StorageService>,
+    outbound: mpsc::UnboundedSender<Value>,
+    initial_cursor: i64,
+) {
+    let mut cursor = initial_cursor;
+    let mut interval = tokio::time::interval(AUTOMATION_EVENT_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let request_storage = Arc::clone(&storage);
+        let page = tokio::task::spawn_blocking(move || {
+            request_storage.list_notification_change_events_after(cursor, 256)
+        })
+        .await;
+        let Ok(Ok(events)) = page else {
+            continue;
+        };
+        for event in events {
+            cursor = event.sequence;
+            let Ok(params) = application::notification::notification_event_dto(event) else {
+                continue;
+            };
+            let notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": mycopilot_protocol_rs::NOTIFICATION_EVENT_NOTIFICATION_METHOD,
+                "params": params,
+            });
+            if outbound.send(notification).is_err() {
+                return;
+            }
+        }
+    }
+}
+
 fn automation_resync_notification(last_sequence: i64) -> io::Result<Value> {
     let last_sequence = u64::try_from(last_sequence)
         .map_err(|_| io::Error::other("automation event sequence is negative"))?;
@@ -757,6 +808,21 @@ fn automation_resync_notification(last_sequence: i64) -> io::Result<Value> {
         "params": mycopilot_protocol_rs::AutomationResyncDto {
             schema_version: mycopilot_protocol_rs::AUTOMATION_SCHEMA_VERSION,
             reason: mycopilot_protocol_rs::AutomationResyncReasonDto::CoreStarted,
+            last_sequence,
+            occurred_at: mycopilot_core::storage::now_ms(),
+        },
+    }))
+}
+
+fn notification_resync_notification(last_sequence: i64) -> io::Result<Value> {
+    let last_sequence = u64::try_from(last_sequence)
+        .map_err(|_| io::Error::other("notification event sequence is negative"))?;
+    Ok(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": mycopilot_protocol_rs::NOTIFICATION_RESYNC_NOTIFICATION_METHOD,
+        "params": mycopilot_protocol_rs::NotificationResyncDto {
+            schema_version: mycopilot_protocol_rs::NOTIFICATION_SCHEMA_VERSION,
+            reason: mycopilot_protocol_rs::NotificationResyncReasonDto::CoreStarted,
             last_sequence,
             occurred_at: mycopilot_core::storage::now_ms(),
         },

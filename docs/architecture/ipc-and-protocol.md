@@ -147,7 +147,7 @@ Automation 在 UI 中名为 `Scheduled`，协议、代码和本文均使用 Auto
 - `AUTOMATION_PERMISSION_MODE_VERSION = 2`；
 - Automation JSON-RPC error code `-32045`，结构化 `data.type = automation`。
 
-这些都是 transport/domain envelope 版本，不是 SQLite schema。当前 canonical SQLite schema 是 v19，由 Rust Core storage 独立校验；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
+这些都是 transport/domain envelope 版本，不是 SQLite schema。当前 canonical SQLite schema 是 v20，由 Rust Core storage 独立校验；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
 
 Renderer-facing `AutomationsHostApi` 暴露十个 request：
 
@@ -158,16 +158,15 @@ listRuns / attentionSummary / acknowledgeAttention
 
 它还暴露三个可解除订阅的输入面：`onEvent`、`onResync` 和 `onOpenRequested`。对应 Electron channel 统一定义在 `HOST_CHANNELS.automations`；Preload 只转发固定 invoke/event，并在 listener ready 后发送 `resyncReady` 握手，不提供任意 automation method 或通用 IPC。
 
-Main ↔ Core Server 使用同名的十个业务 JSON-RPC method，并额外定义四个 **Host-only** 原生通知投递 method：
+Main ↔ Core Server 使用同名的十个 Automation 业务 JSON-RPC method。应用级通知另有独立协议；其中原生投递方法为 **Host-only**：
 
 ```text
-automation.notifications.claim
-automation.notifications.validate
-automation.notifications.acknowledge
-automation.notifications.release
+notifications.claim / validate / acknowledge / release / suppress
+notifications.list / summary / markSeen
+notifications.settings.get / settings.update
 ```
 
-Host-only method 只供 Main 的 `AutomationNotificationCoordinator` 使用，不得加入 Renderer Host API 或 Electron invoke allowlist。claim token、lease、最终 validation 和 ACK/release 都由 Core Server/Rust Core 持久状态校验；Renderer 的 attention 或点击行为不是投递授权。
+claim/validate/acknowledge/release/suppress/list/summary 只供 Main 的 `SystemNotificationCoordinator` 使用，不得加入 Renderer Host API 或 Electron invoke allowlist。Renderer 只获得 settings、原生点击导航，以及用于点击失败补偿的精确 event `markSeen`；没有通知列表或 badge API。claim token、lease、最终 validation 和 ACK/release 都由 Core Server/Rust Core 持久状态校验；Renderer 不是投递授权边界。
 
 Core Server 主动发送两类 notification：
 
@@ -211,7 +210,7 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 7. 订阅必须可解除，迟到事件必须通过身份和 generation 拒绝。
 8. Automation Host-only 通知投递 RPC 永远不进入 Renderer allowlist；`resyncReady` 只声明 listener ready，不授予业务权限。
 9. Automation event/resync 不是状态或系统通知送达 receipt；业务消费者必须回读 SQLite 派生的权威 snapshot。
-10. Automation DTO schema v1、permission mode v2 和 SQLite schema v19 必须分别命名、分别验证。
+10. Automation DTO schema v1、permission mode v2 和 SQLite schema v20 必须分别命名、分别验证。
 
 ## 代码真源
 
@@ -227,7 +226,8 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 - Main IPC 组合：`src/main/ipc.ts`
 - Main 领域 registrar：`src/main/ipc/*.ts`
 - Automation Main registrar：`src/main/ipc/automationIpc.ts`
-- Automation 原生通知 owner：`src/main/automation/automationNotificationCoordinator.ts`
+- 通用原生通知 owner：`src/main/notifications/systemNotificationCoordinator.ts`
+- 通知 Main registrar：`src/main/ipc/notificationIpc.ts`
 - 发送方信任包装：`src/main/ipc/trustedIpc.ts`
 - Renderer Host 客户端：`src/renderer/src/host/hostClient.ts`
 - Main/Core Server JSON-RPC：`src/main/core/jsonRpcClient.ts`、`src/main/core/coreServer.ts`
@@ -256,7 +256,7 @@ pnpm test:rust
 pnpm test:automation-core-e2e
 ```
 
-Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`、`src/preload/AutomationIpcBridge.test.ts`、`src/main/core/ipc.automation.test.ts`、`src/main/core/coreServer.automation.test.ts`、`src/main/core/automationNotificationCoordinator.test.ts` 和 `src/main/core/automationHostRealCore.integration.test.ts`。最后一项启动真实 Core Server，当前是独立 project，不包含在 `pnpm test:web` 或 `pnpm check` 中。
+Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`、`src/preload/AutomationIpcBridge.test.ts`、`src/main/core/ipc.automation.test.ts`、`src/main/core/coreServer.automation.test.ts` 和 `src/main/core/automationHostRealCore.integration.test.ts`。通用通知另由 `packages/protocol/src/notifications.test.ts`、`src/preload/NotificationIpcBridge.test.ts`、`src/main/core/ipc.notifications.test.ts` 与 `src/main/core/systemNotificationCoordinator.test.ts` 覆盖。Automation 真实 Core Server 集成测试当前是独立 project，不包含在 `pnpm test:web` 或 `pnpm check` 中。
 
 ## 变更检查表
 

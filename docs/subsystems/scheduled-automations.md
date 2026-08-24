@@ -163,12 +163,13 @@ Approval 和配置 blocked 可产生对应通知。通知先与业务状态在 S
 Main 显示前再次向 Core Server 校验 lease 和语义时效，收到 Electron `show` 后才 ACK；展示失败或 15 秒
 未确认则释放，60 秒后重试。Renderer 不能调用 claim/validate/acknowledge/release 这四个 Host-only RPC。
 
-点击通知时，Main 只发送经过严格解析的 `AutomationOpenRequest`：有 Conversation 时打开精确消息，
-否则打开 Scheduled 任务/Run；窗口尚未 ready 时暂存一次请求并在就绪后恢复、显示和聚焦。
+点击通知时，Main 只发送经过严格解析的 `NotificationOpenRequest`：有 Conversation 时打开精确消息，
+否则打开 Scheduled 任务/Run。合并通知选择当次可见快照中优先级最高、同级最新的可导航成员；窗口尚未
+ready 时以 FIFO 暂存最多 32 个请求，并在 `openRequestedReady` 后恢复、显示和聚焦。
 
 ## 7. 持久化、恢复与删除联动
 
-SQLite canonical schema 当前为 **v19**，而 Automation DTO、permission mode 和 Automation 表记录的
+SQLite canonical schema 当前为 **v20**，而 Automation DTO、permission mode 和 Automation 表记录的
 `schemaVersion` 各为 **v1**；这些版本域不能混用。四组权威数据为：
 
 - `automations`：配置、schedule、目标/权限 snapshot、revision、health、attention 和 tombstone；
@@ -216,7 +217,7 @@ Run 保持冻结 snapshot 并由正常取消/Trace 结算路径收口，避免�
   [`automation_report.rs`](../../crates/core/src/tools/automation_report.rs)
 - Main/Preload：
   [`automationIpc.ts`](../../src/main/ipc/automationIpc.ts)、
-  [`automationNotificationCoordinator.ts`](../../src/main/automation/automationNotificationCoordinator.ts)、
+  [`systemNotificationCoordinator.ts`](../../src/main/notifications/systemNotificationCoordinator.ts)、
   [`AutomationIpcBridge.ts`](../../src/preload/AutomationIpcBridge.ts)
 - Renderer：
   [`features/automations`](../../src/renderer/src/features/automations)
@@ -242,7 +243,7 @@ Core Server，验证 Host API 的 CRUD、CAS、`runNow`、历史和 attention；
 - UI 不能停止一个活动 Run；暂停只影响后续 schedule，删除会走取消请求。
 - 没有独立 attention inbox，也没有 Renderer toast 作为系统不支持原生通知时的 fallback。
 - Main 在“原生通知已显示、durable ACK 尚未完成”之间崩溃时，重启后可能重复显示一次。
-- Renderer ready 前只保留最后一个通知打开请求；连续点击可能覆盖较早请求。
+- Renderer ready 前最多保留 32 个通知打开请求；极端连续点击溢出时丢弃最早请求。
 - Scheduler 是单 Core Server 进程内轮询器，不是分布式 scheduler，也不承诺秒级准点。
 - Run/history 没有独立 retention 或 purge 策略；删除任务使用 tombstone 并保留持久历史。
 - 不支持 cron、一次性计划或结束日期；missed occurrences 会合并为一个 `recovery` Run，不逐次补跑。

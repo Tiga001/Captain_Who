@@ -26,10 +26,10 @@ use crate::storage::{
     conversation_model_context_repository, conversation_trace_repository,
     conversation_turn_rewrite_repository, file_draft_repository, guidance_repository,
     image_generation_repository, mcp_approval_envelope_repository,
-    model_request_observation_repository, now_ms, pending_action_repository,
-    preferences_repository, project_repository, provider_continuation_repository,
-    provider_transition_repository, skill_enablement_repository, storage_error,
-    turn_diff_repository, usage_repository, world_state_repository, StorageState,
+    model_request_observation_repository, notification_repository, now_ms,
+    pending_action_repository, preferences_repository, project_repository,
+    provider_continuation_repository, provider_transition_repository, skill_enablement_repository,
+    storage_error, turn_diff_repository, usage_repository, world_state_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -63,6 +63,7 @@ mod managed_artifacts;
 mod managed_command_workspaces;
 mod mcp_approval_envelopes;
 mod messages;
+mod notifications;
 mod pending_actions;
 mod provider_continuations;
 mod provider_transitions;

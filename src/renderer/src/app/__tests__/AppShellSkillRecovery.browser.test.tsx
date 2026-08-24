@@ -11,6 +11,7 @@ import type {
   AutomationEvent,
   AutomationOpenRequest,
   AutomationResync,
+  NotificationOpenRequest,
   PendingAgentActionSnapshot,
   AgentSteerRunOutput,
   SkillSelection,
@@ -31,6 +32,8 @@ const testState = vi.hoisted(() => ({
   automationEventListeners: new Set<(event: AutomationEvent) => void>(),
   automationOpenRequestListeners: new Set<(request: AutomationOpenRequest) => void>(),
   automationResyncListeners: new Set<(event: AutomationResync) => void>(),
+  notificationOpenRequestListeners: new Set<(request: NotificationOpenRequest) => void>(),
+  markNotificationsSeen: vi.fn(async () => undefined),
   cancelAgentRun: vi.fn(),
   collaborationRootIds: [] as Array<string | null>,
   deleteChatMessages: vi.fn(),
@@ -204,17 +207,28 @@ vi.mock('../../components/layout/ResizeHandle', () => ({ ResizeHandle: () => nul
 vi.mock('../../features/automations/useAutomationAttention', () => ({
   useAutomationAttention: () => ({ unreadCount: 4 })
 }))
+vi.mock('../../features/notifications/notificationClient', () => ({
+  markNotificationsSeen: testState.markNotificationsSeen,
+  onNotificationOpenRequested: (listener: (request: NotificationOpenRequest) => void) => {
+    testState.notificationOpenRequestListeners.add(listener)
+    return () => testState.notificationOpenRequestListeners.delete(listener)
+  }
+}))
 vi.mock('../../features/automations/ScheduledPageLayer', () => ({
   ScheduledPageLayer: ({
     externalNavigationRequest,
     initialPreferredDrawerWidth,
-    onPreferredDrawerWidthChange
+    onPreferredDrawerWidthChange,
+    openRequest
   }: {
     externalNavigationRequest?: { proceed: () => void; requestKey: number }
     initialPreferredDrawerWidth?: number
     onPreferredDrawerWidthChange?: (width: number) => void
+    openRequest?: { automationId: string; runId: string | null }
   }) => (
     <section data-testid="scheduled-page-layer">
+      <output data-testid="scheduled-open-automation">{openRequest?.automationId ?? 'none'}</output>
+      <output data-testid="scheduled-open-run">{openRequest?.runId ?? 'none'}</output>
       <output data-testid="scheduled-drawer-preferred-width">
         {initialPreferredDrawerWidth ?? 'none'}
       </output>
@@ -236,6 +250,7 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
     conversations,
     onArchiveConversation,
     onNewConversation,
+    onOpenSettings,
     onOpenScheduled,
     onRenameConversation,
     onSelectConversation,
@@ -247,6 +262,7 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
     conversations: ChatConversation[]
     onArchiveConversation: (conversationId: string) => void
     onNewConversation: (projectId?: string | null) => void
+    onOpenSettings: () => void
     onOpenScheduled: () => void
     onRenameConversation: (conversationId: string, title: string) => void
     onSelectConversation: (conversationId: string) => void
@@ -261,6 +277,9 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
       <output data-testid="scheduled-attention">{scheduledAttentionCount}</output>
       <button type="button" onClick={onOpenScheduled}>
         open-scheduled
+      </button>
+      <button type="button" onClick={onOpenSettings}>
+        open-settings
       </button>
       <button type="button" onClick={() => onNewConversation(null)}>
         new-conversation
@@ -299,7 +318,9 @@ vi.mock('../../features/rightSidebar/RightSidebar', () => ({
     <output data-testid="right-sidebar-conversation-id">{activeConversationId ?? 'none'}</output>
   )
 }))
-vi.mock('../AppShellSettingsView', () => ({ AppShellSettingsView: () => null }))
+vi.mock('../AppShellSettingsView', () => ({
+  AppShellSettingsView: () => <section data-testid="settings-view" />
+}))
 vi.mock('../../features/chat/NewConversationPage', () => ({
   NewConversationPage: ({ draft }: { draft: ChatComposerDraft }) => (
     <div>
@@ -921,6 +942,8 @@ beforeEach(() => {
   testState.automationEventListeners.clear()
   testState.automationOpenRequestListeners.clear()
   testState.automationResyncListeners.clear()
+  testState.notificationOpenRequestListeners.clear()
+  testState.markNotificationsSeen.mockReset().mockResolvedValue(undefined)
   testState.cancelAgentRun.mockReset().mockResolvedValue(true)
   testState.collaborationRootIds.length = 0
   testState.deleteChatMessages.mockReset().mockResolvedValue(undefined)
@@ -1140,6 +1163,89 @@ describe('scheduled workspace isolation', () => {
     await expect
       .element(screen.getByTestId('scheduled-drawer-preferred-width'))
       .toHaveTextContent('560')
+  })
+})
+
+describe('native notification navigation', () => {
+  it('opens the exact conversation message without an in-app notification surface', async () => {
+    const screen = await renderSelectedConversation()
+    await expect.poll(() => testState.notificationOpenRequestListeners.size).toBe(1)
+
+    const request: NotificationOpenRequest = {
+      schemaVersion: 1,
+      batchId: 'batch-conversation',
+      eventIds: ['notification-conversation'],
+      destination: {
+        kind: 'conversation',
+        conversationId: 'conversation-a',
+        messageId: 'assistant-a',
+        approvalActionId: null
+      }
+    }
+    for (const listener of testState.notificationOpenRequestListeners) listener(request)
+
+    expect(testState.markNotificationsSeen).toHaveBeenCalledWith({
+      kind: 'events',
+      eventIds: ['notification-conversation']
+    })
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    await expect
+      .element(screen.getByTestId('right-sidebar-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    await expect
+      .element(screen.getByTestId('scroll-target-message-id'))
+      .toHaveTextContent('assistant-a')
+    expect(screen.container.querySelector('.notification-center')).toBeNull()
+  })
+
+  it('opens the selected automation run directly', async () => {
+    const screen = await renderSelectedConversation()
+    await expect.poll(() => testState.notificationOpenRequestListeners.size).toBe(1)
+
+    const request: NotificationOpenRequest = {
+      schemaVersion: 1,
+      batchId: 'batch-automation',
+      eventIds: ['notification-automation'],
+      destination: {
+        kind: 'automation',
+        automationId: 'automation-notification',
+        runId: 'run-notification'
+      }
+    }
+    for (const listener of testState.notificationOpenRequestListeners) listener(request)
+
+    await expect
+      .element(screen.getByTestId('scheduled-open-automation'))
+      .toHaveTextContent('automation-notification')
+    await expect
+      .element(screen.getByTestId('scheduled-open-run'))
+      .toHaveTextContent('run-notification')
+  })
+
+  it('leaves the current workspace unchanged for an application-only fallback', async () => {
+    const screen = await renderSelectedConversation()
+    const chatSurface = screen.getByTestId('active-conversation-id').element()
+    const rightSurface = screen.getByTestId('right-sidebar-conversation-id').element()
+    await expect.poll(() => testState.notificationOpenRequestListeners.size).toBe(1)
+    await screen.getByRole('button', { name: 'open-settings' }).click()
+    await expect.element(screen.getByTestId('settings-view')).toBeInTheDocument()
+
+    const request: NotificationOpenRequest = {
+      schemaVersion: 1,
+      batchId: 'batch-application',
+      eventIds: ['notification-application'],
+      destination: { kind: 'application' }
+    }
+    for (const listener of testState.notificationOpenRequestListeners) listener(request)
+
+    expect(screen.getByTestId('active-conversation-id').element()).toBe(chatSurface)
+    expect(screen.getByTestId('right-sidebar-conversation-id').element()).toBe(rightSurface)
+    await expect.element(screen.getByTestId('settings-view')).toBeInTheDocument()
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-a')
   })
 })
 

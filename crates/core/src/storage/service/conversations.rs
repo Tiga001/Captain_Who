@@ -140,6 +140,12 @@ fn cleanup_conversation_owned_records(
 ) -> Result<(), String> {
     let deleted_at = now_ms();
     for conversation_id in conversation_ids {
+        notification_repository::resolve_notification_events_by_conversation_id_in_transaction(
+            connection,
+            conversation_id,
+            deleted_at,
+        )
+        .map_err(storage_error)?;
         usage_repository::roll_up_deleted_usage_for_conversation(
             connection,
             conversation_id,
@@ -269,6 +275,12 @@ fn delete_chat_message_records_in_transaction(
     message_ids: &[String],
     delete_protected_receipts: bool,
 ) -> Result<Vec<AttachmentRecord>, String> {
+    notification_repository::resolve_notification_events_by_message_ids_in_transaction(
+        transaction,
+        message_ids,
+        now_ms(),
+    )
+    .map_err(storage_error)?;
     automation_repository::terminalize_automation_runs_before_message_delete(
         transaction,
         conversation_id,
@@ -568,6 +580,15 @@ impl StorageService {
         let conversation_ids = project_conversation_ids(&connection, project_id)?;
         if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
+            let deleted_at = now_ms();
+            for conversation_id in &conversation_ids {
+                notification_repository::resolve_notification_events_by_conversation_id_in_transaction(
+                    &transaction,
+                    conversation_id,
+                    deleted_at,
+                )
+                .map_err(storage_error)?;
+            }
             automation_repository::terminalize_automation_runs_before_project_delete(
                 &transaction,
                 project_id,
@@ -2174,6 +2195,12 @@ impl StorageService {
             })?;
         } else {
             let transaction = connection.transaction().map_err(storage_error)?;
+            notification_repository::resolve_notification_events_by_conversation_id_in_transaction(
+                &transaction,
+                conversation_id,
+                now_ms(),
+            )
+            .map_err(storage_error)?;
             automation_repository::terminalize_automation_runs_before_conversation_delete(
                 &transaction,
                 &[conversation_id.to_string()],

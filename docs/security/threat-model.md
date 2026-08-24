@@ -104,7 +104,7 @@ Trace、普通日志、Renderer 事件、错误文案、命令行或测试 snaps
 
 Automation notification outbox 持久保存有界 title/body，并由 Electron Main 以短 lease 消费。Main 在原生显示前向 Core Server 做最终语义校验，只有 Electron `show` 事件后才 ACK；任务删除、blocked 修复或 Approval settlement 后的 stale delivery 会被 suppress。原生通知不是授权边界，也不是可靠告警通道：平台不支持时不会 claim，系统权限可能拒绝显示，当前也没有 Renderer toast fallback。
 
-通知内容可能显示在操作系统通知中心或锁屏，不能承载 secret、完整 Tool payload 或敏感模型输出。进程在 `show` 与 ACK 之间崩溃时，lease 恢复可能导致一次重复通知；若 Renderer 尚未 ready，连续通知点击当前只保留最后一个 pending open request。这些限制不得通过自动批准、扩大轮询重试或跳过最终校验来规避。
+通知内容可能显示在操作系统通知中心或锁屏，不能承载 secret、完整 Tool payload 或敏感模型输出。进程在 `show` 与 ACK 之间崩溃时，lease 恢复可能导致一次重复通知；若 Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open request，溢出时丢弃最早请求。这些限制不得通过自动批准、无界扩大重试或跳过最终校验来规避。
 
 ## 持久化与恢复
 
@@ -144,6 +144,6 @@ fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。
 [`crates/core/src/tools`](../../crates/core/src/tools)、
 [`src/main/browser`](../../src/main/browser)、
 [`crates/core-server/src/application/automation`](../../crates/core-server/src/application/automation)、
-[`src/main/automation/automationNotificationCoordinator.ts`](../../src/main/automation/automationNotificationCoordinator.ts)、
+[`src/main/notifications/systemNotificationCoordinator.ts`](../../src/main/notifications/systemNotificationCoordinator.ts)、
 [`crates/core-server/src/application/mcp`](../../crates/core-server/src/application/mcp) 和
 [`canonical_schema.sql`](../../crates/core/src/storage/canonical_schema.sql)。

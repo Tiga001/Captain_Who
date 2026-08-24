@@ -144,6 +144,12 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
   }, [colorSchemePreference])
 
   useEffect(() => {
+    // Renderer owns the application language. Main keeps only a validated, durable mirror so
+    // native notifications can use the same catalog before a Renderer exists on the next launch.
+    void hostClient.notifications?.setLocale?.(language).catch(() => undefined)
+  }, [language])
+
+  useEffect(() => {
     if (!window.matchMedia) return
 
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')

@@ -524,6 +524,27 @@ where
                 });
                 continue;
             }
+            if is_notification_request_method(&request.method) {
+                let request_id = request.id.clone();
+                let request_storage = Arc::clone(&storage);
+                let request_outbound = outbound.clone();
+                tokio::spawn(async move {
+                    let response = match tokio::task::spawn_blocking(move || {
+                        handle_notification_request(&request_storage, request)
+                    })
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => response_error(
+                            Some(request_id),
+                            -32000,
+                            format!("Notification storage task failed: {error}"),
+                        ),
+                    };
+                    let _ = enqueue_outbound(&request_outbound, response);
+                });
+                continue;
+            }
             if request.method == OFFICE_GET_STATUS_METHOD {
                 let request_outbound = outbound.clone();
                 let request_service = agent_service.clone();

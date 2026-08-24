@@ -83,32 +83,32 @@ Core Server 在开发环境由 `cargo run -p mycopilot-core-server --bin core-se
 
 macOS 的普通关闭是 close-to-hide。全屏关闭需要先退出全屏再隐藏；真正退出时 `prepareForQuit()` 关闭该行为。非 macOS 在所有窗口关闭后退出进程。
 
-## Automation 原生通知
+## 应用级原生通知
 
-Automation 在 UI 中名为 `Scheduled`；原生通知交付由 Main 拥有，Automation task、Automation Run、
-attention 和通知 outbox 则由 Core Server/Rust Core 的 SQLite 持有。任务、Run 与通知策略的完整契约见
+原生通知交付由 Main 拥有；HumanRoot 与 Automation 的通知事实、合并批次和投递状态由 Core Server/
+Rust Core 的 SQLite 持有。Automation task、Run 与通知策略的完整契约见
 [Scheduled Automation](../subsystems/scheduled-automations.md)。完整链路为：
 
 ```text
-SQLite automation_notification_outbox
+SQLite notification facts / batches
   -> Core Server Host-only claim/validate/acknowledge/release RPC
-  -> Main AutomationNotificationCoordinator
+  -> Main SystemNotificationCoordinator
   -> Electron Notification
-  -> trusted, listener-ready Renderer AutomationOpenRequest
+  -> trusted, listener-ready Renderer NotificationOpenRequest
 ```
 
-`automation.event` 和 `automation.resync` 只唤醒 coordinator、降低轮询延迟或提示 Renderer 重载；它们不是交付真相。Main 每 30 秒主动 drain，并在启动时立即尝试一次；当前单批最多 10 条、claim lease 60 秒、显示超时 15 秒，原生显示失败后延迟 60 秒重试。
+`notification.event` 和 `notification.resync` 只唤醒 coordinator、降低轮询延迟或提示通知设置重载；它们不是交付真相。Main 每 30 秒主动 drain，并在启动时立即尝试一次；当前单次最多领取 10 个批次、claim lease 60 秒、显示超时 15 秒，原生显示失败后延迟 60 秒重试。
 
 交付必须保持以下顺序：
 
-1. 平台不支持 Electron Notification 时不 claim，outbox 与 attention 留在 SQLite。
+1. 平台不支持 Electron Notification 时把批次持久结算为 suppressed；Automation attention 仍留在 SQLite。
 2. Main claim 后在显示前再次调用 Core Server validate，已删除、已修复或不再满足 policy 的通知不会显示。
 3. 只有 Electron 发出 `show` 后才 acknowledge；创建、`show()`、异步 `failed` 或显示超时失败时 release claim。
 4. 同一 Main 进程若已经显示但 ACK 暂时失败，只重试 ACK，不重复显示。若进程恰在“系统已显示、ACK 未提交”窗口崩溃，lease 恢复后仍可能重复显示，这是当前原生 API 边界的残余限制。
 
-通知点击不会直接操作 React state。Main 把经过共享 parser 校验的 `AutomationOpenRequest` 交给最近一个已通过 `resyncReady` 握手、尚未销毁的受信 Renderer；必要时恢复、显示并聚焦主窗口。Renderer 尚未 ready 时，Main 只保留最新 pending open request，待 listener ready 后交付。请求只包含 automation/run 和可选 Conversation/message identity，不包含原生 Notification 对象、绝对路径或任意导航 URL。
+通知点击不会直接操作 React state。Main 把经过共享 parser 校验的 `NotificationOpenRequest` 交给最近一个已通过 `openRequestedReady` 握手、尚未销毁的受信 Renderer；必要时恢复、显示并聚焦主窗口。Renderer 尚未 ready 时，Main 以 FIFO 暂存最多 32 个请求，溢出时丢弃最早请求。单项点击打开精确 Conversation/message 或 Automation/run；合并通知从用户实际看到且仍有效的快照中，按 Approval、配置 blocked、失败、重要更新、取消、完成的顺序选择最新可导航成员。请求不包含原生 Notification 对象、绝对路径或任意导航 URL。
 
-Automation DTO/notification envelope 使用 schema v1；它与 SQLite canonical schema v19 是两条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
+Automation DTO/notification envelope 使用 schema v1；它与 SQLite canonical schema v20 是两条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
 
 ## 应用数据与环境权威
 
@@ -147,7 +147,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 7. 开发与打包可以使用不同的可执行文件位置，但不能改变上述权限边界。
 8. Renderer 无权 claim、validate、acknowledge 或 release 原生通知；这四个方法仅属于 Main ↔ Core Server 的 Host-only JSON-RPC。
 9. Automation event/resync 和本机定时器只能触发重新读取 outbox/快照，不能被当作通知已显示或 Automation Run 已终结的证据。
-10. Automation DTO schema v1 与 SQLite schema v19 不得由 Main 合并为单一“自动化版本”。
+10. Automation DTO schema v1 与 SQLite schema v20 不得由 Main 合并为单一“自动化版本”。
 
 ## 代码真源
 
@@ -157,7 +157,8 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 - Core Server 类型化门面：`src/main/core/coreServer.ts`
 - Preload 入口：`src/preload/index.ts`
 - Automation Main IPC：`src/main/ipc/automationIpc.ts`
-- Automation 原生通知：`src/main/automation/automationNotificationCoordinator.ts`
+- 通用原生通知：`src/main/notifications/systemNotificationCoordinator.ts`
+- 通知 IPC：`src/main/ipc/notificationIpc.ts`
 - Automation Preload bridge：`src/preload/AutomationIpcBridge.ts`
 - Renderer Provider 树：`src/renderer/src/App.tsx`
 - Renderer 启动阶段：`src/renderer/src/features/startup/appStartupStages.ts`
@@ -173,7 +174,8 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 - `src/main/core/jsonRpcClient.environment.test.ts`
 - `src/main/terminal/TerminalBridge.test.ts`
 - `src/main/core/managedWebviewSecurity.test.ts`
-- `src/main/core/automationNotificationCoordinator.test.ts`
+- `src/main/core/systemNotificationCoordinator.test.ts`
+- `src/main/core/ipc.notifications.test.ts`
 - `src/main/core/ipc.automation.test.ts`
 - `src/preload/AutomationIpcBridge.test.ts`
 - `src/main/core/automationHostRealCore.integration.test.ts`
@@ -212,4 +214,4 @@ pnpm test:automation-core-e2e
 - Renderer 启动阶段是固定清单，没有通用插件式阶段注册机制。
 - Automation 原生通知依赖 Electron/操作系统支持；不支持时只保留 Scheduled attention，不会显示系统通知。
 - “系统已显示、Core Server ACK 未提交”的崩溃窗口可能导致一次重复通知，当前没有 OS 级 exactly-once receipt。
-- Main 当前只保留最新的 pending Automation notification navigation；多窗口交付策略仍按最近 listener-ready 的受信 Renderer 处理。
+- Main 最多保留 32 个 pending notification navigation，溢出时丢弃最早请求；多窗口交付策略仍按最近 listener-ready 的受信 Renderer 处理。
