@@ -79,7 +79,14 @@ export const STARTUP_AMBIENT_PHRASE_GROUPS = [
 
 const STARTUP_CHARACTER_INTERVAL_MS = {
   'zh-CN': 74,
-  'en-US': 52
+  'zh-TW': 74,
+  'en-US': 52,
+  'en-GB': 52,
+  'ko-KR': 74,
+  'ja-JP': 74,
+  'fr-FR': 52,
+  'it-IT': 52,
+  'ru-RU': 52
 } as const satisfies Record<AppLanguage, number>
 
 export function getStartupCharacterIntervalMs(language: AppLanguage): number {

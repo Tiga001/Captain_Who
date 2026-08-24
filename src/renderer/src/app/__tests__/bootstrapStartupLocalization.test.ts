@@ -23,6 +23,15 @@ describe('getBootstrapStartupCopy', () => {
     })
   })
 
+  it('uses a newly registered catalog before React mounts', () => {
+    expect(getBootstrapStartupCopy(JSON.stringify({ language: 'ja-JP' }))).toEqual({
+      ambient: getTranslation('ja-JP', 'startup.ambient.deepThinking'),
+      direction: 'ltr',
+      language: 'ja-JP',
+      loading: getTranslation('ja-JP', 'startup.loading')
+    })
+  })
+
   it.each([null, '{invalid json', JSON.stringify({ language: 'unsupported' })])(
     'falls back safely for invalid stored configuration: %s',
     (rawStoredConfig) => {

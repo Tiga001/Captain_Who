@@ -88,8 +88,7 @@ export function SkillInstallationToolActivity({
     result?.ok === false ||
     settledStatus === 'failed' ||
     status === 'failed' ||
-    status === 'uncertain' ||
-    status === 'expired'
+    status === 'uncertain'
   const cancelled = settledStatus === 'cancelled'
   const stopped = status === 'rejected' || cancelled
   const pending =
@@ -101,21 +100,19 @@ export function SkillInstallationToolActivity({
   const label =
     status === 'uncertain'
       ? t('agent.skillInstallation.uncertain')
-      : status === 'expired'
-        ? t('agent.skillInstallation.prepareExpired')
-        : status === 'rejected'
-          ? t('agent.skillInstallation.rejected')
-          : cancelled
-            ? t('agent.skillInstallation.cancelled')
-            : failed
-              ? t('agent.skillInstallation.installFailed')
-              : status === 'installed'
-                ? t('agent.skillInstallation.installed')
-                : status === 'already_installed'
-                  ? t('agent.skillInstallation.alreadyInstalled')
-                  : status === 'waiting_for_approval'
-                    ? t('agent.skillInstallation.waitingApproval')
-                    : t('agent.skillInstallation.installing')
+      : status === 'rejected'
+        ? t('agent.skillInstallation.rejected')
+        : cancelled
+          ? t('agent.skillInstallation.cancelled')
+          : failed
+            ? t('agent.skillInstallation.installFailed')
+            : status === 'installed'
+              ? t('agent.skillInstallation.installed')
+              : status === 'already_installed'
+                ? t('agent.skillInstallation.alreadyInstalled')
+                : status === 'waiting_for_approval'
+                  ? t('agent.skillInstallation.waitingApproval')
+                  : t('agent.skillInstallation.installing')
   const Icon = failed
     ? CircleX
     : stopped

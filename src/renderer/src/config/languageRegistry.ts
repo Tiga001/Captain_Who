@@ -1,5 +1,12 @@
+import { enGBTranslations } from './frontendTranslations.enGB'
 import { enUSTranslations } from './frontendTranslations.enUS'
+import { frFRTranslations } from './frontendTranslations.frFR'
+import { itITTranslations } from './frontendTranslations.itIT'
+import { jaJPTranslations } from './frontendTranslations.jaJP'
+import { koKRTranslations } from './frontendTranslations.koKR'
+import { ruRUTranslations } from './frontendTranslations.ruRU'
 import { zhCNTranslations } from './frontendTranslations.zhCN'
+import { zhTWTranslations } from './frontendTranslations.zhTW'
 
 export type TranslationKey = keyof typeof zhCNTranslations
 export type LanguageDirection = 'ltr' | 'rtl'
@@ -18,10 +25,45 @@ export const languageRegistry = {
     displayName: '中文（中国）',
     translations: zhCNTranslations
   },
+  'zh-TW': {
+    direction: 'ltr',
+    displayName: '繁體中文',
+    translations: zhTWTranslations
+  },
   'en-US': {
     direction: 'ltr',
     displayName: 'English (United States)',
     translations: enUSTranslations
+  },
+  'en-GB': {
+    direction: 'ltr',
+    displayName: 'English (United Kingdom)',
+    translations: enGBTranslations
+  },
+  'ko-KR': {
+    direction: 'ltr',
+    displayName: '한국어',
+    translations: koKRTranslations
+  },
+  'ja-JP': {
+    direction: 'ltr',
+    displayName: '日本語',
+    translations: jaJPTranslations
+  },
+  'fr-FR': {
+    direction: 'ltr',
+    displayName: 'Français',
+    translations: frFRTranslations
+  },
+  'it-IT': {
+    direction: 'ltr',
+    displayName: 'Italiano',
+    translations: itITTranslations
+  },
+  'ru-RU': {
+    direction: 'ltr',
+    displayName: 'Русский',
+    translations: ruRUTranslations
   }
 } as const satisfies Record<string, LanguageDefinition>
 

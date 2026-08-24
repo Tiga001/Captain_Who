@@ -78,8 +78,12 @@ export function localizedScheduleSummary(
   t: Translate,
   language: AppLanguage
 ): string {
+  const usesIdeographicListSeparator =
+    language === 'zh-CN' || language === 'zh-TW' || language === 'ja-JP'
   const weekdayList = (weekdays: readonly AutomationWeekday[]) =>
-    weekdays.map((weekday) => t(WEEKDAY_KEYS[weekday])).join(language === 'zh-CN' ? '、' : ', ')
+    weekdays
+      .map((weekday) => t(WEEKDAY_KEYS[weekday]))
+      .join(usesIdeographicListSeparator ? '、' : ', ')
   return formatScheduleSummary(task.schedule, {
     interval: (amount, unit) =>
       formatTranslation(t, 'automation.summaryInterval', {
