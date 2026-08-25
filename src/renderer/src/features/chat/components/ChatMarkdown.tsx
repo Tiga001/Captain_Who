@@ -1,5 +1,5 @@
-import { Children, isValidElement, type ReactNode } from 'react'
-import ReactMarkdown from 'react-markdown'
+import { Children, isValidElement, type ComponentProps, type ReactNode } from 'react'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
@@ -21,6 +21,15 @@ interface MarkdownLine {
   body: string
   eol: string
 }
+
+const REMARK_PLUGINS = [remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkBreaks]
+const REMARK_PLUGINS_WITH_MATH = [
+  remarkGfm,
+  remarkNormalizeCjkAutolinkBoundaries,
+  remarkMath,
+  remarkBreaks
+]
+const REHYPE_PLUGINS_WITH_MATH = [rehypeKatex]
 
 function readMarkdownCodeText(node: ReactNode): string {
   if (typeof node === 'string' || typeof node === 'number') return String(node)
@@ -411,88 +420,91 @@ function openMarkdownLink(href: string) {
   })
 }
 
-export function ChatMarkdown({ className, content, enableMath = true }: ChatMarkdownProps) {
+function MarkdownPre({ children }: ComponentProps<'pre'>) {
+  const codeElement = Children.toArray(children).find(
+    (child) => isValidElement(child) && child.type === 'code'
+  )
+
+  if (!isValidElement(codeElement)) return <pre>{children}</pre>
+
+  const codeProps = codeElement.props as {
+    children?: ReactNode
+    className?: string
+  }
+  const language = /(?:^|\s)language-([^\s]+)/.exec(codeProps.className ?? '')?.[1]
+
+  return <ChatCodeBlock code={readMarkdownCodeText(codeProps.children)} language={language} />
+}
+
+function MarkdownAnchor({ children, href, ...props }: ComponentProps<'a'>) {
+  const normalizedHref = normalizeMarkdownExternalHref(href)
+
+  return (
+    <a
+      {...props}
+      href={normalizedHref ?? href}
+      onClick={(event) => {
+        if (!normalizedHref) return
+        event.preventDefault()
+        openMarkdownLink(normalizedHref)
+      }}
+      rel="noreferrer"
+      target="_blank"
+    >
+      {children}
+    </a>
+  )
+}
+
+function MarkdownImage({ alt, src, ...props }: ComponentProps<'img'>) {
   const openImagePreview = useImagePreview()
+  const imageSrc = typeof src === 'string' ? src : ''
+
+  const handleOpenPreview = () => {
+    if (!imageSrc) return
+    openImagePreview({
+      alt: alt ?? '',
+      fileName: alt ?? undefined,
+      src: imageSrc
+    })
+  }
+
+  return (
+    <img
+      {...props}
+      alt={alt ?? ''}
+      onClick={handleOpenPreview}
+      role={imageSrc ? 'button' : undefined}
+      src={src}
+      tabIndex={imageSrc ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!imageSrc) return
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        handleOpenPreview()
+      }}
+    />
+  )
+}
+
+// Keep renderer identities stable while streaming Markdown grows. Recreating this map on every
+// delta remounts completed code blocks and makes their syntax highlighting visibly flash.
+const CHAT_MARKDOWN_COMPONENTS: Components = {
+  a: MarkdownAnchor,
+  img: MarkdownImage,
+  pre: MarkdownPre
+}
+
+export function ChatMarkdown({ className, content, enableMath = true }: ChatMarkdownProps) {
   const markdownClassName = ['chat-markdown', className].filter(Boolean).join(' ')
   const normalizedContent = enableMath ? normalizeMarkdownMath(content) : content
 
   return (
     <div className={markdownClassName}>
       <ReactMarkdown
-        remarkPlugins={
-          enableMath
-            ? [remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkMath, remarkBreaks]
-            : [remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkBreaks]
-        }
-        rehypePlugins={enableMath ? [rehypeKatex] : []}
-        components={{
-          pre: ({ children }) => {
-            const codeElement = Children.toArray(children).find(
-              (child) => isValidElement(child) && child.type === 'code'
-            )
-
-            if (!isValidElement(codeElement)) return <pre>{children}</pre>
-
-            const codeProps = codeElement.props as {
-              children?: ReactNode
-              className?: string
-            }
-            const language = /(?:^|\s)language-([^\s]+)/.exec(codeProps.className ?? '')?.[1]
-
-            return (
-              <ChatCodeBlock code={readMarkdownCodeText(codeProps.children)} language={language} />
-            )
-          },
-          a: ({ children, href, ...props }) => {
-            const normalizedHref = normalizeMarkdownExternalHref(href)
-
-            return (
-              <a
-                {...props}
-                href={normalizedHref ?? href}
-                onClick={(event) => {
-                  if (!normalizedHref) return
-                  event.preventDefault()
-                  openMarkdownLink(normalizedHref)
-                }}
-                rel="noreferrer"
-                target="_blank"
-              >
-                {children}
-              </a>
-            )
-          },
-          img: ({ alt, src, ...props }) => {
-            const imageSrc = typeof src === 'string' ? src : ''
-
-            return (
-              <img
-                {...props}
-                alt={alt ?? ''}
-                onClick={() =>
-                  openImagePreview({
-                    alt: alt ?? '',
-                    fileName: alt ?? undefined,
-                    src: imageSrc
-                  })
-                }
-                role={imageSrc ? 'button' : undefined}
-                src={src}
-                tabIndex={imageSrc ? 0 : undefined}
-                onKeyDown={(event) => {
-                  if (!imageSrc) return
-                  if (event.key !== 'Enter' && event.key !== ' ') return
-                  event.preventDefault()
-                  openImagePreview({
-                    alt: alt ?? '',
-                    fileName: alt ?? undefined,
-                    src: imageSrc
-                  })
-                }}
-              />
-            )
-          }
-        }}
+        remarkPlugins={enableMath ? REMARK_PLUGINS_WITH_MATH : REMARK_PLUGINS}
+        rehypePlugins={enableMath ? REHYPE_PLUGINS_WITH_MATH : undefined}
+        components={CHAT_MARKDOWN_COMPONENTS}
       >
         {normalizedContent}
       </ReactMarkdown>

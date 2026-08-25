@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy, WrapText } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import {
@@ -16,6 +16,12 @@ interface ChatCodeBlockProps {
 interface ResolvedLanguage {
   id: GitReviewSyntaxLanguageId
   label: string
+}
+
+interface HighlightSnapshot {
+  code: string
+  language: GitReviewSyntaxLanguageId
+  lines: readonly SyntaxHighlightLine[]
 }
 
 const SUPPORTED_LANGUAGE_IDS = new Set<string>(GIT_REVIEW_SYNTAX_LANGUAGE_IDS)
@@ -148,7 +154,7 @@ function HighlightedCode({ lines }: { lines: readonly SyntaxHighlightLine[] }) {
   )
 }
 
-export function ChatCodeBlock({ code, language }: ChatCodeBlockProps) {
+function ChatCodeBlockComponent({ code, language }: ChatCodeBlockProps) {
   const { t } = useFrontendConfig()
   const [wrapped, setWrapped] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -168,12 +174,39 @@ export function ChatCodeBlock({ code, language }: ChatCodeBlockProps) {
     enabled: resolvedLanguage.id !== 'text' && settledCode.length > 0,
     language: resolvedLanguage.id
   })
-  const highlightedLines = useMemo(() => {
-    if (settledCode !== code || highlightState.status !== 'ready') return null
+  const settledHighlightedLines = useMemo(() => {
+    if (highlightState.status !== 'ready') return null
     if (highlightState.result.mode !== 'highlighted') return null
-    if (reconstructHighlightedCode(highlightState.result.lines) !== code) return null
+    if (reconstructHighlightedCode(highlightState.result.lines) !== settledCode) return null
     return highlightState.result.lines
-  }, [code, highlightState, settledCode])
+  }, [highlightState, settledCode])
+  const [highlightSnapshot, setHighlightSnapshot] = useState<HighlightSnapshot | null>(null)
+
+  useLayoutEffect(() => {
+    if (!settledHighlightedLines) return
+    setHighlightSnapshot((current) => {
+      if (
+        current?.code === settledCode &&
+        current.language === resolvedLanguage.id &&
+        current.lines === settledHighlightedLines
+      ) {
+        return current
+      }
+      return {
+        code: settledCode,
+        language: resolvedLanguage.id,
+        lines: settledHighlightedLines
+      }
+    })
+  }, [resolvedLanguage.id, settledCode, settledHighlightedLines])
+
+  const exactHighlightedLines = settledCode === code ? settledHighlightedLines : null
+  const highlightedPrefix =
+    !exactHighlightedLines &&
+    highlightSnapshot?.language === resolvedLanguage.id &&
+    code.startsWith(highlightSnapshot.code)
+      ? highlightSnapshot
+      : null
 
   useEffect(
     () => () => {
@@ -232,9 +265,27 @@ export function ChatCodeBlock({ code, language }: ChatCodeBlockProps) {
       </div>
       <div className="chat-code-block__scroller">
         <pre>
-          <code>{highlightedLines ? <HighlightedCode lines={highlightedLines} /> : code}</code>
+          <code>
+            {exactHighlightedLines ? (
+              <HighlightedCode lines={exactHighlightedLines} />
+            ) : highlightedPrefix ? (
+              <>
+                <HighlightedCode lines={highlightedPrefix.lines} />
+                {code.slice(highlightedPrefix.code.length)}
+              </>
+            ) : (
+              code
+            )}
+          </code>
         </pre>
       </div>
     </section>
   )
 }
+
+export const ChatCodeBlock = memo(
+  ChatCodeBlockComponent,
+  (previous, next) => previous.code === next.code && previous.language === next.language
+)
+
+ChatCodeBlock.displayName = 'ChatCodeBlock'

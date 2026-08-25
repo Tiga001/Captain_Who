@@ -6,6 +6,7 @@ import { ChatMarkdown } from '../components/ChatMarkdown'
 
 const markdownMocks = vi.hoisted(() => ({
   copyTextToClipboard: vi.fn(async () => undefined),
+  highlightInputs: [] as Array<{ code: string; language: string }>,
   highlightState: {
     current: { status: 'idle' } as
       | { status: 'idle' }
@@ -43,7 +44,10 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 vi.mock('../../syntaxHighlighting', () => ({
-  useSyntaxHighlight: () => markdownMocks.highlightState.current
+  useSyntaxHighlight: (input: { code: string; language: string }) => {
+    markdownMocks.highlightInputs.push(input)
+    return markdownMocks.highlightState.current
+  }
 }))
 
 vi.mock('../components/chatMessageItemUtils', () => ({
@@ -55,11 +59,12 @@ vi.mock('../../../lib/externalLinks', () => ({
 }))
 
 vi.mock('../components/ImagePreview', () => ({
-  useImagePreview: () => ({ openImagePreview: vi.fn() })
+  useImagePreview: () => vi.fn()
 }))
 
 beforeEach(() => {
   markdownMocks.copyTextToClipboard.mockClear()
+  markdownMocks.highlightInputs.length = 0
   markdownMocks.highlightState.current = { status: 'idle' }
 })
 
@@ -216,6 +221,100 @@ describe('ChatMarkdown fenced code blocks', () => {
     expect(keyword?.textContent).toBe('const')
     expect(keyword?.style.color).toBe('var(--git-review-syntax-keyword)')
     expect(screen.container.querySelector('pre code')?.textContent).toBe('const value = 1\n')
+  })
+
+  it('keeps completed code blocks mounted and preserves toolbar state as later prose streams in', async () => {
+    const initialContent = ['```ts', 'const answer = 42', '```', '', 'First paragraph.'].join('\n')
+    const screen = await render(<ChatMarkdown content={initialContent} />)
+    const initialBlock = screen.container.querySelector('.chat-code-block')
+
+    await screen.getByRole('button', { name: 'Wrap lines' }).click()
+    const highlightCallCount = markdownMocks.highlightInputs.length
+
+    await screen.rerender(
+      <ChatMarkdown content={`${initialContent}\n\nA later streamed paragraph.`} />
+    )
+
+    expect(screen.container.querySelector('.chat-code-block')).toBe(initialBlock)
+    expect(initialBlock?.classList.contains('is-wrapped')).toBe(true)
+    expect(markdownMocks.highlightInputs).toHaveLength(highlightCallCount)
+  })
+
+  it('keeps the last highlighted prefix colored while an active code block receives a new suffix', async () => {
+    markdownMocks.highlightState.current = {
+      result: {
+        cacheKey: 'chat-code:prefix',
+        language: 'typescript',
+        lines: [
+          {
+            line: 0,
+            tokens: [
+              {
+                color: 'var(--git-review-syntax-keyword)',
+                content: 'const',
+                end: 5,
+                start: 0
+              },
+              { content: ' value = 1', end: 15, start: 5 }
+            ]
+          },
+          { line: 1, tokens: [] }
+        ],
+        mode: 'highlighted'
+      },
+      status: 'ready'
+    }
+
+    const initialContent = ['```ts', 'const value = 1', '```'].join('\n')
+    const screen = await render(<ChatMarkdown content={initialContent} />)
+    const keyword = screen.container.querySelector<HTMLSpanElement>('.chat-code-block code span')
+
+    await screen.rerender(
+      <ChatMarkdown
+        content={['```ts', 'const value = 1', 'console.log(value)', '```'].join('\n')}
+      />
+    )
+
+    expect(screen.container.querySelector('.chat-code-block code span')).toBe(keyword)
+    expect(keyword?.style.color).toBe('var(--git-review-syntax-keyword)')
+    expect(screen.container.querySelector('pre code')?.textContent).toBe(
+      'const value = 1\nconsole.log(value)\n'
+    )
+  })
+
+  it('does not reuse a highlighted snapshot after a non-append code edit', async () => {
+    markdownMocks.highlightState.current = {
+      result: {
+        cacheKey: 'chat-code:before-edit',
+        language: 'typescript',
+        lines: [
+          {
+            line: 0,
+            tokens: [
+              {
+                color: 'var(--git-review-syntax-keyword)',
+                content: 'const',
+                end: 5,
+                start: 0
+              },
+              { content: ' value = 1', end: 15, start: 5 }
+            ]
+          },
+          { line: 1, tokens: [] }
+        ],
+        mode: 'highlighted'
+      },
+      status: 'ready'
+    }
+
+    const screen = await render(
+      <ChatMarkdown content={['```ts', 'const value = 1', '```'].join('\n')} />
+    )
+
+    await screen.rerender(<ChatMarkdown content={['```ts', 'let value = 2', '```'].join('\n')} />)
+
+    expect(screen.container.querySelector('.chat-code-block code span')).toBeNull()
+    expect(screen.container.querySelector('pre code')?.textContent).toBe('let value = 2\n')
   })
 
   it('keeps inline code on the existing inline-code path', async () => {
