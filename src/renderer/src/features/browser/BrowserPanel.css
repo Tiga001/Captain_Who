@@ -283,18 +283,85 @@
   line-height: 1.35;
 }
 
-.browser-panel__error {
+.browser-panel__fallback {
   position: absolute;
   z-index: 2;
-  left: 18px;
-  right: 18px;
-  bottom: 18px;
-  padding: 10px 12px;
-  color: var(--mc-color-text-danger);
-  background: var(--mc-color-surface-error-subtle);
-  border: 1px solid var(--mc-color-border-error);
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  padding: clamp(24px, 8vw, 72px);
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-right-panel);
+}
+
+.browser-panel__fallback > svg {
+  width: 50px;
+  height: 50px;
+  margin-bottom: 24px;
+  color: var(--mc-color-icon-accent);
+  stroke-width: 1.7;
+}
+
+.browser-panel__fallback h2 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: var(--mc-font-weight-strong);
+  line-height: 1.25;
+}
+
+.browser-panel__fallback p,
+.browser-panel__fallback ul {
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-md);
+  line-height: 1.6;
+}
+
+.browser-panel__fallback p {
+  margin: 16px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.browser-panel__fallback p strong {
+  color: var(--mc-color-text-primary);
+}
+
+.browser-panel__fallback ul {
+  margin: 22px 0 0;
+  padding-left: 24px;
+}
+
+.browser-panel__fallback code {
+  margin-top: 22px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.browser-panel__fallback button {
+  min-height: 38px;
+  margin-top: 28px;
+  padding: 0 16px;
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-icon-accent);
+  border: 0;
   border-radius: var(--mc-radius-sm);
-  font-size: var(--mc-font-size-sm);
+  font: inherit;
+  font-weight: var(--mc-font-weight-strong);
+  cursor: pointer;
+}
+
+@media (max-width: 460px) {
+  .browser-panel__fallback {
+    justify-content: flex-start;
+    padding: 36px 24px;
+  }
+
+  .browser-panel__fallback h2 {
+    font-size: 22px;
+  }
 }
 
 @keyframes browser-panel-spin {

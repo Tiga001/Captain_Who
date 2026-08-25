@@ -14,9 +14,9 @@ vi.mock('../../browser/useBrowserWebview', () => ({
   useBrowserWebview: () => ({
     clearBrowsingData: vi.fn(async () => undefined),
     currentUrl: null,
-    errorMessage: null,
     goBack: vi.fn(async () => undefined),
     goForward: vi.fn(async () => undefined),
+    hostFallbackError: null,
     isLoaded: false,
     navigationState: {
       canGoBack: false,

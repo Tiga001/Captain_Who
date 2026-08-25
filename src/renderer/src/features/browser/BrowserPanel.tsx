@@ -7,7 +7,8 @@ import {
   Minus,
   MoreVertical,
   Plus,
-  RefreshCw
+  RefreshCw,
+  WifiOff
 } from 'lucide-react'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 import { createBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
@@ -85,21 +86,22 @@ export function BrowserPanel({
   const [addressValue, setAddressValue] = useState('')
   const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const [surfaceInstanceId, setSurfaceInstanceId] = useState<string | null>(null)
   const [zoom, setZoomState] = useState(1)
   const viewId = surfaceId ?? browserSurfaceIdForPage(pageId)
   const {
     clearBrowsingData,
     currentUrl,
-    errorMessage,
     goBack,
     goForward,
+    hostFallbackError,
     isLoaded,
     navigationState,
     navigateToUrl,
     reload,
     setWebview,
     setZoom
-  } = useBrowserWebview({ isActive })
+  } = useBrowserWebview({ isActive, surfaceId: viewId, surfaceInstanceId })
 
   useLayoutEffect(() => {
     isActiveRef.current = isActive
@@ -161,6 +163,7 @@ export function BrowserPanel({
     (webview: WebviewTag | null): void => {
       cancelSurfaceInstanceRef.current?.()
       cancelSurfaceInstanceRef.current = null
+      setSurfaceInstanceId(null)
       const previousInstance = surfaceInstanceWebviewRef.current
       if (previousInstance) {
         onSurfaceInstanceChange?.(
@@ -196,6 +199,7 @@ export function BrowserPanel({
             surfaceInstanceId,
             webview: exactWebview
           }
+          setSurfaceInstanceId(surfaceInstanceId)
           onSurfaceInstanceChange?.(viewId, surfaceInstanceId, true)
           reportAutomationSurfaceReady(exactWebview)
         }
@@ -445,10 +449,36 @@ export function BrowserPanel({
             <p>{t('browser.emptyDescription')}</p>
           </div>
         )}
-        {errorMessage && <div className="browser-panel__error">{errorMessage}</div>}
+        {hostFallbackError && (
+          <div className="browser-panel__fallback" role="status">
+            <WifiOff aria-hidden="true" />
+            <h2>{hostFallbackError.heading}</h2>
+            <p>
+              <strong>{hostnameForUrl(hostFallbackError.failedUrl)}</strong>{' '}
+              {hostFallbackError.summary}
+            </p>
+            <ul>
+              {hostFallbackError.suggestions.map((suggestion) => (
+                <li key={suggestion}>{suggestion}</li>
+              ))}
+            </ul>
+            <code>{hostFallbackError.errorDescription}</code>
+            <button type="button" onClick={() => void reload()}>
+              {t('browser.reload')}
+            </button>
+          </div>
+        )}
       </div>
     </section>
   )
+}
+
+function hostnameForUrl(value: string): string {
+  try {
+    return new URL(value).hostname
+  } catch {
+    return ''
+  }
 }
 
 function measureVisibleWebviewViewport(webview: WebviewTag): { height: number; width: number } {

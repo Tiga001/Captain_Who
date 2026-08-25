@@ -112,6 +112,35 @@ describe('managed webview session requests', () => {
 })
 
 describe('managed webview bootstrap registration', () => {
+  it('keeps data URLs blocked except for the registry exact internal-page authorization', () => {
+    const surfaceId = 'right-sidebar-browser-internal-page'
+    const host = new WebContentsFixture('file:///renderer.html')
+    const guest = new WebContentsFixture(createBrowserSurfaceBootstrapUrl(surfaceId))
+    const internalUrl = 'data:text/html;charset=utf-8,%3Chtml%3Esafe%3C%2Fhtml%3E'
+    const recordBlockedNavigation = vi.fn()
+    const targetRegistry: ManagedWebviewTargetRegistry = {
+      registerManagedGuest: vi.fn(),
+      isInternalNavigationAllowed: vi.fn((_guest, url) => url === internalUrl)
+    }
+    const networkGuard = {
+      registerGuest: vi.fn(),
+      recordBlockedNavigation,
+      handleWindowOpen: vi.fn()
+    } as unknown as BrowserNetworkGuard
+
+    configureManagedWebviewHost(host.asWebContents(), { networkGuard, targetRegistry })
+    host.emit('did-attach-webview', {}, guest.asWebContents())
+    const allowedEvent = { preventDefault: vi.fn() }
+    const blockedEvent = { preventDefault: vi.fn() }
+
+    guest.emit('will-navigate', allowedEvent, internalUrl)
+    guest.emit('will-navigate', blockedEvent, `${internalUrl}%20untrusted`)
+
+    expect(allowedEvent.preventDefault).not.toHaveBeenCalled()
+    expect(blockedEvent.preventDefault).toHaveBeenCalledTimes(1)
+    expect(recordBlockedNavigation).toHaveBeenCalledTimes(1)
+  })
+
   it('registers the trusted surface during did-attach as soon as its bootstrap is identified', () => {
     const surfaceId = 'right-sidebar-browser-startup-race'
     const host = new WebContentsFixture('file:///renderer.html')

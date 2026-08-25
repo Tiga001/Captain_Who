@@ -18,18 +18,16 @@ describe('browser surface Main IPC', () => {
       on: vi.fn()
     } as unknown as TrustedIpcMain
     const sender = {} as WebContents
-    const attach = vi.fn(
-      (): ReturnType<BrowserSurfaceManager['attach']> => ({
-        schemaVersion: 1,
-        accepted: true,
-        status: 'applied',
-        reason: 'surface_ready',
-        retryable: false,
-        requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
-        surfaceId: 'right-sidebar-browser-fixture',
-        surfaceInstanceId: 'instance-00000001'
-      })
-    )
+    const attach = vi.fn((): ReturnType<BrowserSurfaceManager['attach']> => ({
+      schemaVersion: 1,
+      accepted: true,
+      status: 'applied',
+      reason: 'surface_ready',
+      retryable: false,
+      requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001'
+    }))
     const selectManualSurface = vi.fn(
       (
         _sender: WebContents,
@@ -49,13 +47,35 @@ describe('browser surface Main IPC', () => {
         authoritativeRevision: input.selectionRevision
       })
     )
+    const surfaceState = {
+      schemaVersion: 1 as const,
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001',
+      stateRevision: 2,
+      url: 'https://example.test/',
+      title: 'Example',
+      faviconUrl: null,
+      canGoBack: false,
+      canGoForward: false,
+      isLoading: false,
+      presentation: 'content' as const,
+      loadError: null
+    }
+    const performSurfaceAction = vi.fn(() => surfaceState)
+    const getSurfaceState = vi.fn(() => surfaceState)
     registerBrowserSurfaceIpc(ipcMain, {
       attach,
+      getSurfaceState,
+      performSurfaceAction,
       selectManualSurface
     } as unknown as BrowserSurfaceManager)
     const readyHandler = registered.get(HOST_CHANNELS.browser.surfaceReady)
     const selectedHandler = registered.get(HOST_CHANNELS.browser.surfaceSelected)
-    if (!readyHandler || !selectedHandler) throw new Error('handlers were not registered')
+    const actionHandler = registered.get(HOST_CHANNELS.browser.surfaceAction)
+    const stateHandler = registered.get(HOST_CHANNELS.browser.surfaceState)
+    if (!readyHandler || !selectedHandler || !actionHandler || !stateHandler) {
+      throw new Error('handlers were not registered')
+    }
 
     const input = {
       schemaVersion: 1,
@@ -126,5 +146,24 @@ describe('browser surface Main IPC', () => {
       )
     ).toThrow('cannot carry an instance')
     expect(selectManualSurface).toHaveBeenCalledTimes(1)
+
+    const stateInput = {
+      schemaVersion: 1,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: input.surfaceInstanceId
+    }
+    expect(stateHandler({ sender }, stateInput)).toEqual(surfaceState)
+    expect(getSurfaceState).toHaveBeenCalledWith(sender, stateInput)
+    expect(
+      actionHandler({ sender }, { ...stateInput, action: 'navigate', url: 'https://example.test/' })
+    ).toEqual(surfaceState)
+    expect(performSurfaceAction).toHaveBeenCalledWith(sender, {
+      ...stateInput,
+      action: 'navigate',
+      url: 'https://example.test/'
+    })
+    expect(() =>
+      actionHandler({ sender }, { ...stateInput, action: 'navigate', url: 'data:text/html,unsafe' })
+    ).toThrow('navigation URL')
   })
 })

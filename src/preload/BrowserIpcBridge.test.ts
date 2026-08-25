@@ -6,6 +6,69 @@ import { createBrowserIpcBridge } from './BrowserIpcBridge'
 type BrowserIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 describe('Browser IPC bridge', () => {
+  it('validates surface actions, snapshots, and state events without admitting internal URLs', async () => {
+    const state = {
+      schemaVersion: 1 as const,
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001',
+      stateRevision: 3,
+      url: 'https://example.test/path?q=value',
+      title: 'Example',
+      faviconUrl: null,
+      canGoBack: false,
+      canGoForward: false,
+      isLoading: false,
+      presentation: 'content' as const,
+      loadError: null
+    }
+    const listeners = new Map<string, (event: IpcRendererEvent, value: unknown) => void>()
+    const invoke = vi.fn(async (): Promise<unknown> => state)
+    const bridge = createBrowserIpcBridge({
+      invoke,
+      on: vi.fn((channel, listener) => {
+        listeners.set(channel, listener)
+        return {} as IpcRenderer
+      }),
+      removeListener: vi.fn()
+    })
+
+    await expect(
+      bridge.surfaceAction({
+        schemaVersion: 1,
+        surfaceId: state.surfaceId,
+        surfaceInstanceId: state.surfaceInstanceId,
+        action: 'navigate',
+        url: state.url
+      })
+    ).resolves.toEqual(state)
+    expect(invoke).toHaveBeenLastCalledWith(HOST_CHANNELS.browser.surfaceAction, {
+      schemaVersion: 1,
+      surfaceId: state.surfaceId,
+      surfaceInstanceId: state.surfaceInstanceId,
+      action: 'navigate',
+      url: state.url
+    })
+    expect(() =>
+      bridge.surfaceAction({
+        schemaVersion: 1,
+        surfaceId: state.surfaceId,
+        surfaceInstanceId: state.surfaceInstanceId,
+        action: 'navigate',
+        url: 'data:text/html,unsafe'
+      })
+    ).toThrow('navigation URL')
+
+    const handler = vi.fn()
+    bridge.onSurfaceState(handler)
+    listeners.get(HOST_CHANNELS.browser.surfaceStateChanged)?.({} as IpcRendererEvent, state)
+    listeners.get(HOST_CHANNELS.browser.surfaceStateChanged)?.({} as IpcRendererEvent, {
+      ...state,
+      url: 'data:text/html,unsafe'
+    })
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(state)
+  })
+
   it('strictly validates readiness on both sides of the invoke boundary', async () => {
     const input = {
       schemaVersion: 1,

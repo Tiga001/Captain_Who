@@ -83,9 +83,12 @@ export const HOST_CHANNELS = {
     artifactExport: 'host:browser.artifact.export',
     artifactReadPreview: 'host:browser.artifact.readPreview',
     clearBrowsingData: 'host:browser.clearBrowsingData',
+    surfaceAction: 'host:browser.surfaceAction',
     surfaceCommand: 'host:browser.surfaceCommand',
     surfaceReady: 'host:browser.surfaceReady',
-    surfaceSelected: 'host:browser.surfaceSelected'
+    surfaceSelected: 'host:browser.surfaceSelected',
+    surfaceState: 'host:browser.surfaceState',
+    surfaceStateChanged: 'host:browser.surfaceStateChanged'
   },
   git: {
     getReviewFileContent: 'host:git.getReviewFileContent',

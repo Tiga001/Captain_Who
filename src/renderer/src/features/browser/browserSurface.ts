@@ -268,8 +268,11 @@ export function resolveBrowserSurfaceHostApi(): BrowserHostApi | null {
   if (
     !browser ||
     typeof browser.onSurfaceCommand !== 'function' ||
+    typeof browser.onSurfaceState !== 'function' ||
+    typeof browser.surfaceAction !== 'function' ||
     typeof browser.surfaceReady !== 'function' ||
-    typeof browser.surfaceSelected !== 'function'
+    typeof browser.surfaceSelected !== 'function' ||
+    typeof browser.surfaceState !== 'function'
   ) {
     throw new Error('MyCopilot browser surface API is malformed')
   }

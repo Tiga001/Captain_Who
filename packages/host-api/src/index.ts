@@ -83,11 +83,14 @@ import type {
   BrowserArtifactExportOutput,
   BrowserArtifactReadInput,
   BrowserArtifactReadOutput,
+  BrowserSurfaceActionInput,
   BrowserSurfaceCommand,
   BrowserSurfaceReadyInput,
   BrowserSurfaceReadyOutput,
   BrowserSurfaceSelectedInput,
   BrowserSurfaceSelectedOutput,
+  BrowserSurfaceState,
+  BrowserSurfaceStateInput,
   CorePingRequest,
   CorePingResponse,
   GitRepositoryInspectInput,
@@ -223,8 +226,14 @@ export interface BrowserHostApi {
   surfaceReady(input: BrowserSurfaceReadyInput): Promise<BrowserSurfaceReadyOutput>
   /** Reports the visible Browser tab without granting any target or debugger authority. */
   surfaceSelected(input: BrowserSurfaceSelectedInput): Promise<BrowserSurfaceSelectedOutput>
+  /** Dispatches one navigation action to the exact Main-owned surface generation. */
+  surfaceAction(input: BrowserSurfaceActionInput): Promise<BrowserSurfaceState>
+  /** Reads logical navigation state without exposing the guest or an internal implementation URL. */
+  surfaceState(input: BrowserSurfaceStateInput): Promise<BrowserSurfaceState>
   /** Receives Host-owned reveal/create/close requests without exposing guest or CDP identity. */
   onSurfaceCommand(handler: (command: BrowserSurfaceCommand) => void): () => void
+  /** Receives state for the exact surface incarnation; stale generations are ignored by Renderer. */
+  onSurfaceState(handler: (state: BrowserSurfaceState) => void): () => void
 }
 
 export interface NotificationsHostApi {

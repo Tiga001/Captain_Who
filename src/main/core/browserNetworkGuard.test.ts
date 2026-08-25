@@ -188,6 +188,26 @@ function begin(harness: ReturnType<typeof createHarness>, signal?: AbortSignal) 
 }
 
 describe('BrowserNetworkGuard', () => {
+  it('admits only an exact leased internal data document for one guest generation', async () => {
+    const harness = createHarness(undefined, ['93.184.216.34'], {}, 'host_boundaries_only')
+    const internalUrl = 'data:text/html;charset=utf-8,%3Chtml%3Esafe%3C%2Fhtml%3E'
+    const lease = harness.guard.beginInternalNavigation({
+      generation: 1,
+      guest: harness.guest,
+      url: internalUrl
+    })
+
+    await expect(request(harness, { url: internalUrl })).resolves.toEqual({})
+    expect(harness.authorizer.requests).toHaveLength(0)
+    await expect(request(harness, { url: `${internalUrl}%20different` })).resolves.toEqual({
+      cancel: true
+    })
+
+    lease.finish()
+    await expect(request(harness, { url: internalUrl })).resolves.toEqual({ cancel: true })
+    await harness.guard.shutdown()
+  })
+
   it('binds a zero-tab tabs-new authority to one exact created guest before load', async () => {
     const claimCreatedGuest = vi.fn(async () => undefined)
     const downloadLease: BrowserDownloadToolLease = {

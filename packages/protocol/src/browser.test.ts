@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   BROWSER_SURFACE_SCHEMA_VERSION,
   createBrowserSurfaceBootstrapUrl,
+  parseBrowserSurfaceActionInput,
   parseBrowserSurfaceBootstrapUrl,
   parseBrowserSurfaceCommand,
   parseBrowserSurfaceReadyInput,
   parseBrowserSurfaceReadyOutput,
   parseBrowserSurfaceSelectedInput,
-  parseBrowserSurfaceSelectedOutput
+  parseBrowserSurfaceSelectedOutput,
+  parseBrowserSurfaceState
 } from './browser'
 
 const REQUEST_ID = '5ee8f693-c8e6-48ab-a2c1-9ed774bc18a9'
@@ -15,6 +17,54 @@ const SURFACE_ID = 'right-sidebar-browser-browser-1234'
 const SURFACE_INSTANCE_ID = 'instance-00000001'
 
 describe('browser surface protocol', () => {
+  it('strictly binds navigation actions and state without admitting internal data URLs', () => {
+    const action = {
+      schemaVersion: 1,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID,
+      action: 'navigate',
+      url: 'https://example.test/path?q=value'
+    }
+    expect(parseBrowserSurfaceActionInput(action)).toEqual(action)
+    expect(() =>
+      parseBrowserSurfaceActionInput({ ...action, url: 'data:text/html,unsafe' })
+    ).toThrow('navigation URL')
+    expect(() => parseBrowserSurfaceActionInput({ ...action, action: 'reload' })).toThrow(
+      'Only browser navigation actions'
+    )
+
+    expect(
+      parseBrowserSurfaceState({
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId: SURFACE_INSTANCE_ID,
+        stateRevision: 4,
+        url: action.url,
+        title: 'Example',
+        faviconUrl: null,
+        canGoBack: false,
+        canGoForward: false,
+        isLoading: false,
+        presentation: 'host-fallback',
+        loadError: {
+          kind: 'dns',
+          errorCode: -105,
+          errorDescription: 'ERR_NAME_NOT_RESOLVED',
+          failedUrl: action.url,
+          title: 'Cannot open page',
+          heading: 'Cannot open page',
+          summary: 'could not be found.',
+          suggestions: ['Check DNS']
+        }
+      })
+    ).toMatchObject({
+      stateRevision: 4,
+      url: action.url,
+      presentation: 'host-fallback',
+      loadError: { kind: 'dns' }
+    })
+  })
+
   it('round-trips a bounded inert bootstrap URL', () => {
     const url = createBrowserSurfaceBootstrapUrl(SURFACE_ID)
     expect(url.startsWith('about:blank#')).toBe(true)

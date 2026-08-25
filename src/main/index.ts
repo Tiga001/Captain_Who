@@ -292,6 +292,10 @@ app.whenReady().then(async () => {
     sendCommand: (host, command) => {
       if (!host.isDestroyed()) host.send(HOST_CHANNELS.browser.surfaceCommand, command)
     },
+    sendState: (host, state) => {
+      if (!host.isDestroyed()) host.send(HOST_CHANNELS.browser.surfaceStateChanged, state)
+    },
+    getLocale: () => notificationLocaleStore.getLocale(),
     networkGuard: browserNetworkGuard,
     releaseSurfaceResources: (input) =>
       browserFileBroker?.releaseSurface(input) ?? Promise.resolve()

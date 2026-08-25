@@ -67,6 +67,8 @@ class FakeWebContents extends EventEmitter {
   readonly debugger = new FakeDebugger() as unknown as Debugger
   destroyed = false
   loadingMainFrame = false
+  historyBack = false
+  historyForward = false
 
   constructor(
     readonly id: number,
@@ -93,6 +95,22 @@ class FakeWebContents extends EventEmitter {
   isLoadingMainFrame(): boolean {
     return this.loadingMainFrame
   }
+  canGoBack(): boolean {
+    return this.historyBack
+  }
+  canGoForward(): boolean {
+    return this.historyForward
+  }
+  readonly navigationHistory = {
+    canGoBack: vi.fn(() => this.historyBack),
+    canGoForward: vi.fn(() => this.historyForward),
+    goBack: vi.fn(),
+    goForward: vi.fn()
+  }
+  reload = vi.fn()
+  goBack = vi.fn()
+  goForward = vi.fn()
+  stop = vi.fn()
   async loadURL(url: string): Promise<void> {
     this.url = url
   }
@@ -257,6 +275,148 @@ afterEach(() => {
 })
 
 describe('BrowserSurfaceManager', () => {
+  it('ignores iframe, aborted, and stale main-frame failures without replacing newer state', () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const stateInput = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const oldUrl = 'https://old.example.test/private?token=one'
+    const newUrl = 'https://new.example.test/current?token=two'
+
+    guest.emit('did-start-navigation', {}, oldUrl, false, true)
+    guest.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', oldUrl, false)
+    expect(manager.getSurfaceState(host.asWebContents(), stateInput).loadError).toBeNull()
+
+    guest.emit('did-start-navigation', {}, newUrl, false, true)
+    guest.emit('did-fail-load', {}, -3, 'ERR_ABORTED', newUrl, true)
+    guest.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', oldUrl, true)
+
+    expect(manager.getSurfaceState(host.asWebContents(), stateInput)).toMatchObject({
+      url: newUrl,
+      loadError: null,
+      presentation: 'content'
+    })
+  })
+
+  it('loads a Main-authored internal page while keeping failedUrl as Renderer state', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const failedUrl = 'https://offline.example.test/path?q=sensitive'
+    const loadURL = vi.spyOn(guest, 'loadURL')
+
+    guest.emit('did-start-navigation', {}, failedUrl, false, true)
+    guest.emit('did-fail-load', {}, -106, 'ERR_INTERNET_DISCONNECTED', failedUrl, true)
+    await vi.runAllTimersAsync()
+
+    const internalUrl = loadURL.mock.calls.at(-1)?.[0]
+    expect(internalUrl).toMatch(/^data:text\/html;charset=utf-8,/u)
+    expect(
+      manager.getSurfaceState(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId
+      })
+    ).toMatchObject({
+      url: failedUrl,
+      title: '无法访问此网站',
+      isLoading: false,
+      presentation: 'error-page',
+      loadError: {
+        kind: 'offline',
+        failedUrl
+      }
+    })
+  })
+
+  it('does not recurse or leak a rejection when the internal page itself fails', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const failedUrl = 'https://failure.example.test/'
+    const loadURL = vi.spyOn(guest, 'loadURL').mockImplementation(async (url) => {
+      expect(manager.isInternalNavigationAllowed(guest.asWebContents(), url)).toBe(true)
+      guest.emit('did-fail-load', {}, -2, 'ERR_FAILED', url, true)
+      throw new Error('fixture internal page rejection')
+    })
+
+    guest.emit('did-start-navigation', {}, failedUrl, false, true)
+    guest.emit('did-fail-load', {}, -2, 'ERR_FAILED', failedUrl, true)
+    await vi.runAllTimersAsync()
+
+    expect(loadURL).toHaveBeenCalledTimes(1)
+    expect(
+      manager.getSurfaceState(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId
+      })
+    ).toMatchObject({
+      url: failedUrl,
+      presentation: 'host-fallback',
+      loadError: { kind: 'generic' }
+    })
+  })
+
+  it('bounds a permanently pending internal-page navigation and keeps a safe host fallback', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const failedUrl = 'https://pending.example.test/'
+    const loadURL = vi.spyOn(guest, 'loadURL').mockImplementation(
+      async () =>
+        await new Promise<void>(() => {
+          // Deliberately never settles; the Manager must own the timeout.
+        })
+    )
+
+    guest.emit('did-start-navigation', {}, failedUrl, false, true)
+    guest.emit('did-fail-load', {}, -118, 'ERR_CONNECTION_TIMED_OUT', failedUrl, true)
+    await vi.runAllTimersAsync()
+
+    expect(loadURL).toHaveBeenCalledTimes(4)
+    expect(
+      manager.getSurfaceState(host.asWebContents(), {
+        schemaVersion: 1,
+        surfaceId: SURFACE_ID,
+        surfaceInstanceId
+      })
+    ).toMatchObject({
+      url: failedUrl,
+      isLoading: false,
+      presentation: 'host-fallback',
+      loadError: { kind: 'timeout' }
+    })
+  })
+
+  it('routes back and forward actions through the modern guest navigation history', () => {
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    }
+    guest.historyBack = true
+    guest.historyForward = true
+
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'goBack' })
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'goForward' })
+
+    expect(guest.navigationHistory.goBack).toHaveBeenCalledOnce()
+    expect(guest.navigationHistory.goForward).toHaveBeenCalledOnce()
+    expect(guest.goBack).not.toHaveBeenCalled()
+    expect(guest.goForward).not.toHaveBeenCalled()
+  })
+
   it('keeps a production ensure pending until Renderer acknowledges the exact instance', async () => {
     const { commands, host, manager } = createHarness()
     const pending = manager.ensureActiveSurface()

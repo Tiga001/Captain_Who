@@ -159,6 +159,58 @@ export type BrowserSurfaceSelectedOutput =
   | BrowserSurfaceSelectionNoopOutput
   | BrowserSurfaceSelectionStaleOutput
 
+export const BROWSER_SURFACE_LOAD_ERROR_KINDS = [
+  'offline',
+  'dns',
+  'connection_refused',
+  'timeout',
+  'certificate',
+  'generic'
+] as const
+
+export type BrowserSurfaceLoadErrorKind = (typeof BROWSER_SURFACE_LOAD_ERROR_KINDS)[number]
+
+export interface BrowserSurfacePublicLoadError {
+  kind: BrowserSurfaceLoadErrorKind
+  errorCode: number
+  errorDescription: string
+  failedUrl: string
+  title: string
+  heading: string
+  summary: string
+  suggestions: readonly string[]
+}
+
+export type BrowserSurfacePresentation = 'content' | 'error-page' | 'host-fallback'
+
+/** Renderer-safe logical state. Internal implementation URLs never cross this boundary. */
+export interface BrowserSurfaceState {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  surfaceId: string
+  surfaceInstanceId: string
+  stateRevision: number
+  url: string | null
+  title: string | null
+  faviconUrl: string | null
+  canGoBack: boolean
+  canGoForward: boolean
+  isLoading: boolean
+  presentation: BrowserSurfacePresentation
+  loadError: BrowserSurfacePublicLoadError | null
+}
+
+export interface BrowserSurfaceStateInput {
+  schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
+  surfaceId: string
+  surfaceInstanceId: string
+}
+
+export interface BrowserSurfaceActionInput extends BrowserSurfaceStateInput {
+  action: 'navigate' | 'reload' | 'goBack' | 'goForward'
+  /** Required only for `navigate`; forbidden for all other actions. */
+  url?: string
+}
+
 /**
  * Builds the inert, renderer-visible bootstrap URL used to bind a webview DOM surface to its
  * Main-owned guest target. It contains no authority or secret and is replaced by the first real
@@ -471,6 +523,182 @@ export function parseBrowserSurfaceSelectedOutput(value: unknown): BrowserSurfac
     'browser surface selection reason'
   )
   return { ...base, status, reason }
+}
+
+export function parseBrowserSurfaceStateInput(value: unknown): BrowserSurfaceStateInput {
+  const record = expectRecord(value, 'browser surface state input')
+  expectOnlyKeys(record, ['schemaVersion', 'surfaceId', 'surfaceInstanceId'])
+  return {
+    schemaVersion: expectSchemaVersion(record.schemaVersion),
+    surfaceId: parseBrowserSurfaceId(record.surfaceId),
+    surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId)
+  }
+}
+
+export function parseBrowserSurfaceActionInput(value: unknown): BrowserSurfaceActionInput {
+  const record = expectRecord(value, 'browser surface action input')
+  expectOnlyKeys(record, ['schemaVersion', 'surfaceId', 'surfaceInstanceId', 'action', 'url'])
+  const action = expectEnum(
+    record.action,
+    ['navigate', 'reload', 'goBack', 'goForward'] as const,
+    'browser surface action'
+  )
+  const base = parseBrowserSurfaceStateInput({
+    schemaVersion: record.schemaVersion,
+    surfaceId: record.surfaceId,
+    surfaceInstanceId: record.surfaceInstanceId
+  })
+  if (action === 'navigate') {
+    return { ...base, action, url: parseBrowserNavigationUrl(record.url) }
+  }
+  if (record.url !== undefined) {
+    throw new Error('Only browser navigation actions may include a URL')
+  }
+  return { ...base, action }
+}
+
+export function parseBrowserSurfaceState(value: unknown): BrowserSurfaceState {
+  const record = expectRecord(value, 'browser surface state')
+  expectOnlyKeys(record, [
+    'schemaVersion',
+    'surfaceId',
+    'surfaceInstanceId',
+    'stateRevision',
+    'url',
+    'title',
+    'faviconUrl',
+    'canGoBack',
+    'canGoForward',
+    'isLoading',
+    'presentation',
+    'loadError'
+  ])
+  const state: BrowserSurfaceState = {
+    schemaVersion: expectSchemaVersion(record.schemaVersion),
+    surfaceId: parseBrowserSurfaceId(record.surfaceId),
+    surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId),
+    stateRevision: expectNonNegativeSelectionRevision(record.stateRevision),
+    url: record.url === null ? null : parseBrowserNavigationUrl(record.url),
+    title: parseNullableBoundedText(record.title, 'browser surface title', 256),
+    faviconUrl: parseNullableHttpUrl(record.faviconUrl, 'browser surface favicon URL', 4_096),
+    canGoBack: expectBoolean(record.canGoBack, 'browser surface back state'),
+    canGoForward: expectBoolean(record.canGoForward, 'browser surface forward state'),
+    isLoading: expectBoolean(record.isLoading, 'browser surface loading state'),
+    presentation: expectEnum(
+      record.presentation,
+      ['content', 'error-page', 'host-fallback'] as const,
+      'browser surface presentation'
+    ),
+    loadError:
+      record.loadError === null ? null : parseBrowserSurfacePublicLoadError(record.loadError)
+  }
+  if (state.loadError && state.url !== state.loadError.failedUrl) {
+    throw new Error('Browser surface failure URL does not match its logical URL')
+  }
+  if (!state.loadError && state.presentation !== 'content') {
+    throw new Error('Browser surface error presentation requires a load error')
+  }
+  return state
+}
+
+function parseBrowserSurfacePublicLoadError(value: unknown): BrowserSurfacePublicLoadError {
+  const record = expectRecord(value, 'browser surface load error')
+  expectOnlyKeys(record, [
+    'kind',
+    'errorCode',
+    'errorDescription',
+    'failedUrl',
+    'title',
+    'heading',
+    'summary',
+    'suggestions'
+  ])
+  if (!Number.isSafeInteger(record.errorCode)) {
+    throw new Error('Invalid browser surface error code')
+  }
+  if (!Array.isArray(record.suggestions) || record.suggestions.length > 6) {
+    throw new Error('Invalid browser surface error suggestions')
+  }
+  return {
+    kind: expectEnum(
+      record.kind,
+      BROWSER_SURFACE_LOAD_ERROR_KINDS,
+      'browser surface load error kind'
+    ),
+    errorCode: record.errorCode as number,
+    errorDescription: parseBoundedText(
+      record.errorDescription,
+      'browser surface error description',
+      128
+    ),
+    failedUrl: parseBrowserNavigationUrl(record.failedUrl),
+    title: parseBoundedText(record.title, 'browser surface error title', 256),
+    heading: parseBoundedText(record.heading, 'browser surface error heading', 256),
+    summary: parseBoundedText(record.summary, 'browser surface error summary', 512),
+    suggestions: record.suggestions.map((suggestion) =>
+      parseBoundedText(suggestion, 'browser surface error suggestion', 256)
+    )
+  }
+}
+
+function parseBrowserNavigationUrl(value: unknown): string {
+  return parseHttpUrl(value, 'browser navigation URL', 16_384)
+}
+
+function parseNullableHttpUrl(value: unknown, context: string, maxLength: number): string | null {
+  return value === null ? null : parseHttpUrl(value, context, maxLength)
+}
+
+function parseHttpUrl(value: unknown, context: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
+    throw new Error(`Invalid ${context}`)
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`Invalid ${context}`)
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username !== '' ||
+    parsed.password !== ''
+  ) {
+    throw new Error(`Invalid ${context}`)
+  }
+  return parsed.toString()
+}
+
+function parseNullableBoundedText(
+  value: unknown,
+  context: string,
+  maxLength: number
+): string | null {
+  return value === null ? null : parseBoundedText(value, context, maxLength)
+}
+
+function parseBoundedText(value: unknown, context: string, maxLength: number): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    hasForbiddenControlCharacter(value)
+  ) {
+    throw new Error(`Invalid ${context}`)
+  }
+  return value
+}
+
+function hasForbiddenControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return (codePoint < 32 && ![9, 10, 13].includes(codePoint)) || codePoint === 127
+  })
+}
+
+function expectBoolean(value: unknown, context: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(`Invalid ${context}`)
+  return value
 }
 
 export function parseBrowserSurfaceId(value: unknown): string {

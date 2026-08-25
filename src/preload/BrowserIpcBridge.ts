@@ -5,11 +5,14 @@ import {
   parseBrowserArtifactExportOutput,
   parseBrowserArtifactReadInput,
   parseBrowserArtifactReadOutput,
+  parseBrowserSurfaceActionInput,
   parseBrowserSurfaceCommand,
   parseBrowserSurfaceReadyInput,
   parseBrowserSurfaceReadyOutput,
   parseBrowserSurfaceSelectedInput,
-  parseBrowserSurfaceSelectedOutput
+  parseBrowserSurfaceSelectedOutput,
+  parseBrowserSurfaceState,
+  parseBrowserSurfaceStateInput
 } from '@mycopilot/protocol'
 
 type BrowserIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
@@ -48,6 +51,14 @@ export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): Browser
       ipcRenderer
         .invoke(HOST_CHANNELS.browser.surfaceSelected, parseBrowserSurfaceSelectedInput(input))
         .then(parseBrowserSurfaceSelectedOutput),
+    surfaceAction: (input) =>
+      ipcRenderer
+        .invoke(HOST_CHANNELS.browser.surfaceAction, parseBrowserSurfaceActionInput(input))
+        .then(parseBrowserSurfaceState),
+    surfaceState: (input) =>
+      ipcRenderer
+        .invoke(HOST_CHANNELS.browser.surfaceState, parseBrowserSurfaceStateInput(input))
+        .then(parseBrowserSurfaceState),
     onSurfaceCommand: (handler) => {
       const listener = (_event: IpcRendererEvent, value: unknown): void => {
         try {
@@ -58,6 +69,17 @@ export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): Browser
       }
       ipcRenderer.on(HOST_CHANNELS.browser.surfaceCommand, listener)
       return () => ipcRenderer.removeListener(HOST_CHANNELS.browser.surfaceCommand, listener)
+    },
+    onSurfaceState: (handler) => {
+      const listener = (_event: IpcRendererEvent, value: unknown): void => {
+        try {
+          handler(parseBrowserSurfaceState(value))
+        } catch {
+          // Invalid Main-to-Renderer data is fail-closed and never reaches application state.
+        }
+      }
+      ipcRenderer.on(HOST_CHANNELS.browser.surfaceStateChanged, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.browser.surfaceStateChanged, listener)
     }
   }
 }

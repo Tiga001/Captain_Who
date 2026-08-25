@@ -54,6 +54,8 @@ describe('browser surface Host bridge availability', () => {
         listener = nextListener
         return unsubscribe
       }),
+      onSurfaceState: vi.fn(() => () => undefined),
+      surfaceAction: vi.fn(async (input) => emptySurfaceState(input)),
       surfaceReady: vi.fn(async () => ({
         schemaVersion: 1 as const,
         accepted: true as const,
@@ -72,7 +74,8 @@ describe('browser surface Host bridge availability', () => {
         surfaceInstanceId: null,
         selectionRevision: input.selectionRevision,
         authoritativeRevision: 0
-      }))
+      })),
+      surfaceState: vi.fn(async (input) => emptySurfaceState(input))
     }
     exposeHost({ browser })
     const openRightSidebar = vi.fn()
@@ -130,6 +133,23 @@ function Harness({ openRightSidebar }: { openRightSidebar: () => void }) {
       </button>
     </div>
   )
+}
+
+function emptySurfaceState(input: { surfaceId: string; surfaceInstanceId: string }) {
+  return {
+    schemaVersion: 1 as const,
+    surfaceId: input.surfaceId,
+    surfaceInstanceId: input.surfaceInstanceId,
+    stateRevision: 0,
+    url: null,
+    title: null,
+    faviconUrl: null,
+    canGoBack: false,
+    canGoForward: false,
+    isLoading: false,
+    presentation: 'content' as const,
+    loadError: null
+  }
 }
 
 function exposeHost(host: Partial<HostApi>): void {

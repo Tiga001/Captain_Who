@@ -31,6 +31,8 @@ export interface ManagedWebviewTargetRegistry {
     guest: WebContents
     url: string
   }): Promise<void> | void
+  /** Exact, short-lived Main authorization; never widens the partition protocol policy. */
+  isInternalNavigationAllowed?(guest: WebContents, url: string): boolean
 }
 
 export interface ManagedWebviewHostOptions {
@@ -259,14 +261,20 @@ function configureManagedGuest(
   })
 
   guest.on('will-navigate', (event, url) => {
-    if (!isAllowedWebviewUrl(url, policy)) {
+    if (
+      !isAllowedWebviewUrl(url, policy) &&
+      !targetRegistry?.isInternalNavigationAllowed?.(guest, url)
+    ) {
       event.preventDefault()
       networkGuard?.recordBlockedNavigation(guest)
     }
   })
 
   guest.on('will-redirect', (event, url) => {
-    if (!isAllowedWebviewUrl(url, policy)) {
+    if (
+      !isAllowedWebviewUrl(url, policy) &&
+      !targetRegistry?.isInternalNavigationAllowed?.(guest, url)
+    ) {
       event.preventDefault()
       networkGuard?.recordBlockedNavigation(guest)
     }

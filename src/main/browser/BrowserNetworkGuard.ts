@@ -35,8 +35,13 @@ interface GuestRecord {
   generation: number
   guest: WebContents
   handleDestroyed: () => void
+  internalNavigation?: InternalNavigationRecord
   navigationFence?: MainFrameNavigationFenceRecord
   surfaceId: string
+}
+
+interface InternalNavigationRecord {
+  url: string
 }
 
 interface MainFrameNavigationFenceRecord {
@@ -45,6 +50,10 @@ interface MainFrameNavigationFenceRecord {
 
 export interface BrowserMainFrameNavigationFence {
   blocked(): boolean
+  finish(): void
+}
+
+export interface BrowserInternalNavigationLease {
   finish(): void
 }
 
@@ -395,6 +404,46 @@ export class BrowserNetworkGuard {
       this.guests.delete(input.guest.id)
       throw error
     }
+  }
+
+  /** Grants one exact Main-authored data document to one exact registered guest generation. */
+  beginInternalNavigation(input: {
+    generation: number
+    guest: WebContents
+    url: string
+  }): BrowserInternalNavigationLease {
+    this.assertUsable()
+    const record = this.guests.get(input.guest.id)
+    if (
+      !record ||
+      record.guest !== input.guest ||
+      record.generation !== input.generation ||
+      input.guest.isDestroyed() ||
+      !isManagedInternalPageUrl(input.url)
+    ) {
+      throw new Error('browser.network_guard.internal_navigation_denied')
+    }
+    const authorization: InternalNavigationRecord = { url: input.url }
+    record.internalNavigation = authorization
+    let finished = false
+    return {
+      finish: () => {
+        if (finished) return
+        finished = true
+        if (record.internalNavigation === authorization) record.internalNavigation = undefined
+      }
+    }
+  }
+
+  isInternalNavigationAllowed(guest: WebContents, url: string): boolean {
+    const record = this.guests.get(guest.id)
+    return Boolean(
+      !this.disposed &&
+      record &&
+      record.guest === guest &&
+      !guest.isDestroyed() &&
+      record.internalNavigation?.url === url
+    )
   }
 
   beginOperation(
@@ -891,6 +940,13 @@ export class BrowserNetworkGuard {
       })
       throw new Error('browser.sensitive_navigation_blocked')
     }
+    if (
+      registeredRecord &&
+      details.resourceType === 'mainFrame' &&
+      registeredRecord.internalNavigation?.url === details.url
+    ) {
+      return
+    }
     // Chromium's PDF MIME handler owns a separate, unregistered WebContents. Admit only its
     // compiled-in component resources; registered Browser surfaces still pass through policy.
     if (!registeredRecord && this.chromiumPdfViewerRequests.allows(details)) return
@@ -1073,6 +1129,7 @@ export class BrowserNetworkGuard {
       record.navigationFence.blocked = true
       record.navigationFence = undefined
     }
+    record.internalNavigation = undefined
     this.downloadBroker?.unregisterGuest(record.guest, record.generation)
     void this.downloadBroker
       ?.releaseSurface({ surfaceId: record.surfaceId, generation: record.generation })
@@ -1200,6 +1257,10 @@ export class BrowserNetworkGuard {
   private assertUsable(): void {
     if (this.disposed) throw new Error('browser.network_guard.closed')
   }
+}
+
+function isManagedInternalPageUrl(value: string): boolean {
+  return value.length <= 1_048_576 && value.startsWith('data:text/html;charset=utf-8,')
 }
 
 function onceCallback<T>(callback: (value: T) => void): (value: T) => void {

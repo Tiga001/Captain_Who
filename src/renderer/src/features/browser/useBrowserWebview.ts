@@ -1,28 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type {
-  DidFailLoadEvent,
-  DidNavigateEvent,
-  DidNavigateInPageEvent,
-  PageFaviconUpdatedEvent,
-  PageTitleUpdatedEvent,
-  RenderProcessGoneEvent,
-  WebviewTag
-} from 'electron'
-import { parseBrowserSurfaceBootstrapUrl } from '@mycopilot/protocol'
+import type { WebviewTag } from 'electron'
+import {
+  BROWSER_SURFACE_SCHEMA_VERSION,
+  type BrowserSurfaceActionInput,
+  type BrowserSurfacePublicLoadError,
+  type BrowserSurfaceState
+} from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 import type { BrowserNavigationState } from './browserTypes'
 import { getFallbackPageTitle } from './browserUrl'
+import { resolveBrowserSurfaceHostApi } from './browserSurface'
 
 interface UseBrowserWebviewOptions {
   isActive: boolean
+  surfaceId: string
+  surfaceInstanceId: string | null
 }
 
 interface UseBrowserWebviewResult {
   clearBrowsingData: () => Promise<void>
   currentUrl: string | null
-  errorMessage: string | null
   goBack: () => Promise<void>
   goForward: () => Promise<void>
+  hostFallbackError: BrowserSurfacePublicLoadError | null
   isLoaded: boolean
   navigationState: BrowserNavigationState
   navigateToUrl: (url: string) => Promise<void>
@@ -31,74 +31,36 @@ interface UseBrowserWebviewResult {
   setZoom: (zoomFactor: number) => Promise<void>
 }
 
-const ABORTED_NAVIGATION_ERROR_CODE = -3
-
-export function useBrowserWebview({ isActive }: UseBrowserWebviewOptions): UseBrowserWebviewResult {
+export function useBrowserWebview({
+  isActive,
+  surfaceId,
+  surfaceInstanceId
+}: UseBrowserWebviewOptions): UseBrowserWebviewResult {
   const [navigationState, setNavigationState] = useState<BrowserNavigationState>(
     createEmptyNavigationState
   )
-  const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [attachedWebview, setAttachedWebview] = useState<WebviewTag | null>(null)
+  const [hostFallbackError, setHostFallbackError] = useState<BrowserSurfacePublicLoadError | null>(
+    null
+  )
   const webviewRef = useRef<WebviewTag | null>(null)
-  const currentUrlRef = useRef<string | null>(null)
   const faviconRequestSequenceRef = useRef(0)
+  const stateRevisionRef = useRef(-1)
+  const surfaceIdentityRef = useRef({ surfaceId, surfaceInstanceId })
+  const pendingNavigationRef = useRef<string | null>(null)
   const zoomFactorRef = useRef(1)
 
   const updateNavigationState = useCallback(
     (update: (current: BrowserNavigationState) => BrowserNavigationState) => {
       setNavigationState((current) => {
-        const next = update(current)
-        currentUrlRef.current = next.metadata.url
-        return next
+        return update(current)
       })
     },
     []
   )
 
-  const refreshFromWebview = useCallback(
-    (webview: WebviewTag, requestedUrl?: string) => {
-      try {
-        const url = normalizeWebviewUrl(requestedUrl || webview.getURL())
-        const title = url ? webview.getTitle().trim() || getFallbackPageTitle(url) : null
-
-        updateNavigationState((current) => ({
-          canGoBack: webview.canGoBack(),
-          canGoForward: webview.canGoForward(),
-          isLoading: webview.isLoading(),
-          metadata: {
-            iconUrl: haveSameHttpOrigin(current.metadata.url, url)
-              ? current.metadata.iconUrl
-              : null,
-            title,
-            url
-          }
-        }))
-      } catch (error) {
-        handleOperationError('refresh browser state', error, setErrorMessage)
-      }
-    },
-    [updateNavigationState]
-  )
-
-  const setWebview = useCallback(
-    (webview: WebviewTag | null) => {
-      webviewRef.current = webview
-      setAttachedWebview((current) => (current === webview ? current : webview))
-      if (!webview) return
-
-      try {
-        webview.setZoomFactor(zoomFactorRef.current)
-        refreshFromWebview(webview)
-      } catch (error) {
-        handleOperationError('initialize browser', error, setErrorMessage)
-      }
-    },
-    [refreshFromWebview]
-  )
-
   const resolveFavicon = useCallback(
     (pageUrlValue: string | null | undefined, faviconUrl?: string | null) => {
-      const pageUrl = normalizeWebviewUrl(pageUrlValue)
+      const pageUrl = normalizeHttpUrl(pageUrlValue)
       if (!pageUrl) return
 
       const requestSequence = faviconRequestSequenceRef.current + 1
@@ -107,13 +69,9 @@ export function useBrowserWebview({ isActive }: UseBrowserWebviewOptions): UseBr
         .resolveFavicon({ faviconUrl: faviconUrl ?? null, pageUrl })
         .then(({ url }) => {
           if (!url || requestSequence !== faviconRequestSequenceRef.current) return
-
           updateNavigationState((current) =>
             haveSameHttpOrigin(current.metadata.url, pageUrl)
-              ? {
-                  ...current,
-                  metadata: { ...current.metadata, iconUrl: url }
-                }
+              ? { ...current, metadata: { ...current.metadata, iconUrl: url } }
               : current
           )
         })
@@ -122,140 +80,153 @@ export function useBrowserWebview({ isActive }: UseBrowserWebviewOptions): UseBr
     [updateNavigationState]
   )
 
-  useEffect(() => {
-    const webview = attachedWebview
-    if (!webview) return undefined
-
-    const handleStartLoading = () => {
-      setErrorMessage(null)
-      updateNavigationState((current) => ({ ...current, isLoading: true }))
-    }
-    const handleStopLoading = () => refreshFromWebview(webview)
-    const handleNavigate = (event: DidNavigateEvent) => {
-      if (!haveSameHttpOrigin(currentUrlRef.current, event.url)) {
-        faviconRequestSequenceRef.current += 1
+  const applySurfaceState = useCallback(
+    (state: BrowserSurfaceState): void => {
+      const identity = surfaceIdentityRef.current
+      if (
+        state.surfaceId !== identity.surfaceId ||
+        state.surfaceInstanceId !== identity.surfaceInstanceId ||
+        state.stateRevision < stateRevisionRef.current
+      ) {
+        return
       }
-      setErrorMessage(null)
-      refreshFromWebview(webview, event.url)
-      resolveFavicon(event.url)
-    }
-    const handleNavigateInPage = (event: DidNavigateInPageEvent) => {
-      if (event.isMainFrame) refreshFromWebview(webview, event.url)
-    }
-    const handleTitleUpdated = (event: PageTitleUpdatedEvent) => {
-      const title = event.title.trim() || getFallbackPageTitle(currentUrlRef.current)
-      updateNavigationState((current) => ({
-        ...current,
-        metadata: { ...current.metadata, title }
-      }))
-    }
-    const handleFaviconUpdated = (event: PageFaviconUpdatedEvent) => {
-      resolveFavicon(webview.getURL(), event.favicons[0] ?? null)
-    }
-    const handleFailedLoad = (event: DidFailLoadEvent) => {
-      if (!event.isMainFrame || event.errorCode === ABORTED_NAVIGATION_ERROR_CODE) return
+      stateRevisionRef.current = state.stateRevision
+      setHostFallbackError(state.presentation === 'host-fallback' ? state.loadError : null)
+      updateNavigationState((current) => {
+        const sameOrigin = haveSameHttpOrigin(current.metadata.url, state.url)
+        return {
+          canGoBack: state.canGoBack,
+          canGoForward: state.canGoForward,
+          isLoading: state.isLoading,
+          metadata: {
+            iconUrl: sameOrigin ? current.metadata.iconUrl : null,
+            title: state.title ?? getFallbackPageTitle(state.url),
+            url: state.url
+          }
+        }
+      })
+      if (state.url && state.presentation === 'content') {
+        resolveFavicon(state.url, state.faviconUrl)
+      }
+    },
+    [resolveFavicon, updateNavigationState]
+  )
 
-      setErrorMessage(event.errorDescription)
-      updateNavigationState((current) => ({ ...current, isLoading: false }))
-    }
-    const handleRenderProcessGone = (event: RenderProcessGoneEvent) => {
-      setErrorMessage(`Browser renderer stopped: ${event.details.reason}`)
-      updateNavigationState((current) => ({ ...current, isLoading: false }))
-    }
+  useEffect(() => {
+    surfaceIdentityRef.current = { surfaceId, surfaceInstanceId }
+    stateRevisionRef.current = -1
+    faviconRequestSequenceRef.current += 1
+    setHostFallbackError(null)
+    if (!surfaceInstanceId) return undefined
 
-    webview.addEventListener('did-start-loading', handleStartLoading)
-    webview.addEventListener('did-stop-loading', handleStopLoading)
-    webview.addEventListener('did-navigate', handleNavigate)
-    webview.addEventListener('did-navigate-in-page', handleNavigateInPage)
-    webview.addEventListener('page-title-updated', handleTitleUpdated)
-    webview.addEventListener('page-favicon-updated', handleFaviconUpdated)
-    webview.addEventListener('did-fail-load', handleFailedLoad)
-    webview.addEventListener('render-process-gone', handleRenderProcessGone)
+    const browser = resolveBrowserSurfaceHostApi()
+    if (!browser) return undefined
+    const input = {
+      schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+      surfaceId,
+      surfaceInstanceId
+    } as const
+    const unsubscribe = browser.onSurfaceState(applySurfaceState)
+    const pendingNavigation = pendingNavigationRef.current
+    pendingNavigationRef.current = null
+    const initialState = pendingNavigation
+      ? browser.surfaceAction({ ...input, action: 'navigate', url: pendingNavigation })
+      : browser.surfaceState(input)
+    void initialState.then(applySurfaceState).catch(() => undefined)
+    return unsubscribe
+  }, [applySurfaceState, surfaceId, surfaceInstanceId])
 
-    return () => {
-      webview.removeEventListener('did-start-loading', handleStartLoading)
-      webview.removeEventListener('did-stop-loading', handleStopLoading)
-      webview.removeEventListener('did-navigate', handleNavigate)
-      webview.removeEventListener('did-navigate-in-page', handleNavigateInPage)
-      webview.removeEventListener('page-title-updated', handleTitleUpdated)
-      webview.removeEventListener('page-favicon-updated', handleFaviconUpdated)
-      webview.removeEventListener('did-fail-load', handleFailedLoad)
-      webview.removeEventListener('render-process-gone', handleRenderProcessGone)
+  const setWebview = useCallback((webview: WebviewTag | null) => {
+    webviewRef.current = webview
+    if (!webview) return
+    try {
+      webview.setZoomFactor(zoomFactorRef.current)
+    } catch {
+      // A replaced/destroyed guest is recovered by the existing surface lifecycle handshake.
     }
-  }, [attachedWebview, refreshFromWebview, resolveFavicon, updateNavigationState])
+  }, [])
 
   useEffect(() => {
     if (!isActive) webviewRef.current?.blur()
   }, [isActive])
 
-  const navigateToUrl = useCallback(
-    async (url: string) => {
-      const webview = webviewRef.current
-      if (!webview) {
-        setErrorMessage('Browser surface is not ready')
+  const dispatchSurfaceAction = useCallback(
+    async (
+      action: BrowserSurfaceActionInput['action'],
+      options: { url?: string } = {}
+    ): Promise<void> => {
+      const identity = surfaceIdentityRef.current
+      if (!identity.surfaceInstanceId) {
+        if (action === 'navigate' && options.url) pendingNavigationRef.current = options.url
         return
       }
-
-      if (!haveSameHttpOrigin(currentUrlRef.current, url)) {
-        faviconRequestSequenceRef.current += 1
+      const browser = resolveBrowserSurfaceHostApi()
+      if (!browser) return
+      const input: BrowserSurfaceActionInput = {
+        schemaVersion: BROWSER_SURFACE_SCHEMA_VERSION,
+        surfaceId: identity.surfaceId,
+        surfaceInstanceId: identity.surfaceInstanceId,
+        action,
+        ...(action === 'navigate' && options.url ? { url: options.url } : {})
       }
-      setErrorMessage(null)
+      try {
+        applySurfaceState(await browser.surfaceAction(input))
+      } catch {
+        // Main publishes the authoritative safe state. Never surface raw IPC/Electron details.
+      }
+    },
+    [applySurfaceState]
+  )
+
+  const navigateToUrl = useCallback(
+    async (url: string) => {
+      const normalizedUrl = normalizeHttpUrl(url)
+      if (!normalizedUrl) return
+      faviconRequestSequenceRef.current += 1
+      setHostFallbackError(null)
       updateNavigationState((current) => ({
         ...current,
         isLoading: true,
         metadata: {
-          iconUrl: haveSameHttpOrigin(current.metadata.url, url) ? current.metadata.iconUrl : null,
-          title: getFallbackPageTitle(url),
-          url
+          iconUrl: haveSameHttpOrigin(current.metadata.url, normalizedUrl)
+            ? current.metadata.iconUrl
+            : null,
+          title: getFallbackPageTitle(normalizedUrl),
+          url: normalizedUrl
         }
       }))
-
-      try {
-        await webview.loadURL(url)
-      } catch (error) {
-        if (isAbortedNavigationError(error)) return
-        handleOperationError('navigate browser', error, setErrorMessage)
-        updateNavigationState((current) => ({ ...current, isLoading: false }))
-      }
+      await dispatchSurfaceAction('navigate', { url: normalizedUrl })
     },
-    [updateNavigationState]
+    [dispatchSurfaceAction, updateNavigationState]
   )
 
   const reload = useCallback(async () => {
-    runWebviewOperation(webviewRef.current, 'reload browser', setErrorMessage, (webview) => {
-      webview.reload()
-    })
-  }, [])
+    setHostFallbackError(null)
+    await dispatchSurfaceAction('reload')
+  }, [dispatchSurfaceAction])
 
   const goBack = useCallback(async () => {
-    runWebviewOperation(webviewRef.current, 'navigate browser back', setErrorMessage, (webview) => {
-      if (webview.canGoBack()) webview.goBack()
-    })
-  }, [])
+    await dispatchSurfaceAction('goBack')
+  }, [dispatchSurfaceAction])
 
   const goForward = useCallback(async () => {
-    runWebviewOperation(
-      webviewRef.current,
-      'navigate browser forward',
-      setErrorMessage,
-      (webview) => {
-        if (webview.canGoForward()) webview.goForward()
-      }
-    )
-  }, [])
+    await dispatchSurfaceAction('goForward')
+  }, [dispatchSurfaceAction])
 
   const setZoom = useCallback(async (zoomFactor: number) => {
     zoomFactorRef.current = zoomFactor
-    runWebviewOperation(webviewRef.current, 'zoom browser', setErrorMessage, (webview) => {
-      webview.setZoomFactor(zoomFactor)
-    })
+    try {
+      webviewRef.current?.setZoomFactor(zoomFactor)
+    } catch {
+      // Zoom is a local presentation preference and never changes navigation state.
+    }
   }, [])
 
   const clearBrowsingData = useCallback(async () => {
     try {
       await hostClient.browser.clearBrowsingData()
-    } catch (error) {
-      handleOperationError('clear browser data', error, setErrorMessage)
+    } catch {
+      // Clearing session data is optional and must not expose transport details in the UI.
     }
   }, [])
 
@@ -263,9 +234,9 @@ export function useBrowserWebview({ isActive }: UseBrowserWebviewOptions): UseBr
     () => ({
       clearBrowsingData,
       currentUrl: navigationState.metadata.url,
-      errorMessage,
       goBack,
       goForward,
+      hostFallbackError,
       isLoaded: Boolean(navigationState.metadata.url),
       navigationState,
       navigateToUrl,
@@ -275,9 +246,9 @@ export function useBrowserWebview({ isActive }: UseBrowserWebviewOptions): UseBr
     }),
     [
       clearBrowsingData,
-      errorMessage,
       goBack,
       goForward,
+      hostFallbackError,
       navigateToUrl,
       navigationState,
       reload,
@@ -292,21 +263,18 @@ function createEmptyNavigationState(): BrowserNavigationState {
     canGoBack: false,
     canGoForward: false,
     isLoading: false,
-    metadata: {
-      iconUrl: null,
-      title: null,
-      url: null
-    }
+    metadata: { iconUrl: null, title: null, url: null }
   }
 }
 
-function normalizeWebviewUrl(url: string | null | undefined): string | null {
-  const normalized = url?.trim()
-  return normalized &&
-    normalized !== 'about:blank' &&
-    parseBrowserSurfaceBootstrapUrl(normalized) === null
-    ? normalized
-    : null
+function normalizeHttpUrl(value: string | null | undefined): string | null {
+  if (!value) return null
+  try {
+    const parsed = new URL(value)
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : null
+  } catch {
+    return null
+  }
 }
 
 function haveSameHttpOrigin(
@@ -314,43 +282,15 @@ function haveSameHttpOrigin(
   right: string | null | undefined
 ): boolean {
   if (!left || !right) return false
-
   try {
     const leftUrl = new URL(left)
     const rightUrl = new URL(right)
-    if (!['http:', 'https:'].includes(leftUrl.protocol)) return false
-    if (!['http:', 'https:'].includes(rightUrl.protocol)) return false
-    return leftUrl.origin === rightUrl.origin
+    return (
+      ['http:', 'https:'].includes(leftUrl.protocol) &&
+      ['http:', 'https:'].includes(rightUrl.protocol) &&
+      leftUrl.origin === rightUrl.origin
+    )
   } catch {
     return false
   }
-}
-
-function runWebviewOperation(
-  webview: WebviewTag | null,
-  operation: string,
-  setErrorMessage: (message: string | null) => void,
-  callback: (webview: WebviewTag) => void
-): void {
-  if (!webview) return
-
-  try {
-    callback(webview)
-  } catch (error) {
-    handleOperationError(operation, error, setErrorMessage)
-  }
-}
-
-function handleOperationError(
-  operation: string,
-  error: unknown,
-  setErrorMessage: (message: string | null) => void
-): void {
-  const message = error instanceof Error ? error.message : String(error)
-  console.error(`Failed to ${operation}`, error)
-  setErrorMessage(message)
-}
-
-function isAbortedNavigationError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes('ERR_ABORTED')
 }
