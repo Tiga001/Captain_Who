@@ -1212,7 +1212,7 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
     migrations::run_migrations(&connection).unwrap();
     let mut stored = conversation();
     stored.messages[1].status = Some("pending".to_string());
-    stored.messages[1].content = THINKING_PLACEHOLDER.to_string();
+    stored.messages[1].content = String::new();
     stored.messages[1].agent_run_json = Some(live_running_agent_run().to_string());
     save_conversation(&mut connection, stored).unwrap();
 
@@ -1232,7 +1232,7 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
         "conversation-1",
         &ChatMessageStateRecord {
             id: "assistant-1".to_string(),
-            content: THINKING_PLACEHOLDER.to_string(),
+            content: String::new(),
             status: Some("pending".to_string()),
             agent_run_json: Some(live_running_agent_run().to_string()),
             ui_state_json: None,
@@ -1257,7 +1257,7 @@ fn load_repairs_pending_message_when_trace_is_already_cancelled() {
     migrations::run_migrations(&connection).unwrap();
     let mut stored = conversation();
     stored.messages[1].status = Some("pending".to_string());
-    stored.messages[1].content = THINKING_PLACEHOLDER.to_string();
+    stored.messages[1].content = String::new();
     stored.messages[1].agent_run_json = Some(live_running_agent_run().to_string());
     save_conversation(&mut connection, stored).unwrap();
 
@@ -1293,7 +1293,7 @@ fn load_repairs_pending_message_when_trace_is_already_cancelled() {
         "conversation-1",
         &ChatMessageStateRecord {
             id: "assistant-1".to_string(),
-            content: THINKING_PLACEHOLDER.to_string(),
+            content: String::new(),
             status: Some("pending".to_string()),
             agent_run_json: Some(live_running_agent_run().to_string()),
             ui_state_json: None,

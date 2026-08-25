@@ -25,7 +25,7 @@ fn setup() -> Connection {
         (0, "user-1", "user", "first request", "sent"),
         (1, "assistant-1", "assistant", "first answer", "sent"),
         (2, "user-2", "user", "current request", "sent"),
-        (3, "assistant-2", "assistant", "正在思考...", "pending"),
+        (3, "assistant-2", "assistant", "", "pending"),
     ] {
         connection
             .execute(

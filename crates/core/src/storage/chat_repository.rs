@@ -17,8 +17,6 @@ use crate::{AgentMcpToolApproval, AgentMcpToolInvocationEvent};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
 
-const THINKING_PLACEHOLDER: &str = "正在思考...";
-
 /// Persists one Renderer-safe MCP lifecycle card from the Host-authenticated frozen approval.
 ///
 /// Raw arguments, result content and diagnostics never enter this projection. The helper may
@@ -1528,10 +1526,6 @@ fn is_live_run_status(status: &str) -> bool {
     )
 }
 
-fn is_thinking_placeholder(content: &str) -> bool {
-    content.trim() == THINKING_PLACEHOLDER
-}
-
 fn message_status_for_terminal_run(status: &str) -> &'static str {
     if status == "failed" {
         "error"
@@ -1550,15 +1544,6 @@ fn content_for_terminal_write(
     incoming_content: &str,
     incoming_reopens_run: bool,
 ) -> String {
-    if is_thinking_placeholder(incoming_content)
-        || (incoming_reopens_run && is_thinking_placeholder(existing_content))
-    {
-        return if is_thinking_placeholder(existing_content) {
-            String::new()
-        } else {
-            existing_content.to_string()
-        };
-    }
     if incoming_reopens_run {
         return existing_content.to_string();
     }
@@ -1667,17 +1652,12 @@ fn overlay_loaded_message_with_terminal_trace(
         status: trace_status,
         completed_at: trace_completed_at.unwrap_or(created_at),
     };
-    let next_content = if is_thinking_placeholder(&content) {
-        String::new()
-    } else {
-        content
-    };
     let next_status = Some(message_status_for_terminal_run(&terminal.status).to_string());
     let next_json = stamp_terminal_agent_run_json(agent_run_json.as_deref(), &terminal, created_at)
         .ok()
         .flatten()
         .or(agent_run_json);
-    (next_content, next_status, next_json)
+    (content, next_status, next_json)
 }
 
 #[derive(Debug, Clone)]

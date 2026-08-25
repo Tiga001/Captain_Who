@@ -6628,7 +6628,7 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-bad-reconciliation".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -9165,7 +9165,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-cancel-usage-failure".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -9248,7 +9248,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         .load_conversation("conversation-cancel-usage-failure")
         .unwrap()
         .unwrap();
-    assert_eq!(conversation.messages[0].content, THINKING_PLACEHOLDER);
+    assert!(conversation.messages[0].content.is_empty());
     assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
     assert!(storage
         .list_agent_tool_results_for_run("run-cancel-usage-failure", "approval_tool")
@@ -9269,7 +9269,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-file-write-cancel-failure".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),

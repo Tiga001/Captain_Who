@@ -1,6 +1,7 @@
 import { RefreshCw, Settings2 } from 'lucide-react'
 import type { McpServerListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { McpExternalServerIcon } from './McpPresentationIcon'
 import { McpServerStatusBadge } from './McpServerStatusBadge'
 import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 import type { McpServerPendingOperation } from './useMcpManagement'
@@ -31,6 +32,7 @@ export function McpServerList({
             className="mcp-server-row"
             key={server.serverId}
           >
+            <McpExternalServerIcon />
             <div className="mcp-server-row__primary">
               <span className="mcp-server-row__name">{displayName}</span>
               <McpServerStatusBadge state={server.state} />

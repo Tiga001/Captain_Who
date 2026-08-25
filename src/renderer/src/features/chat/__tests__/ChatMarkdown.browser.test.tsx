@@ -1,8 +1,54 @@
 // Browser coverage for chat Markdown URL boundaries, math normalization, and link compatibility.
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { ChatMarkdown } from '../components/ChatMarkdown'
+
+const markdownMocks = vi.hoisted(() => ({
+  copyTextToClipboard: vi.fn(async () => undefined),
+  highlightState: {
+    current: { status: 'idle' } as
+      | { status: 'idle' }
+      | { status: 'loading' }
+      | {
+          result: {
+            cacheKey: string
+            language: string
+            lines: Array<{
+              line: number
+              tokens: Array<{
+                color?: string
+                content: string
+                end: number
+                start: number
+              }>
+            }>
+            mode: 'highlighted' | 'plain'
+          }
+          status: 'ready'
+        }
+  }
+}))
+
+vi.mock('../../../config/FrontendConfigProvider', () => ({
+  useFrontendConfig: () => ({
+    t: (key: string) =>
+      ({
+        'chat.codeBlock.plainText': 'Plain text',
+        'chat.copied': 'Copied',
+        'chat.copy': 'Copy',
+        'files.wrapLines': 'Wrap lines'
+      })[key] ?? key
+  })
+}))
+
+vi.mock('../../syntaxHighlighting', () => ({
+  useSyntaxHighlight: () => markdownMocks.highlightState.current
+}))
+
+vi.mock('../components/chatMessageItemUtils', () => ({
+  copyTextToClipboard: markdownMocks.copyTextToClipboard
+}))
 
 vi.mock('../../../lib/externalLinks', () => ({
   openExternalUrl: vi.fn()
@@ -11,6 +57,11 @@ vi.mock('../../../lib/externalLinks', () => ({
 vi.mock('../components/ImagePreview', () => ({
   useImagePreview: () => ({ openImagePreview: vi.fn() })
 }))
+
+beforeEach(() => {
+  markdownMocks.copyTextToClipboard.mockClear()
+  markdownMocks.highlightState.current = { status: 'idle' }
+})
 
 describe('ChatMarkdown URL boundaries', () => {
   it('stops a GFM bare URL before adjacent CJK prose', async () => {
@@ -103,5 +154,83 @@ describe('ChatMarkdown math normalization', () => {
     expect(screen.container.textContent).toContain('Zhejiang_University_logo')
     expect(screen.container.textContent).toContain('EXIT=$?')
     expect(screen.container.textContent).toContain('运行这个命令')
+  })
+})
+
+describe('ChatMarkdown fenced code blocks', () => {
+  it('renders a compact language toolbar with wrap and copy controls', async () => {
+    const screen = await render(
+      <ChatMarkdown content={['```ts', 'const answer: number = 42', '```'].join('\n')} />
+    )
+    const block = screen.container.querySelector('.chat-code-block')
+    const wrapButton = screen.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Wrap lines"]'
+    )
+
+    await expect.element(screen.getByText('TypeScript')).toBeVisible()
+    expect(block?.classList.contains('is-wrapped')).toBe(false)
+    expect(wrapButton?.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.container.querySelector('pre code')?.textContent).toBe(
+      'const answer: number = 42\n'
+    )
+
+    await screen.getByRole('button', { name: 'Wrap lines' }).click()
+    expect(block?.classList.contains('is-wrapped')).toBe(true)
+    expect(wrapButton?.getAttribute('aria-pressed')).toBe('true')
+
+    await screen.getByRole('button', { name: 'Copy' }).click()
+    expect(markdownMocks.copyTextToClipboard).toHaveBeenCalledWith('const answer: number = 42\n')
+    await expect.element(screen.getByRole('button', { name: 'Copied' })).toBeVisible()
+  })
+
+  it('renders trusted syntax tokens without changing the source text', async () => {
+    markdownMocks.highlightState.current = {
+      result: {
+        cacheKey: 'chat-code:test',
+        language: 'typescript',
+        lines: [
+          {
+            line: 0,
+            tokens: [
+              {
+                color: 'var(--git-review-syntax-keyword)',
+                content: 'const',
+                end: 5,
+                start: 0
+              },
+              { content: ' value = 1', end: 15, start: 5 }
+            ]
+          },
+          { line: 1, tokens: [] }
+        ],
+        mode: 'highlighted'
+      },
+      status: 'ready'
+    }
+
+    const screen = await render(
+      <ChatMarkdown content={['```typescript', 'const value = 1', '```'].join('\n')} />
+    )
+    const keyword = screen.container.querySelector<HTMLSpanElement>('.chat-code-block code span')
+
+    expect(keyword?.textContent).toBe('const')
+    expect(keyword?.style.color).toBe('var(--git-review-syntax-keyword)')
+    expect(screen.container.querySelector('pre code')?.textContent).toBe('const value = 1\n')
+  })
+
+  it('keeps inline code on the existing inline-code path', async () => {
+    const screen = await render(<ChatMarkdown content={'Use `const value = 1` inline.'} />)
+
+    expect(screen.container.querySelector('.chat-code-block')).toBeNull()
+    expect(screen.container.querySelector('code')?.textContent).toBe('const value = 1')
+  })
+
+  it('keeps an unsupported fenced language visible while safely using plain text', async () => {
+    const screen = await render(
+      <ChatMarkdown content={['```mermaid', 'graph TD; A-->B', '```'].join('\n')} />
+    )
+
+    await expect.element(screen.getByText('mermaid')).toBeVisible()
+    expect(screen.container.querySelector('pre code')?.textContent).toBe('graph TD; A-->B\n')
   })
 })

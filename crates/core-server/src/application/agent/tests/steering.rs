@@ -159,7 +159,7 @@ fn install_active_run(
             messages: vec![ChatMessageRecord {
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -785,7 +785,7 @@ fn service_startup_abandons_guidance_left_queued_by_the_previous_process() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-startup-guidance".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),

@@ -182,4 +182,11 @@ describe('languageRegistry', () => {
     }
     expect(getTranslation('en-GB', 'chat.favorite')).toBe('Favourite')
   })
+
+  it('uses the current Classic name for the built-in classic themes', () => {
+    for (const language of Object.keys(languageRegistry) as AppLanguage[]) {
+      expect(getTranslation(language, 'appearance.themeVariant.classicLight')).toBe('Classic')
+      expect(getTranslation(language, 'appearance.themeVariant.classicDark')).toBe('Classic')
+    }
+  })
 })

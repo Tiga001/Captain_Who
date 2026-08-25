@@ -1,3 +1,4 @@
+import { Children, isValidElement, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkBreaks from 'remark-breaks'
@@ -6,6 +7,7 @@ import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
 import { openExternalUrl } from '../../../lib/externalLinks'
 import { remarkNormalizeCjkAutolinkBoundaries } from './chatMarkdownAutolinks'
+import { ChatCodeBlock } from './ChatCodeBlock'
 import { useImagePreview } from './ImagePreview'
 
 interface ChatMarkdownProps {
@@ -18,6 +20,13 @@ interface ChatMarkdownProps {
 interface MarkdownLine {
   body: string
   eol: string
+}
+
+function readMarkdownCodeText(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(readMarkdownCodeText).join('')
+  if (!isValidElement(node)) return ''
+  return readMarkdownCodeText((node.props as { children?: ReactNode }).children)
 }
 
 function splitMarkdownLines(value: string): MarkdownLine[] {
@@ -417,6 +426,23 @@ export function ChatMarkdown({ className, content, enableMath = true }: ChatMark
         }
         rehypePlugins={enableMath ? [rehypeKatex] : []}
         components={{
+          pre: ({ children }) => {
+            const codeElement = Children.toArray(children).find(
+              (child) => isValidElement(child) && child.type === 'code'
+            )
+
+            if (!isValidElement(codeElement)) return <pre>{children}</pre>
+
+            const codeProps = codeElement.props as {
+              children?: ReactNode
+              className?: string
+            }
+            const language = /(?:^|\s)language-([^\s]+)/.exec(codeProps.className ?? '')?.[1]
+
+            return (
+              <ChatCodeBlock code={readMarkdownCodeText(codeProps.children)} language={language} />
+            )
+          },
           a: ({ children, href, ...props }) => {
             const normalizedHref = normalizeMarkdownExternalHref(href)
 

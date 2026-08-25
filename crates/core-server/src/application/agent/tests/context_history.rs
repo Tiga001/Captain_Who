@@ -857,7 +857,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
             ChatMessageRecord {
                 id: "assistant-current".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 2,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),

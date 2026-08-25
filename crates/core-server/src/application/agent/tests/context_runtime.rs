@@ -45,7 +45,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                 ChatMessageRecord {
                     id: "assistant-current".to_string(),
                     role: "assistant".to_string(),
-                    content: THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 4,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),
@@ -339,7 +339,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
                 ChatMessageRecord {
                     id: "assistant-live".to_string(),
                     role: "assistant".to_string(),
-                    content: THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 2,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),
@@ -591,7 +591,7 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
                 ChatMessageRecord {
                     id: "assistant-terminal-skill".to_string(),
                     role: "assistant".to_string(),
-                    content: THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 2,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),
@@ -701,7 +701,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
                 ChatMessageRecord {
                     id: "assistant-hidden-indicator".to_string(),
                     role: "assistant".to_string(),
-                    content: THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 2,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),

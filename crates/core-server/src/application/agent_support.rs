@@ -2,7 +2,7 @@
 use crate::adapters::skills_adapter::{
     activate_selected_skills, prepare_enabled_skill_discovery, SkillActivationFailure,
 };
-use crate::application::agent::{AGENT_EVENT_NAME, ID_COUNTER, THINKING_PLACEHOLDER};
+use crate::application::agent::{AGENT_EVENT_NAME, ID_COUNTER};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};

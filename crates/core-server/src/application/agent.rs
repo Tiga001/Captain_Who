@@ -176,8 +176,6 @@ fn test_provider_continuation_vault(
 
 pub(crate) const AGENT_EVENT_NAME: &str = "agent.event";
 
-pub(crate) const THINKING_PLACEHOLDER: &str = "正在思考...";
-
 pub(crate) static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // Test-only fault queues are keyed by the durable Automation run identity so concurrently running

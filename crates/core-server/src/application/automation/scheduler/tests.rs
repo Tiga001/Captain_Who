@@ -581,7 +581,7 @@ async fn busy_existing_chat_is_retryable_and_preserves_exact_message_history() {
                 ChatMessageRecord {
                     id: ACTIVE_ASSISTANT_ID.to_string(),
                     role: "assistant".to_string(),
-                    content: crate::application::agent::THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 2,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),

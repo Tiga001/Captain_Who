@@ -226,6 +226,7 @@ describe('MCP Settings page', () => {
     await expect
       .element(screen.getByText('mcp.builtin.browserAutomation.description'))
       .toBeVisible()
+    expect(screen.container.querySelector('[data-mcp-icon="browser-automation"]')).not.toBeNull()
     expect(screen.getByRole('switch').elements()).toHaveLength(1)
     expect(screen.getByText('Host Browser automation').query()).toBeNull()
     expect(screen.getByText('Host description').query()).toBeNull()

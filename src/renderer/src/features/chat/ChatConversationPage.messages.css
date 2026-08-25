@@ -856,6 +856,112 @@ button.chat-message-attachment:focus-visible {
   word-break: break-word;
 }
 
+.chat-code-block {
+  max-width: 100%;
+  margin: 0.9em 0;
+  overflow: hidden;
+  color: var(--mc-color-text-secondary);
+  background: var(--mc-color-surface-muted);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-2xl);
+}
+
+.chat-code-block__header {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 14px;
+  color: var(--mc-color-text-muted);
+  border-bottom: 1px solid var(--mc-color-border-subtle);
+}
+
+.chat-code-block__language {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mc-mono-font-family);
+  font-size: var(--mc-font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-code-block__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  align-items: center;
+}
+
+.chat-code-block__action {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--mc-color-icon-muted);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-sm);
+}
+
+.chat-code-block__action:hover,
+.chat-code-block__action[aria-pressed='true'] {
+  color: var(--mc-color-icon-default);
+  background: var(--mc-color-state-hover);
+}
+
+.chat-code-block__action.is-copied {
+  color: var(--mc-color-text-accent);
+}
+
+.chat-code-block__action:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 1px;
+}
+
+.chat-code-block__scroller {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.chat-markdown .chat-code-block pre {
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  padding: 14px 16px;
+  margin: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.chat-markdown .chat-code-block pre code {
+  overflow-wrap: normal;
+  white-space: pre;
+  word-break: normal;
+}
+
+.chat-markdown .chat-code-block.is-wrapped pre {
+  width: 100%;
+  max-width: 100%;
+}
+
+.chat-markdown .chat-code-block.is-wrapped pre code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-code-block__action {
+    transition: none;
+  }
+}
+
 .chat-markdown table {
   display: table;
   width: 100%;

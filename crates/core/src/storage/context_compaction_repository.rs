@@ -1064,7 +1064,7 @@ fn list_journal_entries(
     };
 
     let mut entries = Vec::new();
-    for (message_id, role, mut content, created_at, status) in rows {
+    for (message_id, role, content, created_at, status) in rows {
         match role.as_str() {
             "user" => entries.push(ContextCompactionSourceItem::Message {
                 cursor: ContextJournalCursor::message(&message_id),
@@ -1103,9 +1103,6 @@ fn list_journal_entries(
                 if !has_complete_message || (trace.is_none() && status.as_deref() == Some("error"))
                 {
                     continue;
-                }
-                if status.as_deref() == Some("pending") && content.trim() == "正在思考..." {
-                    content.clear();
                 }
                 entries.push(ContextCompactionSourceItem::Message {
                     cursor: ContextJournalCursor::message(&message_id),

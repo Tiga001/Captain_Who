@@ -263,7 +263,7 @@ fn store_action(
             messages: vec![ChatMessageRecord {
                 id: assistant_message_id.clone(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),

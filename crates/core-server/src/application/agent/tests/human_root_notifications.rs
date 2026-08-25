@@ -28,7 +28,7 @@ fn seed_turn(
                 ChatMessageRecord {
                     id: assistant_message_id.to_string(),
                     role: "assistant".to_string(),
-                    content: THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 2,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),

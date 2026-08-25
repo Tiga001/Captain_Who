@@ -67,7 +67,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
                 ChatMessageRecord {
                     id: "assistant-cancel".to_string(),
                     role: "assistant".to_string(),
-                    content: THINKING_PLACEHOLDER.to_string(),
+                    content: String::new(),
                     created_at: 2,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),
@@ -231,7 +231,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-forced".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -382,7 +382,7 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
             messages: vec![ChatMessageRecord {
                 id: "assistant-forced-recovery".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -512,7 +512,7 @@ fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-atomic".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -561,7 +561,7 @@ fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
         .is_err());
 
     let conversation = storage.load_conversations().unwrap().remove(0);
-    assert_eq!(conversation.messages[0].content, THINKING_PLACEHOLDER);
+    assert!(conversation.messages[0].content.is_empty());
     assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
     assert!(storage
         .get_conversation_turn_trace("assistant-atomic")
@@ -582,7 +582,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
             messages: vec![ChatMessageRecord {
                 id: "assistant-cancel-before-spawn".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -741,7 +741,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
             messages: vec![ChatMessageRecord {
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
@@ -922,7 +922,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
             messages: vec![ChatMessageRecord {
                 id: "assistant-command-cancel".to_string(),
                 role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
+                content: String::new(),
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),

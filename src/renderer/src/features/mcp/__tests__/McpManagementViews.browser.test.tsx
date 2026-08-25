@@ -221,6 +221,7 @@ describe('MCP Server list', () => {
         servers={[current]}
       />
     )
+    expect(screen.container.querySelector('[data-mcp-icon="external-server"]')).not.toBeNull()
     await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
     expect(onEdit).toHaveBeenCalledWith(current)
   })

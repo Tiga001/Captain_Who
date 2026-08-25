@@ -1,6 +1,7 @@
 import type { McpBuiltinCapabilityListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { getBuiltinCapabilityDisplayName } from './builtinCapabilityPresentation'
+import { McpBuiltinCapabilityIcon } from './McpPresentationIcon'
 import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 
 interface McpBuiltinCapabilityListProps {
@@ -28,6 +29,7 @@ export function McpBuiltinCapabilityList({
             className="mcp-builtin-capability-row"
             key={capability.capabilityId}
           >
+            <McpBuiltinCapabilityIcon capabilityId={capability.capabilityId} />
             <div className="mcp-builtin-capability-row__copy">
               <strong>{name}</strong>
               {description && <p>{description}</p>}

@@ -118,7 +118,7 @@ fn durable_turn_occupancy_blocks_provider_transition_after_runtime_is_gone() {
     conversation.messages.push(ChatMessageRecord {
         id: "assistant-durable-active".to_string(),
         role: "assistant".to_string(),
-        content: THINKING_PLACEHOLDER.to_string(),
+        content: String::new(),
         created_at: 3,
         status: Some("pending".to_string()),
         attachments: Vec::new(),

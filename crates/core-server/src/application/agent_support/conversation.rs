@@ -497,7 +497,8 @@ fn prepare_conversation_turn_from_source(
     let assistant_message = ChatMessageRecord {
         id: assistant_message_id.clone(),
         role: "assistant".to_string(),
-        content: THINKING_PLACEHOLDER.to_string(),
+        // Lifecycle labels belong to structured run state; message content is model-authored only.
+        content: String::new(),
         created_at: assistant_created_at,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
@@ -977,10 +978,7 @@ pub(crate) fn conversation_history_messages_with_model_context(
         }
         let content = if trace.as_ref().is_some_and(|trace| {
             trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-        }) || (trace.as_ref().is_some_and(|trace| {
-            trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
-        }) && message.content.trim() == THINKING_PLACEHOLDER)
-        {
+        }) {
             String::new()
         } else {
             message.content.clone()
