@@ -1,24 +1,54 @@
 import { randomBytes } from 'node:crypto'
 import type {
+  BrowserSurfaceCrashErrorKind,
   BrowserSurfaceLoadErrorKind,
+  BrowserSurfacePublicCrashError,
   BrowserSurfacePublicLoadError
 } from '@mycopilot/protocol'
+import {
+  DEFAULT_APP_LANGUAGE,
+  getTranslation,
+  isAppLanguage,
+  type AppLanguage,
+  type TranslationKey
+} from '../../shared/i18n/languageRegistry'
+import { BROWSER_INTERNAL_PAGE_SCHEME } from './BrowserInternalPageStore'
 
 const MAX_FAILED_URL_LENGTH = 16_384
 const MAX_ERROR_DESCRIPTION_LENGTH = 128
+const INTERNAL_ACTION_ORIGIN = `${BROWSER_INTERNAL_PAGE_SCHEME}://action`
 
 export interface BrowserSurfaceLoadError extends BrowserSurfacePublicLoadError {
-  internalPageUrl: string
-  navigationEpoch: number
   generation: number
+  internalActionUrl: string
+  internalPageHtml: string
+  navigationEpoch: number
+}
+
+export interface BrowserSurfaceCrashError extends BrowserSurfacePublicCrashError {
+  generation: number
+  internalActionUrl: string
+  internalPageHtml: string
+  navigationEpoch: number
 }
 
 export interface BrowserSurfaceLoadErrorInput {
+  actionToken?: string
   errorCode: number
   errorDescription: string
   failedUrl: string
   generation: number
   locale?: string
+  navigationEpoch: number
+  nonce?: string
+}
+
+export interface BrowserSurfaceCrashErrorInput {
+  actionToken?: string
+  generation: number
+  kind: BrowserSurfaceCrashErrorKind
+  locale?: string
+  logicalUrl: string | null
   navigationEpoch: number
   nonce?: string
 }
@@ -41,8 +71,10 @@ export function createBrowserSurfaceLoadError(
   const failedUrl = normalizeFailedUrl(input.failedUrl)
   const errorDescription = normalizeErrorDescription(input.errorDescription)
   const kind = classifyBrowserLoadError(errorDescription)
+  const locale = normalizeLocale(input.locale)
   const hostname = new URL(failedUrl).hostname
-  const copy = localizedErrorCopy(kind, input.locale)
+  const copy = localizedLoadErrorCopy(kind, hostname, locale)
+  const internalActionUrl = createBrowserInternalActionUrl('retry', input.actionToken)
   const publicError: BrowserSurfacePublicLoadError = {
     kind,
     errorCode: Number.isSafeInteger(input.errorCode) ? input.errorCode : -2,
@@ -53,15 +85,54 @@ export function createBrowserSurfaceLoadError(
     summary: copy.summary,
     suggestions: copy.suggestions
   }
-  const internalPageUrl = createBrowserLoadErrorPageUrl(publicError, {
-    hostname,
-    nonce: input.nonce
-  })
   return {
     ...publicError,
-    internalPageUrl,
-    navigationEpoch: input.navigationEpoch,
-    generation: input.generation
+    generation: input.generation,
+    internalActionUrl,
+    internalPageHtml: createBrowserLoadErrorPageHtml(publicError, {
+      actionUrl: internalActionUrl,
+      locale,
+      nonce: input.nonce
+    }),
+    navigationEpoch: input.navigationEpoch
+  }
+}
+
+export function createBrowserSurfaceCrashError(
+  input: BrowserSurfaceCrashErrorInput
+): BrowserSurfaceCrashError {
+  const locale = normalizeLocale(input.locale)
+  const hostname = hostnameForLogicalUrl(input.logicalUrl)
+  const titleKey =
+    input.kind === 'renderer_unresponsive'
+      ? 'browser.internalUnresponsive.title'
+      : 'browser.internalCrash.title'
+  const summaryKey =
+    input.kind === 'renderer_unresponsive'
+      ? 'browser.internalUnresponsive.summary'
+      : 'browser.internalCrash.summary'
+  const actionKey =
+    input.kind === 'renderer_unresponsive'
+      ? 'browser.internalUnresponsive.action'
+      : 'browser.internalCrash.action'
+  const internalActionUrl = createBrowserInternalActionUrl('recover', input.actionToken)
+  const publicError: BrowserSurfacePublicCrashError = {
+    kind: input.kind,
+    title: translate(locale, titleKey),
+    heading: translate(locale, titleKey),
+    summary: translate(locale, summaryKey, { host: hostname }),
+    actionLabel: translate(locale, actionKey)
+  }
+  return {
+    ...publicError,
+    generation: input.generation,
+    internalActionUrl,
+    internalPageHtml: createBrowserCrashPageHtml(publicError, {
+      actionUrl: internalActionUrl,
+      locale,
+      nonce: input.nonce
+    }),
+    navigationEpoch: input.navigationEpoch
   }
 }
 
@@ -80,120 +151,244 @@ export function toPublicBrowserSurfaceLoadError(
   }
 }
 
-export function createBrowserLoadErrorPageUrl(
+export function toPublicBrowserSurfaceCrashError(
+  error: BrowserSurfaceCrashError
+): BrowserSurfacePublicCrashError {
+  return {
+    kind: error.kind,
+    title: error.title,
+    heading: error.heading,
+    summary: error.summary,
+    actionLabel: error.actionLabel
+  }
+}
+
+export function createBrowserLoadErrorPageHtml(
   error: BrowserSurfacePublicLoadError,
-  options: { hostname?: string; nonce?: string } = {}
+  options: { actionUrl?: string; locale?: string; nonce?: string } = {}
 ): string {
-  const hostname = options.hostname ?? new URL(error.failedUrl).hostname
-  const nonce = normalizeNonce(options.nonce) ?? randomBytes(18).toString('base64url')
-  const retryTarget = serializeInlineJson(error.failedUrl)
-  const suggestionItems = error.suggestions
-    .map((suggestion) => `<li>${escapeHtml(suggestion)}</li>`)
-    .join('')
+  const locale = normalizeLocale(options.locale)
+  const actionUrl = normalizeInternalActionUrl(
+    options.actionUrl ?? createBrowserInternalActionUrl('retry')
+  )
+  return createInternalPageHtml({
+    actionLabel: translate(locale, 'browser.internalError.reload'),
+    actionUrl,
+    code: error.errorDescription,
+    heading: error.heading,
+    locale,
+    nonce: options.nonce,
+    summary: error.summary,
+    suggestions: error.suggestions,
+    title: error.title,
+    tryLabel: translate(locale, 'browser.internalError.try')
+  })
+}
+
+export function createBrowserCrashPageHtml(
+  error: BrowserSurfacePublicCrashError,
+  options: { actionUrl?: string; locale?: string; nonce?: string } = {}
+): string {
+  const locale = normalizeLocale(options.locale)
+  const actionUrl = normalizeInternalActionUrl(
+    options.actionUrl ?? createBrowserInternalActionUrl('recover')
+  )
+  return createInternalPageHtml({
+    actionLabel: error.actionLabel,
+    actionUrl,
+    heading: error.heading,
+    locale,
+    nonce: options.nonce,
+    summary: error.summary,
+    suggestions: [],
+    title: error.title
+  })
+}
+
+export function isBrowserInternalActionUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return (
+      parsed.protocol === `${BROWSER_INTERNAL_PAGE_SCHEME}:` &&
+      parsed.hostname === 'action' &&
+      /^\/(?:retry|recover)\/[A-Za-z0-9_-]{24,128}$/u.test(parsed.pathname) &&
+      parsed.port === '' &&
+      parsed.username === '' &&
+      parsed.password === '' &&
+      parsed.search === '' &&
+      parsed.hash === ''
+    )
+  } catch {
+    return false
+  }
+}
+
+function createInternalPageHtml(input: {
+  actionLabel: string
+  actionUrl: string
+  code?: string
+  heading: string
+  locale: AppLanguage
+  nonce?: string
+  summary: string
+  suggestions: readonly string[]
+  title: string
+  tryLabel?: string
+}): string {
+  const nonce = normalizeNonce(input.nonce) ?? randomBytes(18).toString('base64url')
+  const actionTarget = serializeInlineJson(input.actionUrl)
+  const suggestionBlock =
+    input.suggestions.length > 0
+      ? `<section class="suggestions" aria-label="${escapeHtmlAttribute(input.tryLabel ?? '')}">
+      <p>${escapeHtml(input.tryLabel ?? '')}</p>
+      <ul>${input.suggestions.map((suggestion) => `<li>${escapeHtml(suggestion)}</li>`).join('')}</ul>
+    </section>`
+      : ''
+  const code = input.code ? `<p class="code">${escapeHtml(input.code)}</p>` : ''
   const html = `<!doctype html>
-<html lang="${isChineseLocale(error.title) ? 'zh-CN' : 'en'}">
+<html lang="${escapeHtmlAttribute(input.locale)}" dir="ltr">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; img-src data:; style-src 'nonce-${escapeHtmlAttribute(nonce)}'; script-src 'nonce-${escapeHtmlAttribute(nonce)}'">
-  <title>${escapeHtml(error.title)}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; connect-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; object-src 'none'; img-src 'none'; media-src 'none'; style-src 'nonce-${escapeHtmlAttribute(nonce)}'; script-src 'nonce-${escapeHtmlAttribute(nonce)}'">
+  <title>${escapeHtml(input.title)}</title>
   <style nonce="${escapeHtmlAttribute(nonce)}">
-    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --page: #ffffff;
+      --text: #202124;
+      --muted: #62666d;
+      --accent: #1673d1;
+      --button: #eef1f4;
+      --button-hover: #e2e6ea;
+      --focus: #1673d1;
+    }
     * { box-sizing: border-box; }
     html, body { min-height: 100%; margin: 0; }
-    body { display: grid; place-items: center; padding: clamp(24px, 8vw, 72px); background: #ffffff; color: #202124; }
-    main { width: min(100%, 680px); }
-    .mark { position: relative; width: 54px; height: 54px; margin-bottom: 28px; border: 4px solid #2878d0; border-radius: 50%; }
-    .mark::before, .mark::after { content: ""; position: absolute; background: #2878d0; border-radius: 2px; transform: rotate(-38deg); }
-    .mark::before { width: 4px; height: 28px; left: 23px; top: 9px; }
-    .mark::after { width: 26px; height: 4px; left: 12px; top: 21px; }
-    h1 { margin: 0; font-size: 32px; line-height: 1.25; font-weight: 650; letter-spacing: 0; }
-    .summary { margin: 18px 0 0; color: #5f6368; font-size: 17px; line-height: 1.55; overflow-wrap: anywhere; }
-    .host { color: #3c4043; font-weight: 600; }
-    .try { margin: 30px 0 8px; color: #5f6368; font-size: 16px; }
-    ul { margin: 0; padding-left: 27px; color: #5f6368; font-size: 16px; line-height: 1.7; }
-    .code { margin: 28px 0 0; color: #70757a; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-    button { margin-top: 34px; min-height: 40px; padding: 0 18px; border: 0; border-radius: 6px; background: #1a73e8; color: #fff; font: 600 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; cursor: pointer; }
-    button:focus-visible { outline: 3px solid color-mix(in srgb, #1a73e8 35%, transparent); outline-offset: 3px; }
+    body { background: var(--page); color: var(--text); }
+    main {
+      display: flex;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+      padding: clamp(32px, 7vw, 76px);
+    }
+    .content { width: min(100%, 680px); min-width: 0; }
+    .mark {
+      position: relative;
+      width: 52px;
+      height: 52px;
+      margin-bottom: 28px;
+      color: var(--accent);
+      border: 4px solid currentColor;
+      border-radius: 50%;
+    }
+    .mark::before, .mark::after {
+      position: absolute;
+      content: "";
+      background: currentColor;
+      border-radius: 2px;
+      transform: rotate(-38deg);
+    }
+    .mark::before { width: 4px; height: 28px; left: 20px; top: 8px; }
+    .mark::after { width: 25px; height: 4px; left: 10px; top: 20px; }
+    h1 { margin: 0; font-size: 30px; font-weight: 650; line-height: 1.28; letter-spacing: 0; }
+    .summary { margin: 18px 0 0; color: var(--muted); font-size: 17px; line-height: 1.55; overflow-wrap: anywhere; }
+    .suggestions { margin-top: 30px; color: var(--muted); }
+    .suggestions p { margin: 0 0 8px; font-size: 16px; }
+    ul { margin: 0; padding-left: 26px; font-size: 16px; line-height: 1.72; }
+    .code { margin: 28px 0 0; color: var(--muted); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    button {
+      min-height: 40px;
+      margin-top: 34px;
+      padding: 0 17px;
+      color: var(--text);
+      background: var(--button);
+      border: 0;
+      border-radius: 7px;
+      font: 600 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    button:hover { background: var(--button-hover); }
+    button:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 40%, transparent); outline-offset: 3px; }
     @media (max-width: 460px) {
-      body { place-items: start; padding: 38px 24px; }
+      main { align-items: flex-start; justify-content: flex-start; padding: 38px 24px; }
       .mark { width: 46px; height: 46px; margin-bottom: 22px; }
-      .mark::before { height: 24px; left: 19px; top: 7px; }
-      .mark::after { width: 22px; left: 10px; top: 18px; }
+      .mark::before { height: 24px; left: 18px; top: 7px; }
+      .mark::after { width: 22px; left: 9px; top: 18px; }
       h1 { font-size: 24px; }
-      .summary, .try, ul { font-size: 15px; }
+      .summary, .suggestions p, ul { font-size: 15px; }
     }
     @media (prefers-color-scheme: dark) {
-      body { background: #202124; color: #f1f3f4; }
-      .summary, .try, ul { color: #bdc1c6; }
-      .host { color: #e8eaed; }
-      .code { color: #9aa0a6; }
-      button { background: #8ab4f8; color: #202124; }
+      :root { --page: #202428; --text: #f1f3f4; --muted: #b7bdc5; --accent: #6aa9e9; --button: #343a40; --button-hover: #40474e; --focus: #8abcf0; }
     }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
   </style>
 </head>
 <body>
   <main>
-    <div class="mark" aria-hidden="true"></div>
-    <h1>${escapeHtml(error.heading)}</h1>
-    <p class="summary"><span class="host">${escapeHtml(hostname)}</span> ${escapeHtml(error.summary)}</p>
-    <p class="try">${escapeHtml(error.title.startsWith('无法') ? '请尝试：' : 'Try:')}</p>
-    <ul>${suggestionItems}</ul>
-    <p class="code">${escapeHtml(error.errorDescription)}</p>
-    <button id="retry" type="button">${escapeHtml(error.title.startsWith('无法') ? '重新加载' : 'Reload')}</button>
+    <div class="content">
+      <div class="mark" aria-hidden="true"></div>
+      <h1>${escapeHtml(input.heading)}</h1>
+      <p class="summary">${escapeHtml(input.summary)}</p>
+      ${suggestionBlock}
+      ${code}
+      <button id="primary-action" type="button">${escapeHtml(input.actionLabel)}</button>
+    </div>
   </main>
   <script nonce="${escapeHtmlAttribute(nonce)}">
     (() => {
-      const target = ${retryTarget};
-      document.getElementById('retry')?.addEventListener('click', () => window.location.replace(target));
+      const target = ${actionTarget};
+      document.getElementById('primary-action')?.addEventListener('click', () => {
+        document.title = target;
+      });
     })();
   </script>
 </body>
 </html>`
-  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
+  return html
 }
 
-function localizedErrorCopy(
+function localizedLoadErrorCopy(
   kind: BrowserSurfaceLoadErrorKind,
-  locale?: string
+  hostname: string,
+  locale: AppLanguage
 ): { title: string; heading: string; summary: string; suggestions: readonly string[] } {
-  const chinese = locale?.toLowerCase().startsWith('zh') ?? true
-  if (chinese) {
-    const summary = {
-      offline: '无法加载，因为设备处于离线状态。',
-      dns: '的服务器 IP 地址无法找到。',
-      connection_refused: '拒绝了连接。',
-      timeout: '响应时间过长。',
-      certificate: '使用了无效的安全证书。',
-      generic: '暂时无法加载。'
-    }[kind]
-    return {
-      title: '无法访问此网站',
-      heading: '无法访问此网站',
-      summary,
-      suggestions:
-        kind === 'certificate'
-          ? ['检查设备日期和时间', '联系网站管理员']
-          : ['检查网络连接', '检查代理、防火墙和 DNS 配置']
-    }
+  const summaryKey: Record<BrowserSurfaceLoadErrorKind, TranslationKey> = {
+    offline: 'browser.internalError.offlineSummary',
+    dns: 'browser.internalError.dnsSummary',
+    connection_refused: 'browser.internalError.refusedSummary',
+    timeout: 'browser.internalError.timeoutSummary',
+    certificate: 'browser.internalError.certificateSummary',
+    generic: 'browser.internalError.genericSummary'
   }
-  const summary = {
-    offline: 'could not be loaded because this device is offline.',
-    dns: 'could not be found.',
-    connection_refused: 'refused to connect.',
-    timeout: 'took too long to respond.',
-    certificate: 'presented an invalid security certificate.',
-    generic: 'could not be loaded.'
-  }[kind]
+  const title = translate(locale, 'browser.internalError.title')
   return {
-    title: 'This site cannot be reached',
-    heading: 'This site cannot be reached',
-    summary,
+    title,
+    heading: title,
+    summary: translate(locale, summaryKey[kind], { host: hostname }),
     suggestions:
       kind === 'certificate'
-        ? ['Check your device date and time', 'Contact the site administrator']
-        : ['Check the network connection', 'Check proxy, firewall, and DNS settings']
+        ? [
+            translate(locale, 'browser.internalError.checkDateTime'),
+            translate(locale, 'browser.internalError.contactAdministrator')
+          ]
+        : [
+            translate(locale, 'browser.internalError.checkNetwork'),
+            translate(locale, 'browser.internalError.checkProxyFirewallDns')
+          ]
   }
+}
+
+function createBrowserInternalActionUrl(action: 'recover' | 'retry', token?: string): string {
+  const normalizedToken = normalizeActionToken(token) ?? randomBytes(24).toString('base64url')
+  return `${INTERNAL_ACTION_ORIGIN}/${action}/${normalizedToken}`
+}
+
+function normalizeInternalActionUrl(value: string): string {
+  if (!isBrowserInternalActionUrl(value)) throw new Error('browser.invalid_internal_action')
+  return value
 }
 
 function normalizeFailedUrl(value: string): string {
@@ -224,8 +419,36 @@ function normalizeErrorDescription(value: string): string {
   return candidate.slice(0, MAX_ERROR_DESCRIPTION_LENGTH) || 'ERR_FAILED'
 }
 
+function normalizeLocale(value: string | undefined): AppLanguage {
+  return isAppLanguage(value) ? value : DEFAULT_APP_LANGUAGE
+}
+
 function normalizeNonce(value: string | undefined): string | null {
   return value && /^[A-Za-z0-9_-]{16,128}$/u.test(value) ? value : null
+}
+
+function normalizeActionToken(value: string | undefined): string | null {
+  return value && /^[A-Za-z0-9_-]{24,128}$/u.test(value) ? value : null
+}
+
+function hostnameForLogicalUrl(value: string | null): string {
+  if (!value) return 'page'
+  try {
+    const parsed = new URL(value)
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.hostname : 'page'
+  } catch {
+    return 'page'
+  }
+}
+
+function translate(
+  locale: AppLanguage,
+  key: TranslationKey,
+  values: Readonly<Record<string, string>> = {}
+): string {
+  return getTranslation(locale, key).replace(/\{([^{}]+)\}/gu, (placeholder, name: string) =>
+    Object.prototype.hasOwnProperty.call(values, name) ? values[name] : placeholder
+  )
 }
 
 function escapeHtml(value: string): string {
@@ -248,8 +471,4 @@ function serializeInlineJson(value: string): string {
     .replaceAll('&', '\\u0026')
     .replaceAll('\u2028', '\\u2028')
     .replaceAll('\u2029', '\\u2029')
-}
-
-function isChineseLocale(title: string): boolean {
-  return title.startsWith('无法')
 }

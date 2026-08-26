@@ -52,9 +52,19 @@ interface RegisteredGuest {
   host: WebContents
   partition: string
   pendingTransport?: ElectronGuestCdpTransport
+  resolvePresentation?: BrowserSurfacePresentationResolver
   surfaceId?: string
   surfaceGeneration?: number
 }
+
+export interface BrowserSurfaceCdpPresentation {
+  title: string
+  url: string
+}
+
+export type BrowserSurfacePresentationResolver = (
+  physicalUrl: string
+) => BrowserSurfaceCdpPresentation | null
 
 interface SurfaceClaim {
   generation: number
@@ -149,10 +159,14 @@ export class BrowserTargetBroker {
 
     record.connecting = true
     try {
-      const transport = new ElectronGuestCdpTransport(record.guest, (closedTransport) => {
-        if (record.activeTransport === closedTransport) record.activeTransport = undefined
-        if (record.pendingTransport === closedTransport) record.pendingTransport = undefined
-      })
+      const transport = new ElectronGuestCdpTransport(
+        record.guest,
+        (closedTransport) => {
+          if (record.activeTransport === closedTransport) record.activeTransport = undefined
+          if (record.pendingTransport === closedTransport) record.pendingTransport = undefined
+        },
+        (physicalUrl) => record.resolvePresentation?.(physicalUrl) ?? null
+      )
       record.pendingTransport = transport
       await transport.attach()
       if (
@@ -223,10 +237,21 @@ export class BrowserTargetBroker {
     record?.pendingTransport?.close()
     record?.activeTransport?.close()
     if (record?.surfaceId === surfaceId) {
+      record.resolvePresentation = undefined
       record.surfaceId = undefined
       record.surfaceGeneration = undefined
     }
     this.surfaces.delete(surfaceId)
+  }
+
+  setSurfacePresentationResolver(
+    surfaceId: string,
+    generation: number,
+    resolver: BrowserSurfacePresentationResolver
+  ): void {
+    this.assertUsable()
+    const record = this.getClaimedGuest(surfaceId, generation)
+    record.resolvePresentation = resolver
   }
 
   dispose(): void {

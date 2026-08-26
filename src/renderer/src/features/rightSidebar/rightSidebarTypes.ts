@@ -66,6 +66,7 @@ export type RightSidebarModulePageState =
   | {
       kind: 'browser-surface'
       surfaceId: string
+      url?: string
       viewport?: { height: number; width: number }
     }
   | {

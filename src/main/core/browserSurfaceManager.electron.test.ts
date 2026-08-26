@@ -81,7 +81,11 @@ describe.runIf(process.platform === 'darwin')('BrowserSurfaceManager Electron fi
       const electronPath = requireFromWorkspace('electron') as string
       const environment = { ...process.env }
       delete environment.ELECTRON_RUN_AS_NODE
-      const execution = await runProcess(electronPath, [fixturePath], environment)
+      const execution = await runProcess(
+        electronPath,
+        [fixturePath, '-ApplePersistenceIgnoreState', 'YES'],
+        environment
+      )
       expect(execution.exitCode, execution.stderr || execution.stdout).toBe(0)
       const resultLine = execution.stdout
         .split(/\r?\n/u)

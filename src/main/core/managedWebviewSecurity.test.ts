@@ -112,11 +112,11 @@ describe('managed webview session requests', () => {
 })
 
 describe('managed webview bootstrap registration', () => {
-  it('keeps data URLs blocked except for the registry exact internal-page authorization', () => {
+  it('allows only the registry-owned opaque internal-page URL', () => {
     const surfaceId = 'right-sidebar-browser-internal-page'
     const host = new WebContentsFixture('file:///renderer.html')
     const guest = new WebContentsFixture(createBrowserSurfaceBootstrapUrl(surfaceId))
-    const internalUrl = 'data:text/html;charset=utf-8,%3Chtml%3Esafe%3C%2Fhtml%3E'
+    const internalUrl = 'mycopilot-browser-internal://page/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
     const recordBlockedNavigation = vi.fn()
     const targetRegistry: ManagedWebviewTargetRegistry = {
       registerManagedGuest: vi.fn(),

@@ -12,6 +12,7 @@ import { app, BrowserWindow, session } from 'electron'
 import type { WebContents } from 'electron'
 import { BrowserSurfaceManager } from '../BrowserSurfaceManager'
 import { BrowserTargetBroker } from '../BrowserTargetBroker'
+import { BrowserInternalPageStore } from '../BrowserInternalPageStore'
 import {
   configureManagedWebviewHost,
   initializeManagedWebviewSessions
@@ -89,10 +90,10 @@ async function main(): Promise<void> {
     'data:text/html;charset=utf-8,<html><body><div id="host"></div></body></html>'
   )
 
-  const broker = new BrowserTargetBroker(
-    BROWSER_WEBVIEW_PARTITION,
-    session.fromPartition(BROWSER_WEBVIEW_PARTITION)
-  )
+  const managedSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
+  const browserInternalPageStore = new BrowserInternalPageStore(managedSession)
+  browserInternalPageStore.install()
+  const broker = new BrowserTargetBroker(BROWSER_WEBVIEW_PARTITION, managedSession)
   let pendingEnsure:
     Extract<BrowserSurfaceCommand, { kind: 'ensureAttached' | 'createSurface' }> | undefined
   const guests = new Map<string, WebContents>()
@@ -171,6 +172,7 @@ async function main(): Promise<void> {
     broker,
     closeTimeoutMs: 5_000,
     createSurfaceId: () => allocatedSurfaceIds.shift() ?? `unexpected-${Date.now()}`,
+    internalPageStore: browserInternalPageStore,
     resolveHost: () => window.webContents,
     sendCommand: (_host, command) => {
       if (command.kind === 'ensureAttached' || command.kind === 'createSurface') {

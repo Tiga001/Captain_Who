@@ -225,6 +225,7 @@ export const RightSidebar = memo(function RightSidebar({
     if (browserSurfaceCommand.kind === 'resizeSurface' && existing) {
       updatePage(existing.id, {
         moduleState: {
+          ...(existing.moduleState?.kind === 'browser-surface' ? existing.moduleState : {}),
           kind: 'browser-surface',
           surfaceId: browserSurfaceCommand.surfaceId,
           viewport: {

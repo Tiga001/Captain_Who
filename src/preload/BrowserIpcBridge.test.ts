@@ -19,7 +19,8 @@ describe('Browser IPC bridge', () => {
       canGoForward: false,
       isLoading: false,
       presentation: 'content' as const,
-      loadError: null
+      loadError: null,
+      crashError: null
     }
     const listeners = new Map<string, (event: IpcRendererEvent, value: unknown) => void>()
     const invoke = vi.fn(async (): Promise<unknown> => state)

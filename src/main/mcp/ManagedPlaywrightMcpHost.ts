@@ -1,7 +1,13 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { BrowserContext, ElementHandle, Frame, Locator, Page, Route } from 'playwright'
-import type { BrowserArtifactKind, BrowserArtifactReference } from '@mycopilot/protocol'
+import type {
+  BrowserArtifactKind,
+  BrowserArtifactReference,
+  BrowserSurfacePresentation,
+  BrowserSurfacePublicCrashError,
+  BrowserSurfacePublicLoadError
+} from '@mycopilot/protocol'
 import { createConnection } from '@playwright/mcp'
 import { chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -150,6 +156,15 @@ const EXISTING_PAGE_TOOLS = new Set([
   'browser_wait_for'
 ])
 
+const INTERNAL_PAGE_AUTOMATION_TOOLS = new Set([
+  'browser_navigate',
+  'browser_navigate_back',
+  'browser_network_state_set',
+  'browser_resize',
+  'browser_tabs',
+  'browser_take_screenshot'
+])
+
 export type ManagedPlaywrightMcpHostErrorCode =
   | 'mcp.builtin_playwright.closed'
   | 'mcp.builtin_playwright.busy'
@@ -273,11 +288,14 @@ export interface ManagedPlaywrightMcpHostOptions {
 }
 
 export interface ManagedPlaywrightSurfaceView {
+  crashError?: BrowserSurfacePublicCrashError | null
   surfaceId: string
   index: number
   title: string
   url: string
   isActive: boolean
+  loadError?: BrowserSurfacePublicLoadError | null
+  presentation?: BrowserSurfacePresentation
   generation: number
 }
 
@@ -691,6 +709,13 @@ export class ManagedPlaywrightMcpHost {
                 return result
               }
               surfaceLease = await this.acquireToolSurfaceLease(name, modelArguments)
+              const surfaceFailure = surfaceLease
+                ? this.surfaceFailureForLease(surfaceLease)
+                : undefined
+              if (surfaceFailure && !INTERNAL_PAGE_AUTOMATION_TOOLS.has(name)) {
+                responseReceived = true
+                return browserSurfaceFailureResult(surfaceFailure)
+              }
               if (
                 name === 'browser_navigate' &&
                 !surfaceLease &&
@@ -1797,6 +1822,18 @@ export class ManagedPlaywrightMcpHost {
     return candidate
   }
 
+  private surfaceFailureForLease(
+    lease: ManagedPlaywrightToolSurfaceLease
+  ): ManagedPlaywrightSurfaceView | undefined {
+    const surface = this.surfaceGroup
+      ?.listSurfaces()
+      .find(
+        (candidate) =>
+          candidate.surfaceId === lease.surfaceId && candidate.generation === lease.generation
+      )
+    return surface && (surface.loadError || surface.crashError) ? surface : undefined
+  }
+
   private getActiveBrowserTarget(): {
     surfaceId: string
     generation: number
@@ -2895,6 +2932,46 @@ function riskFailureResult(failure: BrowserRiskFailure | null): ManagedPlaywrigh
 
 function textToolResult(text: string): ManagedPlaywrightCallResult {
   return { content: [{ type: 'text', text }], isError: false }
+}
+
+function browserSurfaceFailureResult(
+  surface: ManagedPlaywrightSurfaceView
+): ManagedPlaywrightCallResult {
+  if (surface.loadError) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: 'The managed browser target is displaying a load error. Navigate or retry before interacting with the page.'
+        }
+      ],
+      structuredContent: {
+        status: 'load_error',
+        generation: surface.generation,
+        surfaceId: surface.surfaceId,
+        loadError: surface.loadError
+      },
+      isError: true
+    }
+  }
+  if (surface.crashError) {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: 'The managed browser target requires renderer recovery before page interaction.'
+        }
+      ],
+      structuredContent: {
+        status: 'renderer_failure',
+        generation: surface.generation,
+        surfaceId: surface.surfaceId,
+        crashError: surface.crashError
+      },
+      isError: true
+    }
+  }
+  throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.protocol_error')
 }
 
 function managedBrowserConfigResult(): ManagedPlaywrightCallResult {

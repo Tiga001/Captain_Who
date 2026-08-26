@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyBrowserLoadError,
-  createBrowserLoadErrorPageUrl,
+  createBrowserSurfaceCrashError,
+  createBrowserLoadErrorPageHtml,
   createBrowserSurfaceLoadError
 } from '../browser/BrowserLoadErrorPage'
 
@@ -29,7 +30,8 @@ describe('Browser internal load error page', () => {
       generation: 7,
       locale: 'zh-CN',
       navigationEpoch: 12,
-      nonce: 'fixed-test-nonce-0001'
+      nonce: 'fixed-test-nonce-0001',
+      actionToken: 'fixed-test-action-token-00000001'
     })
 
     expect(error).toMatchObject({
@@ -39,13 +41,19 @@ describe('Browser internal load error page', () => {
       failedUrl: 'https://example.com/private?q=secret',
       generation: 7,
       navigationEpoch: 12,
-      title: '无法访问此网站'
+      title: '无法访问此站点'
     })
-    expect(error.internalPageUrl).toMatch(/^data:text\/html;charset=utf-8,/u)
+    const html = error.internalPageHtml
+    expect(html).toMatch(/^<!doctype html>/u)
+    expect(html).not.toContain('private?q=secret')
+    expect(html).not.toContain('q=secret')
+    expect(html).toContain(
+      'mycopilot-browser-internal://action/retry/fixed-test-action-token-00000001'
+    )
   })
 
   it('escapes HTML, attributes, and inline JSON without loading remote resources', () => {
-    const pageUrl = createBrowserLoadErrorPageUrl(
+    const html = createBrowserLoadErrorPageHtml(
       {
         kind: 'generic',
         errorCode: -2,
@@ -57,18 +65,41 @@ describe('Browser internal load error page', () => {
         summary: '" onmouseover="alert(1)',
         suggestions: ['<script>alert(1)</script>']
       },
-      { hostname: '<example>&"', nonce: 'fixed-test-nonce-0001' }
+      {
+        actionUrl: 'mycopilot-browser-internal://action/retry/fixed-test-action-token-00000001',
+        nonce: 'fixed-test-nonce-0001'
+      }
     )
-    const html = decodeURIComponent(pageUrl.slice(pageUrl.indexOf(',') + 1))
-
     expect(html).toContain("default-src 'none'")
     expect(html).toContain("style-src 'nonce-fixed-test-nonce-0001'")
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;')
     expect(html).toContain('&lt;/style&gt;&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(html).toContain('&lt;example&gt;&amp;&quot;')
-    expect(html).toContain('%3C%2Fscript%3E')
-    expect(html).toContain('\\u0026safe=1')
+    expect(html).not.toContain('%3C%2Fscript%3E')
+    expect(html).not.toContain('safe=1')
+    expect(html).toContain(
+      'mycopilot-browser-internal://action/retry/fixed-test-action-token-00000001'
+    )
     expect(html).not.toContain('<img src=x onerror=alert(1)>')
     expect(html).not.toMatch(/https?:\/\/[^"']+\.(?:js|css|png|svg)/u)
+  })
+
+  it('builds a distinct localized renderer recovery document without exposing the logical URL', () => {
+    const error = createBrowserSurfaceCrashError({
+      actionToken: 'fixed-crash-action-token-0000001',
+      generation: 4,
+      kind: 'renderer_crashed',
+      locale: 'en-US',
+      logicalUrl: 'https://example.com/private?session=secret',
+      navigationEpoch: 9,
+      nonce: 'fixed-test-nonce-0001'
+    })
+    const html = error.internalPageHtml
+
+    expect(error.kind).toBe('renderer_crashed')
+    expect(html).toContain('The page crashed')
+    expect(html).toContain(
+      'mycopilot-browser-internal://action/recover/fixed-crash-action-token-0000001'
+    )
+    expect(html).not.toContain('session=secret')
   })
 })

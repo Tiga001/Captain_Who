@@ -59,7 +59,8 @@ describe('browser surface Main IPC', () => {
       canGoForward: false,
       isLoading: false,
       presentation: 'content' as const,
-      loadError: null
+      loadError: null,
+      crashError: null
     }
     const performSurfaceAction = vi.fn(() => surfaceState)
     const getSurfaceState = vi.fn(() => surfaceState)

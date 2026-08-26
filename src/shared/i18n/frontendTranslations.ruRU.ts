@@ -280,6 +280,30 @@ export const ruRUTranslations = {
   'browser.zoomOut': 'Уменьшить масштаб',
   'browser.emptyTitle': 'Начать просмотр',
   'browser.emptyDescription': 'Введите URL, чтобы открыть страницу',
+  'browser.internalError.title': 'Не удается открыть этот сайт',
+  'browser.internalError.try': 'Попробуйте:',
+  'browser.internalError.offlineSummary':
+    'Не удалось загрузить {host}, так как компьютер не подключен к сети',
+  'browser.internalError.dnsSummary': 'Не удалось найти IP-адрес сервера {host}',
+  'browser.internalError.refusedSummary': 'Сайт {host} отклонил подключение',
+  'browser.internalError.timeoutSummary': 'Сайт {host} слишком долго не отвечает',
+  'browser.internalError.certificateSummary':
+    'Сайт {host} предоставил недействительный сертификат безопасности',
+  'browser.internalError.genericSummary': 'Не удалось загрузить {host}',
+  'browser.internalError.checkNetwork': 'Проверьте подключение к сети',
+  'browser.internalError.checkProxyFirewallDns':
+    'Проверьте настройки прокси-сервера, брандмауэра и DNS',
+  'browser.internalError.checkDateTime': 'Проверьте дату и время на устройстве',
+  'browser.internalError.contactAdministrator': 'Свяжитесь с администратором сайта',
+  'browser.internalError.reload': 'Перезагрузить',
+  'browser.internalCrash.title': 'Произошел сбой страницы',
+  'browser.internalCrash.summary':
+    'Страница браузера неожиданно остановилась. Создайте ее заново, чтобы снова открыть {host}.',
+  'browser.internalCrash.action': 'Создать страницу заново',
+  'browser.internalUnresponsive.title': 'Страница не отвечает',
+  'browser.internalUnresponsive.summary':
+    'Сайт {host} не отвечает. Можно создать страницу заново и повторить попытку.',
+  'browser.internalUnresponsive.action': 'Создать страницу заново',
   'imagePreview.title': 'Предварительный просмотр изображения',
   'imagePreview.close': 'Закрыть',
   'imagePreview.download': 'Скачать',

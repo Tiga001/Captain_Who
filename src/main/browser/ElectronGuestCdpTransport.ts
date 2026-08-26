@@ -32,6 +32,11 @@ export interface ElectronGuestCdpIdentity {
   targetInfo: Readonly<CdpTargetInfo>
 }
 
+export interface ElectronGuestCdpPresentation {
+  title: string
+  url: string
+}
+
 interface ChildReadiness {
   readonly promise: Promise<boolean>
   settle(ready: boolean): void
@@ -98,7 +103,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
 
   constructor(
     private readonly guest: WebContents,
-    private readonly handleClosed: (transport: ElectronGuestCdpTransport) => void
+    private readonly handleClosed: (transport: ElectronGuestCdpTransport) => void,
+    private readonly resolvePresentation?: (
+      physicalUrl: string
+    ) => ElectronGuestCdpPresentation | null
   ) {
     this.debuggerClient = guest.debugger
     this.targetInfo = {
@@ -161,11 +169,12 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   }
 
   managedIdentity(): ElectronGuestCdpIdentity {
+    const targetInfo = this.presentedTargetInfo()
     return {
-      browserContextId: this.targetInfo.browserContextId,
+      browserContextId: targetInfo.browserContextId,
       sessionId: this.syntheticSessionId,
-      targetId: this.targetInfo.targetId,
-      targetInfo: { ...this.targetInfo }
+      targetId: targetInfo.targetId,
+      targetInfo
     }
   }
 
@@ -241,6 +250,9 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       this.childReadiness.get(mappedSessionId)?.settle(true)
     }
 
+    if (mappedSessionId === this.syntheticSessionId) {
+      safeParams = this.sanitizeTopLevelEvent(method, safeParams)
+    }
     const event = { method, params: safeParams, sessionId: mappedSessionId }
     this.enqueueEvent(event)
 
@@ -326,10 +338,11 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private async dispatch(request: CdpRequest): Promise<void> {
     try {
       const rawResult = await this.dispatchCommand(request)
-      const result = cloneBoundedCdpPayload(
+      const boundedResult = cloneBoundedCdpPayload(
         rawResult === undefined ? {} : rawResult,
         cdpPayloadBudget(request.method, 'response')
       )
+      const result = this.sanitizeCommandResult(request, boundedResult)
       this.respond(request, { result })
     } catch (error) {
       this.respond(request, {
@@ -372,10 +385,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     }
     if (request.method === 'Target.getTargetInfo') {
       this.assertSelectedTarget(request.params)
-      return { targetInfo: this.targetInfo }
+      return { targetInfo: this.presentedTargetInfo() }
     }
     if (request.method === 'Target.getTargets') {
-      return { targetInfos: [this.targetInfo] }
+      return { targetInfos: [this.presentedTargetInfo()] }
     }
     if (request.method === 'Target.setDiscoverTargets') return {}
     if (request.method.startsWith('Target.') && request.method !== 'Target.setAutoAttach') {
@@ -615,9 +628,9 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
         return {}
       case 'Target.getTargetInfo':
         this.assertSelectedTarget(params)
-        return { targetInfo: this.targetInfo }
+        return { targetInfo: this.presentedTargetInfo() }
       case 'Target.getTargets':
-        return { targetInfos: [this.targetInfo] }
+        return { targetInfos: [this.presentedTargetInfo()] }
       case 'Target.setDiscoverTargets':
         return {}
       default:
@@ -679,10 +692,189 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       method: 'Target.attachedToTarget',
       params: {
         sessionId: this.syntheticSessionId,
-        targetInfo: this.targetInfo,
+        targetInfo: this.presentedTargetInfo(),
         waitingForDebugger: false
       }
     })
+  }
+
+  private presentedTargetInfo(physicalUrl = this.guest.getURL()): CdpTargetInfo {
+    const presentation = this.safePresentation(physicalUrl)
+    return presentation
+      ? {
+          ...this.targetInfo,
+          title: presentation.title,
+          url: presentation.url
+        }
+      : {
+          ...this.targetInfo,
+          title: boundedString(this.guest.getTitle()),
+          url: publicCdpUrl(physicalUrl)
+        }
+  }
+
+  private safePresentation(physicalUrl: string): ElectronGuestCdpPresentation | null {
+    try {
+      const presentation = this.resolvePresentation?.(physicalUrl)
+      if (!presentation) return null
+      const parsed = new URL(presentation.url)
+      if (
+        !['http:', 'https:'].includes(parsed.protocol) ||
+        parsed.username !== '' ||
+        parsed.password !== ''
+      ) {
+        return null
+      }
+      return {
+        title: boundedString(presentation.title),
+        url: boundedString(parsed.toString())
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private logicalUrl(physicalUrl: unknown): unknown {
+    if (typeof physicalUrl !== 'string') return physicalUrl
+    const publicUrl = publicHttpUrl(physicalUrl)
+    if (publicUrl) return publicUrl
+    return this.safePresentation(physicalUrl)?.url ?? 'about:blank'
+  }
+
+  private logicalOrigin(physicalOrigin: unknown): unknown {
+    if (typeof physicalOrigin !== 'string') return physicalOrigin
+    const publicOrigin = publicHttpOrigin(physicalOrigin)
+    if (publicOrigin) return publicOrigin
+    const presentation = this.safePresentation(this.guest.getURL())
+    return presentation && haveSameProtocolAndHost(physicalOrigin, this.guest.getURL())
+      ? new URL(presentation.url).origin
+      : ''
+  }
+
+  private sanitizeTopLevelEvent(method: string, params: CdpParams): CdpParams {
+    if (method === 'Page.frameNavigated' && isRecord(params.frame)) {
+      return { ...params, frame: this.sanitizeFrameRecord(params.frame) }
+    }
+    if (
+      (method === 'Page.navigatedWithinDocument' ||
+        method === 'Page.frameRequestedNavigation' ||
+        method === 'Page.frameStartedNavigating' ||
+        method === 'Page.downloadWillBegin' ||
+        method === 'Page.windowOpen' ||
+        method === 'Network.webSocketCreated' ||
+        method === 'Network.webTransportCreated') &&
+      typeof params.url === 'string'
+    ) {
+      return { ...params, url: this.logicalUrl(params.url) }
+    }
+    if (method === 'Network.requestWillBeSent') {
+      return {
+        ...params,
+        ...(typeof params.documentURL === 'string'
+          ? { documentURL: this.logicalUrl(params.documentURL) }
+          : {}),
+        ...(isRecord(params.request) ? { request: this.sanitizeUrlRecord(params.request) } : {}),
+        ...(isRecord(params.redirectResponse)
+          ? { redirectResponse: this.sanitizeUrlRecord(params.redirectResponse) }
+          : {})
+      }
+    }
+    if (method === 'Network.responseReceived' && isRecord(params.response)) {
+      return { ...params, response: this.sanitizeUrlRecord(params.response) }
+    }
+    if (method === 'Security.certificateError' && typeof params.requestURL === 'string') {
+      return { ...params, requestURL: this.logicalUrl(params.requestURL) }
+    }
+    if (method === 'Runtime.executionContextCreated' && isRecord(params.context)) {
+      return {
+        ...params,
+        context: {
+          ...params.context,
+          origin: this.logicalOrigin(params.context.origin)
+        }
+      }
+    }
+    if (
+      (method === 'Debugger.scriptParsed' || method === 'Debugger.scriptFailedToParse') &&
+      typeof params.url === 'string'
+    ) {
+      return { ...params, url: this.logicalUrl(params.url) }
+    }
+    if (method === 'Runtime.exceptionThrown' && isRecord(params.exceptionDetails)) {
+      return {
+        ...params,
+        exceptionDetails: this.sanitizeUrlRecord(params.exceptionDetails)
+      }
+    }
+    if (method === 'Log.entryAdded' && isRecord(params.entry)) {
+      return { ...params, entry: this.sanitizeUrlRecord(params.entry) }
+    }
+    if (method === 'Target.targetInfoChanged' && isRecord(params.targetInfo)) {
+      const targetInfo = params.targetInfo
+      if (targetInfo.targetId === this.targetInfo.targetId) {
+        return { ...params, targetInfo: this.presentedTargetInfo(String(targetInfo.url ?? '')) }
+      }
+    }
+    return params
+  }
+
+  private sanitizeUrlRecord(record: CdpParams): CdpParams {
+    return typeof record.url === 'string' ? { ...record, url: this.logicalUrl(record.url) } : record
+  }
+
+  private sanitizeFrameRecord(record: CdpParams): CdpParams {
+    const url = this.logicalUrl(record.url)
+    const logicalUrl = typeof url === 'string' ? publicHttpUrl(url) : null
+    return {
+      ...record,
+      ...(record.url !== undefined ? { url } : {}),
+      ...(record.unreachableUrl !== undefined
+        ? { unreachableUrl: this.logicalUrl(record.unreachableUrl) }
+        : {}),
+      ...(record.securityOrigin !== undefined
+        ? { securityOrigin: this.logicalOrigin(record.securityOrigin) }
+        : {}),
+      ...(record.domainAndRegistry !== undefined
+        ? { domainAndRegistry: logicalUrl ? new URL(logicalUrl).hostname : '' }
+        : {})
+    }
+  }
+
+  private sanitizeCommandResult(request: CdpRequest, result: unknown): unknown {
+    if (!isRecord(result)) return result
+    if (request.method === 'Page.getNavigationHistory' && Array.isArray(result.entries)) {
+      return {
+        ...result,
+        entries: result.entries.map((entry) =>
+          isRecord(entry) ? { ...entry, url: this.logicalUrl(entry.url) } : entry
+        )
+      }
+    }
+    if (
+      (request.method === 'Page.getFrameTree' || request.method === 'Page.getResourceTree') &&
+      isRecord(result.frameTree)
+    ) {
+      return { ...result, frameTree: this.sanitizeFrameTree(result.frameTree) }
+    }
+    return result
+  }
+
+  private sanitizeFrameTree(value: CdpParams): CdpParams {
+    const frame = isRecord(value.frame) ? this.sanitizeFrameRecord(value.frame) : value.frame
+    const childFrames = Array.isArray(value.childFrames)
+      ? value.childFrames.map((child) => (isRecord(child) ? this.sanitizeFrameTree(child) : child))
+      : value.childFrames
+    const resources = Array.isArray(value.resources)
+      ? value.resources.map((resource) =>
+          isRecord(resource) ? this.sanitizeUrlRecord(resource) : resource
+        )
+      : value.resources
+    return {
+      ...value,
+      frame,
+      ...(childFrames ? { childFrames } : {}),
+      ...(resources ? { resources } : {})
+    }
   }
 
   private respond(
@@ -1196,6 +1388,42 @@ function normalizeTargetInfo(value: unknown, fallback: CdpTargetInfo): CdpTarget
     title: boundedString(targetInfo.title) || fallback.title,
     url: boundedString(targetInfo.url) || fallback.url
   }
+}
+
+function publicHttpUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value)
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      parsed.username !== '' ||
+      parsed.password !== ''
+    ) {
+      return null
+    }
+    return boundedString(parsed.toString())
+  } catch {
+    return null
+  }
+}
+
+function publicHttpOrigin(value: string): string | null {
+  const publicUrl = publicHttpUrl(value)
+  return publicUrl ? new URL(publicUrl).origin : null
+}
+
+function haveSameProtocolAndHost(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(left)
+    const rightUrl = new URL(right)
+    return leftUrl.protocol === rightUrl.protocol && leftUrl.host === rightUrl.host
+  } catch {
+    return false
+  }
+}
+
+function publicCdpUrl(value: string): string {
+  if (value === 'about:blank') return value
+  return publicHttpUrl(value) ?? 'about:blank'
 }
 
 function boundedString(value: unknown): string {

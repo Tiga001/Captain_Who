@@ -153,6 +153,7 @@ function renderBrowserModule({
       viewport={
         page.moduleState?.kind === 'browser-surface' ? page.moduleState.viewport : undefined
       }
+      logicalUrl={page.moduleState?.kind === 'browser-surface' ? page.moduleState.url : undefined}
       t={t}
     />
   )
@@ -163,6 +164,7 @@ type BrowserModuleSurfaceProps = Pick<
   'activity' | 'onPageUpdate' | 'onSurfaceFocus' | 't'
 > & {
   pageId: string
+  logicalUrl?: string
   surfaceId: string
   viewport?: { height: number; width: number }
 }
@@ -172,6 +174,7 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   onPageUpdate,
   onSurfaceFocus,
   pageId,
+  logicalUrl,
   surfaceId,
   viewport,
   t
@@ -181,12 +184,21 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   const handlePageMetadataChange = useCallback(
     (metadata: BrowserPageMetadata) => {
       const title = metadata.title?.trim()
+      // The recreated guest reports an empty bootstrap snapshot before Main restores its logical
+      // URL. Keep the persisted URL until a new authoritative HTTP(S) URL arrives.
+      const nextLogicalUrl = metadata.url ?? logicalUrl
       onPageUpdate({
         iconUrl: metadata.iconUrl,
+        moduleState: {
+          kind: 'browser-surface',
+          surfaceId,
+          ...(nextLogicalUrl ? { url: nextLogicalUrl } : {}),
+          ...(viewport ? { viewport } : {})
+        },
         ...(title ? { title } : {})
       })
     },
-    [onPageUpdate]
+    [logicalUrl, onPageUpdate, surfaceId, viewport]
   )
 
   return (
@@ -205,6 +217,7 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
         }
         onSurfaceFocus={onSurfaceFocus}
         pageId={pageId}
+        initialLogicalUrl={logicalUrl}
         surfaceId={surfaceId}
         viewport={viewport}
       />

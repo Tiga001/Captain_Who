@@ -4,6 +4,7 @@ import {
   ArrowRight,
   CornerDownRight,
   Globe2,
+  MonitorX,
   Minus,
   MoreVertical,
   Plus,
@@ -44,6 +45,7 @@ interface BrowserPanelProps {
   ) => void
   onSurfaceFocus?: () => void
   pageId: string
+  initialLogicalUrl?: string
   surfaceId?: string
   viewport?: { height: number; width: number }
 }
@@ -62,6 +64,7 @@ export function BrowserPanel({
   onSurfaceInstanceChange,
   onSurfaceFocus,
   pageId,
+  initialLogicalUrl,
   surfaceId,
   viewport
 }: BrowserPanelProps) {
@@ -95,13 +98,19 @@ export function BrowserPanel({
     goBack,
     goForward,
     hostFallbackError,
+    hostFallbackCrashError,
     isLoaded,
     navigationState,
     navigateToUrl,
     reload,
     setWebview,
     setZoom
-  } = useBrowserWebview({ isActive, surfaceId: viewId, surfaceInstanceId })
+  } = useBrowserWebview({
+    initialLogicalUrl,
+    isActive,
+    surfaceId: viewId,
+    surfaceInstanceId
+  })
 
   useLayoutEffect(() => {
     isActiveRef.current = isActive
@@ -453,10 +462,7 @@ export function BrowserPanel({
           <div className="browser-panel__fallback" role="status">
             <WifiOff aria-hidden="true" />
             <h2>{hostFallbackError.heading}</h2>
-            <p>
-              <strong>{hostnameForUrl(hostFallbackError.failedUrl)}</strong>{' '}
-              {hostFallbackError.summary}
-            </p>
+            <p>{hostFallbackError.summary}</p>
             <ul>
               {hostFallbackError.suggestions.map((suggestion) => (
                 <li key={suggestion}>{suggestion}</li>
@@ -468,17 +474,19 @@ export function BrowserPanel({
             </button>
           </div>
         )}
+        {hostFallbackCrashError && (
+          <div className="browser-panel__fallback" role="status">
+            <MonitorX aria-hidden="true" />
+            <h2>{hostFallbackCrashError.heading}</h2>
+            <p>{hostFallbackCrashError.summary}</p>
+            <button type="button" onClick={() => void reload()}>
+              {hostFallbackCrashError.actionLabel}
+            </button>
+          </div>
+        )}
       </div>
     </section>
   )
-}
-
-function hostnameForUrl(value: string): string {
-  try {
-    return new URL(value).hostname
-  } catch {
-    return ''
-  }
 }
 
 function measureVisibleWebviewViewport(webview: WebviewTag): { height: number; width: number } {

@@ -46,6 +46,7 @@ describe('browser surface protocol', () => {
         canGoForward: false,
         isLoading: false,
         presentation: 'host-fallback',
+        crashError: null,
         loadError: {
           kind: 'dns',
           errorCode: -105,
@@ -63,6 +64,59 @@ describe('browser surface protocol', () => {
       presentation: 'host-fallback',
       loadError: { kind: 'dns' }
     })
+  })
+
+  it('strictly separates renderer failures from network load failures', () => {
+    const crashState = {
+      schemaVersion: 1,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: SURFACE_INSTANCE_ID,
+      stateRevision: 5,
+      url: 'https://example.test/page',
+      title: 'Page renderer stopped',
+      faviconUrl: null,
+      canGoBack: true,
+      canGoForward: false,
+      isLoading: false,
+      presentation: 'crash-page',
+      loadError: null,
+      crashError: {
+        kind: 'renderer_crashed',
+        title: 'Page renderer stopped',
+        heading: 'Page renderer stopped',
+        summary: 'The page renderer exited unexpectedly.',
+        actionLabel: 'Recreate page'
+      }
+    }
+
+    expect(parseBrowserSurfaceState(crashState)).toMatchObject({
+      presentation: 'crash-page',
+      crashError: { kind: 'renderer_crashed' }
+    })
+    expect(() =>
+      parseBrowserSurfaceState({
+        ...crashState,
+        loadError: {
+          kind: 'generic',
+          errorCode: -2,
+          errorDescription: 'ERR_FAILED',
+          failedUrl: crashState.url,
+          title: 'Failed',
+          heading: 'Failed',
+          summary: 'Failed',
+          suggestions: []
+        }
+      })
+    ).toThrow('multiple failures')
+    expect(() => parseBrowserSurfaceState({ ...crashState, presentation: 'content' })).toThrow(
+      'content presentation'
+    )
+    expect(() => parseBrowserSurfaceState({ ...crashState, crashError: null })).toThrow(
+      'requires a renderer failure'
+    )
+    expect(() => parseBrowserSurfaceState({ ...crashState, url: 'data:text/html,forged' })).toThrow(
+      'navigation URL'
+    )
   })
 
   it('round-trips a bounded inert bootstrap URL', () => {

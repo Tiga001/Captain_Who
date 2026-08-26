@@ -188,9 +188,9 @@ function begin(harness: ReturnType<typeof createHarness>, signal?: AbortSignal) 
 }
 
 describe('BrowserNetworkGuard', () => {
-  it('admits only an exact leased internal data document for one guest generation', async () => {
+  it('retains only an exact Main-authored internal document until history releases it', async () => {
     const harness = createHarness(undefined, ['93.184.216.34'], {}, 'host_boundaries_only')
-    const internalUrl = 'data:text/html;charset=utf-8,%3Chtml%3Esafe%3C%2Fhtml%3E'
+    const internalUrl = 'mycopilot-browser-internal://page/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
     const lease = harness.guard.beginInternalNavigation({
       generation: 1,
       guest: harness.guest,
@@ -204,6 +204,8 @@ describe('BrowserNetworkGuard', () => {
     })
 
     lease.finish()
+    await expect(request(harness, { url: internalUrl })).resolves.toEqual({})
+    harness.guard.forgetInternalNavigation(harness.guest, internalUrl)
     await expect(request(harness, { url: internalUrl })).resolves.toEqual({ cancel: true })
     await harness.guard.shutdown()
   })

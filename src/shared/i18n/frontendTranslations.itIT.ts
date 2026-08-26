@@ -284,6 +284,30 @@ export const itITTranslations = {
   'browser.zoomOut': 'Rimpicciolisci',
   'browser.emptyTitle': 'Inizia a navigare',
   'browser.emptyDescription': 'Inserisci URL per aprire una pagina',
+  'browser.internalError.title': 'Impossibile raggiungere il sito',
+  'browser.internalError.try': 'Prova a:',
+  'browser.internalError.offlineSummary':
+    'Impossibile caricare {host} perché il computer è offline',
+  'browser.internalError.dnsSummary': 'Impossibile trovare l’indirizzo IP del server di {host}',
+  'browser.internalError.refusedSummary': '{host} ha rifiutato la connessione',
+  'browser.internalError.timeoutSummary': '{host} ha impiegato troppo tempo a rispondere',
+  'browser.internalError.certificateSummary':
+    '{host} ha presentato un certificato di sicurezza non valido',
+  'browser.internalError.genericSummary': 'Impossibile caricare {host}',
+  'browser.internalError.checkNetwork': 'Controlla la connessione di rete',
+  'browser.internalError.checkProxyFirewallDns':
+    'Controlla le impostazioni di proxy, firewall e DNS',
+  'browser.internalError.checkDateTime': 'Controlla la data e l’ora del dispositivo',
+  'browser.internalError.contactAdministrator': 'Contatta l’amministratore del sito',
+  'browser.internalError.reload': 'Ricarica',
+  'browser.internalCrash.title': 'La pagina si è arrestata',
+  'browser.internalCrash.summary':
+    'La pagina del browser si è arrestata in modo imprevisto. Ricreala per visitare di nuovo {host}.',
+  'browser.internalCrash.action': 'Ricrea pagina',
+  'browser.internalUnresponsive.title': 'La pagina non risponde',
+  'browser.internalUnresponsive.summary':
+    '{host} non risponde. Puoi ricreare la pagina e riprovare.',
+  'browser.internalUnresponsive.action': 'Ricrea pagina',
   'imagePreview.title': "Anteprima dell'immagine",
   'imagePreview.close': 'Chiudi',
   'imagePreview.download': 'Scarica',

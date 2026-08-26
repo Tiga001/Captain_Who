@@ -19,6 +19,7 @@ import {
 } from './BrowserRiskCoordinator'
 import { BrowserDownloadBroker, type BrowserDownloadToolLease } from './BrowserDownloadBroker'
 import { ChromiumPdfViewerRequestGate } from './ChromiumPdfViewer'
+import { isBrowserInternalPageUrl } from './BrowserInternalPageStore'
 
 const MAX_REGISTERED_GUESTS = 32
 const MAX_REDIRECT_MARKERS = 1_024
@@ -26,16 +27,18 @@ const MAX_ACTIVE_DOWNLOADS = 4
 const MAX_SINGLE_DOWNLOAD_BYTES = 64 * 1024 * 1024
 const MAX_TOTAL_ACTIVE_DOWNLOAD_BYTES = 128 * 1024 * 1024
 const MAX_TOOL_POPUP_AUTHORITIES = 4
+const MAX_TRUSTED_INTERNAL_PAGES_PER_GUEST = 128
 
 /** Host-owned policy; Renderer and model cannot select or weaken it. */
 export type BrowserNetworkAccessPolicy = 'host_boundaries_only' | 'risk_approval'
 
 interface GuestRecord {
   active?: ActiveOperation
+  activeInternalNavigation?: InternalNavigationRecord
   generation: number
   guest: WebContents
   handleDestroyed: () => void
-  internalNavigation?: InternalNavigationRecord
+  internalNavigationUrls: Set<string>
   navigationFence?: MainFrameNavigationFenceRecord
   surfaceId: string
 }
@@ -388,6 +391,7 @@ export class BrowserNetworkGuard {
       generation: input.generation,
       guest: input.guest,
       handleDestroyed: () => this.unregisterGuest(record, true),
+      internalNavigationUrls: new Set(),
       surfaceId: input.surfaceId
     }
     this.guests.set(input.guest.id, record)
@@ -406,7 +410,7 @@ export class BrowserNetworkGuard {
     }
   }
 
-  /** Grants one exact Main-authored data document to one exact registered guest generation. */
+  /** Registers one exact Main-authored internal document for this exact guest generation. */
   beginInternalNavigation(input: {
     generation: number
     guest: WebContents
@@ -423,16 +427,34 @@ export class BrowserNetworkGuard {
     ) {
       throw new Error('browser.network_guard.internal_navigation_denied')
     }
+    if (
+      !record.internalNavigationUrls.has(input.url) &&
+      record.internalNavigationUrls.size >= MAX_TRUSTED_INTERNAL_PAGES_PER_GUEST
+    ) {
+      throw new Error('browser.network_guard.internal_navigation_capacity')
+    }
+    record.internalNavigationUrls.add(input.url)
     const authorization: InternalNavigationRecord = { url: input.url }
-    record.internalNavigation = authorization
+    record.activeInternalNavigation = authorization
     let finished = false
     return {
       finish: () => {
         if (finished) return
         finished = true
-        if (record.internalNavigation === authorization) record.internalNavigation = undefined
+        if (record.activeInternalNavigation === authorization) {
+          record.activeInternalNavigation = undefined
+        }
       }
     }
+  }
+
+  forgetInternalNavigation(guest: WebContents, url: string): void {
+    const record = this.guests.get(guest.id)
+    if (!record || record.guest !== guest) return
+    if (record.activeInternalNavigation?.url === url) {
+      record.activeInternalNavigation = undefined
+    }
+    record.internalNavigationUrls.delete(url)
   }
 
   isInternalNavigationAllowed(guest: WebContents, url: string): boolean {
@@ -442,7 +464,7 @@ export class BrowserNetworkGuard {
       record &&
       record.guest === guest &&
       !guest.isDestroyed() &&
-      record.internalNavigation?.url === url
+      record.internalNavigationUrls.has(url)
     )
   }
 
@@ -943,7 +965,7 @@ export class BrowserNetworkGuard {
     if (
       registeredRecord &&
       details.resourceType === 'mainFrame' &&
-      registeredRecord.internalNavigation?.url === details.url
+      registeredRecord.internalNavigationUrls.has(details.url)
     ) {
       return
     }
@@ -1129,7 +1151,8 @@ export class BrowserNetworkGuard {
       record.navigationFence.blocked = true
       record.navigationFence = undefined
     }
-    record.internalNavigation = undefined
+    record.activeInternalNavigation = undefined
+    record.internalNavigationUrls.clear()
     this.downloadBroker?.unregisterGuest(record.guest, record.generation)
     void this.downloadBroker
       ?.releaseSurface({ surfaceId: record.surfaceId, generation: record.generation })
@@ -1260,7 +1283,7 @@ export class BrowserNetworkGuard {
 }
 
 function isManagedInternalPageUrl(value: string): boolean {
-  return value.length <= 1_048_576 && value.startsWith('data:text/html;charset=utf-8,')
+  return isBrowserInternalPageUrl(value)
 }
 
 function onceCallback<T>(callback: (value: T) => void): (value: T) => void {

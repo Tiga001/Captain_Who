@@ -7,6 +7,14 @@ import {
   resolveBrowserSurfaceHostApi,
   useBrowserSurfaceCommand
 } from '../../browser/browserSurface'
+import { useBrowserWebview } from '../../browser/useBrowserWebview'
+
+vi.mock('../../../host/hostClient', () => ({
+  hostClient: {
+    browser: { clearBrowsingData: vi.fn(async () => undefined) },
+    resources: { resolveFavicon: vi.fn(async () => ({ url: null })) }
+  }
+}))
 
 const originalMyCopilot = Object.getOwnPropertyDescriptor(window, 'mycopilot')
 
@@ -40,43 +48,12 @@ describe('browser surface Host bridge availability', () => {
   it('subscribes to a complete bridge and cleans up the exact listener', async () => {
     let listener: ((command: BrowserSurfaceCommand) => void) | undefined
     const unsubscribe = vi.fn()
-    const browser: BrowserHostApi = {
-      clearBrowsingData: vi.fn(async () => undefined),
-      exportArtifact: vi.fn(async () => ({
-        ok: true as const,
-        value: { schemaVersion: 1 as const, status: 'cancelled' as const }
-      })),
-      readArtifactPreview: vi.fn(async () => ({
-        ok: false as const,
-        error: { code: -32_001, message: 'not found' }
-      })),
+    const browser = createBrowserApi({
       onSurfaceCommand: vi.fn((nextListener) => {
         listener = nextListener
         return unsubscribe
-      }),
-      onSurfaceState: vi.fn(() => () => undefined),
-      surfaceAction: vi.fn(async (input) => emptySurfaceState(input)),
-      surfaceReady: vi.fn(async () => ({
-        schemaVersion: 1 as const,
-        accepted: true as const,
-        status: 'applied' as const,
-        reason: 'surface_ready' as const,
-        retryable: false as const,
-        requestId: '22222222-2222-4222-8222-222222222222',
-        surfaceId: 'right-sidebar-browser-test'
-      })),
-      surfaceSelected: vi.fn(async (input) => ({
-        schemaVersion: 1 as const,
-        status: 'noop' as const,
-        reason: 'not_registered' as const,
-        retryable: true as const,
-        surfaceId: input.surfaceId,
-        surfaceInstanceId: null,
-        selectionRevision: input.selectionRevision,
-        authoritativeRevision: 0
-      })),
-      surfaceState: vi.fn(async (input) => emptySurfaceState(input))
-    }
+      })
+    })
     exposeHost({ browser })
     const openRightSidebar = vi.fn()
     const screen = await render(<Harness openRightSidebar={openRightSidebar} />)
@@ -93,6 +70,105 @@ describe('browser surface Host bridge availability', () => {
 
     screen.unmount()
     expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores only the persisted logical URL when a recreated surface is blank', async () => {
+    const restoredUrl = 'https://example.test/restored?view=logical'
+    const surfaceAction = vi.fn(async (input) => ({
+      ...emptySurfaceState(input),
+      stateRevision: 1,
+      url: restoredUrl,
+      title: 'Unable to load',
+      presentation: 'host-fallback' as const,
+      loadError: {
+        kind: 'offline' as const,
+        errorCode: -106,
+        errorDescription: 'ERR_INTERNET_DISCONNECTED',
+        failedUrl: restoredUrl,
+        title: 'Unable to load',
+        heading: 'Unable to load',
+        summary: 'Offline',
+        suggestions: []
+      }
+    }))
+    const surfaceState = vi.fn(async (input) => emptySurfaceState(input))
+    exposeHost({ browser: createBrowserApi({ surfaceAction, surfaceState }) })
+
+    const screen = await render(
+      <BrowserStateHarness
+        initialLogicalUrl={restoredUrl}
+        surfaceInstanceId="instance-restore-0001"
+      />
+    )
+
+    await expect.element(screen.getByTestId('logical-url')).toHaveTextContent(restoredUrl)
+    expect(surfaceState).toHaveBeenCalledOnce()
+    expect(surfaceAction).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      surfaceId: 'right-sidebar-browser-restore',
+      surfaceInstanceId: 'instance-restore-0001',
+      action: 'navigate',
+      url: restoredUrl
+    })
+  })
+
+  it('snapshots the persisted logical URL before the blank bootstrap state resolves', async () => {
+    const restoredUrl = 'https://example.test/persisted-before-bootstrap'
+    const stateInput = {
+      surfaceId: 'right-sidebar-browser-restore',
+      surfaceInstanceId: 'instance-restore-0003'
+    }
+    let resolveSurfaceState!: (state: ReturnType<typeof emptySurfaceState>) => void
+    const surfaceState = vi.fn(
+      async () =>
+        await new Promise<ReturnType<typeof emptySurfaceState>>((resolve) => {
+          resolveSurfaceState = resolve
+        })
+    )
+    const surfaceAction = vi.fn(async (input) => ({
+      ...emptySurfaceState(input),
+      stateRevision: 1,
+      url: restoredUrl
+    }))
+    exposeHost({ browser: createBrowserApi({ surfaceAction, surfaceState }) })
+
+    const screen = await render(
+      <BrowserStateHarness
+        initialLogicalUrl={restoredUrl}
+        surfaceInstanceId={stateInput.surfaceInstanceId}
+      />
+    )
+    expect(surfaceState).toHaveBeenCalledOnce()
+
+    await screen.rerender(
+      <BrowserStateHarness initialLogicalUrl="" surfaceInstanceId={stateInput.surfaceInstanceId} />
+    )
+    resolveSurfaceState(emptySurfaceState(stateInput))
+
+    await expect
+      .poll(() => surfaceAction)
+      .toHaveBeenCalledWith({
+        schemaVersion: 1,
+        ...stateInput,
+        action: 'navigate',
+        url: restoredUrl
+      })
+    await expect.element(screen.getByTestId('logical-url')).toHaveTextContent(restoredUrl)
+  })
+
+  it('never restores a persisted private implementation URL', async () => {
+    const surfaceAction = vi.fn(async (input) => emptySurfaceState(input))
+    exposeHost({ browser: createBrowserApi({ surfaceAction }) })
+
+    const screen = await render(
+      <BrowserStateHarness
+        initialLogicalUrl={`mycopilot-browser-internal://page/${'A'.repeat(32)}`}
+        surfaceInstanceId="instance-restore-0002"
+      />
+    )
+
+    await expect.element(screen.getByTestId('logical-url')).toHaveTextContent('blank')
+    expect(surfaceAction).not.toHaveBeenCalled()
   })
 
   it('rejects a present but malformed browser bridge', () => {
@@ -135,6 +211,60 @@ function Harness({ openRightSidebar }: { openRightSidebar: () => void }) {
   )
 }
 
+function BrowserStateHarness({
+  initialLogicalUrl,
+  surfaceInstanceId
+}: {
+  initialLogicalUrl: string
+  surfaceInstanceId: string
+}) {
+  const browser = useBrowserWebview({
+    initialLogicalUrl,
+    isActive: true,
+    surfaceId: 'right-sidebar-browser-restore',
+    surfaceInstanceId
+  })
+  return <output data-testid="logical-url">{browser.currentUrl ?? 'blank'}</output>
+}
+
+function createBrowserApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
+  return {
+    clearBrowsingData: vi.fn(async () => undefined),
+    exportArtifact: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: 1 as const, status: 'cancelled' as const }
+    })),
+    readArtifactPreview: vi.fn(async () => ({
+      ok: false as const,
+      error: { code: -32_001, message: 'not found' }
+    })),
+    onSurfaceCommand: vi.fn(() => () => undefined),
+    onSurfaceState: vi.fn(() => () => undefined),
+    surfaceAction: vi.fn(async (input) => emptySurfaceState(input)),
+    surfaceReady: vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      accepted: true as const,
+      status: 'applied' as const,
+      reason: 'surface_ready' as const,
+      retryable: false as const,
+      requestId: '22222222-2222-4222-8222-222222222222',
+      surfaceId: 'right-sidebar-browser-test'
+    })),
+    surfaceSelected: vi.fn(async (input) => ({
+      schemaVersion: 1 as const,
+      status: 'noop' as const,
+      reason: 'not_registered' as const,
+      retryable: true as const,
+      surfaceId: input.surfaceId,
+      surfaceInstanceId: null,
+      selectionRevision: input.selectionRevision,
+      authoritativeRevision: 0
+    })),
+    surfaceState: vi.fn(async (input) => emptySurfaceState(input)),
+    ...overrides
+  }
+}
+
 function emptySurfaceState(input: { surfaceId: string; surfaceInstanceId: string }) {
   return {
     schemaVersion: 1 as const,
@@ -148,7 +278,8 @@ function emptySurfaceState(input: { surfaceId: string; surfaceInstanceId: string
     canGoForward: false,
     isLoading: false,
     presentation: 'content' as const,
-    loadError: null
+    loadError: null,
+    crashError: null
   }
 }
 

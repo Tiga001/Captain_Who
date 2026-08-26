@@ -28,6 +28,7 @@ import { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
 import { BrowserNetworkPolicy, ElectronSessionDnsResolver } from './browser/BrowserNetworkPolicy'
 import { BrowserRiskCoordinator } from './browser/BrowserRiskCoordinator'
 import { BrowserNetworkGuard } from './browser/BrowserNetworkGuard'
+import { BrowserInternalPageStore } from './browser/BrowserInternalPageStore'
 import { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
 import { BrowserDownloadBroker } from './browser/BrowserDownloadBroker'
 import { BrowserFileBroker } from './browser/BrowserFileBroker'
@@ -286,8 +287,11 @@ app.whenReady().then(async () => {
     policy: browserNetworkPolicy
   })
   initializeManagedWebviewSessions({ networkGuard: browserNetworkGuard })
+  const browserInternalPageStore = new BrowserInternalPageStore(managedBrowserSession)
+  browserInternalPageStore.install()
   browserSurfaceManager = new BrowserSurfaceManager({
     broker: new BrowserTargetBroker(BROWSER_WEBVIEW_PARTITION, managedBrowserSession),
+    internalPageStore: browserInternalPageStore,
     resolveHost: () => mainWindow?.webContents ?? null,
     sendCommand: (host, command) => {
       if (!host.isDestroyed()) host.send(HOST_CHANNELS.browser.surfaceCommand, command)

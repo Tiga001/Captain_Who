@@ -15,12 +15,17 @@ import {
 } from '../browser/BrowserNetworkGuard'
 import type { BrowserRiskOperationInput } from '../browser/BrowserRiskCoordinator'
 import {
+  BROWSER_INTERNAL_PAGE_SCHEME,
+  type BrowserInternalPageStoreLike
+} from '../browser/BrowserInternalPageStore'
+import {
   BrowserSurfaceManager,
   type BrowserSurfaceManagerOptions
 } from '../browser/BrowserSurfaceManager'
 
 const EXPECTED_SESSION = {} as Session
 const SURFACE_ID = 'right-sidebar-browser-browser-fixture'
+const trackedManagers = new Set<BrowserSurfaceManager>()
 const RISK_OPERATION_INPUT: BrowserRiskOperationInput = {
   authorizationContext: {
     runId: 'run-1',
@@ -69,6 +74,8 @@ class FakeWebContents extends EventEmitter {
   loadingMainFrame = false
   historyBack = false
   historyForward = false
+  historyEntries: string[]
+  historyIndex = 0
 
   constructor(
     readonly id: number,
@@ -78,6 +85,7 @@ class FakeWebContents extends EventEmitter {
     public session: Session = EXPECTED_SESSION
   ) {
     super()
+    this.historyEntries = [url]
   }
 
   getTitle(): string {
@@ -102,17 +110,53 @@ class FakeWebContents extends EventEmitter {
     return this.historyForward
   }
   readonly navigationHistory = {
-    canGoBack: vi.fn(() => this.historyBack),
-    canGoForward: vi.fn(() => this.historyForward),
-    goBack: vi.fn(),
-    goForward: vi.fn()
+    canGoBack: vi.fn(() => this.historyBack || this.historyIndex > 0),
+    canGoForward: vi.fn(
+      () => this.historyForward || this.historyIndex + 1 < this.historyEntries.length
+    ),
+    getActiveIndex: vi.fn(() => this.historyIndex),
+    getAllEntries: vi.fn(() =>
+      this.historyEntries.map((url, index) => ({
+        index,
+        pageState: '',
+        title: `History ${index}`,
+        transitionType: 'link',
+        url
+      }))
+    ),
+    goBack: vi.fn(() => this.activateHistoryIndex(this.historyIndex - 1)),
+    goForward: vi.fn(() => this.activateHistoryIndex(this.historyIndex + 1)),
+    removeEntryAtIndex: vi.fn((index: number) => {
+      if (index < 0 || index >= this.historyEntries.length || index === this.historyIndex) {
+        return false
+      }
+      this.historyEntries.splice(index, 1)
+      if (index < this.historyIndex) this.historyIndex -= 1
+      return true
+    })
   }
   reload = vi.fn()
   goBack = vi.fn()
   goForward = vi.fn()
   stop = vi.fn()
   async loadURL(url: string): Promise<void> {
+    this.historyEntries.splice(this.historyIndex + 1)
+    this.historyEntries.push(url)
+    this.historyIndex = this.historyEntries.length - 1
     this.url = url
+  }
+  setHistory(entries: string[], activeIndex = entries.length - 1): void {
+    this.historyEntries = [...entries]
+    this.historyIndex = activeIndex
+    this.url = entries[activeIndex] ?? ''
+  }
+  activateHistoryIndex(index: number): void {
+    if (index < 0 || index >= this.historyEntries.length) return
+    const url = this.historyEntries[index]
+    this.emit('did-start-navigation', { preventDefault: vi.fn() }, url, false, true)
+    this.historyIndex = index
+    this.url = url
+    this.emit('did-navigate', {}, url)
   }
   close = vi.fn(() => this.destroy())
   printToPDF = vi.fn(async () => Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
@@ -129,6 +173,26 @@ class FakeWebContents extends EventEmitter {
 interface FakeBrowserHarness {
   browser: Browser
   context: BrowserContext
+}
+
+class FakeInternalPageStore implements BrowserInternalPageStoreLike {
+  readonly documents = new Map<string, string>()
+  private sequence = 0
+
+  register(html: string): { url: string } {
+    const token = (++this.sequence).toString(36).padStart(32, 'A')
+    const url = `${BROWSER_INTERNAL_PAGE_SCHEME}://page/${token}`
+    this.documents.set(url, html)
+    return { url }
+  }
+
+  release(url: string): void {
+    this.documents.delete(url)
+  }
+
+  async shutdown(): Promise<void> {
+    this.documents.clear()
+  }
 }
 
 function createFakeBrowser(transport: ConnectOverCDPTransport): FakeBrowserHarness {
@@ -180,6 +244,7 @@ function createHarness(overrides: Partial<BrowserSurfaceManagerOptions> = {}) {
   const commands: BrowserSurfaceCommand[] = []
   const browsers: FakeBrowserHarness[] = []
   const broker = new BrowserTargetBroker(BROWSER_WEBVIEW_PARTITION, EXPECTED_SESSION)
+  const internalPageStore = new FakeInternalPageStore()
   const manager = new BrowserSurfaceManager({
     attachTimeoutMs: 1_000,
     broker,
@@ -190,11 +255,13 @@ function createHarness(overrides: Partial<BrowserSurfaceManagerOptions> = {}) {
       browsers.push(browser)
       return browser.browser
     },
+    internalPageStore,
     resolveHost: () => host.asWebContents(),
     sendCommand: (_host, command) => commands.push(command),
     ...overrides
   })
-  return { broker, browsers, commands, host, manager }
+  trackedManagers.add(manager)
+  return { broker, browsers, commands, host, internalPageStore, manager }
 }
 
 function attachGuest(
@@ -270,8 +337,11 @@ function attachSurface(
   })
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers()
+  const managers = [...trackedManagers]
+  trackedManagers.clear()
+  await Promise.allSettled(managers.map(async (manager) => manager.shutdown()))
 })
 
 describe('BrowserSurfaceManager', () => {
@@ -316,7 +386,7 @@ describe('BrowserSurfaceManager', () => {
     await vi.runAllTimersAsync()
 
     const internalUrl = loadURL.mock.calls.at(-1)?.[0]
-    expect(internalUrl).toMatch(/^data:text\/html;charset=utf-8,/u)
+    expect(internalUrl).toMatch(/^mycopilot-browser-internal:\/\/page\//u)
     expect(
       manager.getSurfaceState(host.asWebContents(), {
         schemaVersion: 1,
@@ -325,7 +395,7 @@ describe('BrowserSurfaceManager', () => {
       })
     ).toMatchObject({
       url: failedUrl,
-      title: '无法访问此网站',
+      title: '无法访问此站点',
       isLoading: false,
       presentation: 'error-page',
       loadError: {
@@ -362,6 +432,31 @@ describe('BrowserSurfaceManager', () => {
       url: failedUrl,
       presentation: 'host-fallback',
       loadError: { kind: 'generic' }
+    })
+  })
+
+  it('ignores Chromium ERR_ABORTED emitted after an internal history document commits', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    }
+    const failedUrl = 'https://offline.example.test/history'
+
+    guest.emit('did-start-navigation', {}, failedUrl, false, true)
+    guest.emit('did-fail-load', {}, -106, 'ERR_INTERNET_DISCONNECTED', failedUrl, true)
+    await vi.runAllTimersAsync()
+    const internalUrl = guest.getURL()
+
+    guest.emit('did-fail-load', {}, -3, '', internalUrl, true)
+
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: { failedUrl, kind: 'offline' },
+      presentation: 'error-page',
+      url: failedUrl
     })
   })
 
@@ -415,6 +510,396 @@ describe('BrowserSurfaceManager', () => {
     expect(guest.navigationHistory.goForward).toHaveBeenCalledOnce()
     expect(guest.goBack).not.toHaveBeenCalled()
     expect(guest.goForward).not.toHaveBeenCalled()
+  })
+
+  it('projects one logical failed page through back, forward, and a successful retry', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const pageA = 'https://a.example.test/'
+    const pageB = 'https://b.example.test/private?token=secret'
+
+    guest.setHistory([pageA])
+    guest.emit('did-start-navigation', {}, pageA, false, true)
+    guest.emit('did-navigate', {}, pageA)
+    manager.performSurfaceAction(host.asWebContents(), {
+      ...input,
+      action: 'navigate',
+      url: pageB
+    })
+    guest.emit('did-start-navigation', {}, pageB, false, true)
+    guest.emit('did-fail-load', {}, -106, 'ERR_INTERNET_DISCONNECTED', pageB, true)
+    await vi.runAllTimersAsync()
+
+    const internalUrl = guest.getURL()
+    expect(internalUrl).toMatch(/^mycopilot-browser-internal:\/\/page\//u)
+    expect(guest.historyEntries).toEqual([pageA, internalUrl])
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      presentation: 'error-page',
+      url: pageB
+    })
+
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'goBack' })
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: null,
+      presentation: 'content',
+      url: pageA
+    })
+
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'goForward' })
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: { failedUrl: pageB },
+      presentation: 'error-page',
+      url: pageB
+    })
+
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'reload' })
+    guest.emit('did-start-navigation', {}, pageB, false, true)
+    guest.emit('did-navigate', {}, pageB)
+
+    expect(guest.historyEntries).toEqual([pageA, pageB])
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      crashError: null,
+      loadError: null,
+      presentation: 'content',
+      url: pageB
+    })
+  })
+
+  it('does not project a historical internal document before its physical commit', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId: probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    }
+    const pageA = 'https://a.example.test/'
+    const pageB = 'https://b.example.test/'
+
+    guest.setHistory([pageA])
+    guest.emit('did-start-navigation', {}, pageB, false, true)
+    guest.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', pageB, true)
+    await vi.runAllTimersAsync()
+    const internalUrl = guest.getURL()
+    guest.setHistory([internalUrl, pageA], 1)
+    guest.emit('did-start-navigation', {}, pageA, false, true)
+    guest.emit('did-navigate', {}, pageA)
+
+    guest.emit('did-start-navigation', {}, internalUrl, false, true)
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      isLoading: true,
+      loadError: null,
+      presentation: 'content',
+      url: pageA
+    })
+
+    guest.url = internalUrl
+    guest.emit('did-navigate', {}, internalUrl)
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      isLoading: false,
+      loadError: { failedUrl: pageB, kind: 'dns' },
+      presentation: 'error-page',
+      url: pageB
+    })
+  })
+
+  it('replaces repeated failed retries without accumulating internal history entries', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const pageA = 'https://a.example.test/'
+    const pageB = 'https://b.example.test/'
+
+    guest.setHistory([pageA])
+    guest.emit('did-start-navigation', {}, pageA, false, true)
+    guest.emit('did-navigate', {}, pageA)
+    manager.performSurfaceAction(host.asWebContents(), {
+      ...input,
+      action: 'navigate',
+      url: pageB
+    })
+    guest.emit('did-start-navigation', {}, pageB, false, true)
+    guest.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', pageB, true)
+    await vi.runAllTimersAsync()
+    const firstInternalUrl = guest.getURL()
+
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'reload' })
+    guest.emit('did-start-navigation', {}, pageB, false, true)
+    guest.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', pageB, true)
+    await vi.runAllTimersAsync()
+
+    const secondInternalUrl = guest.getURL()
+    expect(secondInternalUrl).not.toBe(firstInternalUrl)
+    expect(guest.historyEntries).toEqual([pageA, secondInternalUrl])
+    expect(
+      guest.historyEntries.filter((url) => url.startsWith('mycopilot-browser-internal:'))
+    ).toHaveLength(1)
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: { failedUrl: pageB, kind: 'dns' },
+      presentation: 'error-page',
+      url: pageB
+    })
+  })
+
+  it('keeps a failed page in history when the address bar navigates to another URL', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const pageA = 'https://a.example.test/'
+    const pageB = 'https://b.example.test/'
+    const pageC = 'https://c.example.test/'
+
+    guest.setHistory([pageA])
+    guest.emit('did-start-navigation', {}, pageA, false, true)
+    guest.emit('did-navigate', {}, pageA)
+    manager.performSurfaceAction(host.asWebContents(), {
+      ...input,
+      action: 'navigate',
+      url: pageB
+    })
+    guest.emit('did-start-navigation', {}, pageB, false, true)
+    guest.emit('did-fail-load', {}, -102, 'ERR_CONNECTION_REFUSED', pageB, true)
+    await vi.runAllTimersAsync()
+    const internalUrl = guest.getURL()
+
+    manager.performSurfaceAction(host.asWebContents(), {
+      ...input,
+      action: 'navigate',
+      url: pageC
+    })
+    guest.emit('did-start-navigation', {}, pageC, false, true)
+    guest.emit('did-navigate', {}, pageC)
+
+    expect(guest.historyEntries).toEqual([pageA, internalUrl, pageC])
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'goBack' })
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: { failedUrl: pageB },
+      presentation: 'error-page',
+      url: pageB
+    })
+  })
+
+  it('does not let rejected A or B navigation promises overwrite committed C', async () => {
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const destinations = [
+      'https://a.example.test/',
+      'https://b.example.test/',
+      'https://c.example.test/'
+    ]
+    const pending = new Map<string, { reject: (error: Error) => void; resolve: () => void }>()
+    vi.spyOn(guest, 'loadURL').mockImplementation(
+      async (url) =>
+        await new Promise<void>((resolve, reject) => {
+          pending.set(url, { reject, resolve })
+        })
+    )
+
+    for (const url of destinations) {
+      manager.performSurfaceAction(host.asWebContents(), {
+        ...input,
+        action: 'navigate',
+        url
+      })
+    }
+    const pageC = destinations[2]
+    guest.url = pageC
+    guest.emit('did-start-navigation', {}, pageC, false, true)
+    guest.emit('did-navigate', {}, pageC)
+    pending.get(pageC)?.resolve()
+    pending.get(destinations[0])?.reject(new Error('ERR_NAME_NOT_RESOLVED'))
+    pending.get(destinations[1])?.reject(new Error('ERR_CONNECTION_REFUSED'))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: null,
+      presentation: 'content',
+      url: pageC
+    })
+  })
+
+  it('uses the final redirect URL as the logical failed destination', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const startUrl = 'https://redirect.example.test/start'
+    const failedUrl = 'https://destination.example.test/private?token=secret'
+
+    manager.performSurfaceAction(host.asWebContents(), {
+      ...input,
+      action: 'navigate',
+      url: startUrl
+    })
+    guest.emit('did-start-navigation', {}, startUrl, false, true)
+    guest.emit('did-redirect-navigation', {}, failedUrl, false, true)
+    guest.emit('did-fail-load', {}, -118, 'ERR_CONNECTION_TIMED_OUT', failedUrl, true)
+    await vi.runAllTimersAsync()
+
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      loadError: { failedUrl, kind: 'timeout' },
+      presentation: 'error-page',
+      url: failedUrl
+    })
+  })
+
+  it('requires an exact internal action token and unifies button and keyboard retries', async () => {
+    vi.useFakeTimers()
+    const { host, internalPageStore, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const failedUrl = 'https://offline.example.test/'
+    const loadURL = vi.spyOn(guest, 'loadURL')
+
+    guest.emit('did-start-navigation', {}, failedUrl, false, true)
+    guest.emit('did-fail-load', {}, -106, 'ERR_INTERNET_DISCONNECTED', failedUrl, true)
+    await vi.runAllTimersAsync()
+    const internalUrl = guest.getURL()
+    expect(internalUrl).toMatch(/^mycopilot-browser-internal:\/\/page\//u)
+    const internalHtml = internalPageStore.documents.get(internalUrl)
+    expect(internalHtml).toBeDefined()
+    const exactAction = internalHtml?.match(
+      /mycopilot-browser-internal:\/\/action\/retry\/[A-Za-z0-9_-]{24,128}/u
+    )?.[0]
+    expect(exactAction).toBeDefined()
+
+    const callsBeforeAction = loadURL.mock.calls.length
+    guest.emit(
+      'page-title-updated',
+      {},
+      'mycopilot-browser-internal://action/retry/AAAAAAAAAAAAAAAAAAAAAAAA'
+    )
+    await vi.runAllTimersAsync()
+    expect(loadURL).toHaveBeenCalledTimes(callsBeforeAction)
+
+    guest.emit('page-title-updated', {}, exactAction!)
+    await vi.runAllTimersAsync()
+    expect(loadURL.mock.calls.at(-1)?.[0]).toBe(failedUrl)
+
+    guest.emit('did-fail-load', {}, -106, 'ERR_INTERNET_DISCONNECTED', failedUrl, true)
+    await vi.runAllTimersAsync()
+    const preventDefault = vi.fn()
+    guest.emit(
+      'before-input-event',
+      { preventDefault },
+      {
+        control: false,
+        key: 'r',
+        meta: true,
+        type: 'keyDown'
+      }
+    )
+    expect(preventDefault).toHaveBeenCalledOnce()
+    expect(loadURL.mock.calls.at(-1)?.[0]).toBe(failedUrl)
+  })
+
+  it('separates renderer crashes from network errors and keeps recovery user-driven', async () => {
+    vi.useFakeTimers()
+    const diagnostics: unknown[] = []
+    const { host, manager } = createHarness({
+      recordDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
+    })
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const pageUrl = 'https://crash.example.test/private?token=secret'
+    guest.setHistory([pageUrl])
+    guest.emit('did-start-navigation', {}, pageUrl, false, true)
+    guest.emit('did-navigate', {}, pageUrl)
+
+    guest.emit('render-process-gone', {}, { exitCode: 9, reason: 'crashed' })
+    await vi.runAllTimersAsync()
+    const crashedState = manager.getSurfaceState(host.asWebContents(), input)
+    expect(crashedState).toMatchObject({
+      crashError: { kind: 'renderer_crashed' },
+      loadError: null,
+      presentation: 'crash-page',
+      url: pageUrl
+    })
+    expect(manager.getSensitiveTargetIdentity()).toBeNull()
+    expect(JSON.stringify(diagnostics)).not.toContain(pageUrl)
+    expect(diagnostics).toEqual([
+      {
+        generation: 1,
+        kind: 'renderer_process_gone',
+        reason: 'crashed',
+        surfaceId: SURFACE_ID
+      }
+    ])
+
+    guest.emit('responsive')
+    expect(manager.getSurfaceState(host.asWebContents(), input).presentation).toBe('crash-page')
+    manager.performSurfaceAction(host.asWebContents(), { ...input, action: 'reload' })
+    guest.emit('did-start-navigation', {}, pageUrl, false, true)
+    guest.emit('did-navigate', {}, pageUrl)
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      crashError: null,
+      loadError: null,
+      presentation: 'content',
+      url: pageUrl
+    })
+  })
+
+  it('keeps an unresponsive page in recovery state until an explicit reload', async () => {
+    vi.useFakeTimers()
+    const { host, manager } = createHarness()
+    const guest = attachGuest(manager, host)
+    const surfaceInstanceId = probeSurfaceInstance(manager, host, SURFACE_ID, 1)
+    const input = {
+      schemaVersion: 1 as const,
+      surfaceId: SURFACE_ID,
+      surfaceInstanceId
+    }
+    const pageUrl = 'https://hung.example.test/'
+    guest.setHistory([pageUrl])
+    guest.emit('did-start-navigation', {}, pageUrl, false, true)
+    guest.emit('did-navigate', {}, pageUrl)
+
+    guest.emit('unresponsive')
+    await vi.runAllTimersAsync()
+    expect(guest.stop).toHaveBeenCalledOnce()
+    expect(manager.getSurfaceState(host.asWebContents(), input)).toMatchObject({
+      crashError: { kind: 'renderer_unresponsive' },
+      presentation: 'crash-page',
+      url: pageUrl
+    })
+    guest.emit('responsive')
+    expect(manager.getSurfaceState(host.asWebContents(), input).presentation).toBe('crash-page')
   })
 
   it('keeps a production ensure pending until Renderer acknowledges the exact instance', async () => {

@@ -3,6 +3,7 @@ import type { WebviewTag } from 'electron'
 import {
   BROWSER_SURFACE_SCHEMA_VERSION,
   type BrowserSurfaceActionInput,
+  type BrowserSurfacePublicCrashError,
   type BrowserSurfacePublicLoadError,
   type BrowserSurfaceState
 } from '@mycopilot/protocol'
@@ -12,6 +13,7 @@ import { getFallbackPageTitle } from './browserUrl'
 import { resolveBrowserSurfaceHostApi } from './browserSurface'
 
 interface UseBrowserWebviewOptions {
+  initialLogicalUrl?: string
   isActive: boolean
   surfaceId: string
   surfaceInstanceId: string | null
@@ -23,6 +25,7 @@ interface UseBrowserWebviewResult {
   goBack: () => Promise<void>
   goForward: () => Promise<void>
   hostFallbackError: BrowserSurfacePublicLoadError | null
+  hostFallbackCrashError: BrowserSurfacePublicCrashError | null
   isLoaded: boolean
   navigationState: BrowserNavigationState
   navigateToUrl: (url: string) => Promise<void>
@@ -32,6 +35,7 @@ interface UseBrowserWebviewResult {
 }
 
 export function useBrowserWebview({
+  initialLogicalUrl,
   isActive,
   surfaceId,
   surfaceInstanceId
@@ -42,12 +46,19 @@ export function useBrowserWebview({
   const [hostFallbackError, setHostFallbackError] = useState<BrowserSurfacePublicLoadError | null>(
     null
   )
+  const [hostFallbackCrashError, setHostFallbackCrashError] =
+    useState<BrowserSurfacePublicCrashError | null>(null)
   const webviewRef = useRef<WebviewTag | null>(null)
   const faviconRequestSequenceRef = useRef(0)
   const stateRevisionRef = useRef(-1)
   const surfaceIdentityRef = useRef({ surfaceId, surfaceInstanceId })
+  const initialLogicalUrlRef = useRef(initialLogicalUrl)
   const pendingNavigationRef = useRef<string | null>(null)
   const zoomFactorRef = useRef(1)
+
+  useEffect(() => {
+    initialLogicalUrlRef.current = initialLogicalUrl
+  }, [initialLogicalUrl])
 
   const updateNavigationState = useCallback(
     (update: (current: BrowserNavigationState) => BrowserNavigationState) => {
@@ -92,6 +103,7 @@ export function useBrowserWebview({
       }
       stateRevisionRef.current = state.stateRevision
       setHostFallbackError(state.presentation === 'host-fallback' ? state.loadError : null)
+      setHostFallbackCrashError(state.presentation === 'host-fallback' ? state.crashError : null)
       updateNavigationState((current) => {
         const sameOrigin = haveSameHttpOrigin(current.metadata.url, state.url)
         return {
@@ -117,6 +129,7 @@ export function useBrowserWebview({
     stateRevisionRef.current = -1
     faviconRequestSequenceRef.current += 1
     setHostFallbackError(null)
+    setHostFallbackCrashError(null)
     if (!surfaceInstanceId) return undefined
 
     const browser = resolveBrowserSurfaceHostApi()
@@ -129,9 +142,14 @@ export function useBrowserWebview({
     const unsubscribe = browser.onSurfaceState(applySurfaceState)
     const pendingNavigation = pendingNavigationRef.current
     pendingNavigationRef.current = null
+    const restoreUrl = normalizeHttpUrl(initialLogicalUrlRef.current)
     const initialState = pendingNavigation
       ? browser.surfaceAction({ ...input, action: 'navigate', url: pendingNavigation })
-      : browser.surfaceState(input)
+      : browser.surfaceState(input).then((state) => {
+          return !state.url && restoreUrl
+            ? browser.surfaceAction({ ...input, action: 'navigate', url: restoreUrl })
+            : state
+        })
     void initialState.then(applySurfaceState).catch(() => undefined)
     return unsubscribe
   }, [applySurfaceState, surfaceId, surfaceInstanceId])
@@ -184,6 +202,7 @@ export function useBrowserWebview({
       if (!normalizedUrl) return
       faviconRequestSequenceRef.current += 1
       setHostFallbackError(null)
+      setHostFallbackCrashError(null)
       updateNavigationState((current) => ({
         ...current,
         isLoading: true,
@@ -202,6 +221,7 @@ export function useBrowserWebview({
 
   const reload = useCallback(async () => {
     setHostFallbackError(null)
+    setHostFallbackCrashError(null)
     await dispatchSurfaceAction('reload')
   }, [dispatchSurfaceAction])
 
@@ -237,6 +257,7 @@ export function useBrowserWebview({
       goBack,
       goForward,
       hostFallbackError,
+      hostFallbackCrashError,
       isLoaded: Boolean(navigationState.metadata.url),
       navigationState,
       navigateToUrl,
@@ -249,6 +270,7 @@ export function useBrowserWebview({
       goBack,
       goForward,
       hostFallbackError,
+      hostFallbackCrashError,
       navigateToUrl,
       navigationState,
       reload,

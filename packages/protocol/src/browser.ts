@@ -181,7 +181,22 @@ export interface BrowserSurfacePublicLoadError {
   suggestions: readonly string[]
 }
 
-export type BrowserSurfacePresentation = 'content' | 'error-page' | 'host-fallback'
+export const BROWSER_SURFACE_CRASH_ERROR_KINDS = [
+  'renderer_crashed',
+  'renderer_unresponsive'
+] as const
+
+export type BrowserSurfaceCrashErrorKind = (typeof BROWSER_SURFACE_CRASH_ERROR_KINDS)[number]
+
+export interface BrowserSurfacePublicCrashError {
+  kind: BrowserSurfaceCrashErrorKind
+  title: string
+  heading: string
+  summary: string
+  actionLabel: string
+}
+
+export type BrowserSurfacePresentation = 'content' | 'error-page' | 'crash-page' | 'host-fallback'
 
 /** Renderer-safe logical state. Internal implementation URLs never cross this boundary. */
 export interface BrowserSurfaceState {
@@ -197,6 +212,7 @@ export interface BrowserSurfaceState {
   isLoading: boolean
   presentation: BrowserSurfacePresentation
   loadError: BrowserSurfacePublicLoadError | null
+  crashError: BrowserSurfacePublicCrashError | null
 }
 
 export interface BrowserSurfaceStateInput {
@@ -571,7 +587,8 @@ export function parseBrowserSurfaceState(value: unknown): BrowserSurfaceState {
     'canGoForward',
     'isLoading',
     'presentation',
-    'loadError'
+    'loadError',
+    'crashError'
   ])
   const state: BrowserSurfaceState = {
     schemaVersion: expectSchemaVersion(record.schemaVersion),
@@ -586,17 +603,31 @@ export function parseBrowserSurfaceState(value: unknown): BrowserSurfaceState {
     isLoading: expectBoolean(record.isLoading, 'browser surface loading state'),
     presentation: expectEnum(
       record.presentation,
-      ['content', 'error-page', 'host-fallback'] as const,
+      ['content', 'error-page', 'crash-page', 'host-fallback'] as const,
       'browser surface presentation'
     ),
     loadError:
-      record.loadError === null ? null : parseBrowserSurfacePublicLoadError(record.loadError)
+      record.loadError === null ? null : parseBrowserSurfacePublicLoadError(record.loadError),
+    crashError:
+      record.crashError === null ? null : parseBrowserSurfacePublicCrashError(record.crashError)
   }
   if (state.loadError && state.url !== state.loadError.failedUrl) {
     throw new Error('Browser surface failure URL does not match its logical URL')
   }
-  if (!state.loadError && state.presentation !== 'content') {
-    throw new Error('Browser surface error presentation requires a load error')
+  if (state.loadError && state.crashError) {
+    throw new Error('Browser surface cannot expose multiple failures')
+  }
+  if (state.presentation === 'content' && (state.loadError || state.crashError)) {
+    throw new Error('Browser surface content presentation cannot expose a failure')
+  }
+  if (state.presentation === 'error-page' && !state.loadError) {
+    throw new Error('Browser surface error page requires a load error')
+  }
+  if (state.presentation === 'crash-page' && !state.crashError) {
+    throw new Error('Browser surface crash page requires a renderer failure')
+  }
+  if (state.presentation === 'host-fallback' && !state.loadError && !state.crashError) {
+    throw new Error('Browser surface host fallback requires a failure')
   }
   return state
 }
@@ -638,6 +669,22 @@ function parseBrowserSurfacePublicLoadError(value: unknown): BrowserSurfacePubli
     suggestions: record.suggestions.map((suggestion) =>
       parseBoundedText(suggestion, 'browser surface error suggestion', 256)
     )
+  }
+}
+
+function parseBrowserSurfacePublicCrashError(value: unknown): BrowserSurfacePublicCrashError {
+  const record = expectRecord(value, 'browser surface crash error')
+  expectOnlyKeys(record, ['kind', 'title', 'heading', 'summary', 'actionLabel'])
+  return {
+    kind: expectEnum(
+      record.kind,
+      BROWSER_SURFACE_CRASH_ERROR_KINDS,
+      'browser surface crash error kind'
+    ),
+    title: parseBoundedText(record.title, 'browser surface crash title', 256),
+    heading: parseBoundedText(record.heading, 'browser surface crash heading', 256),
+    summary: parseBoundedText(record.summary, 'browser surface crash summary', 512),
+    actionLabel: parseBoundedText(record.actionLabel, 'browser surface crash action', 128)
   }
 }
 

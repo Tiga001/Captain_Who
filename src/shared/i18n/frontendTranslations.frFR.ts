@@ -286,6 +286,30 @@ export const frFRTranslations = {
   'browser.zoomOut': 'Zoom arrière',
   'browser.emptyTitle': 'Commencez à naviguer',
   'browser.emptyDescription': 'Entrez un URL pour ouvrir une page',
+  'browser.internalError.title': 'Ce site est inaccessible',
+  'browser.internalError.try': 'Essayez :',
+  'browser.internalError.offlineSummary':
+    'Impossible de charger {host}, car l’ordinateur est hors connexion',
+  'browser.internalError.dnsSummary': 'L’adresse IP du serveur de {host} est introuvable',
+  'browser.internalError.refusedSummary': '{host} a refusé la connexion',
+  'browser.internalError.timeoutSummary': '{host} a mis trop de temps à répondre',
+  'browser.internalError.certificateSummary':
+    '{host} a présenté un certificat de sécurité non valide',
+  'browser.internalError.genericSummary': 'Impossible de charger {host}',
+  'browser.internalError.checkNetwork': 'Vérifier la connexion réseau',
+  'browser.internalError.checkProxyFirewallDns':
+    'Vérifier les paramètres du proxy, du pare-feu et du DNS',
+  'browser.internalError.checkDateTime': 'Vérifier la date et l’heure de l’appareil',
+  'browser.internalError.contactAdministrator': 'Contacter l’administrateur du site',
+  'browser.internalError.reload': 'Recharger',
+  'browser.internalCrash.title': 'La page a cessé de fonctionner',
+  'browser.internalCrash.summary':
+    'La page du navigateur s’est arrêtée de manière inattendue. Recréez-la pour consulter de nouveau {host}.',
+  'browser.internalCrash.action': 'Recréer la page',
+  'browser.internalUnresponsive.title': 'La page ne répond pas',
+  'browser.internalUnresponsive.summary':
+    '{host} ne répond pas. Vous pouvez recréer la page et réessayer.',
+  'browser.internalUnresponsive.action': 'Recréer la page',
   'imagePreview.title': "Aperçu de l'image",
   'imagePreview.close': 'Fermer',
   'imagePreview.download': 'Télécharger',

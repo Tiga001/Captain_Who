@@ -26,6 +26,7 @@ import {
 import { app, BrowserWindow, session, type WebContents } from 'electron'
 
 import { BrowserSurfaceManager } from '../BrowserSurfaceManager'
+import { BrowserInternalPageStore } from '../BrowserInternalPageStore'
 import { BrowserArtifactBroker } from '../BrowserArtifactBroker'
 import { BrowserDownloadBroker } from '../BrowserDownloadBroker'
 import { BrowserFileBroker } from '../BrowserFileBroker'
@@ -228,6 +229,8 @@ async function main(): Promise<void> {
   await app.whenReady()
   const core = new JsonLineBridgeCore()
   const managedSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
+  const browserInternalPageStore = new BrowserInternalPageStore(managedSession)
+  browserInternalPageStore.install()
   const artifactBroker = new BrowserArtifactBroker({
     rootDirectory: join(PROFILE_DIRECTORY, 'browser-automation-artifacts')
   })
@@ -618,6 +621,7 @@ async function main(): Promise<void> {
   const manager = new BrowserSurfaceManager({
     attachTimeoutMs: 10_000,
     broker,
+    internalPageStore: browserInternalPageStore,
     networkGuard,
     releaseSurfaceResources: (input) => fileBroker.releaseSurface(input),
     closeTimeoutMs: 5_000,
