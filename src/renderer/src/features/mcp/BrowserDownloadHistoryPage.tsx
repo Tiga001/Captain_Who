@@ -18,13 +18,11 @@ import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 
 interface BrowserDownloadHistoryPageProps {
   onBack: () => void
-  onNavigateMcp: () => void
   onNavigateSettingsRoot: () => void
 }
 
 export function BrowserDownloadHistoryPage({
   onBack,
-  onNavigateMcp,
   onNavigateSettingsRoot
 }: BrowserDownloadHistoryPageProps) {
   const { language, t } = useFrontendConfig()
@@ -131,10 +129,9 @@ export function BrowserDownloadHistoryPage({
             label: t('settings.breadcrumb.root'),
             onSelect: onNavigateSettingsRoot
           },
-          { id: 'mcp', label: t('settings.nav.mcp'), onSelect: onNavigateMcp },
           {
-            id: 'browser-automation',
-            label: t('mcp.builtin.browserAutomation.name'),
+            id: 'browser',
+            label: t('settings.nav.browser'),
             onSelect: onBack
           },
           { id: 'download-history', label: t('mcp.browserDownloads.history') }

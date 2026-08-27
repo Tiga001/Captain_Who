@@ -706,6 +706,24 @@
   line-height: var(--mc-line-height-title);
 }
 
+.browser-automation-preference {
+  margin-top: 26px;
+}
+
+.browser-automation-preference .browser-download-preferences {
+  margin-top: 0;
+}
+
+.browser-automation-preference__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browser-automation-preference p[data-error='true'] {
+  color: var(--mc-color-text-danger);
+}
+
 .browser-download-preferences {
   display: grid;
   margin-top: 12px;
@@ -791,6 +809,17 @@
 
 .browser-link-target-select .settings-select__button {
   width: 100%;
+}
+
+.browser-link-target-select .settings-select__menu {
+  width: max-content;
+  min-width: min(240px, calc(100vw - 32px));
+  max-width: min(320px, calc(100vw - 32px));
+}
+
+.browser-link-target-select .settings-select__option-label {
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .browser-download-history-page > h1,

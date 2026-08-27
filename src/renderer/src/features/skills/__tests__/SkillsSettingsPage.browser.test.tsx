@@ -98,6 +98,9 @@ vi.mock('../../mcp/McpSettingsPage', () => ({
     </div>
   )
 }))
+vi.mock('../../mcp/BrowserAutomationSettingsPage', () => ({
+  BrowserAutomationSettingsPage: () => <div>browser-page</div>
+}))
 
 const [{ SkillsSettingsPage }, { SettingsPage }] = await Promise.all([
   import('../../settings/pages/SkillsSettingsPage'),
@@ -399,6 +402,25 @@ describe('Skills settings navigation and management inventory', () => {
         }}
       />
     )
+
+    const codingGroup = screen
+      .getByRole('heading', { name: 'settings.group.coding' })
+      .element()
+      .closest('.settings-nav__group')
+    expect(
+      [...(codingGroup?.querySelectorAll<HTMLButtonElement>('.settings-nav__item') ?? [])].map(
+        (button) => button.textContent
+      )
+    ).toEqual([
+      'settings.page.environment',
+      'settings.page.skills',
+      'settings.nav.mcp',
+      'settings.nav.browser',
+      'settings.page.agentTemplates'
+    ])
+
+    await screen.getByRole('button', { name: 'settings.nav.browser' }).click()
+    await expect.element(screen.getByText('browser-page')).toBeVisible()
 
     const skillsNavigation = screen.getByRole('button', { name: 'settings.page.skills' })
     await expect.element(skillsNavigation).toBeVisible()

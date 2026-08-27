@@ -1,10 +1,10 @@
-import { app, protocol } from 'electron'
+import { app, protocol, type Session } from 'electron'
 import { createHash } from 'crypto'
-import { lookup } from 'dns/promises'
-import { isIP } from 'net'
+import { BlockList, isIP } from 'net'
 import { extname, join } from 'path'
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import type { ResourceFaviconRequest, ResourceFaviconResponse } from '@mycopilot/protocol'
+import { classifyAddress } from '../browser/BrowserNetworkPolicy'
 
 const RESOURCE_SCHEME = 'mycopilot-resource'
 const FAVICON_HOST = 'favicon'
@@ -16,6 +16,10 @@ const FAVICON_MAX_REDIRECTS = 3
 const FAVICON_CACHE_MAX_FILES = 256
 const FAVICON_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const FAVICON_USER_AGENT = 'MyCopilot/1.0 favicon resolver'
+const PROXY_FAKE_IP_RANGES = new BlockList()
+
+PROXY_FAKE_IP_RANGES.addSubnet('198.18.0.0', 15, 'ipv4')
+PROXY_FAKE_IP_RANGES.addSubnet('fdfe:dcba:9876::', 64, 'ipv6')
 
 const FAVICON_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'svg'] as const
 
@@ -49,6 +53,13 @@ interface DownloadedFavicon {
   mimeType: string
 }
 
+export type FaviconNetworkSession = Pick<Session, 'fetch' | 'resolveHost' | 'resolveProxy'>
+
+export interface FaviconResourceCacheOptions {
+  cacheDirectory?: string
+  networkSession: FaviconNetworkSession
+}
+
 export function registerResourceSchemes(): void {
   protocol.registerSchemesAsPrivileged([
     {
@@ -64,15 +75,27 @@ export function registerResourceSchemes(): void {
 
 export class FaviconResourceCache {
   private readonly pending = new Map<string, Promise<ResourceFaviconResponse>>()
+  private readonly cacheRootDirectory: string | undefined
+  private readonly networkSession: FaviconNetworkSession
+  private cacheGeneration = 0
+  private mutationQueue: Promise<void> = Promise.resolve()
+
+  constructor(options: FaviconResourceCacheOptions) {
+    this.cacheRootDirectory = options.cacheDirectory
+    this.networkSession = options.networkSession
+  }
 
   registerProtocol(): void {
     protocol.handle(RESOURCE_SCHEME, async (request) => this.handleProtocolRequest(request.url))
-    void this.pruneCache().catch(() => undefined)
+    void this.enqueueMutation(() => this.pruneCache()).catch(() => undefined)
   }
 
   async clear(): Promise<void> {
+    this.cacheGeneration += 1
     this.pending.clear()
-    await rm(this.cacheDirectoryPath(), { force: true, recursive: true })
+    await this.enqueueMutation(() =>
+      rm(this.cacheDirectoryPath(), { force: true, recursive: true })
+    )
   }
 
   async resolveFavicon(input: ResourceFaviconRequest): Promise<ResourceFaviconResponse> {
@@ -88,10 +111,16 @@ export class FaviconResourceCache {
     const pending = this.pending.get(cacheKey)
     if (pending) return pending
 
-    const task = this.resolveAndCacheFavicon(cacheKey, pageUrl, input.faviconUrl)
+    const generation = this.cacheGeneration
+    const task: Promise<ResourceFaviconResponse> = this.resolveAndCacheFavicon(
+      cacheKey,
+      pageUrl,
+      input.faviconUrl,
+      generation
+    )
       .catch(() => ({ url: null }))
       .finally(() => {
-        this.pending.delete(cacheKey)
+        if (this.pending.get(cacheKey) === task) this.pending.delete(cacheKey)
       })
 
     this.pending.set(cacheKey, task)
@@ -101,35 +130,38 @@ export class FaviconResourceCache {
   private async resolveAndCacheFavicon(
     cacheKey: string,
     pageUrl: URL,
-    rawFaviconUrl: string | null | undefined
+    rawFaviconUrl: string | null | undefined,
+    generation: number
   ): Promise<ResourceFaviconResponse> {
-    const candidates = await this.faviconCandidates(pageUrl, rawFaviconUrl)
+    const attempted = new Set<string>()
+    const cacheCandidate = async (candidate: URL | null): Promise<boolean> => {
+      if (!candidate || attempted.has(candidate.toString())) return false
+      attempted.add(candidate.toString())
 
-    for (const candidate of candidates) {
-      const favicon = await fetchFavicon(candidate)
-      if (!favicon) continue
+      const favicon = await fetchFavicon(candidate, this.networkSession).catch(() => null)
+      if (!favicon || generation !== this.cacheGeneration) return false
 
-      await this.writeCachedFile(cacheKey, favicon)
+      return this.enqueueMutation(async () => {
+        if (generation !== this.cacheGeneration) return false
+        await this.writeCachedFile(cacheKey, favicon)
+        return true
+      })
+    }
+
+    if (await cacheCandidate(normalizeHttpUrl(rawFaviconUrl))) {
       return { url: faviconProtocolUrl(cacheKey) }
     }
 
-    return { url: null }
-  }
-
-  private async faviconCandidates(
-    pageUrl: URL,
-    rawFaviconUrl: string | null | undefined
-  ): Promise<URL[]> {
-    const candidates: URL[] = []
-    pushUniqueUrl(candidates, normalizeHttpUrl(rawFaviconUrl))
-
-    const htmlCandidates = await fetchHtmlFaviconCandidates(pageUrl)
+    const htmlCandidates = await fetchHtmlFaviconCandidates(pageUrl, this.networkSession).catch(
+      () => []
+    )
     for (const candidate of htmlCandidates) {
-      pushUniqueUrl(candidates, candidate)
+      if (await cacheCandidate(candidate)) return { url: faviconProtocolUrl(cacheKey) }
     }
 
-    pushUniqueUrl(candidates, originFaviconUrl(pageUrl))
-    return candidates
+    return (await cacheCandidate(originFaviconUrl(pageUrl)))
+      ? { url: faviconProtocolUrl(cacheKey) }
+      : { url: null }
   }
 
   private async handleProtocolRequest(rawUrl: string): Promise<Response> {
@@ -164,7 +196,10 @@ export class FaviconResourceCache {
   }
 
   private cacheDirectoryPath(): string {
-    return join(app.getPath('userData'), 'resource-cache', FAVICON_CACHE_DIRECTORY)
+    return (
+      this.cacheRootDirectory ??
+      join(app.getPath('userData'), 'resource-cache', FAVICON_CACHE_DIRECTORY)
+    )
   }
 
   private async findCachedFile(cacheKey: string): Promise<CachedFaviconFile | null> {
@@ -222,12 +257,28 @@ export class FaviconResourceCache {
         .map((file) => rm(file.filePath, { force: true }))
     )
   }
+
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationQueue.catch(() => undefined).then(operation)
+    this.mutationQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
 }
 
-async function fetchHtmlFaviconCandidates(pageUrl: URL): Promise<URL[]> {
-  const response = await fetchPublicUrl(pageUrl, {
-    accept: 'text/html,application/xhtml+xml'
-  })
+async function fetchHtmlFaviconCandidates(
+  pageUrl: URL,
+  networkSession: FaviconNetworkSession
+): Promise<URL[]> {
+  const response = await fetchPublicUrl(
+    pageUrl,
+    {
+      accept: 'text/html,application/xhtml+xml'
+    },
+    networkSession
+  )
   if (!response?.ok) return []
   if (!isHtmlContentType(response.headers.get('content-type'))) return []
 
@@ -235,10 +286,17 @@ async function fetchHtmlFaviconCandidates(pageUrl: URL): Promise<URL[]> {
   return htmlFaviconCandidates(html, pageUrl)
 }
 
-async function fetchFavicon(url: URL): Promise<DownloadedFavicon | null> {
-  const response = await fetchPublicUrl(url, {
-    accept: 'image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8'
-  })
+async function fetchFavicon(
+  url: URL,
+  networkSession: FaviconNetworkSession
+): Promise<DownloadedFavicon | null> {
+  const response = await fetchPublicUrl(
+    url,
+    {
+      accept: 'image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8'
+    },
+    networkSession
+  )
   if (!response?.ok) return null
 
   const mimeType =
@@ -251,13 +309,19 @@ async function fetchFavicon(url: URL): Promise<DownloadedFavicon | null> {
   return { bytes, mimeType }
 }
 
-async function fetchPublicUrl(url: URL, options: { accept: string }): Promise<Response | null> {
+async function fetchPublicUrl(
+  url: URL,
+  options: { accept: string },
+  networkSession: FaviconNetworkSession
+): Promise<Response | null> {
   let current = new URL(url.toString())
 
   for (let redirectCount = 0; redirectCount <= FAVICON_MAX_REDIRECTS; redirectCount += 1) {
-    if (!(await isPublicHttpUrl(current))) return null
+    if (!(await isPublicHttpUrl(current, networkSession))) return null
 
-    const response = await fetchWithTimeout(current, options.accept).catch(() => null)
+    const response = await fetchWithTimeout(networkSession, current, options.accept).catch(
+      () => null
+    )
     if (!response) return null
 
     if (response.status >= 300 && response.status < 400) {
@@ -273,15 +337,22 @@ async function fetchPublicUrl(url: URL, options: { accept: string }): Promise<Re
   return null
 }
 
-async function fetchWithTimeout(url: URL, accept: string): Promise<Response> {
+async function fetchWithTimeout(
+  networkSession: FaviconNetworkSession,
+  url: URL,
+  accept: string
+): Promise<Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), FAVICON_FETCH_TIMEOUT_MS)
   try {
-    return await fetch(url.toString(), {
+    return await networkSession.fetch(url.toString(), {
+      cache: 'no-store',
+      credentials: 'omit',
       headers: {
         accept,
         'user-agent': FAVICON_USER_AGENT
       },
+      referrerPolicy: 'no-referrer',
       redirect: 'manual',
       signal: controller.signal
     })
@@ -321,7 +392,7 @@ async function readResponseBytes(response: Response, maxBytes: number): Promise<
   )
 }
 
-async function isPublicHttpUrl(url: URL): Promise<boolean> {
+async function isPublicHttpUrl(url: URL, networkSession: FaviconNetworkSession): Promise<boolean> {
   if (!['http:', 'https:'].includes(url.protocol)) return false
   if (url.username || url.password) return false
 
@@ -334,9 +405,33 @@ async function isPublicHttpUrl(url: URL): Promise<boolean> {
     return !isBlockedIpAddress(host)
   }
 
-  const records = await lookup(host, { all: true }).catch(() => [])
-  if (records.length === 0) return false
-  return records.every((record) => !isBlockedIpAddress(record.address))
+  const resolved = await networkSession
+    .resolveHost(host, {
+      cacheUsage: 'disallowed',
+      source: 'any',
+      secureDnsPolicy: 'allow'
+    })
+    .catch(() => null)
+  const addresses = [
+    ...new Set(
+      (resolved?.endpoints ?? [])
+        .map((endpoint) => endpoint.address)
+        .filter((address) => isIP(address) !== 0)
+    )
+  ]
+  if (addresses.length === 0) return false
+
+  const blockedAddresses = addresses.filter(isBlockedIpAddress)
+  if (blockedAddresses.length === 0) return true
+  if (
+    !isProxyFakeIpEligibleUrl(url, host) ||
+    blockedAddresses.some((address) => !isProxyFakeIpAddress(address))
+  ) {
+    return false
+  }
+
+  const proxy = await networkSession.resolveProxy(url.toString()).catch(() => '')
+  return isExclusiveProxyRoute(proxy)
 }
 
 function normalizeHttpUrl(value: string | null | undefined): URL | null {
@@ -357,32 +452,59 @@ function normalizedHostname(url: URL): string {
 }
 
 function isBlockedIpAddress(value: string): boolean {
-  if (value.includes(':')) return isBlockedIpv6Address(value)
-  const parts = value.split('.').map((part) => Number(part))
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true
-  const [a, b] = parts
-
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    a >= 224
-  )
+  return classifyAddress(value) !== 'public'
 }
 
-function isBlockedIpv6Address(value: string): boolean {
-  const normalized = value.toLowerCase()
+function isProxyFakeIpAddress(value: string): boolean {
+  const family = isIP(value)
+  if (family === 4) return PROXY_FAKE_IP_RANGES.check(value, 'ipv4')
+  if (family === 6) return PROXY_FAKE_IP_RANGES.check(value, 'ipv6')
+  return false
+}
+
+function isProxyFakeIpEligibleUrl(url: URL, host: string): boolean {
+  if (url.protocol !== 'https:' || (url.port && url.port !== '443')) return false
+  if (!host.includes('.') || host.endsWith('.')) return false
+
+  const deniedSuffixes = [
+    'localhost',
+    'local',
+    'localdomain',
+    'home',
+    'home.arpa',
+    'internal',
+    'intranet',
+    'lan',
+    'corp',
+    'invalid',
+    'test',
+    'example',
+    'example.com',
+    'example.net',
+    'example.org',
+    'onion',
+    'arpa'
+  ]
+  if (deniedSuffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) {
+    return false
+  }
+
+  return host
+    .split('.')
+    .every(
+      (label) =>
+        label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
+    )
+}
+
+function isExclusiveProxyRoute(value: string): boolean {
+  const routes = value
+    .split(';')
+    .map((route) => route.trim())
+    .filter(Boolean)
   return (
-    normalized === '::' ||
-    normalized === '::1' ||
-    normalized.startsWith('fe80:') ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    normalized.startsWith('ff')
+    routes.length > 0 &&
+    routes.every((route) => /^(?:PROXY|HTTPS|SOCKS|SOCKS4|SOCKS5|QUIC)\s+\S+$/iu.test(route))
   )
 }
 

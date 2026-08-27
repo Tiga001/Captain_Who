@@ -1,4 +1,3 @@
-import { Settings2 } from 'lucide-react'
 import type { McpBuiltinCapabilityListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { getBuiltinCapabilityDisplayName } from './builtinCapabilityPresentation'
@@ -8,13 +7,11 @@ import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 interface McpBuiltinCapabilityListProps {
   capabilities: readonly McpBuiltinCapabilityListItem[]
   onSetAllowed: (capability: McpBuiltinCapabilityListItem, allowed: boolean) => void
-  onConfigureBrowserAutomation?: () => void
   pendingCapabilities: ReadonlySet<McpBuiltinCapabilityListItem['capabilityId']>
 }
 
 export function McpBuiltinCapabilityList({
   capabilities,
-  onConfigureBrowserAutomation,
   onSetAllowed,
   pendingCapabilities
 }: McpBuiltinCapabilityListProps) {
@@ -38,17 +35,6 @@ export function McpBuiltinCapabilityList({
               {description && <p>{description}</p>}
             </div>
             <div className="mcp-builtin-capability-row__actions">
-              {capability.capabilityId === 'browser_automation' && onConfigureBrowserAutomation && (
-                <button
-                  aria-label={t('mcp.browserDownloads.configure')}
-                  className="mcp-icon-button"
-                  onClick={onConfigureBrowserAutomation}
-                  title={t('mcp.browserDownloads.configure')}
-                  type="button"
-                >
-                  <Settings2 aria-hidden="true" />
-                </button>
-              )}
               <button
                 aria-checked={capability.userAllowed}
                 aria-label={replaceToken(t('mcp.builtin.toggleNamed'), 'name', name)}

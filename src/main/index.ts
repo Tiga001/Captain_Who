@@ -55,7 +55,6 @@ registerResourceSchemes()
 const coreServer = new CoreServer({ appDataRoot })
 const notificationLocaleStore = new NotificationLocaleStore(appDataRoot)
 const terminalBridge = new TerminalBridge()
-const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: HostIpcRegistration | null = null
@@ -253,8 +252,11 @@ async function initializeApplication(): Promise<void> {
   electronApp.setAppUserModelId('com.mycopilot.next')
   disposeAdaptiveAppIcon = installAdaptiveAppIcon()
   coreServer.start()
-  faviconResourceCache.registerProtocol()
   const managedBrowserSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
+  const faviconResourceCache = new FaviconResourceCache({
+    networkSession: managedBrowserSession
+  })
+  faviconResourceCache.registerProtocol()
   browserArtifactBroker = new BrowserArtifactBroker({
     rootDirectory: join(appDataRoot, 'browser-automation-artifacts')
   })

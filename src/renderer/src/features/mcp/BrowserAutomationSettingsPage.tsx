@@ -14,6 +14,7 @@ import { SettingsSelect } from '../settings/components/SettingsSelect'
 import type { SettingsSelectOption } from '../settings/components/SettingsSelect'
 import { BrowserDownloadHistoryPage } from './BrowserDownloadHistoryPage'
 import { BrowserHistoryPage } from './BrowserHistoryPage'
+import { useBuiltinMcpCapabilities } from './useBuiltinMcpCapabilities'
 import {
   chooseBrowserDownloadDirectory,
   getBrowserDownloadSettings,
@@ -24,7 +25,6 @@ import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 
 interface BrowserAutomationSettingsPageProps {
   initialView?: BrowserAutomationView
-  onBack: () => void
   onCloseSettings?: () => void
   onNavigateSettingsRoot: () => void
 }
@@ -33,7 +33,6 @@ export type BrowserAutomationView = 'settings' | 'downloadHistory' | 'history'
 
 export function BrowserAutomationSettingsPage({
   initialView = 'settings',
-  onBack,
   onCloseSettings,
   onNavigateSettingsRoot
 }: BrowserAutomationSettingsPageProps) {
@@ -46,6 +45,22 @@ export function BrowserAutomationSettingsPage({
   const [browserMutating, setBrowserMutating] = useState(false)
   const [clearDialogOpen, setClearDialogOpen] = useState(false)
   const initialLoadStarted = useRef(false)
+  const {
+    pendingCapabilities: pendingBuiltinCapabilities,
+    refresh: refreshBuiltinCapabilities,
+    setAllowed: setBuiltinAllowed,
+    state: builtinState
+  } = useBuiltinMcpCapabilities()
+  const browserAutomationCapability = builtinState.output?.capabilities.find(
+    (capability) => capability.capabilityId === 'browser_automation'
+  )
+  const browserAutomationPending = pendingBuiltinCapabilities.has('browser_automation')
+  const browserAutomationName = t('mcp.builtin.browserAutomation.name')
+  const browserAutomationError = builtinState.errorMessage
+    ? toSafeMcpDisplayText(builtinState.errorMessage, 256)
+    : builtinState.status === 'error'
+      ? t('mcp.builtin.loadFailed')
+      : null
 
   const showFailure = useCallback(
     (error: unknown) => {
@@ -107,11 +122,19 @@ export function BrowserAutomationSettingsPage({
     }
   }
 
+  const setBrowserAutomationAllowed = async (): Promise<void> => {
+    if (!browserAutomationCapability || browserAutomationPending) return
+    try {
+      await setBuiltinAllowed(browserAutomationCapability, !browserAutomationCapability.userAllowed)
+    } catch (error) {
+      showFailure(error)
+    }
+  }
+
   if (view === 'downloadHistory') {
     return (
       <BrowserDownloadHistoryPage
         onBack={() => setView('settings')}
-        onNavigateMcp={onBack}
         onNavigateSettingsRoot={onNavigateSettingsRoot}
       />
     )
@@ -122,7 +145,6 @@ export function BrowserAutomationSettingsPage({
       <BrowserHistoryPage
         onBack={() => setView('settings')}
         onCloseSettings={onCloseSettings}
-        onNavigateMcp={onBack}
         onNavigateSettingsRoot={onNavigateSettingsRoot}
       />
     )
@@ -138,15 +160,59 @@ export function BrowserAutomationSettingsPage({
             label: t('settings.breadcrumb.root'),
             onSelect: onNavigateSettingsRoot
           },
-          { id: 'mcp', label: t('settings.nav.mcp'), onSelect: onBack },
-          { id: 'browser-automation', label: t('mcp.builtin.browserAutomation.name') }
+          { id: 'browser', label: t('settings.nav.browser') }
         ]}
       />
 
       <header className="browser-download-settings__header">
-        <h1>{t('mcp.builtin.browserAutomation.name')}</h1>
+        <h1>{t('settings.nav.browser')}</h1>
         <p className="settings-list-page__description">{t('mcp.browserDownloads.description')}</p>
       </header>
+
+      <section aria-label={browserAutomationName} className="browser-automation-preference">
+        <div className="browser-download-preferences">
+          <div
+            aria-busy={browserAutomationPending || undefined}
+            className="browser-download-preference-row browser-download-preference-row--compact"
+          >
+            <div className="browser-download-preference-row__copy">
+              <strong>{browserAutomationName}</strong>
+              <p data-error={browserAutomationError ? 'true' : undefined}>
+                {browserAutomationError ??
+                  (builtinState.status === 'loading'
+                    ? t('mcp.builtin.loading')
+                    : t('mcp.builtin.browserAutomation.description'))}
+              </p>
+            </div>
+            <div className="browser-automation-preference__actions">
+              {browserAutomationError && (
+                <button
+                  className="mcp-secondary-button"
+                  onClick={() => void refreshBuiltinCapabilities(true)}
+                  type="button"
+                >
+                  {t('mcp.actions.retry')}
+                </button>
+              )}
+              <button
+                aria-checked={browserAutomationCapability?.userAllowed ?? false}
+                aria-label={t('mcp.builtin.toggleNamed').replaceAll(
+                  '{name}',
+                  browserAutomationName
+                )}
+                className="settings-switch"
+                data-state={browserAutomationCapability?.userAllowed ? 'on' : 'off'}
+                disabled={!browserAutomationCapability || browserAutomationPending}
+                onClick={() => void setBrowserAutomationAllowed()}
+                role="switch"
+                type="button"
+              >
+                <span aria-hidden="true" className="settings-switch__thumb" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section className="mcp-settings-section" aria-labelledby="browser-general-section">
         <h2 id="browser-general-section">{t('mcp.browserData.general')}</h2>

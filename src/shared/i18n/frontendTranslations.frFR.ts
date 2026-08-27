@@ -358,6 +358,7 @@ export const frFRTranslations = {
   'settings.page.skills': 'Compétences',
   'settings.page.agentTemplates': 'Sous-agents',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': 'Navigateur',
   'settings.page.mcp': 'MCP serveurs',
   'settings.breadcrumb.label': 'Navigation des paramètres',
   'settings.breadcrumb.root': 'Paramètres',

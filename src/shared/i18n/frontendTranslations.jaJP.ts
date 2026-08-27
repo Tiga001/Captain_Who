@@ -351,6 +351,7 @@ export const jaJPTranslations = {
   'settings.page.skills': 'スキル',
   'settings.page.agentTemplates': 'サブエージェント',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': 'ブラウザ',
   'settings.page.mcp': 'MCP サーバー',
   'settings.breadcrumb.label': '設定ページのナビゲーション',
   'settings.breadcrumb.root': '設定',

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
+  AppWindow,
   Archive,
   ArrowLeft,
   Bot,
@@ -25,6 +26,7 @@ import type { UiPreferencesSnapshot } from '../storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../storage/storageClient'
 import { McpSettingsPage } from '../mcp/McpSettingsPage'
 import type { BrowserAutomationView } from '../mcp/BrowserAutomationSettingsPage'
+import { BrowserAutomationSettingsPage } from '../mcp/BrowserAutomationSettingsPage'
 import { AppearanceSettingsPage } from './pages/AppearanceSettingsPage'
 import { ArchivedConversationsSettingsPage } from './pages/ArchivedConversationsSettingsPage'
 import { ConfigurationSettingsPage } from './pages/ConfigurationSettingsPage'
@@ -50,7 +52,7 @@ interface SettingsPageProps {
   projects: AppProject[]
   initialProjectId?: string | null
   initialPage?: SettingsPageId
-  initialMcpBrowserView?: BrowserAutomationView
+  initialBrowserView?: BrowserAutomationView
   uiPreferences: UiPreferencesSnapshot
 }
 
@@ -63,6 +65,7 @@ export type SettingsPageId =
   | 'usageBilling'
   | 'skills'
   | 'mcp'
+  | 'browser'
   | 'environment'
   | 'archivedConversations'
   | 'agentTemplates'
@@ -88,10 +91,11 @@ const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsNavItem[
   {
     titleKey: 'settings.group.coding',
     items: [
+      { id: 'environment', labelKey: 'settings.page.environment', icon: Monitor },
       { id: 'skills', labelKey: 'settings.page.skills', icon: WandSparkles },
-      { id: 'agentTemplates', labelKey: 'settings.page.agentTemplates', icon: Bot },
       { id: 'mcp', labelKey: 'settings.nav.mcp', icon: Cable },
-      { id: 'environment', labelKey: 'settings.page.environment', icon: Monitor }
+      { id: 'browser', labelKey: 'settings.nav.browser', icon: AppWindow },
+      { id: 'agentTemplates', labelKey: 'settings.page.agentTemplates', icon: Bot }
     ]
   },
   {
@@ -117,7 +121,8 @@ function SettingsContent({
   onUnarchiveConversation,
   onUiPreferencesChange,
   initialProjectId,
-  initialMcpBrowserView,
+  initialBrowserView,
+  browserPageRevision,
   onCloseSettings,
   projects,
   uiPreferences
@@ -132,7 +137,8 @@ function SettingsContent({
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   initialProjectId?: string | null
-  initialMcpBrowserView?: BrowserAutomationView
+  initialBrowserView?: BrowserAutomationView
+  browserPageRevision: number
   onCloseSettings: () => void
   projects: AppProject[]
   uiPreferences: UiPreferencesSnapshot
@@ -191,9 +197,18 @@ function SettingsContent({
   if (activePage === 'mcp') {
     return (
       <McpSettingsPage
-        initialBrowserView={initialMcpBrowserView}
-        onCloseSettings={onCloseSettings}
         onDirtyChange={onMcpDirtyChange}
+        onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
+      />
+    )
+  }
+
+  if (activePage === 'browser') {
+    return (
+      <BrowserAutomationSettingsPage
+        key={browserPageRevision}
+        initialView={initialBrowserView}
+        onCloseSettings={onCloseSettings}
         onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
       />
     )
@@ -304,12 +319,16 @@ export function SettingsPage({
   onUiPreferencesChange,
   projects,
   initialProjectId,
-  initialMcpBrowserView,
+  initialBrowserView,
   initialPage = 'general',
   uiPreferences
 }: SettingsPageProps) {
   const { t } = useFrontendConfig()
   const [activePage, setActivePage] = useState<SettingsPageId>(initialPage)
+  const [browserEntryView, setBrowserEntryView] = useState<BrowserAutomationView | undefined>(
+    initialBrowserView
+  )
+  const [browserPageRevision, setBrowserPageRevision] = useState(0)
   const [mcpDirty, setMcpDirty] = useState(false)
   const [pendingNavigation, setPendingNavigation] = useState<
     { type: 'back' } | { type: 'page'; page: SettingsPageId } | null
@@ -320,6 +339,12 @@ export function SettingsPage({
   }, [])
 
   const requestPage = (page: SettingsPageId) => {
+    if (page === 'browser') {
+      setBrowserEntryView(undefined)
+      if (activePage === 'browser') setBrowserPageRevision((current) => current + 1)
+    } else if (activePage === 'browser') {
+      setBrowserEntryView(undefined)
+    }
     if (page === activePage) return
     if (activePage === 'mcp' && mcpDirty) {
       setPendingNavigation({ type: 'page', page })
@@ -351,6 +376,10 @@ export function SettingsPage({
   useEffect(() => {
     setActivePage(initialPage)
   }, [initialPage])
+
+  useEffect(() => {
+    setBrowserEntryView(initialBrowserView)
+  }, [initialBrowserView])
 
   useEffect(() => {
     pageRef.current?.focus({ preventScroll: true })
@@ -393,7 +422,8 @@ export function SettingsPage({
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}
             initialProjectId={initialProjectId}
-            initialMcpBrowserView={initialMcpBrowserView}
+            initialBrowserView={browserEntryView}
+            browserPageRevision={browserPageRevision}
             onCloseSettings={onBack}
             uiPreferences={uiPreferences}
           />

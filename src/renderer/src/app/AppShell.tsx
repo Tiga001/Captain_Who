@@ -2118,7 +2118,7 @@ export function AppShell() {
           onOpenAgentTemplates={() => openSettings('agentTemplates')}
           onOpenBrowserSettings={(destination) =>
             openSettings(
-              'mcp',
+              'browser',
               destination === 'downloads'
                 ? 'downloadHistory'
                 : destination === 'history'

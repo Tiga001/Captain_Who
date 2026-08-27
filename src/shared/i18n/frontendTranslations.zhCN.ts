@@ -343,6 +343,7 @@ export const zhCNTranslations = {
   'settings.page.skills': '技能',
   'settings.page.agentTemplates': '子智能体',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': '浏览器',
   'settings.page.mcp': 'MCP 服务器',
   'settings.breadcrumb.label': '设置页面导航',
   'settings.breadcrumb.root': '设置',

@@ -13,27 +13,15 @@ const ASSISTANT_SOURCES_MAX_WIDTH = 620
 const ASSISTANT_SOURCES_HEADER_HEIGHT = 33
 const ASSISTANT_SOURCES_ROW_HEIGHT = 34
 const ASSISTANT_SOURCES_MAX_VISIBLE_ITEMS = 5
-const faviconCache = new Map<string, Promise<string | null>>()
-
-function faviconCacheKey(pageUrl: string, faviconUrl?: string | null) {
-  return `${pageUrl}\n${faviconUrl ?? ''}`
-}
 
 function resolveSourceFavicon(pageUrl: string, faviconUrl?: string | null): Promise<string | null> {
-  const key = faviconCacheKey(pageUrl, faviconUrl)
-  const cached = faviconCache.get(key)
-  if (cached) return cached
-
-  const request = hostClient.resources
+  return hostClient.resources
     .resolveFavicon({
       pageUrl,
       faviconUrl: faviconUrl ?? null
     })
     .then((response) => response.url)
     .catch(() => null)
-
-  faviconCache.set(key, request)
-  return request
 }
 
 function getDomainInitial(domain: string) {

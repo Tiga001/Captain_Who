@@ -356,6 +356,7 @@ export const itITTranslations = {
   'settings.page.skills': 'Abilità',
   'settings.page.agentTemplates': 'Subagenti',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': 'Browser',
   'settings.page.mcp': 'MCP server',
   'settings.breadcrumb.label': 'Navigazione delle impostazioni',
   'settings.breadcrumb.root': 'Impostazioni',

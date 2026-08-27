@@ -40,7 +40,7 @@ export function useAppWindowSettings<T extends HTMLElement>(shellRef: RefObject<
           ? activeElement
           : null
       setSettingsInitialPage(initialPage)
-      setSettingsInitialBrowserView(initialPage === 'mcp' ? browserView : undefined)
+      setSettingsInitialBrowserView(initialPage === 'browser' ? browserView : undefined)
       setSettingsOpen(true)
     },
     [shellRef]

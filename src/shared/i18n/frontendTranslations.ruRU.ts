@@ -352,6 +352,7 @@ export const ruRUTranslations = {
   'settings.page.skills': 'Навыки',
   'settings.page.agentTemplates': 'Субагенты',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': 'Браузер',
   'settings.page.mcp': 'MCP серверов',
   'settings.breadcrumb.label': 'Навигация по настройкам',
   'settings.breadcrumb.root': 'Настройки',

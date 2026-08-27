@@ -349,6 +349,7 @@ export const enUSTranslations = {
   'settings.page.skills': 'Skills',
   'settings.page.agentTemplates': 'Subagents',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': 'Browser',
   'settings.page.mcp': 'MCP servers',
   'settings.breadcrumb.label': 'Settings page navigation',
   'settings.breadcrumb.root': 'Settings',

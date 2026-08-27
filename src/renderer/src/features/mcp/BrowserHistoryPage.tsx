@@ -28,7 +28,6 @@ import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 interface BrowserHistoryPageProps {
   onBack: () => void
   onCloseSettings?: () => void
-  onNavigateMcp: () => void
   onNavigateSettingsRoot: () => void
 }
 
@@ -41,7 +40,6 @@ interface HistoryMenuState {
 export function BrowserHistoryPage({
   onBack,
   onCloseSettings,
-  onNavigateMcp,
   onNavigateSettingsRoot
 }: BrowserHistoryPageProps) {
   const { language, t } = useFrontendConfig()
@@ -170,10 +168,9 @@ export function BrowserHistoryPage({
             label: t('settings.breadcrumb.root'),
             onSelect: onNavigateSettingsRoot
           },
-          { id: 'mcp', label: t('settings.nav.mcp'), onSelect: onNavigateMcp },
           {
-            id: 'browser-automation',
-            label: t('mcp.builtin.browserAutomation.name'),
+            id: 'browser',
+            label: t('settings.nav.browser'),
             onSelect: onBack
           },
           { id: 'browser-history', label: t('browser.history') }

@@ -38,7 +38,7 @@ export function AppShellSettingsView({
     <SettingsPage
       conversations={conversations}
       initialPage={initialPage}
-      initialMcpBrowserView={initialBrowserView}
+      initialBrowserView={initialBrowserView}
       initialProjectId={initialProjectId}
       projects={projects}
       uiPreferences={uiPreferences}

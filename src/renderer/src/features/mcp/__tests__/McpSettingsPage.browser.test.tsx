@@ -95,7 +95,10 @@ vi.mock('../../../host/hostClient', () => ({
   }
 }))
 
-const { McpSettingsPage } = await import('../McpSettingsPage')
+const [{ McpSettingsPage }, { BrowserAutomationSettingsPage }] = await Promise.all([
+  import('../McpSettingsPage'),
+  import('../BrowserAutomationSettingsPage')
+])
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111'
 
@@ -326,8 +329,8 @@ beforeEach(() => {
   })
 })
 
-describe('MCP Settings page', () => {
-  it('separates the built-in capability from the unchanged external Server area', async () => {
+describe('MCP and Browser settings pages', () => {
+  it('shows only external MCP servers without built-in or external grouping', async () => {
     service.hook.mockReturnValue(
       management({
         status: 'ready',
@@ -338,22 +341,15 @@ describe('MCP Settings page', () => {
     )
     const screen = await render(<McpSettingsPage />)
 
-    await expect.element(screen.getByRole('heading', { name: 'mcp.section.builtin' })).toBeVisible()
-    await expect
-      .element(screen.getByRole('heading', { name: 'mcp.section.external' }))
-      .toBeVisible()
-    await expect.element(screen.getByText('mcp.builtin.browserAutomation.name')).toBeVisible()
-    await expect
-      .element(screen.getByText('mcp.builtin.browserAutomation.description'))
-      .toBeVisible()
-    expect(screen.container.querySelector('[data-mcp-icon="browser-automation"]')).not.toBeNull()
-    expect(screen.getByRole('switch').elements()).toHaveLength(1)
-    expect(screen.getByText('Host Browser automation').query()).toBeNull()
-    expect(screen.getByText('Host description').query()).toBeNull()
+    expect(screen.getByRole('heading', { name: 'mcp.section.builtin' }).query()).toBeNull()
+    expect(screen.getByRole('heading', { name: 'mcp.section.external' }).query()).toBeNull()
+    expect(screen.getByText('mcp.builtin.browserAutomation.name').query()).toBeNull()
+    expect(screen.getByRole('switch').elements()).toHaveLength(0)
     await expect.element(screen.getByText('mcp.empty.title')).toBeVisible()
+    expect(service.builtinHook).not.toHaveBeenCalled()
   })
 
-  it('changes only user_allowed when the built-in capability switch is used', async () => {
+  it('moves the browser automation permission switch to the Browser page', async () => {
     const capability = builtinCapability()
     service.builtinHook.mockReturnValue(
       builtinManagement({
@@ -363,18 +359,13 @@ describe('MCP Settings page', () => {
         isRefreshing: false
       })
     )
-    service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([]),
-        errorMessage: null,
-        isRefreshing: false
-      })
-    )
-    const screen = await render(<McpSettingsPage />)
+    const screen = await render(<BrowserAutomationSettingsPage onNavigateSettingsRoot={vi.fn()} />)
 
     const toggle = screen.getByRole('switch', { name: 'mcp.builtin.toggleNamed' })
     await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    expect(
+      screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).query()
+    ).toBeNull()
     await toggle.click()
 
     await expect.poll(() => service.builtinSetAllowed.mock.calls.length).toBe(1)
@@ -385,17 +376,11 @@ describe('MCP Settings page', () => {
   })
 
   it('opens browser automation settings, toggles manual save prompts, and separates history', async () => {
-    service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([]),
-        errorMessage: null,
-        isRefreshing: false
-      })
-    )
-    const screen = await render(<McpSettingsPage />)
+    const screen = await render(<BrowserAutomationSettingsPage onNavigateSettingsRoot={vi.fn()} />)
 
-    await screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'settings.nav.browser' }))
+      .toBeVisible()
     await expect
       .element(screen.getByRole('heading', { name: 'mcp.browserDownloads.section' }))
       .toBeVisible()
@@ -440,22 +425,15 @@ describe('MCP Settings page', () => {
       .toBeVisible()
     expect(service.listBrowserDownloadHistory).toHaveBeenCalledWith('')
 
-    await screen.getByRole('button', { name: 'settings.nav.mcp' }).click()
-    await expect.element(screen.getByRole('heading', { name: 'mcp.section.builtin' })).toBeVisible()
+    await screen.getByRole('button', { name: 'settings.nav.browser' }).click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'mcp.browserData.general' }))
+      .toBeVisible()
   })
 
   it('updates the link target and opens browsing history from the General section', async () => {
-    service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([]),
-        errorMessage: null,
-        isRefreshing: false
-      })
-    )
-    const screen = await render(<McpSettingsPage />)
+    const screen = await render(<BrowserAutomationSettingsPage onNavigateSettingsRoot={vi.fn()} />)
 
-    await screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).click()
     await expect
       .element(screen.getByRole('heading', { name: 'mcp.browserData.general' }))
       .toBeVisible()
@@ -469,7 +447,26 @@ describe('MCP Settings page', () => {
         name: 'mcp.browserData.linkTarget: mcp.browserData.systemBrowser'
       })
       .click()
-    await screen.getByRole('option', { name: 'mcp.browserData.builtinBrowser' }).click()
+    const browserTargetMenu = screen.container.querySelector<HTMLElement>(
+      '.browser-link-target-select .settings-select__menu'
+    )
+    expect(browserTargetMenu).not.toBeNull()
+    expect(browserTargetMenu!.getBoundingClientRect().width).toBeGreaterThanOrEqual(239)
+
+    const systemBrowserOption = screen.getByRole('option', {
+      name: 'mcp.browserData.systemBrowser'
+    })
+    const builtinBrowserOption = screen.getByRole('option', {
+      name: 'mcp.browserData.builtinBrowser'
+    })
+    for (const option of [systemBrowserOption, builtinBrowserOption]) {
+      const label = option.element().querySelector<HTMLElement>('.settings-select__option-label')
+      expect(label).not.toBeNull()
+      expect(window.getComputedStyle(label!).textOverflow).toBe('clip')
+      expect(label!.scrollWidth).toBeLessThanOrEqual(label!.clientWidth + 1)
+    }
+
+    await builtinBrowserOption.click()
     await expect.poll(() => service.updateBrowserPreferences.mock.calls.length).toBe(1)
     expect(service.updateBrowserPreferences).toHaveBeenCalledWith('builtin')
 
@@ -489,21 +486,14 @@ describe('MCP Settings page', () => {
       .toBeVisible()
     expect(service.listBrowserHistory).toHaveBeenCalledWith('')
     const breadcrumb = screen.getByRole('navigation', { name: 'settings.breadcrumb.label' })
+    expect(breadcrumb.getByText('settings.nav.browser', { exact: true }).elements()).toHaveLength(1)
     expect(breadcrumb.getByText('browser.history', { exact: true }).elements()).toHaveLength(1)
+    expect(breadcrumb.getByText('settings.nav.mcp', { exact: true }).elements()).toHaveLength(0)
   })
 
   it('renders the clear-data dialog in a top-level portal and enforces all-time-only rows', async () => {
-    service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([]),
-        errorMessage: null,
-        isRefreshing: false
-      })
-    )
-    const screen = await render(<McpSettingsPage />)
+    const screen = await render(<BrowserAutomationSettingsPage onNavigateSettingsRoot={vi.fn()} />)
 
-    await screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).click()
     await screen.getByRole('button', { name: 'browser.clearBrowsingData' }).click()
     const dialog = screen.getByRole('dialog', { name: 'browser.clearBrowsingData' })
     await expect.element(dialog).toBeVisible()
@@ -521,14 +511,6 @@ describe('MCP Settings page', () => {
   })
 
   it('groups browsing history and opens each row menu from a top-level portal', async () => {
-    service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([]),
-        errorMessage: null,
-        isRefreshing: false
-      })
-    )
     service.listBrowserHistory.mockResolvedValue({
       schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
       entries: [
@@ -555,7 +537,11 @@ describe('MCP Settings page', () => {
     })
     const onCloseSettings = vi.fn()
     const screen = await render(
-      <McpSettingsPage initialBrowserView="history" onCloseSettings={onCloseSettings} />
+      <BrowserAutomationSettingsPage
+        initialView="history"
+        onCloseSettings={onCloseSettings}
+        onNavigateSettingsRoot={vi.fn()}
+      />
     )
 
     await new Promise((resolve) => window.setTimeout(resolve, 50))
@@ -585,7 +571,7 @@ describe('MCP Settings page', () => {
     expect(onCloseSettings).toHaveBeenCalledTimes(1)
   })
 
-  it('shows built-in loading and safe retry independently from external Servers', async () => {
+  it('shows safe browser automation load errors and retries independently', async () => {
     service.builtinHook.mockReturnValue(
       builtinManagement({
         status: 'error',
@@ -594,24 +580,15 @@ describe('MCP Settings page', () => {
         isRefreshing: false
       })
     )
-    service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([details()]),
-        errorMessage: null,
-        isRefreshing: false
-      })
-    )
-    const screen = await render(<McpSettingsPage />)
+    const screen = await render(<BrowserAutomationSettingsPage onNavigateSettingsRoot={vi.fn()} />)
 
     await expect.element(screen.getByText('safe built-in failure')).toBeVisible()
-    await expect.element(screen.getByText('fixture')).toBeVisible()
     await screen.getByRole('button', { name: 'mcp.actions.retry' }).click()
     expect(service.builtinRefresh).toHaveBeenCalledWith(true)
     expect(service.refresh).not.toHaveBeenCalled()
   })
 
-  it('refreshes built-in and external MCP from the shared refresh action', async () => {
+  it('refreshes only external MCP from the MCP page action', async () => {
     service.hook.mockReturnValue(
       management({
         status: 'ready',
@@ -624,7 +601,7 @@ describe('MCP Settings page', () => {
 
     await screen.getByRole('button', { name: 'mcp.actions.refresh' }).click()
     expect(service.refresh).toHaveBeenCalledTimes(1)
-    expect(service.builtinRefresh).toHaveBeenCalledWith(true)
+    expect(service.builtinRefresh).not.toHaveBeenCalled()
   })
 
   it('renders the initial loading state', async () => {

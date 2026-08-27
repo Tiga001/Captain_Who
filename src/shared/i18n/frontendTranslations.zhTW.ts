@@ -339,6 +339,7 @@ export const zhTWTranslations = {
   'settings.page.skills': '技能',
   'settings.page.agentTemplates': '子智能體',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': '瀏覽器',
   'settings.page.mcp': 'MCP 伺服器',
   'settings.breadcrumb.label': '設定頁面導覽',
   'settings.breadcrumb.root': '設定',

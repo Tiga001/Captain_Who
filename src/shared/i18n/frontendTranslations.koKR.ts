@@ -346,6 +346,7 @@ export const koKRTranslations = {
   'settings.page.skills': '기술',
   'settings.page.agentTemplates': '하위 에이전트',
   'settings.nav.mcp': 'MCP',
+  'settings.nav.browser': '브라우저',
   'settings.page.mcp': 'MCP 서버',
   'settings.breadcrumb.label': '설정 페이지 탐색',
   'settings.breadcrumb.root': '설정',
