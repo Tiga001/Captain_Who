@@ -39,6 +39,14 @@
   transform: translateY(0);
 }
 
+.mc-tooltip[data-appearance='inverse'] {
+  color: var(--mc-color-text-inverse);
+  background-color: var(--mc-color-text-primary);
+  border-color: transparent;
+  border-radius: var(--mc-radius-lg);
+  box-shadow: var(--mc-shadow-popover);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .mc-tooltip {
     transition: none;

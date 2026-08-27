@@ -54,6 +54,18 @@ afterEach(() => {
 })
 
 describe('BrowserPanel automation readiness lifecycle', () => {
+  it('renders the browser overflow menu in the top-level portal', async () => {
+    const screen = await render(
+      <BrowserPanel isActive pageId="portal-menu" surfaceId="right-sidebar-browser-portal-menu" />
+    )
+
+    await screen.getByRole('button', { name: 'browser.menu' }).click()
+    await expect.poll(() => document.body.querySelector('.browser-panel__menu')).not.toBeNull()
+    const menu = document.body.querySelector('.browser-panel__menu') as HTMLElement
+    expect(menu.parentElement).toBe(document.body)
+    expect(menu.style.width).not.toBe('')
+  })
+
   it('does not acknowledge did-attach and only reports the exact surviving document-ready webview', async () => {
     const ready = vi.fn()
     const instanceChanged = vi.fn()

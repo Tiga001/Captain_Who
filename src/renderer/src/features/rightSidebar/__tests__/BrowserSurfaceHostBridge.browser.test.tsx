@@ -230,6 +230,23 @@ function BrowserStateHarness({
 function createBrowserApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
   return {
     clearBrowsingData: vi.fn(async () => undefined),
+    getDownloadCenter: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, revision: 0, downloads: [] }
+    })),
+    performDownloadCenterAction: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        status: 'unavailable' as const,
+        snapshot: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, revision: 0, downloads: [] }
+      }
+    })),
+    openDownloadDirectory: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, status: 'opened' as const }
+    })),
+    onDownloadCenterChanged: vi.fn(() => () => undefined),
     getDownloadSettings: vi.fn(async () => ({
       ok: true as const,
       value: {

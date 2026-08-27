@@ -10,7 +10,7 @@ import {
 } from '@mycopilot/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const electronHarness = vi.hoisted(() => ({ send: vi.fn() }))
+const electronHarness = vi.hoisted(() => ({ send: vi.fn(), writeText: vi.fn() }))
 
 vi.mock('electron', () => ({
   BrowserWindow: {
@@ -25,8 +25,9 @@ vi.mock('electron', () => ({
       }
     ]
   },
+  clipboard: { writeText: electronHarness.writeText },
   dialog: { showOpenDialog: vi.fn() },
-  shell: { showItemInFolder: vi.fn() }
+  shell: { openPath: vi.fn(async () => ''), showItemInFolder: vi.fn() }
 }))
 
 import type { BrowserDownloadBroker } from '../browser/BrowserDownloadBroker'
@@ -60,6 +61,7 @@ async function createHarness() {
   }
   let directory = systemDirectory
   let historyChanged: (() => void) | undefined
+  let downloadCenterChanged: ((snapshot: unknown) => void) | undefined
   const record: BrowserDownloadRecord = {
     schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
     downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000',
@@ -90,11 +92,25 @@ async function createHarness() {
     }))
   }
   const broker = {
+    downloadCenterResource: vi.fn(() => ({
+      absolutePath: filePath,
+      sourceUrl: 'https://example.test/archive.zip'
+    })),
+    downloadCenterSnapshot: vi.fn(() => ({
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      revision: 1,
+      downloads: []
+    })),
     downloadDirectory: vi.fn(() => directory),
+    onDownloadCenterChangedEvent: vi.fn((listener: (snapshot: unknown) => void) => {
+      downloadCenterChanged = listener
+      return vi.fn()
+    }),
     onHistoryChangedEvent: vi.fn((listener: () => void) => {
       historyChanged = listener
       return vi.fn()
     }),
+    performDownloadCenterAction: vi.fn(async () => 'performed' as const),
     settings: vi.fn(() => settings),
     updateSettings: vi.fn((next: BrowserDownloadSettingsRecord) => {
       settings = next
@@ -109,8 +125,10 @@ async function createHarness() {
     on: vi.fn()
   } as unknown as TrustedIpcMain
   const nativeHost = {
+    openDirectory: vi.fn(async () => true),
     revealInFolder: vi.fn(),
-    selectDirectory: vi.fn(async () => customDirectory)
+    selectDirectory: vi.fn(async () => customDirectory),
+    writeText: vi.fn()
   }
   registerBrowserDownloadIpc(
     ipcMain,
@@ -124,6 +142,7 @@ async function createHarness() {
     broker,
     coreServer,
     customDirectory,
+    downloadCenterChanged,
     filePath,
     historyChanged,
     invoke,
@@ -234,5 +253,59 @@ describe('Browser Download IPC', () => {
       ok: true,
       value: { askWhereToSave: true, revision: 1 }
     })
+  })
+
+  it('controls live downloads and keeps copy and reveal targets in Main', async () => {
+    const harness = await createHarness()
+    const input = {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000'
+    }
+
+    await expect(harness.invoke(HOST_CHANNELS.browser.downloadCenterGet)).resolves.toMatchObject({
+      ok: true,
+      value: { revision: 1, downloads: [] }
+    })
+    await expect(
+      harness.invoke(HOST_CHANNELS.browser.downloadCenterAction, {
+        ...input,
+        action: 'pause'
+      })
+    ).resolves.toMatchObject({ ok: true, value: { status: 'performed' } })
+    expect(harness.broker.performDownloadCenterAction).toHaveBeenCalledWith(
+      input.downloadId,
+      'pause'
+    )
+
+    await harness.invoke(HOST_CHANNELS.browser.downloadCenterAction, {
+      ...input,
+      action: 'copy_url'
+    })
+    expect(harness.nativeHost.writeText).toHaveBeenCalledWith('https://example.test/archive.zip')
+    await harness.invoke(HOST_CHANNELS.browser.downloadCenterAction, {
+      ...input,
+      action: 'copy_path'
+    })
+    expect(harness.nativeHost.writeText).toHaveBeenCalledWith(harness.filePath)
+    await harness.invoke(HOST_CHANNELS.browser.downloadCenterAction, {
+      ...input,
+      action: 'reveal'
+    })
+    expect(harness.nativeHost.revealInFolder).toHaveBeenCalledWith(harness.filePath)
+
+    await expect(
+      harness.invoke(HOST_CHANNELS.browser.downloadDirectoryOpen)
+    ).resolves.toMatchObject({ ok: true, value: { status: 'opened' } })
+    expect(harness.nativeHost.openDirectory).toHaveBeenCalled()
+
+    harness.downloadCenterChanged?.({
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      revision: 2,
+      downloads: []
+    })
+    expect(electronHarness.send).toHaveBeenCalledWith(
+      HOST_CHANNELS.browser.downloadCenterChanged,
+      expect.objectContaining({ revision: 2 })
+    )
   })
 })

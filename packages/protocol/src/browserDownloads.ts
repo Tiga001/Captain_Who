@@ -16,6 +16,10 @@ export const BROWSER_DOWNLOAD_SCHEMA_VERSION = 2 as const
 export type BrowserDownloadSource = 'manual' | 'agent'
 export type BrowserDownloadAvailability = 'available' | 'missing' | 'modified'
 export type BrowserDownloadLocationMode = 'system' | 'custom'
+export type BrowserDownloadTransferState =
+  'progressing' | 'paused' | 'completed' | 'cancelled' | 'interrupted'
+export type BrowserDownloadCenterAction =
+  'pause' | 'resume' | 'cancel' | 'reveal' | 'copy_url' | 'copy_path' | 'remove'
 
 /** Durable, path-free identity for a file saved by the managed browser. */
 export interface BrowserDownloadReference {
@@ -84,6 +88,48 @@ export interface BrowserDownloadHistoryChangedNotification {
   schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
 }
 
+/** Path-free live state for one download owned by the managed browser session. */
+export interface BrowserDownloadCenterItem {
+  downloadId: string
+  displayName: string
+  source: BrowserDownloadSource
+  state: BrowserDownloadTransferState
+  receivedBytes: number
+  totalBytes: number
+  bytesPerSecond: number
+  startedAt: number
+  updatedAt: number
+  canPause: boolean
+  canResume: boolean
+  canCancel: boolean
+  canReveal: boolean
+  canCopyUrl: boolean
+  canCopyPath: boolean
+}
+
+export interface BrowserDownloadCenterSnapshot {
+  schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
+  revision: number
+  downloads: BrowserDownloadCenterItem[]
+}
+
+export interface BrowserDownloadCenterActionInput {
+  schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
+  downloadId: string
+  action: BrowserDownloadCenterAction
+}
+
+export interface BrowserDownloadCenterActionOutput {
+  schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
+  status: 'performed' | 'unavailable'
+  snapshot: BrowserDownloadCenterSnapshot
+}
+
+export interface BrowserDownloadDirectoryOpenOutput {
+  schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
+  status: 'opened' | 'unavailable'
+}
+
 /** Main/Core-only settings record. Never return this object to Renderer or model code. */
 export interface BrowserDownloadSettingsRecord {
   schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
@@ -135,6 +181,16 @@ const MIME_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&
 const SOURCES = ['manual', 'agent'] as const
 const AVAILABILITIES = ['available', 'missing', 'modified'] as const
 const LOCATION_MODES = ['system', 'custom'] as const
+const TRANSFER_STATES = ['progressing', 'paused', 'completed', 'cancelled', 'interrupted'] as const
+const CENTER_ACTIONS = [
+  'pause',
+  'resume',
+  'cancel',
+  'reveal',
+  'copy_url',
+  'copy_path',
+  'remove'
+] as const
 
 export function parseBrowserDownloadReference(
   value: unknown,
@@ -333,6 +389,110 @@ export function parseBrowserDownloadHistoryChangedNotification(
   expectOnlyKeys(record, ['schemaVersion'], context)
   expectSchemaVersion(record, BROWSER_DOWNLOAD_SCHEMA_VERSION, context)
   return { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION }
+}
+
+export function parseBrowserDownloadCenterItem(
+  value: unknown,
+  context = 'Browser Download center item'
+): BrowserDownloadCenterItem {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'downloadId',
+      'displayName',
+      'source',
+      'state',
+      'receivedBytes',
+      'totalBytes',
+      'bytesPerSecond',
+      'startedAt',
+      'updatedAt',
+      'canPause',
+      'canResume',
+      'canCancel',
+      'canReveal',
+      'canCopyUrl',
+      'canCopyPath'
+    ],
+    context
+  )
+  return {
+    downloadId: downloadId(record.downloadId, `${context}.downloadId`),
+    displayName: displayName(record.displayName, `${context}.displayName`),
+    source: expectEnum(record.source, SOURCES, `${context}.source`),
+    state: expectEnum(record.state, TRANSFER_STATES, `${context}.state`),
+    receivedBytes: expectSafeInteger(record.receivedBytes, `${context}.receivedBytes`, 0),
+    totalBytes: expectSafeInteger(record.totalBytes, `${context}.totalBytes`, 0),
+    bytesPerSecond: expectSafeInteger(record.bytesPerSecond, `${context}.bytesPerSecond`, 0),
+    startedAt: expectSafeInteger(record.startedAt, `${context}.startedAt`, 0),
+    updatedAt: expectSafeInteger(record.updatedAt, `${context}.updatedAt`, 0),
+    canPause: expectBoolean(record.canPause, `${context}.canPause`),
+    canResume: expectBoolean(record.canResume, `${context}.canResume`),
+    canCancel: expectBoolean(record.canCancel, `${context}.canCancel`),
+    canReveal: expectBoolean(record.canReveal, `${context}.canReveal`),
+    canCopyUrl: expectBoolean(record.canCopyUrl, `${context}.canCopyUrl`),
+    canCopyPath: expectBoolean(record.canCopyPath, `${context}.canCopyPath`)
+  }
+}
+
+export function parseBrowserDownloadCenterSnapshot(value: unknown): BrowserDownloadCenterSnapshot {
+  const context = 'Browser Download center snapshot'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'revision', 'downloads'], context)
+  expectSchemaVersion(record, BROWSER_DOWNLOAD_SCHEMA_VERSION, context)
+  const downloads = expectArray(record.downloads, `${context}.downloads`)
+  if (downloads.length > 100) {
+    throw invalidProtocolValue(`${context}.downloads`, 'exceeds 100')
+  }
+  return {
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    revision: expectSafeInteger(record.revision, `${context}.revision`, 0),
+    downloads: downloads.map((item, index) =>
+      parseBrowserDownloadCenterItem(item, `${context}.downloads[${index}]`)
+    )
+  }
+}
+
+export function parseBrowserDownloadCenterActionInput(
+  value: unknown
+): BrowserDownloadCenterActionInput {
+  const context = 'Browser Download center action input'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'downloadId', 'action'], context)
+  expectSchemaVersion(record, BROWSER_DOWNLOAD_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    downloadId: downloadId(record.downloadId, `${context}.downloadId`),
+    action: expectEnum(record.action, CENTER_ACTIONS, `${context}.action`)
+  }
+}
+
+export function parseBrowserDownloadCenterActionOutput(
+  value: unknown
+): BrowserDownloadCenterActionOutput {
+  const context = 'Browser Download center action output'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'status', 'snapshot'], context)
+  expectSchemaVersion(record, BROWSER_DOWNLOAD_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    status: expectEnum(record.status, ['performed', 'unavailable'] as const, `${context}.status`),
+    snapshot: parseBrowserDownloadCenterSnapshot(record.snapshot)
+  }
+}
+
+export function parseBrowserDownloadDirectoryOpenOutput(
+  value: unknown
+): BrowserDownloadDirectoryOpenOutput {
+  const context = 'Browser Download directory open output'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'status'], context)
+  expectSchemaVersion(record, BROWSER_DOWNLOAD_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    status: expectEnum(record.status, ['opened', 'unavailable'] as const, `${context}.status`)
+  }
 }
 
 export function parseBrowserDownloadSettingsRecord(value: unknown): BrowserDownloadSettingsRecord {

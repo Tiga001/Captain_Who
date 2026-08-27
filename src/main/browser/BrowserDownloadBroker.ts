@@ -7,6 +7,9 @@ import {
   BROWSER_DOWNLOAD_SCHEMA_VERSION,
   parseBrowserDownloadRecord,
   parseBrowserDownloadSettingsRecord,
+  type BrowserDownloadCenterAction,
+  type BrowserDownloadCenterItem,
+  type BrowserDownloadCenterSnapshot,
   type BrowserDownloadRecord,
   type BrowserDownloadReference,
   type BrowserDownloadRegistrationInput,
@@ -22,6 +25,8 @@ const DOWNLOAD_SETTLE_TIMEOUT_MS = 30_000
 const DOWNLOAD_PROMPT_SETTLE_TIMEOUT_MS = 5 * 60_000
 const MAX_REGISTERED_GUESTS = 32
 const MAX_FILE_NAME_ATTEMPTS = 10_000
+const MAX_DOWNLOAD_CENTER_ENTRIES = 50
+const DOWNLOAD_CENTER_UPDATE_INTERVAL_MS = 100
 
 export type BrowserDownloadBrokerErrorCode =
   | 'browser.download.closed'
@@ -102,6 +107,8 @@ interface ActiveTool {
 }
 
 interface ActiveDownload {
+  centerRecord: DownloadCenterRecord
+  centerVisible: boolean
   destination: string | null
   downloadId: string
   displayName: string
@@ -116,6 +123,26 @@ interface ActiveDownload {
   tempPath: string | null
   terminal: boolean
   tool?: ActiveTool
+  waitsForDestinationConfirmation: boolean
+}
+
+interface DownloadCenterRecord {
+  absolutePath: string | null
+  bytesPerSecond: number
+  displayName: string
+  downloadId: string
+  receivedBytes: number
+  source: 'manual' | 'agent'
+  sourceUrl: string | null
+  startedAt: number
+  state: BrowserDownloadCenterItem['state']
+  totalBytes: number
+  updatedAt: number
+}
+
+export interface BrowserDownloadCenterResource {
+  absolutePath: string | null
+  sourceUrl: string | null
 }
 
 /**
@@ -132,6 +159,9 @@ export class BrowserDownloadBroker {
   private readonly registerDownloadRecord: BrowserDownloadBrokerOptions['registerDownload']
   private readonly onHistoryChanged?: () => void
   private readonly historyChangedListeners = new Set<() => void>()
+  private readonly downloadCenterChangedListeners = new Set<
+    (snapshot: BrowserDownloadCenterSnapshot) => void
+  >()
   private readonly maxActiveBytes: number
   private readonly maxActiveDownloads: number
   private readonly maxSingleDownloadBytes: number
@@ -140,12 +170,15 @@ export class BrowserDownloadBroker {
   private readonly guests = new Map<number, GuestRecord>()
   private readonly tools = new Set<ActiveTool>()
   private readonly activeDownloads = new Set<ActiveDownload>()
+  private readonly downloadCenterRecords = new Map<string, DownloadCenterRecord>()
   private readonly closedSurfaces = new Set<string>()
   private readonly closedToolCalls = new Set<string>()
   private readonly finalizedRuns = new Set<string>()
   private readonly revokedActivations = new Set<string>()
   private disposed = false
   private installed = false
+  private downloadCenterRevision = 0
+  private downloadCenterChangedTimer: ReturnType<typeof setTimeout> | undefined
 
   private readonly handleWillDownload = (
     _event: Event,
@@ -208,6 +241,100 @@ export class BrowserDownloadBroker {
     this.assertUsable()
     this.historyChangedListeners.add(listener)
     return () => this.historyChangedListeners.delete(listener)
+  }
+
+  downloadCenterSnapshot(): BrowserDownloadCenterSnapshot {
+    this.assertUsable()
+    const activeById = new Map(
+      [...this.activeDownloads].map((download) => [download.downloadId, download] as const)
+    )
+    const downloads = [...this.downloadCenterRecords.values()]
+      .sort(compareDownloadCenterRecords)
+      .map((record) => {
+        const active = activeById.get(record.downloadId)
+        const canResume = Boolean(
+          active &&
+          !active.terminal &&
+          (record.state === 'paused' || record.state === 'interrupted') &&
+          safeCanResume(active.item)
+        )
+        return {
+          downloadId: record.downloadId,
+          displayName: record.displayName,
+          source: record.source,
+          state: record.state,
+          receivedBytes: record.receivedBytes,
+          totalBytes: record.totalBytes,
+          bytesPerSecond: record.bytesPerSecond,
+          startedAt: record.startedAt,
+          updatedAt: record.updatedAt,
+          canPause: Boolean(active && !active.terminal && record.state === 'progressing'),
+          canResume,
+          canCancel: Boolean(active && !active.terminal),
+          canReveal: record.absolutePath !== null,
+          canCopyUrl: record.sourceUrl !== null,
+          canCopyPath: record.absolutePath !== null
+        }
+      })
+    return {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      revision: this.downloadCenterRevision,
+      downloads
+    }
+  }
+
+  onDownloadCenterChangedEvent(
+    listener: (snapshot: BrowserDownloadCenterSnapshot) => void
+  ): () => void {
+    this.assertUsable()
+    this.downloadCenterChangedListeners.add(listener)
+    return () => this.downloadCenterChangedListeners.delete(listener)
+  }
+
+  downloadCenterResource(downloadId: string): BrowserDownloadCenterResource | null {
+    this.assertUsable()
+    const record = this.downloadCenterRecords.get(downloadId)
+    return record ? { absolutePath: record.absolutePath, sourceUrl: record.sourceUrl } : null
+  }
+
+  async performDownloadCenterAction(
+    downloadId: string,
+    action: Extract<BrowserDownloadCenterAction, 'pause' | 'resume' | 'cancel' | 'remove'>
+  ): Promise<'performed' | 'unavailable'> {
+    this.assertUsable()
+    const record = this.downloadCenterRecords.get(downloadId)
+    if (!record) return 'unavailable'
+    const download = [...this.activeDownloads].find(
+      (candidate) => candidate.downloadId === downloadId && !candidate.terminal
+    )
+
+    if (action === 'remove') {
+      if (download) return 'unavailable'
+      this.downloadCenterRecords.delete(downloadId)
+      this.markDownloadCenterChanged(true)
+      return 'performed'
+    }
+    if (!download) return 'unavailable'
+
+    if (action === 'pause') {
+      if (record.state !== 'progressing' || !safePause(download.item)) return 'unavailable'
+      this.refreshDownloadCenterRecord(download, 'paused', true)
+      return 'performed'
+    }
+    if (action === 'resume') {
+      if (
+        (record.state !== 'paused' && record.state !== 'interrupted') ||
+        !safeResume(download.item)
+      ) {
+        return 'unavailable'
+      }
+      this.refreshDownloadCenterRecord(download, 'progressing', true)
+      return 'performed'
+    }
+
+    if (download.tool) this.failTool(download.tool, 'browser.download.cancelled')
+    await this.cancelDownload(download)
+    return 'performed'
   }
 
   updateSettings(value: BrowserDownloadSettingsRecord): void {
@@ -455,6 +582,10 @@ export class BrowserDownloadBroker {
       this.expectedSession.removeListener('will-download', this.handleWillDownload)
       this.installed = false
     }
+    if (this.downloadCenterChangedTimer) {
+      clearTimeout(this.downloadCenterChangedTimer)
+      this.downloadCenterChangedTimer = undefined
+    }
     await Promise.allSettled(
       [...this.tools].map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
     )
@@ -464,11 +595,13 @@ export class BrowserDownloadBroker {
     this.guests.clear()
     this.tools.clear()
     this.activeDownloads.clear()
+    this.downloadCenterRecords.clear()
     this.closedSurfaces.clear()
     this.closedToolCalls.clear()
     this.finalizedRuns.clear()
     this.revokedActivations.clear()
     this.historyChangedListeners.clear()
+    this.downloadCenterChangedListeners.clear()
   }
 
   private admitDownload(
@@ -502,12 +635,27 @@ export class BrowserDownloadBroker {
 
     const downloadId = `browser-download:${randomUUID()}`
     const displayName = sanitizedDownloadFileName(safeDownloadString(item, 'getFilename'))
+    const now = Date.now()
+    const centerRecord: DownloadCenterRecord = {
+      absolutePath: null,
+      bytesPerSecond: safeDownloadBytesPerSecond(item),
+      displayName,
+      downloadId,
+      receivedBytes: safeDownloadBytes(item, 'getReceivedBytes'),
+      source: tool ? 'agent' : 'manual',
+      sourceUrl: safeDownloadUrl(item),
+      startedAt: safeDownloadStartedAt(item, now),
+      state: safeDownloadTransferState(item, 'progressing'),
+      totalBytes: safeDownloadBytes(item, 'getTotalBytes'),
+      updatedAt: now
+    }
     const promptForDestination = this.settingsRecord.askWhereToSave
     const destination = promptForDestination ? null : configuredDestination
     const tempPath = promptForDestination
       ? null
       : join(configuredDestination, `.mycopilot-download-${downloadId.slice(17)}.part`)
     const download = createActiveDownload({
+      centerRecord,
       destination,
       downloadId,
       displayName,
@@ -517,8 +665,10 @@ export class BrowserDownloadBroker {
       sourceOrigin: safeDownloadOrigin(item),
       tempPath,
       tool,
+      waitsForDestinationConfirmation: promptForDestination,
       finish: (active, state) => this.finishDownload(active, state),
-      updated: (active) => {
+      updated: (active, state) => {
+        this.refreshDownloadCenterRecord(active, safeDownloadTransferState(active.item, state))
         if (!active.tool || !this.downloadExceedsAgentBudget(active.item, active)) return
         this.failTool(active.tool, 'browser.download.too_large')
         void this.cancelDownload(active)
@@ -534,10 +684,18 @@ export class BrowserDownloadBroker {
       } else {
         item.setSavePath(tempPath as string)
       }
+      if (!promptForDestination) {
+        this.refreshDownloadCenterRecord(
+          download,
+          safeDownloadTransferState(item, 'progressing'),
+          true
+        )
+      }
     } catch {
       this.removeDownloadListeners(download)
       tool?.downloads.delete(download)
       this.activeDownloads.delete(download)
+      this.downloadCenterRecords.delete(downloadId)
       download.terminal = true
       download.settle()
       if (tool) this.failTool(tool, 'browser.download.destination_unavailable')
@@ -562,6 +720,10 @@ export class BrowserDownloadBroker {
     download.terminal = true
     this.removeDownloadListeners(download)
     this.activeDownloads.delete(download)
+    this.refreshDownloadCenterRecord(download, state, true)
+    let terminalState: BrowserDownloadCenterItem['state'] = state
+    let retainedPath: string | null = null
+    let completedSize: number | undefined
     try {
       if (state !== 'completed') {
         if (download.tool) {
@@ -576,8 +738,10 @@ export class BrowserDownloadBroker {
 
       const completedPath = download.tempPath ?? safeCompletedDownloadPath(download.item)
       const identity = await hashRegularFile(completedPath)
+      completedSize = identity.sizeBytes
       if (download.tool && identity.sizeBytes > this.maxSingleDownloadBytes) {
         this.failTool(download.tool, 'browser.download.too_large')
+        terminalState = 'cancelled'
         if (download.tempPath) await removeFile(download.tempPath)
         return
       }
@@ -588,6 +752,7 @@ export class BrowserDownloadBroker {
             download.displayName
           )
         : completedPath
+      download.centerRecord.displayName = basename(absolutePath)
       let record: BrowserDownloadRecord
       try {
         record = parseBrowserDownloadRecord(
@@ -610,15 +775,22 @@ export class BrowserDownloadBroker {
       } catch {
         // A native save dialog makes the selected path user-owned. Never delete that file merely
         // because metadata registration failed; automatic staging remains transactional.
-        if (download.tempPath) await removeFile(absolutePath)
+        if (download.tempPath) {
+          await removeFile(absolutePath)
+        } else {
+          retainedPath = absolutePath
+        }
         throw new BrowserDownloadBrokerError(
           'browser.download.registration_failed',
           download.tool?.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
         )
       }
+      retainedPath = absolutePath
+      download.centerRecord.displayName = record.displayName
       download.tool?.references.push(publicDownloadReference(record))
       notifyHistoryChanged(this.onHistoryChanged, this.historyChangedListeners)
     } catch (error) {
+      terminalState = retainedPath ? 'completed' : 'interrupted'
       if (download.tool) {
         this.failTool(
           download.tool,
@@ -629,6 +801,7 @@ export class BrowserDownloadBroker {
       }
       if (download.tempPath) await removeFile(download.tempPath)
     } finally {
+      this.finishDownloadCenterRecord(download, terminalState, retainedPath, completedSize)
       download.tool?.downloads.delete(download)
       download.settle()
     }
@@ -641,8 +814,95 @@ export class BrowserDownloadBroker {
     this.activeDownloads.delete(download)
     safeCancel(download.item)
     if (download.tempPath) await removeFile(download.tempPath)
+    this.finishDownloadCenterRecord(download, 'cancelled', null)
     download.tool?.downloads.delete(download)
     download.settle()
+  }
+
+  private refreshDownloadCenterRecord(
+    download: ActiveDownload,
+    state: BrowserDownloadCenterItem['state'],
+    immediate = false
+  ): void {
+    if (!this.ensureDownloadCenterRecord(download)) return
+    const record = download.centerRecord
+    record.state = state
+    record.receivedBytes = safeDownloadBytes(download.item, 'getReceivedBytes')
+    record.totalBytes = safeDownloadBytes(download.item, 'getTotalBytes')
+    record.bytesPerSecond = state === 'progressing' ? safeDownloadBytesPerSecond(download.item) : 0
+    record.updatedAt = Date.now()
+    this.markDownloadCenterChanged(immediate)
+  }
+
+  private finishDownloadCenterRecord(
+    download: ActiveDownload,
+    state: BrowserDownloadCenterItem['state'],
+    absolutePath: string | null,
+    completedSize?: number
+  ): void {
+    if (!this.ensureDownloadCenterRecord(download)) return
+    const record = download.centerRecord
+    record.absolutePath = absolutePath
+    record.state = state
+    record.receivedBytes = completedSize ?? safeDownloadBytes(download.item, 'getReceivedBytes')
+    record.totalBytes = completedSize ?? safeDownloadBytes(download.item, 'getTotalBytes')
+    record.bytesPerSecond = 0
+    record.updatedAt = Date.now()
+    this.trimDownloadCenterRecords()
+    this.markDownloadCenterChanged(true)
+  }
+
+  private ensureDownloadCenterRecord(download: ActiveDownload): boolean {
+    if (download.centerVisible) return true
+    if (download.waitsForDestinationConfirmation && !hasSelectedDownloadPath(download.item)) {
+      return false
+    }
+    download.centerVisible = true
+    this.downloadCenterRecords.set(download.downloadId, download.centerRecord)
+    return true
+  }
+
+  private trimDownloadCenterRecords(): void {
+    const terminal = [...this.downloadCenterRecords.values()]
+      .filter(
+        (record) =>
+          ![...this.activeDownloads].some(
+            (download) => download.downloadId === record.downloadId && !download.terminal
+          )
+      )
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+    for (const record of terminal.slice(MAX_DOWNLOAD_CENTER_ENTRIES)) {
+      this.downloadCenterRecords.delete(record.downloadId)
+    }
+  }
+
+  private markDownloadCenterChanged(immediate: boolean): void {
+    this.downloadCenterRevision += 1
+    if (immediate) {
+      if (this.downloadCenterChangedTimer) {
+        clearTimeout(this.downloadCenterChangedTimer)
+        this.downloadCenterChangedTimer = undefined
+      }
+      this.emitDownloadCenterChanged()
+      return
+    }
+    if (this.downloadCenterChangedTimer) return
+    this.downloadCenterChangedTimer = setTimeout(() => {
+      this.downloadCenterChangedTimer = undefined
+      this.emitDownloadCenterChanged()
+    }, DOWNLOAD_CENTER_UPDATE_INTERVAL_MS)
+  }
+
+  private emitDownloadCenterChanged(): void {
+    if (this.disposed || this.downloadCenterChangedListeners.size === 0) return
+    const snapshot = this.downloadCenterSnapshot()
+    for (const listener of this.downloadCenterChangedListeners) {
+      try {
+        listener(snapshot)
+      } catch {
+        // Live observers cannot affect transfer ownership or durable publication.
+      }
+    }
   }
 
   private async settleTool(tool: ActiveTool): Promise<readonly BrowserDownloadReference[]> {
@@ -762,6 +1022,7 @@ export class BrowserDownloadBroker {
 }
 
 function createActiveDownload(input: {
+  centerRecord: DownloadCenterRecord
   destination: string | null
   downloadId: string
   displayName: string
@@ -771,11 +1032,12 @@ function createActiveDownload(input: {
   sourceOrigin: string | null
   tempPath: string | null
   tool?: ActiveTool
+  waitsForDestinationConfirmation: boolean
   finish: (
     download: ActiveDownload,
     state: 'completed' | 'cancelled' | 'interrupted'
   ) => Promise<void>
-  updated: (download: ActiveDownload) => void
+  updated: (download: ActiveDownload, state: 'progressing' | 'interrupted') => void
 }): ActiveDownload {
   let settle!: () => void
   const lifetime = new Promise<void>((resolve) => {
@@ -784,12 +1046,14 @@ function createActiveDownload(input: {
   const download = {} as ActiveDownload
   Object.assign(download, {
     ...input,
+    centerVisible: false,
     settle,
     lifetime,
     handleDone: (_event: Event, state: 'completed' | 'cancelled' | 'interrupted') => {
       void input.finish(download, state)
     },
-    handleUpdated: () => input.updated(download),
+    handleUpdated: (_event: Event, state: 'progressing' | 'interrupted') =>
+      input.updated(download, state),
     terminal: false
   })
   return download
@@ -802,6 +1066,15 @@ function safeCompletedDownloadPath(item: DownloadItem): string {
     return path
   } catch {
     throw new Error('browser.download.destination_unavailable')
+  }
+}
+
+function hasSelectedDownloadPath(item: DownloadItem): boolean {
+  try {
+    const path = item.getSavePath()
+    return Boolean(path && isAbsolute(path))
+  } catch {
+    return false
   }
 }
 
@@ -957,6 +1230,17 @@ function safeDownloadOrigin(item: DownloadItem): string | null {
   }
 }
 
+function safeDownloadUrl(item: DownloadItem): string | null {
+  try {
+    const value = item.getURL()
+    if (typeof value !== 'string' || value.length === 0 || value.length > 8192) return null
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null
+  } catch {
+    return null
+  }
+}
+
 function safeDownloadString(item: DownloadItem, method: 'getFilename' | 'getMimeType'): string {
   try {
     const value = item[method]()
@@ -976,6 +1260,69 @@ function safeDownloadState(
       : 'progressing'
   } catch {
     return 'progressing'
+  }
+}
+
+function safeDownloadTransferState(
+  item: DownloadItem,
+  fallback: 'progressing' | 'interrupted'
+): BrowserDownloadCenterItem['state'] {
+  if (safeIsPaused(item)) return 'paused'
+  return fallback
+}
+
+function safeDownloadStartedAt(item: DownloadItem, fallback: number): number {
+  try {
+    const value = item.getStartTime()
+    if (!Number.isFinite(value) || value <= 0) return fallback
+    const milliseconds = value < 1_000_000_000_000 ? Math.round(value * 1_000) : Math.round(value)
+    return Number.isSafeInteger(milliseconds) && milliseconds > 0 ? milliseconds : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function safeDownloadBytesPerSecond(item: DownloadItem): number {
+  try {
+    const value = item.getCurrentBytesPerSecond()
+    return Number.isSafeInteger(value) && value > 0 ? value : 0
+  } catch {
+    return 0
+  }
+}
+
+function safeIsPaused(item: DownloadItem): boolean {
+  try {
+    return item.isPaused()
+  } catch {
+    return false
+  }
+}
+
+function safeCanResume(item: DownloadItem): boolean {
+  try {
+    return item.canResume()
+  } catch {
+    return false
+  }
+}
+
+function safePause(item: DownloadItem): boolean {
+  try {
+    item.pause()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function safeResume(item: DownloadItem): boolean {
+  try {
+    if (!item.canResume()) return false
+    item.resume()
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -1004,6 +1351,17 @@ function safeCancel(item: DownloadItem): void {
   } catch {
     // Terminal DownloadItems can reject cancellation.
   }
+}
+
+function compareDownloadCenterRecords(
+  left: DownloadCenterRecord,
+  right: DownloadCenterRecord
+): number {
+  const leftRank = left.state === 'progressing' || left.state === 'paused' ? 0 : 1
+  const rightRank = right.state === 'progressing' || right.state === 'paused' ? 0 : 1
+  return (
+    leftRank - rightRank || right.startedAt - left.startedAt || right.updatedAt - left.updatedAt
+  )
 }
 
 async function removeFile(path: string): Promise<void> {

@@ -37,6 +37,8 @@ class FakeSession extends EventEmitter {}
 
 class FakeDownloadItem extends EventEmitter {
   cancelled = false
+  currentBytesPerSecond = 0
+  paused = false
   saveDialogOptions?: { defaultPath?: string }
   savePath?: string
   receivedBytes = 0
@@ -54,6 +56,22 @@ class FakeDownloadItem extends EventEmitter {
   cancel(): void {
     this.cancelled = true
     this.state = 'cancelled'
+  }
+
+  pause(): void {
+    this.paused = true
+  }
+
+  resume(): void {
+    this.paused = false
+  }
+
+  canResume(): boolean {
+    return this.paused && this.state === 'progressing'
+  }
+
+  isPaused(): boolean {
+    return this.paused
   }
 
   setSavePath(path: string): void {
@@ -93,6 +111,14 @@ class FakeDownloadItem extends EventEmitter {
     return this.receivedBytes
   }
 
+  getCurrentBytesPerSecond(): number {
+    return this.currentBytesPerSecond
+  }
+
+  getStartTime(): number {
+    return 1
+  }
+
   getState(): typeof this.state {
     return this.state
   }
@@ -101,8 +127,9 @@ class FakeDownloadItem extends EventEmitter {
     return this.url
   }
 
-  update(receivedBytes: number): void {
+  update(receivedBytes: number, bytesPerSecond = 0): void {
     this.receivedBytes = receivedBytes
+    this.currentBytesPerSecond = bytesPerSecond
     this.emit('updated', {}, 'progressing')
   }
 
@@ -236,6 +263,89 @@ describe('BrowserDownloadBroker', () => {
       runId: null,
       callId: null
     })
+    const [completed] = broker.downloadCenterSnapshot().downloads
+    expect(completed).toMatchObject({
+      displayName: 'manual.txt',
+      state: 'completed',
+      canReveal: true,
+      canCopyPath: true
+    })
+    expect(JSON.stringify(completed)).not.toContain(records[0]!.absolutePath)
+    expect(broker.downloadCenterResource(completed!.downloadId)?.absolutePath).toBe(
+      records[0]!.absolutePath
+    )
+    await broker.shutdown()
+  })
+
+  it('publishes path-free live progress and controls pause, resume, stop, and removal', async () => {
+    const { broker, guest, session } = await createHarness()
+    const changed: unknown[] = []
+    broker.onDownloadCenterChangedEvent((snapshot) => changed.push(snapshot))
+    const item = new FakeDownloadItem('large.zip', 'application/zip', 100)
+
+    dispatchDownload(session, guest, item)
+    const temporaryPath = await waitForManagedPath(item)
+    item.update(25, 10)
+
+    expect(broker.downloadCenterSnapshot()).toMatchObject({
+      downloads: [
+        {
+          displayName: 'large.zip',
+          state: 'progressing',
+          receivedBytes: 25,
+          totalBytes: 100,
+          bytesPerSecond: 10,
+          canPause: true,
+          canResume: false,
+          canCancel: true,
+          canCopyUrl: true,
+          canCopyPath: false
+        }
+      ]
+    })
+    expect(JSON.stringify(broker.downloadCenterSnapshot())).not.toContain(temporaryPath)
+    expect(JSON.stringify(broker.downloadCenterSnapshot())).not.toContain('example.com')
+
+    const downloadId = broker.downloadCenterSnapshot().downloads[0]!.downloadId
+    await expect(broker.performDownloadCenterAction(downloadId, 'pause')).resolves.toBe('performed')
+    expect(item.paused).toBe(true)
+    expect(broker.downloadCenterSnapshot().downloads[0]).toMatchObject({
+      state: 'paused',
+      canPause: false,
+      canResume: true,
+      bytesPerSecond: 0
+    })
+
+    await expect(broker.performDownloadCenterAction(downloadId, 'resume')).resolves.toBe(
+      'performed'
+    )
+    expect(item.paused).toBe(false)
+    expect(broker.downloadCenterSnapshot().downloads[0]).toMatchObject({
+      state: 'progressing',
+      canPause: true,
+      canResume: false
+    })
+
+    await expect(broker.performDownloadCenterAction(downloadId, 'cancel')).resolves.toBe(
+      'performed'
+    )
+    expect(item.cancelled).toBe(true)
+    expect(broker.downloadCenterSnapshot().downloads[0]).toMatchObject({
+      state: 'cancelled',
+      canCancel: false,
+      canCopyUrl: true,
+      canCopyPath: false
+    })
+    expect(broker.downloadCenterResource(downloadId)).toMatchObject({
+      absolutePath: null,
+      sourceUrl: 'https://example.com/report.txt'
+    })
+    expect(changed.length).toBeGreaterThan(0)
+
+    await expect(broker.performDownloadCenterAction(downloadId, 'remove')).resolves.toBe(
+      'performed'
+    )
+    expect(broker.downloadCenterSnapshot().downloads).toEqual([])
     await broker.shutdown()
   })
 
@@ -251,11 +361,21 @@ describe('BrowserDownloadBroker', () => {
     dispatchDownload(session, guest, item)
     await waitFor(() => Boolean(item.saveDialogOptions))
     expect(item.savePath).toBeUndefined()
+    expect(broker.downloadCenterSnapshot().downloads).toEqual([])
     expect(item.saveDialogOptions).toEqual({
       defaultPath: join(await realpath(systemDirectory), 'suggested-name.txt')
     })
 
     item.chooseSavePath(selectedPath)
+    expect(broker.downloadCenterSnapshot().downloads).toEqual([])
+    item.update(1, 1)
+    expect(broker.downloadCenterSnapshot().downloads).toMatchObject([
+      {
+        displayName: 'suggested-name.txt',
+        state: 'progressing',
+        receivedBytes: 1
+      }
+    ])
     await item.complete(Buffer.from('chosen'))
     await waitFor(() => records.length === 1)
 
@@ -279,6 +399,7 @@ describe('BrowserDownloadBroker', () => {
 
     expect(records).toEqual([])
     expect(item.savePath).toBeUndefined()
+    expect(broker.downloadCenterSnapshot().downloads).toEqual([])
     await broker.shutdown()
   })
 

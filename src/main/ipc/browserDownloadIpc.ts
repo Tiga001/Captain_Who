@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { lstat } from 'node:fs/promises'
 import {
   BrowserWindow,
+  clipboard,
   dialog,
   shell,
   type IpcMainInvokeEvent,
@@ -12,6 +13,10 @@ import { captureHostInvocation, HOST_CHANNELS } from '@mycopilot/host-api'
 import {
   BROWSER_DOWNLOAD_SCHEMA_VERSION,
   parseBrowserDownloadAskWhereToSaveInput,
+  parseBrowserDownloadCenterActionInput,
+  parseBrowserDownloadCenterActionOutput,
+  parseBrowserDownloadCenterSnapshot,
+  parseBrowserDownloadDirectoryOpenOutput,
   parseBrowserDownloadHistoryClearInput,
   parseBrowserDownloadHistoryClearOutput,
   parseBrowserDownloadHistoryListInput,
@@ -32,6 +37,8 @@ import type { TrustedIpcMain } from './trustedIpc'
 interface BrowserDownloadIpcNativeHost {
   selectDirectory(event: IpcMainInvokeEvent, currentDirectory: string): Promise<string | null>
   revealInFolder(path: string): void
+  openDirectory(path: string): Promise<boolean>
+  writeText(value: string): void
 }
 
 export function registerBrowserDownloadIpc(
@@ -48,7 +55,65 @@ export function registerBrowserDownloadIpc(
       }
     }
   }
-  const unsubscribe = broker.onHistoryChangedEvent(broadcastChanged)
+  const broadcastDownloadCenter = (snapshot: unknown): void => {
+    const parsed = parseBrowserDownloadCenterSnapshot(snapshot)
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.browser.downloadCenterChanged, parsed)
+      }
+    }
+  }
+  const unsubscribeHistory = broker.onHistoryChangedEvent(broadcastChanged)
+  const unsubscribeDownloadCenter = broker.onDownloadCenterChangedEvent(broadcastDownloadCenter)
+
+  ipcMain.handle(HOST_CHANNELS.browser.downloadCenterGet, () =>
+    captureHostInvocation(async () => broker.downloadCenterSnapshot())
+  )
+  ipcMain.handle(HOST_CHANNELS.browser.downloadCenterAction, (_event, value) =>
+    captureHostInvocation(async () => {
+      const input = parseBrowserDownloadCenterActionInput(value)
+      let status: 'performed' | 'unavailable' = 'unavailable'
+      if (
+        input.action === 'pause' ||
+        input.action === 'resume' ||
+        input.action === 'cancel' ||
+        input.action === 'remove'
+      ) {
+        status = await broker.performDownloadCenterAction(input.downloadId, input.action)
+      } else {
+        const resource = broker.downloadCenterResource(input.downloadId)
+        if (input.action === 'copy_url' && resource?.sourceUrl) {
+          nativeHost.writeText(resource.sourceUrl)
+          status = 'performed'
+        } else if (input.action === 'copy_path' && resource?.absolutePath) {
+          nativeHost.writeText(resource.absolutePath)
+          status = 'performed'
+        } else if (
+          input.action === 'reveal' &&
+          resource?.absolutePath &&
+          (await isAvailableDownloadPath(resource.absolutePath))
+        ) {
+          nativeHost.revealInFolder(resource.absolutePath)
+          status = 'performed'
+        }
+      }
+      return parseBrowserDownloadCenterActionOutput({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        status,
+        snapshot: broker.downloadCenterSnapshot()
+      })
+    })
+  )
+  ipcMain.handle(HOST_CHANNELS.browser.downloadDirectoryOpen, () =>
+    captureHostInvocation(async () =>
+      parseBrowserDownloadDirectoryOpenOutput({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        status: (await nativeHost.openDirectory(broker.downloadDirectory()))
+          ? 'opened'
+          : 'unavailable'
+      })
+    )
+  )
 
   ipcMain.handle(HOST_CHANNELS.browser.downloadSettingsGet, () =>
     captureHostInvocation(async () => settingsView(broker.settings(), broker.downloadDirectory()))
@@ -159,7 +224,10 @@ export function registerBrowserDownloadIpc(
     })
   )
 
-  return unsubscribe
+  return () => {
+    unsubscribeHistory()
+    unsubscribeDownloadCenter()
+  }
 }
 
 function createNativeHost(): BrowserDownloadIpcNativeHost {
@@ -177,7 +245,9 @@ function createNativeHost(): BrowserDownloadIpcNativeHost {
       const selected = result.filePaths[0]
       return result.canceled || !selected ? null : resolve(selected)
     },
-    revealInFolder: (path) => shell.showItemInFolder(path)
+    revealInFolder: (path) => shell.showItemInFolder(path),
+    openDirectory: async (path) => (await shell.openPath(path)) === '',
+    writeText: (value) => clipboard.writeText(value)
   }
 }
 
@@ -215,5 +285,14 @@ async function downloadAvailability(
     return metadata.size === record.sizeBytes ? 'available' : 'modified'
   } catch {
     return 'missing'
+  }
+}
+
+async function isAvailableDownloadPath(path: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(path)
+    return !metadata.isSymbolicLink() && metadata.isFile()
+  } catch {
+    return false
   }
 }

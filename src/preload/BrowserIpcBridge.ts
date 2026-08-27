@@ -6,6 +6,10 @@ import {
   parseBrowserArtifactReadInput,
   parseBrowserArtifactReadOutput,
   parseBrowserDownloadAskWhereToSaveInput,
+  parseBrowserDownloadCenterActionInput,
+  parseBrowserDownloadCenterActionOutput,
+  parseBrowserDownloadCenterSnapshot,
+  parseBrowserDownloadDirectoryOpenOutput,
   parseBrowserDownloadHistoryChangedNotification,
   parseBrowserDownloadHistoryClearInput,
   parseBrowserDownloadHistoryClearOutput,
@@ -30,6 +34,38 @@ type BrowserIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): BrowserHostApi {
   return {
     clearBrowsingData: () => ipcRenderer.invoke(HOST_CHANNELS.browser.clearBrowsingData),
+    getDownloadCenter: () =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadCenterGet,
+        undefined,
+        parseBrowserDownloadCenterSnapshot
+      ),
+    performDownloadCenterAction: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadCenterAction,
+        parseBrowserDownloadCenterActionInput(input),
+        parseBrowserDownloadCenterActionOutput
+      ),
+    openDownloadDirectory: () =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadDirectoryOpen,
+        undefined,
+        parseBrowserDownloadDirectoryOpenOutput
+      ),
+    onDownloadCenterChanged: (handler) => {
+      const listener = (_event: IpcRendererEvent, value: unknown): void => {
+        try {
+          handler(parseBrowserDownloadCenterSnapshot(value))
+        } catch {
+          // Invalid Main-to-Renderer data is fail-closed and never reaches application state.
+        }
+      }
+      ipcRenderer.on(HOST_CHANNELS.browser.downloadCenterChanged, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.browser.downloadCenterChanged, listener)
+    },
     getDownloadSettings: () =>
       invokeParsed(
         ipcRenderer,

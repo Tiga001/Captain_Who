@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArrowLeft,
   ArrowRight,
@@ -26,6 +27,7 @@ import {
   synchronizeBrowserSurfaceInstance,
   synchronizeBrowserSurfaceSelection
 } from './browserSurface'
+import { BrowserDownloadCenter } from './BrowserDownloadCenter'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
@@ -51,6 +53,14 @@ interface BrowserPanelProps {
 }
 
 const ZOOM_STEP = 0.1
+const BROWSER_MENU_MAX_WIDTH = 286
+const BROWSER_MENU_VIEWPORT_MARGIN = 8
+
+interface BrowserMenuPosition {
+  left: number
+  top: number
+  width: number
+}
 
 function clampZoom(value: number) {
   return Math.min(3, Math.max(0.3, value))
@@ -88,7 +98,9 @@ export function BrowserPanel({
   } | null>(null)
   const [addressValue, setAddressValue] = useState('')
   const [isAddressEditing, setIsAddressEditing] = useState(false)
+  const [isDownloadsOpen, setIsDownloadsOpen] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const [menuPosition, setMenuPosition] = useState<BrowserMenuPosition | null>(null)
   const [surfaceInstanceId, setSurfaceInstanceId] = useState<string | null>(null)
   const [zoom, setZoomState] = useState(1)
   const viewId = surfaceId ?? browserSurfaceIdForPage(pageId)
@@ -120,9 +132,57 @@ export function BrowserPanel({
   const closeMenu = useCallback(() => setIsMenuOpen(false), [])
   const handleSurfaceFocus = useCallback(() => {
     closeMenu()
+    setIsDownloadsOpen(false)
     onSurfaceFocus?.()
   }, [closeMenu, onSurfaceFocus])
-  useDismissOnOutsidePointer(menuAnchorRef, isMenuOpen, closeMenu)
+  const ignoreMenuPortal = useCallback(
+    (target: Node) => target instanceof Element && Boolean(target.closest('.browser-panel__menu')),
+    []
+  )
+  useDismissOnOutsidePointer(menuAnchorRef, isMenuOpen, closeMenu, ignoreMenuPortal)
+
+  const updateMenuPosition = useCallback((): void => {
+    const anchor = menuAnchorRef.current
+    if (!anchor) return
+    const anchorBounds = anchor.getBoundingClientRect()
+    const browserBounds = anchor.closest('.browser-panel')?.getBoundingClientRect()
+    const availableWidth = Math.max(0, window.innerWidth - BROWSER_MENU_VIEWPORT_MARGIN * 2)
+    const width = Math.min(BROWSER_MENU_MAX_WIDTH, availableWidth)
+    const right = Math.min(
+      window.innerWidth - BROWSER_MENU_VIEWPORT_MARGIN,
+      browserBounds?.right ?? anchorBounds.right
+    )
+    const next = {
+      left: Math.round(Math.max(BROWSER_MENU_VIEWPORT_MARGIN, right - width)),
+      top: Math.round(anchorBounds.bottom + 8),
+      width: Math.round(width)
+    }
+    setMenuPosition((current) =>
+      current?.left === next.left && current.top === next.top && current.width === next.width
+        ? current
+        : next
+    )
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!isMenuOpen) {
+      setMenuPosition(null)
+      return
+    }
+    updateMenuPosition()
+    const anchor = menuAnchorRef.current
+    const browserPanel = anchor?.closest('.browser-panel')
+    const observer = new ResizeObserver(updateMenuPosition)
+    if (anchor) observer.observe(anchor)
+    if (browserPanel) observer.observe(browserPanel)
+    window.addEventListener('resize', updateMenuPosition)
+    window.addEventListener('scroll', updateMenuPosition, true)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateMenuPosition)
+      window.removeEventListener('scroll', updateMenuPosition, true)
+    }
+  }, [isMenuOpen, updateMenuPosition])
 
   const reportAutomationSurfaceReady = useCallback(
     (webview: WebviewTag | null): void => {
@@ -244,7 +304,10 @@ export function BrowserPanel({
   }, [automationRequestId, reportAutomationSurfaceReady])
 
   useEffect(() => {
-    if (!isActive) setIsMenuOpen(false)
+    if (!isActive) {
+      setIsDownloadsOpen(false)
+      setIsMenuOpen(false)
+    }
     reportManualSurfaceSelection(webviewRef.current)
   }, [isActive, reportManualSurfaceSelection])
 
@@ -388,19 +451,34 @@ export function BrowserPanel({
           </button>
         </form>
 
-        <div className="browser-panel__menu-anchor" ref={menuAnchorRef}>
-          <button
-            className="browser-panel__icon-button"
-            type="button"
-            aria-label={t('browser.menu')}
-            aria-expanded={isMenuOpen}
-            onClick={() => setIsMenuOpen((current) => !current)}
-          >
-            <MoreVertical aria-hidden="true" />
-          </button>
+        <div className="browser-panel__toolbar-actions">
+          <BrowserDownloadCenter
+            isOpen={isDownloadsOpen}
+            onOpenChange={(open) => {
+              setIsDownloadsOpen(open)
+              if (open) setIsMenuOpen(false)
+            }}
+          />
+          <div className="browser-panel__menu-anchor" ref={menuAnchorRef}>
+            <button
+              className="browser-panel__icon-button"
+              type="button"
+              aria-label={t('browser.menu')}
+              aria-expanded={isMenuOpen}
+              onClick={() => {
+                setIsMenuOpen((current) => !current)
+                setIsDownloadsOpen(false)
+              }}
+            >
+              <MoreVertical aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      </header>
 
-          {isMenuOpen && (
-            <div className="browser-panel__menu">
+      {isMenuOpen && menuPosition
+        ? createPortal(
+            <div className="browser-panel__menu" style={menuPosition}>
               <button
                 className="browser-panel__menu-item"
                 type="button"
@@ -432,10 +510,10 @@ export function BrowserPanel({
                   </button>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
-      </header>
+            </div>,
+            document.body
+          )
+        : null}
 
       <div className="browser-panel__content" data-fixed-viewport={viewport ? 'true' : undefined}>
         <WebviewSurface

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   BROWSER_DOWNLOAD_SCHEMA_VERSION,
   parseBrowserDownloadAskWhereToSaveInput,
+  parseBrowserDownloadCenterActionInput,
+  parseBrowserDownloadCenterSnapshot,
   parseBrowserDownloadHistoryListOutput,
   parseBrowserDownloadReference,
   parseBrowserDownloadRegistrationInput,
@@ -151,5 +153,62 @@ describe('Browser Download protocol', () => {
         askWhereToSave: 1
       })
     ).toThrow(/expected a boolean/)
+  })
+
+  it('keeps live download-center snapshots path-free and strictly bounded', () => {
+    const snapshot = {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      revision: 3,
+      downloads: [
+        {
+          downloadId: reference.downloadId,
+          displayName: reference.displayName,
+          source: reference.source,
+          state: 'progressing',
+          receivedBytes: 128,
+          totalBytes: 512,
+          bytesPerSecond: 64,
+          startedAt: 1_000,
+          updatedAt: 2_000,
+          canPause: true,
+          canResume: false,
+          canCancel: true,
+          canReveal: false,
+          canCopyUrl: true,
+          canCopyPath: false
+        }
+      ]
+    } as const
+
+    expect(parseBrowserDownloadCenterSnapshot(snapshot)).toEqual(snapshot)
+    expect(() =>
+      parseBrowserDownloadCenterSnapshot({
+        ...snapshot,
+        downloads: [{ ...snapshot.downloads[0], absolutePath: '/Users/private/archive.zip' }]
+      })
+    ).toThrow(/absolutePath/)
+    expect(() =>
+      parseBrowserDownloadCenterSnapshot({
+        ...snapshot,
+        downloads: [{ ...snapshot.downloads[0], sourceUrl: 'https://secret.example/download' }]
+      })
+    ).toThrow(/sourceUrl/)
+  })
+
+  it('accepts only explicit download-center actions', () => {
+    expect(
+      parseBrowserDownloadCenterActionInput({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        downloadId: reference.downloadId,
+        action: 'pause'
+      })
+    ).toMatchObject({ action: 'pause' })
+    expect(() =>
+      parseBrowserDownloadCenterActionInput({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        downloadId: reference.downloadId,
+        action: 'delete_file'
+      })
+    ).toThrow(/unexpected value/)
   })
 })

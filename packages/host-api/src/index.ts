@@ -84,6 +84,10 @@ import type {
   BrowserArtifactReadInput,
   BrowserArtifactReadOutput,
   BrowserDownloadAskWhereToSaveInput,
+  BrowserDownloadCenterActionInput,
+  BrowserDownloadCenterActionOutput,
+  BrowserDownloadCenterSnapshot,
+  BrowserDownloadDirectoryOpenOutput,
   BrowserDownloadHistoryChangedNotification,
   BrowserDownloadHistoryClearInput,
   BrowserDownloadHistoryClearOutput,
@@ -223,6 +227,12 @@ export interface AutomationsHostApi {
 
 export interface BrowserHostApi {
   clearBrowsingData(): Promise<void>
+  getDownloadCenter(): Promise<HostInvocationResult<BrowserDownloadCenterSnapshot>>
+  performDownloadCenterAction(
+    input: BrowserDownloadCenterActionInput
+  ): Promise<HostInvocationResult<BrowserDownloadCenterActionOutput>>
+  openDownloadDirectory(): Promise<HostInvocationResult<BrowserDownloadDirectoryOpenOutput>>
+  onDownloadCenterChanged(handler: (snapshot: BrowserDownloadCenterSnapshot) => void): () => void
   getDownloadSettings(): Promise<HostInvocationResult<BrowserDownloadSettingsView>>
   chooseDownloadDirectory(): Promise<HostInvocationResult<BrowserDownloadSettingsView | null>>
   resetDownloadDirectory(): Promise<HostInvocationResult<BrowserDownloadSettingsView>>

@@ -28,6 +28,7 @@ export function dismissActiveTooltip(): void {
 
 interface TooltipProps {
   anchorClassName?: string
+  appearance?: 'default' | 'inverse'
   children: ReactElement
   content: ReactNode
   delayMs?: number
@@ -42,6 +43,7 @@ interface TooltipProps {
  */
 export function Tooltip({
   anchorClassName,
+  appearance = 'default',
   children,
   content,
   delayMs = DEFAULT_DELAY_MS,
@@ -225,6 +227,7 @@ export function Tooltip({
         createPortal(
           <div
             className="mc-tooltip"
+            data-appearance={appearance}
             data-placement={placement}
             data-positioned={isPositioned ? 'true' : undefined}
             id={tooltipId}

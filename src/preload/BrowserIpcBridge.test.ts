@@ -351,6 +351,76 @@ describe('Browser IPC bridge', () => {
     )
   })
 
+  it('validates live download-center snapshots and actions across preload', async () => {
+    const download = {
+      downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000',
+      displayName: 'archive.zip',
+      source: 'manual',
+      state: 'progressing',
+      receivedBytes: 128,
+      totalBytes: 512,
+      bytesPerSecond: 64,
+      startedAt: 1_000,
+      updatedAt: 2_000,
+      canPause: true,
+      canResume: false,
+      canCancel: true,
+      canReveal: false,
+      canCopyUrl: true,
+      canCopyPath: false
+    } as const
+    const snapshot = {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      revision: 2,
+      downloads: [download]
+    } as const
+    let centerListener: ((event: IpcRendererEvent, value: unknown) => void) | undefined
+    const invoke = vi.fn(async (channel: string): Promise<unknown> => {
+      if (channel === HOST_CHANNELS.browser.downloadCenterAction) {
+        return {
+          ok: true,
+          value: {
+            schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+            status: 'performed',
+            snapshot
+          }
+        }
+      }
+      return { ok: true, value: snapshot }
+    })
+    const bridge = createBrowserIpcBridge({
+      invoke,
+      on: vi.fn((channel, listener) => {
+        if (channel === HOST_CHANNELS.browser.downloadCenterChanged) centerListener = listener
+        return {} as IpcRenderer
+      }),
+      removeListener: vi.fn()
+    } as unknown as BrowserIpcRenderer)
+
+    await expect(bridge.getDownloadCenter()).resolves.toEqual({ ok: true, value: snapshot })
+    await expect(
+      bridge.performDownloadCenterAction({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        downloadId: download.downloadId,
+        action: 'pause'
+      })
+    ).resolves.toMatchObject({ ok: true, value: { status: 'performed' } })
+    expect(invoke).toHaveBeenLastCalledWith(HOST_CHANNELS.browser.downloadCenterAction, {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      downloadId: download.downloadId,
+      action: 'pause'
+    })
+
+    const changed = vi.fn()
+    bridge.onDownloadCenterChanged(changed)
+    centerListener?.({} as IpcRendererEvent, snapshot)
+    centerListener?.({} as IpcRendererEvent, {
+      ...snapshot,
+      downloads: [{ ...download, absolutePath: '/Users/private/archive.zip' }]
+    })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
   it('reads only a bounded exact Browser Artifact preview identity', async () => {
     const artifact = {
       schemaVersion: 1,
