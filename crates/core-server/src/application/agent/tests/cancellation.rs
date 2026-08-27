@@ -46,7 +46,8 @@ fn pending_model_context_item(call: &AgentToolCall) -> ConversationModelContextI
 #[test]
 fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-cancel".to_string(),
@@ -203,12 +204,10 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
     assert_eq!(conversation.messages[1].status.as_deref(), Some("sent"));
 
     let terminal_events = storage.list_notifications(None, 100, false, None).unwrap();
-    let resolved_approval = terminal_events
+    assert!(terminal_events
         .items
         .iter()
-        .find(|event| event.notification_kind == "approval_required")
-        .unwrap();
-    assert!(resolved_approval.resolved_at.is_some());
+        .all(|event| event.notification_kind != "approval_required"));
     let cancelled = terminal_events
         .items
         .iter()
@@ -216,6 +215,17 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         .expect("terminal cancellation must publish its replacement notification");
     assert_eq!(cancelled.subject_text, "Keep tracking this objective.");
     assert!(cancelled.resolved_at.is_some());
+
+    let notification_connection = rusqlite::Connection::open(database_path).unwrap();
+    let (resolved_at, superseded_at): (Option<i64>, Option<i64>) = notification_connection
+        .query_row(
+            "SELECT resolved_at, superseded_at FROM notification_events WHERE id = ?1",
+            [&approval_event.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(resolved_at.is_some());
+    assert!(superseded_at.is_some());
 }
 
 #[test]

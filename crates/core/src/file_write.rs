@@ -628,6 +628,63 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn atomically_rewrites_file_and_preserves_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let target = root.path().join("report.md");
+        fs::write(&target, "old\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o751)).unwrap();
+        let draft = draft("report.md", "old\n", "new\n");
+
+        let result =
+            apply_file_write(Some(root.path()), &proposal(&draft), &draft, permissions()).unwrap();
+
+        assert_eq!(result.status, AgentFileWriteResultStatus::Applied);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(
+            fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+    }
+
+    #[test]
+    fn create_race_is_no_clobber_and_preserves_concurrent_content() {
+        let root = tempdir().unwrap();
+        let draft = draft("report.md", "", "proposed\n");
+        let proposal = proposal(&draft);
+
+        // The proposal was frozen while the target was absent, then another writer created it
+        // before Host publication revalidated the base state.
+        let target = root.path().join("report.md");
+        fs::write(&target, "concurrent\n").unwrap();
+
+        let error =
+            apply_file_write(Some(root.path()), &proposal, &draft, permissions()).unwrap_err();
+
+        assert!(error.contains("已出现"));
+        assert_eq!(fs::read_to_string(target).unwrap(), "concurrent\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_leaf_symlink_without_modifying_its_target() {
+        let root = tempdir().unwrap();
+        let real = root.path().join("real.md");
+        let link = root.path().join("report.md");
+        fs::write(&real, "keep\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let draft = draft("report.md", "", "replacement\n");
+
+        let error = apply_file_write(Some(root.path()), &proposal(&draft), &draft, permissions())
+            .unwrap_err();
+
+        assert!(error.contains("符号链接"));
+        assert_eq!(fs::read_to_string(real).unwrap(), "keep\n");
+    }
+
     #[test]
     fn rejects_rewrite_when_base_revision_changed() {
         let root = tempdir().unwrap();

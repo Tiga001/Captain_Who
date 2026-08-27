@@ -791,8 +791,68 @@ mod tests {
     };
     use crate::storage::models::ChatConversationRecord;
     use crate::storage::service::StorageService;
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    fn open_test_storage(path: &Path) -> Arc<StorageService> {
+        Arc::new(StorageService::open(path).expect("open test storage"))
+    }
+
+    fn save_test_conversation(storage: &StorageService) {
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-1".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Test".to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .expect("save test conversation");
+    }
+
+    fn test_context(workspace: &Path, storage: Arc<StorageService>) -> ToolExecutionContext {
+        ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: Some("conversation-1".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(workspace.to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
+                patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
+            },
+        }))
+        .with_runtime_services("run-1".to_string(), Some(storage))
+    }
+
+    fn begin_create(tool: &WriteFileTool, context: &ToolExecutionContext, path: &str) -> String {
+        tool.execute(
+            context,
+            json!({
+                "phase": "begin",
+                "filePath": path,
+                "mode": "create"
+            }),
+        )
+        .expect("begin draft")["draft"]["draftId"]
+            .as_str()
+            .expect("draft id")
+            .to_string()
+    }
 
     #[test]
     fn diff_counts_create_and_replace() {
@@ -1001,6 +1061,202 @@ mod tests {
                 .unwrap()
                 .status,
             "waiting_approval"
+        );
+    }
+
+    #[test]
+    fn status_edit_and_abort_share_the_persisted_draft() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let storage = open_test_storage(&fixture.path().join("app.db"));
+        save_test_conversation(&storage);
+        let context = test_context(&workspace, storage.clone());
+        let tool = WriteFileTool;
+        let draft_id = begin_create(&tool, &context, "lifecycle.txt");
+
+        tool.execute(
+            &context,
+            json!({
+                "phase": "append",
+                "draftId": draft_id,
+                "index": 0,
+                "content": "alpha\nanchor\nomega\n"
+            }),
+        )
+        .expect("append draft");
+        let edited = tool
+            .execute(
+                &context,
+                json!({
+                    "phase": "edit",
+                    "draftId": draft_id,
+                    "edits": [
+                        {
+                            "kind": "replace",
+                            "oldText": "alpha",
+                            "newText": "ALPHA",
+                            "replaceAll": false
+                        },
+                        {
+                            "kind": "insert_before",
+                            "anchor": "omega",
+                            "text": "inserted\n"
+                        },
+                        { "kind": "append", "text": "tail\n" }
+                    ]
+                }),
+            )
+            .expect("edit draft");
+        assert_eq!(edited["tail"], "ALPHA\nanchor\ninserted\nomega\ntail\n");
+
+        let status = tool
+            .execute(&context, json!({ "phase": "status", "draftId": draft_id }))
+            .expect("status draft");
+        assert_eq!(status["draft"]["status"], "drafting");
+        assert_eq!(status["tail"], edited["tail"]);
+        assert_eq!(
+            storage
+                .get_agent_file_draft(&draft_id)
+                .unwrap()
+                .unwrap()
+                .content,
+            "ALPHA\nanchor\ninserted\nomega\ntail\n"
+        );
+
+        let aborted = tool
+            .execute(&context, json!({ "phase": "abort", "draftId": draft_id }))
+            .expect("abort draft");
+        assert_eq!(aborted["draft"]["status"], "aborted");
+        assert_eq!(aborted["transactionState"], "settled");
+        assert!(tool
+            .execute(
+                &context,
+                json!({
+                    "phase": "append",
+                    "draftId": draft_id,
+                    "index": 1,
+                    "content": "forbidden"
+                }),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn append_retry_is_idempotent_by_index_and_hash() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let storage = open_test_storage(&fixture.path().join("app.db"));
+        save_test_conversation(&storage);
+        let context = test_context(&workspace, storage.clone());
+        let tool = WriteFileTool;
+        let draft_id = begin_create(&tool, &context, "chunks.txt");
+        let append = |content: &str| {
+            tool.execute(
+                &context,
+                json!({
+                    "phase": "append",
+                    "draftId": draft_id,
+                    "index": 0,
+                    "content": content
+                }),
+            )
+        };
+
+        let first = append("one chunk\n").expect("first append");
+        let retry = append("one chunk\n").expect("idempotent retry");
+        assert_eq!(retry["draft"]["nextChunkIndex"], 1);
+        assert_eq!(retry["draft"]["chunkCount"], 1);
+        assert_eq!(retry["draft"]["byteCount"], first["draft"]["byteCount"]);
+        assert!(append("different bytes\n").is_err());
+        let persisted = storage.get_agent_file_draft(&draft_id).unwrap().unwrap();
+        assert_eq!(persisted.content, "one chunk\n");
+        assert_eq!(persisted.chunk_count, 1);
+        assert_eq!(persisted.next_chunk_index, 1);
+    }
+
+    #[test]
+    fn draft_allows_exactly_four_mib_and_rejects_one_extra_byte() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let storage = open_test_storage(&fixture.path().join("app.db"));
+        save_test_conversation(&storage);
+        let context = test_context(&workspace, storage.clone());
+        let tool = WriteFileTool;
+        let draft_id = begin_create(&tool, &context, "large.txt");
+
+        let exact = "x".repeat(MAX_DRAFT_BYTES);
+        let result = tool
+            .execute(
+                &context,
+                json!({
+                    "phase": "append",
+                    "draftId": draft_id,
+                    "index": 0,
+                    "content": exact
+                }),
+            )
+            .expect("exact limit append");
+        assert_eq!(result["draft"]["byteCount"], MAX_DRAFT_BYTES as u64);
+        assert!(tool
+            .execute(
+                &context,
+                json!({
+                    "phase": "append",
+                    "draftId": draft_id,
+                    "index": 1,
+                    "content": "x"
+                }),
+            )
+            .is_err());
+        let persisted = storage.get_agent_file_draft(&draft_id).unwrap().unwrap();
+        assert_eq!(persisted.content.len(), MAX_DRAFT_BYTES);
+        assert_eq!(persisted.next_chunk_index, 1);
+    }
+
+    #[test]
+    fn draft_survives_storage_service_reopen() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let database = fixture.path().join("app.db");
+        let storage = open_test_storage(&database);
+        save_test_conversation(&storage);
+        let context = test_context(&workspace, storage.clone());
+        let tool = WriteFileTool;
+        let draft_id = begin_create(&tool, &context, "restart.txt");
+        tool.execute(
+            &context,
+            json!({
+                "phase": "append",
+                "draftId": draft_id,
+                "index": 0,
+                "content": "survives restart\n"
+            }),
+        )
+        .expect("append before restart");
+        drop(context);
+        drop(storage);
+
+        let reopened = open_test_storage(&database);
+        let restarted_context = test_context(&workspace, reopened.clone());
+        let status = tool
+            .execute(
+                &restarted_context,
+                json!({ "phase": "status", "draftId": draft_id }),
+            )
+            .expect("status after restart");
+        assert_eq!(status["draft"]["nextChunkIndex"], 1);
+        assert_eq!(status["tail"], "survives restart\n");
+        assert_eq!(
+            reopened
+                .get_agent_file_draft(&draft_id)
+                .unwrap()
+                .unwrap()
+                .content,
+            "survives restart\n"
         );
     }
 

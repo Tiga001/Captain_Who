@@ -1,4 +1,5 @@
 use super::*;
+use mycopilot_core::{AgentDiffProposal, AgentPatchOperation};
 
 fn test_input(permissions: AgentPermissions) -> AgentChatInput {
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
@@ -42,6 +43,41 @@ fn file_write_action(approval_status: AgentApprovalStatus) -> AgentProposedActio
     }
 }
 
+fn apply_patch_action(approval_status: AgentApprovalStatus) -> AgentProposedAction {
+    AgentProposedAction::Diff {
+        diff: AgentDiffProposal {
+            id: "patch-1".to_string(),
+            operation: AgentPatchOperation::Create,
+            file_path: "report.txt".to_string(),
+            patch: "*** Begin Patch\n*** Add File: report.txt\n+hello\n*** End Patch\n".to_string(),
+            base_revision: None,
+            summary: None,
+            approval_status,
+        },
+    }
+}
+
+fn structured_file_write_actions(approval_status: AgentApprovalStatus) -> [AgentProposedAction; 2] {
+    [
+        apply_patch_action(approval_status),
+        file_write_action(approval_status),
+    ]
+}
+
+fn assert_structured_file_write_authorization(
+    input: &AgentChatInput,
+    approval_status: AgentApprovalStatus,
+    source: FileWriteAuthorizationSource,
+    allowed: bool,
+) {
+    for action in structured_file_write_actions(approval_status) {
+        assert_eq!(
+            authorize_structured_file_write(input, &action, source).is_ok(),
+            allowed
+        );
+    }
+}
+
 #[test]
 fn automatic_host_writes_require_auto_approve_and_an_approved_snapshot() {
     let manual = test_input(AgentPermissions {
@@ -49,30 +85,30 @@ fn automatic_host_writes_require_auto_approve_and_an_approved_snapshot() {
         patch: mycopilot_core::AgentPatchPermission::RequireApproval,
         ..Default::default()
     });
-    assert!(authorize_structured_file_write(
+    assert_structured_file_write_authorization(
         &manual,
-        &file_write_action(AgentApprovalStatus::Approved),
+        AgentApprovalStatus::Approved,
         FileWriteAuthorizationSource::Automatic,
-    )
-    .is_err());
+        false,
+    );
 
     let automatic = test_input(AgentPermissions {
         write: AgentWritePermission::WorkspaceOnly,
         patch: mycopilot_core::AgentPatchPermission::AutoApprove,
         ..Default::default()
     });
-    assert!(authorize_structured_file_write(
+    assert_structured_file_write_authorization(
         &automatic,
-        &file_write_action(AgentApprovalStatus::Approved),
+        AgentApprovalStatus::Approved,
         FileWriteAuthorizationSource::Automatic,
-    )
-    .is_ok());
-    assert!(authorize_structured_file_write(
+        true,
+    );
+    assert_structured_file_write_authorization(
         &automatic,
-        &file_write_action(AgentApprovalStatus::Required),
+        AgentApprovalStatus::Required,
         FileWriteAuthorizationSource::Automatic,
-    )
-    .is_err());
+        false,
+    );
 }
 
 #[test]
@@ -82,30 +118,30 @@ fn explicit_user_approval_authorizes_manual_writes_but_never_overrides_write_den
         patch: mycopilot_core::AgentPatchPermission::RequireApproval,
         ..Default::default()
     });
-    assert!(authorize_structured_file_write(
+    assert_structured_file_write_authorization(
         &manual,
-        &file_write_action(AgentApprovalStatus::Required),
+        AgentApprovalStatus::Required,
         FileWriteAuthorizationSource::ExplicitUser,
-    )
-    .is_ok());
+        true,
+    );
 
     let denied = test_input(AgentPermissions {
         write: AgentWritePermission::Denied,
         patch: mycopilot_core::AgentPatchPermission::AutoApprove,
         ..Default::default()
     });
-    assert!(authorize_structured_file_write(
+    assert_structured_file_write_authorization(
         &denied,
-        &file_write_action(AgentApprovalStatus::Approved),
+        AgentApprovalStatus::Approved,
         FileWriteAuthorizationSource::Automatic,
-    )
-    .is_err());
-    assert!(authorize_structured_file_write(
+        false,
+    );
+    assert_structured_file_write_authorization(
         &denied,
-        &file_write_action(AgentApprovalStatus::Required),
+        AgentApprovalStatus::Required,
         FileWriteAuthorizationSource::ExplicitUser,
-    )
-    .is_err());
+        false,
+    );
 }
 
 #[test]

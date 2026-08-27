@@ -218,6 +218,77 @@ fn extracts_openai_and_anthropic_usage() {
 }
 
 #[test]
+fn provider_responses_without_usage_keep_token_counts_unknown() {
+    let cases = [
+        (
+            AgentApiStyle::OpenAiCompatible,
+            "gpt",
+            json!({
+                "choices": [{
+                    "message": { "role": "assistant", "content": "done" },
+                    "finish_reason": "stop"
+                }]
+            }),
+        ),
+        (
+            AgentApiStyle::AnthropicCompatible,
+            "claude",
+            json!({
+                "content": [{ "type": "text", "text": "done" }],
+                "stop_reason": "end_turn"
+            }),
+        ),
+    ];
+
+    for (api_style, model, body) in cases {
+        let protocol = generic_provider_protocol(api_style, model);
+        let response = parse_non_stream_response(
+            &body.to_string(),
+            &protocol,
+            LlmResponseValidation::RequireModelAction,
+        )
+        .unwrap();
+        let usage = response.usage.expect("one request usage envelope");
+
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.output_thinking_tokens, None);
+        assert_eq!(usage.total_tokens, None);
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.billable_request_count, Some(1));
+    }
+
+    let deepseek_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let deepseek_protocol = deepseek_provider_protocol(&deepseek_profile, "deepseek-v4-pro");
+    let deepseek = parse_non_stream_response_with_profile(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "reasoning_content": "private"
+                },
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string(),
+        &deepseek_profile,
+        &deepseek_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+    let usage = deepseek.usage.expect("one DeepSeek request usage envelope");
+    assert_eq!(usage.input_tokens, None);
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.output_thinking_tokens, None);
+    assert_eq!(usage.total_tokens, None);
+    assert_eq!(usage.cached_input_tokens, None);
+    assert_eq!(usage.cache_creation_input_tokens, None);
+    assert_eq!(usage.billable_request_count, Some(1));
+}
+
+#[test]
 fn generic_adapters_project_complete_multi_tool_turn_to_split_wire_order() {
     for api_style in [
         AgentApiStyle::OpenAiCompatible,

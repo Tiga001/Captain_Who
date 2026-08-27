@@ -426,6 +426,115 @@ fn builds_openai_native_tool_payload_and_tool_result_messages() {
 }
 
 #[test]
+fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
+    let registry = crate::tools::ToolRegistry::defaults_with_search(None);
+    let definitions = ["apply_patch", "write_file"]
+        .into_iter()
+        .map(|name| {
+            registry
+                .definition_for(name)
+                .unwrap_or_else(|| panic!("missing stable tool definition for {name}"))
+        })
+        .collect::<Vec<_>>();
+
+    let apply_patch = &definitions[0];
+    assert_eq!(apply_patch.safety, AgentToolSafety::RequiresApproval);
+    assert!(!apply_patch.requires_workspace);
+    assert!(apply_patch.requires_approval);
+    assert_eq!(
+        apply_patch.approval_mode,
+        crate::protocol::AgentToolApprovalMode::Always
+    );
+    assert!(apply_patch.description.contains("read_file"));
+    assert_eq!(
+        apply_patch.input_schema["required"],
+        json!(["operation", "filePath"])
+    );
+    assert_eq!(
+        apply_patch.input_schema["properties"]["operation"]["enum"],
+        json!(["create", "update", "delete"])
+    );
+    assert_eq!(
+        apply_patch.input_schema["properties"]["content"]["maxLength"],
+        32 * 1024
+    );
+    assert_eq!(
+        apply_patch.input_schema["properties"]["edits"]["items"]["properties"]["kind"]["enum"],
+        json!([
+            "replace",
+            "insert_before",
+            "insert_after",
+            "append",
+            "prepend"
+        ])
+    );
+    let write_file = &definitions[1];
+    assert_eq!(write_file.safety, AgentToolSafety::RequiresApproval);
+    assert!(!write_file.requires_workspace);
+    assert!(write_file.requires_approval);
+    assert_eq!(
+        write_file.approval_mode,
+        crate::protocol::AgentToolApprovalMode::Dynamic
+    );
+    assert!(write_file.description.contains("phase=finish"));
+    assert_eq!(write_file.input_schema["required"], json!(["phase"]));
+    assert_eq!(
+        write_file.input_schema["properties"]["phase"]["enum"],
+        json!(["begin", "append", "edit", "finish", "status", "abort"])
+    );
+    let write_modes = write_file.input_schema["properties"]["mode"]["enum"]
+        .as_array()
+        .unwrap();
+    for current_mode in ["create", "rewrite", "modify", "append"] {
+        assert!(write_modes.iter().any(|mode| mode == current_mode));
+    }
+    assert_eq!(
+        write_file.input_schema["properties"]["edits"]["maxItems"],
+        128
+    );
+
+    let request = |api_style, tools: Vec<AgentToolDefinition>| LlmChatRequest {
+        api_url: "https://example.test".to_string(),
+        api_token: "token".to_string(),
+        provider_profile: generic_provider_profile(api_style),
+        provider_protocol: generic_provider_protocol(api_style, "model"),
+        max_tokens: 1_024,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![message(LlmMessageRole::User, "Update a file")],
+        tools,
+    };
+
+    let openai = build_payload(&request(
+        AgentApiStyle::OpenAiCompatible,
+        definitions.clone(),
+    ));
+    let openai_tools = openai["tools"].as_array().unwrap();
+    assert_eq!(openai_tools.len(), 2);
+    for (projected, definition) in openai_tools.iter().zip(&definitions) {
+        assert_eq!(projected["type"], "function");
+        assert_eq!(projected["function"]["name"], definition.name);
+        assert_eq!(projected["function"]["description"], definition.description);
+        assert_eq!(projected["function"]["parameters"], definition.input_schema);
+        assert_eq!(projected.as_object().unwrap().len(), 2);
+        assert_eq!(projected["function"].as_object().unwrap().len(), 3);
+    }
+
+    let anthropic = build_payload(&request(
+        AgentApiStyle::AnthropicCompatible,
+        definitions.clone(),
+    ));
+    let anthropic_tools = anthropic["tools"].as_array().unwrap();
+    assert_eq!(anthropic_tools.len(), 2);
+    for (projected, definition) in anthropic_tools.iter().zip(&definitions) {
+        assert_eq!(projected["name"], definition.name);
+        assert_eq!(projected["description"], definition.description);
+        assert_eq!(projected["input_schema"], definition.input_schema);
+        assert_eq!(projected.as_object().unwrap().len(), 3);
+    }
+}
+
+#[test]
 fn builds_openai_mcp_namespace_tool_payload_without_internal_catalog_fields() {
     let definition = mcp_tool_definition();
     let expected_schema = definition.input_schema.clone();

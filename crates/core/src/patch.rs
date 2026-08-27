@@ -779,6 +779,100 @@ mod tests {
         assert!(!workspace.path.join("src/new.txt").exists());
     }
 
+    #[test]
+    fn create_race_is_no_clobber_and_preserves_concurrent_content() {
+        let workspace = TestWorkspace::new();
+        let patch = "--- /dev/null\n+++ b/src/raced.txt\n@@ -0,0 +1 @@\n+proposed\n";
+
+        // The patch was planned while the target was absent, then another writer won the race
+        // before Host execution reached its final precondition check.
+        let target = workspace.path.join("src/raced.txt");
+        std::fs::write(&target, "concurrent\n").unwrap();
+
+        let error = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Create,
+            "src/raced.txt",
+            patch,
+            None,
+            workspace_permissions(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("目标文件当前不存在"));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "concurrent\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_ancestor_symlink_without_touching_the_external_target() {
+        let workspace = TestWorkspace::new();
+        let outside = std::env::temp_dir().join(format!(
+            "mycopilot-outside-patch-parent-{}",
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.path.join("src/linked")).unwrap();
+        let patch = "--- /dev/null\n+++ b/src/linked/new.txt\n@@ -0,0 +1 @@\n+must not escape\n";
+
+        let error = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Create,
+            "src/linked/new.txt",
+            patch,
+            None,
+            workspace_permissions(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("符号链接"));
+        assert!(!outside.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn rejects_version_control_paths_before_writing() {
+        let workspace = TestWorkspace::new();
+        std::fs::create_dir_all(workspace.path.join(".git")).unwrap();
+        let patch = "--- /dev/null\n+++ b/.git/config\n@@ -0,0 +1 @@\n+unsafe\n";
+
+        let error = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Create,
+            ".git/config",
+            patch,
+            None,
+            workspace_permissions(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("版本控制系统目录"));
+        assert!(!workspace.path.join(".git/config").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_regular_socket_target() {
+        let workspace = TestWorkspace::new();
+        let target = workspace.path.join("src/socket.txt");
+        let _listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
+        let patch = "--- a/src/socket.txt\n+++ b/src/socket.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let error = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Update,
+            "src/socket.txt",
+            patch,
+            None,
+            workspace_permissions(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("目标必须是文件"));
+        assert!(target.exists());
+    }
+
     fn workspace_permissions() -> AgentPermissions {
         AgentPermissions {
             read: AgentReadPermission::WorkspaceOnly,

@@ -85,6 +85,15 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
 
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
     let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let registry = crate::tools::ToolRegistry::defaults_with_search(None);
+    let tools = ["read_file", "apply_patch", "write_file"]
+        .into_iter()
+        .map(|name| {
+            registry
+                .definition_for(name)
+                .unwrap_or_else(|| panic!("missing stable tool definition for {name}"))
+        })
+        .collect::<Vec<_>>();
     let first_request = LlmChatRequest {
         api_url: format!("http://{address}/chat/completions"),
         api_token: "deepseek-fake-token".to_string(),
@@ -94,7 +103,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         temperature: 0.3,
         stream: false,
         messages: vec![LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs")],
-        tools: vec![tool_definition()],
+        tools: tools.clone(),
     };
     let first_response = complete_chat(first_request, AgentCancellationToken::new())
         .await
@@ -148,7 +157,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
             first_turn_message.clone(),
             first_result_message.clone(),
         ],
-        tools: vec![tool_definition()],
+        tools: tools.clone(),
     };
     let second_response = complete_chat(second_request, AgentCancellationToken::new())
         .await
@@ -189,7 +198,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
             LlmMessage::from_assistant_turn(second_turn),
             LlmMessage::tool_result(second_runtime_call.id, "{\"ok\":true}", false),
         ],
-        tools: vec![tool_definition()],
+        tools,
     };
     let third_response = complete_chat(third_request, AgentCancellationToken::new())
         .await
@@ -209,6 +218,18 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
     assert_eq!(requests[0]["reasoning_effort"], "max");
     assert!(requests[0].get("temperature").is_none());
     assert!(requests[0].get("tool_choice").is_none());
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(requests[0]["tools"][0]["function"]["name"], "read_file");
+    assert_eq!(requests[0]["tools"][1]["function"]["name"], "apply_patch");
+    assert_eq!(requests[0]["tools"][2]["function"]["name"], "write_file");
+    assert_eq!(
+        requests[0]["tools"][1]["function"]["parameters"],
+        registry.definition_for("apply_patch").unwrap().input_schema
+    );
+    assert_eq!(
+        requests[0]["tools"][2]["function"]["parameters"],
+        registry.definition_for("write_file").unwrap().input_schema
+    );
     assert_eq!(requests[1]["messages"][1]["role"], "assistant");
     assert_eq!(requests[1]["messages"][1]["content"], "");
     assert_eq!(

@@ -206,6 +206,10 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         .unwrap();
     assert_eq!(waiting.status, AgentRunStatus::WaitingForApproval);
     assert!(waiting.conversation_turn_trace.is_none());
+    assert!(
+        !workspace.join("report.txt").exists(),
+        "an apply_patch proposal must not change the workspace before approval"
+    );
     let checkpoint = waiting
         .events
         .iter()
@@ -343,6 +347,10 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
 
     assert_eq!(completed.status, AgentRunStatus::Completed);
     assert_eq!(completed.content, "resumed with evidence");
+    assert!(
+        !workspace.join("report.txt").exists(),
+        "a rejected apply_patch proposal must remain definitely unexecuted"
+    );
     assert_eq!(completed.todo.as_ref().unwrap().revision, 1);
     let request = final_request.lock().unwrap().take().unwrap();
     let messages = serde_json::to_string(&request["messages"]).unwrap();

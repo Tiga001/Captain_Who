@@ -702,6 +702,92 @@ mod tests {
     }
 
     #[test]
+    fn structured_update_supports_replace_insert_before_and_prepend() {
+        let workspace = TestWorkspace::new();
+        let initial = "section:\nold value\nfooter\n";
+        workspace.write("notes.txt", initial);
+        let call = tool_call(json!({
+            "operation": "update",
+            "filePath": "notes.txt",
+            "edits": [
+                {
+                    "kind": "prepend",
+                    "text": "title\n"
+                },
+                {
+                    "kind": "insert_before",
+                    "anchor": "footer\n",
+                    "text": "before footer\n"
+                },
+                {
+                    "kind": "replace",
+                    "oldText": "old value",
+                    "newText": "new value"
+                }
+            ]
+        }));
+
+        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
+
+        assert_eq!(
+            proposal.base_revision,
+            Some(content_revision(initial.as_bytes()))
+        );
+        assert!(proposal.patch.contains("+title"));
+        assert!(proposal.patch.contains("+before footer"));
+        assert!(proposal.patch.contains("-old value"));
+        assert!(proposal.patch.contains("+new value"));
+        assert_git_apply_check(&workspace.root, &proposal.patch);
+    }
+
+    #[test]
+    fn structured_replace_reports_missing_match() {
+        let workspace = TestWorkspace::new();
+        workspace.write("notes.txt", "current value\n");
+        let call = tool_call(json!({
+            "operation": "update",
+            "filePath": "notes.txt",
+            "edits": [{
+                "kind": "replace",
+                "oldText": "missing value",
+                "newText": "new value"
+            }]
+        }));
+
+        let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
+
+        assert_eq!(error.code(), Some("agent.apply_patch.match_not_found"));
+        assert_eq!(error.details().unwrap()["code"], "match_not_found");
+        assert_eq!(error.details().unwrap()["recovery"], "rereadFile");
+        assert!(error.to_string().contains("匹配 0 次"));
+        assert!(!error.to_string().contains("structured_edit_error"));
+    }
+
+    #[test]
+    fn structured_delete_freezes_the_current_base_revision() {
+        let workspace = TestWorkspace::new();
+        let initial = "remove me\n";
+        workspace.write("obsolete.txt", initial);
+        let call = tool_call(json!({
+            "operation": "delete",
+            "filePath": "obsolete.txt"
+        }));
+
+        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
+
+        assert_eq!(proposal.operation, AgentPatchOperation::Delete);
+        assert_eq!(
+            proposal.base_revision,
+            Some(content_revision(initial.as_bytes()))
+        );
+        assert!(proposal
+            .patch
+            .starts_with("--- a/obsolete.txt\n+++ /dev/null\n"));
+        assert!(proposal.patch.contains("-remove me"));
+        assert_git_apply_check(&workspace.root, &proposal.patch);
+    }
+
+    #[test]
     fn structured_update_reports_ambiguous_anchor() {
         let workspace = TestWorkspace::new();
         workspace.write("notes.txt", "same\nsame\n");
