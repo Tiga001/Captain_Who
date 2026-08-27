@@ -292,6 +292,7 @@ export function AgentTemplatesSettingsPage({
             <textarea
               maxLength={4096}
               onChange={(event) => setForm({ ...form, description: event.currentTarget.value })}
+              placeholder={t('agentTemplates.descriptionPlaceholder')}
               rows={3}
               value={form.description}
             />
@@ -301,6 +302,7 @@ export function AgentTemplatesSettingsPage({
             <textarea
               maxLength={65536}
               onChange={(event) => setForm({ ...form, instructions: event.currentTarget.value })}
+              placeholder={t('agentTemplates.instructionsPlaceholder')}
               required
               rows={8}
               value={form.instructions}

@@ -380,7 +380,11 @@ export const frFRTranslations = {
     "Les modifications s'appliquent aux agents créés ultérieurement. Les agents existants conservent leur instantané de création.",
   'agentTemplates.name': 'Nom',
   'agentTemplates.description': 'Brève description',
+  'agentTemplates.descriptionPlaceholder':
+    'Pour l’Agent parent : résumez les compétences de ce sous-agent et quand l’utiliser. Exemple : rechercher et vérifier des informations publiques, puis produire une synthèse avec ses sources.',
   'agentTemplates.instructions': 'Instructions',
+  'agentTemplates.instructionsPlaceholder':
+    'Instructions permanentes envoyées au sous-agent : précisez ses responsabilités, sa méthode de travail, ses limites et le format attendu. Exemple : privilégier les sources fiables et les recouper ; signaler les incertitudes ; fournir des conclusions concises avec les liens sources.',
   'agentTemplates.model': 'Modèle',
   'agentTemplates.selectModel': 'Sélectionnez le modèle de modèle',
   'agentTemplates.modelUnavailable': 'Indisponible',

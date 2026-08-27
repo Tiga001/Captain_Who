@@ -373,7 +373,11 @@ export const jaJPTranslations = {
     '変更は、今後作成されるエージェントに適用されます。既存のエージェントは作成スナップショットを保持します。',
   'agentTemplates.name': '名前',
   'agentTemplates.description': '簡単な説明',
+  'agentTemplates.descriptionPlaceholder':
+    '親エージェント向け：このサブエージェントの得意分野と、どのような場面で使うかを簡潔に説明します。例：公開情報を調査・検証し、出典付きの要約を作成する。',
   'agentTemplates.instructions': '指示',
+  'agentTemplates.instructionsPlaceholder':
+    'サブエージェントに送る継続的な指示：役割、作業方法、境界、出力要件を記述します。例：信頼できる情報源を優先して照合し、不確かな点を明示し、簡潔な結論と出典リンクを返す。',
   'agentTemplates.model': 'モデル',
   'agentTemplates.selectModel': 'テンプレートモデルの選択',
   'agentTemplates.modelUnavailable': '利用不可',

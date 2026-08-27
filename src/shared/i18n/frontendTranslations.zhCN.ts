@@ -362,7 +362,11 @@ export const zhCNTranslations = {
   'agentTemplates.snapshotHint': '修改只影响未来创建的智能体，已有智能体保留创建时快照。',
   'agentTemplates.name': '名称',
   'agentTemplates.description': '简短描述',
+  'agentTemplates.descriptionPlaceholder':
+    '供父智能体选择时参考：简要说明这个子智能体擅长什么，以及适合在什么情况下调用。例如：检索并核实公开资料，整理带来源的研究摘要。',
   'agentTemplates.instructions': '指令',
+  'agentTemplates.instructionsPlaceholder':
+    '发送给子智能体的长期指令：说明它的职责、工作方式、边界和输出要求。例如：优先使用权威来源并交叉核实；标注不确定信息；最终返回简洁结论和来源链接。',
   'agentTemplates.model': '模型',
   'agentTemplates.selectModel': '选择模板模型',
   'agentTemplates.modelUnavailable': '不可用',

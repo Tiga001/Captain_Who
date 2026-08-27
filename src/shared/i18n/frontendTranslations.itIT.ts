@@ -378,7 +378,11 @@ export const itITTranslations = {
     'Le modifiche si applicano agli agenti creati in futuro. Gli agenti esistenti conservano la loro istantanea di creazione.',
   'agentTemplates.name': 'Nome',
   'agentTemplates.description': 'Breve descrizione',
+  'agentTemplates.descriptionPlaceholder':
+    'Per l’Agent padre: descrivi brevemente in cosa è specializzato questo subagent e quando usarlo. Esempio: cercare e verificare informazioni pubbliche, quindi produrre una sintesi con le fonti.',
   'agentTemplates.instructions': 'Istruzioni',
+  'agentTemplates.instructionsPlaceholder':
+    'Istruzioni permanenti inviate al subagent: definisci responsabilità, metodo di lavoro, limiti e requisiti di output. Esempio: privilegiare fonti autorevoli e verificarle; segnalare le incertezze; restituire conclusioni concise con i link alle fonti.',
   'agentTemplates.model': 'Modello',
   'agentTemplates.selectModel': 'Seleziona il modello del modello',
   'agentTemplates.modelUnavailable': 'Non disponibile',

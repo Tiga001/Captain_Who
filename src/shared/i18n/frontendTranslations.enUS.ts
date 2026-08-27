@@ -371,7 +371,11 @@ export const enUSTranslations = {
     'Changes apply to Agents created in the future. Existing Agents retain their creation snapshot.',
   'agentTemplates.name': 'Name',
   'agentTemplates.description': 'Short description',
+  'agentTemplates.descriptionPlaceholder':
+    'For the parent Agent: briefly explain what this subagent is good at and when to use it. Example: Research and verify public information, then produce a source-backed summary.',
   'agentTemplates.instructions': 'Instructions',
+  'agentTemplates.instructionsPlaceholder':
+    'Long-term instructions sent to the subagent: define its responsibilities, working method, boundaries, and output requirements. Example: Prefer authoritative sources and cross-check them; flag uncertainty; return concise conclusions with source links.',
   'agentTemplates.model': 'Model',
   'agentTemplates.selectModel': 'Select template model',
   'agentTemplates.modelUnavailable': 'Unavailable',

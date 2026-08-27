@@ -155,6 +155,12 @@ describe('Agent template settings', () => {
     await expect
       .element(screen.getByText('agentTemplates.noProjectsAvailable', { exact: true }))
       .toBeVisible()
+    await expect
+      .element(screen.getByRole('textbox', { name: 'agentTemplates.description' }))
+      .toHaveAttribute('placeholder', 'agentTemplates.descriptionPlaceholder')
+    await expect
+      .element(screen.getByRole('textbox', { name: 'agentTemplates.instructions' }))
+      .toHaveAttribute('placeholder', 'agentTemplates.instructionsPlaceholder')
     const breadcrumbs = screen.getByRole('navigation', { name: 'settings.breadcrumb.label' })
     await breadcrumbs.getByRole('button', { name: 'settings.breadcrumb.root' }).click()
     expect(navigateSettingsRoot).toHaveBeenCalledTimes(1)

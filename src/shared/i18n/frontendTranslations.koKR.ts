@@ -368,7 +368,11 @@ export const koKRTranslations = {
     '변경사항은 향후 생성되는 에이전트에 적용됩니다. 기존 에이전트는 생성 스냅샷을 유지합니다.',
   'agentTemplates.name': '이름',
   'agentTemplates.description': '간단한 설명',
+  'agentTemplates.descriptionPlaceholder':
+    '부모 에이전트가 선택할 때 참고합니다. 이 하위 에이전트가 잘하는 일과 언제 호출하면 좋은지 간단히 설명하세요. 예: 공개 정보를 조사하고 검증하여 출처가 포함된 요약을 작성합니다.',
   'agentTemplates.instructions': '지침',
+  'agentTemplates.instructionsPlaceholder':
+    '하위 에이전트에게 보내는 지속적인 지침입니다. 역할, 작업 방식, 범위와 출력 요구사항을 설명하세요. 예: 권위 있는 출처를 우선하고 교차 검증하며, 불확실한 정보를 표시하고, 간결한 결론과 출처 링크를 반환합니다.',
   'agentTemplates.model': '모델',
   'agentTemplates.selectModel': '템플릿 모델 선택',
   'agentTemplates.modelUnavailable': '이용 불가',
