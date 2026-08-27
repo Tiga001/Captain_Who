@@ -132,6 +132,17 @@ import type {
   BrowserDownloadRecord,
   BrowserDownloadRegistrationInput,
   BrowserDownloadSettingsRecord,
+  BrowserHistoryDeleteInput,
+  BrowserHistoryEntry,
+  BrowserHistoryListInput,
+  BrowserHistoryMetadataUpdateInput,
+  BrowserHistoryRegistrationInput,
+  BrowserOwnedDataClearInput,
+  BrowserOwnedDataClearOutput,
+  BrowserOwnedDataRangeInput,
+  BrowserOwnedDataSummary,
+  BrowserPreferencesSaveInput,
+  BrowserPreferencesView,
   McpServerCreateInput,
   McpServerDetailsOutput,
   McpServerIdInput,
@@ -389,6 +400,17 @@ import {
   parseBrowserDownloadRecord,
   parseBrowserDownloadRegistrationInput,
   parseBrowserDownloadSettingsRecord,
+  parseBrowserHistoryDeleteInput,
+  parseBrowserHistoryEntry,
+  parseBrowserHistoryListInput,
+  parseBrowserHistoryMetadataUpdateInput,
+  parseBrowserHistoryRegistrationInput,
+  parseBrowserOwnedDataClearInput,
+  parseBrowserOwnedDataClearOutput,
+  parseBrowserOwnedDataRangeInput,
+  parseBrowserOwnedDataSummary,
+  parseBrowserPreferencesSaveInput,
+  parseBrowserPreferencesView,
   parseImageGenerationConfigurationErrorData,
   IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
   IMAGE_GENERATION_READ_ARTIFACT_METHOD,
@@ -487,6 +509,14 @@ const STORAGE_REGISTER_BROWSER_DOWNLOAD_METHOD = 'storage.registerBrowserDownloa
 const STORAGE_LIST_BROWSER_DOWNLOADS_METHOD = 'storage.listBrowserDownloads'
 const STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD = 'storage.loadBrowserDownload'
 const STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD = 'storage.clearBrowserDownloadHistory'
+const STORAGE_LOAD_BROWSER_PREFERENCES_METHOD = 'storage.loadBrowserPreferences'
+const STORAGE_SAVE_BROWSER_PREFERENCES_METHOD = 'storage.saveBrowserPreferences'
+const STORAGE_REGISTER_BROWSER_HISTORY_METHOD = 'storage.registerBrowserHistory'
+const STORAGE_UPDATE_BROWSER_HISTORY_METHOD = 'storage.updateBrowserHistoryMetadata'
+const STORAGE_LIST_BROWSER_HISTORY_METHOD = 'storage.listBrowserHistory'
+const STORAGE_DELETE_BROWSER_HISTORY_METHOD = 'storage.deleteBrowserHistory'
+const STORAGE_SUMMARIZE_BROWSER_OWNED_DATA_METHOD = 'storage.summarizeBrowserOwnedData'
+const STORAGE_CLEAR_BROWSER_OWNED_DATA_METHOD = 'storage.clearBrowserOwnedData'
 const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
 const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
@@ -2444,5 +2474,73 @@ export class CoreServer {
 
   clearBrowserDownloadHistory(): Promise<number> {
     return this.rpc.request<number>(STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD)
+  }
+
+  loadBrowserPreferences(): Promise<BrowserPreferencesView> {
+    return this.rpc
+      .request<unknown>(STORAGE_LOAD_BROWSER_PREFERENCES_METHOD)
+      .then(parseBrowserPreferencesView)
+  }
+
+  saveBrowserPreferences(input: BrowserPreferencesSaveInput): Promise<BrowserPreferencesView> {
+    const parsed = parseBrowserPreferencesSaveInput(input)
+    return this.rpc
+      .request<unknown, BrowserPreferencesSaveInput>(
+        STORAGE_SAVE_BROWSER_PREFERENCES_METHOD,
+        parsed
+      )
+      .then(parseBrowserPreferencesView)
+  }
+
+  registerBrowserHistory(input: BrowserHistoryRegistrationInput): Promise<BrowserHistoryEntry> {
+    const parsed = parseBrowserHistoryRegistrationInput(input)
+    return this.rpc
+      .request<unknown, BrowserHistoryRegistrationInput>(
+        STORAGE_REGISTER_BROWSER_HISTORY_METHOD,
+        parsed
+      )
+      .then(parseBrowserHistoryEntry)
+  }
+
+  updateBrowserHistoryMetadata(input: BrowserHistoryMetadataUpdateInput): Promise<boolean> {
+    return this.rpc.request<boolean, BrowserHistoryMetadataUpdateInput>(
+      STORAGE_UPDATE_BROWSER_HISTORY_METHOD,
+      parseBrowserHistoryMetadataUpdateInput(input)
+    )
+  }
+
+  listBrowserHistory(input: BrowserHistoryListInput): Promise<BrowserHistoryEntry[]> {
+    const parsed = parseBrowserHistoryListInput(input)
+    return this.rpc
+      .request<unknown, BrowserHistoryListInput>(STORAGE_LIST_BROWSER_HISTORY_METHOD, parsed)
+      .then((value) => {
+        if (!Array.isArray(value)) throw new Error('Invalid Browser history record list')
+        return value.map((item) => parseBrowserHistoryEntry(item))
+      })
+  }
+
+  deleteBrowserHistory(input: BrowserHistoryDeleteInput): Promise<number> {
+    return this.rpc.request<number, BrowserHistoryDeleteInput>(
+      STORAGE_DELETE_BROWSER_HISTORY_METHOD,
+      parseBrowserHistoryDeleteInput(input)
+    )
+  }
+
+  summarizeBrowserOwnedData(input: BrowserOwnedDataRangeInput): Promise<BrowserOwnedDataSummary> {
+    return this.rpc
+      .request<unknown, BrowserOwnedDataRangeInput>(
+        STORAGE_SUMMARIZE_BROWSER_OWNED_DATA_METHOD,
+        parseBrowserOwnedDataRangeInput(input)
+      )
+      .then(parseBrowserOwnedDataSummary)
+  }
+
+  clearBrowserOwnedData(input: BrowserOwnedDataClearInput): Promise<BrowserOwnedDataClearOutput> {
+    return this.rpc
+      .request<unknown, BrowserOwnedDataClearInput>(
+        STORAGE_CLEAR_BROWSER_OWNED_DATA_METHOD,
+        parseBrowserOwnedDataClearInput(input)
+      )
+      .then(parseBrowserOwnedDataClearOutput)
   }
 }

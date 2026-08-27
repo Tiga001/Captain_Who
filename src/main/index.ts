@@ -19,7 +19,7 @@ import {
   initializeManagedWebviewSessions
 } from './webviews/managedWebviewSecurity'
 import { CoreServer } from './core/coreServer'
-import { openExternalUrl, registerHostIpc, type HostIpcRegistration } from './ipc'
+import { registerHostIpc, type HostIpcRegistration } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { MainWindowLifecycleController } from './mainWindowLifecycle'
@@ -31,6 +31,8 @@ import { BrowserNetworkGuard } from './browser/BrowserNetworkGuard'
 import { BrowserInternalPageStore } from './browser/BrowserInternalPageStore'
 import { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
 import { BrowserDownloadBroker } from './browser/BrowserDownloadBroker'
+import { BrowserHistoryService } from './browser/BrowserHistoryService'
+import { BrowserLinkRouter } from './browser/BrowserLinkRouter'
 import { BrowserFileBroker } from './browser/BrowserFileBroker'
 import { CoreBrowserRiskAuthorizer } from './browser/CoreBrowserRiskAuthorizer'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
@@ -62,6 +64,8 @@ let browserSurfaceManager: BrowserSurfaceManager | null = null
 let browserNetworkGuard: BrowserNetworkGuard | null = null
 let browserArtifactBroker: BrowserArtifactBroker | null = null
 let browserDownloadBroker: BrowserDownloadBroker | null = null
+let browserHistoryService: BrowserHistoryService | null = null
+let browserLinkRouter: BrowserLinkRouter | null = null
 let browserFileBroker: BrowserFileBroker | null = null
 let managedPlaywrightBridgeHost: ManagedPlaywrightBridgeHost | null = null
 const mainWindowLifecycle = new MainWindowLifecycleController(process.platform)
@@ -208,9 +212,11 @@ function createWindow(): void {
   window.on('restore', handleWindowStateChange)
 
   rendererWebContents.setWindowOpenHandler((details) => {
-    void openExternalUrl(details.url).catch((error: unknown) => {
-      console.error('Failed to open external URL', error)
-    })
+    void getBrowserLinkRouter()
+      .openAppUrl(details.url)
+      .catch((error: unknown) => {
+        console.error('Failed to open app URL', error)
+      })
     return { action: 'deny' }
   })
 
@@ -218,9 +224,11 @@ function createWindow(): void {
     if (isAllowedRendererUrl(url, rendererEntryUrl)) return
 
     event.preventDefault()
-    void openExternalUrl(url).catch((error: unknown) => {
-      console.error('Blocked main-window navigation', error)
-    })
+    void getBrowserLinkRouter()
+      .openAppUrl(url)
+      .catch((error: unknown) => {
+        console.error('Blocked main-window navigation', error)
+      })
   })
 
   void window.loadURL(rendererEntryUrl).catch(() => {
@@ -268,6 +276,7 @@ async function initializeApplication(): Promise<void> {
     }
   })
   await browserFileBroker.initialize()
+  const browserPreferences = await coreServer.loadBrowserPreferences()
   const browserDownloadSettings = await coreServer.loadBrowserDownloadSettings()
   browserDownloadBroker = new BrowserDownloadBroker({
     expectedSession: managedBrowserSession,
@@ -292,6 +301,7 @@ async function initializeApplication(): Promise<void> {
   initializeManagedWebviewSessions({ networkGuard: browserNetworkGuard })
   const browserInternalPageStore = new BrowserInternalPageStore(managedBrowserSession)
   browserInternalPageStore.install()
+  browserHistoryService = new BrowserHistoryService(coreServer)
   browserSurfaceManager = new BrowserSurfaceManager({
     broker: new BrowserTargetBroker(BROWSER_WEBVIEW_PARTITION, managedBrowserSession),
     internalPageStore: browserInternalPageStore,
@@ -303,9 +313,18 @@ async function initializeApplication(): Promise<void> {
       if (!host.isDestroyed()) host.send(HOST_CHANNELS.browser.surfaceStateChanged, state)
     },
     getLocale: () => notificationLocaleStore.getLocale(),
+    onHistoryMetadata: (event) => browserHistoryService?.updateMetadata(event),
+    onHistoryNavigation: (event) => browserHistoryService?.recordNavigation(event),
     networkGuard: browserNetworkGuard,
-    releaseSurfaceResources: (input) =>
-      browserFileBroker?.releaseSurface(input) ?? Promise.resolve()
+    releaseSurfaceResources: (input) => {
+      browserHistoryService?.forgetSurface(input)
+      return browserFileBroker?.releaseSurface(input) ?? Promise.resolve()
+    }
+  })
+  browserLinkRouter = new BrowserLinkRouter({
+    coreServer,
+    initialPreferences: browserPreferences,
+    surfaceManager: browserSurfaceManager
   })
   const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
     beginDispatchFence: (target) => {
@@ -376,7 +395,14 @@ async function initializeApplication(): Promise<void> {
     browserSurfaceManager,
     browserArtifactBroker,
     notificationLocaleStore,
-    browserDownloadBroker
+    browserDownloadBroker,
+    {
+      coreServer,
+      faviconResourceCache,
+      historyService: browserHistoryService,
+      linkRouter: browserLinkRouter,
+      session: managedBrowserSession
+    }
   )
 
   createWindow()
@@ -428,6 +454,8 @@ app.on('before-quit', (event) => {
     browserSurfaceManager = null
     browserNetworkGuard = null
     browserDownloadBroker = null
+    browserHistoryService = null
+    browserLinkRouter = null
     await browserFileBroker?.shutdown().catch(() => undefined)
     browserFileBroker = null
     await browserArtifactBroker?.shutdown().catch(() => undefined)
@@ -443,6 +471,8 @@ app.on('will-quit', () => {
   terminalBridge.killNow()
   managedPlaywrightBridgeHost = null
   browserDownloadBroker = null
+  browserHistoryService = null
+  browserLinkRouter = null
   browserFileBroker = null
   browserNetworkGuard = null
   browserSurfaceManager = null
@@ -454,6 +484,11 @@ app.on('will-quit', () => {
 export function getBrowserSurfaceManager(): BrowserSurfaceManager {
   if (!browserSurfaceManager) throw new Error('Browser surface manager is not initialized')
   return browserSurfaceManager
+}
+
+function getBrowserLinkRouter(): BrowserLinkRouter {
+  if (!browserLinkRouter) throw new Error('Browser link router is not initialized')
+  return browserLinkRouter
 }
 
 function getRendererEntryUrl(): string {

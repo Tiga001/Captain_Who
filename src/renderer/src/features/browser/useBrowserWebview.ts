@@ -20,7 +20,6 @@ interface UseBrowserWebviewOptions {
 }
 
 interface UseBrowserWebviewResult {
-  clearBrowsingData: () => Promise<void>
   currentUrl: string | null
   goBack: () => Promise<void>
   goForward: () => Promise<void>
@@ -242,17 +241,8 @@ export function useBrowserWebview({
     }
   }, [])
 
-  const clearBrowsingData = useCallback(async () => {
-    try {
-      await hostClient.browser.clearBrowsingData()
-    } catch {
-      // Clearing session data is optional and must not expose transport details in the UI.
-    }
-  }, [])
-
   return useMemo(
     () => ({
-      clearBrowsingData,
       currentUrl: navigationState.metadata.url,
       goBack,
       goForward,
@@ -266,7 +256,6 @@ export function useBrowserWebview({
       setZoom
     }),
     [
-      clearBrowsingData,
       goBack,
       goForward,
       hostFallbackError,

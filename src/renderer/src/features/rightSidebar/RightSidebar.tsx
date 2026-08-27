@@ -45,6 +45,7 @@ interface RightSidebarProps {
   modules?: RightSidebarModuleDefinition[]
   onBrowserSurfaceReady?: (input: BrowserSurfaceReadyInput) => Promise<BrowserSurfaceReadyOutput>
   onOpenAgentTemplates?: () => void
+  onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   onToggleMaximized: () => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
@@ -100,6 +101,7 @@ export const RightSidebar = memo(function RightSidebar({
   modules: configuredModules = RIGHT_SIDEBAR_MODULES,
   onBrowserSurfaceReady,
   onOpenAgentTemplates,
+  onOpenBrowserSettings,
   onToggleMaximized,
   reviewNavigationRequest,
   renderAgentObserver,
@@ -376,6 +378,7 @@ export const RightSidebar = memo(function RightSidebar({
       onBrowserSurfaceInstance: handleBrowserSurfaceInstance,
       onBrowserSurfaceReady: handleBrowserSurfaceReady,
       onOpenAgentTemplates,
+      onOpenBrowserSettings,
       renderAgentObserver
     }),
     [
@@ -385,6 +388,7 @@ export const RightSidebar = memo(function RightSidebar({
       handleBrowserSurfaceInstance,
       handleBrowserSurfaceReady,
       onOpenAgentTemplates,
+      onOpenBrowserSettings,
       renderAgentObserver,
       workspaceKey
     ]

@@ -855,6 +855,104 @@ pub struct BrowserDownloadListInput {
     pub limit: u32,
 }
 
+pub const BROWSER_DATA_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserLinkOpenTarget {
+    System,
+    Builtin,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserPreferencesRecord {
+    pub schema_version: u32,
+    pub link_open_target: BrowserLinkOpenTarget,
+    pub revision: u64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserPreferencesUpdate {
+    pub schema_version: u32,
+    pub link_open_target: BrowserLinkOpenTarget,
+    pub expected_revision: u64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserHistoryRecord {
+    pub schema_version: u32,
+    pub history_id: String,
+    pub url: String,
+    pub title: String,
+    pub hostname: String,
+    pub favicon_url: Option<String>,
+    pub visited_at: i64,
+}
+
+pub type BrowserHistoryRegistration = BrowserHistoryRecord;
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserHistoryMetadataUpdate {
+    pub schema_version: u32,
+    pub history_id: String,
+    pub title: String,
+    pub favicon_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserHistoryListInput {
+    pub schema_version: u32,
+    pub query: String,
+    pub limit: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserHistoryDeleteInput {
+    pub schema_version: u32,
+    pub history_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserOwnedDataRangeInput {
+    pub schema_version: u32,
+    pub since: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserOwnedDataSummary {
+    pub schema_version: u32,
+    pub history_count: u64,
+    pub history_site_count: u64,
+    pub download_count: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserOwnedDataClearInput {
+    pub schema_version: u32,
+    pub since: Option<i64>,
+    pub clear_history: bool,
+    pub clear_downloads: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserOwnedDataClearOutput {
+    pub schema_version: u32,
+    pub deleted_history_count: u64,
+    pub deleted_download_count: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPromptPreferencesRecord {

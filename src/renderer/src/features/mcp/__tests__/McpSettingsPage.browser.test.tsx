@@ -1,4 +1,5 @@
 import {
+  BROWSER_DATA_SCHEMA_VERSION,
   BROWSER_DOWNLOAD_SCHEMA_VERSION,
   type McpBuiltinCapabilityListItem,
   type McpBuiltinCapabilityListOutput,
@@ -21,12 +22,19 @@ const service = vi.hoisted(() => ({
   builtinRefresh: vi.fn(),
   builtinSetAllowed: vi.fn(),
   chooseBrowserDownloadDirectory: vi.fn(),
+  clearBrowserData: vi.fn(),
   clearBrowserDownloadHistory: vi.fn(),
+  deleteBrowserHistory: vi.fn(),
+  getBrowserDataSummary: vi.fn(),
   getBrowserDownloadSettings: vi.fn(),
+  getBrowserPreferences: vi.fn(),
+  listBrowserHistory: vi.fn(),
   listBrowserDownloadHistory: vi.fn(),
   loadDetails: vi.fn(),
   loadTools: vi.fn(),
   onBrowserDownloadHistoryChanged: vi.fn(),
+  onBrowserHistoryChanged: vi.fn(),
+  openBrowserHistoryEntry: vi.fn(),
   refresh: vi.fn(),
   refreshCatalog: vi.fn(),
   resetBrowserDownloadDirectory: vi.fn(),
@@ -39,6 +47,7 @@ const service = vi.hoisted(() => ({
   showToast: vi.fn(),
   startServer: vi.fn(),
   stopServer: vi.fn(),
+  updateBrowserPreferences: vi.fn(),
   updateServer: vi.fn()
 }))
 
@@ -61,12 +70,29 @@ vi.mock('../browserDownloadClient', () => ({
   revealBrowserDownload: service.revealBrowserDownload
 }))
 
+vi.mock('../../browser/browserDataClient', () => ({
+  clearBrowserData: service.clearBrowserData,
+  deleteBrowserHistory: service.deleteBrowserHistory,
+  getBrowserDataSummary: service.getBrowserDataSummary,
+  getBrowserPreferences: service.getBrowserPreferences,
+  listBrowserHistory: service.listBrowserHistory,
+  onBrowserHistoryChanged: service.onBrowserHistoryChanged,
+  openBrowserHistoryEntry: service.openBrowserHistoryEntry,
+  updateBrowserPreferences: service.updateBrowserPreferences
+}))
+
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'en-US', t: (key: string) => key })
 }))
 
 vi.mock('../../../components/toast/ToastContext', () => ({
   useToast: () => ({ showToast: service.showToast })
+}))
+
+vi.mock('../../../host/hostClient', () => ({
+  hostClient: {
+    resources: { resolveFavicon: vi.fn(async () => ({ url: null })) }
+  }
 }))
 
 const { McpSettingsPage } = await import('../McpSettingsPage')
@@ -221,6 +247,25 @@ beforeEach(() => {
   service.builtinSetAllowed.mockResolvedValue(null)
   service.chooseBrowserDownloadDirectory.mockResolvedValue(null)
   service.clearBrowserDownloadHistory.mockResolvedValue(0)
+  service.clearBrowserData.mockResolvedValue({
+    schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+    deletedHistoryCount: 0,
+    deletedDownloadCount: 0,
+    clearedCookiesAndSiteData: false,
+    clearedCache: false
+  })
+  service.deleteBrowserHistory.mockResolvedValue({
+    schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+    deletedCount: 0
+  })
+  service.getBrowserDataSummary.mockResolvedValue({
+    schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+    historyCount: 0,
+    historySiteCount: 0,
+    downloadCount: 0,
+    cookieSiteCount: 0,
+    cacheBytes: 0
+  })
   service.getBrowserDownloadSettings.mockResolvedValue({
     schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
     locationMode: 'system',
@@ -229,12 +274,25 @@ beforeEach(() => {
     revision: 0,
     updatedAt: 0
   })
+  service.getBrowserPreferences.mockResolvedValue({
+    schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+    linkOpenTarget: 'system',
+    revision: 0,
+    updatedAt: 0
+  })
+  service.listBrowserHistory.mockResolvedValue({
+    schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+    entries: [],
+    truncated: false
+  })
   service.listBrowserDownloadHistory.mockResolvedValue({
     schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
     downloads: [],
     truncated: false
   })
   service.onBrowserDownloadHistoryChanged.mockReturnValue(() => undefined)
+  service.onBrowserHistoryChanged.mockReturnValue(() => undefined)
+  service.openBrowserHistoryEntry.mockResolvedValue(undefined)
   service.loadTools.mockResolvedValue(null)
   service.loadDetails.mockResolvedValue(null)
   service.refresh.mockResolvedValue(null)
@@ -259,6 +317,12 @@ beforeEach(() => {
   service.revealBrowserDownload.mockResolvedValue({
     schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
     status: 'shown'
+  })
+  service.updateBrowserPreferences.mockResolvedValue({
+    schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+    linkOpenTarget: 'builtin',
+    revision: 1,
+    updatedAt: 1
   })
 })
 
@@ -346,6 +410,7 @@ describe('MCP Settings page', () => {
       0
     )
     expect(service.getBrowserDownloadSettings).toHaveBeenCalled()
+    expect(service.getBrowserPreferences).toHaveBeenCalled()
     expect(service.listBrowserDownloadHistory).not.toHaveBeenCalled()
     expect(service.builtinSetAllowed).not.toHaveBeenCalled()
     expect(service.setServerEnabled).not.toHaveBeenCalled()
@@ -358,7 +423,15 @@ describe('MCP Settings page', () => {
     await expect.poll(() => service.setBrowserDownloadAskWhereToSave.mock.calls.length).toBe(1)
     expect(service.setBrowserDownloadAskWhereToSave).toHaveBeenCalledWith(true)
 
-    await screen.getByRole('button', { name: 'mcp.browserDownloads.manage' }).click()
+    const downloadHistoryRow = screen
+      .getByText('mcp.browserDownloads.history', { exact: true })
+      .element()
+      .closest('.browser-download-preference-row')
+    const manageDownloadHistory = downloadHistoryRow?.querySelector('button')
+    if (!(manageDownloadHistory instanceof HTMLButtonElement)) {
+      throw new Error('download history management button missing')
+    }
+    manageDownloadHistory.click()
     await expect
       .element(screen.getByRole('heading', { name: 'mcp.browserDownloads.history' }))
       .toBeVisible()
@@ -369,6 +442,147 @@ describe('MCP Settings page', () => {
 
     await screen.getByRole('button', { name: 'settings.nav.mcp' }).click()
     await expect.element(screen.getByRole('heading', { name: 'mcp.section.builtin' })).toBeVisible()
+  })
+
+  it('updates the link target and opens browsing history from the General section', async () => {
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'mcp.browserData.general' }))
+      .toBeVisible()
+    const linkTargetSelect = screen.container.querySelector('.browser-link-target-select')
+    if (!(linkTargetSelect instanceof HTMLElement)) throw new Error('link target select missing')
+    expect(
+      Number.parseFloat(window.getComputedStyle(linkTargetSelect).width)
+    ).toBeGreaterThanOrEqual(190)
+    await screen
+      .getByRole('button', {
+        name: 'mcp.browserData.linkTarget: mcp.browserData.systemBrowser'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'mcp.browserData.builtinBrowser' }).click()
+    await expect.poll(() => service.updateBrowserPreferences.mock.calls.length).toBe(1)
+    expect(service.updateBrowserPreferences).toHaveBeenCalledWith('builtin')
+
+    const historyRow = screen
+      .getByText('browser.history', { exact: true })
+      .element()
+      .closest('.browser-download-preference-row')
+    const manageHistory = historyRow?.querySelector('button')
+    if (!(manageHistory instanceof HTMLButtonElement)) {
+      throw new Error('browsing history management button missing')
+    }
+    manageHistory.click()
+
+    await expect.element(screen.getByRole('heading', { name: 'browser.history' })).toBeVisible()
+    await expect
+      .element(screen.getByText('mcp.browserData.emptyHistory', { exact: true }))
+      .toBeVisible()
+    expect(service.listBrowserHistory).toHaveBeenCalledWith('')
+    const breadcrumb = screen.getByRole('navigation', { name: 'settings.breadcrumb.label' })
+    expect(breadcrumb.getByText('browser.history', { exact: true }).elements()).toHaveLength(1)
+  })
+
+  it('renders the clear-data dialog in a top-level portal and enforces all-time-only rows', async () => {
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).click()
+    await screen.getByRole('button', { name: 'browser.clearBrowsingData' }).click()
+    const dialog = screen.getByRole('dialog', { name: 'browser.clearBrowsingData' })
+    await expect.element(dialog).toBeVisible()
+    expect(dialog.element().closest('.browser-data-dialog__backdrop')?.parentElement).toBe(
+      document.body
+    )
+
+    await screen.getByRole('button', { name: 'mcp.browserData.range.last7Days' }).click()
+    const cookies = screen.getByRole('checkbox', { name: /mcp\.browserData\.cookies/u })
+    const cache = screen.getByRole('checkbox', { name: /mcp\.browserData\.cache/u })
+    await expect.element(cookies).toBeDisabled()
+    await expect.element(cache).toBeDisabled()
+    await expect.element(cookies).not.toBeChecked()
+    await expect.element(cache).not.toBeChecked()
+  })
+
+  it('groups browsing history and opens each row menu from a top-level portal', async () => {
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    service.listBrowserHistory.mockResolvedValue({
+      schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+      entries: [
+        {
+          schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+          historyId: 'browser-history:123e4567-e89b-42d3-a456-426614174000',
+          url: 'https://example.test/docs',
+          title: 'Example documentation',
+          hostname: 'example.test',
+          faviconUrl: null,
+          visitedAt: Date.UTC(2026, 7, 27, 6, 15)
+        },
+        {
+          schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+          historyId: 'browser-history:223e4567-e89b-42d3-a456-426614174000',
+          url: 'https://other.test/',
+          title: 'Other page',
+          hostname: 'other.test',
+          faviconUrl: null,
+          visitedAt: Date.UTC(2026, 7, 26, 4, 0)
+        }
+      ],
+      truncated: false
+    })
+    const onCloseSettings = vi.fn()
+    const screen = await render(
+      <McpSettingsPage initialBrowserView="history" onCloseSettings={onCloseSettings} />
+    )
+
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+    expect(screen.container.textContent).toContain('Example documentation')
+    expect(screen.container.textContent).toContain('example.test')
+    expect(screen.container.querySelectorAll('.browser-history-group')).toHaveLength(2)
+    await screen.getByText('Example documentation').click()
+    await expect
+      .element(screen.getByRole('checkbox', { name: 'Example documentation' }))
+      .toBeChecked()
+    expect(service.openBrowserHistoryEntry).not.toHaveBeenCalled()
+    const moreButton = screen.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="browser.downloadCenter.moreActions"]'
+    )
+    if (!moreButton) throw new Error('history menu trigger missing')
+    moreButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    const historyMenu = document.body.querySelector('.browser-history-menu') as HTMLElement | null
+    expect(historyMenu).not.toBeNull()
+    expect(historyMenu?.parentElement).toBe(document.body)
+    const openButton = historyMenu?.querySelector<HTMLButtonElement>('button')
+    if (!openButton) throw new Error('history open action missing')
+    openButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await Promise.resolve()
+    expect(service.openBrowserHistoryEntry).toHaveBeenCalledWith('https://example.test/docs')
+    await Promise.resolve()
+    expect(onCloseSettings).toHaveBeenCalledTimes(1)
   })
 
   it('shows built-in loading and safe retry independently from external Servers', async () => {

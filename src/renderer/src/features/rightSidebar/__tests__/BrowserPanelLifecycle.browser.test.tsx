@@ -12,7 +12,6 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 
 vi.mock('../../browser/useBrowserWebview', () => ({
   useBrowserWebview: () => ({
-    clearBrowsingData: vi.fn(async () => undefined),
     currentUrl: null,
     goBack: vi.fn(async () => undefined),
     goForward: vi.fn(async () => undefined),
@@ -55,8 +54,14 @@ afterEach(() => {
 
 describe('BrowserPanel automation readiness lifecycle', () => {
   it('renders the browser overflow menu in the top-level portal', async () => {
+    const onOpenSettings = vi.fn()
     const screen = await render(
-      <BrowserPanel isActive pageId="portal-menu" surfaceId="right-sidebar-browser-portal-menu" />
+      <BrowserPanel
+        isActive
+        onOpenSettings={onOpenSettings}
+        pageId="portal-menu"
+        surfaceId="right-sidebar-browser-portal-menu"
+      />
     )
 
     await screen.getByRole('button', { name: 'browser.menu' }).click()
@@ -64,6 +69,21 @@ describe('BrowserPanel automation readiness lifecycle', () => {
     const menu = document.body.querySelector('.browser-panel__menu') as HTMLElement
     expect(menu.parentElement).toBe(document.body)
     expect(menu.style.width).not.toBe('')
+    const menuButtons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button'))
+    const downloadButton = menuButtons.find(
+      (button) => button.textContent?.trim() === 'browser.downloadCenter.title'
+    )
+    const historyButton = menuButtons.find(
+      (button) => button.textContent?.trim() === 'browser.history'
+    )
+    const settingsButton = menuButtons.find(
+      (button) => button.textContent?.trim() === 'browser.settings'
+    )
+    expect(downloadButton).toBeTruthy()
+    expect(historyButton).toBeTruthy()
+    expect(settingsButton).toBeTruthy()
+    historyButton?.click()
+    expect(onOpenSettings).toHaveBeenCalledWith('history')
   })
 
   it('does not acknowledge did-attach and only reports the exact surviving document-ready webview', async () => {

@@ -455,6 +455,41 @@ INSERT INTO browser_download_settings (
             id, schema_version, location_mode, custom_directory, ask_where_to_save,
             revision, updated_at
         ) VALUES ('default', 2, 'system', NULL, 0, 0, 0);
+CREATE TABLE browser_preferences (
+            id TEXT PRIMARY KEY CHECK (id = 'default'),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            link_open_target TEXT NOT NULL CHECK (link_open_target IN ('system', 'builtin')),
+            revision INTEGER NOT NULL CHECK (revision >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+        );
+INSERT INTO browser_preferences (
+            id, schema_version, link_open_target, revision, updated_at
+        ) VALUES ('default', 1, 'system', 0, 0);
+CREATE TABLE browser_history (
+            history_id TEXT PRIMARY KEY CHECK (
+                length(history_id) = 52
+                AND substr(history_id, 1, 16) = 'browser-history:'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            url TEXT NOT NULL CHECK (
+                length(CAST(url AS BLOB)) BETWEEN 1 AND 8192
+            ),
+            title TEXT NOT NULL CHECK (
+                length(CAST(title AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            hostname TEXT NOT NULL CHECK (
+                length(CAST(hostname AS BLOB)) BETWEEN 1 AND 255
+            ),
+            favicon_url TEXT CHECK (
+                favicon_url IS NULL
+                OR length(CAST(favicon_url AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            visited_at INTEGER NOT NULL CHECK (visited_at >= 0)
+        );
+CREATE INDEX browser_history_visited_idx
+            ON browser_history (visited_at DESC, history_id DESC);
+CREATE INDEX browser_history_hostname_idx
+            ON browser_history (hostname, visited_at DESC);
 CREATE TABLE browser_downloads (
             download_id TEXT PRIMARY KEY CHECK (
                 length(download_id) = 53

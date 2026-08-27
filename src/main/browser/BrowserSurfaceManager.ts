@@ -77,12 +77,23 @@ export interface BrowserSurfaceManagerOptions {
   createSurfaceId?: () => string
   getLocale?: () => string
   internalPageStore: BrowserInternalPageStoreLike
+  onHistoryMetadata?: (event: BrowserSurfaceHistoryEvent) => void
+  onHistoryNavigation?: (event: BrowserSurfaceHistoryEvent) => void
   releaseSurfaceResources?: (input: { surfaceId: string; generation: number }) => Promise<void>
   resolveHost: () => WebContents | null
   sendCommand: (host: WebContents, command: BrowserSurfaceCommand) => void
   sendState?: (host: WebContents, state: BrowserSurfaceState) => void
   maxSurfaces?: number
   recordDiagnostic?: (diagnostic: BrowserSurfaceDiagnostic) => void
+}
+
+export interface BrowserSurfaceHistoryEvent {
+  faviconUrl: string | null
+  generation: number
+  surfaceId: string
+  title: string | null
+  url: string
+  visitedAt: number
 }
 
 export interface BrowserSurfaceDiagnostic {
@@ -300,6 +311,8 @@ export class BrowserSurfaceManager {
   private readonly createSurfaceId: () => string
   private readonly getLocale: () => string
   private readonly internalPageStore: BrowserInternalPageStoreLike
+  private readonly onHistoryMetadata?: BrowserSurfaceManagerOptions['onHistoryMetadata']
+  private readonly onHistoryNavigation?: BrowserSurfaceManagerOptions['onHistoryNavigation']
   private readonly closingSurfaceIds = new Set<string>()
   private readonly closeWaiters = new Map<string, PendingClose>()
   private readonly generationBySurface = new Map<string, number>()
@@ -361,6 +374,8 @@ export class BrowserSurfaceManager {
     this.sendState = options.sendState ?? (() => undefined)
     this.getLocale = options.getLocale ?? (() => 'zh-CN')
     this.internalPageStore = options.internalPageStore
+    this.onHistoryMetadata = options.onHistoryMetadata
+    this.onHistoryNavigation = options.onHistoryNavigation
     this.connectOverCdp =
       options.connectOverCdp ??
       ((transport) =>
@@ -2801,6 +2816,7 @@ export class BrowserSurfaceManager {
     this.settlePendingHistoryRemoval(surface)
     this.pruneInternalDocuments(surface)
     this.publishSurfaceState(surface)
+    if (logicalUrl) this.notifyHistoryNavigation(surface)
   }
 
   private handleSurfaceDidNavigateInPage(
@@ -2815,6 +2831,7 @@ export class BrowserSurfaceManager {
     surface.logicalUrl = logicalUrl
     surface.pendingNavigationUrl = logicalUrl
     this.publishSurfaceState(surface)
+    this.notifyHistoryNavigation(surface)
   }
 
   private handleSurfaceDidStopLoading(
@@ -2846,6 +2863,7 @@ export class BrowserSurfaceManager {
     }
     surface.logicalTitle = safeSurfaceTitle(title)
     this.publishSurfaceState(surface)
+    this.notifyHistoryMetadata(surface)
   }
 
   private handleSurfaceFaviconUpdated(
@@ -2865,6 +2883,39 @@ export class BrowserSurfaceManager {
     }
     surface.logicalFaviconUrl = favicons.map(safeRemoteResourceUrl).find(Boolean) ?? null
     this.publishSurfaceState(surface)
+    this.notifyHistoryMetadata(surface)
+  }
+
+  private notifyHistoryNavigation(surface: ManagedSurface): void {
+    const event = this.historyEvent(surface)
+    if (!event) return
+    try {
+      this.onHistoryNavigation?.(event)
+    } catch {
+      // Browser history is observational and never participates in navigation.
+    }
+  }
+
+  private notifyHistoryMetadata(surface: ManagedSurface): void {
+    const event = this.historyEvent(surface)
+    if (!event) return
+    try {
+      this.onHistoryMetadata?.(event)
+    } catch {
+      // Browser history is observational and never participates in page metadata updates.
+    }
+  }
+
+  private historyEvent(surface: ManagedSurface): BrowserSurfaceHistoryEvent | null {
+    if (!surface.logicalUrl || surface.loadError || surface.crashError) return null
+    return {
+      faviconUrl: surface.logicalFaviconUrl,
+      generation: surface.generation,
+      surfaceId: surface.surfaceId,
+      title: surface.logicalTitle,
+      url: surface.logicalUrl,
+      visitedAt: Date.now()
+    }
   }
 
   private handleSurfaceBeforeInputEvent(

@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import type { AppProject } from '../config/projectConfig'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
+import type { BrowserAutomationView } from '../features/mcp/BrowserAutomationSettingsPage'
 import type { ChatConversation } from '../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { deleteStoredConversation } from '../features/storage/storageClient'
@@ -9,6 +10,7 @@ import { deleteStoredConversation } from '../features/storage/storageClient'
 interface AppShellSettingsViewProps {
   conversations: ChatConversation[]
   initialPage: SettingsPageId
+  initialBrowserView?: BrowserAutomationView
   initialProjectId?: string | null
   onBack: () => void
   onConversationPatch: (conversationId: string, patch: Partial<ChatConversation>) => void
@@ -22,6 +24,7 @@ interface AppShellSettingsViewProps {
 export function AppShellSettingsView({
   conversations,
   initialPage,
+  initialBrowserView,
   initialProjectId,
   onBack,
   onConversationPatch,
@@ -35,6 +38,7 @@ export function AppShellSettingsView({
     <SettingsPage
       conversations={conversations}
       initialPage={initialPage}
+      initialMcpBrowserView={initialBrowserView}
       initialProjectId={initialProjectId}
       projects={projects}
       uiPreferences={uiPreferences}

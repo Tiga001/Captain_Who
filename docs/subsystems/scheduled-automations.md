@@ -169,7 +169,7 @@ ready 时以 FIFO 暂存最多 32 个请求，并在 `openRequestedReady` 后恢
 
 ## 7. 持久化、恢复与删除联动
 
-SQLite canonical schema 当前为 **v23**，而 Automation DTO、permission mode 和 Automation 表记录的
+SQLite canonical schema 当前为 **v24**，而 Automation DTO、permission mode 和 Automation 表记录的
 `schemaVersion` 各为 **v1**；这些版本域不能混用。四组权威数据为：
 
 - `automations`：配置、schedule、目标/权限 snapshot、revision、health、attention 和 tombstone；

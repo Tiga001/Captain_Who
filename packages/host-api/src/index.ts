@@ -84,6 +84,10 @@ import type {
   BrowserArtifactExportOutput,
   BrowserArtifactReadInput,
   BrowserArtifactReadOutput,
+  BrowserDataClearInput,
+  BrowserDataClearOutput,
+  BrowserDataSummaryInput,
+  BrowserDataSummaryOutput,
   BrowserDownloadAskWhereToSaveInput,
   BrowserDownloadCenterActionInput,
   BrowserDownloadCenterActionOutput,
@@ -97,6 +101,14 @@ import type {
   BrowserDownloadIdInput,
   BrowserDownloadRevealOutput,
   BrowserDownloadSettingsView,
+  BrowserHistoryChangedNotification,
+  BrowserHistoryDeleteInput,
+  BrowserHistoryDeleteOutput,
+  BrowserHistoryListInput,
+  BrowserHistoryListOutput,
+  BrowserOpenUrlInput,
+  BrowserPreferencesUpdateInput,
+  BrowserPreferencesView,
   BrowserSurfaceActionInput,
   BrowserSurfaceCommand,
   BrowserSurfaceReadyInput,
@@ -227,7 +239,22 @@ export interface AutomationsHostApi {
 }
 
 export interface BrowserHostApi {
-  clearBrowsingData(): Promise<void>
+  getPreferences(): Promise<HostInvocationResult<BrowserPreferencesView>>
+  updatePreferences(
+    input: BrowserPreferencesUpdateInput
+  ): Promise<HostInvocationResult<BrowserPreferencesView>>
+  listHistory(
+    input: BrowserHistoryListInput
+  ): Promise<HostInvocationResult<BrowserHistoryListOutput>>
+  deleteHistory(
+    input: BrowserHistoryDeleteInput
+  ): Promise<HostInvocationResult<BrowserHistoryDeleteOutput>>
+  openHistoryEntry(input: BrowserOpenUrlInput): Promise<HostInvocationResult<void>>
+  onHistoryChanged(handler: (event: BrowserHistoryChangedNotification) => void): () => void
+  getDataSummary(
+    input: BrowserDataSummaryInput
+  ): Promise<HostInvocationResult<BrowserDataSummaryOutput>>
+  clearData(input: BrowserDataClearInput): Promise<HostInvocationResult<BrowserDataClearOutput>>
   getDownloadCenter(): Promise<HostInvocationResult<BrowserDownloadCenterSnapshot>>
   performDownloadCenterAction(
     input: BrowserDownloadCenterActionInput

@@ -404,6 +404,58 @@ pub(crate) fn handle_request(
         STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD => {
             storage_response(request.id, storage.clear_browser_download_history())
         }
+        STORAGE_LOAD_BROWSER_PREFERENCES_METHOD => {
+            storage_response(request.id, storage.load_browser_preferences())
+        }
+        STORAGE_SAVE_BROWSER_PREFERENCES_METHOD => {
+            let input = match parse_params::<BrowserPreferencesUpdate>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.save_browser_preferences(input))
+        }
+        STORAGE_REGISTER_BROWSER_HISTORY_METHOD => {
+            let input = match parse_params::<BrowserHistoryRegistration>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.register_browser_history(input))
+        }
+        STORAGE_UPDATE_BROWSER_HISTORY_METHOD => {
+            let input = match parse_params::<BrowserHistoryMetadataUpdate>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.update_browser_history_metadata(input))
+        }
+        STORAGE_LIST_BROWSER_HISTORY_METHOD => {
+            let input = match parse_params::<BrowserHistoryListInput>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.list_browser_history(input))
+        }
+        STORAGE_DELETE_BROWSER_HISTORY_METHOD => {
+            let input = match parse_params::<BrowserHistoryDeleteInput>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.delete_browser_history(input))
+        }
+        STORAGE_SUMMARIZE_BROWSER_OWNED_DATA_METHOD => {
+            let input = match parse_params::<BrowserOwnedDataRangeInput>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.summarize_browser_owned_data(input))
+        }
+        STORAGE_CLEAR_BROWSER_OWNED_DATA_METHOD => {
+            let input = match parse_params::<BrowserOwnedDataClearInput>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.clear_browser_owned_data(input))
+        }
         STORAGE_SAVE_CONVERSATION_META_METHOD => {
             let conversation = match parse_params::<ChatConversationMetaRecord>(request.params) {
                 Ok(conversation) => conversation,

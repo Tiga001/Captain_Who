@@ -179,8 +179,12 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   viewport,
   t
 }: BrowserModuleSurfaceProps) {
-  const { browserSurfaceRequest, onBrowserSurfaceInstance, onBrowserSurfaceReady } =
-    useRightSidebarRuntimeContext()
+  const {
+    browserSurfaceRequest,
+    onBrowserSurfaceInstance,
+    onBrowserSurfaceReady,
+    onOpenBrowserSettings
+  } = useRightSidebarRuntimeContext()
   const handlePageMetadataChange = useCallback(
     (metadata: BrowserPageMetadata) => {
       const title = metadata.title?.trim()
@@ -216,6 +220,7 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
           onBrowserSurfaceInstance?.(pageId, surfaceId, surfaceInstanceId, isCurrent)
         }
         onSurfaceFocus={onSurfaceFocus}
+        onOpenSettings={onOpenBrowserSettings}
         pageId={pageId}
         initialLogicalUrl={logicalUrl}
         surfaceId={surfaceId}

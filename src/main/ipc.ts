@@ -11,10 +11,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
 import type { StorageImageFileRecord, StorageProjectRecord } from '@mycopilot/protocol'
 import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
-import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
-
 import { CoreServer } from './core/coreServer'
-import { clearManagedWebviewData } from './webviews/managedWebviewSecurity'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
@@ -40,6 +37,7 @@ import { registerBrowserArtifactIpc } from './ipc/browserArtifactIpc'
 import { registerBrowserDownloadIpc } from './ipc/browserDownloadIpc'
 import type { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
 import type { BrowserDownloadBroker } from './browser/BrowserDownloadBroker'
+import { registerBrowserDataIpc, type BrowserDataIpcDependencies } from './ipc/browserDataIpc'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -320,7 +318,8 @@ export function registerHostIpc(
   browserSurfaceManager?: BrowserSurfaceManager,
   browserArtifactBroker?: BrowserArtifactBroker,
   notificationLocaleMirror: NotificationLocaleMirror = createVolatileNotificationLocaleMirror(),
-  browserDownloadBroker?: BrowserDownloadBroker
+  browserDownloadBroker?: BrowserDownloadBroker,
+  browserDataIpc?: BrowserDataIpcDependencies
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
@@ -351,7 +350,9 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.app.getWindowState, (event) =>
     getAppWindowState(getInvokeWindow(event))
   )
-  ipcMain.handle(HOST_CHANNELS.app.openExternal, (_event, url) => openExternalUrl(url))
+  ipcMain.handle(HOST_CHANNELS.app.openExternal, (_event, url) =>
+    browserDataIpc ? browserDataIpc.linkRouter.openAppUrl(url) : openExternalUrl(url)
+  )
   ipcMain.handle(HOST_CHANNELS.app.setNativeThemeSource, (_event, themeSource) => {
     if (!isNativeThemeSource(themeSource)) {
       throw new Error('Invalid native theme source')
@@ -361,12 +362,9 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )
-  ipcMain.handle(HOST_CHANNELS.browser.clearBrowsingData, async () => {
-    await Promise.all([
-      clearManagedWebviewData(BROWSER_WEBVIEW_PARTITION),
-      faviconResourceCache.clear()
-    ])
-  })
+  const disposeBrowserDataIpc = browserDataIpc
+    ? registerBrowserDataIpc(ipcMain, browserDataIpc)
+    : () => undefined
   if (browserSurfaceManager) {
     registerBrowserSurfaceIpc(ipcMain, browserSurfaceManager)
   }
@@ -383,6 +381,7 @@ export function registerHostIpc(
     disposeNotificationIpc()
     disposeAutomationIpc()
     disposeMcpIpc()
+    disposeBrowserDataIpc()
     disposeBrowserDownloadIpc()
   }
   dispose.beginNotificationShutdown = (): Promise<void> => disposeNotificationIpc.beginShutdown()

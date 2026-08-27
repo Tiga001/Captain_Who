@@ -24,6 +24,7 @@ import type { ChatConversation } from '../chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../storage/storageClient'
 import { McpSettingsPage } from '../mcp/McpSettingsPage'
+import type { BrowserAutomationView } from '../mcp/BrowserAutomationSettingsPage'
 import { AppearanceSettingsPage } from './pages/AppearanceSettingsPage'
 import { ArchivedConversationsSettingsPage } from './pages/ArchivedConversationsSettingsPage'
 import { ConfigurationSettingsPage } from './pages/ConfigurationSettingsPage'
@@ -49,6 +50,7 @@ interface SettingsPageProps {
   projects: AppProject[]
   initialProjectId?: string | null
   initialPage?: SettingsPageId
+  initialMcpBrowserView?: BrowserAutomationView
   uiPreferences: UiPreferencesSnapshot
 }
 
@@ -115,6 +117,8 @@ function SettingsContent({
   onUnarchiveConversation,
   onUiPreferencesChange,
   initialProjectId,
+  initialMcpBrowserView,
+  onCloseSettings,
   projects,
   uiPreferences
 }: {
@@ -128,6 +132,8 @@ function SettingsContent({
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   initialProjectId?: string | null
+  initialMcpBrowserView?: BrowserAutomationView
+  onCloseSettings: () => void
   projects: AppProject[]
   uiPreferences: UiPreferencesSnapshot
 }) {
@@ -185,6 +191,8 @@ function SettingsContent({
   if (activePage === 'mcp') {
     return (
       <McpSettingsPage
+        initialBrowserView={initialMcpBrowserView}
+        onCloseSettings={onCloseSettings}
         onDirtyChange={onMcpDirtyChange}
         onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
       />
@@ -296,6 +304,7 @@ export function SettingsPage({
   onUiPreferencesChange,
   projects,
   initialProjectId,
+  initialMcpBrowserView,
   initialPage = 'general',
   uiPreferences
 }: SettingsPageProps) {
@@ -384,6 +393,8 @@ export function SettingsPage({
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}
             initialProjectId={initialProjectId}
+            initialMcpBrowserView={initialMcpBrowserView}
+            onCloseSettings={onBack}
             uiPreferences={uiPreferences}
           />
         </div>

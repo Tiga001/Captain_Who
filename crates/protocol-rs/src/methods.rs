@@ -152,3 +152,11 @@ pub const STORAGE_LIST_BROWSER_DOWNLOADS_METHOD: &str = "storage.listBrowserDown
 pub const STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD: &str = "storage.loadBrowserDownload";
 pub const STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD: &str =
     "storage.clearBrowserDownloadHistory";
+pub const STORAGE_LOAD_BROWSER_PREFERENCES_METHOD: &str = "storage.loadBrowserPreferences";
+pub const STORAGE_SAVE_BROWSER_PREFERENCES_METHOD: &str = "storage.saveBrowserPreferences";
+pub const STORAGE_REGISTER_BROWSER_HISTORY_METHOD: &str = "storage.registerBrowserHistory";
+pub const STORAGE_UPDATE_BROWSER_HISTORY_METHOD: &str = "storage.updateBrowserHistoryMetadata";
+pub const STORAGE_LIST_BROWSER_HISTORY_METHOD: &str = "storage.listBrowserHistory";
+pub const STORAGE_DELETE_BROWSER_HISTORY_METHOD: &str = "storage.deleteBrowserHistory";
+pub const STORAGE_SUMMARIZE_BROWSER_OWNED_DATA_METHOD: &str = "storage.summarizeBrowserOwnedData";
+pub const STORAGE_CLEAR_BROWSER_OWNED_DATA_METHOD: &str = "storage.clearBrowserOwnedData";

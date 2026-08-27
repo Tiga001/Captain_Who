@@ -1,5 +1,9 @@
 import type { BrowserHostApi, HostApi, MyCopilotGlobal } from '@mycopilot/host-api'
-import { BROWSER_DOWNLOAD_SCHEMA_VERSION, type BrowserSurfaceCommand } from '@mycopilot/protocol'
+import {
+  BROWSER_DATA_SCHEMA_VERSION,
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
+  type BrowserSurfaceCommand
+} from '@mycopilot/protocol'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -11,7 +15,6 @@ import { useBrowserWebview } from '../../browser/useBrowserWebview'
 
 vi.mock('../../../host/hostClient', () => ({
   hostClient: {
-    browser: { clearBrowsingData: vi.fn(async () => undefined) },
     resources: { resolveFavicon: vi.fn(async () => ({ url: null })) }
   }
 }))
@@ -174,7 +177,7 @@ describe('browser surface Host bridge availability', () => {
   it('rejects a present but malformed browser bridge', () => {
     exposeHost({
       browser: {
-        clearBrowsingData: vi.fn(async () => undefined),
+        getPreferences: vi.fn(),
         onSurfaceCommand: 'not-a-function',
         surfaceReady: vi.fn()
       } as unknown as BrowserHostApi
@@ -229,7 +232,55 @@ function BrowserStateHarness({
 
 function createBrowserApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
   return {
-    clearBrowsingData: vi.fn(async () => undefined),
+    getPreferences: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+        linkOpenTarget: 'system' as const,
+        revision: 0,
+        updatedAt: 0
+      }
+    })),
+    updatePreferences: vi.fn(async (input) => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+        linkOpenTarget: input.linkOpenTarget,
+        revision: 1,
+        updatedAt: 1
+      }
+    })),
+    listHistory: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DATA_SCHEMA_VERSION, entries: [], truncated: false }
+    })),
+    deleteHistory: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DATA_SCHEMA_VERSION, deletedCount: 0 }
+    })),
+    openHistoryEntry: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    onHistoryChanged: vi.fn(() => () => undefined),
+    getDataSummary: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+        historyCount: 0,
+        historySiteCount: 0,
+        downloadCount: 0,
+        cookieSiteCount: 0,
+        cacheBytes: 0
+      }
+    })),
+    clearData: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+        deletedHistoryCount: 0,
+        deletedDownloadCount: 0,
+        clearedCookiesAndSiteData: false,
+        clearedCache: false
+      }
+    })),
     getDownloadCenter: vi.fn(async () => ({
       ok: true as const,
       value: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, revision: 0, downloads: [] }

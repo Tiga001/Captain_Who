@@ -55,7 +55,7 @@ pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。应用或 Core Server 仍持锁时命令会拒绝执行。不要删除原库或
+第一条是非破坏性预检，第二条才会备份并重建。当前或紧邻 schema 会恢复 allowlisted 配置；更旧的 schema 会在输出中明确说明改用默认配置。应用或 Core Server 仍持锁时命令会拒绝执行。不要删除原库或
 手工修改 `PRAGMA user_version`；详见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
 
 ## 页面一直停留在启动状态

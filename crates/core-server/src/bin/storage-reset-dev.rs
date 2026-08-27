@@ -9,14 +9,16 @@ mod sqlite_registry;
 
 use mycopilot_core::durable_fs::{atomic_replace, sync_directory};
 use mycopilot_core::storage::agent_prompt_preferences_repository;
+use mycopilot_core::storage::browser_data_repository;
 use mycopilot_core::storage::browser_download_repository;
 use mycopilot_core::storage::config_repository::is_provider_protocol_revision;
 use mycopilot_core::storage::image_generation_repository::{
     self, DEFAULT_IMAGE_GENERATION_PROFILE_ID,
 };
 use mycopilot_core::storage::models::{
-    AgentPromptPreferencesRecord, BrowserDownloadSettingsRecord, ImageGenerationProfileRecord,
-    ModelConfigRecord, ModelSettingsRecord, UiPreferencesRecord,
+    AgentPromptPreferencesRecord, BrowserDownloadSettingsRecord, BrowserPreferencesRecord,
+    BrowserPreferencesUpdate, ImageGenerationProfileRecord, ModelConfigRecord, ModelSettingsRecord,
+    UiPreferencesRecord, BROWSER_DATA_SCHEMA_VERSION,
 };
 use mycopilot_core::storage::notification_repository::{self, NotificationSettingsRecord};
 use mycopilot_core::storage::preferences_repository;
@@ -52,6 +54,7 @@ const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "image_generation_profiles",
     "notification_settings",
     "browser_download_settings",
+    "browser_preferences",
     "mcp_registry_metadata",
     "mcp_registry_servers",
     "mcp_registry_model_namespaces",
@@ -72,6 +75,7 @@ struct PreservedConfiguration {
     image_generation_profile: Option<ImageGenerationProfileRecord>,
     notification_settings: Option<NotificationSettingsRecord>,
     browser_download_settings: Option<BrowserDownloadSettingsRecord>,
+    browser_preferences: Option<BrowserPreferencesRecord>,
     mcp_records: Vec<McpPersistedRegistryRecord>,
     mcp_server_count: usize,
 }
@@ -87,6 +91,7 @@ struct ResetReport {
     mcp_server_count: usize,
     image_generation_profile_count: usize,
     discarded_conversation_rows: u64,
+    preserved_configuration: bool,
 }
 
 impl ResetReport {
@@ -105,11 +110,19 @@ impl ResetReport {
         } else {
             "absent"
         };
+        let preservation = if !self.source_existed {
+            "not applicable"
+        } else if self.preserved_configuration {
+            "supported"
+        } else {
+            "skipped (unsupported schema; defaults used)"
+        };
         format!(
             "Development storage reset {mode}\n\
              database: {}\n\
              source database: {source}\n\
              backup: {backup}\n\
+             configuration preservation: {preservation}\n\
              preserved models: {}\n\
              preserved Skill overrides: {}\n\
              preserved MCP servers: {}\n\
@@ -293,6 +306,10 @@ fn inspect_source(
     mutable_mcp_snapshot: Option<&Path>,
 ) -> io::Result<(Option<PreservedConfiguration>, u64)> {
     let connection = open_read_only(source_path)?;
+    let schema_version = storage_schema_version(&connection)?;
+    if !can_preserve_development_configuration(schema_version) {
+        return Ok((None, count_all_business_rows(&connection)?));
+    }
     let model_settings = load_model_settings_for_development_reset(&connection)?;
     let model_settings = model_settings.map(validate_model_profiles).transpose()?;
     let ui_preferences = load_ui_preferences_for_development_reset(&connection)?;
@@ -329,6 +346,15 @@ fn inspect_source(
         } else {
             None
         };
+    let browser_preferences =
+        if count_rows_if_table_exists(&connection, "browser_preferences")? == 1 {
+            Some(
+                browser_data_repository::load_preferences(&connection)
+                    .map_err(redacted_storage_error)?,
+            )
+        } else {
+            None
+        };
     let discarded_conversation_rows = count_discarded_conversation_rows(&connection)?;
     let expected_mcp_count = count_rows_if_table_exists(&connection, "mcp_registry_servers")?;
     drop(connection);
@@ -355,10 +381,22 @@ fn inspect_source(
         image_generation_profile,
         notification_settings,
         browser_download_settings,
+        browser_preferences,
         mcp_records,
         mcp_server_count: mcp_count,
     };
     Ok((Some(configuration), discarded_conversation_rows))
+}
+
+fn storage_schema_version(connection: &Connection) -> io::Result<i32> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(redacted_storage_error)
+}
+
+fn can_preserve_development_configuration(schema_version: i32) -> bool {
+    let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
+    schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
 }
 
 /// Preserves only the UI configuration from the current or immediately previous development
@@ -371,12 +409,8 @@ fn inspect_source(
 fn load_ui_preferences_for_development_reset(
     connection: &Connection,
 ) -> io::Result<UiPreferencesRecord> {
-    let schema_version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
-        .map_err(redacted_storage_error)?;
-    let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
-    if schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
-    {
+    let schema_version = storage_schema_version(connection)?;
+    if can_preserve_development_configuration(schema_version) {
         return preferences_repository::load_ui_preferences(connection)
             .map_err(redacted_storage_error);
     }
@@ -389,12 +423,8 @@ fn load_ui_preferences_for_development_reset(
 fn load_browser_download_settings_for_development_reset(
     connection: &Connection,
 ) -> io::Result<BrowserDownloadSettingsRecord> {
-    let schema_version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
-        .map_err(redacted_storage_error)?;
-    let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
-    if schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
-    {
+    let schema_version = storage_schema_version(connection)?;
+    if can_preserve_development_configuration(schema_version) {
         return browser_download_repository::load_settings(connection)
             .map_err(redacted_storage_error);
     }
@@ -630,6 +660,16 @@ fn build_fresh_database(
                     ));
                 }
             }
+        }
+        if let Some(preferences) = &configuration.browser_preferences {
+            storage
+                .save_browser_preferences(BrowserPreferencesUpdate {
+                    schema_version: BROWSER_DATA_SCHEMA_VERSION,
+                    link_open_target: preferences.link_open_target,
+                    expected_revision: 0,
+                    updated_at: preferences.updated_at,
+                })
+                .map_err(|_| io::Error::other("failed to restore browser preferences"))?;
         }
     }
     drop(storage);
@@ -870,6 +910,7 @@ fn verify_fresh_database(
         verify_table_count(&connection, "agent_prompt_preferences", 1)?;
         verify_table_count(&connection, "notification_settings", 1)?;
         verify_table_count(&connection, "browser_download_settings", 1)?;
+        verify_table_count(&connection, "browser_preferences", 1)?;
         if let Some(expected) = &configuration.notification_settings {
             let restored = notification_repository::load_notification_settings(&connection)
                 .map_err(redacted_storage_error)?;
@@ -885,6 +926,15 @@ fn verify_fresh_database(
             if &restored != expected {
                 return Err(invalid_data(
                     "restored browser download settings differ from their preserved value",
+                ));
+            }
+        }
+        if let Some(expected) = &configuration.browser_preferences {
+            let restored = browser_data_repository::load_preferences(&connection)
+                .map_err(redacted_storage_error)?;
+            if restored.link_open_target != expected.link_open_target {
+                return Err(invalid_data(
+                    "restored browser preferences differ from their preserved value",
                 ));
             }
         }
@@ -1033,6 +1083,16 @@ fn count_discarded_conversation_rows(connection: &Connection) -> io::Result<u64>
         })
 }
 
+fn count_all_business_rows(connection: &Connection) -> io::Result<u64> {
+    application_business_tables(connection)?
+        .into_iter()
+        .try_fold(0_u64, |total, table| {
+            total
+                .checked_add(count_rows_if_table_exists(connection, &table)?)
+                .ok_or_else(|| invalid_data("discarded row count overflow"))
+        })
+}
+
 fn ensure_only_configuration_tables_have_rows(connection: &Connection) -> io::Result<()> {
     for table in application_business_tables(connection)? {
         if PRESERVED_CONFIGURATION_TABLES.contains(&table.as_str()) {
@@ -1125,6 +1185,7 @@ fn report_from_configuration(
             .and_then(|configuration| configuration.image_generation_profile.as_ref())
             .map_or(0, |_| 1),
         discarded_conversation_rows,
+        preserved_configuration: configuration.is_some(),
     }
 }
 
@@ -1286,8 +1347,8 @@ mod tests {
     use super::*;
     use mycopilot_core::storage::image_generation_repository::IMAGE_GENERATION_PROFILE_SCHEMA_VERSION;
     use mycopilot_core::storage::models::{
-        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, ModelConfigRecord,
-        ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, BrowserLinkOpenTarget,
+        ModelConfigRecord, ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
     };
     use mycopilot_mcp_client::{
         McpApprovalMode, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
@@ -1689,6 +1750,17 @@ mod tests {
         populated_storage(fixture.path(), "previous-schema-reset-test-token");
         let database = fixture.path().join(DATABASE_FILE_NAME);
 
+        let storage = StorageService::open(&database).unwrap();
+        storage
+            .save_browser_preferences(BrowserPreferencesUpdate {
+                schema_version: BROWSER_DATA_SCHEMA_VERSION,
+                link_open_target: BrowserLinkOpenTarget::Builtin,
+                expected_revision: 0,
+                updated_at: 8,
+            })
+            .unwrap();
+        drop(storage);
+
         let connection = Connection::open(&database).unwrap();
         connection
             .pragma_update(None, "user_version", PREVIOUS_STORAGE_SCHEMA_VERSION)
@@ -1708,6 +1780,39 @@ mod tests {
                 .unwrap()
                 .ask_where_to_save
         );
+        assert_eq!(
+            storage.load_browser_preferences().unwrap().link_open_target,
+            BrowserLinkOpenTarget::Builtin
+        );
+        assert!(storage.load_projects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn confirmed_reset_rebuilds_older_schema_with_defaults_after_creating_a_backup() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "older-schema-reset-test-token");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "user_version", PREVIOUS_STORAGE_SCHEMA_VERSION - 1)
+            .unwrap();
+        drop(connection);
+
+        let report = execute(options(fixture.path(), true)).unwrap();
+
+        assert!(report.confirmed);
+        assert!(report
+            .backup_path
+            .as_ref()
+            .is_some_and(|path| path.is_file()));
+        assert!(!report.preserved_configuration);
+        assert!(report
+            .render()
+            .contains("configuration preservation: skipped (unsupported schema; defaults used)"));
+        assert_eq!(report.model_count, 0);
+        let storage = StorageService::open(&database).unwrap();
+        assert!(storage.load_model_settings_snapshot().unwrap().is_none());
         assert!(storage.load_projects().unwrap().is_empty());
     }
 

@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 23;
+pub const STORAGE_SCHEMA_VERSION: i32 = 24;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:3e93868dfdae770b7c3d152b4112b48b44dbfc744e0cf85da0ac90366f0657a9";
+    "sha256:875906cdf084705598430f8416ec4aeb95db9f3a42e886139fc985d3709142f1";
 
 /// Opens the single supported development schema.
 ///
@@ -277,6 +277,15 @@ mod tests {
             "mcp_registry_servers_revision",
             "mcp_builtin_capability_metadata",
             "mcp_builtin_capability_policies",
+            "browser_download_settings",
+            "browser_preferences",
+            "browser_history",
+            "browser_history_visited_idx",
+            "browser_history_hostname_idx",
+            "browser_downloads",
+            "browser_downloads_created_idx",
+            "browser_downloads_conversation_idx",
+            "browser_downloads_project_idx",
             "conversation_history_fts",
             "conversation_history_fts_message_insert",
             "validate_agent_command_session_model_receipt_payload_insert",

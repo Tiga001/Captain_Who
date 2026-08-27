@@ -189,13 +189,13 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 ## 8. Schema
 
-当前 canonical storage 是 **v23**。唯一真源：
+当前 canonical storage 是 **v24**。唯一真源：
 
 ```rust
 pub const STORAGE_SCHEMA_VERSION: i32 = 23;
 ```
 
-版本不等于 23、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v23。
+版本不等于 24、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v24。
 
 ## 9. 代码真源
 
@@ -244,5 +244,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 根 Agent/子 Agent/project/祖先权限是否从持久事实解析，而不是调用参数？
 - [ ] wait 是否保持 SQLite 权威、first-ready、独立停止域和 precommitted ToolResult？
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
-- [ ] 是否更新 schema v23 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v24 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

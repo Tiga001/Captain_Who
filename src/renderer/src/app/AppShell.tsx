@@ -197,6 +197,7 @@ export function AppShell() {
     closeSettings,
     openSettings,
     setSettingsOpen,
+    settingsInitialBrowserView,
     settingsInitialPage,
     settingsOpen
   } = useAppWindowSettings(shellRef)
@@ -2115,6 +2116,16 @@ export function AppShell() {
           onToggleMaximized={toggleRightSidebarMaximized}
           onBrowserSurfaceReady={browserSurfaceBridge.surfaceReady}
           onOpenAgentTemplates={() => openSettings('agentTemplates')}
+          onOpenBrowserSettings={(destination) =>
+            openSettings(
+              'mcp',
+              destination === 'downloads'
+                ? 'downloadHistory'
+                : destination === 'history'
+                  ? 'history'
+                  : 'settings'
+            )
+          }
           reviewNavigationRequest={rightSidebarReviewNavigationRequest}
           renderAgentObserver={renderAgentObserver}
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
@@ -2153,6 +2164,7 @@ export function AppShell() {
         createPortal(
           <AppShellSettingsView
             conversations={conversations}
+            initialBrowserView={settingsInitialBrowserView}
             initialPage={settingsInitialPage}
             initialProjectId={rightSidebarWorkspaceProject?.id}
             onBack={closeSettings}

@@ -5,6 +5,10 @@ import {
   parseBrowserArtifactExportOutput,
   parseBrowserArtifactReadInput,
   parseBrowserArtifactReadOutput,
+  parseBrowserDataClearInput,
+  parseBrowserDataClearOutput,
+  parseBrowserDataSummaryInput,
+  parseBrowserDataSummaryOutput,
   parseBrowserDownloadAskWhereToSaveInput,
   parseBrowserDownloadCenterActionInput,
   parseBrowserDownloadCenterActionOutput,
@@ -18,6 +22,14 @@ import {
   parseBrowserDownloadIdInput,
   parseBrowserDownloadRevealOutput,
   parseBrowserDownloadSettingsView,
+  parseBrowserHistoryChangedNotification,
+  parseBrowserHistoryDeleteInput,
+  parseBrowserHistoryDeleteOutput,
+  parseBrowserHistoryListInput,
+  parseBrowserHistoryListOutput,
+  parseBrowserOpenUrlInput,
+  parseBrowserPreferencesUpdateInput,
+  parseBrowserPreferencesView,
   parseBrowserSurfaceActionInput,
   parseBrowserSurfaceCommand,
   parseBrowserSurfaceReadyInput,
@@ -33,7 +45,66 @@ type BrowserIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 /** Strict, transport-only bridge for the managed right-sidebar browser surface. */
 export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): BrowserHostApi {
   return {
-    clearBrowsingData: () => ipcRenderer.invoke(HOST_CHANNELS.browser.clearBrowsingData),
+    getPreferences: () =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.preferencesGet,
+        undefined,
+        parseBrowserPreferencesView
+      ),
+    updatePreferences: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.preferencesUpdate,
+        parseBrowserPreferencesUpdateInput(input),
+        parseBrowserPreferencesView
+      ),
+    listHistory: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.historyList,
+        parseBrowserHistoryListInput(input),
+        parseBrowserHistoryListOutput
+      ),
+    deleteHistory: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.historyDelete,
+        parseBrowserHistoryDeleteInput(input),
+        parseBrowserHistoryDeleteOutput
+      ),
+    openHistoryEntry: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.historyOpen,
+        parseBrowserOpenUrlInput(input),
+        () => undefined
+      ),
+    onHistoryChanged: (handler) => {
+      const listener = (_event: IpcRendererEvent, value: unknown): void => {
+        try {
+          handler(parseBrowserHistoryChangedNotification(value))
+        } catch {
+          // Invalid Main-to-Renderer data is fail-closed and never reaches application state.
+        }
+      }
+      ipcRenderer.on(HOST_CHANNELS.browser.historyChanged, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.browser.historyChanged, listener)
+    },
+    getDataSummary: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.dataSummary,
+        parseBrowserDataSummaryInput(input),
+        parseBrowserDataSummaryOutput
+      ),
+    clearData: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.dataClear,
+        parseBrowserDataClearInput(input),
+        parseBrowserDataClearOutput
+      ),
     getDownloadCenter: () =>
       invokeParsed(
         ipcRenderer,

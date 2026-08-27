@@ -51,6 +51,7 @@ mod agent_graph;
 mod agent_templates;
 mod attachments;
 mod automations;
+mod browser_data;
 mod browser_downloads;
 mod child_agents;
 mod command_sessions;

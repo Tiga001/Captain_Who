@@ -7,6 +7,7 @@ import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { SettingsBreadcrumbs } from '../settings/components/SettingsBreadcrumbs'
 import { McpBuiltinCapabilityList } from './McpBuiltinCapabilityList'
 import { BrowserAutomationSettingsPage } from './BrowserAutomationSettingsPage'
+import type { BrowserAutomationView } from './BrowserAutomationSettingsPage'
 import { McpServerEditor } from './McpServerEditor'
 import { McpServerList, McpServerListRefreshButton } from './McpServerList'
 import {
@@ -23,11 +24,18 @@ import './McpSettingsPage.css'
 type McpSettingsView = 'list' | 'add' | 'edit' | 'browserDownloads'
 
 export interface McpSettingsPageProps {
+  initialBrowserView?: BrowserAutomationView
+  onCloseSettings?: () => void
   onDirtyChange?: (dirty: boolean) => void
   onNavigateSettingsRoot?: () => void
 }
 
-export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSettingsPageProps) {
+export function McpSettingsPage({
+  initialBrowserView,
+  onCloseSettings,
+  onDirtyChange,
+  onNavigateSettingsRoot
+}: McpSettingsPageProps) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
   const {
@@ -37,7 +45,9 @@ export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSe
     state: builtinState
   } = useBuiltinMcpCapabilities()
   const management = useMcpManagement()
-  const [view, setView] = useState<McpSettingsView>('list')
+  const [view, setView] = useState<McpSettingsView>(
+    initialBrowserView ? 'browserDownloads' : 'list'
+  )
   const [selectedServerId, setSelectedServerId] = useState<string | null>(null)
   const [editingServerSnapshot, setEditingServerSnapshot] = useState<McpServerDetailsView | null>(
     null
@@ -285,7 +295,9 @@ export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSe
   if (view === 'browserDownloads') {
     return (
       <BrowserAutomationSettingsPage
+        initialView={initialBrowserView}
         onBack={() => setView('list')}
+        onCloseSettings={onCloseSettings}
         onNavigateSettingsRoot={onNavigateSettingsRoot ?? (() => setView('list'))}
       />
     )

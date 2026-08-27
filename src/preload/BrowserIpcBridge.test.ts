@@ -1,6 +1,6 @@
 import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS } from '@mycopilot/host-api'
-import { BROWSER_DOWNLOAD_SCHEMA_VERSION } from '@mycopilot/protocol'
+import { BROWSER_DATA_SCHEMA_VERSION, BROWSER_DOWNLOAD_SCHEMA_VERSION } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { createBrowserIpcBridge } from './BrowserIpcBridge'
 
@@ -419,6 +419,73 @@ describe('Browser IPC bridge', () => {
       downloads: [{ ...download, absolutePath: '/Users/private/archive.zip' }]
     })
     expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('validates browser preferences, history, and clear-data events across preload', async () => {
+    let historyListener: ((event: IpcRendererEvent, value: unknown) => void) | undefined
+    const removeListener = vi.fn()
+    const preferences = {
+      schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+      linkOpenTarget: 'system',
+      revision: 0,
+      updatedAt: 0
+    } as const
+    const invoke = vi.fn(async (channel: string): Promise<unknown> => {
+      if (channel === HOST_CHANNELS.browser.preferencesGet) {
+        return { ok: true, value: preferences }
+      }
+      if (channel === HOST_CHANNELS.browser.dataClear) {
+        return {
+          ok: true,
+          value: {
+            schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+            deletedHistoryCount: 1,
+            deletedDownloadCount: 0,
+            clearedCookiesAndSiteData: false,
+            clearedCache: false
+          }
+        }
+      }
+      return { ok: true, value: undefined }
+    })
+    const bridge = createBrowserIpcBridge({
+      invoke,
+      on: vi.fn((channel, listener) => {
+        if (channel === HOST_CHANNELS.browser.historyChanged) historyListener = listener
+        return {} as IpcRenderer
+      }),
+      removeListener
+    } as unknown as BrowserIpcRenderer)
+
+    await expect(bridge.getPreferences()).resolves.toEqual({ ok: true, value: preferences })
+    await expect(
+      bridge.clearData({
+        schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+        timeRange: 'lastHour',
+        categories: ['history']
+      })
+    ).resolves.toMatchObject({ ok: true, value: { deletedHistoryCount: 1 } })
+    expect(() =>
+      bridge.clearData({
+        schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+        timeRange: 'lastHour',
+        categories: ['cache']
+      })
+    ).toThrow('all time')
+
+    const changed = vi.fn()
+    const unsubscribe = bridge.onHistoryChanged(changed)
+    historyListener?.({} as IpcRendererEvent, { schemaVersion: BROWSER_DATA_SCHEMA_VERSION })
+    historyListener?.({} as IpcRendererEvent, {
+      schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+      absolutePath: '/Users/private/history.sqlite'
+    })
+    expect(changed).toHaveBeenCalledTimes(1)
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith(
+      HOST_CHANNELS.browser.historyChanged,
+      historyListener
+    )
   })
 
   it('reads only a bounded exact Browser Artifact preview identity', async () => {

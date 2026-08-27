@@ -22,6 +22,7 @@ interface RightSidebarRuntimeContextValue {
     viewport?: { height: number; width: number }
   ) => void
   onOpenAgentTemplates?: () => void
+  onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
 }
 

@@ -28,6 +28,7 @@ import {
   synchronizeBrowserSurfaceSelection
 } from './browserSurface'
 import { BrowserDownloadCenter } from './BrowserDownloadCenter'
+import { ClearBrowsingDataDialog } from './ClearBrowsingDataDialog'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
@@ -40,6 +41,7 @@ interface BrowserPanelProps {
     viewport?: { height: number; width: number }
   ) => void
   onPageMetadataChange?: (metadata: BrowserPageMetadata) => void
+  onOpenSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   onSurfaceInstanceChange?: (
     surfaceId: string,
     surfaceInstanceId: string,
@@ -71,6 +73,7 @@ export function BrowserPanel({
   isActive,
   onAutomationSurfaceReady,
   onPageMetadataChange,
+  onOpenSettings,
   onSurfaceInstanceChange,
   onSurfaceFocus,
   pageId,
@@ -100,12 +103,12 @@ export function BrowserPanel({
   const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const [isClearDataOpen, setIsClearDataOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState<BrowserMenuPosition | null>(null)
   const [surfaceInstanceId, setSurfaceInstanceId] = useState<string | null>(null)
   const [zoom, setZoomState] = useState(1)
   const viewId = surfaceId ?? browserSurfaceIdForPage(pageId)
   const {
-    clearBrowsingData,
     currentUrl,
     goBack,
     goForward,
@@ -479,17 +482,6 @@ export function BrowserPanel({
       {isMenuOpen && menuPosition
         ? createPortal(
             <div className="browser-panel__menu" style={menuPosition}>
-              <button
-                className="browser-panel__menu-item"
-                type="button"
-                onClick={() => {
-                  void clearBrowsingData()
-                  setIsMenuOpen(false)
-                }}
-              >
-                <span>{t('browser.clearBrowsingData')}</span>
-              </button>
-
               <div className="browser-panel__zoom-row">
                 <span>{t('browser.zoom')}</span>
                 <div className="browser-panel__zoom-control">
@@ -510,10 +502,54 @@ export function BrowserPanel({
                   </button>
                 </div>
               </div>
+              <hr />
+              <button
+                className="browser-panel__menu-item"
+                type="button"
+                onClick={() => {
+                  setIsMenuOpen(false)
+                  onOpenSettings?.('downloads')
+                }}
+              >
+                <span>{t('browser.downloadCenter.title')}</span>
+              </button>
+              <button
+                className="browser-panel__menu-item"
+                type="button"
+                onClick={() => {
+                  setIsMenuOpen(false)
+                  onOpenSettings?.('history')
+                }}
+              >
+                <span>{t('browser.history')}</span>
+              </button>
+              <button
+                className="browser-panel__menu-item"
+                type="button"
+                onClick={() => {
+                  setIsMenuOpen(false)
+                  setIsClearDataOpen(true)
+                }}
+              >
+                <span>{t('browser.clearBrowsingData')}</span>
+              </button>
+              <hr />
+              <button
+                className="browser-panel__menu-item"
+                type="button"
+                onClick={() => {
+                  setIsMenuOpen(false)
+                  onOpenSettings?.('settings')
+                }}
+              >
+                <span>{t('browser.settings')}</span>
+              </button>
             </div>,
             document.body
           )
         : null}
+
+      {isClearDataOpen && <ClearBrowsingDataDialog onClose={() => setIsClearDataOpen(false)} />}
 
       <div className="browser-panel__content" data-fixed-viewport={viewport ? 'true' : undefined}>
         <WebviewSurface
