@@ -187,7 +187,7 @@ pnpm build:<platform>
 - `pnpm check` 和专项 gate 日志；
 - 已知 pending/unsupported 项。
 
-回滚当前只能发布前一已验证产物或停止分发；仓库没有自动更新/回滚服务。数据库又采用开发 reset-only policy，不能假设新版本写入的 v20 后继库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略。
+回滚当前只能发布前一已验证产物或停止分发；仓库没有自动更新/回滚服务。数据库又采用开发 reset-only policy，不能假设新版本写入的 v23 后继库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略。
 
 ## 9. 代码真源
 

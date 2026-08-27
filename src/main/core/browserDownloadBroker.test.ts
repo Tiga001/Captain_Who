@@ -247,6 +247,166 @@ describe('BrowserDownloadBroker', () => {
     await broker.shutdown()
   })
 
+  it('detaches an admitted Agent transfer from its click and exposes task-scoped progress', async () => {
+    const { broker, guest, records, session, systemDirectory } = await createHarness()
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    lease.markDispatched()
+    const item = new FakeDownloadItem('installer.dmg', 'application/x-apple-diskimage', 100)
+
+    dispatchDownload(session, guest, item)
+    await waitForManagedPath(item)
+    item.update(25, 10)
+
+    await expect(lease.settle()).resolves.toEqual([])
+    expect(lease.progress?.()).toMatchObject([
+      {
+        displayName: 'installer.dmg',
+        state: 'progressing',
+        receivedBytes: 25,
+        totalBytes: 100,
+        bytesPerSecond: 10
+      }
+    ])
+    lease.finish()
+    await broker.releaseToolCall({ runId: OWNER.runId, toolCallId: OWNER.toolCallId })
+
+    item.update(75, 20)
+    expect(
+      broker.agentDownloadSnapshot({
+        runId: OWNER.runId,
+        activationId: OWNER.activationId,
+        conversationId: OWNER.conversationId
+      }).downloads
+    ).toMatchObject([{ state: 'progressing', receivedBytes: 75, bytesPerSecond: 20 }])
+    expect(item.cancelled).toBe(false)
+
+    await item.complete(Buffer.alloc(100))
+    await waitFor(() => records.length === 1)
+    const [completed] = broker.agentDownloadSnapshot({
+      runId: OWNER.runId,
+      activationId: OWNER.activationId,
+      conversationId: OWNER.conversationId
+    }).downloads
+    expect(completed).toMatchObject({
+      state: 'completed',
+      receivedBytes: 100,
+      reference: {
+        displayName: 'installer.dmg',
+        sizeBytes: 100,
+        source: 'agent'
+      }
+    })
+    expect(JSON.stringify(completed)).not.toContain(systemDirectory)
+    expect(JSON.stringify(completed)).not.toContain('example.com')
+    await broker.shutdown()
+  })
+
+  it('reports finalizing until hashing and durable registration publish the reference', async () => {
+    let registrationInput: BrowserDownloadRegistrationInput | undefined
+    let releaseRegistration!: (record: BrowserDownloadRecord) => void
+    const registration = new Promise<BrowserDownloadRecord>((resolve) => {
+      releaseRegistration = resolve
+    })
+    const { broker, guest, session } = await createHarness({
+      registerDownload: async (input) => {
+        registrationInput = input
+        return await registration
+      }
+    })
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    lease.markDispatched()
+    const item = new FakeDownloadItem('verified.bin', 'application/octet-stream', 4)
+
+    dispatchDownload(session, guest, item)
+    await waitForManagedPath(item)
+    await expect(lease.settle()).resolves.toEqual([])
+    lease.finish()
+    await item.complete()
+    await waitFor(() => registrationInput !== undefined)
+
+    const [finalizing] = broker.agentDownloadSnapshot({
+      runId: OWNER.runId,
+      activationId: OWNER.activationId,
+      conversationId: OWNER.conversationId
+    }).downloads
+    expect(finalizing).toMatchObject({ state: 'finalizing' })
+    expect(finalizing?.reference).toBeUndefined()
+
+    releaseRegistration({ ...registrationInput!, projectId: 'project-1' })
+    await waitFor(
+      () =>
+        broker.agentDownloadSnapshot({
+          runId: OWNER.runId,
+          activationId: OWNER.activationId,
+          conversationId: OWNER.conversationId
+        }).downloads[0]?.state === 'completed'
+    )
+    await broker.shutdown()
+  })
+
+  it('reports an Agent save prompt as awaiting a destination without showing a false transfer', async () => {
+    const { broker, guest, root, session } = await createHarness({ askWhereToSave: true })
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    lease.markDispatched()
+    const item = new FakeDownloadItem('prompted.zip', 'application/zip', 50)
+
+    dispatchDownload(session, guest, item)
+    await waitFor(() => Boolean(item.saveDialogOptions))
+    await expect(lease.settle()).resolves.toEqual([])
+    expect(lease.progress?.()).toMatchObject([
+      {
+        displayName: 'prompted.zip',
+        state: 'awaiting_destination',
+        receivedBytes: 0,
+        bytesPerSecond: 0
+      }
+    ])
+    expect(broker.downloadCenterSnapshot().downloads).toEqual([])
+    lease.finish()
+
+    const selectedPath = join(root, 'prompted.zip')
+    item.chooseSavePath(selectedPath)
+    item.update(10, 5)
+    expect(
+      broker.agentDownloadSnapshot({
+        runId: OWNER.runId,
+        activationId: OWNER.activationId,
+        conversationId: OWNER.conversationId
+      }).downloads
+    ).toMatchObject([{ state: 'progressing', receivedBytes: 10, bytesPerSecond: 5 }])
+    await item.complete(Buffer.alloc(50))
+    await waitFor(
+      () =>
+        broker.agentDownloadSnapshot({
+          runId: OWNER.runId,
+          activationId: OWNER.activationId,
+          conversationId: OWNER.conversationId
+        }).downloads[0]?.state === 'completed'
+    )
+    await broker.shutdown()
+  })
+
+  it('admits a 419 MiB Agent transfer under the production default budget', async () => {
+    const { broker, guest, session } = await createHarness()
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    lease.markDispatched()
+    const item = new FakeDownloadItem(
+      'WorkBuddy.dmg',
+      'application/x-apple-diskimage',
+      419 * 1024 * 1024
+    )
+
+    dispatchDownload(session, guest, item)
+    await waitForManagedPath(item)
+    await expect(lease.settle()).resolves.toEqual([])
+    expect(item.cancelled).toBe(false)
+    expect(lease.progress?.()).toMatchObject([
+      { state: 'progressing', totalBytes: 419 * 1024 * 1024 }
+    ])
+    lease.finish()
+    await broker.shutdown()
+  })
+
   it('persists a manual download without assigning Agent ownership', async () => {
     const { broker, guest, records, session } = await createHarness()
     const item = new FakeDownloadItem('manual.txt')

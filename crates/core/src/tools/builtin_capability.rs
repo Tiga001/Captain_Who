@@ -1660,6 +1660,45 @@ mod tests {
     }
 
     #[test]
+    fn builtin_browser_download_persistence_keeps_only_schema_v2_path_free_references() {
+        let download = json!({
+            "schemaVersion": 2,
+            "downloadId": "browser-download:123e4567-e89b-42d3-a456-426614174000",
+            "displayName": "WorkBuddy.dmg",
+            "mimeType": "application/x-apple-diskimage",
+            "sizeBytes": 419 * 1024 * 1024_u64,
+            "sha256": "a".repeat(64),
+            "createdAt": 1_000,
+            "source": "agent"
+        });
+        let result = |reference: Value| AgentToolResult {
+            exact_archive_file: None,
+            call_id: "browser-download-call".to_string(),
+            tool: "browser_get_config".to_string(),
+            ok: true,
+            result: Some(json!({
+                "type": "managed_mcp_tool_result",
+                "structuredContent": {"downloads": [reference]}
+            })),
+            error: None,
+        };
+
+        let projected =
+            builtin_capability_tool_result_persistence_projection(&result(download.clone()));
+        assert_eq!(
+            projected.result.unwrap()["downloads"],
+            json!([download.clone()])
+        );
+
+        let mut forged = download;
+        forged["absolutePath"] = json!("/Users/private/Downloads/WorkBuddy.dmg");
+        let projected = builtin_capability_tool_result_persistence_projection(&result(forged));
+        let safe = projected.result.unwrap();
+        assert!(safe.get("downloads").is_none());
+        assert!(!serde_json::to_string(&safe).unwrap().contains("/Users/"));
+    }
+
+    #[test]
     fn builtin_browser_failed_projection_rejects_untrusted_diagnostic_values() {
         let secret = "BUILTIN_BROWSER_DIAGNOSTIC_VALUE_CANARY";
         let raw = AgentToolResult {

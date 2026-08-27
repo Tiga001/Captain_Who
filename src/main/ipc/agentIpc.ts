@@ -75,6 +75,9 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateSetEnabled, (_event, input) =>
     captureHostInvocation(() => coreServer.setAgentTemplateEnabled(input))
   )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateSetProjectAssignment, (_event, input) =>
+    captureHostInvocation(() => coreServer.setAgentTemplateProjectAssignment(input))
+  )
   ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateDelete, (_event, input) =>
     captureHostInvocation(() => coreServer.deleteAgentTemplate(input))
   )

@@ -355,8 +355,15 @@ export const ruRUTranslations = {
   'settings.breadcrumb.root': 'Настройки',
   'settings.page.environment': 'Окружающая среда',
   'settings.page.archivedConversations': 'Архивированные чаты',
-  'agentTemplates.descriptionText': 'Шаблоны субагентов, которые может вызывать главный агент',
+  'agentTemplates.descriptionText':
+    'Создавайте повторно используемые шаблоны субагентов и выбирайте проекты, в которых они доступны.',
   'agentTemplates.project': 'Проект',
+  'agentTemplates.projects': 'Доступно в проектах',
+  'agentTemplates.projectsHint':
+    'Выберите проекты, которые могут использовать этот шаблон. Оставьте всё пустым, чтобы назначить его позже.',
+  'agentTemplates.noProjectsAvailable':
+    'Проектов пока нет. Шаблон можно сохранить и назначить позже.',
+  'agentTemplates.projectCount': 'Назначено проектов: {count}',
   'agentTemplates.create': 'Новый шаблон',
   'agentTemplates.createTitle': 'Новый шаблон Agent',
   'agentTemplates.editTitle': 'Редактировать шаблон Agent',
@@ -391,7 +398,7 @@ export const ruRUTranslations = {
   'agentTemplates.delete': 'Удалить шаблон',
   'agentTemplates.deleteTitle': 'Удалить Agent шаблон?',
   'agentTemplates.deleteDescription':
-    'Будущие агенты больше не смогут выбирать этот шаблон. Существующие агенты сохраняют свои снимки.',
+    'Этот шаблон назначен проектам: {count}. При удалении он станет недоступен во всех проектах. Существующие агенты сохранят свои снимки.',
   'agentCenter.loading': 'Загрузка субагентов…',
   'agentCenter.unavailable': 'Состояние субагента недоступно.',
   'agentCenter.observerUnavailable': 'Эта беседа, доступная только для чтения, недоступна.',

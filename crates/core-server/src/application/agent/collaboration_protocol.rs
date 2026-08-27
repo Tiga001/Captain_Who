@@ -11,15 +11,16 @@ use mycopilot_protocol_rs::{
     AgentObserverConversationRequest, AgentObserverInputOriginDto, AgentObserverInputOriginKindDto,
     AgentObserverMessageDto, AgentSummaryDto, AgentTemplateBindingDto, AgentTemplateCreateRequest,
     AgentTemplateDeleteRequest, AgentTemplateDto, AgentTemplateListDto, AgentTemplateListRequest,
-    AgentTemplateSetEnabledRequest, AgentTemplateUpdateRequest, AgentTreeLookupDto,
-    AgentTreeRequest, AgentTreeSnapshotDto, CollaborationActivitySemanticDto,
-    CollaborationActivitySnapshotDto, CollaborationApprovalDecisionDto,
-    CollaborationApprovalDecisionRequest, CollaborationApprovalDecisionResultDto,
-    CollaborationApprovalListDto, CollaborationApprovalListRequest,
-    CollaborationApprovalProjectionDto, CollaborationApprovalStatusDto,
-    CollaborationEventEnvelopeDto, CollaborationEventKindDto, CollaborationEventsPageDto,
-    CollaborationEventsRequest, AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
-    AGENT_COLLABORATION_EVENT_SCHEMA_VERSION, AGENT_COLLABORATION_SCHEMA_VERSION,
+    AgentTemplateProjectAssignmentRequest, AgentTemplateSetEnabledRequest,
+    AgentTemplateUpdateRequest, AgentTreeLookupDto, AgentTreeRequest, AgentTreeSnapshotDto,
+    CollaborationActivitySemanticDto, CollaborationActivitySnapshotDto,
+    CollaborationApprovalDecisionDto, CollaborationApprovalDecisionRequest,
+    CollaborationApprovalDecisionResultDto, CollaborationApprovalListDto,
+    CollaborationApprovalListRequest, CollaborationApprovalProjectionDto,
+    CollaborationApprovalStatusDto, CollaborationEventEnvelopeDto, CollaborationEventKindDto,
+    CollaborationEventsPageDto, CollaborationEventsRequest,
+    AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION, AGENT_COLLABORATION_EVENT_SCHEMA_VERSION,
+    AGENT_COLLABORATION_SCHEMA_VERSION,
 };
 
 const TREE_LIMIT: usize = 1_024;
@@ -247,7 +248,7 @@ impl AgentService {
         let models = safe_models(&self.storage)?;
         let templates = self
             .storage
-            .list_agent_templates(&input.project_id, input.include_disabled)
+            .list_agent_templates(input.include_disabled)
             .map_err(safe_template_error)?
             .into_iter()
             .map(|record| template_dto(record, &models))
@@ -266,7 +267,6 @@ impl AgentService {
             .storage
             .create_agent_template(&mycopilot_core::CreateAgentTemplateInput {
                 template_id: input.template_id,
-                project_id: input.project_id,
                 machine_key: input.machine_key,
                 name: input.name,
                 description: input.description,
@@ -285,7 +285,6 @@ impl AgentService {
         let record = self
             .storage
             .update_agent_template(&mycopilot_core::UpdateAgentTemplateInput {
-                project_id: input.project_id,
                 template_id: input.template_id,
                 expected_revision: input.expected_revision,
                 name: input.name,
@@ -303,12 +302,7 @@ impl AgentService {
     ) -> Result<AgentTemplateDto, AgentServiceError> {
         let record = self
             .storage
-            .set_agent_template_enabled(
-                &input.project_id,
-                &input.template_id,
-                input.expected_revision,
-                input.enabled,
-            )
+            .set_agent_template_enabled(&input.template_id, input.expected_revision, input.enabled)
             .map_err(safe_template_error)?;
         Ok(template_dto(record, &safe_models(&self.storage)?))
     }
@@ -320,13 +314,24 @@ impl AgentService {
         let models = safe_models(&self.storage)?;
         let record = self
             .storage
-            .delete_agent_template(
-                &input.project_id,
-                &input.template_id,
-                input.expected_revision,
-            )
+            .delete_agent_template(&input.template_id, input.expected_revision)
             .map_err(safe_template_error)?;
         Ok(template_dto(record, &models))
+    }
+
+    pub fn set_collaboration_template_project_assignment(
+        &self,
+        input: AgentTemplateProjectAssignmentRequest,
+    ) -> Result<AgentTemplateDto, AgentServiceError> {
+        let record = self
+            .storage
+            .set_agent_template_project_assignment(
+                &input.project_id,
+                &input.template_id,
+                input.assigned,
+            )
+            .map_err(safe_template_error)?;
+        Ok(template_dto(record, &safe_models(&self.storage)?))
     }
 
     pub fn list_collaboration_approvals(
@@ -637,7 +642,7 @@ fn template_dto(
     AgentTemplateDto {
         schema_version: AGENT_COLLABORATION_SCHEMA_VERSION,
         template_id: record.template_id,
-        project_id: record.project_id,
+        project_ids: record.project_ids,
         machine_key: record.machine_key,
         name: record.name,
         description: record.description,

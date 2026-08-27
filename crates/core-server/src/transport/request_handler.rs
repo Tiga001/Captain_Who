@@ -160,6 +160,17 @@ pub(crate) fn handle_request(
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
+        AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD => {
+            let input = match parse_params::<AgentTemplateProjectAssignmentRequest>(request.params)
+            {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.set_collaboration_template_project_assignment(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
         AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD => {
             let input = match parse_params::<AgentTemplateDeleteRequest>(request.params) {
                 Ok(input) => input,

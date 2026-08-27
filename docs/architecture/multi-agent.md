@@ -70,6 +70,7 @@ AgentDispatcher → 统一 Turn executor → 原 Agent Runtime/Tool
 - 子 Agent spawn 在同一事务创建/导入 Conversation、冻结 snapshot、AgentNode、initial task Mailbox、唯一投影/ack 和 queued Wake。
 - task path 由后端从父子关系生成；不得接受模型传入的完整路径。
 - 模板更新只影响未来节点；模型 snapshot 冻结精确 `model_config_id` 与审计能力，不复制 Token、URL 或 Provider 凭据。
+- 模板定义属于全局模板库；`project_agent_template_bindings` 决定一个项目未来可以 spawn 哪些模板。删除项目或取消关联只删除授权关系，不改写已创建节点的模板 snapshot。
 - `fork_turns=none | all | N` 复制已结算的逻辑轮次；active 尾部、Usage、pending action、Command Session、provider continuation 等不复制。
 
 ### MailboxMessage
@@ -122,7 +123,7 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 
 ### Selector 目录
 
-Host 给每个 Turn 冻结脱敏模板/模型目录：每类最多 32 项，总编码后 JSON 最多 16 KiB，并包含后端权威 `imageInput` 能力。目录只是精确 allowlist；过期、被禁用或截断的 selector 必须 fail closed，不按名称猜测。Approval continuation 使用原 checkpoint 的目录，不在恢复时扩大权限。
+Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：每类最多 32 项，总编码后 JSON 最多 16 KiB，并包含后端权威 `imageInput` 能力。模板 selector 的 Host 授权还冻结精确 template ID/revision；模型仍只提交 `agent_type`。目录只是精确 allowlist；过期、被禁用、被解绑、被修改或截断的 selector 必须 fail closed，不按名称猜测。Approval continuation 使用原 checkpoint 的目录，不在恢复时扩大权限。
 
 ## 5. 授权与配额
 
@@ -188,13 +189,13 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 ## 8. Schema
 
-当前 canonical storage 是 **v20**。唯一真源：
+当前 canonical storage 是 **v23**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 20;
+pub const STORAGE_SCHEMA_VERSION: i32 = 23;
 ```
 
-版本不等于 20、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v20。
+版本不等于 23、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v23。
 
 ## 9. 代码真源
 
@@ -243,5 +244,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 根 Agent/子 Agent/project/祖先权限是否从持久事实解析，而不是调用参数？
 - [ ] wait 是否保持 SQLite 权威、first-ready、独立停止域和 precommitted ToolResult？
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
-- [ ] 是否更新 schema v20 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v23 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

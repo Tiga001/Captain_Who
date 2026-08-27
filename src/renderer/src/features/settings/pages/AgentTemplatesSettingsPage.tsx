@@ -12,10 +12,10 @@ import {
   deleteAgentTemplate,
   listAgentTemplates,
   setAgentTemplateEnabled,
+  setAgentTemplateProjectAssignment,
   updateAgentTemplate
 } from '../../agentCollaboration/collaborationClient'
 import { SettingsBreadcrumbs } from '../components/SettingsBreadcrumbs'
-import { SettingsSelect } from '../components/SettingsSelect'
 import './AgentTemplatesSettingsPage.css'
 
 interface AgentTemplatesSettingsPageProps {
@@ -30,6 +30,7 @@ interface TemplateFormState {
   kind: 'create' | 'edit'
   modelConfigId: string | null
   name: string
+  projectIds: string[]
   template: AgentTemplate | null
 }
 
@@ -40,128 +41,83 @@ export function AgentTemplatesSettingsPage({
 }: AgentTemplatesSettingsPageProps) {
   const { t } = useFrontendConfig()
   const { enabledModels, models } = useModelSettings()
-  const [projectId, setProjectId] = useState<string | null>(() =>
-    selectInitialProjectId(projects, initialProjectId)
-  )
   const [templates, setTemplates] = useState<AgentTemplate[]>([])
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [operationError, setOperationError] = useState<string | null>(null)
   const [busyTemplateId, setBusyTemplateId] = useState<string | null>(null)
   const [form, setForm] = useState<TemplateFormState | null>(null)
   const [pendingDelete, setPendingDelete] = useState<AgentTemplate | null>(null)
-  const projectIdRef = useRef(projectId)
-  const selectProject = useCallback((nextProjectId: string | null) => {
-    projectIdRef.current = nextProjectId
-    setProjectId(nextProjectId)
-    setTemplates([])
-    setBusyTemplateId(null)
-    setForm(null)
-    setPendingDelete(null)
-    setError(null)
-  }, [])
+  const loadRequestRef = useRef(0)
 
-  useEffect(() => {
-    projectIdRef.current = projectId
-  }, [projectId])
-
-  useEffect(() => {
-    if (projectId && projects.some((project) => project.id === projectId)) return
-    selectProject(selectInitialProjectId(projects, initialProjectId))
-  }, [initialProjectId, projectId, projects, selectProject])
-
-  const reload = useCallback(async () => {
-    const requestProjectId = projectId
-    if (!requestProjectId) {
-      setTemplates([])
-      setLoading(false)
-      setError(null)
-      return
-    }
+  const reload = useCallback(async (): Promise<AgentTemplate[] | null> => {
+    const requestId = ++loadRequestRef.current
     setLoading(true)
-    setError(null)
+    setLoadError(null)
     try {
-      const result = await listAgentTemplates({
-        includeDisabled: true,
-        projectId: requestProjectId
-      })
-      if (projectIdRef.current !== requestProjectId) return
-      setTemplates(sortTemplates(result.templates))
+      const result = await listAgentTemplates({ includeDisabled: true })
+      if (loadRequestRef.current !== requestId) return null
+      const sorted = sortTemplates(result.templates)
+      setTemplates(sorted)
+      return sorted
     } catch (loadError) {
-      if (projectIdRef.current !== requestProjectId) return
-      setError(getUserFacingErrorMessage(loadError, t, 'agentTemplates.loadFailed'))
+      if (loadRequestRef.current !== requestId) return null
+      setLoadError(getUserFacingErrorMessage(loadError, t, 'agentTemplates.loadFailed'))
+      return null
     } finally {
-      if (projectIdRef.current === requestProjectId) setLoading(false)
+      if (loadRequestRef.current === requestId) setLoading(false)
     }
-  }, [projectId, t])
+  }, [t])
 
   useEffect(() => {
-    let cancelled = false
-    if (!projectId) {
-      setTemplates([])
-      setLoading(false)
-      setError(null)
-      return
-    }
-    setLoading(true)
-    setError(null)
-    const requestProjectId = projectId
-    void listAgentTemplates({ includeDisabled: true, projectId: requestProjectId })
-      .then((result) => {
-        if (!cancelled && projectIdRef.current === requestProjectId) {
-          setTemplates(sortTemplates(result.templates))
-        }
-      })
-      .catch((loadError) => {
-        if (!cancelled && projectIdRef.current === requestProjectId) {
-          setError(getUserFacingErrorMessage(loadError, t, 'agentTemplates.loadFailed'))
-        }
-      })
-      .finally(() => {
-        if (!cancelled && projectIdRef.current === requestProjectId) setLoading(false)
-      })
+    void reload()
     return () => {
-      cancelled = true
+      loadRequestRef.current += 1
     }
-  }, [projectId, t])
+  }, [reload])
 
-  const projectOptions = projects.map((project) => ({ label: project.name, value: project.id }))
   const enabledModelIds = useMemo(
     () => new Set(enabledModels.map((model) => model.id)),
     [enabledModels]
   )
 
   const startCreate = () => {
+    setOperationError(null)
     setForm({
       description: '',
       instructions: '',
       kind: 'create',
       modelConfigId: enabledModels[0]?.id ?? null,
       name: '',
+      projectIds:
+        initialProjectId && projects.some((project) => project.id === initialProjectId)
+          ? [initialProjectId]
+          : [],
       template: null
     })
   }
 
   const startEdit = (template: AgentTemplate) => {
+    setOperationError(null)
     setForm({
       description: template.description,
       instructions: template.instructions,
       kind: 'edit',
       modelConfigId: template.modelConfigId,
       name: template.name,
+      projectIds: [...template.projectIds],
       template
     })
   }
 
   const runTemplateMutation = async (
-    mutationProjectId: string,
     templateId: string,
     mutation: () => Promise<AgentTemplate>
   ): Promise<AgentTemplate | null> => {
     setBusyTemplateId(templateId)
-    setError(null)
+    setOperationError(null)
     try {
       const result = await mutation()
-      if (projectIdRef.current !== mutationProjectId) return null
       setTemplates((current) =>
         sortTemplates([
           ...current.filter((template) => template.templateId !== result.templateId),
@@ -170,16 +126,16 @@ export function AgentTemplatesSettingsPage({
       )
       return result
     } catch (mutationError) {
-      if (projectIdRef.current !== mutationProjectId) return null
-      setError(getUserFacingErrorMessage(mutationError, t, 'agentTemplates.operationFailed'))
-      void reload()
+      const message = getUserFacingErrorMessage(mutationError, t, 'agentTemplates.operationFailed')
+      await reload()
+      setOperationError(message)
       return null
     } finally {
-      if (projectIdRef.current === mutationProjectId) setBusyTemplateId(null)
+      setBusyTemplateId(null)
     }
   }
 
-  if (form && projectId) {
+  if (form) {
     const unavailableModel =
       form.modelConfigId && !enabledModelIds.has(form.modelConfigId)
         ? {
@@ -235,34 +191,60 @@ export function AgentTemplatesSettingsPage({
             event.preventDefault()
             if (!canSave || !form.modelConfigId || busyTemplateId !== null) return
             const templateId = form.template?.templateId ?? crypto.randomUUID()
-            void runTemplateMutation(projectId, templateId, () =>
-              form.kind === 'create'
-                ? createAgentTemplate({
-                    description: form.description,
-                    enabled: true,
-                    instructions: form.instructions,
-                    machineKey: createTemplateMachineKey(
-                      form.name,
-                      templateId,
-                      templates.map((template) => template.machineKey)
-                    ),
-                    modelConfigId: form.modelConfigId!,
-                    name: form.name,
-                    projectId,
-                    templateId
-                  })
-                : updateAgentTemplate({
-                    description: form.description,
-                    expectedRevision: form.template!.revision,
-                    instructions: form.instructions,
-                    modelConfigId: form.modelConfigId!,
-                    name: form.name,
-                    projectId,
-                    templateId
-                  })
-            ).then((saved) => {
-              if (saved) setForm(null)
-            })
+            setBusyTemplateId(templateId)
+            setOperationError(null)
+            void (async () => {
+              try {
+                const savedDefinition =
+                  form.kind === 'create'
+                    ? await createAgentTemplate({
+                        description: form.description,
+                        enabled: true,
+                        instructions: form.instructions,
+                        machineKey: createTemplateMachineKey(
+                          form.name,
+                          templateId,
+                          templates.map((template) => template.machineKey)
+                        ),
+                        modelConfigId: form.modelConfigId!,
+                        name: form.name,
+                        templateId
+                      })
+                    : await updateAgentTemplate({
+                        description: form.description,
+                        expectedRevision: form.template!.revision,
+                        instructions: form.instructions,
+                        modelConfigId: form.modelConfigId!,
+                        name: form.name,
+                        templateId
+                      })
+                const saved = await reconcileProjectAssignments(savedDefinition, form.projectIds)
+                setTemplates((current) => upsertTemplate(current, saved))
+                setForm(null)
+              } catch (mutationError) {
+                const message = getUserFacingErrorMessage(
+                  mutationError,
+                  t,
+                  'agentTemplates.operationFailed'
+                )
+                const refreshed = await reload()
+                const canonical = refreshed?.find((template) => template.templateId === templateId)
+                if (canonical) {
+                  setForm((current) =>
+                    current
+                      ? {
+                          ...current,
+                          kind: 'edit',
+                          template: canonical
+                        }
+                      : current
+                  )
+                }
+                setOperationError(message)
+              } finally {
+                setBusyTemplateId(null)
+              }
+            })()
           }}
         >
           <label>
@@ -275,6 +257,36 @@ export function AgentTemplatesSettingsPage({
               value={form.name}
             />
           </label>
+          <fieldset className="agent-template-form__projects">
+            <legend>{t('agentTemplates.projects')}</legend>
+            <p>{t('agentTemplates.projectsHint')}</p>
+            {projects.length > 0 ? (
+              <div className="agent-template-form__project-list">
+                {projects.map((project) => (
+                  <label key={project.id}>
+                    <input
+                      checked={form.projectIds.includes(project.id)}
+                      onChange={(event) => {
+                        const checked = event.currentTarget.checked
+                        setForm({
+                          ...form,
+                          projectIds: checked
+                            ? [...form.projectIds, project.id]
+                            : form.projectIds.filter((projectId) => projectId !== project.id)
+                        })
+                      }}
+                      type="checkbox"
+                    />
+                    <span>{project.name}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <span className="agent-template-form__no-projects">
+                {t('agentTemplates.noProjectsAvailable')}
+              </span>
+            )}
+          </fieldset>
           <label>
             <span>{t('agentTemplates.description')}</span>
             <textarea
@@ -327,7 +339,11 @@ export function AgentTemplatesSettingsPage({
             </button>
           </div>
         </form>
-        {error ? <p className="agent-templates-page__error">{error}</p> : null}
+        {operationError ? (
+          <p className="agent-templates-page__error" role="alert">
+            {operationError}
+          </p>
+        ) : null}
       </article>
     )
   }
@@ -341,7 +357,7 @@ export function AgentTemplatesSettingsPage({
         </div>
         <button
           className="agent-templates-create-button"
-          disabled={!projectId || enabledModels.length === 0}
+          disabled={enabledModels.length === 0}
           onClick={startCreate}
           type="button"
         >
@@ -350,148 +366,136 @@ export function AgentTemplatesSettingsPage({
         </button>
       </header>
 
-      {projects.length > 0 && projectId ? (
-        <label className="agent-templates-page__project">
-          <span>{t('agentTemplates.project')}</span>
-          <SettingsSelect
-            ariaLabel={t('agentTemplates.project')}
-            onChange={(nextProjectId) => {
-              selectProject(nextProjectId)
-            }}
-            options={projectOptions}
-            value={projectId}
-          />
-        </label>
-      ) : (
-        <div className="agent-templates-page__empty">
-          <Bot aria-hidden="true" />
-          <strong>{t('agentTemplates.noProject')}</strong>
-          <span>{t('agentTemplates.noProjectHint')}</span>
-        </div>
-      )}
-
-      {projectId ? (
-        <section aria-label={t('agentTemplates.list')} className="agent-templates-page__list">
-          {loading ? <p role="status">{t('agentTemplates.loading')}</p> : null}
-          {!loading && error ? (
-            <div className="agent-templates-page__load-error" role="alert">
-              <span>{error}</span>
-              <button onClick={() => void reload()} type="button">
-                <RefreshCw aria-hidden="true" />
-                {t('agentTemplates.retry')}
-              </button>
-            </div>
-          ) : null}
-          {!loading && !error && templates.length === 0 ? (
-            <div className="agent-templates-page__empty">
-              <Bot aria-hidden="true" />
-              <strong>{t('agentTemplates.empty')}</strong>
-              <span>{t('agentTemplates.emptyHint')}</span>
-            </div>
-          ) : null}
-          {!loading && templates.length > 0
-            ? templates.map((template) => {
-                const modelAvailable = enabledModelIds.has(template.modelConfigId)
-                const busy = busyTemplateId === template.templateId
-                return (
-                  <article className="agent-template-row" key={template.templateId}>
-                    <div className="agent-template-row__copy">
-                      <div className="agent-template-row__title">
-                        <strong>{template.name}</strong>
-                        <span data-status={template.enabled ? 'enabled' : 'disabled'}>
-                          {template.enabled
-                            ? t('agentTemplates.enabled')
-                            : t('agentTemplates.disabled')}
-                        </span>
-                      </div>
-                      {template.description ? <p>{template.description}</p> : null}
-                      <small data-unavailable={!modelAvailable || undefined}>
-                        {modelAvailable
-                          ? (template.modelDisplayName ?? template.modelConfigId)
-                          : `${template.modelDisplayName ?? template.modelConfigId} · ${t(
-                              'agentTemplates.modelUnavailable'
-                            )}`}
-                      </small>
-                      {!modelAvailable ? (
-                        <span className="agent-template-row__warning">
-                          {t('agentTemplates.reselectModel')}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="agent-template-row__actions">
-                      <button
-                        aria-label={`${t('agentTemplates.edit')} ${template.name}`}
-                        disabled={busy}
-                        onClick={() => startEdit(template)}
-                        type="button"
-                      >
-                        <Pencil aria-hidden="true" />
-                      </button>
-                      <button
-                        disabled={busy || (!modelAvailable && !template.enabled)}
-                        onClick={() => {
-                          void runTemplateMutation(projectId, template.templateId, () =>
-                            setAgentTemplateEnabled({
-                              enabled: !template.enabled,
-                              expectedRevision: template.revision,
-                              projectId,
-                              templateId: template.templateId
-                            })
-                          )
-                        }}
-                        type="button"
-                      >
-                        {template.enabled
-                          ? t('agentTemplates.disable')
-                          : t('agentTemplates.enable')}
-                      </button>
-                      <button
-                        aria-label={`${t('agentTemplates.delete')} ${template.name}`}
-                        disabled={busy}
-                        onClick={() => setPendingDelete(template)}
-                        type="button"
-                      >
-                        <Trash2 aria-hidden="true" />
-                      </button>
-                    </div>
-                  </article>
-                )
-              })
-            : null}
-        </section>
+      {operationError ? (
+        <p className="agent-templates-page__error" role="alert">
+          {operationError}
+        </p>
       ) : null}
 
-      {pendingDelete && projectId ? (
+      <section aria-label={t('agentTemplates.list')} className="agent-templates-page__list">
+        {loading ? <p role="status">{t('agentTemplates.loading')}</p> : null}
+        {!loading && loadError ? (
+          <div className="agent-templates-page__load-error" role="alert">
+            <span>{loadError}</span>
+            <button onClick={() => void reload()} type="button">
+              <RefreshCw aria-hidden="true" />
+              {t('agentTemplates.retry')}
+            </button>
+          </div>
+        ) : null}
+        {!loading && !loadError && templates.length === 0 ? (
+          <div className="agent-templates-page__empty">
+            <Bot aria-hidden="true" />
+            <strong>{t('agentTemplates.empty')}</strong>
+            <span>{t('agentTemplates.emptyHint')}</span>
+          </div>
+        ) : null}
+        {!loading && !loadError && templates.length > 0
+          ? templates.map((template) => {
+              const modelAvailable = enabledModelIds.has(template.modelConfigId)
+              const busy = busyTemplateId === template.templateId
+              return (
+                <article className="agent-template-row" key={template.templateId}>
+                  <div className="agent-template-row__copy">
+                    <div className="agent-template-row__title">
+                      <strong>{template.name}</strong>
+                      <span data-status={template.enabled ? 'enabled' : 'disabled'}>
+                        {template.enabled
+                          ? t('agentTemplates.enabled')
+                          : t('agentTemplates.disabled')}
+                      </span>
+                    </div>
+                    {template.description ? <p>{template.description}</p> : null}
+                    <small data-unavailable={!modelAvailable || undefined}>
+                      {modelAvailable
+                        ? (template.modelDisplayName ?? template.modelConfigId)
+                        : `${template.modelDisplayName ?? template.modelConfigId} · ${t(
+                            'agentTemplates.modelUnavailable'
+                          )}`}
+                    </small>
+                    <small>
+                      {replaceTokens(t('agentTemplates.projectCount'), {
+                        count: String(template.projectIds.length)
+                      })}
+                    </small>
+                    {!modelAvailable ? (
+                      <span className="agent-template-row__warning">
+                        {t('agentTemplates.reselectModel')}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="agent-template-row__actions">
+                    <button
+                      aria-label={`${t('agentTemplates.edit')} ${template.name}`}
+                      disabled={busy}
+                      onClick={() => startEdit(template)}
+                      type="button"
+                    >
+                      <Pencil aria-hidden="true" />
+                    </button>
+                    <button
+                      disabled={busy || (!modelAvailable && !template.enabled)}
+                      onClick={() => {
+                        void runTemplateMutation(template.templateId, () =>
+                          setAgentTemplateEnabled({
+                            enabled: !template.enabled,
+                            expectedRevision: template.revision,
+                            templateId: template.templateId
+                          })
+                        )
+                      }}
+                      type="button"
+                    >
+                      {template.enabled ? t('agentTemplates.disable') : t('agentTemplates.enable')}
+                    </button>
+                    <button
+                      aria-label={`${t('agentTemplates.delete')} ${template.name}`}
+                      disabled={busy}
+                      onClick={() => setPendingDelete(template)}
+                      type="button"
+                    >
+                      <Trash2 aria-hidden="true" />
+                    </button>
+                  </div>
+                </article>
+              )
+            })
+          : null}
+      </section>
+
+      {pendingDelete ? (
         <ConfirmationDialog
           cancelLabel={t('agentTemplates.cancel')}
           confirmLabel={t('agentTemplates.delete')}
-          description={t('agentTemplates.deleteDescription')}
+          description={replaceTokens(t('agentTemplates.deleteDescription'), {
+            count: String(pendingDelete.projectIds.length)
+          })}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => {
             const template = pendingDelete
             setPendingDelete(null)
             setBusyTemplateId(template.templateId)
-            setError(null)
+            setOperationError(null)
             void deleteAgentTemplate({
               expectedRevision: template.revision,
-              projectId,
               templateId: template.templateId
             })
               .then(() => {
-                if (projectIdRef.current !== projectId) return
                 setTemplates((current) =>
                   current.filter((candidate) => candidate.templateId !== template.templateId)
                 )
               })
-              .catch((deleteError) => {
-                if (projectIdRef.current !== projectId) return
-                setError(
-                  getUserFacingErrorMessage(deleteError, t, 'agentTemplates.operationFailed')
+              .catch(async (deleteError) => {
+                const message = getUserFacingErrorMessage(
+                  deleteError,
+                  t,
+                  'agentTemplates.operationFailed'
                 )
-                void reload()
+                await reload()
+                setOperationError(message)
               })
               .finally(() => {
-                if (projectIdRef.current === projectId) setBusyTemplateId(null)
+                setBusyTemplateId(null)
               })
           }}
           title={t('agentTemplates.deleteTitle')}
@@ -501,20 +505,49 @@ export function AgentTemplatesSettingsPage({
   )
 }
 
-function selectInitialProjectId(
-  projects: readonly AppProject[],
-  preferred: string | null | undefined
-): string | null {
-  if (preferred && projects.some((project) => project.id === preferred)) return preferred
-  return projects[0]?.id ?? null
-}
-
 function sortTemplates(templates: readonly AgentTemplate[]): AgentTemplate[] {
   return [...templates].sort(
     (left, right) =>
       Number(right.enabled) - Number(left.enabled) ||
       left.name.localeCompare(right.name) ||
       left.templateId.localeCompare(right.templateId)
+  )
+}
+
+function upsertTemplate(
+  templates: readonly AgentTemplate[],
+  template: AgentTemplate
+): AgentTemplate[] {
+  return sortTemplates([
+    ...templates.filter((candidate) => candidate.templateId !== template.templateId),
+    template
+  ])
+}
+
+async function reconcileProjectAssignments(
+  template: AgentTemplate,
+  desiredProjectIds: readonly string[]
+): Promise<AgentTemplate> {
+  const currentProjectIds = new Set(template.projectIds)
+  const desired = new Set(desiredProjectIds)
+  const projectIds = [...new Set([...currentProjectIds, ...desired])].sort()
+  let canonical = template
+  for (const projectId of projectIds) {
+    const assigned = desired.has(projectId)
+    if (currentProjectIds.has(projectId) === assigned) continue
+    canonical = await setAgentTemplateProjectAssignment({
+      assigned,
+      projectId,
+      templateId: template.templateId
+    })
+  }
+  return canonical
+}
+
+function replaceTokens(template: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce(
+    (current, [key, value]) => current.replaceAll(`{${key}}`, value),
+    template
   )
 }
 

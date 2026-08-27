@@ -47,8 +47,31 @@ impl StorageService {
         limits: AgentTreeResourceLimits,
         expected_model_capabilities: Option<crate::ModelCapabilities>,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_agent_with_limits_and_expected_selector(
+            input,
+            limits,
+            expected_model_capabilities,
+            None,
+        )
+    }
+
+    /// Creates a child against the exact template identity and model capability facts frozen in
+    /// the caller's model-visible selector directory. Direct Host callers may omit either check;
+    /// model Tool execution always supplies both when an `agent_type` selected a template.
+    pub fn create_child_agent_with_limits_and_expected_selector(
+        &self,
+        input: &CreateChildAgentInput,
+        limits: AgentTreeResourceLimits,
+        expected_model_capabilities: Option<crate::ModelCapabilities>,
+        expected_template_identity: Option<(&str, u64)>,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
         let limits = limits.validate()?;
         validate_spawn_input(input)?;
+        if expected_template_identity.is_some() && input.template_machine_key.is_none() {
+            return Err(ChildAgentSpawnError::Conflict(
+                "frozen template identity does not match the requested selector".to_string(),
+            ));
+        }
         let created_at = now_ms();
         let mut connection = self
             .state
@@ -72,6 +95,10 @@ impl StorageService {
                 existing.agent.model_snapshot.as_ref(),
                 expected_model_capabilities,
             )?;
+            ensure_expected_template_identity(
+                existing.agent.template_snapshot.as_ref(),
+                expected_template_identity,
+            )?;
             // The snapshot repository owns comparison of the persisted logical-turn selector.
             ensure_existing_child_snapshot_selector(
                 &transaction,
@@ -90,7 +117,7 @@ impl StorageService {
         enforce_tree_resource_limits(&transaction, &parent, limits)?;
 
         let (template_snapshot, selected_model_id, model_selection_source) =
-            select_model_identity(&transaction, &parent, input)?;
+            select_model_identity(&transaction, &parent, input, expected_template_identity)?;
         let settings = config_repository::load_model_settings_snapshot_in_connection(&transaction)
             .map_err(spawn_database_error)?
             .ok_or_else(|| ChildAgentSpawnError::ModelUnavailable {
@@ -461,6 +488,7 @@ fn select_model_identity(
     connection: &rusqlite::Connection,
     parent: &crate::AgentNodeRecord,
     input: &CreateChildAgentInput,
+    expected_template_identity: Option<(&str, u64)>,
 ) -> Result<
     (
         Option<AgentTemplateSnapshot>,
@@ -475,7 +503,7 @@ fn select_model_identity(
                 .project_id
                 .as_deref()
                 .ok_or(ChildAgentSpawnError::ProjectRequiredForTemplate)?;
-            let record = agent_template_repository::get_template_by_machine_key(
+            let record = agent_template_repository::get_project_template_by_machine_key(
                 connection,
                 project_id,
                 machine_key,
@@ -486,9 +514,20 @@ fn select_model_identity(
                     machine_key.to_string(),
                 ));
             }
+            if let Some((expected_template_id, expected_revision)) = expected_template_identity {
+                if record.template_id != expected_template_id
+                    || record.revision != expected_revision
+                {
+                    return Err(ChildAgentSpawnError::Conflict(
+                        "selected Agent template changed after this Turn began".to_string(),
+                    ));
+                }
+            }
             Some(AgentTemplateSnapshot {
                 template_id: record.template_id,
-                project_id: record.project_id,
+                // The template definition is global. This project identity proves which durable
+                // project binding authorized the creation-time snapshot.
+                project_id: project_id.to_string(),
                 machine_key: record.machine_key,
                 name: record.name,
                 description: record.description,
@@ -626,6 +665,28 @@ fn ensure_expected_model_capabilities(
             model_config_id: Some(model.model_config_id.clone()),
             reason: crate::AgentModelUnavailableReason::CapabilitiesChanged,
         });
+    }
+    Ok(())
+}
+
+fn ensure_expected_template_identity(
+    template: Option<&AgentTemplateSnapshot>,
+    expected: Option<(&str, u64)>,
+) -> Result<(), ChildAgentSpawnError> {
+    let Some((expected_template_id, expected_revision)) = expected else {
+        return Ok(());
+    };
+    let template = template.ok_or_else(|| {
+        ChildAgentSpawnError::Conflict(
+            "committed child has no frozen template identity".to_string(),
+        )
+    })?;
+    if template.template_id != expected_template_id
+        || template.template_revision != expected_revision
+    {
+        return Err(ChildAgentSpawnError::IdempotencyConflict(
+            "template identity differs from the first committed spawn".to_string(),
+        ));
     }
     Ok(())
 }

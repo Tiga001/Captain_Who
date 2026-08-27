@@ -45,10 +45,72 @@ const root = {
   model: null
 }
 
+const template = {
+  schemaVersion: 1 as const,
+  templateId: 'template-1',
+  projectIds: ['project-1'],
+  machineKey: 'reviewer',
+  name: 'Reviewer',
+  description: 'Review work',
+  instructions: 'Review the assigned work.',
+  modelConfigId: 'model-1',
+  modelDisplayName: 'Model 1',
+  enabled: true,
+  revision: 1,
+  createdAt: 1,
+  updatedAt: 1
+}
+
 describe('CoreServer collaboration client', () => {
   beforeEach(() => {
     rpcRequest.mockReset()
     onNotification.mockReset().mockReturnValue(() => undefined)
+  })
+
+  it('uses global template requests and enforces canonical project assignment responses', async () => {
+    rpcRequest
+      .mockResolvedValueOnce({ schemaVersion: 1, templates: [template] })
+      .mockResolvedValueOnce(template)
+    const server = new CoreServer()
+
+    await expect(server.listAgentTemplates({ includeDisabled: true })).resolves.toEqual({
+      schemaVersion: 1,
+      templates: [template]
+    })
+    await expect(
+      server.setAgentTemplateProjectAssignment({
+        projectId: 'project-1',
+        templateId: 'template-1',
+        assigned: true
+      })
+    ).resolves.toEqual(template)
+    expect(rpcRequest).toHaveBeenNthCalledWith(1, 'agent.collaboration.templates.list', {
+      includeDisabled: true
+    })
+    expect(rpcRequest).toHaveBeenNthCalledWith(
+      2,
+      'agent.collaboration.templates.setProjectAssignment',
+      { projectId: 'project-1', templateId: 'template-1', assigned: true }
+    )
+  })
+
+  it('rejects noncanonical global template project ids and mismatched template identities', async () => {
+    rpcRequest
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        templates: [{ ...template, projectIds: ['project-b', 'project-a'] }]
+      })
+      .mockResolvedValueOnce({ ...template, templateId: 'template-other' })
+    const server = new CoreServer()
+
+    await expect(server.listAgentTemplates({ includeDisabled: true })).rejects.toThrow()
+    await expect(
+      server.setAgentTemplateProjectAssignment({
+        projectId: 'project-1',
+        templateId: 'template-1',
+        assigned: true
+      })
+    ).rejects.toThrow('Invalid Agent template response identity')
   })
 
   it('strictly validates a materialized tree and healthy legacy lookup', async () => {

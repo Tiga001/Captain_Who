@@ -1,4 +1,4 @@
-//! Strict SQLite persistence for project-scoped Agent templates.
+//! Strict SQLite persistence for global Agent templates and project availability bindings.
 //!
 //! A template keeps only a reference to the existing model-settings identity. The reference is
 //! deliberately not a foreign key to `models`: model settings are replaced as one atomic catalog,
@@ -19,12 +19,12 @@ const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 const MAX_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 const MAX_MODEL_CONFIG_ID_BYTES: usize = 512;
 const MAX_SQLITE_REVISION: u64 = 9_223_372_036_854_775_807;
+const MAX_PROJECT_TEMPLATES: u32 = 32;
 
 #[derive(Debug)]
 struct StoredTemplateRow {
     template_id: String,
     schema_version: i64,
-    project_id: String,
     machine_key: String,
     name: String,
     description: String,
@@ -45,7 +45,6 @@ pub fn create_template(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage_failure)?;
-    ensure_project_exists(&transaction, &input.project_id)?;
 
     if template_id_exists(&transaction, &input.template_id)? {
         return Err(AgentTemplateError::InvalidInput {
@@ -53,20 +52,19 @@ pub fn create_template(
             reason: "already exists".to_string(),
         });
     }
-    ensure_unique_machine_key(&transaction, &input.project_id, &input.machine_key, None)?;
-    ensure_unique_name(&transaction, &input.project_id, &input.name, None)?;
+    ensure_unique_machine_key(&transaction, &input.machine_key, None)?;
+    ensure_unique_name(&transaction, &input.name, None)?;
 
     let timestamp = now_ms();
     transaction
         .execute(
             "INSERT INTO agent_templates (
-                template_id, schema_version, project_id, machine_key, name, description,
+                template_id, schema_version, machine_key, name, description,
                 instructions, model_config_id, enabled, revision, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)",
             params![
                 &input.template_id,
                 i64::from(AGENT_GRAPH_SCHEMA_VERSION),
-                &input.project_id,
                 &input.machine_key,
                 &input.name,
                 &input.description,
@@ -77,7 +75,7 @@ pub fn create_template(
             ],
         )
         .map_err(storage_failure)?;
-    let stored = query_template(&transaction, &input.project_id, &input.template_id)?
+    let stored = query_template(&transaction, &input.template_id)?
         .ok_or_else(|| corrupt("created template could not be read back"))?;
     transaction.commit().map_err(storage_failure)?;
     Ok(stored)
@@ -85,48 +83,86 @@ pub fn create_template(
 
 pub fn list_templates(
     connection: &Connection,
+    include_disabled: bool,
+) -> Result<Vec<AgentTemplateRecord>, AgentTemplateError> {
+    let sql = if include_disabled {
+        "SELECT template_id, schema_version, machine_key, name, description,
+                instructions, model_config_id, enabled, revision, created_at, updated_at
+         FROM agent_templates
+         ORDER BY created_at ASC, template_id ASC"
+    } else {
+        "SELECT template_id, schema_version, machine_key, name, description,
+                instructions, model_config_id, enabled, revision, created_at, updated_at
+         FROM agent_templates
+         WHERE enabled = 1
+         ORDER BY created_at ASC, template_id ASC"
+    };
+    let mut statement = connection.prepare(sql).map_err(storage_failure)?;
+    let rows = statement
+        .query_map([], read_stored_row)
+        .map_err(storage_failure)?;
+    let mut stored_rows = Vec::new();
+    for row in rows {
+        stored_rows.push(row.map_err(read_failure)?);
+    }
+    drop(statement);
+    stored_rows
+        .into_iter()
+        .map(|row| decode_row(connection, row))
+        .collect()
+}
+
+pub fn get_template(
+    connection: &Connection,
+    template_id: &str,
+) -> Result<AgentTemplateRecord, AgentTemplateError> {
+    validate_opaque_id("template_id", template_id, MAX_TEMPLATE_ID_BYTES)?;
+    query_template(connection, template_id)?
+        .ok_or_else(|| AgentTemplateError::TemplateNotFound(template_id.to_string()))
+}
+
+pub fn list_project_templates(
+    connection: &Connection,
     project_id: &str,
     include_disabled: bool,
 ) -> Result<Vec<AgentTemplateRecord>, AgentTemplateError> {
     validate_project_id(project_id)?;
     ensure_project_exists(connection, project_id)?;
     let sql = if include_disabled {
-        "SELECT template_id, schema_version, project_id, machine_key, name, description,
-                instructions, model_config_id, enabled, revision, created_at, updated_at
-         FROM agent_templates
-         WHERE project_id = ?1
-         ORDER BY created_at ASC, template_id ASC"
+        "SELECT template.template_id, template.schema_version, template.machine_key,
+                template.name, template.description, template.instructions,
+                template.model_config_id, template.enabled, template.revision,
+                template.created_at, template.updated_at
+         FROM project_agent_template_bindings AS binding
+         INNER JOIN agent_templates AS template ON template.template_id = binding.template_id
+         WHERE binding.project_id = ?1
+         ORDER BY template.created_at ASC, template.template_id ASC"
     } else {
-        "SELECT template_id, schema_version, project_id, machine_key, name, description,
-                instructions, model_config_id, enabled, revision, created_at, updated_at
-         FROM agent_templates
-         WHERE project_id = ?1 AND enabled = 1
-         ORDER BY created_at ASC, template_id ASC"
+        "SELECT template.template_id, template.schema_version, template.machine_key,
+                template.name, template.description, template.instructions,
+                template.model_config_id, template.enabled, template.revision,
+                template.created_at, template.updated_at
+         FROM project_agent_template_bindings AS binding
+         INNER JOIN agent_templates AS template ON template.template_id = binding.template_id
+         WHERE binding.project_id = ?1 AND template.enabled = 1
+         ORDER BY template.created_at ASC, template.template_id ASC"
     };
     let mut statement = connection.prepare(sql).map_err(storage_failure)?;
     let rows = statement
         .query_map([project_id], read_stored_row)
         .map_err(storage_failure)?;
-    let mut templates = Vec::new();
+    let mut stored_rows = Vec::new();
     for row in rows {
-        templates.push(decode_row(row.map_err(read_failure)?)?);
+        stored_rows.push(row.map_err(read_failure)?);
     }
-    Ok(templates)
+    drop(statement);
+    stored_rows
+        .into_iter()
+        .map(|row| decode_row(connection, row))
+        .collect()
 }
 
-pub fn get_template(
-    connection: &Connection,
-    project_id: &str,
-    template_id: &str,
-) -> Result<AgentTemplateRecord, AgentTemplateError> {
-    validate_project_id(project_id)?;
-    validate_opaque_id("template_id", template_id, MAX_TEMPLATE_ID_BYTES)?;
-    ensure_project_exists(connection, project_id)?;
-    query_template(connection, project_id, template_id)?
-        .ok_or_else(|| AgentTemplateError::TemplateNotFound(template_id.to_string()))
-}
-
-pub fn get_template_by_machine_key(
+pub fn get_project_template_by_machine_key(
     connection: &Connection,
     project_id: &str,
     machine_key: &str,
@@ -134,7 +170,7 @@ pub fn get_template_by_machine_key(
     validate_project_id(project_id)?;
     validate_machine_key(machine_key)?;
     ensure_project_exists(connection, project_id)?;
-    query_template_by_machine_key(connection, project_id, machine_key)?
+    query_project_template_by_machine_key(connection, project_id, machine_key)?
         .ok_or_else(|| AgentTemplateError::TemplateNotFound(machine_key.to_string()))
 }
 
@@ -150,16 +186,10 @@ pub fn update_template(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage_failure)?;
-    ensure_project_exists(&transaction, &input.project_id)?;
-    let current = query_template(&transaction, &input.project_id, &input.template_id)?
+    let current = query_template(&transaction, &input.template_id)?
         .ok_or_else(|| AgentTemplateError::TemplateNotFound(input.template_id.clone()))?;
     ensure_revision(&current, input.expected_revision)?;
-    ensure_unique_name(
-        &transaction,
-        &input.project_id,
-        &input.name,
-        Some(&input.template_id),
-    )?;
+    ensure_unique_name(&transaction, &input.name, Some(&input.template_id))?;
 
     let next_revision = next_revision(current.revision)?;
     let updated_at = now_ms().max(current.updated_at.saturating_add(1));
@@ -172,7 +202,7 @@ pub fn update_template(
                  model_config_id = ?4,
                  revision = ?5,
                  updated_at = ?6
-             WHERE project_id = ?7 AND template_id = ?8 AND revision = ?9",
+             WHERE template_id = ?7 AND revision = ?8",
             params![
                 &input.name,
                 &input.description,
@@ -180,7 +210,6 @@ pub fn update_template(
                 &input.model_config_id,
                 revision_to_sql(next_revision)?,
                 updated_at,
-                &input.project_id,
                 &input.template_id,
                 revision_to_sql(input.expected_revision)?,
             ],
@@ -191,7 +220,7 @@ pub fn update_template(
             "template compare-and-set updated an unexpected row count",
         ));
     }
-    let stored = query_template(&transaction, &input.project_id, &input.template_id)?
+    let stored = query_template(&transaction, &input.template_id)?
         .ok_or_else(|| corrupt("updated template could not be read back"))?;
     transaction.commit().map_err(storage_failure)?;
     Ok(stored)
@@ -199,19 +228,16 @@ pub fn update_template(
 
 pub fn set_template_enabled(
     connection: &mut Connection,
-    project_id: &str,
     template_id: &str,
     expected_revision: u64,
     enabled: bool,
 ) -> Result<AgentTemplateRecord, AgentTemplateError> {
-    validate_project_id(project_id)?;
     validate_opaque_id("template_id", template_id, MAX_TEMPLATE_ID_BYTES)?;
     validate_expected_revision(expected_revision)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage_failure)?;
-    ensure_project_exists(&transaction, project_id)?;
-    let current = query_template(&transaction, project_id, template_id)?
+    let current = query_template(&transaction, template_id)?
         .ok_or_else(|| AgentTemplateError::TemplateNotFound(template_id.to_string()))?;
     ensure_revision(&current, expected_revision)?;
 
@@ -221,12 +247,11 @@ pub fn set_template_enabled(
         .execute(
             "UPDATE agent_templates
              SET enabled = ?1, revision = ?2, updated_at = ?3
-             WHERE project_id = ?4 AND template_id = ?5 AND revision = ?6",
+             WHERE template_id = ?4 AND revision = ?5",
             params![
                 enabled,
                 revision_to_sql(next_revision)?,
                 updated_at,
-                project_id,
                 template_id,
                 revision_to_sql(expected_revision)?,
             ],
@@ -237,7 +262,7 @@ pub fn set_template_enabled(
             "template enable compare-and-set updated an unexpected row count",
         ));
     }
-    let stored = query_template(&transaction, project_id, template_id)?
+    let stored = query_template(&transaction, template_id)?
         .ok_or_else(|| corrupt("enabled template could not be read back"))?;
     transaction.commit().map_err(storage_failure)?;
     Ok(stored)
@@ -245,26 +270,23 @@ pub fn set_template_enabled(
 
 pub fn delete_template(
     connection: &mut Connection,
-    project_id: &str,
     template_id: &str,
     expected_revision: u64,
 ) -> Result<AgentTemplateRecord, AgentTemplateError> {
-    validate_project_id(project_id)?;
     validate_opaque_id("template_id", template_id, MAX_TEMPLATE_ID_BYTES)?;
     validate_expected_revision(expected_revision)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(storage_failure)?;
-    ensure_project_exists(&transaction, project_id)?;
-    let current = query_template(&transaction, project_id, template_id)?
+    let current = query_template(&transaction, template_id)?
         .ok_or_else(|| AgentTemplateError::TemplateNotFound(template_id.to_string()))?;
     ensure_revision(&current, expected_revision)?;
     let snapshotted_agent_count = transaction
         .query_row(
             "SELECT COUNT(*)
              FROM agent_nodes
-             WHERE project_id = ?1 AND template_id_snapshot = ?2",
-            params![project_id, template_id],
+             WHERE template_id_snapshot = ?1",
+            [template_id],
             |row| row.get::<_, i64>(0),
         )
         .map_err(storage_failure)?;
@@ -279,8 +301,8 @@ pub fn delete_template(
     let changed = transaction
         .execute(
             "DELETE FROM agent_templates
-             WHERE project_id = ?1 AND template_id = ?2 AND revision = ?3",
-            params![project_id, template_id, revision_to_sql(expected_revision)?],
+             WHERE template_id = ?1 AND revision = ?2",
+            params![template_id, revision_to_sql(expected_revision)?],
         )
         .map_err(storage_failure)?;
     if changed != 1 {
@@ -292,64 +314,116 @@ pub fn delete_template(
     Ok(current)
 }
 
-fn query_template(
-    connection: &Connection,
+pub fn set_template_project_assignment(
+    connection: &mut Connection,
     project_id: &str,
     template_id: &str,
+    assigned: bool,
+) -> Result<AgentTemplateRecord, AgentTemplateError> {
+    validate_project_id(project_id)?;
+    validate_opaque_id("template_id", template_id, MAX_TEMPLATE_ID_BYTES)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(storage_failure)?;
+    ensure_project_exists(&transaction, project_id)?;
+    query_template(&transaction, template_id)?
+        .ok_or_else(|| AgentTemplateError::TemplateNotFound(template_id.to_string()))?;
+
+    if assigned {
+        let already_assigned = binding_exists(&transaction, project_id, template_id)?;
+        if !already_assigned {
+            let assigned_count = project_template_count(&transaction, project_id)?;
+            if assigned_count >= u64::from(MAX_PROJECT_TEMPLATES) {
+                return Err(AgentTemplateError::ProjectTemplateLimit {
+                    project_id: project_id.to_string(),
+                    limit: MAX_PROJECT_TEMPLATES,
+                });
+            }
+            transaction
+                .execute(
+                    "INSERT INTO project_agent_template_bindings (
+                         project_id, template_id, created_at
+                     ) VALUES (?1, ?2, ?3)",
+                    params![project_id, template_id, now_ms()],
+                )
+                .map_err(storage_failure)?;
+        }
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM project_agent_template_bindings
+                 WHERE project_id = ?1 AND template_id = ?2",
+                params![project_id, template_id],
+            )
+            .map_err(storage_failure)?;
+    }
+
+    let stored = query_template(&transaction, template_id)?
+        .ok_or_else(|| corrupt("assigned template could not be read back"))?;
+    transaction.commit().map_err(storage_failure)?;
+    Ok(stored)
+}
+
+fn query_template(
+    connection: &Connection,
+    template_id: &str,
 ) -> Result<Option<AgentTemplateRecord>, AgentTemplateError> {
-    connection
+    let row = connection
         .query_row(
-            "SELECT template_id, schema_version, project_id, machine_key, name, description,
+            "SELECT template_id, schema_version, machine_key, name, description,
                     instructions, model_config_id, enabled, revision, created_at, updated_at
              FROM agent_templates
-             WHERE project_id = ?1 AND template_id = ?2",
-            params![project_id, template_id],
+             WHERE template_id = ?1",
+            [template_id],
             read_stored_row,
         )
         .optional()
-        .map_err(read_failure)?
-        .map(decode_row)
-        .transpose()
+        .map_err(read_failure)?;
+    row.map(|row| decode_row(connection, row)).transpose()
 }
 
-fn query_template_by_machine_key(
+fn query_project_template_by_machine_key(
     connection: &Connection,
     project_id: &str,
     machine_key: &str,
 ) -> Result<Option<AgentTemplateRecord>, AgentTemplateError> {
-    connection
+    let row = connection
         .query_row(
-            "SELECT template_id, schema_version, project_id, machine_key, name, description,
-                    instructions, model_config_id, enabled, revision, created_at, updated_at
-             FROM agent_templates
-             WHERE project_id = ?1 AND machine_key = ?2",
+            "SELECT template.template_id, template.schema_version, template.machine_key,
+                    template.name, template.description, template.instructions,
+                    template.model_config_id, template.enabled, template.revision,
+                    template.created_at, template.updated_at
+             FROM project_agent_template_bindings AS binding
+             INNER JOIN agent_templates AS template ON template.template_id = binding.template_id
+             WHERE binding.project_id = ?1 AND template.machine_key = ?2",
             params![project_id, machine_key],
             read_stored_row,
         )
         .optional()
-        .map_err(read_failure)?
-        .map(decode_row)
-        .transpose()
+        .map_err(read_failure)?;
+    row.map(|row| decode_row(connection, row)).transpose()
 }
 
 fn read_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredTemplateRow> {
     Ok(StoredTemplateRow {
         template_id: row.get(0)?,
         schema_version: row.get(1)?,
-        project_id: row.get(2)?,
-        machine_key: row.get(3)?,
-        name: row.get(4)?,
-        description: row.get(5)?,
-        instructions: row.get(6)?,
-        model_config_id: row.get(7)?,
-        enabled: row.get(8)?,
-        revision: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        machine_key: row.get(2)?,
+        name: row.get(3)?,
+        description: row.get(4)?,
+        instructions: row.get(5)?,
+        model_config_id: row.get(6)?,
+        enabled: row.get(7)?,
+        revision: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
-fn decode_row(row: StoredTemplateRow) -> Result<AgentTemplateRecord, AgentTemplateError> {
+fn decode_row(
+    connection: &Connection,
+    row: StoredTemplateRow,
+) -> Result<AgentTemplateRecord, AgentTemplateError> {
     let schema_version = u32::try_from(row.schema_version)
         .map_err(|_| corrupt("schema version is outside the supported integer range"))?;
     if schema_version != AGENT_GRAPH_SCHEMA_VERSION {
@@ -369,7 +443,6 @@ fn decode_row(row: StoredTemplateRow) -> Result<AgentTemplateRecord, AgentTempla
     }
     validate_opaque_id("template_id", &row.template_id, MAX_TEMPLATE_ID_BYTES)
         .map_err(persisted_validation_failure)?;
-    validate_project_id(&row.project_id).map_err(persisted_validation_failure)?;
     validate_machine_key(&row.machine_key).map_err(persisted_validation_failure)?;
     validate_editable_fields(
         &row.name,
@@ -379,9 +452,10 @@ fn decode_row(row: StoredTemplateRow) -> Result<AgentTemplateRecord, AgentTempla
     )
     .map_err(persisted_validation_failure)?;
 
+    let project_ids = query_project_ids(connection, &row.template_id)?;
     Ok(AgentTemplateRecord {
         template_id: row.template_id,
-        project_id: row.project_id,
+        project_ids,
         machine_key: row.machine_key,
         name: row.name,
         description: row.description,
@@ -396,7 +470,6 @@ fn decode_row(row: StoredTemplateRow) -> Result<AgentTemplateRecord, AgentTempla
 
 fn validate_create_input(input: &CreateAgentTemplateInput) -> Result<(), AgentTemplateError> {
     validate_opaque_id("template_id", &input.template_id, MAX_TEMPLATE_ID_BYTES)?;
-    validate_project_id(&input.project_id)?;
     validate_machine_key(&input.machine_key)?;
     validate_editable_fields(
         &input.name,
@@ -407,7 +480,6 @@ fn validate_create_input(input: &CreateAgentTemplateInput) -> Result<(), AgentTe
 }
 
 fn validate_update_input(input: &UpdateAgentTemplateInput) -> Result<(), AgentTemplateError> {
-    validate_project_id(&input.project_id)?;
     validate_opaque_id("template_id", &input.template_id, MAX_TEMPLATE_ID_BYTES)?;
     validate_expected_revision(input.expected_revision)?;
     validate_editable_fields(
@@ -540,9 +612,63 @@ fn template_id_exists(
         .map_err(storage_failure)
 }
 
-fn ensure_unique_machine_key(
+fn query_project_ids(
+    connection: &Connection,
+    template_id: &str,
+) -> Result<Vec<String>, AgentTemplateError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT project_id
+             FROM project_agent_template_bindings
+             WHERE template_id = ?1
+             ORDER BY project_id ASC",
+        )
+        .map_err(storage_failure)?;
+    let rows = statement
+        .query_map([template_id], |row| row.get::<_, String>(0))
+        .map_err(storage_failure)?;
+    let mut project_ids = Vec::new();
+    for row in rows {
+        let project_id = row.map_err(read_failure)?;
+        validate_project_id(&project_id).map_err(persisted_validation_failure)?;
+        project_ids.push(project_id);
+    }
+    Ok(project_ids)
+}
+
+fn binding_exists(
     connection: &Connection,
     project_id: &str,
+    template_id: &str,
+) -> Result<bool, AgentTemplateError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM project_agent_template_bindings
+                 WHERE project_id = ?1 AND template_id = ?2
+             )",
+            params![project_id, template_id],
+            |row| row.get(0),
+        )
+        .map_err(storage_failure)
+}
+
+fn project_template_count(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<u64, AgentTemplateError> {
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM project_agent_template_bindings WHERE project_id = ?1",
+            [project_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(storage_failure)?;
+    u64::try_from(count).map_err(|_| corrupt("project Agent template count is invalid"))
+}
+
+fn ensure_unique_machine_key(
+    connection: &Connection,
     machine_key: &str,
     excluding_template_id: Option<&str>,
 ) -> Result<(), AgentTemplateError> {
@@ -550,10 +676,10 @@ fn ensure_unique_machine_key(
         .query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM agent_templates
-                WHERE project_id = ?1 AND machine_key = ?2
-                  AND (?3 IS NULL OR template_id != ?3)
+                WHERE machine_key = ?1
+                  AND (?2 IS NULL OR template_id != ?2)
              )",
-            params![project_id, machine_key, excluding_template_id],
+            params![machine_key, excluding_template_id],
             |row| row.get::<_, bool>(0),
         )
         .map_err(storage_failure)?;
@@ -568,7 +694,6 @@ fn ensure_unique_machine_key(
 
 fn ensure_unique_name(
     connection: &Connection,
-    project_id: &str,
     name: &str,
     excluding_template_id: Option<&str>,
 ) -> Result<(), AgentTemplateError> {
@@ -576,10 +701,10 @@ fn ensure_unique_name(
         .query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM agent_templates
-                WHERE project_id = ?1 AND name = ?2
-                  AND (?3 IS NULL OR template_id != ?3)
+                WHERE name = ?1
+                  AND (?2 IS NULL OR template_id != ?2)
              )",
-            params![project_id, name, excluding_template_id],
+            params![name, excluding_template_id],
             |row| row.get::<_, bool>(0),
         )
         .map_err(storage_failure)?;

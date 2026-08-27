@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import type { BrowserContext } from 'playwright'
 import type { BrowserNetworkOperationLease } from '../browser/BrowserNetworkGuard'
 import { BrowserArtifactBroker } from '../browser/BrowserArtifactBroker'
+import { BrowserDownloadBrokerError } from '../browser/BrowserDownloadBroker'
 import { BrowserFileBroker } from '../browser/BrowserFileBroker'
 import type {
   BrowserRiskAuthorizationContext,
@@ -3491,6 +3492,164 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(risk.markDispatched).toHaveBeenCalledOnce()
   })
 
+  it('normalizes an authoritative download-navigation error into a successful download start', async () => {
+    const progress = [
+      {
+        downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000',
+        displayName: 'installer.dmg',
+        mimeType: 'application/x-apple-diskimage',
+        state: 'progressing' as const,
+        receivedBytes: 1024,
+        totalBytes: 419 * 1024 * 1024,
+        bytesPerSecond: 512,
+        startedAt: 1,
+        updatedAt: 2
+      }
+    ]
+    const risk = riskLease({ downloadProgress: progress })
+    const host = fakeHost({
+      beginNetworkOperation: vi.fn(async () => risk.lease),
+      callTool: vi.fn(async () => ({
+        content: [{ type: 'text', text: 'Error: Download is starting' }],
+        isError: true
+      })),
+      getAgentDownloadSnapshot: () => ({
+        schemaVersion: 2,
+        revision: 1,
+        downloads: progress
+      })
+    })
+
+    await expect(
+      host.callTool(
+        'browser_click',
+        { target: 'download', call_reason: 'Download the installer.' },
+        { authorizationContext: RISK_CONTEXT, parentRequestId: PARENT_REQUEST_ID }
+      )
+    ).resolves.toMatchObject({
+      structuredContent: {
+        status: 'download_started',
+        downloadProgress: [
+          {
+            displayName: 'installer.dmg',
+            state: 'progressing',
+            totalBytes: 419 * 1024 * 1024
+          }
+        ]
+      },
+      isError: false
+    })
+  })
+
+  it('normalizes an ordinary successful click when Electron authoritatively starts a download', async () => {
+    const progress = [
+      {
+        downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000',
+        displayName: 'archive.zip',
+        mimeType: 'application/zip',
+        state: 'progressing' as const,
+        receivedBytes: 32,
+        totalBytes: 1024,
+        bytesPerSecond: 16,
+        startedAt: 1,
+        updatedAt: 2
+      }
+    ]
+    const risk = riskLease({ downloadProgress: progress })
+    const host = fakeHost({
+      beginNetworkOperation: vi.fn(async () => risk.lease),
+      callTool: vi.fn(async () => ({
+        content: [{ type: 'text', text: 'Clicked the download link.' }],
+        isError: false
+      })),
+      getAgentDownloadSnapshot: () => ({
+        schemaVersion: 2,
+        revision: 1,
+        downloads: progress
+      })
+    })
+
+    await expect(
+      host.callTool(
+        'browser_click',
+        { target: 'download', call_reason: 'Download the archive.' },
+        { authorizationContext: RISK_CONTEXT, parentRequestId: PARENT_REQUEST_ID }
+      )
+    ).resolves.toMatchObject({
+      structuredContent: {
+        status: 'download_started',
+        downloadProgress: [{ displayName: 'archive.zip', state: 'progressing' }]
+      },
+      isError: false
+    })
+  })
+
+  it('preserves an exact Broker failure when the official click rejects after dispatch', async () => {
+    const risk = riskLease({
+      settle: async () => {
+        throw new BrowserDownloadBrokerError('browser.download.too_large', 'possibly_dispatched')
+      }
+    })
+    const host = fakeHost({
+      beginNetworkOperation: vi.fn(async () => risk.lease),
+      callTool: vi.fn(async () => {
+        throw new Error('untrusted upstream click error')
+      })
+    })
+
+    await expect(
+      host.callTool(
+        'browser_click',
+        { target: 'download', call_reason: 'Download the fixture.' },
+        { authorizationContext: RISK_CONTEXT, parentRequestId: PARENT_REQUEST_ID }
+      )
+    ).rejects.toMatchObject({
+      code: 'mcp.builtin_playwright.output_too_large',
+      dispatchCertainty: 'possibly_dispatched'
+    })
+  })
+
+  it('reports current-task download progress through the no-navigation config tool', async () => {
+    const downloadId = 'browser-download:123e4567-e89b-42d3-a456-426614174000'
+    const host = fakeHost({
+      getAgentDownloadSnapshot: () => ({
+        schemaVersion: 2,
+        revision: 3,
+        downloads: [
+          {
+            downloadId,
+            displayName: 'archive.zip',
+            mimeType: 'application/zip',
+            state: 'paused',
+            receivedBytes: 10,
+            totalBytes: 100,
+            bytesPerSecond: 0,
+            startedAt: 1,
+            updatedAt: 2
+          }
+        ]
+      })
+    })
+
+    const result = await host.callTool(
+      'browser_get_config',
+      { call_reason: 'Check the active download.' },
+      {
+        authorizationContext: {
+          ...RISK_CONTEXT,
+          triggerToolName: 'browser_get_config'
+        }
+      }
+    )
+    expect(result).toMatchObject({
+      structuredContent: {
+        downloadProgress: [{ downloadId, state: 'paused', receivedBytes: 10 }]
+      },
+      isError: false
+    })
+    expect(JSON.stringify(result)).not.toContain('/Users/')
+  })
+
   it('does not settle a tool before an asynchronous boundary decision finishes', async () => {
     let release!: () => void
     let failure: BrowserRiskFailure | undefined
@@ -4754,6 +4913,7 @@ function fakeHost(overrides: {
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
   getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
+  getAgentDownloadSnapshot?: ManagedPlaywrightMcpHostOptions['getAgentDownloadSnapshot']
   getBrowserContext?: () => Promise<BrowserContext>
   listTools?: ManagedMcpClient['listTools']
   preparedFileHandles?: readonly string[]
@@ -4772,6 +4932,7 @@ function fakeHost(overrides: {
     beginNetworkOperation: overrides.beginNetworkOperation,
     beginTargetCreationOperation: overrides.beginTargetCreationOperation,
     getActiveSurfaceIdentity: overrides.getActiveSurfaceIdentity,
+    getAgentDownloadSnapshot: overrides.getAgentDownloadSnapshot,
     getBrowserContext:
       overrides.getBrowserContext ??
       (async () => {
@@ -4858,6 +5019,7 @@ function fakeSensitiveTargetBindings(
 
 function riskLease(options: {
   check?: (input: unknown) => Promise<void>
+  downloadProgress?: readonly import('@mycopilot/protocol').BrowserAgentDownloadStatus[]
   failure?: BrowserRiskFailure | (() => BrowserRiskFailure | undefined)
   settle?: () => Promise<void>
 }): {
@@ -4879,6 +5041,7 @@ function riskLease(options: {
     markDispatched,
     settle,
     downloads: () => [],
+    downloadProgress: () => options.downloadProgress ?? [],
     finish
   } as unknown as BrowserNetworkOperationLease
   return { finish, lease, markDispatched, settle }

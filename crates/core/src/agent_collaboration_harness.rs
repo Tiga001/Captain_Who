@@ -50,6 +50,11 @@ pub struct AgentCollaborationCaller {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCollaborationTemplateSelector {
     pub agent_type: String,
+    /// Host-authored immutable identity for the exact template definition exposed this Turn.
+    /// The model still selects templates only through `agent_type`; these fields prevent an old
+    /// Turn from resolving a deleted/recreated or subsequently edited template with the same key.
+    pub template_id: String,
+    pub template_revision: u64,
     pub name: String,
     pub description: String,
     pub model_display_name: String,
@@ -137,6 +142,10 @@ impl AgentCollaborationSelectorDirectory {
                 !selector.agent_type.is_empty()
                     && selector.agent_type.trim() == selector.agent_type
                     && selector.agent_type.len() <= AGENT_COLLABORATION_MAX_AGENT_TYPE_BYTES
+                    && !selector.template_id.is_empty()
+                    && selector.template_id.trim() == selector.template_id
+                    && selector.template_id.len() <= AGENT_COLLABORATION_MAX_AGENT_ID_BYTES
+                    && selector.template_revision > 0
             });
         let models_are_canonical = self.models.len() <= AGENT_COLLABORATION_MAX_SELECTOR_ITEMS
             && self
@@ -189,7 +198,7 @@ impl AgentCollaborationRunSnapshot {
 /// Exact allow-list frozen from the bounded, model-visible selector directory for one Turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentCollaborationSelectorAuthorization {
-    agent_types: Vec<(String, ModelCapabilities)>,
+    agent_types: Vec<(String, String, u64, ModelCapabilities)>,
     model_config_ids: Vec<(String, ModelCapabilities)>,
 }
 
@@ -202,6 +211,8 @@ impl AgentCollaborationSelectorAuthorization {
                 .map(|selector| {
                     (
                         selector.agent_type.clone(),
+                        selector.template_id.clone(),
+                        selector.template_revision,
                         selector.default_model_capabilities,
                     )
                 })
@@ -217,7 +228,16 @@ impl AgentCollaborationSelectorAuthorization {
     pub fn allows_agent_type(&self, agent_type: &str) -> bool {
         self.agent_types
             .iter()
-            .any(|(allowed, _)| allowed == agent_type)
+            .any(|(allowed, _, _, _)| allowed == agent_type)
+    }
+
+    /// Resolves the hidden exact identity paired with one model-visible `agent_type` in this
+    /// Turn's frozen selector snapshot.
+    pub fn expected_template_identity(&self, agent_type: &str) -> Option<(&str, u64)> {
+        self.agent_types
+            .iter()
+            .find(|(allowed, _, _, _)| allowed == agent_type)
+            .map(|(_, template_id, revision, _)| (template_id.as_str(), *revision))
     }
 
     pub fn allows_model_config_id(&self, model_config_id: &str) -> bool {
@@ -243,8 +263,8 @@ impl AgentCollaborationSelectorAuthorization {
         agent_type.and_then(|agent_type| {
             self.agent_types
                 .iter()
-                .find(|(allowed, _)| allowed == agent_type)
-                .map(|(_, capabilities)| *capabilities)
+                .find(|(allowed, _, _, _)| allowed == agent_type)
+                .map(|(_, _, _, capabilities)| *capabilities)
         })
     }
 }
@@ -544,6 +564,8 @@ mod tests {
             .rev()
             .map(|index| AgentCollaborationTemplateSelector {
                 agent_type: format!("type-{index:02}"),
+                template_id: format!("template-{index:02}"),
+                template_revision: 1,
                 name: format!("Name {index}"),
                 description: "x".repeat(700),
                 model_display_name: "Display".to_string(),
@@ -594,6 +616,8 @@ mod tests {
         let directory = AgentCollaborationSelectorDirectory::bounded(
             vec![AgentCollaborationTemplateSelector {
                 agent_type: "vision_reviewer".to_string(),
+                template_id: "template-vision-reviewer".to_string(),
+                template_revision: 7,
                 name: "Vision reviewer".to_string(),
                 description: "Review images".to_string(),
                 model_display_name: "Template vision model".to_string(),
@@ -606,6 +630,10 @@ mod tests {
             }],
         );
         let authorization = AgentCollaborationSelectorAuthorization::from_directory(&directory);
+        assert_eq!(
+            authorization.expected_template_identity("vision_reviewer"),
+            Some(("template-vision-reviewer", 7))
+        );
         assert_eq!(
             authorization.expected_model_capabilities(Some("vision_reviewer"), None),
             Some(ModelCapabilities { image_input: true })

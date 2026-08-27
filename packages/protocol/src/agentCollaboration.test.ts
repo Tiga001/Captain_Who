@@ -16,8 +16,10 @@ import {
   AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
   AGENT_COLLABORATION_TEMPLATES_LIST_METHOD,
   AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD,
   AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
   parseAgentTemplateCreateRequest,
+  parseAgentTemplateProjectAssignmentRequest,
   parseAgentTemplate,
   parseAgentTemplateList,
   parseAgentDetail,
@@ -250,6 +252,7 @@ describe('agent collaboration protocol', () => {
       AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD,
       AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
       AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD,
+      AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD,
       AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
       AGENT_COLLABORATION_APPROVALS_LIST_METHOD,
       AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD
@@ -300,7 +303,7 @@ describe('agent collaboration protocol', () => {
     })
     expect(locator).toMatchObject({ agentId: detail.summary.agentId, mode: 'observer' })
     expect(templateList.templates).toEqual([template])
-    expect(template.projectId).toBe(tree.projectId)
+    expect(template.projectIds).toEqual([tree.projectId])
     expect(detail.template?.templateId).toBe(template.templateId)
     expect(approvals.approvals[0]).toMatchObject({
       rootAgentId: tree.rootAgentId,
@@ -324,7 +327,6 @@ describe('agent collaboration protocol', () => {
     expect(() =>
       parseAgentTemplateCreateRequest({
         templateId: 'template-1',
-        projectId: 'project-1',
         machineKey: 'research',
         name: 'Research',
         description: '',
@@ -332,6 +334,26 @@ describe('agent collaboration protocol', () => {
         modelConfigId: 'model-safe-id',
         enabled: true,
         apiKey: 'must-never-cross-the-boundary'
+      })
+    ).toThrow()
+    expect(() =>
+      parseAgentTemplateProjectAssignmentRequest({
+        projectId: 'project-1',
+        templateId: 'template-1',
+        assigned: true,
+        enabled: true
+      })
+    ).toThrow()
+    expect(() =>
+      parseAgentTemplate({
+        ...(fixture.template as object),
+        projectIds: ['project-b', 'project-a']
+      })
+    ).toThrow()
+    expect(() =>
+      parseAgentTemplate({
+        ...(fixture.template as object),
+        projectIds: ['project-a', 'project-a']
       })
     ).toThrow()
   })

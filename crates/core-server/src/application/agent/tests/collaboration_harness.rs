@@ -436,7 +436,6 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     storage
         .create_agent_template(&mycopilot_core::CreateAgentTemplateInput {
             template_id: "template-reviewer".to_string(),
-            project_id: PROJECT_ID.to_string(),
             machine_key: "reviewer".to_string(),
             name: "Reviewer".to_string(),
             description: "Review a delegated boundary".to_string(),
@@ -444,6 +443,9 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
             model_config_id: "model-1".to_string(),
             enabled: true,
         })
+        .unwrap();
+    storage
+        .set_agent_template_project_assignment(PROJECT_ID, "template-reviewer", true)
         .unwrap();
     assert!(storage
         .get_agent_node_by_conversation(ROOT_CONVERSATION_ID)

@@ -29,6 +29,8 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateUpdate, input),
     setAgentTemplateEnabled: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateSetEnabled, input),
+    setAgentTemplateProjectAssignment: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateSetProjectAssignment, input),
     deleteAgentTemplate: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateDelete, input),
     listCollaborationApprovals: (input) =>

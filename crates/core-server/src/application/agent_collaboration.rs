@@ -215,12 +215,21 @@ impl ChildAgentFactory {
         input: &CreateChildAgentInput,
         expected_model_capabilities: Option<mycopilot_core::ModelCapabilities>,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_with_expected_selector(input, expected_model_capabilities, None)
+    }
+
+    pub(crate) fn create_child_with_expected_selector(
+        &self,
+        input: &CreateChildAgentInput,
+        expected_model_capabilities: Option<mycopilot_core::ModelCapabilities>,
+        expected_template_identity: Option<(&str, u64)>,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
         self.authorizer
             .authorize_spawn(&input.parent_agent_id)
             .map_err(map_spawn_authorization_error)?;
         let policy = self.authorizer.policy();
         self.storage
-            .create_child_agent_with_limits_and_expected_model_capabilities(
+            .create_child_agent_with_limits_and_expected_selector(
                 input,
                 mycopilot_core::AgentTreeResourceLimits {
                     max_depth: policy.max_tree_depth,
@@ -228,6 +237,7 @@ impl ChildAgentFactory {
                     max_task_bytes: policy.max_message_bytes,
                 },
                 expected_model_capabilities,
+                expected_template_identity,
             )
     }
 
@@ -483,19 +493,35 @@ impl AgentCollaborationService {
 
     pub(crate) fn list_templates(
         &self,
-        project_id: &str,
         include_disabled: bool,
     ) -> Result<Vec<AgentTemplateRecord>, AgentTemplateError> {
-        self.storage
-            .list_agent_templates(project_id, include_disabled)
+        self.storage.list_agent_templates(include_disabled)
     }
 
     pub(crate) fn get_template(
         &self,
-        project_id: &str,
         template_id: &str,
     ) -> Result<AgentTemplateRecord, AgentTemplateError> {
-        self.storage.get_agent_template(project_id, template_id)
+        self.storage.get_agent_template(template_id)
+    }
+
+    pub(crate) fn list_project_templates(
+        &self,
+        project_id: &str,
+        include_disabled: bool,
+    ) -> Result<Vec<AgentTemplateRecord>, AgentTemplateError> {
+        self.storage
+            .list_project_agent_templates(project_id, include_disabled)
+    }
+
+    pub(crate) fn set_template_project_assignment(
+        &self,
+        project_id: &str,
+        template_id: &str,
+        assigned: bool,
+    ) -> Result<AgentTemplateRecord, AgentTemplateError> {
+        self.storage
+            .set_agent_template_project_assignment(project_id, template_id, assigned)
     }
 
     pub(crate) fn update_template(
@@ -507,23 +533,21 @@ impl AgentCollaborationService {
 
     pub(crate) fn set_template_enabled(
         &self,
-        project_id: &str,
         template_id: &str,
         expected_revision: u64,
         enabled: bool,
     ) -> Result<AgentTemplateRecord, AgentTemplateError> {
         self.storage
-            .set_agent_template_enabled(project_id, template_id, expected_revision, enabled)
+            .set_agent_template_enabled(template_id, expected_revision, enabled)
     }
 
     pub(crate) fn delete_template(
         &self,
-        project_id: &str,
         template_id: &str,
         expected_revision: u64,
     ) -> Result<AgentTemplateRecord, AgentTemplateError> {
         self.storage
-            .delete_agent_template(project_id, template_id, expected_revision)
+            .delete_agent_template(template_id, expected_revision)
     }
 
     pub(crate) fn resolve_template_for_spawn(
@@ -585,7 +609,6 @@ mod tests {
         service
             .create_template(&CreateAgentTemplateInput {
                 template_id: "template-review".to_string(),
-                project_id: "project-a".to_string(),
                 machine_key: "reviewer".to_string(),
                 name: "Reviewer".to_string(),
                 description: "Read-only reviewer".to_string(),
@@ -594,6 +617,9 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
-        assert_eq!(service.list_templates("project-a", false).unwrap().len(), 1);
+        service
+            .set_template_project_assignment("project-a", "template-review", true)
+            .unwrap();
+        assert_eq!(service.list_templates(false).unwrap().len(), 1);
     }
 }

@@ -16,20 +16,40 @@ impl StorageService {
 
     pub fn list_agent_templates(
         &self,
-        project_id: &str,
         include_disabled: bool,
     ) -> Result<Vec<AgentTemplateRecord>, AgentTemplateError> {
         let connection = self.template_connection()?;
-        agent_template_repository::list_templates(&connection, project_id, include_disabled)
+        agent_template_repository::list_templates(&connection, include_disabled)
     }
 
     pub fn get_agent_template(
         &self,
-        project_id: &str,
         template_id: &str,
     ) -> Result<AgentTemplateRecord, AgentTemplateError> {
         let connection = self.template_connection()?;
-        agent_template_repository::get_template(&connection, project_id, template_id)
+        agent_template_repository::get_template(&connection, template_id)
+    }
+
+    pub fn list_project_agent_templates(
+        &self,
+        project_id: &str,
+        include_disabled: bool,
+    ) -> Result<Vec<AgentTemplateRecord>, AgentTemplateError> {
+        let connection = self.template_connection()?;
+        agent_template_repository::list_project_templates(&connection, project_id, include_disabled)
+    }
+
+    pub fn get_project_agent_template_by_machine_key(
+        &self,
+        project_id: &str,
+        machine_key: &str,
+    ) -> Result<AgentTemplateRecord, AgentTemplateError> {
+        let connection = self.template_connection()?;
+        agent_template_repository::get_project_template_by_machine_key(
+            &connection,
+            project_id,
+            machine_key,
+        )
     }
 
     pub fn update_agent_template(
@@ -42,7 +62,6 @@ impl StorageService {
 
     pub fn set_agent_template_enabled(
         &self,
-        project_id: &str,
         template_id: &str,
         expected_revision: u64,
         enabled: bool,
@@ -50,7 +69,6 @@ impl StorageService {
         let mut connection = self.template_connection()?;
         agent_template_repository::set_template_enabled(
             &mut connection,
-            project_id,
             template_id,
             expected_revision,
             enabled,
@@ -59,16 +77,25 @@ impl StorageService {
 
     pub fn delete_agent_template(
         &self,
-        project_id: &str,
         template_id: &str,
         expected_revision: u64,
     ) -> Result<AgentTemplateRecord, AgentTemplateError> {
         let mut connection = self.template_connection()?;
-        agent_template_repository::delete_template(
+        agent_template_repository::delete_template(&mut connection, template_id, expected_revision)
+    }
+
+    pub fn set_agent_template_project_assignment(
+        &self,
+        project_id: &str,
+        template_id: &str,
+        assigned: bool,
+    ) -> Result<AgentTemplateRecord, AgentTemplateError> {
+        let mut connection = self.template_connection()?;
+        agent_template_repository::set_template_project_assignment(
             &mut connection,
             project_id,
             template_id,
-            expected_revision,
+            assigned,
         )
     }
 
@@ -84,7 +111,7 @@ impl StorageService {
         // Keep both reads under the single StorageState mutex. Model settings already use their own
         // SQLite read transaction, and no in-process settings/template mutation can interleave.
         let mut connection = self.template_connection()?;
-        let template = agent_template_repository::get_template_by_machine_key(
+        let template = agent_template_repository::get_project_template_by_machine_key(
             &connection,
             project_id,
             machine_key,
@@ -106,7 +133,7 @@ impl StorageService {
         Ok(ResolvedAgentTemplateForSpawn {
             template: AgentTemplateSnapshot {
                 template_id: template.template_id,
-                project_id: template.project_id,
+                project_id: project_id.to_string(),
                 machine_key: template.machine_key,
                 name: template.name,
                 description: template.description,
@@ -252,14 +279,13 @@ mod tests {
 
     fn create_input(
         template_id: &str,
-        project_id: &str,
+        _project_id: &str,
         machine_key: &str,
         name: &str,
         model_config_id: &str,
     ) -> CreateAgentTemplateInput {
         CreateAgentTemplateInput {
             template_id: template_id.to_string(),
-            project_id: project_id.to_string(),
             machine_key: machine_key.to_string(),
             name: name.to_string(),
             description: "Focused reviewer".to_string(),
@@ -320,8 +346,14 @@ mod tests {
         }
     }
 
+    fn assign(service: &StorageService, project_id: &str, template_id: &str) {
+        service
+            .set_agent_template_project_assignment(project_id, template_id, true)
+            .unwrap();
+    }
+
     #[test]
-    fn project_scoped_crud_owns_machine_identity_and_compare_and_set_revision() {
+    fn global_crud_owns_machine_identity_assignments_and_compare_and_set_revision() {
         let fixture = Fixture::new();
         let service = &fixture.service;
         let first = service
@@ -335,16 +367,20 @@ mod tests {
             .unwrap();
         assert_eq!(first.revision, 1);
         assert_eq!(first.machine_key, "security_review");
+        assert!(first.project_ids.is_empty());
         assert_eq!(
-            service.list_agent_templates("project-a", false).unwrap(),
+            service.list_agent_templates(false).unwrap(),
             vec![first.clone()]
         );
-        assert_eq!(
-            service
-                .get_agent_template("project-b", "template-1")
-                .unwrap_err(),
-            AgentTemplateError::TemplateNotFound("template-1".to_string())
-        );
+        assert_eq!(service.get_agent_template("template-1").unwrap(), first);
+        let assigned = service
+            .set_agent_template_project_assignment("project-a", "template-1", true)
+            .unwrap();
+        assert_eq!(assigned.project_ids, vec!["project-a"]);
+        let assigned_again = service
+            .set_agent_template_project_assignment("project-a", "template-1", true)
+            .unwrap();
+        assert_eq!(assigned_again, assigned);
 
         let machine_conflict = service
             .create_agent_template(&create_input(
@@ -384,7 +420,6 @@ mod tests {
 
         let updated = service
             .update_agent_template(&UpdateAgentTemplateInput {
-                project_id: "project-a".to_string(),
                 template_id: "template-1".to_string(),
                 expected_revision: 1,
                 name: "Security specialist".to_string(),
@@ -398,7 +433,6 @@ mod tests {
         assert_eq!(
             service
                 .update_agent_template(&UpdateAgentTemplateInput {
-                    project_id: "project-a".to_string(),
                     template_id: "template-1".to_string(),
                     expected_revision: 2,
                     name: second.name,
@@ -412,7 +446,6 @@ mod tests {
         assert_eq!(
             service
                 .update_agent_template(&UpdateAgentTemplateInput {
-                    project_id: "project-a".to_string(),
                     template_id: "template-1".to_string(),
                     expected_revision: 1,
                     name: "Stale".to_string(),
@@ -426,15 +459,10 @@ mod tests {
                 current: 2
             }
         );
-        assert_eq!(
-            service
-                .get_agent_template("project-a", "template-1")
-                .unwrap(),
-            updated
-        );
+        assert_eq!(service.get_agent_template("template-1").unwrap(), updated);
 
         let disabled = service
-            .set_agent_template_enabled("project-a", "template-1", 2, false)
+            .set_agent_template_enabled("template-1", 2, false)
             .unwrap();
         assert_eq!(disabled.revision, 3);
         assert!(!disabled.enabled);
@@ -444,45 +472,42 @@ mod tests {
                 .unwrap_err(),
             AgentTemplateError::TemplateDisabled("security_review".to_string())
         );
+        assert_eq!(service.list_agent_templates(false).unwrap().len(), 1);
+        assert_eq!(service.list_agent_templates(true).unwrap().len(), 2);
+        assert!(service
+            .list_project_agent_templates("project-a", false)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             service
-                .list_agent_templates("project-a", false)
+                .list_project_agent_templates("project-a", true)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            service
-                .list_agent_templates("project-a", true)
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            service
-                .delete_agent_template("project-a", "template-1", 2)
-                .unwrap_err(),
+            service.delete_agent_template("template-1", 2).unwrap_err(),
             AgentTemplateError::RevisionConflict {
                 expected: 2,
                 current: 3
             }
         );
-        service
-            .delete_agent_template("project-a", "template-1", 3)
-            .unwrap();
+        service.delete_agent_template("template-1", 3).unwrap();
         assert_eq!(
-            service
-                .get_agent_template("project-a", "template-1")
-                .unwrap_err(),
+            service.get_agent_template("template-1").unwrap_err(),
             AgentTemplateError::TemplateNotFound("template-1".to_string())
         );
+        assert!(service
+            .list_project_agent_templates("project-a", true)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn project_delete_cascades_templates_without_touching_other_projects() {
+    fn project_delete_cascades_only_bindings_and_preserves_global_templates() {
         let fixture = Fixture::new();
         let service = &fixture.service;
-        service
+        let template = service
             .create_agent_template(&create_input(
                 "template-a",
                 "project-a",
@@ -492,27 +517,90 @@ mod tests {
             ))
             .unwrap();
         service
-            .create_agent_template(&create_input(
-                "template-b",
-                "project-b",
-                "reviewer",
-                "Reviewer A",
-                "model-a",
-            ))
+            .set_agent_template_project_assignment("project-a", &template.template_id, true)
+            .unwrap();
+        service
+            .set_agent_template_project_assignment("project-b", &template.template_id, true)
             .unwrap();
 
         service.delete_project("project-a").unwrap();
 
         assert_eq!(
-            service.list_agent_templates("project-a", true).unwrap_err(),
+            service
+                .list_project_agent_templates("project-a", true)
+                .unwrap_err(),
             AgentTemplateError::ProjectNotFound("project-a".to_string())
         );
+        let preserved = service.get_agent_template("template-a").unwrap();
+        assert_eq!(preserved.project_ids, vec!["project-b"]);
+        assert_eq!(service.list_agent_templates(true).unwrap(), vec![preserved]);
+    }
+
+    #[test]
+    fn project_template_assignments_are_idempotent_and_bounded_to_32() {
+        let fixture = Fixture::new();
+        let service = &fixture.service;
+        for index in 0..=32 {
+            let template_id = format!("template-{index}");
+            service
+                .create_agent_template(&create_input(
+                    &template_id,
+                    "project-a",
+                    &format!("reviewer_{index}"),
+                    &format!("Reviewer {index}"),
+                    "model-a",
+                ))
+                .unwrap();
+            if index < 32 {
+                assign(service, "project-a", &template_id);
+            }
+        }
+
+        let idempotent = service
+            .set_agent_template_project_assignment("project-a", "template-0", true)
+            .unwrap();
+        assert_eq!(idempotent.project_ids, vec!["project-a"]);
         assert_eq!(
             service
-                .list_agent_templates("project-b", true)
+                .set_agent_template_project_assignment("project-a", "template-32", true)
+                .unwrap_err(),
+            AgentTemplateError::ProjectTemplateLimit {
+                project_id: "project-a".to_string(),
+                limit: 32,
+            }
+        );
+        {
+            let connection = service.state.connection().unwrap();
+            assert!(connection
+                .execute(
+                    "INSERT INTO project_agent_template_bindings (
+                         project_id, template_id, created_at
+                     ) VALUES ('project-a', 'template-32', 1)",
+                    [],
+                )
+                .is_err());
+        }
+
+        let unassigned = service
+            .set_agent_template_project_assignment("project-a", "template-0", false)
+            .unwrap();
+        assert!(unassigned.project_ids.is_empty());
+        assert_eq!(
+            service
+                .set_agent_template_project_assignment("project-a", "template-0", false)
+                .unwrap(),
+            unassigned
+        );
+        let newly_assigned = service
+            .set_agent_template_project_assignment("project-a", "template-32", true)
+            .unwrap();
+        assert_eq!(newly_assigned.project_ids, vec!["project-a"]);
+        assert_eq!(
+            service
+                .list_project_agent_templates("project-a", true)
                 .unwrap()
                 .len(),
-            1
+            32
         );
     }
 
@@ -539,13 +627,7 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(
-            service
-                .list_agent_templates("project-a", true)
-                .unwrap()
-                .len(),
-            2
-        );
+        assert_eq!(service.list_agent_templates(true).unwrap().len(), 2);
     }
 
     #[test]
@@ -564,6 +646,13 @@ mod tests {
                 "model-a",
             ))
             .unwrap();
+        assert_eq!(
+            service
+                .resolve_template_for_spawn("project-a", "reviewer")
+                .unwrap_err(),
+            AgentTemplateError::TemplateNotFound("reviewer".to_string())
+        );
+        assign(service, "project-a", "template-1");
 
         let resolved = service
             .resolve_template_for_spawn("project-a", "reviewer")
@@ -587,7 +676,6 @@ mod tests {
         let before = resolved.clone();
         service
             .update_agent_template(&UpdateAgentTemplateInput {
-                project_id: "project-a".to_string(),
                 template_id: "template-1".to_string(),
                 expected_revision: 1,
                 name: "Renamed reviewer".to_string(),
@@ -623,6 +711,7 @@ mod tests {
                 "model-a",
             ))
             .unwrap();
+        assign(service, "project-a", "template-1");
         assert_unavailable(
             service
                 .resolve_template_for_spawn("project-a", "reviewer")
@@ -694,6 +783,7 @@ mod tests {
                 "model-a",
             ))
             .unwrap();
+        assign(service, "project-a", "template-1");
 
         // Model settings intentionally replace every `models` row. This succeeds only because a
         // template is a soft exact reference rather than an FK with fallback behavior.
@@ -728,6 +818,7 @@ mod tests {
                 "model-a",
             ))
             .unwrap();
+        assign(service, "project-a", "template-1");
         service
             .create_agent_template(&create_input(
                 "template-override-source",
@@ -737,6 +828,7 @@ mod tests {
                 "model-b",
             ))
             .unwrap();
+        assign(service, "project-a", "template-override-source");
         let resolved = service
             .resolve_template_for_spawn("project-a", "reviewer")
             .unwrap();
@@ -784,7 +876,7 @@ mod tests {
             .unwrap();
 
         let disabled = service
-            .set_agent_template_enabled("project-a", "template-1", 1, false)
+            .set_agent_template_enabled("template-1", 1, false)
             .unwrap();
         assert!(!disabled.enabled);
         assert_eq!(disabled.revision, 2);
@@ -816,12 +908,10 @@ mod tests {
                 })
                 .unwrap_err(),
             AgentGraphError::Conflict(reason)
-                if reason.contains("template snapshot is stale, disabled, or unavailable")
+                if reason.contains("template snapshot is stale, disabled, unassigned, or unavailable")
         ));
         assert_eq!(
-            service
-                .delete_agent_template("project-a", "template-1", 2)
-                .unwrap_err(),
+            service.delete_agent_template("template-1", 2).unwrap_err(),
             AgentTemplateError::TemplateInUse {
                 template_id: "template-1".to_string(),
                 agent_count: 1,
@@ -829,12 +919,8 @@ mod tests {
         );
 
         service.delete_project("project-a").unwrap();
-        assert_eq!(
-            service
-                .get_agent_template("project-a", "template-1")
-                .unwrap_err(),
-            AgentTemplateError::ProjectNotFound("project-a".to_string())
-        );
+        let preserved = service.get_agent_template("template-1").unwrap();
+        assert!(preserved.project_ids.is_empty());
         assert!(service.get_agent_node("root-agent").unwrap().is_none());
         assert!(service.get_agent_node("child-agent").unwrap().is_none());
     }
@@ -843,7 +929,7 @@ mod tests {
     fn resolver_reports_missing_model_identities_from_a_frozen_settings_snapshot() {
         let template = AgentTemplateRecord {
             template_id: "template-1".to_string(),
-            project_id: "project-a".to_string(),
+            project_ids: vec!["project-a".to_string()],
             machine_key: "reviewer".to_string(),
             name: "Reviewer".to_string(),
             description: String::new(),
@@ -918,10 +1004,10 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO agent_templates (
-                        template_id, schema_version, project_id, machine_key, name, description,
+                        template_id, schema_version, machine_key, name, description,
                         instructions, model_config_id, enabled, revision, created_at, updated_at
                      ) VALUES (
-                        'template-1', 1, 'project-a', 'reviewer', 'Reviewer', '',
+                        'template-1', 1, 'reviewer', 'Reviewer', '',
                         'Review.', 'model-a', 1, ?1, 1, 1
                      )",
                     [i64::MAX],
@@ -931,24 +1017,17 @@ mod tests {
 
         assert_eq!(
             service
-                .set_agent_template_enabled(
-                    "project-a",
-                    "template-1",
-                    u64::try_from(i64::MAX).unwrap(),
-                    false,
-                )
+                .set_agent_template_enabled("template-1", u64::try_from(i64::MAX).unwrap(), false,)
                 .unwrap_err(),
             AgentTemplateError::RevisionExhausted
         );
-        let unchanged = service
-            .get_agent_template("project-a", "template-1")
-            .unwrap();
+        let unchanged = service.get_agent_template("template-1").unwrap();
         assert!(unchanged.enabled);
         assert_eq!(unchanged.revision, u64::try_from(i64::MAX).unwrap());
     }
 
     #[test]
-    fn database_rejects_machine_key_and_project_identity_rewrites() {
+    fn database_rejects_machine_key_identity_rewrites() {
         let fixture = Fixture::new();
         let service = &fixture.service;
         service
@@ -969,18 +1048,8 @@ mod tests {
                 [],
             )
             .is_err());
-        assert!(connection
-            .execute(
-                "UPDATE agent_templates
-                 SET project_id = 'project-b', revision = 2, updated_at = 2
-                 WHERE template_id = 'template-1'",
-                [],
-            )
-            .is_err());
         drop(connection);
-        let unchanged = service
-            .get_agent_template("project-a", "template-1")
-            .unwrap();
+        let unchanged = service.get_agent_template("template-1").unwrap();
         assert_eq!(unchanged.machine_key, "reviewer");
         assert_eq!(unchanged.revision, 1);
     }

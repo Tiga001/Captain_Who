@@ -361,8 +361,15 @@ export const frFRTranslations = {
   'settings.breadcrumb.root': 'Paramètres',
   'settings.page.environment': 'Environnement',
   'settings.page.archivedConversations': 'Discussions archivées',
-  'agentTemplates.descriptionText': "Modèles de sous-agents que l'agent principal peut appeler",
+  'agentTemplates.descriptionText':
+    'Créez des modèles de sous-agents réutilisables, puis choisissez les projets autorisés à les utiliser.',
   'agentTemplates.project': 'Projet',
+  'agentTemplates.projects': 'Projets autorisés',
+  'agentTemplates.projectsHint':
+    'Choisissez les projets qui peuvent utiliser ce modèle. Ne cochez rien pour l’attribuer plus tard.',
+  'agentTemplates.noProjectsAvailable':
+    'Aucun projet pour le moment. Vous pourrez attribuer ce modèle ultérieurement.',
+  'agentTemplates.projectCount': 'Projets attribués : {count}',
   'agentTemplates.create': 'Nouveau modèle',
   'agentTemplates.createTitle': 'Nouveau modèle Agent',
   'agentTemplates.editTitle': 'Modifier le modèle Agent',
@@ -396,7 +403,7 @@ export const frFRTranslations = {
   'agentTemplates.delete': 'Supprimer le modèle',
   'agentTemplates.deleteTitle': 'Supprimer le modèle Agent ?',
   'agentTemplates.deleteDescription':
-    'Les futurs agents ne peuvent plus sélectionner ce modèle. Les agents existants conservent leur instantané.',
+    'Ce modèle est attribué à {count} projets. Sa suppression le retire de tous les projets. Les agents existants conservent leur instantané.',
   'agentCenter.loading': 'Chargement des sous-agents…',
   'agentCenter.unavailable': 'L’état du sous-agent n’est pas disponible.',
   'agentCenter.observerUnavailable': "Cette conversation en lecture seule n'est pas disponible.",

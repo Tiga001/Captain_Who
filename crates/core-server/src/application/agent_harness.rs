@@ -192,7 +192,7 @@ impl AgentCollaborationHarnessAdapter {
         let templates = match project_id {
             Some(project_id) => self
                 .storage
-                .list_agent_templates(project_id, false)
+                .list_project_agent_templates(project_id, false)
                 .map_err(template_error)?
                 .into_iter()
                 .filter_map(|template| {
@@ -201,6 +201,8 @@ impl AgentCollaborationHarnessAdapter {
                         .ok()
                         .map(|resolved| AgentCollaborationTemplateSelector {
                             agent_type: template.machine_key,
+                            template_id: resolved.template.template_id,
+                            template_revision: resolved.template.template_revision,
                             name: template.name,
                             description: template.description,
                             model_display_name: resolved.model.display_name,
@@ -297,12 +299,18 @@ impl AgentCollaborationHarnessAdapter {
                         (request.agent_type.is_none() && request.model_config_id.is_none())
                             .then_some(invocation.caller_model_capabilities)
                     });
+                let expected_template_identity =
+                    request.agent_type.as_deref().and_then(|agent_type| {
+                        invocation
+                            .selector_authorization
+                            .expected_template_identity(agent_type)
+                    });
                 self.authorizer
                     .authorize_spawn(&caller.agent_id)
                     .and_then(|_| self.authorizer.authorize_message_size(&request.message))
                     .map_err(authorizer_error)?;
                 let child = ChildAgentFactory::new(Arc::clone(&self.storage))
-                    .create_child_with_expected_model_capabilities(
+                    .create_child_with_expected_selector(
                         &CreateChildAgentInput {
                             parent_agent_id: caller.agent_id.clone(),
                             creation_request_id: request_id,
@@ -314,6 +322,7 @@ impl AgentCollaborationHarnessAdapter {
                             fork_turns: request.fork_turns,
                         },
                         expected_model_capabilities,
+                        expected_template_identity,
                     )
                     .map_err(spawn_error)?;
                 self.notify_work_available()?;
@@ -748,6 +757,8 @@ mod tests {
             (0..34)
                 .map(|index| AgentCollaborationTemplateSelector {
                     agent_type: format!("type-{index:02}"),
+                    template_id: format!("template-{index:02}"),
+                    template_revision: 1,
                     name: format!("Type {index:02}"),
                     description: "Fixture".to_string(),
                     model_display_name: "Model".to_string(),
@@ -906,7 +917,6 @@ mod tests {
         let template = storage
             .create_agent_template(&CreateAgentTemplateInput {
                 template_id: "template-catalog-reviewer".to_string(),
-                project_id: "project-catalog".to_string(),
                 machine_key: "reviewer".to_string(),
                 name: "Reviewer".to_string(),
                 description: "Review one delegated boundary".to_string(),
@@ -914,6 +924,9 @@ mod tests {
                 model_config_id: "model-catalog".to_string(),
                 enabled: true,
             })
+            .unwrap();
+        storage
+            .set_agent_template_project_assignment("project-catalog", &template.template_id, true)
             .unwrap();
         let enabled = adapter
             .runtime_services_for_conversation("conversation-catalog")
@@ -935,12 +948,7 @@ mod tests {
         let frozen_authorization = enabled.selector_authorization();
 
         let disabled = storage
-            .set_agent_template_enabled(
-                "project-catalog",
-                &template.template_id,
-                template.revision,
-                false,
-            )
+            .set_agent_template_enabled(&template.template_id, template.revision, false)
             .unwrap();
         let refreshed = adapter
             .preview_runtime_services_for_conversation("conversation-catalog")
@@ -1103,12 +1111,7 @@ mod tests {
         assert_eq!(error.details().unwrap()["retryable"], false);
 
         storage
-            .set_agent_template_enabled(
-                "project-catalog",
-                &template.template_id,
-                disabled.revision,
-                true,
-            )
+            .set_agent_template_enabled(&template.template_id, disabled.revision, true)
             .unwrap();
         let mut settings = storage.load_model_settings().unwrap().unwrap();
         settings.models[0].enabled = false;

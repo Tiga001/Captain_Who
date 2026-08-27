@@ -647,7 +647,7 @@ impl fmt::Display for ChildAgentSpawnError {
             Self::ParentNotFound(id) => write!(formatter, "parent Agent `{id}` was not found"),
             Self::ParentUnavailable(id) => write!(formatter, "parent Agent `{id}` is unavailable"),
             Self::ProjectRequiredForTemplate => {
-                formatter.write_str("a project-bound Agent template requires a project")
+                formatter.write_str("a project-authorized Agent template requires a project")
             }
             Self::TemplateNotFound(key) => {
                 write!(formatter, "Agent template `{key}` was not found")
@@ -995,7 +995,7 @@ pub enum InterruptAgentExecutionOutcome {
 #[serde(rename_all = "camelCase")]
 pub struct AgentTemplateRecord {
     pub template_id: String,
-    pub project_id: String,
+    pub project_ids: Vec<String>,
     pub machine_key: String,
     pub name: String,
     pub description: String,
@@ -1010,7 +1010,6 @@ pub struct AgentTemplateRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateAgentTemplateInput {
     pub template_id: String,
-    pub project_id: String,
     pub machine_key: String,
     pub name: String,
     pub description: String,
@@ -1021,7 +1020,6 @@ pub struct CreateAgentTemplateInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAgentTemplateInput {
-    pub project_id: String,
     pub template_id: String,
     pub expected_revision: u64,
     pub name: String,
@@ -1146,6 +1144,10 @@ pub enum AgentTemplateError {
     },
     ProjectNotFound(String),
     TemplateNotFound(String),
+    ProjectTemplateLimit {
+        project_id: String,
+        limit: u32,
+    },
     MachineKeyConflict(String),
     NameConflict(String),
     RevisionConflict {
@@ -1172,6 +1174,10 @@ impl fmt::Display for AgentTemplateError {
             Self::InvalidInput { field, reason } => write!(formatter, "invalid {field}: {reason}"),
             Self::ProjectNotFound(id) => write!(formatter, "project `{id}` was not found"),
             Self::TemplateNotFound(id) => write!(formatter, "Agent template `{id}` was not found"),
+            Self::ProjectTemplateLimit { project_id, limit } => write!(
+                formatter,
+                "project `{project_id}` cannot use more than {limit} Agent templates"
+            ),
             Self::MachineKeyConflict(key) => {
                 write!(
                     formatter,

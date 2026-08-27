@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 22;
+pub const STORAGE_SCHEMA_VERSION: i32 = 23;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:d637288c29f4b4252be1c02ef5d6bc7a0cf48ca1cbded567a2dae86ddf6c7a5f";
+    "sha256:3e93868dfdae770b7c3d152b4112b48b44dbfc744e0cf85da0ac90366f0657a9";
 
 /// Opens the single supported development schema.
 ///
@@ -142,6 +142,9 @@ mod tests {
         for required_object in [
             "models",
             "agent_templates",
+            "project_agent_template_bindings",
+            "project_agent_template_bindings_template",
+            "validate_project_agent_template_binding_limit",
             "prevent_agent_template_identity_update",
             "validate_agent_template_revision_update",
             "agent_nodes",
@@ -984,9 +987,9 @@ mod tests {
         assert!(error
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
-        assert!(error
-            .to_string()
-            .contains("expected schema version 20, found 17"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 17"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 17);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(

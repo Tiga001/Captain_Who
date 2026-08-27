@@ -359,8 +359,15 @@ export const itITTranslations = {
   'settings.breadcrumb.root': 'Impostazioni',
   'settings.page.environment': 'Ambiente',
   'settings.page.archivedConversations': 'Chat archiviate',
-  'agentTemplates.descriptionText': "Modelli di subagente che l'agente principale può chiamare",
+  'agentTemplates.descriptionText':
+    'Crea modelli di subagente riutilizzabili, quindi scegli quali progetti possono usarli.',
   'agentTemplates.project': 'Progetto',
+  'agentTemplates.projects': 'Progetti autorizzati',
+  'agentTemplates.projectsHint':
+    'Scegli i progetti che possono usare questo modello. Non selezionare nulla per assegnarlo in seguito.',
+  'agentTemplates.noProjectsAvailable':
+    'Non ci sono ancora progetti. Potrai assegnare questo modello in seguito.',
+  'agentTemplates.projectCount': 'Progetti assegnati: {count}',
   'agentTemplates.create': 'Nuovo modello',
   'agentTemplates.createTitle': 'Nuovo modello Agent',
   'agentTemplates.editTitle': 'Modifica modello Agent',
@@ -394,7 +401,7 @@ export const itITTranslations = {
   'agentTemplates.delete': 'Elimina modello',
   'agentTemplates.deleteTitle': 'Eliminare il modello Agent?',
   'agentTemplates.deleteDescription':
-    'I futuri agenti non potranno più selezionare questo modello. Gli agenti esistenti mantengono la loro istantanea.',
+    'Questo modello è assegnato a {count} progetti. Eliminandolo verrà rimosso da tutti i progetti. Gli agenti esistenti mantengono la loro istantanea.',
   'agentCenter.loading': 'Caricamento degli agenti secondari…',
   'agentCenter.unavailable': 'Lo stato del subagente non è disponibile.',
   'agentCenter.observerUnavailable': 'Questa conversazione di sola lettura non è disponibile.',

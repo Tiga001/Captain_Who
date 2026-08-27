@@ -22,6 +22,8 @@ export const AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD = 'agent.collaboration.
 export const AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD = 'agent.collaboration.templates.update'
 export const AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD =
   'agent.collaboration.templates.setEnabled'
+export const AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD =
+  'agent.collaboration.templates.setProjectAssignment'
 export const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD = 'agent.collaboration.templates.delete'
 export const AGENT_COLLABORATION_APPROVALS_LIST_METHOD = 'agent.collaboration.approvals.list'
 export const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD = 'agent.collaboration.approvals.decide'
@@ -249,7 +251,7 @@ export interface CollaborationResyncEnvelope {
 export interface AgentTemplate {
   schemaVersion: typeof AGENT_COLLABORATION_SCHEMA_VERSION
   templateId: string
-  projectId: string
+  projectIds: string[]
   machineKey: string
   name: string
   description: string
@@ -263,7 +265,6 @@ export interface AgentTemplate {
 }
 
 export interface AgentTemplateListRequest {
-  projectId: string
   includeDisabled: boolean
 }
 
@@ -274,7 +275,6 @@ export interface AgentTemplateList {
 
 export interface AgentTemplateCreateRequest {
   templateId: string
-  projectId: string
   machineKey: string
   name: string
   description: string
@@ -284,7 +284,6 @@ export interface AgentTemplateCreateRequest {
 }
 
 export interface AgentTemplateUpdateRequest {
-  projectId: string
   templateId: string
   expectedRevision: number
   name: string
@@ -294,16 +293,20 @@ export interface AgentTemplateUpdateRequest {
 }
 
 export interface AgentTemplateSetEnabledRequest {
-  projectId: string
   templateId: string
   expectedRevision: number
   enabled: boolean
 }
 
 export interface AgentTemplateDeleteRequest {
-  projectId: string
   templateId: string
   expectedRevision: number
+}
+
+export interface AgentTemplateProjectAssignmentRequest {
+  projectId: string
+  templateId: string
+  assigned: boolean
 }
 
 export type CollaborationApprovalStatus =
@@ -391,6 +394,16 @@ function text(value: unknown, context: string, maximum = MAX_ID_BYTES): string {
 
 function nullableText(value: unknown, context: string): string | null {
   return value === null ? null : text(value, context)
+}
+
+function utf8LessThan(left: string, right: string): boolean {
+  const leftBytes = new TextEncoder().encode(left)
+  const rightBytes = new TextEncoder().encode(right)
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length)
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index]! < rightBytes[index]!
+  }
+  return leftBytes.length < rightBytes.length
 }
 
 function boundedOptionalString(
@@ -1133,7 +1146,7 @@ export function parseAgentTemplate(value: unknown): AgentTemplate {
     [
       'schemaVersion',
       'templateId',
-      'projectId',
+      'projectIds',
       'machineKey',
       'name',
       'description',
@@ -1154,10 +1167,23 @@ export function parseAgentTemplate(value: unknown): AgentTemplate {
     new TextEncoder().encode(item.instructions).byteLength > MAX_TEXT_BYTES
   )
     throw new Error('Invalid template text')
+  if (!Array.isArray(item.projectIds) || item.projectIds.length > 256) {
+    throw new Error('Invalid AgentTemplate.projectIds')
+  }
+  const projectIds = item.projectIds.map((projectId, index) =>
+    text(projectId, `AgentTemplate.projectIds[${index}]`)
+  )
+  if (
+    projectIds.some(
+      (projectId, index) => index > 0 && !utf8LessThan(projectIds[index - 1]!, projectId)
+    )
+  ) {
+    throw new Error('Invalid AgentTemplate.projectIds')
+  }
   return {
     schemaVersion: schema(item.schemaVersion, 'AgentTemplate'),
     templateId: text(item.templateId, 'templateId'),
-    projectId: text(item.projectId, 'projectId'),
+    projectIds,
     machineKey: text(item.machineKey, 'machineKey'),
     name: text(item.name, 'name'),
     description: item.description,
@@ -1184,9 +1210,8 @@ export function parseAgentTemplateList(value: unknown): AgentTemplateList {
 
 export function parseAgentTemplateListRequest(value: unknown): AgentTemplateListRequest {
   const item = record(value, 'AgentTemplateListRequest')
-  exact(item, ['projectId', 'includeDisabled'], 'AgentTemplateListRequest')
+  exact(item, ['includeDisabled'], 'AgentTemplateListRequest')
   return {
-    projectId: text(item.projectId, 'projectId'),
     includeDisabled: bool(item.includeDisabled, 'includeDisabled')
   }
 }
@@ -1195,16 +1220,7 @@ export function parseAgentTemplateCreateRequest(value: unknown): AgentTemplateCr
   const item = record(value, 'AgentTemplateCreateRequest')
   exact(
     item,
-    [
-      'templateId',
-      'projectId',
-      'machineKey',
-      'name',
-      'description',
-      'instructions',
-      'modelConfigId',
-      'enabled'
-    ],
+    ['templateId', 'machineKey', 'name', 'description', 'instructions', 'modelConfigId', 'enabled'],
     'AgentTemplateCreateRequest'
   )
   const description = typeof item.description === 'string' ? item.description : null
@@ -1219,7 +1235,6 @@ export function parseAgentTemplateCreateRequest(value: unknown): AgentTemplateCr
   }
   return {
     templateId: text(item.templateId, 'templateId'),
-    projectId: text(item.projectId, 'projectId'),
     machineKey: text(item.machineKey, 'machineKey'),
     name: text(item.name, 'name'),
     description,
@@ -1233,20 +1248,11 @@ export function parseAgentTemplateUpdateRequest(value: unknown): AgentTemplateUp
   const item = record(value, 'AgentTemplateUpdateRequest')
   exact(
     item,
-    [
-      'projectId',
-      'templateId',
-      'expectedRevision',
-      'name',
-      'description',
-      'instructions',
-      'modelConfigId'
-    ],
+    ['templateId', 'expectedRevision', 'name', 'description', 'instructions', 'modelConfigId'],
     'AgentTemplateUpdateRequest'
   )
   const common = parseAgentTemplateCreateRequest({
     templateId: item.templateId,
-    projectId: item.projectId,
     machineKey: 'immutable-machine-key',
     name: item.name,
     description: item.description,
@@ -1255,7 +1261,6 @@ export function parseAgentTemplateUpdateRequest(value: unknown): AgentTemplateUp
     enabled: true
   })
   return {
-    projectId: common.projectId,
     templateId: common.templateId,
     expectedRevision: integer(item.expectedRevision, 'expectedRevision', 1),
     name: common.name,
@@ -1269,13 +1274,8 @@ export function parseAgentTemplateSetEnabledRequest(
   value: unknown
 ): AgentTemplateSetEnabledRequest {
   const item = record(value, 'AgentTemplateSetEnabledRequest')
-  exact(
-    item,
-    ['projectId', 'templateId', 'expectedRevision', 'enabled'],
-    'AgentTemplateSetEnabledRequest'
-  )
+  exact(item, ['templateId', 'expectedRevision', 'enabled'], 'AgentTemplateSetEnabledRequest')
   return {
-    projectId: text(item.projectId, 'projectId'),
     templateId: text(item.templateId, 'templateId'),
     expectedRevision: integer(item.expectedRevision, 'expectedRevision', 1),
     enabled: bool(item.enabled, 'enabled')
@@ -1284,11 +1284,22 @@ export function parseAgentTemplateSetEnabledRequest(
 
 export function parseAgentTemplateDeleteRequest(value: unknown): AgentTemplateDeleteRequest {
   const item = record(value, 'AgentTemplateDeleteRequest')
-  exact(item, ['projectId', 'templateId', 'expectedRevision'], 'AgentTemplateDeleteRequest')
+  exact(item, ['templateId', 'expectedRevision'], 'AgentTemplateDeleteRequest')
+  return {
+    templateId: text(item.templateId, 'templateId'),
+    expectedRevision: integer(item.expectedRevision, 'expectedRevision', 1)
+  }
+}
+
+export function parseAgentTemplateProjectAssignmentRequest(
+  value: unknown
+): AgentTemplateProjectAssignmentRequest {
+  const item = record(value, 'AgentTemplateProjectAssignmentRequest')
+  exact(item, ['projectId', 'templateId', 'assigned'], 'AgentTemplateProjectAssignmentRequest')
   return {
     projectId: text(item.projectId, 'projectId'),
     templateId: text(item.templateId, 'templateId'),
-    expectedRevision: integer(item.expectedRevision, 'expectedRevision', 1)
+    assigned: bool(item.assigned, 'assigned')
   }
 }
 

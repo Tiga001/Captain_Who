@@ -9,6 +9,7 @@
     "agent.collaboration.templates.create",
     "agent.collaboration.templates.update",
     "agent.collaboration.templates.setEnabled",
+    "agent.collaboration.templates.setProjectAssignment",
     "agent.collaboration.templates.delete",
     "agent.collaboration.approvals.list",
     "agent.collaboration.approvals.decide"
@@ -114,7 +115,7 @@
   "template": {
     "schemaVersion": 1,
     "templateId": "template-research",
-    "projectId": "project-1",
+    "projectIds": ["project-1"],
     "machineKey": "research",
     "name": "Research",
     "description": "Read-only research",
@@ -132,7 +133,7 @@
       {
         "schemaVersion": 1,
         "templateId": "template-research",
-        "projectId": "project-1",
+        "projectIds": ["project-1"],
         "machineKey": "research",
         "name": "Research",
         "description": "Read-only research",

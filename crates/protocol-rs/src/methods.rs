@@ -88,6 +88,8 @@ pub const AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD: &str =
     "agent.collaboration.templates.update";
 pub const AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD: &str =
     "agent.collaboration.templates.setEnabled";
+pub const AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD: &str =
+    "agent.collaboration.templates.setProjectAssignment";
 pub const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD: &str =
     "agent.collaboration.templates.delete";
 pub const AGENT_COLLABORATION_APPROVALS_LIST_METHOD: &str = "agent.collaboration.approvals.list";

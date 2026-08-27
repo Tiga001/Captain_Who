@@ -119,6 +119,15 @@ const HOST_CALL_REASON_SCHEMA = Object.freeze({
   maxLength: 512
 })
 
+const HOST_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
+  browser_click:
+    'Perform a click on the current page. If the click starts a browser download, the result reports download_started with a stable download ID; use browser_wait_for with a short time to observe progress.',
+  browser_get_config:
+    "Get the managed browser's resolved Host configuration and the current task's path-free download progress.",
+  browser_wait_for:
+    'Wait for text to appear or disappear or for a specified time. The result also reports current-task browser download progress, so use a short time to poll an active download.'
+})
+
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 export const MANAGED_PLAYWRIGHT_CATALOG_LOCK = parseUpstreamCatalog(rawUpstreamCatalog)
@@ -379,8 +388,8 @@ function parsePolicyManifest(
       modelName: parsed.modelName,
       description:
         parsed.rawName === 'browser_take_screenshot'
-          ? 'Take a screenshot of the current page. You can\'t perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.'
-          : (upstream.description ?? parsed.rawName),
+          ? "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId."
+          : (HOST_TOOL_DESCRIPTIONS[parsed.rawName] ?? upstream.description ?? parsed.rawName),
       handlingMode: parsed.handlingMode,
       exposed: parsed.exposed,
       safety: readOnly ? ('read_only' as const) : ('destructive' as const),

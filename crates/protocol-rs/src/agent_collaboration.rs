@@ -423,7 +423,8 @@ pub struct CollaborationResyncEnvelopeDto {
 pub struct AgentTemplateDto {
     pub schema_version: u32,
     pub template_id: String,
-    pub project_id: String,
+    #[serde(deserialize_with = "deserialize_canonical_project_ids")]
+    pub project_ids: Vec<String>,
     pub machine_key: String,
     pub name: String,
     pub description: String,
@@ -439,7 +440,6 @@ pub struct AgentTemplateDto {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTemplateListRequest {
-    pub project_id: String,
     pub include_disabled: bool,
 }
 
@@ -454,7 +454,6 @@ pub struct AgentTemplateListDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTemplateCreateRequest {
     pub template_id: String,
-    pub project_id: String,
     pub machine_key: String,
     pub name: String,
     pub description: String,
@@ -466,7 +465,6 @@ pub struct AgentTemplateCreateRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTemplateUpdateRequest {
-    pub project_id: String,
     pub template_id: String,
     pub expected_revision: u64,
     pub name: String,
@@ -478,7 +476,6 @@ pub struct AgentTemplateUpdateRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTemplateSetEnabledRequest {
-    pub project_id: String,
     pub template_id: String,
     pub expected_revision: u64,
     pub enabled: bool,
@@ -487,9 +484,39 @@ pub struct AgentTemplateSetEnabledRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTemplateDeleteRequest {
-    pub project_id: String,
     pub template_id: String,
     pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentTemplateProjectAssignmentRequest {
+    pub project_id: String,
+    pub template_id: String,
+    pub assigned: bool,
+}
+
+fn deserialize_canonical_project_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let project_ids = Vec::<String>::deserialize(deserializer)?;
+    if project_ids.len() > 256
+        || project_ids.iter().any(|project_id| {
+            project_id.is_empty()
+                || project_id.trim() != project_id
+                || project_id.len() > 512
+                || project_id.contains('\0')
+        })
+        || project_ids
+            .windows(2)
+            .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+    {
+        return Err(D::Error::custom(
+            "projectIds must be a bounded, canonical sorted unique list",
+        ));
+    }
+    Ok(project_ids)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

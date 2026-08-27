@@ -108,7 +108,7 @@ SQLite notification facts / batches
 
 通知点击不会直接操作 React state。Main 把经过共享 parser 校验的 `NotificationOpenRequest` 交给最近一个已通过 `openRequestedReady` 握手、尚未销毁的受信 Renderer；必要时恢复、显示并聚焦主窗口。Renderer 尚未 ready 时，Main 以 FIFO 暂存最多 32 个请求，溢出时丢弃最早请求。单项点击打开精确 Conversation/message 或 Automation/run；合并通知从用户实际看到且仍有效的快照中，按 Approval、配置 blocked、失败、重要更新、取消、完成的顺序选择最新可导航成员。请求不包含原生 Notification 对象、绝对路径或任意导航 URL。
 
-Automation DTO/notification envelope 使用 schema v1；它与 SQLite canonical schema v20 是两条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
+Automation DTO/notification envelope 使用 schema v1；它与 SQLite canonical schema v23 是两条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
 
 ## 应用数据与环境权威
 
@@ -147,7 +147,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 7. 开发与打包可以使用不同的可执行文件位置，但不能改变上述权限边界。
 8. Renderer 无权 claim、validate、acknowledge 或 release 原生通知；这四个方法仅属于 Main ↔ Core Server 的 Host-only JSON-RPC。
 9. Automation event/resync 和本机定时器只能触发重新读取 outbox/快照，不能被当作通知已显示或 Automation Run 已终结的证据。
-10. Automation DTO schema v1 与 SQLite schema v20 不得由 Main 合并为单一“自动化版本”。
+10. Automation DTO schema v1 与 SQLite schema v23 不得由 Main 合并为单一“自动化版本”。
 
 ## 代码真源
 

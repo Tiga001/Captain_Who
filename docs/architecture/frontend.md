@@ -151,7 +151,7 @@ ScheduledPage
 
 Scheduled drawer 的展开、最大化、dirty guard、焦点恢复和宽度都是 Renderer 交互状态。布局以 Scheduled 容器自身宽度而非 viewport 为准；当前默认宽度 440 px、可调整范围 380–640 px、列表至少保留 360 px，容器小于 760 px 时 drawer 覆盖列表。宽度偏好只保存在当前 AppShell 会话，应用重启后恢复默认值。
 
-Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v20，Renderer 不读取或协商该数据库版本。
+Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v23，Renderer 不读取或协商该数据库版本。
 
 ## 设置架构
 
@@ -172,7 +172,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 7. 大文本、diff、PDF、图片和流式事件均需先经过领域预算，再进入 DOM/解码器。
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
-10. Automation DTO schema v1、permission mode v2 与 SQLite schema v20 必须分开命名和演进。
+10. Automation DTO schema v1、permission mode v2 与 SQLite schema v23 必须分开命名和演进。
 
 ## 代码真源
 

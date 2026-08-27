@@ -4,11 +4,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 
 const service = vi.hoisted(() => ({
+  assign: vi.fn(),
   create: vi.fn(),
   delete: vi.fn(),
   list: vi.fn(),
   setEnabled: vi.fn(),
-  translate: (key: string) => key,
+  translate: (key: string) => {
+    if (key === 'agentTemplates.projectCount') return 'Assigned projects: {count}'
+    if (key === 'agentTemplates.deleteDescription') {
+      return 'Assigned to {count} projects. Existing Agents keep their snapshot.'
+    }
+    return key
+  },
   update: vi.fn()
 }))
 
@@ -32,6 +39,7 @@ vi.mock('../../features/agentCollaboration/collaborationClient', () => ({
   deleteAgentTemplate: service.delete,
   listAgentTemplates: service.list,
   setAgentTemplateEnabled: service.setEnabled,
+  setAgentTemplateProjectAssignment: service.assign,
   updateAgentTemplate: service.update
 }))
 
@@ -43,67 +51,111 @@ const PROJECTS = [
   { createdAt: 2, id: 'project-b', name: 'Project B', path: '/workspace/b' }
 ]
 
+let inventory: AgentTemplate[]
+
 beforeEach(() => {
+  inventory = [
+    template('template-a', 'Global Alpha', 'model-one', ['project-a']),
+    template('template-b', 'Global Beta', 'model-two', ['project-b'])
+  ]
+  service.assign.mockReset()
   service.create.mockReset()
   service.delete.mockReset()
   service.list.mockReset()
   service.setEnabled.mockReset()
   service.update.mockReset()
-  service.list.mockImplementation(async ({ projectId }: { projectId: string }) => ({
+  service.list.mockImplementation(async () => ({
     schemaVersion: 1,
-    templates:
-      projectId === 'project-a'
-        ? [template('template-a', 'Project A template', 'model-retired')]
-        : [template('template-b', 'Project B template', 'model-two')]
+    templates: inventory.map(cloneTemplate)
   }))
-  service.create.mockImplementation(async (input) => ({
-    ...template(input.templateId, input.name, input.modelConfigId),
-    description: input.description,
-    enabled: input.enabled,
-    instructions: input.instructions,
-    machineKey: input.machineKey,
-    projectId: input.projectId
-  }))
-  service.update.mockImplementation(async (input) => ({
-    ...template(input.templateId, input.name, input.modelConfigId),
-    description: input.description,
-    instructions: input.instructions,
-    projectId: input.projectId,
-    revision: input.expectedRevision + 1
-  }))
-  service.setEnabled.mockImplementation(async (input) => ({
-    ...template(input.templateId, input.templateId, 'model-two'),
-    enabled: input.enabled,
-    projectId: input.projectId,
-    revision: input.expectedRevision + 1
-  }))
-  service.delete.mockImplementation(async (input) => ({
-    ...template(input.templateId, input.templateId, 'model-two'),
-    enabled: false,
-    projectId: input.projectId,
-    revision: input.expectedRevision + 1
-  }))
+  service.create.mockImplementation(async (input) => {
+    const created = {
+      ...template(input.templateId, input.name, input.modelConfigId, []),
+      description: input.description,
+      enabled: input.enabled,
+      instructions: input.instructions,
+      machineKey: input.machineKey
+    }
+    inventory = [...inventory, created]
+    return cloneTemplate(created)
+  })
+  service.update.mockImplementation(async (input) => {
+    const current = inventory.find((candidate) => candidate.templateId === input.templateId)!
+    const updated = {
+      ...current,
+      description: input.description,
+      instructions: input.instructions,
+      modelConfigId: input.modelConfigId,
+      name: input.name,
+      revision: input.expectedRevision + 1
+    }
+    inventory = inventory.map((candidate) =>
+      candidate.templateId === updated.templateId ? updated : candidate
+    )
+    return cloneTemplate(updated)
+  })
+  service.assign.mockImplementation(async (input) => {
+    const current = inventory.find((candidate) => candidate.templateId === input.templateId)!
+    const projectIds = input.assigned
+      ? [...new Set([...current.projectIds, input.projectId])]
+      : current.projectIds.filter((projectId) => projectId !== input.projectId)
+    const updated = { ...current, projectIds, revision: current.revision + 1 }
+    inventory = inventory.map((candidate) =>
+      candidate.templateId === updated.templateId ? updated : candidate
+    )
+    return cloneTemplate(updated)
+  })
+  service.setEnabled.mockImplementation(async (input) => {
+    const current = inventory.find((candidate) => candidate.templateId === input.templateId)!
+    const updated = {
+      ...current,
+      enabled: input.enabled,
+      revision: input.expectedRevision + 1
+    }
+    inventory = inventory.map((candidate) =>
+      candidate.templateId === updated.templateId ? updated : candidate
+    )
+    return cloneTemplate(updated)
+  })
+  service.delete.mockImplementation(async (input) => {
+    const current = inventory.find((candidate) => candidate.templateId === input.templateId)!
+    inventory = inventory.filter((candidate) => candidate.templateId !== input.templateId)
+    return { ...cloneTemplate(current), enabled: false, revision: input.expectedRevision + 1 }
+  })
 })
 
 describe('Agent template settings', () => {
-  it('keeps machine keys stable and creates through the shared model-config picker', async () => {
+  it('loads one global library instead of a project-scoped list', async () => {
+    const screen = await render(
+      <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
+    )
+
+    await expect.element(screen.getByText('Global Alpha', { exact: true })).toBeVisible()
+    await expect.element(screen.getByText('Global Beta', { exact: true })).toBeVisible()
+    expect(service.list).toHaveBeenCalledWith({ includeDisabled: true })
+    expect(service.list.mock.calls[0]?.[0]).not.toHaveProperty('projectId')
+    expect(screen.getByText('Assigned projects: 1', { exact: true }).elements()).toHaveLength(2)
+  })
+
+  it('creates a global template with zero projects even when no projects exist', async () => {
+    inventory = []
     expect(createTemplateMachineKey('Code Reviewer', 'abc12345', [])).toBe('code_reviewer')
     expect(createTemplateMachineKey('中文', 'ABC1-2345', ['agent'])).toBe('agent-abc12345')
-
-    service.list.mockResolvedValue({ schemaVersion: 1, templates: [] })
     const navigateSettingsRoot = vi.fn()
     const screen = await render(
       <AgentTemplatesSettingsPage
-        initialProjectId="project-a"
+        initialProjectId={null}
         onNavigateSettingsRoot={navigateSettingsRoot}
-        projects={PROJECTS}
+        projects={[]}
       />
     )
     await expect.element(screen.getByText('agentTemplates.empty', { exact: true })).toBeVisible()
 
     await screen.getByRole('button', { name: /agentTemplates.create/ }).click()
+    await expect
+      .element(screen.getByText('agentTemplates.noProjectsAvailable', { exact: true }))
+      .toBeVisible()
     const breadcrumbs = screen.getByRole('navigation', { name: 'settings.breadcrumb.label' })
-    await expect.element(breadcrumbs).toBeVisible()
     await breadcrumbs.getByRole('button', { name: 'settings.breadcrumb.root' }).click()
     expect(navigateSettingsRoot).toHaveBeenCalledTimes(1)
     await screen.getByRole('textbox', { name: 'agentTemplates.name' }).fill('Code Reviewer')
@@ -119,19 +171,69 @@ describe('Agent template settings', () => {
       expect.objectContaining({
         machineKey: 'code_reviewer',
         modelConfigId: 'model-two',
-        name: 'Code Reviewer',
-        projectId: 'project-a'
+        name: 'Code Reviewer'
       })
     )
+    expect(service.create.mock.calls[0]?.[0]).not.toHaveProperty('projectId')
+    expect(service.assign).not.toHaveBeenCalled()
+    await expect.element(screen.getByText('Assigned projects: 0', { exact: true })).toBeVisible()
   })
 
-  it('locks a create submission until its durable mutation settles', async () => {
-    service.list.mockResolvedValue({ schemaVersion: 1, templates: [] })
-    const pendingCreate = deferred<AgentTemplate>()
-    service.create.mockReturnValueOnce(pendingCreate.promise)
+  it('defaults only a new template to the initial project and supports multiple assignments', async () => {
+    inventory = []
     const screen = await render(
       <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
     )
+    await screen.getByRole('button', { name: /agentTemplates.create/ }).click()
+
+    const projectA = screen.getByRole('checkbox', { name: 'Project A' })
+    const projectB = screen.getByRole('checkbox', { name: 'Project B' })
+    await expect.element(projectA).toBeChecked()
+    await expect.element(projectB).not.toBeChecked()
+    await projectB.click()
+    await screen.getByRole('textbox', { name: 'agentTemplates.name' }).fill('Researcher')
+    await screen
+      .getByRole('textbox', { name: 'agentTemplates.instructions' })
+      .fill('Research the assigned topic.')
+    await screen.getByRole('button', { name: 'agentTemplates.save' }).click()
+
+    await expect.poll(() => service.assign).toHaveBeenCalledTimes(2)
+    expect(service.assign.mock.calls.map(([input]) => input)).toEqual([
+      expect.objectContaining({ assigned: true, projectId: 'project-a' }),
+      expect.objectContaining({ assigned: true, projectId: 'project-b' })
+    ])
+    await expect.element(screen.getByText('Assigned projects: 2', { exact: true })).toBeVisible()
+  })
+
+  it('applies only the assignment difference after editing a global template', async () => {
+    inventory = [template('template-edit', 'Researcher', 'model-two', ['project-a'])]
+    const screen = await render(
+      <AgentTemplatesSettingsPage initialProjectId="project-b" projects={PROJECTS} />
+    )
+    await expect.element(screen.getByText('Researcher', { exact: true })).toBeVisible()
+    await screen.getByRole('button', { name: 'agentTemplates.edit Researcher' }).click()
+
+    await expect.element(screen.getByRole('checkbox', { name: 'Project A' })).toBeChecked()
+    await expect.element(screen.getByRole('checkbox', { name: 'Project B' })).not.toBeChecked()
+    await screen.getByRole('checkbox', { name: 'Project A' }).click()
+    await screen.getByRole('checkbox', { name: 'Project B' }).click()
+    await screen.getByRole('button', { name: 'agentTemplates.save' }).click()
+
+    await expect.poll(() => service.update).toHaveBeenCalledTimes(1)
+    expect(service.update.mock.calls[0]?.[0]).not.toHaveProperty('projectId')
+    await expect.poll(() => service.assign).toHaveBeenCalledTimes(2)
+    expect(service.assign.mock.calls.map(([input]) => input)).toEqual([
+      { assigned: false, projectId: 'project-a', templateId: 'template-edit' },
+      { assigned: true, projectId: 'project-b', templateId: 'template-edit' }
+    ])
+    await expect.element(screen.getByText('Assigned projects: 1', { exact: true })).toBeVisible()
+  })
+
+  it('locks a create submission until its durable definition settles', async () => {
+    inventory = []
+    const pendingCreate = deferred<AgentTemplate>()
+    service.create.mockReturnValueOnce(pendingCreate.promise)
+    const screen = await render(<AgentTemplatesSettingsPage projects={[]} />)
 
     await screen.getByRole('button', { name: /agentTemplates.create/ }).click()
     await screen.getByRole('textbox', { name: 'agentTemplates.name' }).fill('Code Reviewer')
@@ -143,17 +245,17 @@ describe('Agent template settings', () => {
 
     await expect.poll(() => service.create).toHaveBeenCalledTimes(1)
     await expect.element(save).toBeDisabled()
-    pendingCreate.resolve(template('template-created', 'Code Reviewer', 'model-one'))
+    pendingCreate.resolve(template('template-created', 'Code Reviewer', 'model-one', []))
     await expect.element(screen.getByText('Code Reviewer', { exact: true })).toBeVisible()
     expect(service.create).toHaveBeenCalledTimes(1)
   })
 
   it('requires an explicit replacement for an unavailable model before update', async () => {
+    inventory = [template('template-retired', 'Retired template', 'model-retired', [])]
     const screen = await render(
       <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
     )
-    await expect.element(screen.getByText('Project A template', { exact: true })).toBeVisible()
-    await screen.getByRole('button', { name: 'agentTemplates.edit Project A template' }).click()
+    await screen.getByRole('button', { name: 'agentTemplates.edit Retired template' }).click()
 
     await expect
       .element(screen.getByRole('alert'))
@@ -166,7 +268,6 @@ describe('Agent template settings', () => {
     await screen.getByRole('button', { name: 'agentTemplates.selectModel' }).click()
     await expect.element(screen.getByRole('option', { name: /Retired Model/ })).toBeDisabled()
     await screen.getByRole('option', { name: 'Model Two' }).click()
-    await expect.element(screen.getByRole('button', { name: 'agentTemplates.save' })).toBeEnabled()
     await screen.getByRole('button', { name: 'agentTemplates.save' }).click()
 
     await expect.poll(() => service.update).toHaveBeenCalledTimes(1)
@@ -174,89 +275,63 @@ describe('Agent template settings', () => {
       expect.objectContaining({
         expectedRevision: 1,
         modelConfigId: 'model-two',
-        projectId: 'project-a',
-        templateId: 'template-a'
+        templateId: 'template-retired'
       })
     )
   })
 
-  it('does not let a deferred mutation from project A overwrite project B', async () => {
-    const pending = deferred<AgentTemplate>()
-    service.setEnabled.mockReturnValueOnce(pending.promise)
+  it('reloads canonical state and shows an error when project assignment fails', async () => {
+    inventory = [template('template-failure', 'Failure template', 'model-two', [])]
+    service.assign.mockRejectedValueOnce(new Error('assignment failed'))
     const screen = await render(
       <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
     )
-    await expect.element(screen.getByText('Project A template', { exact: true })).toBeVisible()
+    await screen.getByRole('button', { name: 'agentTemplates.edit Failure template' }).click()
+    await screen.getByRole('checkbox', { name: 'Project A' }).click()
+    await screen.getByRole('button', { name: 'agentTemplates.save' }).click()
 
-    // The retired model can still be disabled; it cannot be re-enabled without replacement.
-    await screen.getByRole('button', { name: 'agentTemplates.disable' }).click()
-    await screen.getByRole('button', { name: /agentTemplates.project: Project A/ }).click()
-    await screen.getByRole('option', { name: 'Project B' }).click()
-    await expect.element(screen.getByText('Project B template', { exact: true })).toBeVisible()
-    expect(screen.container.textContent).not.toContain('Project A template')
-
-    pending.resolve({
-      ...template('template-a', 'Late Project A result', 'model-retired'),
-      enabled: false
-    })
-    await expect.poll(() => service.setEnabled).toHaveBeenCalledTimes(1)
-    await new Promise((resolve) => window.setTimeout(resolve, 0))
-    await expect.element(screen.getByText('Project B template', { exact: true })).toBeVisible()
-    expect(screen.container.textContent).not.toContain('Late Project A result')
+    await expect.poll(() => service.assign).toHaveBeenCalledTimes(1)
+    await expect.poll(() => service.list).toHaveBeenCalledTimes(2)
+    await expect
+      .element(screen.getByRole('alert'))
+      .toHaveTextContent('agentTemplates.operationFailed')
+    await expect.element(screen.getByRole('button', { name: 'agentTemplates.save' })).toBeEnabled()
   })
 
-  it('ignores a deferred project A retry after switching to project B', async () => {
-    const pendingRetry = deferred<{ schemaVersion: 1; templates: AgentTemplate[] }>()
-    service.list
-      .mockRejectedValueOnce(new Error('project-a unavailable'))
-      .mockReturnValueOnce(pendingRetry.promise)
-      .mockResolvedValueOnce({
-        schemaVersion: 1,
-        templates: [template('template-b', 'Project B template', 'model-two')]
-      })
-    const screen = await render(
-      <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
-    )
+  it('retries a failed global library load', async () => {
+    service.list.mockRejectedValueOnce(new Error('catalog unavailable'))
+    const screen = await render(<AgentTemplatesSettingsPage projects={PROJECTS} />)
     await expect.element(screen.getByRole('alert')).toHaveTextContent('agentTemplates.loadFailed')
-    expect(screen.container.textContent).not.toContain('project-a unavailable')
 
     await screen.getByRole('button', { name: 'agentTemplates.retry' }).click()
-    await screen.getByRole('button', { name: /agentTemplates.project: Project A/ }).click()
-    await screen.getByRole('option', { name: 'Project B' }).click()
-    await expect.element(screen.getByText('Project B template', { exact: true })).toBeVisible()
-
-    pendingRetry.resolve({
-      schemaVersion: 1,
-      templates: [template('template-a', 'Late retry from Project A', 'model-retired')]
-    })
-    await new Promise((resolve) => window.setTimeout(resolve, 0))
-    await expect.element(screen.getByText('Project B template', { exact: true })).toBeVisible()
-    expect(screen.container.textContent).not.toContain('Late retry from Project A')
+    await expect.element(screen.getByText('Global Alpha', { exact: true })).toBeVisible()
+    await expect.element(screen.getByText('Global Beta', { exact: true })).toBeVisible()
   })
 
-  it('deletes by stable template id and captured project revision', async () => {
-    service.list.mockResolvedValue({
-      schemaVersion: 1,
-      templates: [template('template-delete', 'Delete me', 'model-two')]
-    })
+  it('deletes a global template and reports the number of affected projects', async () => {
+    inventory = [template('template-delete', 'Delete me', 'model-two', ['project-a', 'project-b'])]
     const screen = await render(
       <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
     )
-    await expect.element(screen.getByText('Delete me', { exact: true })).toBeVisible()
     await screen.getByRole('button', { name: 'agentTemplates.delete Delete me' }).click()
+    await expect.element(screen.getByText(/Assigned to 2 projects/)).toBeVisible()
     await screen.getByRole('button', { name: 'agentTemplates.delete', exact: true }).click()
 
     await expect.poll(() => service.delete).toHaveBeenCalledTimes(1)
     expect(service.delete).toHaveBeenCalledWith({
       expectedRevision: 1,
-      projectId: 'project-a',
       templateId: 'template-delete'
     })
     await expect.poll(() => screen.container.textContent).not.toContain('Delete me')
   })
 })
 
-function template(templateId: string, name: string, modelConfigId: string): AgentTemplate {
+function template(
+  templateId: string,
+  name: string,
+  modelConfigId: string,
+  projectIds: string[]
+): AgentTemplate {
   return {
     createdAt: 1,
     description: `${name} description`,
@@ -266,12 +341,16 @@ function template(templateId: string, name: string, modelConfigId: string): Agen
     modelConfigId,
     modelDisplayName: modelConfigId === 'model-retired' ? 'Retired Model' : 'Model Two',
     name,
-    projectId: 'project-a',
+    projectIds,
     revision: 1,
     schemaVersion: 1,
     templateId,
     updatedAt: 2
   }
+}
+
+function cloneTemplate(template: AgentTemplate): AgentTemplate {
+  return { ...template, projectIds: [...template.projectIds] }
 }
 
 function model(id: string, displayName: string, enabled: boolean) {

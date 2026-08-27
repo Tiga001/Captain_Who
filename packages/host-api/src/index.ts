@@ -24,6 +24,7 @@ import type {
   AgentTemplateDeleteRequest,
   AgentTemplateList,
   AgentTemplateListRequest,
+  AgentTemplateProjectAssignmentRequest,
   AgentTemplateSetEnabledRequest,
   AgentTemplateUpdateRequest,
   AgentTreeRequest,
@@ -497,6 +498,9 @@ export interface AgentHostApi {
   ): Promise<HostInvocationResult<AgentTemplate>>
   setAgentTemplateEnabled(
     input: AgentTemplateSetEnabledRequest
+  ): Promise<HostInvocationResult<AgentTemplate>>
+  setAgentTemplateProjectAssignment(
+    input: AgentTemplateProjectAssignmentRequest
   ): Promise<HostInvocationResult<AgentTemplate>>
   deleteAgentTemplate(
     input: AgentTemplateDeleteRequest

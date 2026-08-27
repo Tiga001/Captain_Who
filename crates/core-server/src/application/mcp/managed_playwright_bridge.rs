@@ -4022,7 +4022,53 @@ mod tests {
             "managed fixture download failed: {}",
             tool_result_text(&download)
         );
-        assert_safe_browser_download(&download, "browser_click download");
+        let download_structured = download
+            .structured_content
+            .as_ref()
+            .expect("managed download start structured content");
+        assert_eq!(download_structured["status"], "download_started");
+        let started_download = browser_download_progress(&download, "fixture-download.bin")
+            .expect("download start must expose task-scoped progress");
+        assert_eq!(started_download["state"], "progressing");
+        assert_eq!(
+            started_download["totalBytes"].as_u64(),
+            Some(16 * 1024 * 1024)
+        );
+        let initial_received = started_download["receivedBytes"].as_u64().unwrap_or(0);
+        let serialized_start = serde_json::to_string(download_structured).unwrap();
+        assert!(!serialized_start.contains("/Users/"));
+        assert!(!serialized_start.contains(fixture_origin));
+
+        let mut previous_received = initial_received;
+        let mut observed_growth = false;
+        let mut completed_download = None;
+        for _ in 0..80 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let progress = invoke_browser_tool_with_grant(
+                &runtime,
+                &capability_grant,
+                "browser_get_config",
+                json!({"call_reason": "Observe the active repository-owned download."}),
+            )
+            .await;
+            assert!(
+                !progress.is_error,
+                "managed browser_get_config download observation failed: {}",
+                tool_result_text(&progress)
+            );
+            let status = browser_download_progress(&progress, "fixture-download.bin")
+                .expect("download progress must remain visible to the task");
+            let received = status["receivedBytes"].as_u64().unwrap_or(0);
+            observed_growth |= received > previous_received;
+            previous_received = previous_received.max(received);
+            if status["state"] == "completed" {
+                completed_download = Some(progress);
+                break;
+            }
+        }
+        assert!(observed_growth, "managed download bytes never advanced");
+        let completed_download = completed_download.expect("managed download did not complete");
+        assert_safe_browser_download(&completed_download, "browser_get_config completed download");
 
         for (tool, arguments) in [
             (
@@ -5238,7 +5284,7 @@ mod tests {
             .expect("managed Download reference array");
         assert_eq!(downloads.len(), 1);
         let download = downloads[0].as_object().expect("managed Download object");
-        assert_eq!(download["schemaVersion"], 1);
+        assert_eq!(download["schemaVersion"], 2);
         assert_eq!(download["source"], "agent");
         assert_eq!(download.len(), 8);
         assert!(download["downloadId"]
@@ -5261,6 +5307,23 @@ mod tests {
         let serialized = serde_json::to_string(download).unwrap();
         assert!(!serialized.contains("base64"));
         assert!(!serialized.contains("/Users/"));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn browser_download_progress<'a>(
+        result: &'a McpToolResult,
+        display_name: &str,
+    ) -> Option<&'a serde_json::Map<String, Value>> {
+        result
+            .structured_content
+            .as_ref()?
+            .get("downloadProgress")?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|download| {
+                download.get("displayName").and_then(Value::as_str) == Some(display_name)
+            })
     }
 
     #[cfg(target_os = "macos")]

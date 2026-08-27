@@ -6,7 +6,12 @@ import type {
   Session,
   WebContents
 } from 'electron'
-import { parseBrowserSurfaceBootstrapUrl, type BrowserDownloadReference } from '@mycopilot/protocol'
+import {
+  parseBrowserSurfaceBootstrapUrl,
+  type BrowserAgentDownloadSnapshot,
+  type BrowserAgentDownloadStatus,
+  type BrowserDownloadReference
+} from '@mycopilot/protocol'
 
 import { BrowserNetworkPolicy, type BrowserRiskKind } from './BrowserNetworkPolicy'
 import {
@@ -17,7 +22,11 @@ import {
   type BrowserRiskOperationInput,
   type BrowserRiskTrigger
 } from './BrowserRiskCoordinator'
-import { BrowserDownloadBroker, type BrowserDownloadToolLease } from './BrowserDownloadBroker'
+import {
+  BrowserDownloadBroker,
+  BrowserDownloadBrokerError,
+  type BrowserDownloadToolLease
+} from './BrowserDownloadBroker'
 import { ChromiumPdfViewerRequestGate } from './ChromiumPdfViewer'
 import { isBrowserInternalPageUrl } from './BrowserInternalPageStore'
 
@@ -186,7 +195,7 @@ export class BrowserNetworkOperationLease {
       await this.operation.settle()
       await this.downloadLease?.settle()
     } catch (error) {
-      if (this.dispatched) {
+      if (this.dispatched && !(error instanceof BrowserDownloadBrokerError)) {
         this.operation.recordFailure({
           code: 'browser.risk_outcome_unknown',
           dispatchCertainty: 'possibly_dispatched'
@@ -198,6 +207,10 @@ export class BrowserNetworkOperationLease {
 
   downloads(): readonly BrowserDownloadReference[] {
     return this.downloadLease?.downloads() ?? []
+  }
+
+  downloadProgress(): readonly BrowserAgentDownloadStatus[] {
+    return this.downloadLease?.progress?.() ?? []
   }
 
   finish(): void {
@@ -949,6 +962,21 @@ export class BrowserNetworkGuard {
       redirectMarkers: this.redirectTargets.size,
       stickyContexts
     }
+  }
+
+  agentDownloadSnapshot(input: {
+    runId: string
+    activationId: string
+    conversationId?: string
+  }): BrowserAgentDownloadSnapshot {
+    if (!this.downloadBroker) {
+      return {
+        schemaVersion: 2,
+        revision: 0,
+        downloads: []
+      }
+    }
+    return this.downloadBroker.agentDownloadSnapshot(input)
   }
 
   private async authorizeRequest(details: OnBeforeRequestListenerDetails): Promise<void> {

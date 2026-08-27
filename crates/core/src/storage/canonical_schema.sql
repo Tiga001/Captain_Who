@@ -338,7 +338,6 @@ CREATE TABLE agent_templates (
                 AND length(CAST(template_id AS BLOB)) BETWEEN 1 AND 128
             ),
             schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-            project_id TEXT NOT NULL,
             machine_key TEXT NOT NULL CHECK (
                 length(CAST(machine_key AS BLOB)) BETWEEN 1 AND 64
                 AND machine_key = lower(machine_key)
@@ -364,12 +363,11 @@ CREATE TABLE agent_templates (
             revision INTEGER NOT NULL CHECK (revision > 0),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-            UNIQUE(project_id, machine_key),
-            UNIQUE(project_id, name),
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            UNIQUE(machine_key),
+            UNIQUE(name)
         );
 CREATE TRIGGER prevent_agent_template_identity_update
-        BEFORE UPDATE OF template_id, project_id, machine_key, schema_version, created_at
+        BEFORE UPDATE OF template_id, machine_key, schema_version, created_at
         ON agent_templates
         BEGIN
             SELECT RAISE(ABORT, 'Agent template identity is immutable');
@@ -379,6 +377,28 @@ CREATE TRIGGER validate_agent_template_revision_update
         WHEN NEW.revision != OLD.revision + 1 OR NEW.updated_at <= OLD.updated_at
         BEGIN
             SELECT RAISE(ABORT, 'invalid Agent template revision transition');
+        END;
+CREATE TABLE project_agent_template_bindings (
+            project_id TEXT NOT NULL,
+            template_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (project_id, template_id),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (template_id) REFERENCES agent_templates(template_id) ON DELETE CASCADE
+        );
+CREATE INDEX project_agent_template_bindings_template
+            ON project_agent_template_bindings (template_id, project_id);
+CREATE TRIGGER validate_project_agent_template_binding_limit
+        BEFORE INSERT ON project_agent_template_bindings
+        WHEN NOT EXISTS (
+            SELECT 1 FROM project_agent_template_bindings
+            WHERE project_id = NEW.project_id AND template_id = NEW.template_id
+        ) AND (
+            SELECT COUNT(*) FROM project_agent_template_bindings
+            WHERE project_id = NEW.project_id
+        ) >= 32
+        BEGIN
+            SELECT RAISE(ABORT, 'Project Agent template binding limit exceeded');
         END;
 CREATE TABLE conversations (
             id TEXT PRIMARY KEY,
@@ -1016,9 +1036,12 @@ CREATE TRIGGER validate_agent_node_template_snapshot_insert
         BEFORE INSERT ON agent_nodes
         WHEN NEW.template_id_snapshot IS NOT NULL
           AND NOT EXISTS (
-              SELECT 1 FROM agent_templates AS template
-              WHERE template.template_id = NEW.template_id_snapshot
-                AND template.project_id = NEW.template_project_id_snapshot
+              SELECT 1
+              FROM project_agent_template_bindings AS binding
+              INNER JOIN agent_templates AS template
+                  ON template.template_id = binding.template_id
+              WHERE binding.project_id = NEW.template_project_id_snapshot
+                AND template.template_id = NEW.template_id_snapshot
                 AND template.machine_key = NEW.template_machine_key_snapshot
                 AND template.name = NEW.template_name_snapshot
                 AND template.description = NEW.template_description_snapshot

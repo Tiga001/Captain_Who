@@ -349,8 +349,15 @@ export const koKRTranslations = {
   'settings.breadcrumb.root': '설정',
   'settings.page.environment': '환경',
   'settings.page.archivedConversations': '보관된 채팅',
-  'agentTemplates.descriptionText': '기본 에이전트가 호출할 수 있는 하위 에이전트 템플릿',
+  'agentTemplates.descriptionText':
+    '재사용 가능한 하위 에이전트 템플릿을 만든 다음 사용할 프로젝트를 선택합니다.',
   'agentTemplates.project': '프로젝트',
+  'agentTemplates.projects': '사용 가능한 프로젝트',
+  'agentTemplates.projectsHint':
+    '이 템플릿을 사용할 프로젝트를 선택하세요. 모두 선택하지 않고 나중에 할당할 수도 있습니다.',
+  'agentTemplates.noProjectsAvailable':
+    '아직 프로젝트가 없습니다. 템플릿을 먼저 저장하고 나중에 할당할 수 있습니다.',
+  'agentTemplates.projectCount': '할당된 프로젝트: {count}',
   'agentTemplates.create': '새 템플릿',
   'agentTemplates.createTitle': '새로운 Agent 템플릿',
   'agentTemplates.editTitle': 'Agent 템플릿 편집',
@@ -384,7 +391,7 @@ export const koKRTranslations = {
   'agentTemplates.delete': '템플릿 삭제',
   'agentTemplates.deleteTitle': 'Agent 템플릿을 삭제하시겠습니까?',
   'agentTemplates.deleteDescription':
-    '향후 에이전트는 더 이상 이 템플릿을 선택할 수 없습니다. 기존 에이전트는 스냅샷을 유지합니다.',
+    '이 템플릿은 {count}개 프로젝트에 할당되어 있습니다. 삭제하면 모든 프로젝트에서 제거됩니다. 기존 에이전트는 스냅샷을 유지합니다.',
   'agentCenter.loading': '하위 에이전트 로드 중…',
   'agentCenter.unavailable': '하위 에이전트 상태를 사용할 수 없습니다.',
   'agentCenter.observerUnavailable': '이 읽기 전용 대화는 사용할 수 없습니다.',

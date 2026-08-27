@@ -9,7 +9,8 @@ use crate::{
     ConversationMessageOrigin, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
     CreateAgentTemplateInput, EnqueueAgentMessageInput, EnsureRootAgentInput,
     FinishAgentWakeWithResultInput, ProviderProfileConfig, ProviderProtocolDialect,
-    ReasoningEffort, SendAgentMessageRequest, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    ReasoningEffort, SendAgentMessageRequest, UpdateAgentTemplateInput,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -65,7 +66,6 @@ impl Fixture {
         service
             .create_agent_template(&CreateAgentTemplateInput {
                 template_id: "template-reviewer".to_string(),
-                project_id: "project-a".to_string(),
                 machine_key: "reviewer".to_string(),
                 name: "Reviewer".to_string(),
                 description: "Review evidence".to_string(),
@@ -73,6 +73,9 @@ impl Fixture {
                 model_config_id: "model-b".to_string(),
                 enabled: true,
             })
+            .unwrap();
+        service
+            .set_agent_template_project_assignment("project-a", "template-reviewer", true)
             .unwrap();
         Self {
             _directory: directory,

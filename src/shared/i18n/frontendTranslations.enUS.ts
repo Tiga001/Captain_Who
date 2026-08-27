@@ -353,8 +353,14 @@ export const enUSTranslations = {
   'settings.page.environment': 'Environment',
   'settings.page.archivedConversations': 'Archived chats',
 
-  'agentTemplates.descriptionText': 'Subagent templates the main agent can call',
+  'agentTemplates.descriptionText':
+    'Create reusable subagent templates, then choose which projects can use them.',
   'agentTemplates.project': 'Project',
+  'agentTemplates.projects': 'Available to projects',
+  'agentTemplates.projectsHint':
+    'Choose any projects that may use this template. Leave all unchecked to assign it later.',
+  'agentTemplates.noProjectsAvailable': 'No projects yet. You can assign this template later.',
+  'agentTemplates.projectCount': 'Assigned projects: {count}',
   'agentTemplates.create': 'New template',
   'agentTemplates.createTitle': 'New Agent template',
   'agentTemplates.editTitle': 'Edit Agent template',
@@ -387,7 +393,7 @@ export const enUSTranslations = {
   'agentTemplates.delete': 'Delete template',
   'agentTemplates.deleteTitle': 'Delete Agent template?',
   'agentTemplates.deleteDescription':
-    'Future Agents can no longer select this template. Existing Agents keep their snapshot.',
+    'This template is assigned to {count} projects. Deleting it removes it from every project. Existing Agents keep their snapshot.',
 
   'agentCenter.loading': 'Loading subagents…',
   'agentCenter.unavailable': 'Subagent state is unavailable.',

@@ -355,8 +355,14 @@ export const jaJPTranslations = {
   'settings.page.environment': '環境',
   'settings.page.archivedConversations': 'アーカイブされたチャット',
   'agentTemplates.descriptionText':
-    'メインエージェントが呼び出すことができるサブエージェントテンプレート',
+    '再利用可能なサブエージェントテンプレートを作成し、利用できるプロジェクトを選択します。',
   'agentTemplates.project': 'プロジェクト',
+  'agentTemplates.projects': '利用可能なプロジェクト',
+  'agentTemplates.projectsHint':
+    'このテンプレートを利用できるプロジェクトを選択します。すべて未選択のまま後で割り当てることもできます。',
+  'agentTemplates.noProjectsAvailable':
+    'プロジェクトはまだありません。テンプレートを先に保存して、後で割り当てられます。',
+  'agentTemplates.projectCount': '割り当て済みプロジェクト：{count}',
   'agentTemplates.create': '新しいテンプレート',
   'agentTemplates.createTitle': '新しい Agent テンプレート',
   'agentTemplates.editTitle': 'Agent テンプレートを編集',
@@ -390,7 +396,7 @@ export const jaJPTranslations = {
   'agentTemplates.delete': 'テンプレートの削除',
   'agentTemplates.deleteTitle': 'Agent テンプレートを削除しますか?',
   'agentTemplates.deleteDescription':
-    '今後のエージェントはこのテンプレートを選択できなくなります。既存のエージェントはスナップショットを保持します。',
+    'このテンプレートは {count} 件のプロジェクトに割り当てられています。削除すると、すべてのプロジェクトから取り除かれます。既存のエージェントはスナップショットを保持します。',
   'agentCenter.loading': 'サブエージェントをロード中…',
   'agentCenter.unavailable': 'サブエージェントの状態は利用できません。',
   'agentCenter.observerUnavailable': 'この読み取り専用の会話は利用できません。',

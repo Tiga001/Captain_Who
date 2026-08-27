@@ -64,14 +64,6 @@
   height: var(--mc-icon-size-sm);
 }
 
-.agent-templates-page__project {
-  display: grid;
-  max-width: 440px;
-  gap: 8px;
-  color: var(--settings-content-text-color);
-  font-weight: var(--mc-font-weight-strong);
-}
-
 .agent-templates-page__list {
   display: grid;
   gap: 10px;
@@ -192,7 +184,78 @@
   font-weight: var(--mc-font-weight-strong);
 }
 
-.agent-template-form input,
+.agent-template-form__projects {
+  display: grid;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  gap: 8px;
+  border: 0;
+}
+
+.agent-template-form__projects legend {
+  padding: 0;
+  color: var(--settings-content-text-color);
+  font-weight: var(--mc-font-weight-strong);
+}
+
+.agent-template-form__projects > p {
+  margin: 0;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-sm);
+  line-height: var(--mc-line-height-relaxed);
+}
+
+.agent-template-form__project-list {
+  display: grid;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px;
+  gap: 2px;
+  background: var(--mc-color-surface-input);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-row);
+}
+
+.agent-template-form__project-list label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 7px 8px;
+  gap: 9px;
+  border-radius: var(--mc-radius-row);
+  cursor: pointer;
+}
+
+.agent-template-form__project-list label:hover {
+  background: var(--mc-color-state-hover);
+}
+
+.agent-template-form__project-list input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--mc-color-text-accent);
+}
+
+.agent-template-form__project-list span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-template-form__no-projects {
+  padding: 11px;
+  color: var(--settings-content-muted-color);
+  background: var(--mc-color-surface-input);
+  border: 1px dashed var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-row);
+  font-size: var(--mc-font-size-sm);
+}
+
+.agent-template-form > label input,
 .agent-template-form textarea {
   width: 100%;
   padding: 10px 11px;
@@ -206,7 +269,7 @@
   resize: vertical;
 }
 
-.agent-template-form input:focus,
+.agent-template-form > label input:focus,
 .agent-template-form textarea:focus {
   border-color: var(--mc-color-focus-ring);
 }

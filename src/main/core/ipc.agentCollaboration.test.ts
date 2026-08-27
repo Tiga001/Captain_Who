@@ -10,6 +10,29 @@ import { registerAgentIpc } from '../ipc/agentIpc'
 describe('Main Agent IPC collaboration routing', () => {
   beforeEach(() => getAllWindows.mockReset())
 
+  it('routes template project assignment through the strict invocation envelope', async () => {
+    getAllWindows.mockReturnValue([])
+    const output = { schemaVersion: 1, templateId: 'template-1', projectIds: ['project-1'] }
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      onCollaborationEvent: vi.fn(),
+      onCollaborationObserverEvent: vi.fn(),
+      onCollaborationResync: vi.fn(),
+      setAgentTemplateProjectAssignment: vi.fn().mockResolvedValue(output)
+    }
+    const ipcMain = { handle: vi.fn(), on: vi.fn() }
+    registerAgentIpc(ipcMain as never, coreServer as never)
+    const registration = ipcMain.handle.mock.calls.find(
+      ([channel]) => channel === HOST_CHANNELS.agent.collaborationTemplateSetProjectAssignment
+    )
+    const handler = registration?.[1]
+    const input = { projectId: 'project-1', templateId: 'template-1', assigned: true }
+
+    await expect(handler?.({}, input)).resolves.toEqual({ ok: true, value: output })
+    expect(coreServer.setAgentTemplateProjectAssignment).toHaveBeenCalledWith(input)
+  })
+
   it('routes the strict observer envelope only to live allowlisted renderer windows', () => {
     let observerListener: ((event: unknown) => void) | undefined
     const send = vi.fn()

@@ -12,6 +12,7 @@ import type {
   AgentTemplateDeleteRequest,
   AgentTemplateList,
   AgentTemplateListRequest,
+  AgentTemplateProjectAssignmentRequest,
   AgentTemplateSetEnabledRequest,
   AgentTemplateUpdateRequest,
   AgentTreeRequest,
@@ -92,6 +93,12 @@ export async function setAgentTemplateEnabled(
   input: AgentTemplateSetEnabledRequest
 ): Promise<AgentTemplate> {
   return unwrapHostInvocation(await hostClient.agent.setAgentTemplateEnabled(input))
+}
+
+export async function setAgentTemplateProjectAssignment(
+  input: AgentTemplateProjectAssignmentRequest
+): Promise<AgentTemplate> {
+  return unwrapHostInvocation(await hostClient.agent.setAgentTemplateProjectAssignment(input))
 }
 
 export async function deleteAgentTemplate(

@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use uuid::{Uuid, Version};
 
 const MAX_DOWNLOAD_REFERENCES: usize = 16;
-const MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
+const BROWSER_DOWNLOAD_SCHEMA_VERSION: u64 = 2;
+const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const REFERENCE_FIELDS: [&str; 8] = [
     "schemaVersion",
@@ -41,7 +42,7 @@ fn safe_browser_download_reference(value: &Value) -> Option<Value> {
         || !REFERENCE_FIELDS
             .iter()
             .all(|field| record.contains_key(*field))
-        || record.get("schemaVersion")?.as_u64()? != 1
+        || record.get("schemaVersion")?.as_u64()? != BROWSER_DOWNLOAD_SCHEMA_VERSION
     {
         return None;
     }
@@ -77,7 +78,7 @@ fn safe_browser_download_reference(value: &Value) -> Option<Value> {
         return None;
     }
     Some(json!({
-        "schemaVersion": 1,
+        "schemaVersion": BROWSER_DOWNLOAD_SCHEMA_VERSION,
         "downloadId": download_id,
         "displayName": display_name,
         "mimeType": mime_type,
@@ -134,7 +135,7 @@ mod tests {
 
     fn reference() -> Value {
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": BROWSER_DOWNLOAD_SCHEMA_VERSION,
             "downloadId": "browser-download:123e4567-e89b-42d3-a456-426614174000",
             "displayName": "archive.zip",
             "mimeType": "application/zip",
@@ -183,5 +184,23 @@ mod tests {
             &json!({"downloads": [reference.clone(), reference]})
         )
         .is_none());
+    }
+
+    #[test]
+    fn accepts_schema_v2_installer_sizes_and_rejects_legacy_or_oversized_references() {
+        let mut installer = reference();
+        installer["displayName"] = json!("WorkBuddy.dmg");
+        installer["mimeType"] = json!("application/x-apple-diskimage");
+        installer["sizeBytes"] = json!(419 * 1024 * 1024_u64);
+        assert!(
+            safe_browser_download_references(&json!({"downloads": [installer.clone()]})).is_some()
+        );
+
+        let mut legacy = installer.clone();
+        legacy["schemaVersion"] = json!(1);
+        assert!(safe_browser_download_references(&json!({"downloads": [legacy]})).is_none());
+
+        installer["sizeBytes"] = json!(MAX_DOWNLOAD_BYTES + 1);
+        assert!(safe_browser_download_references(&json!({"downloads": [installer]})).is_none());
     }
 }

@@ -36,7 +36,7 @@ last_verified: 2026-08-23
 
 ### 判断
 
-当前唯一可接受基线为 **schema v20 + exact catalog fingerprint + valid foreign keys**。真源：
+当前唯一可接受基线为 **schema v23 + exact catalog fingerprint + valid foreign keys**。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
@@ -67,7 +67,7 @@ pnpm storage:reset-dev -- --confirm-reset
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
 2. 从只读源或临时副本提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。
-3. 在 staging 文件创建 fresh v20 canonical DB。
+3. 在 staging 文件创建 fresh v23 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
 6. 原子发布新数据库；失败时保留原数据库与恢复备份。
@@ -85,7 +85,7 @@ pnpm storage:reset-dev -- --confirm-reset
 ### 备份处理
 
 - reset 失败时，优先保留原库；backup 是恢复/取证副本，不应被 reset 检查过程修改。
-- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v20 接受；旧库仍会触发 reset-required。
+- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v23 接受；旧库仍会触发 reset-required。
 - 如必须人工还原文件，先停止所有 Core Server、再次复制保存当前文件、在隔离位置验证 SQLite 完整性和 schema，再决定是否替换。仓库当前没有受支持的一键 backup restore 命令。
 - 不要把包含本机模型 Token/搜索 key 的 backup 上传到 issue、CI artifact 或公共对象存储。
 

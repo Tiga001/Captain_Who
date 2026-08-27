@@ -229,6 +229,7 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
         AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD,
         AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
         AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD,
+        AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD,
         AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
         AGENT_COLLABORATION_APPROVALS_LIST_METHOD,
         AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD,
@@ -337,7 +338,7 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     let template_list: AgentTemplateListDto =
         serde_json::from_value(fixture["templateList"].clone()).unwrap();
     assert_eq!(template_list.templates, vec![template.clone()]);
-    assert_eq!(template.project_id, tree.project_id.as_deref().unwrap());
+    assert_eq!(template.project_ids, vec![tree.project_id.clone().unwrap()]);
     assert_eq!(
         detail.template.as_ref().unwrap().template_id,
         template.template_id
@@ -363,6 +364,19 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     let mut unknown = fixture["tree"].clone();
     unknown["providerSecret"] = serde_json::json!("must-not-cross");
     assert!(serde_json::from_value::<AgentTreeSnapshotDto>(unknown).is_err());
+    let mut noncanonical_projects = fixture["template"].clone();
+    noncanonical_projects["projectIds"] = serde_json::json!(["project-b", "project-a"]);
+    assert!(serde_json::from_value::<AgentTemplateDto>(noncanonical_projects).is_err());
+    let assignment_with_unknown = serde_json::json!({
+        "projectId": "project-a",
+        "templateId": "template-a",
+        "assigned": true,
+        "enabled": true,
+    });
+    assert!(
+        serde_json::from_value::<AgentTemplateProjectAssignmentRequest>(assignment_with_unknown)
+            .is_err()
+    );
     let mut unknown_activity = fixture["event"].clone();
     unknown_activity["activity"]["forged"] = serde_json::json!(true);
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unknown_activity).is_err());

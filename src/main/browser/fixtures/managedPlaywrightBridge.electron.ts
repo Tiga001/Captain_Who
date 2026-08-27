@@ -1,4 +1,4 @@
-import { createServer } from 'node:http'
+import { createServer, type ServerResponse } from 'node:http'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -60,6 +60,9 @@ const RISK_DECISION_METHOD = 'fixture.browserRisk.decision'
 const DISPATCH_PHASE_ACK_METHOD = 'fixture.managedPlaywright.dispatchPhaseAck'
 const AGENT_EVENT_METHOD = 'fixture.agentEvent'
 const MAX_INPUT_LINE_BYTES = 8 * 1024 * 1024
+const FIXTURE_DOWNLOAD_BYTES = 16 * 1024 * 1024
+const FIXTURE_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+const FIXTURE_DOWNLOAD_INTERVAL_MS = 40
 const PROFILE_DIRECTORY = mkdtempSync(join(tmpdir(), 'mycopilot-managed-playwright-profile-'))
 const SURFACE_ID = 'right-sidebar-managed-playwright-fixture'
 let surfaceSequence = 0
@@ -73,6 +76,36 @@ function removeFixtureProfileDirectory(): void {
   if (profileDirectoryRemoved) return
   profileDirectoryRemoved = true
   rmSync(PROFILE_DIRECTORY, { force: true, recursive: true })
+}
+
+function serveFixtureDownload(response: ServerResponse): void {
+  response.setHeader('content-type', 'application/octet-stream')
+  response.setHeader('content-disposition', 'attachment; filename="fixture-download.bin"')
+  response.setHeader('content-length', String(FIXTURE_DOWNLOAD_BYTES))
+  response.flushHeaders()
+
+  const chunk = Buffer.alloc(FIXTURE_DOWNLOAD_CHUNK_BYTES, 0x5a)
+  let remaining = FIXTURE_DOWNLOAD_BYTES
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const schedule = (): void => {
+    timer = setTimeout(writeNext, FIXTURE_DOWNLOAD_INTERVAL_MS)
+  }
+  const writeNext = (): void => {
+    timer = undefined
+    if (response.destroyed) return
+    if (remaining === 0) {
+      response.end()
+      return
+    }
+    const bytes = Math.min(remaining, chunk.length)
+    remaining -= bytes
+    if (response.write(chunk.subarray(0, bytes))) schedule()
+    else response.once('drain', schedule)
+  }
+  response.once('close', () => {
+    if (timer) clearTimeout(timer)
+  })
+  writeNext()
 }
 
 /**
@@ -320,9 +353,7 @@ async function main(): Promise<void> {
       return
     }
     if (request.url === '/download') {
-      response.setHeader('content-type', 'text/plain; charset=utf-8')
-      response.setHeader('content-disposition', 'attachment; filename="fixture-download.txt"')
-      response.end('repository-owned download fixture')
+      serveFixtureDownload(response)
       return
     }
     response.setHeader('content-type', 'text/html; charset=utf-8')
@@ -441,7 +472,7 @@ async function main(): Promise<void> {
           </select>
           <button id="apply">Apply</button>
           <button id="dialog">Show dialog</button>
-          <a href="/download" download="fixture-download.txt">Download fixture</a>
+          <a href="/download">Download fixture</a>
           <label for="fixture-upload">Fixture upload</label>
           <input id="fixture-upload" type="file" />
           <button id="submit-upload" type="button">Submit fixture upload</button>
@@ -745,6 +776,7 @@ async function main(): Promise<void> {
       fileBroker,
       finalizeBrowserRun: (runId) => networkGuard.finalizeRun(runId),
       getActiveSurfaceIdentity: () => manager.getActiveSurfaceIdentity(),
+      getAgentDownloadSnapshot: (input) => networkGuard.agentDownloadSnapshot(input),
       sensitiveTargetBindings,
       releaseBrowserCapability: (activationId) => networkGuard.releaseCapability(activationId),
       releaseBrowserToolCall: (input) => networkGuard.releaseToolCall(input),

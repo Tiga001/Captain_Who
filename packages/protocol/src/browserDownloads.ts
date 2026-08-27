@@ -18,6 +18,8 @@ export type BrowserDownloadAvailability = 'available' | 'missing' | 'modified'
 export type BrowserDownloadLocationMode = 'system' | 'custom'
 export type BrowserDownloadTransferState =
   'progressing' | 'paused' | 'completed' | 'cancelled' | 'interrupted'
+export type BrowserAgentDownloadState =
+  'awaiting_destination' | 'finalizing' | BrowserDownloadTransferState | 'failed'
 export type BrowserDownloadCenterAction =
   'pause' | 'resume' | 'cancel' | 'reveal' | 'copy_url' | 'copy_path' | 'remove'
 
@@ -31,6 +33,30 @@ export interface BrowserDownloadReference {
   sha256: string
   createdAt: number
   source: BrowserDownloadSource
+}
+
+/**
+ * Path-free, task-scoped transfer state returned to the model by Browser Tool calls.
+ * `reference` appears only after durable publication has completed.
+ */
+export interface BrowserAgentDownloadStatus {
+  downloadId: string
+  displayName: string
+  mimeType: string
+  state: BrowserAgentDownloadState
+  receivedBytes: number
+  totalBytes: number
+  bytesPerSecond: number
+  startedAt: number
+  updatedAt: number
+  errorCode?: string
+  reference?: BrowserDownloadReference
+}
+
+export interface BrowserAgentDownloadSnapshot {
+  schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
+  revision: number
+  downloads: BrowserAgentDownloadStatus[]
 }
 
 /** Renderer-safe settings. The Host keeps the actual custom directory private. */

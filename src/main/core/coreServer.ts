@@ -27,6 +27,7 @@ import type {
   AgentTemplateDeleteRequest,
   AgentTemplateList,
   AgentTemplateListRequest,
+  AgentTemplateProjectAssignmentRequest,
   AgentTemplateSetEnabledRequest,
   AgentTemplateUpdateRequest,
   AgentTreeRequest,
@@ -426,6 +427,7 @@ import {
   parseAgentTemplateDeleteRequest,
   parseAgentTemplateList,
   parseAgentTemplateListRequest,
+  parseAgentTemplateProjectAssignmentRequest,
   parseAgentTemplateSetEnabledRequest,
   parseAgentTemplateUpdateRequest,
   parseAgentTreeRequest,
@@ -496,6 +498,8 @@ const AGENT_COLLABORATION_TEMPLATES_LIST_METHOD = 'agent.collaboration.templates
 const AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD = 'agent.collaboration.templates.create'
 const AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD = 'agent.collaboration.templates.update'
 const AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD = 'agent.collaboration.templates.setEnabled'
+const AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD =
+  'agent.collaboration.templates.setProjectAssignment'
 const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD = 'agent.collaboration.templates.delete'
 const AGENT_COLLABORATION_APPROVALS_LIST_METHOD = 'agent.collaboration.approvals.list'
 const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD = 'agent.collaboration.approvals.decide'
@@ -1900,11 +1904,7 @@ export class CoreServer {
         request
       )
       .then((value) => {
-        const output = parseAgentTemplateList(value)
-        if (output.templates.some((template) => template.projectId !== request.projectId)) {
-          throw new Error('Invalid Agent template list identity')
-        }
-        return output
+        return parseAgentTemplateList(value)
       })
   }
 
@@ -1917,7 +1917,7 @@ export class CoreServer {
       )
       .then((value) => {
         const output = parseAgentTemplate(value)
-        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+        if (output.templateId !== request.templateId) {
           throw new Error('Invalid Agent template response identity')
         }
         return output
@@ -1933,7 +1933,7 @@ export class CoreServer {
       )
       .then((value) => {
         const output = parseAgentTemplate(value)
-        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+        if (output.templateId !== request.templateId) {
           throw new Error('Invalid Agent template response identity')
         }
         return output
@@ -1949,7 +1949,25 @@ export class CoreServer {
       )
       .then((value) => {
         const output = parseAgentTemplate(value)
-        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+        if (output.templateId !== request.templateId) {
+          throw new Error('Invalid Agent template response identity')
+        }
+        return output
+      })
+  }
+
+  setAgentTemplateProjectAssignment(
+    input: AgentTemplateProjectAssignmentRequest
+  ): Promise<AgentTemplate> {
+    const request = parseAgentTemplateProjectAssignmentRequest(input)
+    return this.rpc
+      .request<unknown, AgentTemplateProjectAssignmentRequest>(
+        AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentTemplate(value)
+        if (output.templateId !== request.templateId) {
           throw new Error('Invalid Agent template response identity')
         }
         return output
@@ -1965,7 +1983,7 @@ export class CoreServer {
       )
       .then((value) => {
         const output = parseAgentTemplate(value)
-        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+        if (output.templateId !== request.templateId) {
           throw new Error('Invalid Agent template response identity')
         }
         return output

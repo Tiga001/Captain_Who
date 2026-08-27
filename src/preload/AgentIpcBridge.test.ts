@@ -126,6 +126,24 @@ describe('Agent IPC bridge Provider transitions', () => {
 })
 
 describe('Agent IPC bridge collaboration', () => {
+  it('routes global template project assignments on their dedicated channel', async () => {
+    const invoke = vi.fn().mockResolvedValue({ ok: true, value: {} })
+    const ipcRenderer = {
+      invoke,
+      on: vi.fn(),
+      removeListener: vi.fn()
+    } as unknown as Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
+    const bridge = createAgentIpcBridge(ipcRenderer)
+    const input = { projectId: 'project-1', templateId: 'template-1', assigned: true }
+
+    await bridge.setAgentTemplateProjectAssignment(input)
+
+    expect(invoke).toHaveBeenCalledWith(
+      'host:agent.collaboration.templates.setProjectAssignment',
+      input
+    )
+  })
+
   it('uses the dedicated snapshot, replay and observer channels', async () => {
     const invoke = vi.fn().mockResolvedValue({ ok: true, value: {} })
     const ipcRenderer = {

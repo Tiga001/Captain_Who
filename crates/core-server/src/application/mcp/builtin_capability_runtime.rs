@@ -3313,6 +3313,43 @@ mod tests {
     }
 
     #[test]
+    fn managed_download_progress_reaches_the_agent_model_projection() {
+        let download_id = "browser-download:123e4567-e89b-42d3-a456-426614174000";
+        let progress = json!({
+            "downloadId": download_id,
+            "displayName": "fixture-download.bin",
+            "mimeType": "application/octet-stream",
+            "state": "progressing",
+            "receivedBytes": 65_536,
+            "totalBytes": 16 * 1024 * 1024,
+            "bytesPerSecond": 1_638_400,
+            "startedAt": 1_000,
+            "updatedAt": 1_100
+        });
+        let projected = project_managed_browser_result(McpToolResult {
+            content: vec![McpContentBlock::Text {
+                text: "Download fixture-download.bin: 65.5 KB / 16.8 MB.".to_string(),
+            }],
+            structured_content: Some(json!({
+                "status": "download_started",
+                "downloadProgress": [progress.clone()]
+            })),
+            is_error: false,
+        })
+        .unwrap();
+
+        assert_eq!(projected["outcome"], "completed");
+        assert_eq!(projected["structuredContent"]["status"], "download_started");
+        assert_eq!(
+            projected["structuredContent"]["downloadProgress"],
+            json!([progress])
+        );
+        let serialized = serde_json::to_string(&projected).unwrap();
+        assert!(!serialized.contains("/Users/"));
+        assert!(!serialized.contains("sourceUrl"));
+    }
+
+    #[test]
     fn managed_result_projection_keeps_only_strict_artifact_references() {
         let artifact = json!({
             "schemaVersion": 1,

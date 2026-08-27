@@ -27,6 +27,8 @@ export const HOST_CHANNELS = {
     collaborationTemplateDelete: 'host:agent.collaboration.templates.delete',
     collaborationTemplateList: 'host:agent.collaboration.templates.list',
     collaborationTemplateSetEnabled: 'host:agent.collaboration.templates.setEnabled',
+    collaborationTemplateSetProjectAssignment:
+      'host:agent.collaboration.templates.setProjectAssignment',
     collaborationTemplateUpdate: 'host:agent.collaboration.templates.update',
     approveAction: 'host:agent.approveAction',
     cancelAction: 'host:agent.cancelAction',

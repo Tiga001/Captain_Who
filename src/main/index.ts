@@ -240,7 +240,7 @@ function activateMainWindow(): void {
   sendAppWindowState(window)
 }
 
-app.whenReady().then(async () => {
+async function initializeApplication(): Promise<void> {
   app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
   disposeAdaptiveAppIcon = installAdaptiveAppIcon()
@@ -326,6 +326,11 @@ app.whenReady().then(async () => {
       getBrowserContext: () =>
         getBrowserSurfaceManager().getBrowserContext({ createVisiblePage: false }),
       getActiveSurfaceIdentity: () => getBrowserSurfaceManager().getActiveSurfaceIdentity(),
+      getAgentDownloadSnapshot: (input) => {
+        const guard = browserNetworkGuard
+        if (!guard) throw new Error('browser.surface_unavailable')
+        return guard.agentDownloadSnapshot(input)
+      },
       sensitiveTargetBindings,
       artifactBroker: browserArtifactBroker,
       fileBroker: browserFileBroker,
@@ -377,7 +382,15 @@ app.whenReady().then(async () => {
   createWindow()
 
   app.on('activate', activateMainWindow)
-})
+}
+
+void app
+  .whenReady()
+  .then(initializeApplication)
+  .catch((error: unknown) => {
+    console.error('Failed to initialize application', error)
+    app.exit(1)
+  })
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

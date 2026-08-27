@@ -15,9 +15,8 @@ use mycopilot_core::storage::image_generation_repository::{
     self, DEFAULT_IMAGE_GENERATION_PROFILE_ID,
 };
 use mycopilot_core::storage::models::{
-    AgentPromptPreferencesRecord, BrowserDownloadLocationMode, BrowserDownloadSettingsRecord,
-    ImageGenerationProfileRecord, ModelConfigRecord, ModelSettingsRecord, UiPreferencesRecord,
-    BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    AgentPromptPreferencesRecord, BrowserDownloadSettingsRecord, ImageGenerationProfileRecord,
+    ModelConfigRecord, ModelSettingsRecord, UiPreferencesRecord,
 };
 use mycopilot_core::storage::notification_repository::{self, NotificationSettingsRecord};
 use mycopilot_core::storage::preferences_repository;
@@ -41,7 +40,8 @@ const DATABASE_FILE_NAME: &str = "storage.sqlite";
 const BACKUP_DIRECTORY_NAME: &str = "storage-backups";
 const CONFIRM_RESET_FLAG: &str = "--confirm-reset";
 const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
-const PREVIOUS_UI_PREFERENCES_SCHEMA_VERSION: i32 = 21;
+const PREVIOUS_STORAGE_SCHEMA_VERSION: i32 =
+    mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION - 1;
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
@@ -375,8 +375,7 @@ fn load_ui_preferences_for_development_reset(
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
         .map_err(redacted_storage_error)?;
     let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
-    if schema_version == current_schema_version
-        || schema_version == PREVIOUS_UI_PREFERENCES_SCHEMA_VERSION
+    if schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
     {
         return preferences_repository::load_ui_preferences(connection)
             .map_err(redacted_storage_error);
@@ -394,38 +393,15 @@ fn load_browser_download_settings_for_development_reset(
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
         .map_err(redacted_storage_error)?;
     let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
-    if schema_version == current_schema_version {
+    if schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
+    {
         return browser_download_repository::load_settings(connection)
             .map_err(redacted_storage_error);
     }
-    if schema_version != PREVIOUS_UI_PREFERENCES_SCHEMA_VERSION {
-        return Err(invalid_data(
-            "only the immediately previous development browser download settings can be preserved",
-        ));
-    }
 
-    connection
-        .query_row(
-            "SELECT location_mode, custom_directory, revision, updated_at
-             FROM browser_download_settings WHERE id = 'default'",
-            [],
-            |row| {
-                let location_mode = match row.get::<_, String>(0)?.as_str() {
-                    "system" => BrowserDownloadLocationMode::System,
-                    "custom" => BrowserDownloadLocationMode::Custom,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                Ok(BrowserDownloadSettingsRecord {
-                    schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
-                    location_mode,
-                    custom_directory: row.get(1)?,
-                    ask_where_to_save: false,
-                    revision: row.get(2)?,
-                    updated_at: row.get(3)?,
-                })
-            },
-        )
-        .map_err(redacted_storage_error)
+    Err(invalid_data(
+        "only the immediately previous development browser download settings can be preserved",
+    ))
 }
 
 /// Reads only the configuration fields that the explicit development reset preserves.
@@ -1708,14 +1684,14 @@ mod tests {
     }
 
     #[test]
-    fn reset_preserves_v21_ui_configuration_without_migrating_runtime_history() {
+    fn reset_preserves_immediately_previous_ui_configuration_without_runtime_history() {
         let fixture = tempfile::tempdir().unwrap();
-        populated_storage(fixture.path(), "v21-reset-test-token");
+        populated_storage(fixture.path(), "previous-schema-reset-test-token");
         let database = fixture.path().join(DATABASE_FILE_NAME);
 
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch("PRAGMA user_version = 21;")
+            .pragma_update(None, "user_version", PREVIOUS_STORAGE_SCHEMA_VERSION)
             .unwrap();
         drop(connection);
 
@@ -1726,6 +1702,12 @@ mod tests {
         let preferences = storage.load_ui_preferences().unwrap();
         assert_eq!(preferences.profile_display_name, "Reset Test");
         assert_eq!(preferences.profile_handle, "USER");
+        assert!(
+            storage
+                .load_browser_download_settings()
+                .unwrap()
+                .ask_where_to_save
+        );
         assert!(storage.load_projects().unwrap().is_empty());
     }
 

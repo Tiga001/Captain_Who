@@ -2,6 +2,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { BrowserContext, ElementHandle, Frame, Locator, Page, Route } from 'playwright'
 import type {
+  BrowserAgentDownloadSnapshot,
+  BrowserAgentDownloadStatus,
   BrowserArtifactKind,
   BrowserArtifactReference,
   BrowserDownloadReference,
@@ -274,6 +276,11 @@ export interface ManagedPlaywrightMcpHostOptions {
   }) => Promise<BrowserNetworkOperationLease>
   getBrowserContext: () => Promise<BrowserContext>
   getActiveSurfaceIdentity?: () => { surfaceId: string; generation: number } | null
+  getAgentDownloadSnapshot?: (input: {
+    runId: string
+    activationId: string
+    conversationId?: string
+  }) => BrowserAgentDownloadSnapshot
   sensitiveTargetBindings?: ManagedPlaywrightSensitiveTargetBindingStore
   artifactBroker?: BrowserArtifactBroker
   fileBroker?: BrowserFileBroker
@@ -480,6 +487,7 @@ export class ManagedPlaywrightMcpHost {
   private readonly detachAutomation: () => Promise<void>
   private readonly getBrowserContext: () => Promise<BrowserContext>
   private readonly getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
+  private readonly getAgentDownloadSnapshot?: ManagedPlaywrightMcpHostOptions['getAgentDownloadSnapshot']
   private readonly fileBroker?: BrowserFileBroker
   private readonly surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
   private readonly sensitiveTargetBindings?: ManagedPlaywrightSensitiveTargetBindingStore
@@ -513,6 +521,7 @@ export class ManagedPlaywrightMcpHost {
     this.beginTargetCreationOperation = options.beginTargetCreationOperation
     this.getBrowserContext = options.getBrowserContext
     this.getActiveSurfaceIdentity = options.getActiveSurfaceIdentity
+    this.getAgentDownloadSnapshot = options.getAgentDownloadSnapshot
     this.fileBroker = options.fileBroker
     this.finalizeBrowserRun = options.finalizeBrowserRun
     this.releaseBrowserCapability = options.releaseBrowserCapability
@@ -949,26 +958,27 @@ export class ManagedPlaywrightMcpHost {
                     markDispatched: markOperationDispatched
                   })
                 } catch (error) {
+                  let settleError: unknown
                   try {
                     await riskLease?.settle()
-                  } catch {
-                    const pendingFailure = riskLease?.failure()
-                    if (pendingFailure) return riskFailureResult(pendingFailure)
+                  } catch (caught) {
+                    settleError = caught
                   }
                   const failure = riskLease?.failure()
                   if (failure) return riskFailureResult(failure)
+                  if (settleError) throw settleError
+                  if (networkLeaseDownloadProgress(riskLease).length > 0) {
+                    return downloadTakeoverResult()
+                  }
                   throw error
                 }
                 if (hostAdapted) {
                   try {
                     await riskLease?.settle()
-                  } catch {
+                  } catch (error) {
                     const pendingFailure = riskLease?.failure()
                     if (pendingFailure) return riskFailureResult(pendingFailure)
-                    throw new ManagedPlaywrightMcpHostError(
-                      'browser.risk_outcome_unknown',
-                      dispatchStarted ? 'possibly_dispatched' : 'definitely_not_dispatched'
-                    )
+                    throw error
                   }
                   const failure = riskLease?.failure()
                   if (failure) return riskFailureResult(failure)
@@ -977,6 +987,8 @@ export class ManagedPlaywrightMcpHost {
                 }
 
                 let officialResult: ManagedPlaywrightCallResult
+                let officialCallStarted = false
+                let officialResponseReceived = false
                 try {
                   artifactPlan = await this.prepareUpstreamArtifactPlan({
                     name,
@@ -990,6 +1002,7 @@ export class ManagedPlaywrightMcpHost {
                   // submission may already have happened. Later network refusals are therefore never
                   // represented as a safe pre-dispatch denial and must not be replayed automatically.
                   await markOperationDispatched()
+                  officialCallStarted = true
                   officialResult = await this.callOfficialTool(
                     connection,
                     { name, arguments: artifactPlan?.serverArguments ?? serverArguments },
@@ -1000,20 +1013,29 @@ export class ManagedPlaywrightMcpHost {
                       // acknowledge that boundary before bounded parsing: a locally rejected
                       // oversized/malformed response is still response_received, not a transport
                       // ambiguity, and must not cause this healthy connection to be retired.
+                      officialResponseReceived = true
                       responseReceived = true
                       await acknowledgeDispatchPhase('response_received')
-                    }
+                    },
+                    true
                   )
                 } catch (error) {
                   await artifactPlan?.reservation.discard().catch(() => undefined)
+                  let settleError: unknown
                   try {
                     await riskLease?.settle()
-                  } catch {
-                    const pendingFailure = riskLease?.failure()
-                    if (pendingFailure) return riskFailureResult(pendingFailure)
+                  } catch (caught) {
+                    settleError = caught
+                  }
+                  if (officialCallStarted && !officialResponseReceived) {
+                    await this.retireStaleConnection(connection).catch(() => undefined)
                   }
                   const failure = riskLease?.failure()
                   if (failure) return riskFailureResult(failure)
+                  if (settleError) throw settleError
+                  if (networkLeaseDownloadProgress(riskLease).length > 0) {
+                    return downloadTakeoverResult()
+                  }
                   throw error
                 }
                 try {
@@ -1030,6 +1052,9 @@ export class ManagedPlaywrightMcpHost {
                 }
                 if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
                 let parsed = adaptReviewedToolResult(name, officialResult)
+                if (networkLeaseDownloadProgress(riskLease).length > 0) {
+                  parsed = downloadTakeoverResult()
+                }
                 if (name === 'browser_snapshot' && !artifactPlan && !parsed.isError) {
                   try {
                     parsed = await this.appendSafeFrameEditorCandidates(
@@ -1123,7 +1148,10 @@ export class ManagedPlaywrightMcpHost {
             if (targetFenceError) throw targetFenceError
             await acknowledgeDispatchPhase('response_received')
             responseReceived = true
-            return outcome.result
+            return withAgentDownloadProgress(
+              outcome.result,
+              this.currentAgentDownloadSnapshot(options.authorizationContext)
+            )
           }),
         options.signal,
         options.timeoutMs,
@@ -1293,6 +1321,9 @@ export class ManagedPlaywrightMcpHost {
     })
     let authority: BrowserTargetCreationAuthority | undefined
     let finishIntent: (() => void) | undefined
+    let connection: ActiveConnection | undefined
+    let officialCallStarted = false
+    let officialResponseReceived = false
     try {
       await riskLease.ready()
       authority = await riskLease.beginTargetCreationAuthority({
@@ -1306,37 +1337,51 @@ export class ManagedPlaywrightMcpHost {
       })
       finishIntent = surfaceGroup.beginTargetCreationIntent('interactive', authority)
 
-      const connection = await this.ensureConnected()
+      connection = await this.ensureConnected()
       await this.ensureOfficialCatalog(connection, input.signal)
       // Intent registration and an empty-context/catalog handshake are reversible Host setup.
       // Cross the side-effect boundary only immediately before fixed official browser_tabs can
       // issue Target.createTarget/navigation, so an earlier connection failure stays definite.
       await input.markDispatched()
       riskLease.markDispatched()
+      officialCallStarted = true
       const officialResult = await this.callOfficialTool(
         connection,
         {
           name: toolName,
           arguments: input.arguments
         },
-        input.signal
+        input.signal,
+        this.toolTimeoutMs,
+        () => {
+          officialResponseReceived = true
+        },
+        true
       )
-      const result = adaptReviewedToolResult(toolName, officialResult)
+      let result = adaptReviewedToolResult(toolName, officialResult)
       input.markResponseReceived()
       await riskLease.settle()
       const failure = riskLease.failure()
       if (failure) return riskFailureResult(failure)
       if (input.signal.aborted) throw cancellationError(input.signal.reason)
+      if (networkLeaseDownloadProgress(riskLease).length > 0) {
+        result = downloadTakeoverResult()
+      }
       return withDownloadReferences(result, riskLease.downloads())
     } catch (error) {
+      let settleError: unknown
       try {
         await riskLease.settle()
-      } catch {
-        const pendingFailure = riskLease.failure()
-        if (pendingFailure) return riskFailureResult(pendingFailure)
+      } catch (caught) {
+        settleError = caught
+      }
+      if (officialCallStarted && !officialResponseReceived && connection) {
+        await this.retireStaleConnection(connection).catch(() => undefined)
       }
       const failure = riskLease.failure()
       if (failure) return riskFailureResult(failure)
+      if (settleError) throw settleError
+      if (networkLeaseDownloadProgress(riskLease).length > 0) return downloadTakeoverResult()
       throw error
     } finally {
       if (finishIntent) finishIntent()
@@ -1372,7 +1417,8 @@ export class ManagedPlaywrightMcpHost {
     request: Parameters<ManagedMcpClient['callTool']>[0],
     signal: AbortSignal,
     timeoutMs = this.toolTimeoutMs,
-    onResponseReceived?: () => void | Promise<void>
+    onResponseReceived?: () => void | Promise<void>,
+    deferRetirementOnReject = false
   ): Promise<ManagedPlaywrightCallResult> {
     let rawResponseReceived = false
     let rawResult: unknown
@@ -1394,7 +1440,9 @@ export class ManagedPlaywrightMcpHost {
         // rejected request therefore has no authoritative response and may leave the official
         // server's lazy shared-context promise or its in-memory transport unusable. Retire this
         // generation exactly once, but never replay the current invocation.
-        await this.retireStaleConnection(connection).catch(() => undefined)
+        if (!deferRetirementOnReject) {
+          await this.retireStaleConnection(connection).catch(() => undefined)
+        }
       }
       throw error
     }
@@ -1478,6 +1526,21 @@ export class ManagedPlaywrightMcpHost {
   private assertRunStateAccess(runId: string | undefined): void {
     if (this.stateOwnerRunId && runId !== this.stateOwnerRunId) {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.busy')
+    }
+  }
+
+  private currentAgentDownloadSnapshot(
+    authorization: BrowserRiskAuthorizationContext | undefined
+  ): BrowserAgentDownloadSnapshot | undefined {
+    if (!authorization || !this.getAgentDownloadSnapshot) return undefined
+    try {
+      return this.getAgentDownloadSnapshot({
+        runId: authorization.runId,
+        activationId: authorization.activationId,
+        ...(authorization.conversationId ? { conversationId: authorization.conversationId } : {})
+      })
+    } catch {
+      return undefined
     }
   }
 
@@ -3071,6 +3134,92 @@ function withDownloadReferences(
       downloads: [...downloads]
     }
   }
+}
+
+function downloadTakeoverResult(): ManagedPlaywrightCallResult {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: 'The page action started a managed browser download. The original navigation was taken over by Electron; this is a successful download start, not a page-click failure.'
+      }
+    ],
+    structuredContent: { status: 'download_started' },
+    isError: false
+  }
+}
+
+function networkLeaseDownloadProgress(
+  lease: BrowserNetworkOperationLease | undefined
+): readonly BrowserAgentDownloadStatus[] {
+  if (!lease || typeof lease.downloadProgress !== 'function') return []
+  return lease.downloadProgress()
+}
+
+function withAgentDownloadProgress(
+  result: ManagedPlaywrightCallResult,
+  snapshot: BrowserAgentDownloadSnapshot | undefined
+): ManagedPlaywrightCallResult {
+  if (!snapshot || snapshot.downloads.length === 0) return result
+  const progress = snapshot.downloads.map((download) => structuredClone(download))
+  const existing = Array.isArray(result.structuredContent?.downloads)
+    ? (result.structuredContent.downloads as BrowserDownloadReference[])
+    : []
+  const completed = progress
+    .map((download) => download.reference)
+    .filter((reference): reference is BrowserDownloadReference => reference !== undefined)
+  const downloads = [...existing]
+  const ids = new Set(downloads.map((download) => download.downloadId))
+  for (const reference of completed) {
+    if (!ids.has(reference.downloadId)) {
+      ids.add(reference.downloadId)
+      downloads.push(reference)
+    }
+  }
+  return {
+    ...result,
+    content: [
+      ...result.content,
+      ...progress.map((download) => ({
+        type: 'text' as const,
+        text: agentDownloadProgressText(download)
+      }))
+    ],
+    structuredContent: {
+      ...(result.structuredContent ?? {}),
+      downloadProgress: progress,
+      ...(downloads.length > 0 ? { downloads } : {})
+    }
+  }
+}
+
+function agentDownloadProgressText(download: BrowserAgentDownloadStatus): string {
+  const transferred = `${formatDownloadBytes(download.receivedBytes)} / ${formatDownloadBytes(download.totalBytes)}`
+  switch (download.state) {
+    case 'awaiting_destination':
+      return `Download “${download.displayName}” is waiting for the user to choose a save location.`
+    case 'progressing':
+      return `Downloading “${download.displayName}”: ${transferred}${download.bytesPerSecond > 0 ? ` at ${formatDownloadBytes(download.bytesPerSecond)}/s` : ''}. Download ID: ${download.downloadId}`
+    case 'paused':
+      return `Download “${download.displayName}” is paused at ${transferred}. Download ID: ${download.downloadId}`
+    case 'finalizing':
+      return `Download “${download.displayName}” received all bytes and is being verified and registered. Download ID: ${download.downloadId}`
+    case 'completed':
+      return `Downloaded “${download.displayName}” (${formatDownloadBytes(download.receivedBytes)}). Durable reference: ${download.downloadId}`
+    case 'cancelled':
+      return `Download “${download.displayName}” was cancelled. Download ID: ${download.downloadId}`
+    case 'interrupted':
+    case 'failed':
+      return `Download “${download.displayName}” failed with ${download.errorCode ?? 'browser.download.interrupted'}. Download ID: ${download.downloadId}`
+  }
+}
+
+function formatDownloadBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  const units = ['B', 'KiB', 'MiB', 'GiB'] as const
+  const unit = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+  const amount = value / 1024 ** unit
+  return `${unit === 0 ? Math.round(amount) : amount.toFixed(amount >= 100 ? 0 : 1)} ${units[unit]}`
 }
 
 export async function appendSafeFrameEditorCandidates(

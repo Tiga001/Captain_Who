@@ -4378,10 +4378,15 @@ fn validate_template_snapshot(
     let exact = connection
         .query_row(
             "SELECT EXISTS(
-                 SELECT 1 FROM agent_templates
-                 WHERE template_id = ?1 AND project_id = ?2 AND machine_key = ?3
-                   AND name = ?4 AND description = ?5 AND instructions = ?6
-                   AND revision = ?7 AND model_config_id = ?8 AND enabled = 1
+                 SELECT 1
+                 FROM agent_templates AS template
+                 INNER JOIN project_agent_template_bindings AS binding
+                   ON binding.template_id = template.template_id
+                 WHERE template.template_id = ?1 AND binding.project_id = ?2
+                   AND template.machine_key = ?3
+                   AND template.name = ?4 AND template.description = ?5
+                   AND template.instructions = ?6 AND template.revision = ?7
+                   AND template.model_config_id = ?8 AND template.enabled = 1
              )",
             params![
                 &template.template_id,
@@ -4398,7 +4403,7 @@ fn validate_template_snapshot(
         .map_err(read_error)?;
     if !exact {
         return Err(conflict(
-            "template snapshot is stale, disabled, or unavailable",
+            "template snapshot is stale, disabled, unassigned, or unavailable",
         ));
     }
     Ok(())

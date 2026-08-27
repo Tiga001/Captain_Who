@@ -7,6 +7,8 @@ import {
   BROWSER_DOWNLOAD_SCHEMA_VERSION,
   parseBrowserDownloadRecord,
   parseBrowserDownloadSettingsRecord,
+  type BrowserAgentDownloadSnapshot,
+  type BrowserAgentDownloadStatus,
   type BrowserDownloadCenterAction,
   type BrowserDownloadCenterItem,
   type BrowserDownloadCenterSnapshot,
@@ -19,13 +21,12 @@ import {
 import { safeSuggestedFileName, type BrowserArtifactOwner } from './BrowserArtifactBroker'
 
 const DEFAULT_MAX_ACTIVE_DOWNLOADS = 8
-const DEFAULT_MAX_SINGLE_AGENT_DOWNLOAD_BYTES = 64 * 1024 * 1024
-const DEFAULT_MAX_ACTIVE_AGENT_BYTES = 128 * 1024 * 1024
-const DOWNLOAD_SETTLE_TIMEOUT_MS = 30_000
-const DOWNLOAD_PROMPT_SETTLE_TIMEOUT_MS = 5 * 60_000
+const DEFAULT_MAX_SINGLE_AGENT_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+const DEFAULT_MAX_ACTIVE_AGENT_BYTES = 4 * 1024 * 1024 * 1024
 const MAX_REGISTERED_GUESTS = 32
 const MAX_FILE_NAME_ATTEMPTS = 10_000
 const MAX_DOWNLOAD_CENTER_ENTRIES = 50
+const MAX_AGENT_DOWNLOAD_ENTRIES = 50
 const DOWNLOAD_CENTER_UPDATE_INTERVAL_MS = 100
 
 export type BrowserDownloadBrokerErrorCode =
@@ -66,6 +67,7 @@ export interface BrowserDownloadToolLease {
   markDispatched(): void
   settle(): Promise<readonly BrowserDownloadReference[]>
   downloads(): readonly BrowserDownloadReference[]
+  progress?(): readonly BrowserAgentDownloadStatus[]
   finish(): void
 }
 
@@ -94,6 +96,7 @@ interface ActiveTool {
   createdGuestClaimsStarted: Record<'new' | 'popup', number>
   dispatched: boolean
   downloads: Set<ActiveDownload>
+  downloadIds: Set<string>
   expectedTargetCloses: Set<string>
   failure?: BrowserDownloadBrokerError
   finished: boolean
@@ -112,18 +115,25 @@ interface ActiveDownload {
   destination: string | null
   downloadId: string
   displayName: string
+  failureCode?: BrowserDownloadBrokerErrorCode
+  finalization?: Promise<void>
   guest: GuestRecord
   handleDone: (event: Event, state: 'completed' | 'cancelled' | 'interrupted') => void
   handleUpdated: (event: Event, state: 'progressing' | 'interrupted') => void
   item: DownloadItem
-  lifetime: Promise<void>
   mimeType: string
-  settle: () => void
+  owner?: ToolOwner
+  reference?: BrowserDownloadReference
   sourceOrigin: string | null
   tempPath: string | null
   terminal: boolean
   tool?: ActiveTool
   waitsForDestinationConfirmation: boolean
+}
+
+interface AgentDownloadRecord {
+  owner: ToolOwner
+  status: BrowserAgentDownloadStatus
 }
 
 interface DownloadCenterRecord {
@@ -171,6 +181,7 @@ export class BrowserDownloadBroker {
   private readonly tools = new Set<ActiveTool>()
   private readonly activeDownloads = new Set<ActiveDownload>()
   private readonly downloadCenterRecords = new Map<string, DownloadCenterRecord>()
+  private readonly agentDownloadRecords = new Map<string, AgentDownloadRecord>()
   private readonly closedSurfaces = new Set<string>()
   private readonly closedToolCalls = new Set<string>()
   private readonly finalizedRuns = new Set<string>()
@@ -178,6 +189,7 @@ export class BrowserDownloadBroker {
   private disposed = false
   private installed = false
   private downloadCenterRevision = 0
+  private agentDownloadRevision = 0
   private downloadCenterChangedTimer: ReturnType<typeof setTimeout> | undefined
 
   private readonly handleWillDownload = (
@@ -279,6 +291,30 @@ export class BrowserDownloadBroker {
     return {
       schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
       revision: this.downloadCenterRevision,
+      downloads
+    }
+  }
+
+  /** Returns only path-free downloads owned by the current Agent run. */
+  agentDownloadSnapshot(input: {
+    runId: string
+    activationId: string
+    conversationId?: string
+  }): BrowserAgentDownloadSnapshot {
+    this.assertUsable()
+    const downloads = [...this.agentDownloadRecords.values()]
+      .filter(
+        (record) =>
+          record.owner.runId === input.runId &&
+          record.owner.activationId === input.activationId &&
+          (input.conversationId === undefined ||
+            record.owner.conversationId === input.conversationId)
+      )
+      .sort((left, right) => right.status.startedAt - left.status.startedAt)
+      .map((record) => structuredClone(record.status))
+    return {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      revision: this.agentDownloadRevision,
       downloads
     }
   }
@@ -442,6 +478,7 @@ export class BrowserDownloadBroker {
       createdGuestClaimsStarted: { new: 0, popup: 0 },
       dispatched: false,
       downloads: new Set<ActiveDownload>(),
+      downloadIds: new Set<string>(),
       expectedTargetCloses: new Set<string>(),
       finished: false,
       guests: new Set(guests),
@@ -483,6 +520,7 @@ export class BrowserDownloadBroker {
       },
       settle: () => this.settleTool(tool),
       downloads: () => tool.references.map((reference) => structuredClone(reference)),
+      progress: () => this.agentProgressForTool(tool),
       finish: () => this.finishTool(tool)
     }
   }
@@ -596,6 +634,7 @@ export class BrowserDownloadBroker {
     this.tools.clear()
     this.activeDownloads.clear()
     this.downloadCenterRecords.clear()
+    this.agentDownloadRecords.clear()
     this.closedSurfaces.clear()
     this.closedToolCalls.clear()
     this.finalizedRuns.clear()
@@ -635,6 +674,8 @@ export class BrowserDownloadBroker {
 
     const downloadId = `browser-download:${randomUUID()}`
     const displayName = sanitizedDownloadFileName(safeDownloadString(item, 'getFilename'))
+    const mimeType = sanitizedDownloadMimeType(safeDownloadString(item, 'getMimeType'))
+    const owner = tool?.owner
     const now = Date.now()
     const centerRecord: DownloadCenterRecord = {
       absolutePath: null,
@@ -642,7 +683,7 @@ export class BrowserDownloadBroker {
       displayName,
       downloadId,
       receivedBytes: safeDownloadBytes(item, 'getReceivedBytes'),
-      source: tool ? 'agent' : 'manual',
+      source: owner ? 'agent' : 'manual',
       sourceUrl: safeDownloadUrl(item),
       startedAt: safeDownloadStartedAt(item, now),
       state: safeDownloadTransferState(item, 'progressing'),
@@ -661,7 +702,8 @@ export class BrowserDownloadBroker {
       displayName,
       guest,
       item,
-      mimeType: sanitizedDownloadMimeType(safeDownloadString(item, 'getMimeType')),
+      mimeType,
+      owner,
       sourceOrigin: safeDownloadOrigin(item),
       tempPath,
       tool,
@@ -669,13 +711,31 @@ export class BrowserDownloadBroker {
       finish: (active, state) => this.finishDownload(active, state),
       updated: (active, state) => {
         this.refreshDownloadCenterRecord(active, safeDownloadTransferState(active.item, state))
-        if (!active.tool || !this.downloadExceedsAgentBudget(active.item, active)) return
-        this.failTool(active.tool, 'browser.download.too_large')
-        void this.cancelDownload(active)
+        if (!active.owner || !this.downloadExceedsAgentBudget(active.item, active)) return
+        if (active.tool) this.failTool(active.tool, 'browser.download.too_large')
+        void this.cancelDownload(active, 'browser.download.too_large')
       }
     })
     try {
-      tool?.downloads.add(download)
+      if (tool) {
+        tool.downloads.add(download)
+        tool.downloadIds.add(downloadId)
+        this.agentDownloadRecords.set(downloadId, {
+          owner: { ...tool.owner },
+          status: {
+            downloadId,
+            displayName,
+            mimeType,
+            state: promptForDestination ? 'awaiting_destination' : 'progressing',
+            receivedBytes: centerRecord.receivedBytes,
+            totalBytes: centerRecord.totalBytes,
+            bytesPerSecond: promptForDestination ? 0 : centerRecord.bytesPerSecond,
+            startedAt: centerRecord.startedAt,
+            updatedAt: now
+          }
+        })
+        this.markAgentDownloadChanged()
+      }
       this.activeDownloads.add(download)
       item.once('done', download.handleDone)
       item.on('updated', download.handleUpdated)
@@ -696,8 +756,8 @@ export class BrowserDownloadBroker {
       tool?.downloads.delete(download)
       this.activeDownloads.delete(download)
       this.downloadCenterRecords.delete(downloadId)
+      this.agentDownloadRecords.delete(downloadId)
       download.terminal = true
-      download.settle()
       if (tool) this.failTool(tool, 'browser.download.destination_unavailable')
       if (tempPath) void removeFile(tempPath)
       safeCancel(item)
@@ -705,10 +765,10 @@ export class BrowserDownloadBroker {
     }
     const state = safeDownloadState(item)
     if (state !== 'progressing') {
-      void this.finishDownload(download, state)
-    } else if (tool && this.downloadExceedsAgentBudget(item, download)) {
-      this.failTool(tool, 'browser.download.too_large')
-      void this.cancelDownload(download)
+      download.finalization ??= this.finishDownload(download, state)
+    } else if (owner && this.downloadExceedsAgentBudget(item, download)) {
+      if (tool) this.failTool(tool, 'browser.download.too_large')
+      void this.cancelDownload(download, 'browser.download.too_large')
     }
   }
 
@@ -732,6 +792,8 @@ export class BrowserDownloadBroker {
             state === 'interrupted' ? 'browser.download.interrupted' : 'browser.download.cancelled'
           )
         }
+        download.failureCode =
+          state === 'interrupted' ? 'browser.download.interrupted' : 'browser.download.cancelled'
         if (download.tempPath) await removeFile(download.tempPath)
         return
       }
@@ -739,8 +801,9 @@ export class BrowserDownloadBroker {
       const completedPath = download.tempPath ?? safeCompletedDownloadPath(download.item)
       const identity = await hashRegularFile(completedPath)
       completedSize = identity.sizeBytes
-      if (download.tool && identity.sizeBytes > this.maxSingleDownloadBytes) {
-        this.failTool(download.tool, 'browser.download.too_large')
+      if (download.owner && identity.sizeBytes > this.maxSingleDownloadBytes) {
+        if (download.tool) this.failTool(download.tool, 'browser.download.too_large')
+        download.failureCode = 'browser.download.too_large'
         terminalState = 'cancelled'
         if (download.tempPath) await removeFile(download.tempPath)
         return
@@ -759,16 +822,16 @@ export class BrowserDownloadBroker {
           await this.registerDownloadRecord({
             schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
             downloadId: download.downloadId,
-            source: download.tool ? 'agent' : 'manual',
+            source: download.owner ? 'agent' : 'manual',
             displayName: basename(absolutePath),
             mimeType: download.mimeType,
             sizeBytes: identity.sizeBytes,
             sha256: identity.sha256,
             absolutePath,
             sourceOrigin: download.sourceOrigin,
-            conversationId: download.tool?.owner.conversationId ?? null,
-            runId: download.tool?.owner.runId ?? null,
-            callId: download.tool?.owner.toolCallId ?? null,
+            conversationId: download.owner?.conversationId ?? null,
+            runId: download.owner?.runId ?? null,
+            callId: download.owner?.toolCallId ?? null,
             createdAt: Date.now()
           })
         )
@@ -787,10 +850,16 @@ export class BrowserDownloadBroker {
       }
       retainedPath = absolutePath
       download.centerRecord.displayName = record.displayName
-      download.tool?.references.push(publicDownloadReference(record))
+      const reference = publicDownloadReference(record)
+      download.reference = reference
+      download.tool?.references.push(reference)
       notifyHistoryChanged(this.onHistoryChanged, this.historyChangedListeners)
     } catch (error) {
       terminalState = retainedPath ? 'completed' : 'interrupted'
+      download.failureCode =
+        error instanceof BrowserDownloadBrokerError
+          ? error.code
+          : 'browser.download.registration_failed'
       if (download.tool) {
         this.failTool(
           download.tool,
@@ -802,21 +871,25 @@ export class BrowserDownloadBroker {
       if (download.tempPath) await removeFile(download.tempPath)
     } finally {
       this.finishDownloadCenterRecord(download, terminalState, retainedPath, completedSize)
+      this.finishAgentDownloadRecord(download, terminalState)
       download.tool?.downloads.delete(download)
-      download.settle()
     }
   }
 
-  private async cancelDownload(download: ActiveDownload): Promise<void> {
+  private async cancelDownload(
+    download: ActiveDownload,
+    failureCode: BrowserDownloadBrokerErrorCode = 'browser.download.cancelled'
+  ): Promise<void> {
     if (download.terminal) return
     download.terminal = true
     this.removeDownloadListeners(download)
     this.activeDownloads.delete(download)
     safeCancel(download.item)
+    download.failureCode = failureCode
     if (download.tempPath) await removeFile(download.tempPath)
     this.finishDownloadCenterRecord(download, 'cancelled', null)
+    this.finishAgentDownloadRecord(download, 'cancelled')
     download.tool?.downloads.delete(download)
-    download.settle()
   }
 
   private refreshDownloadCenterRecord(
@@ -831,6 +904,7 @@ export class BrowserDownloadBroker {
     record.totalBytes = safeDownloadBytes(download.item, 'getTotalBytes')
     record.bytesPerSecond = state === 'progressing' ? safeDownloadBytesPerSecond(download.item) : 0
     record.updatedAt = Date.now()
+    this.refreshAgentDownloadRecord(download, state)
     this.markDownloadCenterChanged(immediate)
   }
 
@@ -850,6 +924,80 @@ export class BrowserDownloadBroker {
     record.updatedAt = Date.now()
     this.trimDownloadCenterRecords()
     this.markDownloadCenterChanged(true)
+  }
+
+  private refreshAgentDownloadRecord(
+    download: ActiveDownload,
+    state: BrowserDownloadCenterItem['state']
+  ): void {
+    const record = this.agentDownloadRecords.get(download.downloadId)
+    if (!record) return
+    const selectedDestination =
+      !download.waitsForDestinationConfirmation || hasSelectedDownloadPath(download.item)
+    record.status.state = !selectedDestination
+      ? 'awaiting_destination'
+      : state === 'completed' && !download.reference
+        ? 'finalizing'
+        : state
+    record.status.receivedBytes = safeDownloadBytes(download.item, 'getReceivedBytes')
+    record.status.totalBytes = safeDownloadBytes(download.item, 'getTotalBytes')
+    record.status.bytesPerSecond =
+      selectedDestination && state === 'progressing' ? safeDownloadBytesPerSecond(download.item) : 0
+    record.status.updatedAt = Date.now()
+    this.markAgentDownloadChanged()
+  }
+
+  private finishAgentDownloadRecord(
+    download: ActiveDownload,
+    state: BrowserDownloadCenterItem['state']
+  ): void {
+    const record = this.agentDownloadRecords.get(download.downloadId)
+    if (!record) return
+    record.status.displayName = download.centerRecord.displayName
+    record.status.receivedBytes =
+      download.reference?.sizeBytes ?? download.centerRecord.receivedBytes
+    record.status.totalBytes = download.reference?.sizeBytes ?? download.centerRecord.totalBytes
+    record.status.bytesPerSecond = 0
+    record.status.updatedAt = Date.now()
+    if (download.reference) {
+      record.status.state = 'completed'
+      record.status.reference = structuredClone(download.reference)
+      delete record.status.errorCode
+    } else if (download.failureCode && download.failureCode !== 'browser.download.cancelled') {
+      record.status.state =
+        download.failureCode === 'browser.download.interrupted' ? 'interrupted' : 'failed'
+      record.status.errorCode = download.failureCode
+      delete record.status.reference
+    } else {
+      record.status.state = state === 'interrupted' ? 'interrupted' : 'cancelled'
+      record.status.errorCode =
+        state === 'interrupted' ? 'browser.download.interrupted' : 'browser.download.cancelled'
+      delete record.status.reference
+    }
+    this.trimAgentDownloadRecords()
+    this.markAgentDownloadChanged()
+  }
+
+  private agentProgressForTool(tool: ActiveTool): readonly BrowserAgentDownloadStatus[] {
+    return [...tool.downloadIds]
+      .map((downloadId) => this.agentDownloadRecords.get(downloadId)?.status)
+      .filter((status): status is BrowserAgentDownloadStatus => status !== undefined)
+      .map((status) => structuredClone(status))
+  }
+
+  private markAgentDownloadChanged(): void {
+    this.agentDownloadRevision += 1
+  }
+
+  private trimAgentDownloadRecords(): void {
+    const terminal = [...this.agentDownloadRecords.entries()]
+      .filter(([, record]) =>
+        ['completed', 'cancelled', 'interrupted', 'failed'].includes(record.status.state)
+      )
+      .sort((left, right) => right[1].status.updatedAt - left[1].status.updatedAt)
+    for (const [downloadId] of terminal.slice(MAX_AGENT_DOWNLOAD_ENTRIES)) {
+      this.agentDownloadRecords.delete(downloadId)
+    }
   }
 
   private ensureDownloadCenterRecord(download: ActiveDownload): boolean {
@@ -910,23 +1058,20 @@ export class BrowserDownloadBroker {
     if (tool.settled) return tool.references.map((reference) => structuredClone(reference))
     await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
     tool.accepting = false
-    if (tool.downloads.size > 0) {
-      const timeoutMs = [...tool.downloads].some((download) => download.tempPath === null)
-        ? DOWNLOAD_PROMPT_SETTLE_TIMEOUT_MS
-        : DOWNLOAD_SETTLE_TIMEOUT_MS
-      const completed = await settleDownloadsWithin(
-        [...tool.downloads].map((download) => download.lifetime),
-        timeoutMs
-      )
-      if (!completed) {
-        this.failTool(tool, 'browser.download.outcome_unknown')
-        await Promise.allSettled(
-          [...tool.downloads].map((download) => this.cancelDownload(download))
-        )
-      }
+    await Promise.allSettled(
+      [...tool.downloads]
+        .map((download) => download.finalization)
+        .filter((finalization): finalization is Promise<void> => finalization !== undefined)
+    )
+    if (tool.failure) throw tool.failure
+    // DownloadItem belongs to the browser session, not to one MCP call. Once will-download has
+    // synchronously admitted it, detach the transfer so a large file or native save dialog can
+    // outlive the initiating click while remaining visible to subsequent Browser Tool calls.
+    for (const download of [...tool.downloads]) {
+      download.tool = undefined
+      tool.downloads.delete(download)
     }
     tool.settled = true
-    if (tool.failure) throw tool.failure
     return tool.references.map((reference) => structuredClone(reference))
   }
 
@@ -981,7 +1126,7 @@ export class BrowserDownloadBroker {
   private activeByteEstimate(exclude?: ActiveDownload, agentOnly = false): number {
     let bytes = 0
     for (const download of this.activeDownloads) {
-      if (download === exclude || (agentOnly && !download.tool)) continue
+      if (download === exclude || (agentOnly && !download.owner)) continue
       bytes += downloadByteEstimate(download.item)
     }
     return bytes
@@ -1029,6 +1174,7 @@ function createActiveDownload(input: {
   guest: GuestRecord
   item: DownloadItem
   mimeType: string
+  owner?: ToolOwner
   sourceOrigin: string | null
   tempPath: string | null
   tool?: ActiveTool
@@ -1039,18 +1185,12 @@ function createActiveDownload(input: {
   ) => Promise<void>
   updated: (download: ActiveDownload, state: 'progressing' | 'interrupted') => void
 }): ActiveDownload {
-  let settle!: () => void
-  const lifetime = new Promise<void>((resolve) => {
-    settle = once(resolve)
-  })
   const download = {} as ActiveDownload
   Object.assign(download, {
     ...input,
     centerVisible: false,
-    settle,
-    lifetime,
     handleDone: (_event: Event, state: 'completed' | 'cancelled' | 'interrupted') => {
-      void input.finish(download, state)
+      download.finalization ??= input.finish(download, state)
     },
     handleUpdated: (_event: Event, state: 'progressing' | 'interrupted') =>
       input.updated(download, state),
@@ -1366,33 +1506,6 @@ function compareDownloadCenterRecords(
 
 async function removeFile(path: string): Promise<void> {
   await unlink(path).catch(() => undefined)
-}
-
-function once(callback: () => void): () => void {
-  let called = false
-  return () => {
-    if (called) return
-    called = true
-    callback()
-  }
-}
-
-async function settleDownloadsWithin(
-  lifetimes: readonly Promise<void>[],
-  timeoutMs: number
-): Promise<boolean> {
-  if (lifetimes.length === 0) return true
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      Promise.allSettled(lifetimes).then(() => true),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs)
-      })
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
 }
 
 function positiveBound(value: number | undefined, fallback: number): number {

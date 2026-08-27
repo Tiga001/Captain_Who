@@ -24,6 +24,9 @@ const FIXED_UPSTREAM_TOOL_COUNT: usize = 69;
 const MAX_REVIEWED_EXPOSED_TOOLS: usize = 128;
 const CALL_REASON_PROPERTY: &str = "call_reason";
 const BROWSER_TAKE_SCREENSHOT_DESCRIPTION: &str = "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.";
+const BROWSER_CLICK_DESCRIPTION: &str = "Perform a click on the current page. If the click starts a browser download, the result reports download_started with a stable download ID; use browser_wait_for with a short time to observe progress.";
+const BROWSER_GET_CONFIG_DESCRIPTION: &str = "Get the managed browser's resolved Host configuration and the current task's path-free download progress.";
+const BROWSER_WAIT_FOR_DESCRIPTION: &str = "Wait for text to appear or disappear or for a specified time. The result also reports current-task browser download progress, so use a short time to poll an active download.";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PlaywrightToolIdentity(String);
@@ -292,10 +295,12 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
             let mut descriptor = BuiltinCapabilityToolDescriptor::new(
                 identity.as_str(),
                 &policy.model_name,
-                if identity.as_str() == "browser_take_screenshot" {
-                    BROWSER_TAKE_SCREENSHOT_DESCRIPTION
-                } else {
-                    &upstream_tool.description
+                match identity.as_str() {
+                    "browser_take_screenshot" => BROWSER_TAKE_SCREENSHOT_DESCRIPTION,
+                    "browser_click" => BROWSER_CLICK_DESCRIPTION,
+                    "browser_get_config" => BROWSER_GET_CONFIG_DESCRIPTION,
+                    "browser_wait_for" => BROWSER_WAIT_FOR_DESCRIPTION,
+                    _ => &upstream_tool.description,
                 },
                 host_input_schema.clone(),
                 tool_safety(&upstream_tool.annotations)?,

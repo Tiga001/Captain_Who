@@ -8,11 +8,11 @@ fn retry_uses_frozen_bundle_after_template_and_model_catalog_change() {
     let created = fixture.service.create_child_agent(&input).unwrap();
     let template = fixture
         .service
-        .get_agent_template("project-a", "template-reviewer")
+        .get_agent_template("template-reviewer")
         .unwrap();
     fixture
         .service
-        .set_agent_template_enabled("project-a", "template-reviewer", template.revision, false)
+        .set_agent_template_enabled("template-reviewer", template.revision, false)
         .unwrap();
     fixture
         .service
@@ -24,6 +24,64 @@ fn retry_uses_frozen_bundle_after_template_and_model_catalog_change() {
     assert_eq!(
         retry.agent.model_snapshot.unwrap().model_config_id,
         "model-b"
+    );
+}
+
+#[test]
+fn removing_project_assignment_blocks_new_spawns_but_not_idempotent_retry() {
+    let fixture = Fixture::new(Some("model-a"));
+    let mut first = spawn_input("spawn-before-unassign", "before_unassign");
+    first.template_machine_key = Some("reviewer".to_string());
+    let created = fixture.service.create_child_agent(&first).unwrap();
+
+    fixture
+        .service
+        .set_agent_template_project_assignment("project-a", "template-reviewer", false)
+        .unwrap();
+
+    assert_eq!(fixture.service.create_child_agent(&first).unwrap(), created);
+    let mut later = spawn_input("spawn-after-unassign", "after_unassign");
+    later.template_machine_key = Some("reviewer".to_string());
+    assert_eq!(
+        fixture.service.create_child_agent(&later).unwrap_err(),
+        ChildAgentSpawnError::TemplateNotFound("reviewer".to_string())
+    );
+}
+
+#[test]
+fn frozen_selector_identity_rejects_a_template_revised_during_the_turn() {
+    let fixture = Fixture::new(Some("model-a"));
+    let original = fixture
+        .service
+        .get_agent_template("template-reviewer")
+        .unwrap();
+    fixture
+        .service
+        .update_agent_template(&UpdateAgentTemplateInput {
+            template_id: original.template_id.clone(),
+            expected_revision: original.revision,
+            name: original.name,
+            description: "Updated after the selector directory was frozen".to_string(),
+            instructions: original.instructions,
+            model_config_id: original.model_config_id,
+        })
+        .unwrap();
+
+    let mut input = spawn_input("spawn-stale-selector", "stale_selector");
+    input.template_machine_key = Some("reviewer".to_string());
+    assert_eq!(
+        fixture
+            .service
+            .create_child_agent_with_limits_and_expected_selector(
+                &input,
+                AgentTreeResourceLimits::default(),
+                None,
+                Some(("template-reviewer", original.revision)),
+            )
+            .unwrap_err(),
+        ChildAgentSpawnError::Conflict(
+            "selected Agent template changed after this Turn began".to_string()
+        )
     );
 }
 

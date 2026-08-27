@@ -472,7 +472,7 @@ describe('BrowserNetworkGuard', () => {
     })
   })
 
-  it('records an OutcomeUnknown when a managed download fails after dispatch', async () => {
+  it('preserves an exact managed-download failure instead of collapsing it to OutcomeUnknown', async () => {
     const downloadLease: BrowserDownloadToolLease = {
       claimCreatedGuest: vi.fn(async () => undefined),
       expectTargetClose: vi.fn(),
@@ -505,10 +505,7 @@ describe('BrowserNetworkGuard', () => {
     lease.markDispatched()
 
     await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.too_large' })
-    expect(lease.failure()).toEqual({
-      code: 'browser.risk_outcome_unknown',
-      dispatchCertainty: 'possibly_dispatched'
-    })
+    expect(lease.failure()).toBeNull()
     expect(downloadLease.markDispatched).toHaveBeenCalledOnce()
     lease.finish()
     expect(downloadLease.finish).toHaveBeenCalledOnce()

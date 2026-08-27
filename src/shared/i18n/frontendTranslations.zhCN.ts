@@ -347,8 +347,12 @@ export const zhCNTranslations = {
   'settings.page.environment': '环境',
   'settings.page.archivedConversations': '已归档对话',
 
-  'agentTemplates.descriptionText': '可供主智能体调用的子智能体模板',
+  'agentTemplates.descriptionText': '先创建可复用的子智能体模板，再选择哪些项目可以使用。',
   'agentTemplates.project': '项目',
+  'agentTemplates.projects': '适用项目',
+  'agentTemplates.projectsHint': '选择可以使用此模板的项目；全部不选时可稍后再分配。',
+  'agentTemplates.noProjectsAvailable': '尚无项目，可以先保存模板并在以后分配。',
+  'agentTemplates.projectCount': '已分配项目：{count}',
   'agentTemplates.create': '新建模板',
   'agentTemplates.createTitle': '新建智能体模板',
   'agentTemplates.editTitle': '编辑智能体模板',
@@ -379,7 +383,8 @@ export const zhCNTranslations = {
   'agentTemplates.edit': '编辑模板',
   'agentTemplates.delete': '删除模板',
   'agentTemplates.deleteTitle': '删除智能体模板？',
-  'agentTemplates.deleteDescription': '未来智能体将不能再选择此模板；已有智能体仍保留其快照。',
+  'agentTemplates.deleteDescription':
+    '此模板已分配给 {count} 个项目。删除后所有项目都将无法再使用它；已有智能体仍保留其快照。',
 
   'agentCenter.loading': '正在加载子智能体…',
   'agentCenter.unavailable': '子智能体状态暂不可用。',
