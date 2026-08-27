@@ -438,9 +438,9 @@ export const enUSTranslations = {
   'mcp.browserDownloads.useSystemLocation': 'Use system default',
   'mcp.browserDownloads.changeLocation': 'Change',
   'mcp.browserDownloads.section': 'Downloads',
-  'mcp.browserDownloads.askWhereToSave': 'Ask where to save before downloading',
+  'mcp.browserDownloads.askWhereToSave': 'Ask where to save manual downloads',
   'mcp.browserDownloads.askWhereToSaveDescription':
-    'Show the system save dialog for downloads started in the built-in browser',
+    'Show the system save dialog for manual downloads; Agent downloads use the configured folder',
   'mcp.browserDownloads.historyDescription':
     'View and manage files downloaded from the built-in browser',
   'mcp.browserDownloads.manage': 'Manage',

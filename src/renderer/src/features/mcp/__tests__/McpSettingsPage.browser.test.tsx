@@ -320,7 +320,7 @@ describe('MCP Settings page', () => {
     expect(service.authorizeLaunch).not.toHaveBeenCalled()
   })
 
-  it('opens browser automation settings, toggles native save prompts, and separates history', async () => {
+  it('opens browser automation settings, toggles manual save prompts, and separates history', async () => {
     service.hook.mockReturnValue(
       management({
         status: 'ready',
@@ -338,7 +338,7 @@ describe('MCP Settings page', () => {
     await expect
       .element(screen.getByText('mcp.browserDownloads.history', { exact: true }))
       .toBeVisible()
-    await expect.element(screen.getByText('~/Downloads')).toBeVisible()
+    await expect.element(screen.getByText('mcp.browserDownloads.systemLocation')).toBeVisible()
     await expect
       .element(screen.getByRole('navigation', { name: 'settings.breadcrumb.label' }))
       .toBeVisible()

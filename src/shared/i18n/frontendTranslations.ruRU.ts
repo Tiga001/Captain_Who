@@ -441,9 +441,9 @@ export const ruRUTranslations = {
   'mcp.browserDownloads.useSystemLocation': 'Использовать системную',
   'mcp.browserDownloads.changeLocation': 'Изменить',
   'mcp.browserDownloads.section': 'Загрузки',
-  'mcp.browserDownloads.askWhereToSave': 'Спрашивать место сохранения перед загрузкой',
+  'mcp.browserDownloads.askWhereToSave': 'Спрашивать, куда сохранять ручные загрузки',
   'mcp.browserDownloads.askWhereToSaveDescription':
-    'Показывать системный диалог сохранения для загрузок во встроенном браузере',
+    'Показывать диалог сохранения для ручных загрузок; загрузки Agent используют заданную папку',
   'mcp.browserDownloads.historyDescription':
     'Просмотр и управление файлами, загруженными во встроенном браузере',
   'mcp.browserDownloads.manage': 'Управление',

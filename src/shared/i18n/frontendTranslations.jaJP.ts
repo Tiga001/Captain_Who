@@ -440,9 +440,9 @@ export const jaJPTranslations = {
   'mcp.browserDownloads.useSystemLocation': 'システム既定を使用',
   'mcp.browserDownloads.changeLocation': '変更',
   'mcp.browserDownloads.section': 'ダウンロード',
-  'mcp.browserDownloads.askWhereToSave': 'ダウンロード前に保存先を確認',
+  'mcp.browserDownloads.askWhereToSave': '手動ダウンロードの保存先を確認',
   'mcp.browserDownloads.askWhereToSaveDescription':
-    '内蔵ブラウザからのダウンロード時にシステムの保存ダイアログを表示します',
+    '手動ダウンロードでは保存ダイアログを表示し、Agent のダウンロードでは設定済みフォルダを使用します',
   'mcp.browserDownloads.historyDescription':
     '内蔵ブラウザからダウンロードしたファイルを表示、管理します',
   'mcp.browserDownloads.manage': '管理',

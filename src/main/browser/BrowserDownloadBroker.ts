@@ -690,7 +690,9 @@ export class BrowserDownloadBroker {
       totalBytes: safeDownloadBytes(item, 'getTotalBytes'),
       updatedAt: now
     }
-    const promptForDestination = this.settingsRecord.askWhereToSave
+    // Native save dialogs are outside Browser Tool control and would strand an Agent run.
+    // Only an admitted Agent tool can bypass the user's manual-download prompt preference.
+    const promptForDestination = !owner && this.settingsRecord.askWhereToSave
     const destination = promptForDestination ? null : configuredDestination
     const tempPath = promptForDestination
       ? null

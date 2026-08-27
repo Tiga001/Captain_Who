@@ -445,9 +445,9 @@ export const itITTranslations = {
   'mcp.browserDownloads.useSystemLocation': 'Usa predefinita di sistema',
   'mcp.browserDownloads.changeLocation': 'Modifica',
   'mcp.browserDownloads.section': 'Download',
-  'mcp.browserDownloads.askWhereToSave': 'Chiedi dove salvare prima del download',
+  'mcp.browserDownloads.askWhereToSave': 'Chiedi dove salvare i download manuali',
   'mcp.browserDownloads.askWhereToSaveDescription':
-    'Mostra la finestra di salvataggio di sistema per i download del browser integrato',
+    'Mostra la finestra di salvataggio per i download manuali; i download Agent usano la cartella configurata',
   'mcp.browserDownloads.historyDescription':
     'Visualizza e gestisci i file scaricati dal browser integrato',
   'mcp.browserDownloads.manage': 'Gestisci',

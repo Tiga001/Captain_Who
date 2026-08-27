@@ -428,8 +428,9 @@ export const zhCNTranslations = {
   'mcp.browserDownloads.useSystemLocation': '使用系统默认',
   'mcp.browserDownloads.changeLocation': '更改',
   'mcp.browserDownloads.section': '下载',
-  'mcp.browserDownloads.askWhereToSave': '下载前询问保存位置',
-  'mcp.browserDownloads.askWhereToSaveDescription': '对在内置浏览器中发起的下载显示系统保存对话框',
+  'mcp.browserDownloads.askWhereToSave': '手动下载前询问保存位置',
+  'mcp.browserDownloads.askWhereToSaveDescription':
+    '仅对手动下载显示系统保存对话框；Agent 下载自动使用配置目录',
   'mcp.browserDownloads.historyDescription': '查看和管理从内置浏览器下载的文件',
   'mcp.browserDownloads.manage': '管理',
   'mcp.browserDownloads.allHistory': '全部历史记录',

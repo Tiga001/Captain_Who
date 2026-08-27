@@ -64,6 +64,7 @@ export interface BrowserDownloadSettingsView {
   schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
   locationMode: BrowserDownloadLocationMode
   displayPath: string
+  /** Applies only to downloads started manually by the user. */
   askWhereToSave: boolean
   revision: number
   updatedAt: number
@@ -71,6 +72,7 @@ export interface BrowserDownloadSettingsView {
 
 export interface BrowserDownloadAskWhereToSaveInput {
   schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
+  /** Applies only to downloads started manually by the user. */
   askWhereToSave: boolean
 }
 
@@ -161,6 +163,7 @@ export interface BrowserDownloadSettingsRecord {
   schemaVersion: typeof BROWSER_DOWNLOAD_SCHEMA_VERSION
   locationMode: BrowserDownloadLocationMode
   customDirectory: string | null
+  /** Applies only to downloads started manually by the user. */
   askWhereToSave: boolean
   revision: number
   updatedAt: number

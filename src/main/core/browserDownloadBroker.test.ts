@@ -344,28 +344,29 @@ describe('BrowserDownloadBroker', () => {
     await broker.shutdown()
   })
 
-  it('reports an Agent save prompt as awaiting a destination without showing a false transfer', async () => {
-    const { broker, guest, root, session } = await createHarness({ askWhereToSave: true })
+  it('automatically saves an Agent download when manual downloads require a destination prompt', async () => {
+    const { broker, guest, records, session, systemDirectory } = await createHarness({
+      askWhereToSave: true
+    })
     const lease = broker.beginTool({ guest, owner: OWNER })
     lease.markDispatched()
     const item = new FakeDownloadItem('prompted.zip', 'application/zip', 50)
 
     dispatchDownload(session, guest, item)
-    await waitFor(() => Boolean(item.saveDialogOptions))
+    const temporaryPath = await waitForManagedPath(item)
     await expect(lease.settle()).resolves.toEqual([])
+    expect(item.saveDialogOptions).toBeUndefined()
+    expect(temporaryPath).toContain(await realpath(systemDirectory))
     expect(lease.progress?.()).toMatchObject([
       {
         displayName: 'prompted.zip',
-        state: 'awaiting_destination',
+        state: 'progressing',
         receivedBytes: 0,
         bytesPerSecond: 0
       }
     ])
-    expect(broker.downloadCenterSnapshot().downloads).toEqual([])
     lease.finish()
 
-    const selectedPath = join(root, 'prompted.zip')
-    item.chooseSavePath(selectedPath)
     item.update(10, 5)
     expect(
       broker.agentDownloadSnapshot({
@@ -375,14 +376,11 @@ describe('BrowserDownloadBroker', () => {
       }).downloads
     ).toMatchObject([{ state: 'progressing', receivedBytes: 10, bytesPerSecond: 5 }])
     await item.complete(Buffer.alloc(50))
-    await waitFor(
-      () =>
-        broker.agentDownloadSnapshot({
-          runId: OWNER.runId,
-          activationId: OWNER.activationId,
-          conversationId: OWNER.conversationId
-        }).downloads[0]?.state === 'completed'
-    )
+    await waitFor(() => records.length === 1)
+    expect(records[0]).toMatchObject({
+      displayName: 'prompted.zip',
+      source: 'agent'
+    })
     await broker.shutdown()
   })
 
@@ -649,17 +647,24 @@ describe('BrowserDownloadBroker', () => {
     await broker.shutdown()
   })
 
-  it('never overwrites an existing file and records the actual published name', async () => {
-    const { broker, guest, records, session, systemDirectory } = await createHarness()
+  it('suffixes an Agent download without prompting or overwriting an existing file', async () => {
+    const { broker, guest, records, session, systemDirectory } = await createHarness({
+      askWhereToSave: true
+    })
     await writeFile(join(systemDirectory, 'report.txt'), 'existing')
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    lease.markDispatched()
     const item = new FakeDownloadItem('report.txt')
 
     dispatchDownload(session, guest, item)
     await waitForManagedPath(item)
+    expect(item.saveDialogOptions).toBeUndefined()
+    await expect(lease.settle()).resolves.toEqual([])
+    lease.finish()
     await item.complete(Buffer.from('new'))
     await waitFor(() => records.length === 1)
 
-    expect(records[0]?.displayName).toBe('report (1).txt')
+    expect(records[0]).toMatchObject({ displayName: 'report (1).txt', source: 'agent' })
     await expect(readFile(join(systemDirectory, 'report.txt'), 'utf8')).resolves.toBe('existing')
     await expect(readFile(join(systemDirectory, 'report (1).txt'), 'utf8')).resolves.toBe('new')
     await broker.shutdown()

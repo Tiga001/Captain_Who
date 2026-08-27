@@ -434,9 +434,9 @@ export const koKRTranslations = {
   'mcp.browserDownloads.useSystemLocation': '시스템 기본값 사용',
   'mcp.browserDownloads.changeLocation': '변경',
   'mcp.browserDownloads.section': '다운로드',
-  'mcp.browserDownloads.askWhereToSave': '다운로드 전에 저장 위치 묻기',
+  'mcp.browserDownloads.askWhereToSave': '수동 다운로드 저장 위치 묻기',
   'mcp.browserDownloads.askWhereToSaveDescription':
-    '내장 브라우저에서 시작한 다운로드에 시스템 저장 대화상자를 표시합니다',
+    '수동 다운로드에는 저장 대화상자를 표시하고 Agent 다운로드에는 설정된 폴더를 사용합니다',
   'mcp.browserDownloads.historyDescription': '내장 브라우저에서 다운로드한 파일을 보고 관리합니다',
   'mcp.browserDownloads.manage': '관리',
   'mcp.browserDownloads.allHistory': '전체 기록',

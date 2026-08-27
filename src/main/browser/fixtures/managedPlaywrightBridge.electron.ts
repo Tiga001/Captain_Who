@@ -297,7 +297,7 @@ async function main(): Promise<void> {
       schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
       locationMode: 'system',
       customDirectory: null,
-      askWhereToSave: false,
+      askWhereToSave: true,
       revision: 0,
       updatedAt: 1
     },

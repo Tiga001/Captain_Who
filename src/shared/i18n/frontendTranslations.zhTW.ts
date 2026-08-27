@@ -421,8 +421,9 @@ export const zhTWTranslations = {
   'mcp.browserDownloads.useSystemLocation': '使用系統預設',
   'mcp.browserDownloads.changeLocation': '更改',
   'mcp.browserDownloads.section': '下載',
-  'mcp.browserDownloads.askWhereToSave': '下載前詢問儲存位置',
-  'mcp.browserDownloads.askWhereToSaveDescription': '對在內建瀏覽器中發起的下載顯示系統儲存對話框',
+  'mcp.browserDownloads.askWhereToSave': '手動下載前詢問儲存位置',
+  'mcp.browserDownloads.askWhereToSaveDescription':
+    '僅對手動下載顯示系統儲存對話框；Agent 下載自動使用設定目錄',
   'mcp.browserDownloads.historyDescription': '檢視和管理從內建瀏覽器下載的檔案',
   'mcp.browserDownloads.manage': '管理',
   'mcp.browserDownloads.allHistory': '全部歷史記錄',

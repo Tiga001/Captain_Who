@@ -447,9 +447,9 @@ export const frFRTranslations = {
   'mcp.browserDownloads.useSystemLocation': 'Utiliser le dossier système',
   'mcp.browserDownloads.changeLocation': 'Modifier',
   'mcp.browserDownloads.section': 'Téléchargements',
-  'mcp.browserDownloads.askWhereToSave': 'Demander où enregistrer avant le téléchargement',
+  'mcp.browserDownloads.askWhereToSave': 'Demander où enregistrer les téléchargements manuels',
   'mcp.browserDownloads.askWhereToSaveDescription':
-    'Afficher la boîte de dialogue système pour les téléchargements du navigateur intégré',
+    'Afficher la boîte de dialogue système pour les téléchargements manuels ; les téléchargements Agent utilisent le dossier configuré',
   'mcp.browserDownloads.historyDescription':
     'Afficher et gérer les fichiers téléchargés depuis le navigateur intégré',
   'mcp.browserDownloads.manage': 'Gérer',
