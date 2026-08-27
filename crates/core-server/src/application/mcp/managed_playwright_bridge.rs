@@ -1717,6 +1717,7 @@ mod tests {
 
     fn test_authorization_context() -> ManagedPlaywrightAuthorizationContext {
         ManagedPlaywrightAuthorizationContext {
+            conversation_id: Some("conversation-test".to_string()),
             run_id: "run-test".to_string(),
             capability_id: "browser_automation".to_string(),
             activation_id: Uuid::new_v4().to_string(),
@@ -4021,7 +4022,7 @@ mod tests {
             "managed fixture download failed: {}",
             tool_result_text(&download)
         );
-        assert_safe_browser_artifact(&download, "download", "browser_click download");
+        assert_safe_browser_download(&download, "browser_click download");
 
         for (tool, arguments) in [
             (
@@ -4777,6 +4778,7 @@ mod tests {
                 &Uuid::new_v4().to_string(),
                 arguments,
                 ManagedPlaywrightAuthorizationContext {
+                    conversation_id: Some("conversation-managed-playwright-unit".to_string()),
                     run_id: "run_managed_playwright_unit".to_string(),
                     capability_id: BROWSER_AUTOMATION_CAPABILITY_ID.to_string(),
                     activation_id: Uuid::new_v4().to_string(),
@@ -4818,6 +4820,7 @@ mod tests {
                 &Uuid::new_v4().to_string(),
                 arguments,
                 ManagedPlaywrightAuthorizationContext {
+                    conversation_id: Some("conversation-managed-playwright-fixture".to_string()),
                     run_id: capability_grant.run_id.clone(),
                     capability_id: capability_grant.capability_id.as_str().to_string(),
                     activation_id: capability_grant.activation_id.as_str().to_string(),
@@ -5108,6 +5111,7 @@ mod tests {
                 &Uuid::new_v4().to_string(),
                 arguments,
                 ManagedPlaywrightAuthorizationContext {
+                    conversation_id: Some("conversation-managed-playwright-fixture".to_string()),
                     run_id: capability_grant.run_id.clone(),
                     capability_id: capability_grant.capability_id.as_str().to_string(),
                     activation_id: capability_grant.activation_id.as_str().to_string(),
@@ -5219,6 +5223,44 @@ mod tests {
         }
         let serialized = serde_json::to_string(artifact).unwrap();
         assert!(!serialized.contains("base64"));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_safe_browser_download(result: &McpToolResult, operation: &str) {
+        let structured = result.structured_content.as_ref().unwrap_or_else(|| {
+            panic!(
+                "managed Download structured content missing for {operation}: {}",
+                tool_result_text(result)
+            )
+        });
+        let downloads = structured["downloads"]
+            .as_array()
+            .expect("managed Download reference array");
+        assert_eq!(downloads.len(), 1);
+        let download = downloads[0].as_object().expect("managed Download object");
+        assert_eq!(download["schemaVersion"], 1);
+        assert_eq!(download["source"], "agent");
+        assert_eq!(download.len(), 8);
+        assert!(download["downloadId"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("browser-download:")));
+        assert!(download["sizeBytes"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
+        assert_eq!(download["sha256"].as_str().map(str::len), Some(64));
+        for forbidden in [
+            "path",
+            "absolutePath",
+            "managedPath",
+            "outputDir",
+            "data",
+            "body",
+        ] {
+            assert!(!download.contains_key(forbidden));
+        }
+        let serialized = serde_json::to_string(download).unwrap();
+        assert!(!serialized.contains("base64"));
+        assert!(!serialized.contains("/Users/"));
     }
 
     #[cfg(target_os = "macos")]

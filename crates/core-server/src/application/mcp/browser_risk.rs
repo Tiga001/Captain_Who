@@ -960,6 +960,7 @@ mod tests {
             request_id: request_id.to_string(),
             parent_request_id: None,
             authorization_context: ManagedPlaywrightAuthorizationContext {
+                conversation_id: None,
                 run_id: harness.grant.run_id.clone(),
                 capability_id: harness.grant.capability_id.as_str().to_string(),
                 activation_id: harness.grant.activation_id.as_str().to_string(),

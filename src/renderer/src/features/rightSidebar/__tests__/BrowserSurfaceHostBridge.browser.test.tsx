@@ -1,5 +1,5 @@
 import type { BrowserHostApi, HostApi, MyCopilotGlobal } from '@mycopilot/host-api'
-import type { BrowserSurfaceCommand } from '@mycopilot/protocol'
+import { BROWSER_DOWNLOAD_SCHEMA_VERSION, type BrowserSurfaceCommand } from '@mycopilot/protocol'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -230,6 +230,53 @@ function BrowserStateHarness({
 function createBrowserApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
   return {
     clearBrowsingData: vi.fn(async () => undefined),
+    getDownloadSettings: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        locationMode: 'system' as const,
+        displayPath: '~/Downloads',
+        askWhereToSave: false,
+        revision: 0,
+        updatedAt: 1
+      }
+    })),
+    chooseDownloadDirectory: vi.fn(async () => ({ ok: true as const, value: null })),
+    resetDownloadDirectory: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        locationMode: 'system' as const,
+        displayPath: '~/Downloads',
+        askWhereToSave: false,
+        revision: 0,
+        updatedAt: 1
+      }
+    })),
+    setDownloadAskWhereToSave: vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        locationMode: 'system' as const,
+        displayPath: '~/Downloads',
+        askWhereToSave: false,
+        revision: 0,
+        updatedAt: 1
+      }
+    })),
+    listDownloadHistory: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, downloads: [], truncated: false }
+    })),
+    revealDownload: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, status: 'shown' as const }
+    })),
+    clearDownloadHistory: vi.fn(async () => ({
+      ok: true as const,
+      value: { schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION, deletedCount: 0 }
+    })),
+    onDownloadHistoryChanged: vi.fn(() => () => undefined),
     exportArtifact: vi.fn(async () => ({
       ok: true as const,
       value: { schemaVersion: 1 as const, status: 'cancelled' as const }

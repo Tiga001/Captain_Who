@@ -31,7 +31,7 @@ impl AgentTool for ReadImageTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_image".to_string(),
-            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, absolute paths, system aliases, @attachments/... paths, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
+            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, absolute paths, system aliases, @attachments/... paths, browser-download:... references, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -76,7 +76,8 @@ impl AgentTool for ReadImageTool {
             context.skill_resources_optional(),
         )
         .with_storage(context.storage_optional())
-        .with_conversation_id(context.conversation_id_optional());
+        .with_conversation_id(context.conversation_id_optional())
+        .with_permissions(context.permissions());
         let workspace_root = context.workspace_root_optional()?;
         let snapshot = read_verified_agent_file_input(
             workspace_root.as_deref(),
@@ -284,7 +285,8 @@ impl ReadImageArgs {
             context.skill_resources_optional(),
         )
         .with_storage(context.storage_optional())
-        .with_conversation_id(context.conversation_id_optional());
+        .with_conversation_id(context.conversation_id_optional())
+        .with_permissions(context.permissions());
         agent_file_input_ref_from_model_path(&file_inputs, legacy).map_err(AgentError::from)
     }
 }

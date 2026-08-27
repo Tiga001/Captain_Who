@@ -10,6 +10,7 @@ use crate::protocol::{
     AgentFileInputRef, AgentFileInputSourceKind, AgentFileInputSpec, AgentPermissions,
     AgentReadPermission, AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
 };
+use crate::resource_locator::ResourceLocator;
 use crate::skills::{SkillResourceSession, SkillResourceUri};
 use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
@@ -112,6 +113,7 @@ pub struct AgentFileInputExecutionContext {
     skill_resources: Option<Arc<SkillResourceSession>>,
     storage: Option<Arc<StorageService>>,
     conversation_id: Option<String>,
+    allow_manual_browser_downloads: bool,
 }
 
 impl AgentFileInputExecutionContext {
@@ -124,6 +126,7 @@ impl AgentFileInputExecutionContext {
             skill_resources,
             storage: None,
             conversation_id: None,
+            allow_manual_browser_downloads: false,
         }
     }
 
@@ -156,6 +159,11 @@ impl AgentFileInputExecutionContext {
         self.conversation_id = conversation_id.map(ToString::to_string);
         self
     }
+
+    pub fn with_permissions(mut self, permissions: AgentPermissions) -> Self {
+        self.allow_manual_browser_downloads = permissions.read == AgentReadPermission::All;
+        self
+    }
 }
 
 /// Resolves the single model-facing file location into the richer internal authority reference.
@@ -168,69 +176,108 @@ pub(crate) fn agent_file_input_ref_from_model_path(
     model_path: &str,
 ) -> Result<AgentFileInputRef, AgentFileInputError> {
     let model_path = required_model_path(model_path)?;
-    if model_path.starts_with("@attachments/") {
-        return Ok(AgentFileInputRef::Attachment {
-            read_path: model_path,
-        });
-    }
-    if model_path.starts_with("image-artifact://sha256/")
-        || model_path.starts_with("artifact://sha256/")
-    {
-        let (scheme, digest) = artifact_uri_identity(&model_path)?;
-        let storage = context.storage.as_ref().ok_or_else(|| {
-            AgentFileInputError::new(
-                ERROR_SNAPSHOT_UNAVAILABLE,
-                "retry",
-                "生成物的权威 Artifact 注册表不可用。",
-            )
-        })?;
-        let artifact_id = format!("sha256:{digest}");
-        let registered = resolve_artifact_for_scheme(
-            storage,
-            &artifact_id,
-            context.conversation_id.as_deref(),
-            scheme,
-        )
-        .map_err(|_| {
-            AgentFileInputError::new(
-                ERROR_SNAPSHOT_UNAVAILABLE,
-                "retry",
-                "无法读取生成物的权威 Artifact 发布记录。",
-            )
-        })?
-        .ok_or_else(|| {
-            AgentFileInputError::new(
-                ERROR_NOT_FOUND,
-                "regenerate",
-                "权威 Artifact 注册表中不存在该已发布生成物。",
-            )
-        })?;
-        if registered.sha256 != digest {
-            return Err(AgentFileInputError::new(
-                ERROR_INTEGRITY_MISMATCH,
-                "regenerate",
-                "生成物 URI 与权威 Artifact 发布记录不一致。",
-            ));
-        }
-        return Ok(AgentFileInputRef::GeneratedArtifact {
-            uri: model_path,
-            path: registered.path.to_string_lossy().into_owned(),
-        });
-    }
-    if model_path.starts_with("skill://") {
-        return Ok(AgentFileInputRef::SkillResource { uri: model_path });
-    }
-    let expanded = expand_system_path(&model_path).map_err(|_| {
-        AgentFileInputError::new(
-            ERROR_INVALID_REQUEST,
-            "changeRequest",
-            "文件路径包含无效的系统路径别名。",
-        )
+    let locator = ResourceLocator::parse(&model_path).map_err(|error| {
+        AgentFileInputError::new(ERROR_INVALID_REQUEST, "changeRequest", error.to_string())
     })?;
-    if expanded.is_some() || Path::new(&model_path).is_absolute() {
-        Ok(AgentFileInputRef::External { path: model_path })
-    } else {
-        Ok(AgentFileInputRef::Workspace { path: model_path })
+    match locator {
+        ResourceLocator::Attachment(read_path) => Ok(AgentFileInputRef::Attachment { read_path }),
+        ResourceLocator::BrowserDownload(reference) => {
+            let storage = context.storage.as_ref().ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "浏览器下载的权威注册表不可用。",
+                )
+            })?;
+            let record = storage
+                .authorize_browser_download_input(
+                    &reference,
+                    context.conversation_id.as_deref(),
+                    context.allow_manual_browser_downloads,
+                )
+                .map_err(|_| {
+                    AgentFileInputError::new(
+                        ERROR_SNAPSHOT_UNAVAILABLE,
+                        "retry",
+                        "无法读取浏览器下载的权威注册记录。",
+                    )
+                })?
+                .ok_or_else(|| {
+                    AgentFileInputError::new(
+                        ERROR_AUTHORIZATION_DENIED,
+                        "redownload",
+                        "当前任务无权读取该浏览器下载，或下载记录已被清除。",
+                    )
+                })?;
+            Ok(AgentFileInputRef::BrowserDownload {
+                reference,
+                display_name: record.display_name,
+                size_bytes: record.size_bytes,
+                sha256: record.sha256,
+            })
+        }
+        ResourceLocator::OpaqueBrowserArtifact(_) => Err(AgentFileInputError::new(
+                ERROR_INVALID_REQUEST,
+                "changeRequest",
+                "browser-artifact 是临时浏览器能力句柄，不能作为文件路径；请使用下载结果返回的 browser-download 引用。",
+            )),
+        ResourceLocator::GeneratedArtifact(model_path) => {
+            let (scheme, digest) = artifact_uri_identity(&model_path)?;
+            let storage = context.storage.as_ref().ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "生成物的权威 Artifact 注册表不可用。",
+                )
+            })?;
+            let artifact_id = format!("sha256:{digest}");
+            let registered = resolve_artifact_for_scheme(
+                storage,
+                &artifact_id,
+                context.conversation_id.as_deref(),
+                scheme,
+            )
+            .map_err(|_| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "无法读取生成物的权威 Artifact 发布记录。",
+                )
+            })?
+            .ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_NOT_FOUND,
+                    "regenerate",
+                    "权威 Artifact 注册表中不存在该已发布生成物。",
+                )
+            })?;
+            if registered.sha256 != digest {
+                return Err(AgentFileInputError::new(
+                    ERROR_INTEGRITY_MISMATCH,
+                    "regenerate",
+                    "生成物 URI 与权威 Artifact 发布记录不一致。",
+                ));
+            }
+            Ok(AgentFileInputRef::GeneratedArtifact {
+                uri: model_path,
+                path: registered.path.to_string_lossy().into_owned(),
+            })
+        }
+        ResourceLocator::SkillResource(uri) => Ok(AgentFileInputRef::SkillResource { uri }),
+        ResourceLocator::SystemAlias(model_path) | ResourceLocator::Filesystem(model_path) => {
+            let expanded = expand_system_path(&model_path).map_err(|_| {
+                AgentFileInputError::new(
+                    ERROR_INVALID_REQUEST,
+                    "changeRequest",
+                    "文件路径包含无效的系统路径别名。",
+                )
+            })?;
+            if expanded.is_some() || Path::new(&model_path).is_absolute() {
+                Ok(AgentFileInputRef::External { path: model_path })
+            } else {
+                Ok(AgentFileInputRef::Workspace { path: model_path })
+            }
+        }
     }
 }
 
@@ -252,6 +299,7 @@ pub(crate) fn agent_file_input_ref_matches_model_path(
             artifact_uri_identity(&model_path)? == artifact_uri_identity(uri)?
         }
         AgentFileInputRef::SkillResource { uri } => model_path == uri.trim(),
+        AgentFileInputRef::BrowserDownload { reference, .. } => model_path == reference.trim(),
     })
 }
 
@@ -262,6 +310,7 @@ pub fn model_path_for_agent_file_input_ref(source: &AgentFileInputRef) -> &str {
         AgentFileInputRef::Workspace { path } | AgentFileInputRef::External { path } => path,
         AgentFileInputRef::GeneratedArtifact { uri, .. }
         | AgentFileInputRef::SkillResource { uri } => uri,
+        AgentFileInputRef::BrowserDownload { reference, .. } => reference,
     }
 }
 
@@ -281,6 +330,9 @@ pub(crate) fn default_agent_file_input_mount_path(
                 .unwrap_or(uri.as_str()),
         )
         .file_name(),
+        AgentFileInputRef::BrowserDownload { display_name, .. } => {
+            Path::new(display_name).file_name()
+        }
     }
     .and_then(|name| name.to_str())
     .map(str::trim)
@@ -682,6 +734,31 @@ pub(crate) fn resolve_verified_agent_file_input_path(
             Ok(Some(registered_path))
         }
         AgentFileInputRef::SkillResource { .. } => Ok(None),
+        AgentFileInputRef::BrowserDownload {
+            reference,
+            size_bytes,
+            sha256,
+            ..
+        } => {
+            let (path, record) = resolve_browser_download(
+                context,
+                &reference,
+                permissions.read == AgentReadPermission::All,
+            )?;
+            validate_browser_download_identity(&record, size_bytes, &sha256)?;
+            ensure_size_with_limit(size_bytes, MAX_AGENT_FILE_INPUT_BYTES)?;
+            let bytes = read_regular_file(&path, None, MAX_AGENT_FILE_INPUT_BYTES)?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != size_bytes
+                || sha256_hex(&bytes) != sha256
+            {
+                return Err(AgentFileInputError::new(
+                    ERROR_INTEGRITY_MISMATCH,
+                    "redownload",
+                    "浏览器下载文件与权威下载记录不一致。",
+                ));
+            }
+            Ok(Some(path))
+        }
     }
 }
 
@@ -707,6 +784,7 @@ fn source_kind(source: &AgentFileInputRef) -> AgentFileInputSourceKind {
         AgentFileInputRef::External { .. } => AgentFileInputSourceKind::External,
         AgentFileInputRef::GeneratedArtifact { .. } => AgentFileInputSourceKind::GeneratedArtifact,
         AgentFileInputRef::SkillResource { .. } => AgentFileInputSourceKind::SkillResource,
+        AgentFileInputRef::BrowserDownload { .. } => AgentFileInputSourceKind::BrowserDownload,
     }
 }
 
@@ -748,6 +826,17 @@ fn normalize_source_ref(
         }
         AgentFileInputRef::SkillResource { uri } => AgentFileInputRef::SkillResource {
             uri: required(uri, "uri")?,
+        },
+        AgentFileInputRef::BrowserDownload {
+            reference,
+            display_name,
+            size_bytes,
+            sha256,
+        } => AgentFileInputRef::BrowserDownload {
+            reference: required(reference, "reference")?,
+            display_name: required(display_name, "displayName")?,
+            size_bytes: *size_bytes,
+            sha256: required(sha256, "sha256")?,
         },
     })
 }
@@ -1131,7 +1220,83 @@ fn read_authorized_source(
             )?;
             Ok(snapshot.bytes)
         }
+        AgentFileInputRef::BrowserDownload {
+            reference,
+            size_bytes,
+            sha256,
+            ..
+        } => {
+            let (path, record) = resolve_browser_download(
+                context,
+                reference,
+                permissions.read == AgentReadPermission::All,
+            )?;
+            validate_browser_download_identity(&record, *size_bytes, sha256)?;
+            ensure_size_with_limit(*size_bytes, max_bytes)?;
+            let bytes = read_regular_file(&path, cancellation, max_bytes)?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != *size_bytes
+                || sha256_hex(&bytes) != *sha256
+            {
+                return Err(AgentFileInputError::new(
+                    ERROR_INTEGRITY_MISMATCH,
+                    "redownload",
+                    "浏览器下载文件与权威下载记录不一致。",
+                ));
+            }
+            Ok(bytes)
+        }
     }
+}
+
+fn resolve_browser_download(
+    context: &AgentFileInputExecutionContext,
+    reference: &str,
+    allow_manual: bool,
+) -> Result<(PathBuf, crate::storage::models::BrowserDownloadRecord), AgentFileInputError> {
+    let storage = context.storage.as_ref().ok_or_else(|| {
+        AgentFileInputError::new(
+            ERROR_SNAPSHOT_UNAVAILABLE,
+            "retry",
+            "浏览器下载的权威注册表不可用。",
+        )
+    })?;
+    let record = storage
+        .authorize_browser_download_input(
+            reference,
+            context.conversation_id.as_deref(),
+            allow_manual,
+        )
+        .map_err(|_| {
+            AgentFileInputError::new(
+                ERROR_SNAPSHOT_UNAVAILABLE,
+                "retry",
+                "无法读取浏览器下载的权威注册记录。",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentFileInputError::new(
+                ERROR_AUTHORIZATION_DENIED,
+                "redownload",
+                "当前任务无权读取该浏览器下载，或下载记录已被清除。",
+            )
+        })?;
+    let path = canonical_regular_path(Path::new(&record.absolute_path))?;
+    Ok((path, record))
+}
+
+fn validate_browser_download_identity(
+    record: &crate::storage::models::BrowserDownloadRecord,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), AgentFileInputError> {
+    if record.size_bytes != expected_size || record.sha256 != expected_sha256 {
+        return Err(AgentFileInputError::new(
+            ERROR_INTEGRITY_MISMATCH,
+            "redownload",
+            "浏览器下载引用与权威下载记录不一致。",
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_attachment(
@@ -1613,7 +1778,10 @@ mod tests {
         ImageGenerationExecutionTerminalUpdate, StoredImageGenerationArtifactState,
         StoredImageGenerationExecutionStatus,
     };
-    use crate::storage::models::ChatConversationRecord;
+    use crate::storage::models::{
+        BrowserDownloadRegistration, BrowserDownloadSource, ChatConversationRecord,
+        BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    };
     use crate::storage::service::ManagedArtifactAuthority;
     use crate::{
         AgentAttachmentReference, AgentInputAttachmentKind, AgentPatchPermission,
@@ -2184,5 +2352,138 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.code(), ERROR_INVALID_REQUEST);
         }
+    }
+
+    #[test]
+    fn resolves_and_materializes_a_durable_agent_browser_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let storage = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        insert_conversation(&storage, "conversation-1");
+        let bytes = b"durable browser download";
+        let path = root.join("archive.zip");
+        fs::write(&path, bytes).unwrap();
+        let reference = "browser-download:123e4567-e89b-42d3-a456-426614174000";
+        storage
+            .register_browser_download(BrowserDownloadRegistration {
+                schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+                download_id: reference.to_string(),
+                source: BrowserDownloadSource::Agent,
+                display_name: "archive.zip".to_string(),
+                mime_type: "application/zip".to_string(),
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_hex(bytes),
+                absolute_path: path.to_string_lossy().into_owned(),
+                source_origin: Some("https://example.com".to_string()),
+                conversation_id: Some("conversation-1".to_string()),
+                run_id: Some("run-1".to_string()),
+                call_id: Some("call-1".to_string()),
+                created_at: 1,
+            })
+            .unwrap();
+        let context = AgentFileInputExecutionContext::default()
+            .with_storage(Some(storage))
+            .with_conversation_id(Some("conversation-1"));
+        let source = agent_file_input_ref_from_model_path(&context, reference).unwrap();
+        assert!(matches!(source, AgentFileInputRef::BrowserDownload { .. }));
+        let bindings = prepare_agent_file_input_bindings(
+            None,
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &[AgentFileInputSpec {
+                mount_path: "downloads/archive.zip".to_string(),
+                source,
+            }],
+            None,
+        )
+        .unwrap();
+        let prepared = materialize_agent_file_inputs(
+            None,
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &bindings,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read(prepared.root().join("downloads/archive.zip")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            prepared.evidence()[0].source_kind,
+            AgentFileInputSourceKind::BrowserDownload
+        );
+        assert!(!serde_json::to_string(prepared.evidence())
+            .unwrap()
+            .contains(root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn browser_download_authority_and_integrity_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let storage = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        insert_conversation(&storage, "conversation-1");
+        insert_conversation(&storage, "conversation-2");
+        let bytes = b"frozen bytes";
+        let path = root.join("download.txt");
+        fs::write(&path, bytes).unwrap();
+        let reference = "browser-download:123e4567-e89b-42d3-a456-426614174001";
+        storage
+            .register_browser_download(BrowserDownloadRegistration {
+                schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+                download_id: reference.to_string(),
+                source: BrowserDownloadSource::Agent,
+                display_name: "download.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_hex(bytes),
+                absolute_path: path.to_string_lossy().into_owned(),
+                source_origin: None,
+                conversation_id: Some("conversation-1".to_string()),
+                run_id: Some("run-1".to_string()),
+                call_id: Some("call-1".to_string()),
+                created_at: 1,
+            })
+            .unwrap();
+        let owner_context = AgentFileInputExecutionContext::default()
+            .with_storage(Some(Arc::clone(&storage)))
+            .with_conversation_id(Some("conversation-1"));
+        let source = agent_file_input_ref_from_model_path(&owner_context, reference).unwrap();
+        let bindings = prepare_agent_file_input_bindings(
+            None,
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &owner_context,
+            &[AgentFileInputSpec {
+                mount_path: "download.txt".to_string(),
+                source,
+            }],
+            None,
+        )
+        .unwrap();
+        fs::write(&path, b"changed byte").unwrap();
+        assert_eq!(
+            materialize_agent_file_inputs(
+                None,
+                permissions(AgentReadPermission::WorkspaceOnly),
+                &owner_context,
+                &bindings,
+                None,
+            )
+            .unwrap_err()
+            .code(),
+            ERROR_INTEGRITY_MISMATCH
+        );
+
+        let unrelated = AgentFileInputExecutionContext::default()
+            .with_storage(Some(storage))
+            .with_conversation_id(Some("conversation-2"));
+        assert_eq!(
+            agent_file_input_ref_from_model_path(&unrelated, reference)
+                .unwrap_err()
+                .code(),
+            ERROR_AUTHORIZATION_DENIED
+        );
     }
 }

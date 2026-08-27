@@ -9,6 +9,7 @@ import {
   parseBrowserArtifactReference,
   parseBrowserArtifactToolProjection
 } from './browserArtifacts'
+import { BROWSER_DOWNLOAD_SCHEMA_VERSION } from './browserDownloads'
 
 const artifact = {
   schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
@@ -129,5 +130,22 @@ describe('Browser Artifact protocol', () => {
     expect(() =>
       parseBrowserArtifactToolProjection({ ...projection, artifacts: [artifact, artifact] })
     ).toThrow(/duplicate/)
+    expect(() =>
+      parseBrowserArtifactToolProjection({
+        ...projection,
+        downloads: [
+          {
+            schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+            downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174001',
+            displayName: 'manual.zip',
+            mimeType: 'application/zip',
+            sizeBytes: 42,
+            sha256: 'a'.repeat(64),
+            createdAt: 1_000,
+            source: 'manual'
+          }
+        ]
+      })
+    ).toThrow(/Agent downloads/)
   })
 })

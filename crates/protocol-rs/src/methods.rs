@@ -141,3 +141,12 @@ pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences"
 pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
 pub const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD: &str = "storage.loadAttachmentImage";
 pub const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD: &str = "storage.loadInputAttachments";
+pub const STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD: &str =
+    "storage.loadBrowserDownloadSettings";
+pub const STORAGE_SAVE_BROWSER_DOWNLOAD_SETTINGS_METHOD: &str =
+    "storage.saveBrowserDownloadSettings";
+pub const STORAGE_REGISTER_BROWSER_DOWNLOAD_METHOD: &str = "storage.registerBrowserDownload";
+pub const STORAGE_LIST_BROWSER_DOWNLOADS_METHOD: &str = "storage.listBrowserDownloads";
+pub const STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD: &str = "storage.loadBrowserDownload";
+pub const STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD: &str =
+    "storage.clearBrowserDownloadHistory";

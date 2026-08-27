@@ -1,4 +1,9 @@
-import type { AgentToolCall, AgentToolIdentity, AgentToolResult } from '@mycopilot/protocol'
+import {
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
+  type AgentToolCall,
+  type AgentToolIdentity,
+  type AgentToolResult
+} from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { enUSTranslations } from '../../config/frontendTranslations.enUS'
@@ -18,6 +23,10 @@ const translations: Record<string, string> = {
   'agent.builtinCapability.artifact.preview': 'Preview',
   'agent.builtinCapability.artifact.previewTruncated': 'Preview truncated',
   'agent.builtinCapability.artifact.previewUnavailable': 'Preview unavailable',
+  'agent.builtinCapability.download.list': 'Browser downloads',
+  'agent.builtinCapability.download.reveal': 'Show in folder',
+  'agent.builtinCapability.download.missing': 'The downloaded file was moved or deleted.',
+  'agent.builtinCapability.download.revealUnavailable': 'Unable to show the downloaded file.',
   'agent.builtinCapability.browser.navigate.running': 'Opening page',
   'agent.builtinCapability.browser.navigate.completed': 'Opened page',
   'agent.builtinCapability.browser.navigate.outcomeUnknown':
@@ -100,13 +109,15 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 }))
 const hostMocks = vi.hoisted(() => ({
   exportArtifact: vi.fn(),
-  readArtifactPreview: vi.fn()
+  readArtifactPreview: vi.fn(),
+  revealDownload: vi.fn()
 }))
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
     browser: {
       exportArtifact: hostMocks.exportArtifact,
-      readArtifactPreview: hostMocks.readArtifactPreview
+      readArtifactPreview: hostMocks.readArtifactPreview,
+      revealDownload: hostMocks.revealDownload
     }
   }
 }))
@@ -615,6 +626,59 @@ describe('BuiltinCapabilityToolActivity', () => {
     exportButton?.click()
     await expect.poll(() => screen.container.textContent).toContain('Export unavailable')
     expect(screen.container.textContent).not.toContain('/private/secret/export-path')
+  })
+
+  it('renders a durable Download reference and reveals it without exposing a host path', async () => {
+    const download = {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000',
+      displayName: 'archive.zip',
+      mimeType: 'application/zip',
+      sizeBytes: 351,
+      sha256: 'a'.repeat(64),
+      createdAt: 1_000,
+      source: 'agent'
+    } as const
+    hostMocks.revealDownload.mockResolvedValueOnce({
+      ok: true,
+      value: { schemaVersion: 1, status: 'shown' }
+    })
+    const screen = await render(
+      <AgentToolActivity
+        call={call('browser_click')}
+        result={{
+          callId: 'call-browser-capability',
+          tool: 'browser_click',
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            type: 'builtin_capability_tool',
+            status: 'completed',
+            contentOmitted: true,
+            downloads: [download]
+          }
+        }}
+        run={run()}
+        showImageGenerationPreview={false}
+        toolIdentity={identity('browser_click', 'browser_click')}
+      />
+    )
+    screen.container.querySelector('summary')?.click()
+    expect(screen.container.textContent).toContain('archive.zip')
+    expect(screen.container.textContent).toContain('application/zip · 351 B')
+    expect(screen.container.textContent).not.toContain('browser-download:')
+    expect(screen.container.textContent).not.toContain('/Users/')
+
+    const reveal = [...screen.container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show in folder'
+    )
+    expect(reveal).toBeDefined()
+    reveal?.click()
+    await expect.poll(() => hostMocks.revealDownload.mock.calls.length).toBeGreaterThan(0)
+    expect(hostMocks.revealDownload).toHaveBeenLastCalledWith({
+      schemaVersion: 1,
+      downloadId: download.downloadId
+    })
   })
 
   it.each([`<img-${CANARY}>.png`, `../${CANARY}.png`])(

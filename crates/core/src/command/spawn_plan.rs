@@ -16,6 +16,7 @@ pub(crate) struct CommandSpawnPlan {
     hard_timeout: Option<Duration>,
     launch: CommandLaunchPlan,
     output_redactions: ProcessOutputRedactionSet,
+    environment: Vec<(OsString, OsString)>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +73,7 @@ impl CommandSpawnPlan {
             hard_timeout,
             launch: CommandLaunchPlan::Shell,
             output_redactions: ProcessOutputRedactionSet::default(),
+            environment: Vec::new(),
         }
     }
 
@@ -101,11 +103,17 @@ impl CommandSpawnPlan {
                 clear_environment,
             },
             output_redactions: ProcessOutputRedactionSet::default(),
+            environment: Vec::new(),
         }
     }
 
     pub(crate) fn with_output_redactions(mut self, redactions: ProcessOutputRedactionSet) -> Self {
         self.output_redactions = redactions;
+        self
+    }
+
+    pub(crate) fn with_environment(mut self, environment: Vec<(OsString, OsString)>) -> Self {
+        self.environment = environment;
         self
     }
 
@@ -133,7 +141,8 @@ impl CommandSpawnPlan {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("TERM", "dumb")
-            .env("CI", "1");
+            .env("CI", "1")
+            .envs(self.environment.iter().cloned());
         command
     }
 

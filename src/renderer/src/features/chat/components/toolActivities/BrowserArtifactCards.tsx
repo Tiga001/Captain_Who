@@ -1,4 +1,8 @@
-import type { BrowserArtifactReference } from '@mycopilot/protocol'
+import {
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
+  type BrowserArtifactReference,
+  type BrowserDownloadReference
+} from '@mycopilot/protocol'
 import {
   Braces,
   Download,
@@ -39,8 +43,6 @@ function ArtifactIcon({ artifact }: { artifact: BrowserArtifactReference }) {
       return <FileArchive aria-hidden="true" />
     case 'video':
       return <Video aria-hidden="true" />
-    case 'download':
-      return <Download aria-hidden="true" />
     case 'json':
       return <Braces aria-hidden="true" />
     default:
@@ -190,6 +192,97 @@ export function BrowserArtifactCards({
     >
       {artifacts.map((artifact) => (
         <BrowserArtifactCard artifact={artifact} key={artifact.artifactId} />
+      ))}
+    </section>
+  )
+}
+
+type RevealState = 'idle' | 'revealing' | 'missing' | 'failed'
+
+function BrowserDownloadCard({ download }: { download: BrowserDownloadReference }) {
+  const { t } = useFrontendConfig()
+  const revealInFlight = useRef(false)
+  const [revealState, setRevealState] = useState<RevealState>('idle')
+
+  const revealDownload = async (): Promise<void> => {
+    if (revealInFlight.current || revealState === 'missing') return
+    revealInFlight.current = true
+    setRevealState('revealing')
+    try {
+      const result = await hostClient.browser.revealDownload({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        downloadId: download.downloadId
+      })
+      if (!result.ok) {
+        setRevealState('failed')
+        return
+      }
+      setRevealState(result.value.status === 'shown' ? 'idle' : 'missing')
+    } catch {
+      setRevealState('failed')
+    } finally {
+      revealInFlight.current = false
+    }
+  }
+
+  return (
+    <article className="browser-artifact-card" data-kind="download">
+      <div className="browser-artifact-card__summary">
+        <span className="browser-artifact-card__icon">
+          <Download aria-hidden="true" />
+        </span>
+        <span className="browser-artifact-card__content">
+          <span className="browser-artifact-card__name" title={download.displayName}>
+            {download.displayName}
+          </span>
+          <span>
+            {download.mimeType} · {formatBytes(download.sizeBytes)}
+          </span>
+        </span>
+        <span className="browser-artifact-card__actions">
+          <button
+            disabled={revealState === 'revealing' || revealState === 'missing'}
+            onClick={() => void revealDownload()}
+            type="button"
+          >
+            {revealState === 'revealing' ? (
+              <LoaderCircle aria-hidden="true" />
+            ) : (
+              t('agent.builtinCapability.download.reveal')
+            )}
+          </button>
+        </span>
+      </div>
+      {revealState === 'missing' ? (
+        <span className="browser-artifact-card__export-failed">
+          <XCircle aria-hidden="true" />
+          {t('agent.builtinCapability.download.missing')}
+        </span>
+      ) : null}
+      {revealState === 'failed' ? (
+        <span className="browser-artifact-card__export-failed">
+          <XCircle aria-hidden="true" />
+          {t('agent.builtinCapability.download.revealUnavailable')}
+        </span>
+      ) : null}
+    </article>
+  )
+}
+
+export function BrowserDownloadCards({
+  downloads
+}: {
+  downloads: readonly BrowserDownloadReference[]
+}) {
+  const { t } = useFrontendConfig()
+  if (downloads.length === 0) return null
+  return (
+    <section
+      aria-label={t('agent.builtinCapability.download.list')}
+      className="browser-artifact-list"
+    >
+      {downloads.map((download) => (
+        <BrowserDownloadCard download={download} key={download.downloadId} />
       ))}
     </section>
   )

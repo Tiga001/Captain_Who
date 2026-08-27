@@ -1022,20 +1022,6 @@ const MIME_TYPES_BY_KIND: Readonly<Record<BrowserArtifactKind, ReadonlySet<strin
   pdf: new Set(['application/pdf']),
   trace: new Set(['application/zip']),
   video: new Set(['video/webm', 'video/mp4']),
-  download: new Set([
-    'application/json',
-    'application/octet-stream',
-    'application/pdf',
-    'application/zip',
-    'image/gif',
-    'image/jpeg',
-    'image/png',
-    'image/webp',
-    'text/csv',
-    'text/plain',
-    'video/mp4',
-    'video/webm'
-  ]),
   snapshot: new Set(['text/plain', 'application/json']),
   console: new Set(['text/plain', 'application/json']),
   network: new Set(['text/plain', 'application/json'])

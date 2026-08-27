@@ -473,8 +473,8 @@ describe('BrowserArtifactBroker', () => {
     const session = await broker.openSession()
     const empty = await session.reserveFile({
       owner: OWNER,
-      kind: 'download',
-      mimeType: 'application/octet-stream',
+      kind: 'video',
+      mimeType: 'video/mp4',
       suggestedFileName: 'empty.bin'
     })
     await writeFile(empty.managedPath, new Uint8Array())

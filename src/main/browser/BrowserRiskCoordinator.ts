@@ -20,6 +20,7 @@ export type BrowserRiskTrigger =
 export type BrowserRiskDispatchCertainty = 'definitely_not_dispatched' | 'possibly_dispatched'
 
 export interface BrowserRiskAuthorizationContext {
+  conversationId?: string
   runId: string
   capabilityId: 'browser_automation'
   activationId: string

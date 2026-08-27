@@ -1,5 +1,6 @@
 import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS } from '@mycopilot/host-api'
+import { BROWSER_DOWNLOAD_SCHEMA_VERSION } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { createBrowserIpcBridge } from './BrowserIpcBridge'
 
@@ -237,6 +238,117 @@ describe('Browser IPC bridge', () => {
 
     unsubscribe()
     expect(removeListener).toHaveBeenCalledWith(HOST_CHANNELS.browser.surfaceCommand, listener)
+  })
+
+  it('keeps Browser Download settings, history, and notifications path-free', async () => {
+    const download = {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      downloadId: 'browser-download:123e4567-e89b-42d3-a456-426614174000',
+      displayName: 'archive.zip',
+      mimeType: 'application/zip',
+      sizeBytes: 351,
+      sha256: 'a'.repeat(64),
+      createdAt: 1_000,
+      source: 'agent',
+      availability: 'available',
+      sourceOrigin: 'https://example.test'
+    } as const
+    let changedListener: ((event: IpcRendererEvent, value: unknown) => void) | undefined
+    const invoke = vi.fn(async (channel: string): Promise<unknown> => {
+      if (channel === HOST_CHANNELS.browser.downloadSettingsGet) {
+        return {
+          ok: true,
+          value: {
+            schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+            locationMode: 'system',
+            displayPath: '~/Downloads',
+            askWhereToSave: false,
+            revision: 0,
+            updatedAt: 0
+          }
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+          downloads: [download],
+          truncated: false
+        }
+      }
+    })
+    const removeListener = vi.fn()
+    const bridge = createBrowserIpcBridge({
+      invoke,
+      on: vi.fn((channel, listener) => {
+        if (channel === HOST_CHANNELS.browser.downloadHistoryChanged) changedListener = listener
+        return {} as IpcRenderer
+      }),
+      removeListener
+    } as unknown as BrowserIpcRenderer)
+
+    await expect(bridge.getDownloadSettings()).resolves.toEqual({
+      ok: true,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        locationMode: 'system',
+        displayPath: '~/Downloads',
+        askWhereToSave: false,
+        revision: 0,
+        updatedAt: 0
+      }
+    })
+    await expect(
+      bridge.listDownloadHistory({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        query: '',
+        limit: 20
+      })
+    ).resolves.toEqual({
+      ok: true,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        downloads: [download],
+        truncated: false
+      }
+    })
+    expect(invoke).toHaveBeenLastCalledWith(HOST_CHANNELS.browser.downloadHistoryList, {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      query: '',
+      limit: 20
+    })
+
+    invoke.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        downloads: [{ ...download, absolutePath: '/Users/private/Downloads/archive.zip' }],
+        truncated: false
+      }
+    })
+    await expect(
+      bridge.listDownloadHistory({
+        schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        query: '',
+        limit: 20
+      })
+    ).rejects.toThrow(/absolutePath/)
+
+    const changed = vi.fn()
+    const unsubscribe = bridge.onDownloadHistoryChanged(changed)
+    changedListener?.({} as IpcRendererEvent, {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION
+    })
+    changedListener?.({} as IpcRendererEvent, {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      absolutePath: '/Users/private/Downloads/archive.zip'
+    })
+    expect(changed).toHaveBeenCalledTimes(1)
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith(
+      HOST_CHANNELS.browser.downloadHistoryChanged,
+      changedListener
+    )
   })
 
   it('reads only a bounded exact Browser Artifact preview identity', async () => {

@@ -2,10 +2,15 @@
 use super::{clean_relative_path, relative_display};
 use crate::cancellation::AgentCancellationToken;
 use crate::context::ContextTextBudget;
+use crate::file_input::{
+    agent_file_input_ref_from_model_path, resolve_verified_agent_file_input_path,
+    AgentFileInputExecutionContext,
+};
 use crate::protocol::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentError, AgentPermissions,
     AgentReadPermission, AgentResult, AgentRunContext, ModelCapabilities,
 };
+use crate::resource_locator::ResourceLocator;
 use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
 use std::path::{Path, PathBuf};
@@ -471,11 +476,32 @@ impl ToolExecutionContext {
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {
         self.check_cancelled()?;
-        if is_attachment_path(input_path) {
-            return self.resolve_attachment_path(input_path);
+        let locator = ResourceLocator::parse(input_path)
+            .map_err(|error| AgentError::new(error.to_string()))?;
+        if locator.is_virtual() {
+            if matches!(locator, ResourceLocator::OpaqueBrowserArtifact(_)) {
+                return Err(AgentError::new(
+                    "browser-artifact 是临时浏览器能力句柄，不能作为文件路径；请使用 browser-download 引用。",
+                ));
+            }
+            let file_inputs = self.file_input_execution_context();
+            let source = agent_file_input_ref_from_model_path(&file_inputs, input_path)
+                .map_err(AgentError::from)?;
+            return resolve_verified_agent_file_input_path(
+                self.workspace_root_optional()?.as_deref(),
+                self.permissions,
+                &file_inputs,
+                &source,
+            )
+            .map_err(AgentError::from)?
+            .ok_or_else(|| {
+                AgentError::new(
+                    "该逻辑资源没有可暴露给此工具的物理路径；请使用对应的资源读取工具。",
+                )
+            });
         }
 
-        let input_path = input_path.trim();
+        let input_path = locator.logical_value();
         if let Some(candidate) = expand_system_path(input_path).map_err(AgentError::new)? {
             if self.permissions.read != AgentReadPermission::All {
                 return Err(AgentError::new(
@@ -512,10 +538,10 @@ impl ToolExecutionContext {
 
     pub(super) fn display_path(&self, input_path: &str, file_path: &Path) -> AgentResult<String> {
         self.check_cancelled()?;
-        if is_attachment_path(input_path) {
-            return self
-                .attachment_reference_for_path(input_path)
-                .map(|reference| reference.read_path.clone());
+        let locator = ResourceLocator::parse(input_path)
+            .map_err(|error| AgentError::new(error.to_string()))?;
+        if locator.is_virtual() {
+            return Ok(locator.logical_value().to_string());
         }
 
         if let Some(alias_path) = expand_system_path(input_path).map_err(AgentError::new)? {
@@ -548,6 +574,16 @@ impl ToolExecutionContext {
         Err(AgentError::new("路径必须位于已选择的 workspace 内。"))
     }
 
+    fn file_input_execution_context(&self) -> AgentFileInputExecutionContext {
+        AgentFileInputExecutionContext::new(
+            self.attachment_library.clone(),
+            self.skill_resources.clone(),
+        )
+        .with_storage(self.storage.clone())
+        .with_conversation_id(self.conversation_id.as_deref())
+        .with_permissions(self.permissions)
+    }
+
     pub(super) fn conversation_attachments(&self) -> &[AgentAttachmentReference] {
         self.attachment_library
             .as_ref()
@@ -564,38 +600,6 @@ impl ToolExecutionContext {
 
     pub(super) fn validate_relative_path_for_git(&self, input_path: &str) -> AgentResult<PathBuf> {
         clean_relative_path(input_path)
-    }
-
-    fn resolve_attachment_path(&self, input_path: &str) -> AgentResult<PathBuf> {
-        self.check_cancelled()?;
-        let reference = self.attachment_reference_for_path(input_path)?;
-        let library = self.attachment_library.as_ref().ok_or_else(|| {
-            AgentError::new("当前对话没有可用的附件库，无法读取 @attachments 路径。")
-        })?;
-        let root_path = library
-            .root_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| AgentError::new("附件库根目录不可用。"))?;
-        let root = PathBuf::from(root_path)
-            .canonicalize()
-            .map_err(|error| AgentError::new(format!("附件库目录不可访问：{error}")))?;
-        if !root.is_dir() {
-            return Err(AgentError::new("附件库根目录不是目录。"));
-        }
-
-        let relative = clean_relative_path(&reference.storage_rel_path)?;
-        let canonical = root
-            .join(relative)
-            .canonicalize()
-            .map_err(|error| AgentError::new(format!("附件文件不可访问：{error}")))?;
-
-        if !canonical.starts_with(&root) {
-            return Err(AgentError::new("附件路径必须位于附件库目录内。"));
-        }
-
-        Ok(canonical)
     }
 
     pub(super) fn attachment_reference_for_path(
@@ -623,10 +627,6 @@ impl ToolExecutionContext {
 
         Ok(reference)
     }
-}
-
-fn is_attachment_path(input_path: &str) -> bool {
-    input_path.trim().starts_with("@attachments/")
 }
 
 fn attachment_id_from_path(input_path: &str) -> AgentResult<String> {

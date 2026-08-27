@@ -921,6 +921,14 @@ pub fn builtin_capability_tool_result_persistence_projection(
     {
         safe_result["artifacts"] = Value::Array(artifacts);
     }
+    if let Some(downloads) = result
+        .result
+        .as_ref()
+        .and_then(|value| value.get("structuredContent"))
+        .and_then(crate::browser_downloads::safe_browser_download_references)
+    {
+        safe_result["downloads"] = Value::Array(downloads);
+    }
     if let Some(read_path) = result
         .result
         .as_ref()

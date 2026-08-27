@@ -110,6 +110,7 @@ function SettingsContent({
   onDeleteArchivedConversations,
   onDeleteConversation,
   onMcpDirtyChange,
+  onSelectSettingsPage,
   onRemoveProject,
   onUnarchiveConversation,
   onUiPreferencesChange,
@@ -122,6 +123,7 @@ function SettingsContent({
   onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
   onMcpDirtyChange: (dirty: boolean) => void
+  onSelectSettingsPage: (page: SettingsPageId) => void
   onRemoveProject: (projectId: string) => Promise<boolean>
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
@@ -148,7 +150,9 @@ function SettingsContent({
   }
 
   if (activePage === 'configuration') {
-    return <ConfigurationSettingsPage />
+    return (
+      <ConfigurationSettingsPage onNavigateSettingsRoot={() => onSelectSettingsPage('general')} />
+    )
   }
 
   if (activePage === 'personalization') {
@@ -169,11 +173,22 @@ function SettingsContent({
   }
 
   if (activePage === 'agentTemplates') {
-    return <AgentTemplatesSettingsPage initialProjectId={initialProjectId} projects={projects} />
+    return (
+      <AgentTemplatesSettingsPage
+        initialProjectId={initialProjectId}
+        onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
+        projects={projects}
+      />
+    )
   }
 
   if (activePage === 'mcp') {
-    return <McpSettingsPage onDirtyChange={onMcpDirtyChange} />
+    return (
+      <McpSettingsPage
+        onDirtyChange={onMcpDirtyChange}
+        onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
+      />
+    )
   }
 
   if (activePage === 'environment') {
@@ -364,6 +379,7 @@ export function SettingsPage({
             onDeleteArchivedConversations={onDeleteArchivedConversations}
             onDeleteConversation={onDeleteConversation}
             onMcpDirtyChange={handleMcpDirtyChange}
+            onSelectSettingsPage={requestPage}
             onRemoveProject={onRemoveProject}
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}

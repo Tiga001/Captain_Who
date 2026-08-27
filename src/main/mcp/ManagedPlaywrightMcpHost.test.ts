@@ -1685,7 +1685,7 @@ describe('ManagedPlaywrightMcpHost', () => {
         order.push('risk-settled')
       }),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn(() => {
         order.push('risk-finished')
       })
@@ -1786,7 +1786,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: vi.fn(),
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const beginToolSurfaceLease = vi.fn(async () => {
@@ -1899,7 +1899,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: vi.fn(),
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const beginNetworkOperation = vi.fn(async () => risk)
@@ -2139,7 +2139,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: markTargetCreationDispatched,
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
@@ -2234,7 +2234,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: markTargetCreationDispatched,
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
@@ -2411,7 +2411,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       }),
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const upstream = vi.fn<ManagedMcpClient['callTool']>(async ({ arguments: args }) => {
@@ -2482,7 +2482,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: vi.fn(() => order.push('risk-dispatched')),
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const upstream = vi.fn<ManagedMcpClient['callTool']>(async ({ arguments: args }) => {
@@ -4088,7 +4088,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: vi.fn(),
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
@@ -4382,7 +4382,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       markDispatched: vi.fn(),
       settle: vi.fn(async () => undefined),
       failure: () => null,
-      artifacts: () => [],
+      downloads: () => [],
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
@@ -4878,7 +4878,7 @@ function riskLease(options: {
       (typeof options.failure === 'function' ? options.failure() : options.failure) ?? null,
     markDispatched,
     settle,
-    artifacts: () => [],
+    downloads: () => [],
     finish
   } as unknown as BrowserNetworkOperationLease
   return { finish, lease, markDispatched, settle }

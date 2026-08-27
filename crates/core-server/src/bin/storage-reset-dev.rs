@@ -9,13 +9,15 @@ mod sqlite_registry;
 
 use mycopilot_core::durable_fs::{atomic_replace, sync_directory};
 use mycopilot_core::storage::agent_prompt_preferences_repository;
+use mycopilot_core::storage::browser_download_repository;
 use mycopilot_core::storage::config_repository::is_provider_protocol_revision;
 use mycopilot_core::storage::image_generation_repository::{
     self, DEFAULT_IMAGE_GENERATION_PROFILE_ID,
 };
 use mycopilot_core::storage::models::{
-    AgentPromptPreferencesRecord, ImageGenerationProfileRecord, ModelConfigRecord,
-    ModelSettingsRecord, UiPreferencesRecord,
+    AgentPromptPreferencesRecord, BrowserDownloadLocationMode, BrowserDownloadSettingsRecord,
+    ImageGenerationProfileRecord, ModelConfigRecord, ModelSettingsRecord, UiPreferencesRecord,
+    BROWSER_DOWNLOAD_SCHEMA_VERSION,
 };
 use mycopilot_core::storage::notification_repository::{self, NotificationSettingsRecord};
 use mycopilot_core::storage::preferences_repository;
@@ -39,7 +41,7 @@ const DATABASE_FILE_NAME: &str = "storage.sqlite";
 const BACKUP_DIRECTORY_NAME: &str = "storage-backups";
 const CONFIRM_RESET_FLAG: &str = "--confirm-reset";
 const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
-const PREVIOUS_UI_PREFERENCES_SCHEMA_VERSION: i32 = 19;
+const PREVIOUS_UI_PREFERENCES_SCHEMA_VERSION: i32 = 21;
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
@@ -49,6 +51,7 @@ const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "skill_enablement_overrides",
     "image_generation_profiles",
     "notification_settings",
+    "browser_download_settings",
     "mcp_registry_metadata",
     "mcp_registry_servers",
     "mcp_registry_model_namespaces",
@@ -68,6 +71,7 @@ struct PreservedConfiguration {
     skill_enablement_overrides: Vec<(String, bool)>,
     image_generation_profile: Option<ImageGenerationProfileRecord>,
     notification_settings: Option<NotificationSettingsRecord>,
+    browser_download_settings: Option<BrowserDownloadSettingsRecord>,
     mcp_records: Vec<McpPersistedRegistryRecord>,
     mcp_server_count: usize,
 }
@@ -317,6 +321,14 @@ fn inspect_source(
         } else {
             None
         };
+    let browser_download_settings =
+        if count_rows_if_table_exists(&connection, "browser_download_settings")? == 1 {
+            Some(load_browser_download_settings_for_development_reset(
+                &connection,
+            )?)
+        } else {
+            None
+        };
     let discarded_conversation_rows = count_discarded_conversation_rows(&connection)?;
     let expected_mcp_count = count_rows_if_table_exists(&connection, "mcp_registry_servers")?;
     drop(connection);
@@ -342,6 +354,7 @@ fn inspect_source(
         skill_enablement_overrides,
         image_generation_profile,
         notification_settings,
+        browser_download_settings,
         mcp_records,
         mcp_server_count: mcp_count,
     };
@@ -372,6 +385,47 @@ fn load_ui_preferences_for_development_reset(
     Err(invalid_data(
         "only the immediately previous development UI preference schema can be preserved",
     ))
+}
+
+fn load_browser_download_settings_for_development_reset(
+    connection: &Connection,
+) -> io::Result<BrowserDownloadSettingsRecord> {
+    let schema_version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+        .map_err(redacted_storage_error)?;
+    let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
+    if schema_version == current_schema_version {
+        return browser_download_repository::load_settings(connection)
+            .map_err(redacted_storage_error);
+    }
+    if schema_version != PREVIOUS_UI_PREFERENCES_SCHEMA_VERSION {
+        return Err(invalid_data(
+            "only the immediately previous development browser download settings can be preserved",
+        ));
+    }
+
+    connection
+        .query_row(
+            "SELECT location_mode, custom_directory, revision, updated_at
+             FROM browser_download_settings WHERE id = 'default'",
+            [],
+            |row| {
+                let location_mode = match row.get::<_, String>(0)?.as_str() {
+                    "system" => BrowserDownloadLocationMode::System,
+                    "custom" => BrowserDownloadLocationMode::Custom,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok(BrowserDownloadSettingsRecord {
+                    schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+                    location_mode,
+                    custom_directory: row.get(1)?,
+                    ask_where_to_save: false,
+                    revision: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            },
+        )
+        .map_err(redacted_storage_error)
 }
 
 /// Reads only the configuration fields that the explicit development reset preserves.
@@ -607,6 +661,10 @@ fn build_fresh_database(
     if let Some(settings) = configuration.and_then(|value| value.notification_settings.as_ref()) {
         restore_notification_settings(database_path, settings)?;
     }
+    if let Some(settings) = configuration.and_then(|value| value.browser_download_settings.as_ref())
+    {
+        restore_browser_download_settings(database_path, settings)?;
+    }
 
     if let Some(configuration) = configuration {
         restore_mcp_records(database_path, &configuration.mcp_records)?;
@@ -643,6 +701,41 @@ fn restore_notification_settings(
     if changed != 1 {
         return Err(io::Error::other(
             "failed to restore the notification settings singleton",
+        ));
+    }
+    connection
+        .close()
+        .map_err(|(_, error)| redacted_storage_error(error))
+}
+
+fn restore_browser_download_settings(
+    database_path: &Path,
+    settings: &BrowserDownloadSettingsRecord,
+) -> io::Result<()> {
+    let connection = Connection::open(database_path).map_err(redacted_storage_error)?;
+    let location_mode = match settings.location_mode {
+        mycopilot_core::storage::models::BrowserDownloadLocationMode::System => "system",
+        mycopilot_core::storage::models::BrowserDownloadLocationMode::Custom => "custom",
+    };
+    let changed = connection
+        .execute(
+            "UPDATE browser_download_settings
+             SET schema_version = ?1, location_mode = ?2, custom_directory = ?3,
+                 ask_where_to_save = ?4, revision = ?5, updated_at = ?6
+             WHERE id = 'default'",
+            params![
+                settings.schema_version,
+                location_mode,
+                settings.custom_directory,
+                settings.ask_where_to_save,
+                settings.revision,
+                settings.updated_at
+            ],
+        )
+        .map_err(redacted_storage_error)?;
+    if changed != 1 {
+        return Err(invalid_data(
+            "failed to restore browser download settings singleton",
         ));
     }
     connection
@@ -800,12 +893,22 @@ fn verify_fresh_database(
         verify_table_count(&connection, "ui_preferences", 1)?;
         verify_table_count(&connection, "agent_prompt_preferences", 1)?;
         verify_table_count(&connection, "notification_settings", 1)?;
+        verify_table_count(&connection, "browser_download_settings", 1)?;
         if let Some(expected) = &configuration.notification_settings {
             let restored = notification_repository::load_notification_settings(&connection)
                 .map_err(redacted_storage_error)?;
             if &restored != expected {
                 return Err(invalid_data(
                     "restored notification settings differ from their preserved value",
+                ));
+            }
+        }
+        if let Some(expected) = &configuration.browser_download_settings {
+            let restored = browser_download_repository::load_settings(&connection)
+                .map_err(redacted_storage_error)?;
+            if &restored != expected {
+                return Err(invalid_data(
+                    "restored browser download settings differ from their preserved value",
                 ));
             }
         }
@@ -1206,7 +1309,10 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use mycopilot_core::storage::image_generation_repository::IMAGE_GENERATION_PROFILE_SCHEMA_VERSION;
-    use mycopilot_core::storage::models::{ModelConfigRecord, ProjectRecord};
+    use mycopilot_core::storage::models::{
+        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, ModelConfigRecord,
+        ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    };
     use mycopilot_mcp_client::{
         McpApprovalMode, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
         McpTransportConfig,
@@ -1295,6 +1401,18 @@ mod tests {
                 path: Some(root.join("workspace").display().to_string()),
                 created_at: 1,
                 pinned_at: None,
+            })
+            .unwrap();
+        let download_directory = root.join("Downloads");
+        fs::create_dir_all(&download_directory).unwrap();
+        storage
+            .save_browser_download_settings(BrowserDownloadSettingsUpdate {
+                schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+                location_mode: BrowserDownloadLocationMode::Custom,
+                custom_directory: Some(download_directory.display().to_string()),
+                ask_where_to_save: true,
+                expected_revision: 0,
+                updated_at: 7,
             })
             .unwrap();
         drop(storage);
@@ -1590,14 +1708,14 @@ mod tests {
     }
 
     #[test]
-    fn reset_preserves_v19_ui_configuration_without_migrating_runtime_history() {
+    fn reset_preserves_v21_ui_configuration_without_migrating_runtime_history() {
         let fixture = tempfile::tempdir().unwrap();
-        populated_storage(fixture.path(), "v19-reset-test-token");
+        populated_storage(fixture.path(), "v21-reset-test-token");
         let database = fixture.path().join(DATABASE_FILE_NAME);
 
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch("PRAGMA user_version = 19;")
+            .execute_batch("PRAGMA user_version = 21;")
             .unwrap();
         drop(connection);
 

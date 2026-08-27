@@ -1587,6 +1587,7 @@ fn validate_image_source_hint(source: &AgentFileInputRef) -> Result<(), OfficeSe
             (path, "source.path")
         }
         AgentFileInputRef::SkillResource { uri } => (uri, "source.uri"),
+        AgentFileInputRef::BrowserDownload { reference, .. } => (reference, "source.reference"),
     };
     non_empty(value, field)?;
     Ok(())
@@ -1599,6 +1600,7 @@ fn office_image_mount_path(source: &AgentFileInputRef) -> String {
         | AgentFileInputRef::External { path }
         | AgentFileInputRef::GeneratedArtifact { path, .. } => path.as_str(),
         AgentFileInputRef::SkillResource { uri } => uri.as_str(),
+        AgentFileInputRef::BrowserDownload { display_name, .. } => display_name.as_str(),
     };
     let extension = hint
         .split(['?', '#'])

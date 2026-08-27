@@ -753,6 +753,9 @@ pub(crate) fn failed_command_result(
                     mycopilot_core::AgentFileInputRef::SkillResource { .. } => {
                         mycopilot_core::AgentFileInputSourceKind::SkillResource
                     }
+                    mycopilot_core::AgentFileInputRef::BrowserDownload { .. } => {
+                        mycopilot_core::AgentFileInputSourceKind::BrowserDownload
+                    }
                 },
                 size_bytes: binding.size_bytes,
                 sha256: binding.sha256.clone(),

@@ -213,7 +213,7 @@ describe('BrowserNetworkGuard', () => {
   it('binds a zero-tab tabs-new authority to one exact created guest before load', async () => {
     const claimCreatedGuest = vi.fn(async () => undefined)
     const downloadLease: BrowserDownloadToolLease = {
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       claimCreatedGuest,
       expectTargetClose: vi.fn(),
       finish: vi.fn(),
@@ -310,7 +310,7 @@ describe('BrowserNetworkGuard', () => {
 
   it('revokes a targetless creation authority on caller cancellation before any guest claim', async () => {
     const downloadLease: BrowserDownloadToolLease = {
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       claimCreatedGuest: vi.fn(async () => undefined),
       expectTargetClose: vi.fn(),
       finish: vi.fn(),
@@ -366,7 +366,7 @@ describe('BrowserNetworkGuard', () => {
   it('grants bounded exact popup children but gives manual popup callbacks no authority', async () => {
     const claimCreatedGuest = vi.fn(async () => undefined)
     const downloadLease: BrowserDownloadToolLease = {
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       claimCreatedGuest,
       expectTargetClose: vi.fn(),
       finish: vi.fn(),
@@ -480,7 +480,7 @@ describe('BrowserNetworkGuard', () => {
       settle: vi.fn(async () => {
         throw new BrowserDownloadBrokerError('browser.download.too_large', 'possibly_dispatched')
       }),
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       finish: vi.fn()
     }
     const downloadBroker = {
@@ -517,7 +517,7 @@ describe('BrowserNetworkGuard', () => {
   it('treats one exact planned tab close as normal completion while crashes remain fail-closed', async () => {
     const expectTargetClose = vi.fn()
     const downloadLease: BrowserDownloadToolLease = {
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       claimCreatedGuest: vi.fn(async () => undefined),
       expectTargetClose,
       finish: vi.fn(),
@@ -562,13 +562,13 @@ describe('BrowserNetworkGuard', () => {
       expectTargetClose: vi.fn(),
       ready: vi.fn(async () => {
         throw new BrowserDownloadBrokerError(
-          'browser.download.artifact_failed',
+          'browser.download.destination_unavailable',
           'definitely_not_dispatched'
         )
       }),
       markDispatched: vi.fn(),
       settle: vi.fn(async () => []),
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       finish: failedFinish
     }
     const healthyLease: BrowserDownloadToolLease = {
@@ -577,7 +577,7 @@ describe('BrowserNetworkGuard', () => {
       ready: vi.fn(async () => undefined),
       markDispatched: vi.fn(),
       settle: vi.fn(async () => []),
-      artifacts: vi.fn(() => []),
+      downloads: vi.fn(() => []),
       finish: healthyFinish
     }
     const beginTool = vi.fn().mockReturnValueOnce(failedLease).mockReturnValueOnce(healthyLease)
@@ -600,7 +600,7 @@ describe('BrowserNetworkGuard', () => {
 
     const failed = begin(harness)
     await expect(failed.ready()).rejects.toMatchObject({
-      code: 'browser.download.artifact_failed'
+      code: 'browser.download.destination_unavailable'
     })
     expect(failedFinish).toHaveBeenCalledOnce()
     expect(harness.guard.snapshot().activeOperations).toBe(0)

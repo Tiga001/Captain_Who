@@ -127,6 +127,10 @@ import type {
   BrowserRiskAuthorizeInput,
   BrowserRiskAuthorizeOutput,
   BrowserRiskCancelInput,
+  BrowserDownloadListInput,
+  BrowserDownloadRecord,
+  BrowserDownloadRegistrationInput,
+  BrowserDownloadSettingsRecord,
   McpServerCreateInput,
   McpServerDetailsOutput,
   McpServerIdInput,
@@ -381,6 +385,9 @@ import {
   parseBrowserRiskAuthorizeOutput,
   parseBrowserRiskCancelInput,
   parseBrowserRiskCancelOutput,
+  parseBrowserDownloadRecord,
+  parseBrowserDownloadRegistrationInput,
+  parseBrowserDownloadSettingsRecord,
   parseImageGenerationConfigurationErrorData,
   IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
   IMAGE_GENERATION_READ_ARTIFACT_METHOD,
@@ -472,6 +479,12 @@ const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
 const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = 'storage.loadInputAttachments'
+const STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD = 'storage.loadBrowserDownloadSettings'
+const STORAGE_SAVE_BROWSER_DOWNLOAD_SETTINGS_METHOD = 'storage.saveBrowserDownloadSettings'
+const STORAGE_REGISTER_BROWSER_DOWNLOAD_METHOD = 'storage.registerBrowserDownload'
+const STORAGE_LIST_BROWSER_DOWNLOADS_METHOD = 'storage.listBrowserDownloads'
+const STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD = 'storage.loadBrowserDownload'
+const STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD = 'storage.clearBrowserDownloadHistory'
 const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
 const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
@@ -2363,5 +2376,55 @@ export class CoreServer {
       STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
       input
     )
+  }
+
+  loadBrowserDownloadSettings(): Promise<BrowserDownloadSettingsRecord> {
+    return this.rpc
+      .request<unknown>(STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD)
+      .then(parseBrowserDownloadSettingsRecord)
+  }
+
+  saveBrowserDownloadSettings(input: {
+    schemaVersion: 2
+    locationMode: 'system' | 'custom'
+    customDirectory: string | null
+    askWhereToSave: boolean
+    expectedRevision: number
+    updatedAt: number
+  }): Promise<BrowserDownloadSettingsRecord> {
+    return this.rpc
+      .request<unknown, typeof input>(STORAGE_SAVE_BROWSER_DOWNLOAD_SETTINGS_METHOD, input)
+      .then(parseBrowserDownloadSettingsRecord)
+  }
+
+  registerBrowserDownload(input: BrowserDownloadRegistrationInput): Promise<BrowserDownloadRecord> {
+    const parsed = parseBrowserDownloadRegistrationInput(input)
+    return this.rpc
+      .request<unknown, BrowserDownloadRegistrationInput>(
+        STORAGE_REGISTER_BROWSER_DOWNLOAD_METHOD,
+        parsed
+      )
+      .then(parseBrowserDownloadRecord)
+  }
+
+  listBrowserDownloads(input: BrowserDownloadListInput): Promise<BrowserDownloadRecord[]> {
+    return this.rpc
+      .request<unknown, BrowserDownloadListInput>(STORAGE_LIST_BROWSER_DOWNLOADS_METHOD, input)
+      .then((value) => {
+        if (!Array.isArray(value)) throw new Error('Invalid Browser Download record list')
+        return value.map((item) => parseBrowserDownloadRecord(item))
+      })
+  }
+
+  loadBrowserDownload(downloadId: string): Promise<BrowserDownloadRecord | null> {
+    return this.rpc
+      .request<unknown, { downloadId: string }>(STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD, {
+        downloadId
+      })
+      .then((value) => (value === null ? null : parseBrowserDownloadRecord(value)))
+  }
+
+  clearBrowserDownloadHistory(): Promise<number> {
+    return this.rpc.request<number>(STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD)
   }
 }

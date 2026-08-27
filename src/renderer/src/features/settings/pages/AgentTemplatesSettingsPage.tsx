@@ -1,5 +1,5 @@
 import type { AgentTemplate } from '@mycopilot/protocol'
-import { Bot, ChevronLeft, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { Bot, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -14,11 +14,13 @@ import {
   setAgentTemplateEnabled,
   updateAgentTemplate
 } from '../../agentCollaboration/collaborationClient'
+import { SettingsBreadcrumbs } from '../components/SettingsBreadcrumbs'
 import { SettingsSelect } from '../components/SettingsSelect'
 import './AgentTemplatesSettingsPage.css'
 
 interface AgentTemplatesSettingsPageProps {
   initialProjectId?: string | null
+  onNavigateSettingsRoot?: () => void
   projects: readonly AppProject[]
 }
 
@@ -33,6 +35,7 @@ interface TemplateFormState {
 
 export function AgentTemplatesSettingsPage({
   initialProjectId,
+  onNavigateSettingsRoot,
   projects
 }: AgentTemplatesSettingsPageProps) {
   const { t } = useFrontendConfig()
@@ -199,10 +202,28 @@ export function AgentTemplatesSettingsPage({
 
     return (
       <article className="settings-list-page agent-templates-page">
-        <button className="agent-templates-page__back" onClick={() => setForm(null)} type="button">
-          <ChevronLeft aria-hidden="true" />
-          {t('agentTemplates.back')}
-        </button>
+        <SettingsBreadcrumbs
+          ariaLabel={t('settings.breadcrumb.label')}
+          items={[
+            {
+              id: 'settings',
+              label: t('settings.breadcrumb.root'),
+              onSelect: onNavigateSettingsRoot
+            },
+            {
+              id: 'agent-templates',
+              label: t('settings.page.agentTemplates'),
+              onSelect: () => setForm(null)
+            },
+            {
+              id: form.kind,
+              label:
+                form.kind === 'create'
+                  ? t('agentTemplates.createTitle')
+                  : t('agentTemplates.editTitle')
+            }
+          ]}
+        />
         <h1>
           {form.kind === 'create' ? t('agentTemplates.createTitle') : t('agentTemplates.editTitle')}
         </h1>

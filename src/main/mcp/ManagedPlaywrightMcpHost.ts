@@ -4,6 +4,7 @@ import type { BrowserContext, ElementHandle, Frame, Locator, Page, Route } from 
 import type {
   BrowserArtifactKind,
   BrowserArtifactReference,
+  BrowserDownloadReference,
   BrowserSurfacePresentation,
   BrowserSurfacePublicCrashError,
   BrowserSurfacePublicLoadError
@@ -972,7 +973,7 @@ export class ManagedPlaywrightMcpHost {
                   const failure = riskLease?.failure()
                   if (failure) return riskFailureResult(failure)
                   responseReceived = true
-                  return withArtifactReferences(hostAdapted, riskLease?.artifacts() ?? [])
+                  return withDownloadReferences(hostAdapted, riskLease?.downloads() ?? [])
                 }
 
                 let officialResult: ManagedPlaywrightCallResult
@@ -1041,9 +1042,9 @@ export class ManagedPlaywrightMcpHost {
                     // context race must never replace an authoritative upstream snapshot result.
                   }
                 }
-                const downloadArtifacts = riskLease?.artifacts() ?? []
+                const downloads = riskLease?.downloads() ?? []
                 if (!artifactPlan) {
-                  return withArtifactReferences(parsed, downloadArtifacts)
+                  return withDownloadReferences(parsed, downloads)
                 }
                 if (parsed.isError) {
                   await artifactPlan.reservation.discard().catch(() => undefined)
@@ -1059,7 +1060,7 @@ export class ManagedPlaywrightMcpHost {
                     ],
                     structuredContent: {
                       status: 'artifact_failed',
-                      ...(downloadArtifacts.length > 0 ? { artifacts: downloadArtifacts } : {})
+                      ...(downloads.length > 0 ? { downloads } : {})
                     },
                     isError: true
                   }
@@ -1088,7 +1089,8 @@ export class ManagedPlaywrightMcpHost {
                   screenshot && !readPathUnavailable
                     ? this.artifactBroker?.hostOwnedAbsolutePath(screenshot)
                     : undefined
-                return artifactToolResult([artifact, ...downloadArtifacts], {
+                return artifactToolResult(artifact, {
+                  downloads,
                   ...(hostImagePublishPath ? { hostImagePublishPath } : {}),
                   ...(readPathUnavailable ? { readPathUnavailable } : {})
                 })
@@ -1325,7 +1327,7 @@ export class ManagedPlaywrightMcpHost {
       const failure = riskLease.failure()
       if (failure) return riskFailureResult(failure)
       if (input.signal.aborted) throw cancellationError(input.signal.reason)
-      return withArtifactReferences(result, riskLease.artifacts())
+      return withDownloadReferences(result, riskLease.downloads())
     } catch (error) {
       try {
         await riskLease.settle()
@@ -2996,7 +2998,11 @@ function managedBrowserConfigResult(): ManagedPlaywrightCallResult {
 
 function artifactToolResult(
   artifactOrArtifacts: BrowserArtifactReference | readonly BrowserArtifactReference[],
-  options: { hostImagePublishPath?: string; readPathUnavailable?: 'too_large' } = {}
+  options: {
+    downloads?: readonly BrowserDownloadReference[]
+    hostImagePublishPath?: string
+    readPathUnavailable?: 'too_large'
+  } = {}
 ): ManagedPlaywrightCallResult {
   const artifacts = Array.isArray(artifactOrArtifacts)
     ? [...artifactOrArtifacts]
@@ -3015,7 +3021,11 @@ function artifactToolResult(
       : summary
   return {
     content: [{ type: 'text', text }],
-    structuredContent: { status: 'completed', artifacts },
+    structuredContent: {
+      status: 'completed',
+      artifacts,
+      ...(options.downloads?.length ? { downloads: [...options.downloads] } : {})
+    },
     isError: false,
     ...(options.hostImagePublishPath ? { hostImagePublishPath: options.hostImagePublishPath } : {})
   }
@@ -3044,16 +3054,21 @@ function pdfUnavailableToolResult(): ManagedPlaywrightCallResult {
   }
 }
 
-function withArtifactReferences(
+function withDownloadReferences(
   result: ManagedPlaywrightCallResult,
-  artifacts: readonly BrowserArtifactReference[]
+  downloads: readonly BrowserDownloadReference[]
 ): ManagedPlaywrightCallResult {
-  if (artifacts.length === 0) return result
+  if (downloads.length === 0) return result
+  const summaries = downloads.map(
+    (download) =>
+      `Downloaded “${download.displayName}” (${download.mimeType}, ${download.sizeBytes} bytes). Durable reference: ${download.downloadId}`
+  )
   return {
     ...result,
+    content: [...result.content, ...summaries.map((text) => ({ type: 'text' as const, text }))],
     structuredContent: {
       ...(result.structuredContent ?? {}),
-      artifacts: [...artifacts]
+      downloads: [...downloads]
     }
   }
 }
@@ -3893,7 +3908,8 @@ function mapSafeHostError(error: unknown): ManagedPlaywrightMcpHostError {
             : 'mcp.builtin_playwright.protocol_error',
           error.dispatchCertainty
         )
-      case 'browser.download.artifact_failed':
+      case 'browser.download.destination_unavailable':
+      case 'browser.download.registration_failed':
       case 'browser.download.closed':
         return new ManagedPlaywrightMcpHostError(
           'mcp.builtin_playwright.protocol_error',

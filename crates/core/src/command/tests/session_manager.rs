@@ -1,6 +1,16 @@
 use super::*;
 use crate::command::session::CommandSessionCompletionHook;
-use crate::AgentCommandOutputStream;
+use crate::file_input::{
+    agent_file_input_ref_from_model_path, prepare_agent_file_input_bindings,
+    AgentFileInputExecutionContext,
+};
+use crate::storage::models::{
+    BrowserDownloadRegistration, BrowserDownloadSource, ChatConversationRecord,
+    BROWSER_DOWNLOAD_SCHEMA_VERSION,
+};
+use crate::storage::service::StorageService;
+use crate::{AgentCommandOutputStream, AgentFileInputSpec};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 
@@ -1132,6 +1142,106 @@ fn authorized_session_launch_uses_the_same_canonical_lf_as_policy() {
         terminal.execution.command,
         "\nprintf 'one\\n'\nprintf 'two\\n'\n"
     );
+}
+
+#[test]
+fn ordinary_run_command_materializes_a_browser_download_without_exposing_its_host_path() {
+    let workspace = TestWorkspace::new();
+    let private_root = tempfile::tempdir().unwrap();
+    let storage =
+        Arc::new(StorageService::open(&private_root.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-1".to_string(),
+            project_id: None,
+            model_id: None,
+            title: "download command test".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let bytes = b"durable command input";
+    let private_path = private_root.path().join("archive.zip");
+    std::fs::write(&private_path, bytes).unwrap();
+    let reference = "browser-download:123e4567-e89b-42d3-a456-426614174000";
+    storage
+        .register_browser_download(BrowserDownloadRegistration {
+            schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+            download_id: reference.to_string(),
+            source: BrowserDownloadSource::Agent,
+            display_name: "archive.zip".to_string(),
+            mime_type: "application/zip".to_string(),
+            size_bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            absolute_path: private_path.to_string_lossy().into_owned(),
+            source_origin: Some("https://example.test".to_string()),
+            conversation_id: Some("conversation-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            call_id: Some("call-1".to_string()),
+            created_at: 1,
+        })
+        .unwrap();
+    let input_context = AgentFileInputExecutionContext::default()
+        .with_storage(Some(storage))
+        .with_conversation_id(Some("conversation-1"));
+    let mut command_request = request(
+        "cp \"$MYCOPILOT_INPUT_ROOT/downloads/archive.zip\" copied.zip",
+        Some(5_000),
+    );
+    let permissions = AgentPermissions {
+        read: AgentReadPermission::WorkspaceOnly,
+        write: AgentWritePermission::WorkspaceOnly,
+        command: AgentCommandPermission::RequireApproval,
+        ..Default::default()
+    };
+    let input_specs = vec![AgentFileInputSpec {
+        mount_path: "downloads/archive.zip".to_string(),
+        source: agent_file_input_ref_from_model_path(&input_context, reference).unwrap(),
+    }];
+    command_request.inputs = prepare_agent_file_input_bindings(
+        Some(&workspace.path),
+        permissions,
+        &input_context,
+        &input_specs,
+        None,
+    )
+    .unwrap();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let outcome = manager
+        .start_authorized_command_with_runtime_and_lifecycle(
+            CommandSessionScopeId::new("browser-download-copy").unwrap(),
+            Some(&workspace.path),
+            &command_request,
+            permissions,
+            CommandAuthorizationSource::ExplicitUser,
+            CommandStartOptions {
+                initial_yield: Duration::from_secs(1),
+            },
+            None,
+            None,
+            Some(&input_context),
+            None,
+            Arc::new(|_| {}),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    let CommandStartOutcome::Exited(terminal) = outcome else {
+        panic!("copy should exit inside the initial yield");
+    };
+
+    assert_eq!(terminal.execution.exit_code, Some(0));
+    assert_eq!(
+        std::fs::read(workspace.path.join("copied.zip")).unwrap(),
+        bytes
+    );
+    let serialized = serde_json::to_string(&terminal.execution).unwrap();
+    assert!(!serialized.contains(private_root.path().to_string_lossy().as_ref()));
+    assert!(!serialized.contains(private_path.to_string_lossy().as_ref()));
 }
 
 #[test]

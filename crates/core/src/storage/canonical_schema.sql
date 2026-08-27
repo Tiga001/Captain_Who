@@ -415,6 +415,70 @@ CREATE TABLE attachments (
             created_at INTEGER NOT NULL,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
+CREATE TABLE browser_download_settings (
+            id TEXT PRIMARY KEY CHECK (id = 'default'),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+            location_mode TEXT NOT NULL CHECK (location_mode IN ('system', 'custom')),
+            custom_directory TEXT CHECK (
+                custom_directory IS NULL
+                OR length(CAST(custom_directory AS BLOB)) BETWEEN 1 AND 16384
+            ),
+            ask_where_to_save INTEGER NOT NULL CHECK (ask_where_to_save IN (0, 1)),
+            revision INTEGER NOT NULL CHECK (revision >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+            CHECK (
+                (location_mode = 'system' AND custom_directory IS NULL)
+                OR (location_mode = 'custom' AND custom_directory IS NOT NULL)
+            )
+        );
+INSERT INTO browser_download_settings (
+            id, schema_version, location_mode, custom_directory, ask_where_to_save,
+            revision, updated_at
+        ) VALUES ('default', 2, 'system', NULL, 0, 0, 0);
+CREATE TABLE browser_downloads (
+            download_id TEXT PRIMARY KEY CHECK (
+                length(download_id) = 53
+                AND substr(download_id, 1, 17) = 'browser-download:'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+            source_kind TEXT NOT NULL CHECK (source_kind IN ('manual', 'agent')),
+            display_name TEXT NOT NULL CHECK (
+                length(CAST(display_name AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            mime_type TEXT NOT NULL CHECK (
+                length(CAST(mime_type AS BLOB)) BETWEEN 3 AND 256
+            ),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            absolute_path TEXT NOT NULL CHECK (
+                length(CAST(absolute_path AS BLOB)) BETWEEN 1 AND 16384
+            ),
+            source_origin TEXT CHECK (
+                source_origin IS NULL
+                OR length(CAST(source_origin AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            conversation_id TEXT,
+            project_id TEXT,
+            run_id TEXT,
+            call_id TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            CHECK (
+                source_kind = 'agent'
+                OR (conversation_id IS NULL AND project_id IS NULL
+                    AND run_id IS NULL AND call_id IS NULL)
+            )
+        );
+CREATE INDEX browser_downloads_created_idx
+            ON browser_downloads (created_at DESC, download_id DESC);
+CREATE INDEX browser_downloads_conversation_idx
+            ON browser_downloads (conversation_id, created_at DESC);
+CREATE INDEX browser_downloads_project_idx
+            ON browser_downloads (project_id, created_at DESC);
 CREATE TABLE composer_drafts (
             scope_id TEXT PRIMARY KEY,
             message TEXT NOT NULL,

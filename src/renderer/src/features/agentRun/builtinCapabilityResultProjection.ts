@@ -1,7 +1,8 @@
 import {
   parseBrowserArtifactToolProjection,
   type AgentToolResult,
-  type BrowserArtifactReference
+  type BrowserArtifactReference,
+  type BrowserDownloadReference
 } from '@mycopilot/protocol'
 
 const SAFE_BUILTIN_TOOL_STATUSES = new Set([
@@ -27,10 +28,14 @@ export function projectBuiltinCapabilityToolResult(result: AgentToolResult): Age
   const record = asRecord(result.result)
   const status = safeBuiltinToolStatus(record)
   let artifacts: BrowserArtifactReference[] | undefined
+  let downloads: BrowserDownloadReference[] | undefined
   try {
-    artifacts = parseBrowserArtifactToolProjection(result.result).artifacts
+    const projection = parseBrowserArtifactToolProjection(result.result)
+    artifacts = projection.artifacts
+    downloads = projection.downloads
   } catch {
     artifacts = undefined
+    downloads = undefined
   }
 
   return {
@@ -44,7 +49,8 @@ export function projectBuiltinCapabilityToolResult(result: AgentToolResult): Age
             type: 'builtin_capability_tool',
             status,
             contentOmitted: true,
-            ...(artifacts ? { artifacts } : {})
+            ...(artifacts ? { artifacts } : {}),
+            ...(downloads ? { downloads } : {})
           }
         }
       : {})

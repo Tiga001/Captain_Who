@@ -73,7 +73,7 @@ const MANAGED_PDF_SANDBOX_PROFILE: &str = r#"(version 1)
 pub(crate) enum ManagedCommandSessionPreparation {
     Immediate(Box<AgentCommandExecutionResult>),
     Ready {
-        plan: CommandSpawnPlan,
+        plan: Box<CommandSpawnPlan>,
         completion_hook: super::session::CommandSessionCompletionHook,
     },
 }
@@ -824,7 +824,7 @@ pub(crate) fn prepare_managed_command_session(
         },
     );
     Ok(ManagedCommandSessionPreparation::Ready {
-        plan,
+        plan: Box::new(plan),
         completion_hook,
     })
 }
@@ -1424,8 +1424,9 @@ fn presentation_editor_source_path(source: &AgentFileInputRef) -> Result<String,
         }
         AgentFileInputRef::Attachment { read_path } => Ok(read_path.clone()),
         AgentFileInputRef::GeneratedArtifact { path, .. } => Ok(path.clone()),
+        AgentFileInputRef::BrowserDownload { reference, .. } => Ok(reference.clone()),
         AgentFileInputRef::SkillResource { .. } => Err(
-            "Presentation Editor source must be a workspace, attachment, Artifact, or authorized external .pptx."
+            "Presentation Editor source must be a workspace, attachment, Artifact, browser download, or authorized external .pptx."
                 .to_string(),
         ),
     }

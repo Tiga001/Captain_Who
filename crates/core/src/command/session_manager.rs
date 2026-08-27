@@ -1,7 +1,8 @@
 //! Registry, quotas, and lifecycle operations for managed command sessions.
 
 use super::output_capture::{
-    spawn_process_output_capture_with_observers, ProcessOutputTranscriptObserver,
+    spawn_process_output_capture_with_observers, ProcessOutputRedactionSet,
+    ProcessOutputTranscriptObserver,
 };
 use super::session::{
     run_session_watcher, CaptureReceiver, CommandSessionCompletionHook,
@@ -18,7 +19,9 @@ use super::{
     ProcessOutputObserver, MAX_TIMEOUT_MS,
 };
 use crate::artifact_runtime::ArtifactRuntimeProvider;
-use crate::file_input::AgentFileInputExecutionContext;
+use crate::file_input::{
+    materialize_agent_file_inputs, AgentFileInputExecutionContext, AGENT_FILE_INPUT_ROOT_ENV,
+};
 use crate::office::OfficeEngine;
 use std::collections::HashMap;
 use std::path::Path;
@@ -260,13 +263,7 @@ impl CommandSessionManager {
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Result<CommandStartOutcome, CommandSessionStartError> {
         if request.runtime_binding.is_none() {
-            if !request.inputs.is_empty() {
-                return Err(CommandExecutionError::from(
-                    "run_command.inputs requires a frozen managed runtime binding".to_string(),
-                )
-                .into());
-            }
-            return self.start_authorized_command_with_cancel_probe(
+            return self.start_authorized_command_with_cancel_probe_and_inputs(
                 scope_id,
                 workspace_root,
                 request,
@@ -276,6 +273,8 @@ impl CommandSessionManager {
                 None,
                 Some(lifecycle_observer),
                 cancel_probe,
+                file_inputs,
+                cancellation_token,
             );
         }
 
@@ -301,7 +300,7 @@ impl CommandSessionManager {
             } => self
                 .start_plan_with_observers(
                     scope_id,
-                    plan,
+                    *plan,
                     options,
                     None,
                     Some(lifecycle_observer),
@@ -325,10 +324,39 @@ impl CommandSessionManager {
         lifecycle_observer: Option<CommandSessionLifecycleObserver>,
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Result<CommandStartOutcome, CommandSessionStartError> {
-        if request.runtime_binding.is_some() || !request.inputs.is_empty() {
+        self.start_authorized_command_with_cancel_probe_and_inputs(
+            scope_id,
+            workspace_root,
+            request,
+            permissions,
+            authorization_source,
+            options,
+            output_observer,
+            lifecycle_observer,
+            cancel_probe,
+            None,
+            crate::AgentCancellationToken::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_authorized_command_with_cancel_probe_and_inputs(
+        &self,
+        scope_id: CommandSessionScopeId,
+        workspace_root: Option<&Path>,
+        request: &AgentCommandRequest,
+        permissions: AgentPermissions,
+        authorization_source: CommandAuthorizationSource,
+        options: CommandStartOptions,
+        output_observer: Option<ProcessOutputObserver>,
+        lifecycle_observer: Option<CommandSessionLifecycleObserver>,
+        cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        file_inputs: Option<&AgentFileInputExecutionContext>,
+        cancellation_token: crate::AgentCancellationToken,
+    ) -> Result<CommandStartOutcome, CommandSessionStartError> {
+        if request.runtime_binding.is_some() {
             return Err(CommandExecutionError::from(
-                "host-bound runtimes and file inputs require a managed-runtime spawn plan"
-                    .to_string(),
+                "host-bound runtimes require a managed-runtime spawn plan".to_string(),
             )
             .into());
         }
@@ -343,6 +371,15 @@ impl CommandSessionManager {
             root.as_deref(),
             Some(&cwd),
         )?;
+        let empty_input_context = AgentFileInputExecutionContext::default();
+        let prepared_inputs = materialize_agent_file_inputs(
+            root.as_deref(),
+            permissions,
+            file_inputs.unwrap_or(&empty_input_context),
+            &request.inputs,
+            Some(&cancellation_token),
+        )
+        .map_err(|error| CommandExecutionError::from(error.to_string()))?;
         // Policy and process launch must consume the exact same canonical script. The model/tool
         // ingestion path normally already freezes this representation; repeat the deterministic
         // normalization here so lower-level Host callers cannot execute CRLF/lone-CR bytes that
@@ -362,7 +399,7 @@ impl CommandSessionManager {
         let artifact_before = artifact_observer
             .as_ref()
             .map(|observer| observer.capture(AgentCommandArtifactObservationPhase::Before, None));
-        let completion_hook: Option<CommandSessionCompletionHook> = artifact_observer
+        let artifact_completion_hook: Option<CommandSessionCompletionHook> = artifact_observer
             .zip(artifact_before)
             .map(|(observer, before)| {
                 Box::new(move |result: &mut super::AgentCommandExecutionResult, _| {
@@ -373,7 +410,29 @@ impl CommandSessionManager {
         let hard_timeout = request
             .timeout_ms
             .map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)));
-        let plan = CommandSpawnPlan::shell(canonical_command, cwd, root.as_deref(), hard_timeout);
+        let mut plan =
+            CommandSpawnPlan::shell(canonical_command, cwd, root.as_deref(), hard_timeout);
+        if let Some(inputs) = prepared_inputs.as_ref() {
+            plan = plan
+                .with_environment(vec![(
+                    std::ffi::OsString::from(AGENT_FILE_INPUT_ROOT_ENV),
+                    inputs.root().as_os_str().to_os_string(),
+                )])
+                .with_output_redactions(ProcessOutputRedactionSet::new(vec![(
+                    inputs.root().to_string_lossy().into_owned(),
+                    format!("${AGENT_FILE_INPUT_ROOT_ENV}"),
+                )]));
+        }
+        let completion_hook: Option<CommandSessionCompletionHook> =
+            match (artifact_completion_hook, prepared_inputs) {
+                (None, None) => None,
+                (artifact_hook, input_lease) => Some(Box::new(move |result, cancellation| {
+                    if let Some(hook) = artifact_hook {
+                        hook(result, cancellation);
+                    }
+                    drop(input_lease);
+                })),
+            };
         self.start_plan_with_observers(
             scope_id,
             plan,

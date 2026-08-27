@@ -1,9 +1,10 @@
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import {
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
   BROWSER_SURFACE_SCHEMA_VERSION,
   BROWSER_WEBVIEW_PARTITION,
   createBrowserSurfaceBootstrapUrl,
@@ -255,9 +256,20 @@ async function main(): Promise<void> {
     }
   })
   await fileBroker.initialize()
+  const downloadDirectory = join(PROFILE_DIRECTORY, 'Downloads')
+  mkdirSync(downloadDirectory)
   const downloadBroker = new BrowserDownloadBroker({
-    artifacts: artifactBroker,
-    expectedSession: managedSession
+    expectedSession: managedSession,
+    initialSettings: {
+      schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+      locationMode: 'system',
+      customDirectory: null,
+      askWhereToSave: false,
+      revision: 0,
+      updatedAt: 1
+    },
+    registerDownload: async (input) => ({ ...input, projectId: null }),
+    systemDownloadDirectory: downloadDirectory
   })
   const networkPolicy = new BrowserNetworkPolicy({
     dnsResolver: new ElectronSessionDnsResolver(managedSession)

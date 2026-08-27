@@ -5,6 +5,15 @@ import {
   parseBrowserArtifactExportOutput,
   parseBrowserArtifactReadInput,
   parseBrowserArtifactReadOutput,
+  parseBrowserDownloadAskWhereToSaveInput,
+  parseBrowserDownloadHistoryChangedNotification,
+  parseBrowserDownloadHistoryClearInput,
+  parseBrowserDownloadHistoryClearOutput,
+  parseBrowserDownloadHistoryListInput,
+  parseBrowserDownloadHistoryListOutput,
+  parseBrowserDownloadIdInput,
+  parseBrowserDownloadRevealOutput,
+  parseBrowserDownloadSettingsView,
   parseBrowserSurfaceActionInput,
   parseBrowserSurfaceCommand,
   parseBrowserSurfaceReadyInput,
@@ -21,6 +30,67 @@ type BrowserIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): BrowserHostApi {
   return {
     clearBrowsingData: () => ipcRenderer.invoke(HOST_CHANNELS.browser.clearBrowsingData),
+    getDownloadSettings: () =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadSettingsGet,
+        undefined,
+        parseBrowserDownloadSettingsView
+      ),
+    chooseDownloadDirectory: () =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadSettingsChooseDirectory,
+        undefined,
+        (value) => (value === null ? null : parseBrowserDownloadSettingsView(value))
+      ),
+    resetDownloadDirectory: () =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadSettingsResetDirectory,
+        undefined,
+        parseBrowserDownloadSettingsView
+      ),
+    setDownloadAskWhereToSave: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadSettingsSetAskWhereToSave,
+        parseBrowserDownloadAskWhereToSaveInput(input),
+        parseBrowserDownloadSettingsView
+      ),
+    listDownloadHistory: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadHistoryList,
+        parseBrowserDownloadHistoryListInput(input),
+        parseBrowserDownloadHistoryListOutput
+      ),
+    revealDownload: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadHistoryReveal,
+        parseBrowserDownloadIdInput(input),
+        parseBrowserDownloadRevealOutput
+      ),
+    clearDownloadHistory: (input) =>
+      invokeParsed(
+        ipcRenderer,
+        HOST_CHANNELS.browser.downloadHistoryClear,
+        parseBrowserDownloadHistoryClearInput(input),
+        parseBrowserDownloadHistoryClearOutput
+      ),
+    onDownloadHistoryChanged: (handler) => {
+      const listener = (_event: IpcRendererEvent, value: unknown): void => {
+        try {
+          handler(parseBrowserDownloadHistoryChangedNotification(value))
+        } catch {
+          // Invalid Main-to-Renderer data is fail-closed and never reaches application state.
+        }
+      }
+      ipcRenderer.on(HOST_CHANNELS.browser.downloadHistoryChanged, listener)
+      return () =>
+        ipcRenderer.removeListener(HOST_CHANNELS.browser.downloadHistoryChanged, listener)
+    },
     exportArtifact: (input) =>
       ipcRenderer
         .invoke(HOST_CHANNELS.browser.artifactExport, parseBrowserArtifactExportInput(input))
@@ -82,4 +152,18 @@ export function createBrowserIpcBridge(ipcRenderer: BrowserIpcRenderer): Browser
       return () => ipcRenderer.removeListener(HOST_CHANNELS.browser.surfaceStateChanged, listener)
     }
   }
+}
+
+async function invokeParsed<T>(
+  ipcRenderer: BrowserIpcRenderer,
+  channel: string,
+  input: unknown,
+  parse: (value: unknown) => T
+): Promise<{ ok: true; value: T } | { ok: false; error: never }> {
+  const result = (await ipcRenderer.invoke(channel, input)) as unknown
+  if (!result || typeof result !== 'object' || !('ok' in result)) {
+    throw new Error('Invalid Browser Download Host response')
+  }
+  if ((result as { ok?: unknown }).ok !== true) return result as never
+  return { ok: true, value: parse((result as { ok: true; value: unknown }).value) }
 }

@@ -91,12 +91,21 @@ describe('Agent template settings', () => {
     expect(createTemplateMachineKey('中文', 'ABC1-2345', ['agent'])).toBe('agent-abc12345')
 
     service.list.mockResolvedValue({ schemaVersion: 1, templates: [] })
+    const navigateSettingsRoot = vi.fn()
     const screen = await render(
-      <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
+      <AgentTemplatesSettingsPage
+        initialProjectId="project-a"
+        onNavigateSettingsRoot={navigateSettingsRoot}
+        projects={PROJECTS}
+      />
     )
     await expect.element(screen.getByText('agentTemplates.empty', { exact: true })).toBeVisible()
 
     await screen.getByRole('button', { name: /agentTemplates.create/ }).click()
+    const breadcrumbs = screen.getByRole('navigation', { name: 'settings.breadcrumb.label' })
+    await expect.element(breadcrumbs).toBeVisible()
+    await breadcrumbs.getByRole('button', { name: 'settings.breadcrumb.root' }).click()
+    expect(navigateSettingsRoot).toHaveBeenCalledTimes(1)
     await screen.getByRole('textbox', { name: 'agentTemplates.name' }).fill('Code Reviewer')
     await screen
       .getByRole('textbox', { name: 'agentTemplates.instructions' })

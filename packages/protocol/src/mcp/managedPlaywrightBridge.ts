@@ -10,6 +10,7 @@ export const BROWSER_RISK_CANCEL_METHOD = 'mcp.browserRisk.cancel' as const
 export const BROWSER_RISK_PROTOCOL_SCHEMA_VERSION = 1 as const
 
 export interface ManagedPlaywrightAuthorizationContext {
+  conversationId?: string
   runId: string
   capabilityId: 'browser_automation'
   activationId: string
@@ -536,6 +537,7 @@ export function parseBrowserRiskCancelOutput(value: unknown): BrowserRiskCancelO
 function parseAuthorizationContext(value: unknown): ManagedPlaywrightAuthorizationContext {
   const record = expectRecord(value)
   exactKeys(record, [
+    ...(record.conversationId === undefined ? [] : ['conversationId']),
     'runId',
     'capabilityId',
     'activationId',
@@ -560,6 +562,9 @@ function parseAuthorizationContext(value: unknown): ManagedPlaywrightAuthorizati
       ? undefined
       : parseBuiltinToolGrant(record.builtinToolGrant, grantExpiresAtMs)
   return {
+    ...(record.conversationId === undefined
+      ? {}
+      : { conversationId: expectSafeString(record.conversationId, 1, 256) }),
     runId: expectSafeString(record.runId, 1, 256),
     capabilityId: 'browser_automation',
     activationId: expectMatchingString(record.activationId, REQUEST_ID),

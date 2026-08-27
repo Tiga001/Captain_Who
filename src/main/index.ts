@@ -268,9 +268,12 @@ app.whenReady().then(async () => {
     }
   })
   await browserFileBroker.initialize()
+  const browserDownloadSettings = await coreServer.loadBrowserDownloadSettings()
   browserDownloadBroker = new BrowserDownloadBroker({
-    artifacts: browserArtifactBroker,
-    expectedSession: managedBrowserSession
+    expectedSession: managedBrowserSession,
+    initialSettings: browserDownloadSettings,
+    registerDownload: (input) => coreServer.registerBrowserDownload(input),
+    systemDownloadDirectory: app.getPath('downloads')
   })
   const browserNetworkPolicy = new BrowserNetworkPolicy({
     blockedOrigins: [getRendererEntryUrl()],
@@ -367,7 +370,8 @@ app.whenReady().then(async () => {
     isTrustedRendererEvent,
     browserSurfaceManager,
     browserArtifactBroker,
-    notificationLocaleStore
+    notificationLocaleStore,
+    browserDownloadBroker
   )
 
   createWindow()

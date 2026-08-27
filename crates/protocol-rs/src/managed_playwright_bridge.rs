@@ -55,6 +55,8 @@ pub enum ManagedPlaywrightCommand {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagedPlaywrightAuthorizationContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     pub run_id: String,
     pub capability_id: String,
     pub activation_id: String,
@@ -443,6 +445,7 @@ mod tests {
     #[test]
     fn call_tool_wire_uses_the_exact_typescript_casing() {
         let authorization_context = ManagedPlaywrightAuthorizationContext {
+            conversation_id: Some("conversation_1".to_string()),
             run_id: "run_1".to_string(),
             capability_id: "browser_automation".to_string(),
             activation_id: "42e7ec2d-03f1-49f3-aa0a-e73ca0f88d91".to_string(),
@@ -470,6 +473,7 @@ mod tests {
                 "arguments": {"call_reason": "Inspect the local fixture."},
                 "timeoutMs": 60_000,
                 "authorizationContext": {
+                    "conversationId": "conversation_1",
                     "runId": "run_1",
                     "capabilityId": "browser_automation",
                     "activationId": "42e7ec2d-03f1-49f3-aa0a-e73ca0f88d91",
@@ -501,6 +505,7 @@ mod tests {
             request_id: "acb51da4-2716-4b7d-a085-c48864c5a37e".to_string(),
             parent_request_id: None,
             authorization_context: ManagedPlaywrightAuthorizationContext {
+                conversation_id: Some("conversation_1".to_string()),
                 run_id: "run_1".to_string(),
                 capability_id: "browser_automation".to_string(),
                 activation_id: "42e7ec2d-03f1-49f3-aa0a-e73ca0f88d91".to_string(),

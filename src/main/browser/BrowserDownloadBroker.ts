@@ -1,20 +1,27 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { constants, createReadStream, lstatSync, realpathSync } from 'node:fs'
+import { copyFile, link, lstat, unlink } from 'node:fs/promises'
+import { basename, extname, isAbsolute, join, parse } from 'node:path'
 import type { DownloadItem, Event, Session, WebContents } from 'electron'
-import type { BrowserArtifactReference } from '@mycopilot/protocol'
-
 import {
-  BrowserArtifactBroker,
-  BrowserArtifactBrokerError,
-  safeSuggestedFileName,
-  type BrowserArtifactOwner,
-  type BrowserArtifactOutputSession,
-  type BrowserArtifactReservation
-} from './BrowserArtifactBroker'
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
+  parseBrowserDownloadRecord,
+  parseBrowserDownloadSettingsRecord,
+  type BrowserDownloadRecord,
+  type BrowserDownloadReference,
+  type BrowserDownloadRegistrationInput,
+  type BrowserDownloadSettingsRecord
+} from '@mycopilot/protocol'
 
-const DEFAULT_MAX_ACTIVE_DOWNLOADS = 4
-const DEFAULT_MAX_SINGLE_DOWNLOAD_BYTES = 64 * 1024 * 1024
-const DEFAULT_MAX_ACTIVE_BYTES = 128 * 1024 * 1024
+import { safeSuggestedFileName, type BrowserArtifactOwner } from './BrowserArtifactBroker'
+
+const DEFAULT_MAX_ACTIVE_DOWNLOADS = 8
+const DEFAULT_MAX_SINGLE_AGENT_DOWNLOAD_BYTES = 64 * 1024 * 1024
+const DEFAULT_MAX_ACTIVE_AGENT_BYTES = 128 * 1024 * 1024
 const DOWNLOAD_SETTLE_TIMEOUT_MS = 30_000
+const DOWNLOAD_PROMPT_SETTLE_TIMEOUT_MS = 5 * 60_000
 const MAX_REGISTERED_GUESTS = 32
+const MAX_FILE_NAME_ATTEMPTS = 10_000
 
 export type BrowserDownloadBrokerErrorCode =
   | 'browser.download.closed'
@@ -23,7 +30,8 @@ export type BrowserDownloadBrokerErrorCode =
   | 'browser.download.target_closed'
   | 'browser.download.too_large'
   | 'browser.download.interrupted'
-  | 'browser.download.artifact_failed'
+  | 'browser.download.destination_unavailable'
+  | 'browser.download.registration_failed'
   | 'browser.download.outcome_unknown'
 
 export class BrowserDownloadBrokerError extends Error {
@@ -37,6 +45,10 @@ export class BrowserDownloadBrokerError extends Error {
   }
 }
 
+export interface BrowserDownloadOwner extends BrowserArtifactOwner {
+  conversationId?: string
+}
+
 export interface BrowserDownloadToolLease {
   claimCreatedGuest(input: {
     action: 'new' | 'popup'
@@ -47,14 +59,17 @@ export interface BrowserDownloadToolLease {
   expectTargetClose(input: { generation: number; surfaceId: string }): void
   ready?(): Promise<void>
   markDispatched(): void
-  settle(): Promise<readonly BrowserArtifactReference[]>
-  artifacts(): readonly BrowserArtifactReference[]
+  settle(): Promise<readonly BrowserDownloadReference[]>
+  downloads(): readonly BrowserDownloadReference[]
   finish(): void
 }
 
 export interface BrowserDownloadBrokerOptions {
-  artifacts: BrowserArtifactBroker
   expectedSession: Session
+  initialSettings: BrowserDownloadSettingsRecord
+  registerDownload(input: BrowserDownloadRegistrationInput): Promise<BrowserDownloadRecord>
+  systemDownloadDirectory: string
+  onHistoryChanged?: () => void
   maxActiveBytes?: number
   maxActiveDownloads?: number
   maxSingleDownloadBytes?: number
@@ -66,12 +81,12 @@ interface GuestRecord {
   surfaceId: string
 }
 
+type ToolOwner = Omit<BrowserDownloadOwner, 'generation' | 'surfaceId'>
+
 interface ActiveTool {
   accepting: boolean
-  artifacts: BrowserArtifactReference[]
   callerSignal?: AbortSignal
   createdGuestClaimsStarted: Record<'new' | 'popup', number>
-  cleanup?: Promise<void>
   dispatched: boolean
   downloads: Set<ActiveDownload>
   expectedTargetCloses: Set<string>
@@ -80,36 +95,48 @@ interface ActiveTool {
   guests: Set<GuestRecord>
   handleCallerAbort: () => void
   maxCreatedGuests: Record<'new' | 'popup', number>
-  owner: Omit<BrowserArtifactOwner, 'generation' | 'surfaceId'>
-  outputSession?: BrowserArtifactOutputSession
+  owner: ToolOwner
+  references: BrowserDownloadReference[]
   ready: Promise<void>
-  reservationsByGuest: Map<GuestRecord, BrowserArtifactReservation[]>
   settled: boolean
 }
 
 interface ActiveDownload {
+  destination: string | null
+  downloadId: string
+  displayName: string
   guest: GuestRecord
-  item: DownloadItem
-  reservation: BrowserArtifactReservation
-  settle: () => void
-  lifetime: Promise<void>
-  tool: ActiveTool
   handleDone: (event: Event, state: 'completed' | 'cancelled' | 'interrupted') => void
   handleUpdated: (event: Event, state: 'progressing' | 'interrupted') => void
+  item: DownloadItem
+  lifetime: Promise<void>
+  mimeType: string
+  settle: () => void
+  sourceOrigin: string | null
+  tempPath: string | null
   terminal: boolean
+  tool?: ActiveTool
 }
 
 /**
- * Binds Electron downloads to the exact active Browser Tool and publishes them through the same
- * private ArtifactBroker as explicit Playwright file tools. A Tool lease does not settle until
- * every admitted DownloadItem has either committed or reached a typed terminal failure.
+ * Owns every download from the managed browser partition.
+ *
+ * Automatic downloads first land in a hidden temporary file inside the configured destination.
+ * When the user enables save prompts, Electron owns the native dialog and writes to the explicitly
+ * selected path instead. Both paths are hashed and committed as durable Core records; public
+ * references never contain the destination or user name.
  */
 export class BrowserDownloadBroker {
-  private readonly artifactsBroker: BrowserArtifactBroker
   private readonly expectedSession: Session
+  private readonly systemDownloadDirectory: string
+  private readonly registerDownloadRecord: BrowserDownloadBrokerOptions['registerDownload']
+  private readonly onHistoryChanged?: () => void
+  private readonly historyChangedListeners = new Set<() => void>()
   private readonly maxActiveBytes: number
   private readonly maxActiveDownloads: number
   private readonly maxSingleDownloadBytes: number
+  private settingsRecord: BrowserDownloadSettingsRecord
+  private destinationDirectory: string
   private readonly guests = new Map<number, GuestRecord>()
   private readonly tools = new Set<ActiveTool>()
   private readonly activeDownloads = new Set<ActiveDownload>()
@@ -131,12 +158,10 @@ export class BrowserDownloadBroker {
       return
     }
     const tool = [...this.tools].find(
-      (candidate) => candidate.guests.has(guest) && candidate.accepting && !candidate.finished
+      (candidate) => candidate.guests.has(guest) && !candidate.finished
     )
-    // Without an exact active Agent owner there is no safe run/capability binding and no approved
-    // user export path in this round. Cancelling prevents Electron from falling back to the real
-    // user Downloads directory. A future manual-download UX can introduce its own typed owner.
-    if (!tool) {
+    if (tool && !tool.accepting) {
+      this.failTool(tool, 'browser.download.outcome_unknown')
       safeCancel(item)
       return
     }
@@ -144,17 +169,24 @@ export class BrowserDownloadBroker {
   }
 
   constructor(options: BrowserDownloadBrokerOptions) {
-    this.artifactsBroker = options.artifacts
     this.expectedSession = options.expectedSession
-    this.maxActiveBytes = positiveBound(options.maxActiveBytes, DEFAULT_MAX_ACTIVE_BYTES)
+    if (!options.systemDownloadDirectory || !isAbsolute(options.systemDownloadDirectory)) {
+      throw new Error('browser.download.destination_unavailable')
+    }
+    this.systemDownloadDirectory = options.systemDownloadDirectory
+    this.registerDownloadRecord = options.registerDownload
+    this.onHistoryChanged = options.onHistoryChanged
+    this.maxActiveBytes = positiveBound(options.maxActiveBytes, DEFAULT_MAX_ACTIVE_AGENT_BYTES)
     this.maxActiveDownloads = positiveBound(
       options.maxActiveDownloads,
       DEFAULT_MAX_ACTIVE_DOWNLOADS
     )
     this.maxSingleDownloadBytes = positiveBound(
       options.maxSingleDownloadBytes,
-      DEFAULT_MAX_SINGLE_DOWNLOAD_BYTES
+      DEFAULT_MAX_SINGLE_AGENT_DOWNLOAD_BYTES
     )
+    this.settingsRecord = parseBrowserDownloadSettingsRecord(options.initialSettings)
+    this.destinationDirectory = this.configuredDestination(this.settingsRecord)
   }
 
   install(): void {
@@ -162,6 +194,28 @@ export class BrowserDownloadBroker {
     if (this.installed) return
     this.installed = true
     this.expectedSession.on('will-download', this.handleWillDownload)
+  }
+
+  settings(): BrowserDownloadSettingsRecord {
+    return structuredClone(this.settingsRecord)
+  }
+
+  downloadDirectory(): string {
+    return this.destinationDirectory
+  }
+
+  onHistoryChangedEvent(listener: () => void): () => void {
+    this.assertUsable()
+    this.historyChangedListeners.add(listener)
+    return () => this.historyChangedListeners.delete(listener)
+  }
+
+  updateSettings(value: BrowserDownloadSettingsRecord): void {
+    this.assertUsable()
+    const next = parseBrowserDownloadSettingsRecord(value)
+    const destination = this.configuredDestination(next)
+    this.settingsRecord = next
+    this.destinationDirectory = destination
   }
 
   registerGuest(input: { guest: WebContents; surfaceId: string; generation: number }): void {
@@ -194,15 +248,15 @@ export class BrowserDownloadBroker {
 
   unregisterGuest(guest: WebContents, generation?: number): void {
     const record = this.guests.get(guest.id)
-    if (!record || record.guest !== guest || (generation && record.generation !== generation))
+    if (!record || record.guest !== guest || (generation && record.generation !== generation)) {
       return
+    }
     this.guests.delete(guest.id)
     for (const tool of [...this.tools]) {
       if (!tool.guests.has(record)) continue
       const key = surfaceKey(record.surfaceId, record.generation)
       if (tool.expectedTargetCloses.delete(key)) {
         tool.guests.delete(record)
-        void this.releaseGuestReservations(tool, record)
         for (const download of [...tool.downloads]) {
           if (download.guest === record) void this.cancelDownload(download)
         }
@@ -214,23 +268,10 @@ export class BrowserDownloadBroker {
 
   beginTool(input: {
     guest: WebContents
-    owner: BrowserArtifactOwner
+    owner: BrowserDownloadOwner
     signal?: AbortSignal
   }): BrowserDownloadToolLease {
-    this.assertUsable()
-    if (
-      this.finalizedRuns.has(input.owner.runId) ||
-      this.revokedActivations.has(input.owner.activationId) ||
-      this.closedToolCalls.has(toolCallKey(input.owner.runId, input.owner.toolCallId))
-    ) {
-      throw new BrowserDownloadBrokerError('browser.download.closed', 'definitely_not_dispatched')
-    }
-    if (this.closedSurfaces.has(surfaceKey(input.owner.surfaceId, input.owner.generation))) {
-      throw new BrowserDownloadBrokerError(
-        'browser.download.target_closed',
-        'definitely_not_dispatched'
-      )
-    }
+    this.assertToolOwner(input.owner)
     const guest = this.guests.get(input.guest.id)
     if (
       !guest ||
@@ -247,68 +288,46 @@ export class BrowserDownloadBroker {
     if ([...this.tools].some((tool) => tool.guests.has(guest) && !tool.finished)) {
       throw new BrowserDownloadBrokerError('browser.download.busy', 'definitely_not_dispatched')
     }
-    const tool = {} as ActiveTool
-    const handleCallerAbort = (): void => {
-      void this.abortTool(tool, 'browser.download.cancelled')
-    }
-    Object.assign(tool, {
-      accepting: false,
-      artifacts: [],
-      callerSignal: input.signal,
-      createdGuestClaimsStarted: { new: 0, popup: 0 },
-      dispatched: false,
-      downloads: new Set<ActiveDownload>(),
-      expectedTargetCloses: new Set<string>(),
-      finished: false,
-      guests: new Set([guest]),
-      handleCallerAbort,
-      maxCreatedGuests: { new: 0, popup: 4 },
-      owner: ownerBase(input.owner),
-      reservationsByGuest: new Map(),
-      settled: false
-    })
-    this.tools.add(tool)
-    input.signal?.addEventListener('abort', handleCallerAbort, { once: true })
-    tool.ready = this.prepareTool(tool, input)
-    return this.toolLease(tool)
+    return this.createTool(ownerBase(input.owner), [guest], input.signal, { new: 0, popup: 4 })
   }
 
-  /** Prepares a run/call owner before Target.createTarget has produced a guest. */
   beginTargetCreationTool(input: {
-    owner: Omit<BrowserArtifactOwner, 'generation' | 'surfaceId'>
+    owner: ToolOwner
     signal?: AbortSignal
   }): BrowserDownloadToolLease {
-    this.assertUsable()
-    if (
-      this.finalizedRuns.has(input.owner.runId) ||
-      this.revokedActivations.has(input.owner.activationId) ||
-      this.closedToolCalls.has(toolCallKey(input.owner.runId, input.owner.toolCallId))
-    ) {
-      throw new BrowserDownloadBrokerError('browser.download.closed', 'definitely_not_dispatched')
-    }
+    this.assertToolOwner(input.owner)
+    return this.createTool({ ...input.owner }, [], input.signal, { new: 1, popup: 4 })
+  }
+
+  private createTool(
+    owner: ToolOwner,
+    guests: GuestRecord[],
+    signal: AbortSignal | undefined,
+    maxCreatedGuests: Record<'new' | 'popup', number>
+  ): BrowserDownloadToolLease {
     const tool = {} as ActiveTool
     const handleCallerAbort = (): void => {
       void this.abortTool(tool, 'browser.download.cancelled')
     }
     Object.assign(tool, {
       accepting: false,
-      artifacts: [],
-      callerSignal: input.signal,
+      callerSignal: signal,
       createdGuestClaimsStarted: { new: 0, popup: 0 },
       dispatched: false,
       downloads: new Set<ActiveDownload>(),
       expectedTargetCloses: new Set<string>(),
       finished: false,
-      guests: new Set<GuestRecord>(),
+      guests: new Set(guests),
       handleCallerAbort,
-      maxCreatedGuests: { new: 1, popup: 4 },
-      owner: { ...input.owner },
-      reservationsByGuest: new Map<GuestRecord, BrowserArtifactReservation[]>(),
+      maxCreatedGuests,
+      owner,
+      references: [],
+      ready: Promise.resolve(),
       settled: false
     })
     this.tools.add(tool)
-    input.signal?.addEventListener('abort', handleCallerAbort, { once: true })
-    tool.ready = this.prepareTargetCreationTool(tool)
+    signal?.addEventListener('abort', handleCallerAbort, { once: true })
+    if (signal?.aborted) void this.abortTool(tool, 'browser.download.cancelled')
     return this.toolLease(tool)
   }
 
@@ -316,17 +335,11 @@ export class BrowserDownloadBroker {
     return {
       claimCreatedGuest: async (input) => await this.claimCreatedGuest(tool, input),
       expectTargetClose: (input) => {
-        if (tool.finished) {
-          throw new BrowserDownloadBrokerError(
-            'browser.download.target_closed',
-            tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
-          )
-        }
         const guest = [...tool.guests].find(
           (candidate) =>
             candidate.surfaceId === input.surfaceId && candidate.generation === input.generation
         )
-        if (!guest) {
+        if (tool.finished || !guest) {
           throw new BrowserDownloadBrokerError(
             'browser.download.target_closed',
             tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
@@ -338,108 +351,12 @@ export class BrowserDownloadBroker {
       markDispatched: () => {
         if (!tool.finished) {
           tool.dispatched = true
-          // A prepared lease owns private destinations but has no provenance authority yet.
-          // Admission starts only at the exact upstream dispatch boundary so a page timer or a
-          // user's manual click cannot be misattributed to an Agent Tool while Catalog/artifact
-          // preparation is still in progress.
           tool.accepting = true
         }
       },
       settle: () => this.settleTool(tool),
-      artifacts: () => tool.artifacts.map((artifact) => structuredClone(artifact)),
+      downloads: () => tool.references.map((reference) => structuredClone(reference)),
       finish: () => this.finishTool(tool)
-    }
-  }
-
-  private async prepareTool(
-    tool: ActiveTool,
-    input: { guest: WebContents; owner: BrowserArtifactOwner; signal?: AbortSignal }
-  ): Promise<void> {
-    let outputSession: BrowserArtifactOutputSession | undefined
-    const reservations: BrowserArtifactReservation[] = []
-    try {
-      outputSession = await this.artifactsBroker.openSession()
-      for (let index = 0; index < this.maxActiveDownloads; index += 1) {
-        reservations.push(
-          await outputSession.reserveFile({
-            owner: input.owner,
-            kind: 'download',
-            mimeType: 'application/octet-stream',
-            suggestedFileName: `download-${index + 1}.bin`
-          })
-        )
-      }
-      this.assertUsable()
-      const currentGuest = this.guests.get(input.guest.id)
-      if (
-        tool.finished ||
-        input.signal?.aborted ||
-        !currentGuest ||
-        !tool.guests.has(currentGuest) ||
-        input.guest.isDestroyed() ||
-        this.finalizedRuns.has(input.owner.runId) ||
-        this.revokedActivations.has(input.owner.activationId) ||
-        this.closedToolCalls.has(toolCallKey(input.owner.runId, input.owner.toolCallId)) ||
-        this.closedSurfaces.has(surfaceKey(input.owner.surfaceId, input.owner.generation))
-      ) {
-        throw new BrowserDownloadBrokerError(
-          currentGuest && tool.guests.has(currentGuest)
-            ? 'browser.download.cancelled'
-            : 'browser.download.target_closed',
-          'definitely_not_dispatched'
-        )
-      }
-      tool.outputSession = outputSession
-      tool.reservationsByGuest.set(currentGuest, reservations)
-      if (input.signal?.aborted) {
-        await this.abortTool(tool, 'browser.download.cancelled')
-        throw new BrowserDownloadBrokerError(
-          'browser.download.cancelled',
-          'definitely_not_dispatched'
-        )
-      }
-    } catch (error) {
-      await Promise.allSettled(reservations.map((reservation) => reservation.discard()))
-      await outputSession?.close().catch(() => undefined)
-      tool.finished = true
-      tool.accepting = false
-      tool.callerSignal?.removeEventListener('abort', tool.handleCallerAbort)
-      this.tools.delete(tool)
-      if (error instanceof BrowserDownloadBrokerError) throw error
-      throw new BrowserDownloadBrokerError(
-        'browser.download.artifact_failed',
-        'definitely_not_dispatched'
-      )
-    }
-  }
-
-  private async prepareTargetCreationTool(tool: ActiveTool): Promise<void> {
-    try {
-      tool.outputSession = await this.artifactsBroker.openSession()
-      this.assertUsable()
-      if (
-        tool.finished ||
-        tool.callerSignal?.aborted ||
-        this.finalizedRuns.has(tool.owner.runId) ||
-        this.revokedActivations.has(tool.owner.activationId) ||
-        this.closedToolCalls.has(toolCallKey(tool.owner.runId, tool.owner.toolCallId))
-      ) {
-        throw new BrowserDownloadBrokerError(
-          'browser.download.cancelled',
-          'definitely_not_dispatched'
-        )
-      }
-    } catch (error) {
-      await tool.outputSession?.close().catch(() => undefined)
-      tool.finished = true
-      tool.accepting = false
-      tool.callerSignal?.removeEventListener('abort', tool.handleCallerAbort)
-      this.tools.delete(tool)
-      if (error instanceof BrowserDownloadBrokerError) throw error
-      throw new BrowserDownloadBrokerError(
-        'browser.download.artifact_failed',
-        'definitely_not_dispatched'
-      )
     }
   }
 
@@ -468,11 +385,7 @@ export class BrowserDownloadBroker {
       [...this.tools].some(
         (candidate) => candidate !== tool && candidate.guests.has(guest) && !candidate.finished
       ) ||
-      this.closedSurfaces.has(surfaceKey(input.surfaceId, input.generation)) ||
-      this.finalizedRuns.has(tool.owner.runId) ||
-      this.revokedActivations.has(tool.owner.activationId) ||
-      this.closedToolCalls.has(toolCallKey(tool.owner.runId, tool.owner.toolCallId)) ||
-      !tool.outputSession
+      this.closedSurfaces.has(surfaceKey(input.surfaceId, input.generation))
     ) {
       throw new BrowserDownloadBrokerError(
         'browser.download.target_closed',
@@ -480,87 +393,28 @@ export class BrowserDownloadBroker {
       )
     }
     tool.createdGuestClaimsStarted[input.action] += 1
-    const reservations: BrowserArtifactReservation[] = []
-    const owner: BrowserArtifactOwner = {
-      ...tool.owner,
-      generation: input.generation,
-      surfaceId: input.surfaceId
-    }
-    try {
-      for (let index = 0; index < this.maxActiveDownloads; index += 1) {
-        reservations.push(
-          await tool.outputSession.reserveFile({
-            owner,
-            kind: 'download',
-            mimeType: 'application/octet-stream',
-            suggestedFileName: `download-${index + 1}.bin`
-          })
-        )
-      }
-      const current = this.guests.get(input.guest.id)
-      if (
-        tool.finished ||
-        current !== guest ||
-        input.guest.isDestroyed() ||
-        this.closedSurfaces.has(surfaceKey(input.surfaceId, input.generation))
-      ) {
-        throw new BrowserDownloadBrokerError(
-          'browser.download.target_closed',
-          tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
-        )
-      }
-      tool.guests.add(guest)
-      tool.reservationsByGuest.set(guest, reservations)
-    } catch (error) {
-      await Promise.allSettled(reservations.map((reservation) => reservation.discard()))
-      if (error instanceof BrowserDownloadBrokerError) throw error
-      throw new BrowserDownloadBrokerError(
-        'browser.download.artifact_failed',
-        tool.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
-      )
-    }
+    tool.guests.add(guest)
   }
 
   async finalizeRun(runId: string): Promise<void> {
     this.finalizedRuns.add(runId)
-    await Promise.allSettled(
-      [...this.tools]
-        .filter((tool) => tool.owner.runId === runId)
-        .map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
-    )
-    await this.artifactsBroker.finalizeRun(runId)
+    await this.abortMatchingTools((tool) => tool.owner.runId === runId)
   }
 
   async releaseRun(runId: string): Promise<void> {
-    this.finalizedRuns.add(runId)
-    await Promise.allSettled(
-      [...this.tools]
-        .filter((tool) => tool.owner.runId === runId)
-        .map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
-    )
-    await this.artifactsBroker.releaseRun(runId)
+    await this.finalizeRun(runId)
   }
 
   async releaseCapability(activationId: string): Promise<void> {
     this.revokedActivations.add(activationId)
-    await Promise.allSettled(
-      [...this.tools]
-        .filter((tool) => tool.owner.activationId === activationId)
-        .map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
-    )
-    await this.artifactsBroker.releaseCapability(activationId)
+    await this.abortMatchingTools((tool) => tool.owner.activationId === activationId)
   }
 
   async releaseToolCall(input: { runId: string; toolCallId: string }): Promise<void> {
     this.closedToolCalls.add(toolCallKey(input.runId, input.toolCallId))
-    await Promise.allSettled(
-      [...this.tools]
-        .filter(
-          (tool) => tool.owner.runId === input.runId && tool.owner.toolCallId === input.toolCallId
-        )
-        .map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
+    await this.abortMatchingTools(
+      (tool) => tool.owner.runId === input.runId && tool.owner.toolCallId === input.toolCallId
     )
-    await this.artifactsBroker.releaseToolCall(input)
   }
 
   async releaseSurface(input: { surfaceId: string; generation: number }): Promise<void> {
@@ -575,7 +429,6 @@ export class BrowserDownloadBroker {
       const key = surfaceKey(input.surfaceId, input.generation)
       if (tool.expectedTargetCloses.delete(key)) {
         tool.guests.delete(guest)
-        cleanups.push(this.releaseGuestReservations(tool, guest))
         for (const download of [...tool.downloads]) {
           if (download.guest === guest) cleanups.push(this.cancelDownload(download))
         }
@@ -584,7 +437,6 @@ export class BrowserDownloadBroker {
       }
     }
     await Promise.allSettled(cleanups)
-    await this.artifactsBroker.releaseSurface(input)
   }
 
   snapshot(): { downloads: number; guests: number; tools: number; activeBytes: number } {
@@ -606,76 +458,97 @@ export class BrowserDownloadBroker {
     await Promise.allSettled(
       [...this.tools].map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
     )
+    await Promise.allSettled(
+      [...this.activeDownloads].map((download) => this.cancelDownload(download))
+    )
     this.guests.clear()
+    this.tools.clear()
+    this.activeDownloads.clear()
     this.closedSurfaces.clear()
     this.closedToolCalls.clear()
     this.finalizedRuns.clear()
     this.revokedActivations.clear()
-    await Promise.allSettled(
-      [...this.activeDownloads].map((download) => this.cancelDownload(download))
-    )
-    this.activeDownloads.clear()
-    this.tools.clear()
+    this.historyChangedListeners.clear()
   }
 
-  private admitDownload(tool: ActiveTool, guest: GuestRecord, item: DownloadItem): void {
-    const reservations = tool.reservationsByGuest.get(guest)
+  private admitDownload(
+    tool: ActiveTool | undefined,
+    guest: GuestRecord,
+    item: DownloadItem
+  ): void {
+    if (tool && !tool.owner.conversationId) {
+      this.failTool(tool, 'browser.download.registration_failed')
+      safeCancel(item)
+      return
+    }
     if (
       this.disposed ||
       this.activeDownloads.size >= this.maxActiveDownloads ||
-      this.downloadExceedsBudget(item) ||
-      !reservations ||
-      reservations.length === 0
+      (tool && this.downloadExceedsAgentBudget(item))
     ) {
-      this.failTool(tool, 'browser.download.too_large')
+      if (tool) this.failTool(tool, 'browser.download.too_large')
       safeCancel(item)
       return
     }
-    const reservation = reservations.shift()
-    if (!reservation) {
-      this.failTool(tool, 'browser.download.too_large')
+
+    let configuredDestination: string
+    try {
+      configuredDestination = canonicalDownloadDirectory(this.destinationDirectory)
+    } catch {
+      if (tool) this.failTool(tool, 'browser.download.destination_unavailable')
       safeCancel(item)
       return
     }
-    const download = createActiveDownload(
-      tool,
+
+    const downloadId = `browser-download:${randomUUID()}`
+    const displayName = sanitizedDownloadFileName(safeDownloadString(item, 'getFilename'))
+    const promptForDestination = this.settingsRecord.askWhereToSave
+    const destination = promptForDestination ? null : configuredDestination
+    const tempPath = promptForDestination
+      ? null
+      : join(configuredDestination, `.mycopilot-download-${downloadId.slice(17)}.part`)
+    const download = createActiveDownload({
+      destination,
+      downloadId,
+      displayName,
       guest,
       item,
-      reservation,
-      (active, state) => this.finishDownload(active, state),
-      (active) => {
-        if (!this.downloadExceedsBudget(active.item, active)) return
+      mimeType: sanitizedDownloadMimeType(safeDownloadString(item, 'getMimeType')),
+      sourceOrigin: safeDownloadOrigin(item),
+      tempPath,
+      tool,
+      finish: (active, state) => this.finishDownload(active, state),
+      updated: (active) => {
+        if (!active.tool || !this.downloadExceedsAgentBudget(active.item, active)) return
         this.failTool(active.tool, 'browser.download.too_large')
         void this.cancelDownload(active)
       }
-    )
+    })
     try {
-      reservation.updateMetadata({
-        suggestedFileName: sanitizedDownloadFileName(safeDownloadString(item, 'getFilename')),
-        mimeType: sanitizedDownloadMimeType(safeDownloadString(item, 'getMimeType'))
-      })
-      tool.downloads.add(download)
+      tool?.downloads.add(download)
       this.activeDownloads.add(download)
       item.once('done', download.handleDone)
       item.on('updated', download.handleUpdated)
-      // Electron requires the managed destination during the synchronous will-download turn.
-      // It must be set before returning to avoid a native save dialog or a stalled transfer.
-      item.setSavePath(reservation.managedPath)
+      if (promptForDestination) {
+        item.setSaveDialogOptions({ defaultPath: join(configuredDestination, displayName) })
+      } else {
+        item.setSavePath(tempPath as string)
+      }
     } catch {
       this.removeDownloadListeners(download)
-      tool.downloads.delete(download)
+      tool?.downloads.delete(download)
       this.activeDownloads.delete(download)
       download.terminal = true
       download.settle()
-      this.failTool(tool, 'browser.download.artifact_failed')
-      void reservation.discard()
+      if (tool) this.failTool(tool, 'browser.download.destination_unavailable')
+      if (tempPath) void removeFile(tempPath)
       safeCancel(item)
       return
     }
     const state = safeDownloadState(item)
     if (state !== 'progressing') {
       void this.finishDownload(download, state)
-    } else if (this.downloadExceedsBudget(item, download)) {
+    } else if (tool && this.downloadExceedsAgentBudget(item, download)) {
       this.failTool(tool, 'browser.download.too_large')
       void this.cancelDownload(download)
     }
@@ -691,27 +564,72 @@ export class BrowserDownloadBroker {
     this.activeDownloads.delete(download)
     try {
       if (state !== 'completed') {
-        this.failTool(
-          download.tool,
-          state === 'interrupted' ? 'browser.download.interrupted' : 'browser.download.cancelled'
-        )
-        await download.reservation.discard()
+        if (download.tool) {
+          this.failTool(
+            download.tool,
+            state === 'interrupted' ? 'browser.download.interrupted' : 'browser.download.cancelled'
+          )
+        }
+        if (download.tempPath) await removeFile(download.tempPath)
         return
       }
-      const artifact = await download.reservation.commit()
-      download.tool.artifacts.push(artifact)
+
+      const completedPath = download.tempPath ?? safeCompletedDownloadPath(download.item)
+      const identity = await hashRegularFile(completedPath)
+      if (download.tool && identity.sizeBytes > this.maxSingleDownloadBytes) {
+        this.failTool(download.tool, 'browser.download.too_large')
+        if (download.tempPath) await removeFile(download.tempPath)
+        return
+      }
+      const absolutePath = download.tempPath
+        ? await publishWithoutOverwrite(
+            download.tempPath,
+            download.destination as string,
+            download.displayName
+          )
+        : completedPath
+      let record: BrowserDownloadRecord
+      try {
+        record = parseBrowserDownloadRecord(
+          await this.registerDownloadRecord({
+            schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+            downloadId: download.downloadId,
+            source: download.tool ? 'agent' : 'manual',
+            displayName: basename(absolutePath),
+            mimeType: download.mimeType,
+            sizeBytes: identity.sizeBytes,
+            sha256: identity.sha256,
+            absolutePath,
+            sourceOrigin: download.sourceOrigin,
+            conversationId: download.tool?.owner.conversationId ?? null,
+            runId: download.tool?.owner.runId ?? null,
+            callId: download.tool?.owner.toolCallId ?? null,
+            createdAt: Date.now()
+          })
+        )
+      } catch {
+        // A native save dialog makes the selected path user-owned. Never delete that file merely
+        // because metadata registration failed; automatic staging remains transactional.
+        if (download.tempPath) await removeFile(absolutePath)
+        throw new BrowserDownloadBrokerError(
+          'browser.download.registration_failed',
+          download.tool?.dispatched ? 'possibly_dispatched' : 'definitely_not_dispatched'
+        )
+      }
+      download.tool?.references.push(publicDownloadReference(record))
+      notifyHistoryChanged(this.onHistoryChanged, this.historyChangedListeners)
     } catch (error) {
-      this.failTool(
-        download.tool,
-        error instanceof BrowserArtifactBrokerError &&
-          (error.code === 'browser.artifact.too_large' ||
-            error.code === 'browser.artifact.capacity')
-          ? 'browser.download.too_large'
-          : 'browser.download.artifact_failed'
-      )
-      await download.reservation.discard().catch(() => undefined)
+      if (download.tool) {
+        this.failTool(
+          download.tool,
+          error instanceof BrowserDownloadBrokerError
+            ? error.code
+            : 'browser.download.registration_failed'
+        )
+      }
+      if (download.tempPath) await removeFile(download.tempPath)
     } finally {
-      download.tool.downloads.delete(download)
+      download.tool?.downloads.delete(download)
       download.settle()
     }
   }
@@ -722,21 +640,24 @@ export class BrowserDownloadBroker {
     this.removeDownloadListeners(download)
     this.activeDownloads.delete(download)
     safeCancel(download.item)
-    await download.reservation.discard().catch(() => undefined)
-    download.tool.downloads.delete(download)
+    if (download.tempPath) await removeFile(download.tempPath)
+    download.tool?.downloads.delete(download)
     download.settle()
   }
 
-  private async settleTool(tool: ActiveTool): Promise<readonly BrowserArtifactReference[]> {
+  private async settleTool(tool: ActiveTool): Promise<readonly BrowserDownloadReference[]> {
     await tool.ready
-    if (tool.settled) return tool.artifacts.map((artifact) => structuredClone(artifact))
-    // Drain Electron events queued by the page action without a time-based sleep. Once this turn
-    // completes, later downloads are no longer attributed to this settled Tool.
+    if (tool.settled) return tool.references.map((reference) => structuredClone(reference))
     await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
     tool.accepting = false
     if (tool.downloads.size > 0) {
-      const lifetimes = [...tool.downloads].map((download) => download.lifetime)
-      const completed = await settleDownloadsWithin(lifetimes, DOWNLOAD_SETTLE_TIMEOUT_MS)
+      const timeoutMs = [...tool.downloads].some((download) => download.tempPath === null)
+        ? DOWNLOAD_PROMPT_SETTLE_TIMEOUT_MS
+        : DOWNLOAD_SETTLE_TIMEOUT_MS
+      const completed = await settleDownloadsWithin(
+        [...tool.downloads].map((download) => download.lifetime),
+        timeoutMs
+      )
       if (!completed) {
         this.failTool(tool, 'browser.download.outcome_unknown')
         await Promise.allSettled(
@@ -744,10 +665,9 @@ export class BrowserDownloadBroker {
         )
       }
     }
-    await this.cleanupTool(tool)
     tool.settled = true
     if (tool.failure) throw tool.failure
-    return tool.artifacts.map((artifact) => structuredClone(artifact))
+    return tool.references.map((reference) => structuredClone(reference))
   }
 
   private finishTool(tool: ActiveTool): void {
@@ -758,40 +678,24 @@ export class BrowserDownloadBroker {
     this.tools.delete(tool)
     if (!tool.settled && tool.downloads.size > 0) {
       void this.abortTool(tool, 'browser.download.outcome_unknown')
-    } else if (!tool.settled) void this.cleanupTool(tool)
+    }
   }
 
   private async abortTool(tool: ActiveTool, code: BrowserDownloadBrokerErrorCode): Promise<void> {
-    if (tool.finished && tool.downloads.size === 0 && tool.cleanup) {
-      await tool.cleanup
-      return
-    }
     this.failTool(tool, code)
     tool.accepting = false
     tool.finished = true
     tool.callerSignal?.removeEventListener('abort', tool.handleCallerAbort)
     this.tools.delete(tool)
     await Promise.allSettled([...tool.downloads].map((download) => this.cancelDownload(download)))
-    await this.cleanupTool(tool)
   }
 
-  private cleanupTool(tool: ActiveTool): Promise<void> {
-    tool.cleanup ??= (async () => {
-      const unused = [...tool.reservationsByGuest.values()].flatMap((reservations) =>
-        reservations.splice(0)
-      )
-      tool.reservationsByGuest.clear()
-      await Promise.allSettled(unused.map((reservation) => reservation.discard()))
-      await tool.outputSession?.close().catch(() => undefined)
-    })()
-    return tool.cleanup
-  }
-
-  private async releaseGuestReservations(tool: ActiveTool, guest: GuestRecord): Promise<void> {
-    const reservations = tool.reservationsByGuest.get(guest)
-    if (!reservations) return
-    tool.reservationsByGuest.delete(guest)
-    await Promise.allSettled(reservations.splice(0).map((reservation) => reservation.discard()))
+  private async abortMatchingTools(predicate: (tool: ActiveTool) => boolean): Promise<void> {
+    await Promise.allSettled(
+      [...this.tools]
+        .filter(predicate)
+        .map((tool) => this.abortTool(tool, 'browser.download.cancelled'))
+    )
   }
 
   private failTool(tool: ActiveTool, code: BrowserDownloadBrokerErrorCode): void {
@@ -806,22 +710,34 @@ export class BrowserDownloadBroker {
     download.item.removeListener('updated', download.handleUpdated)
   }
 
-  private downloadExceedsBudget(item: DownloadItem, exclude?: ActiveDownload): boolean {
+  private downloadExceedsAgentBudget(item: DownloadItem, exclude?: ActiveDownload): boolean {
     const candidate = downloadByteEstimate(item)
     return (
       candidate > this.maxSingleDownloadBytes ||
-      candidate + this.activeByteEstimate(exclude) > this.maxActiveBytes
+      candidate + this.activeByteEstimate(exclude, true) > this.maxActiveBytes
     )
   }
 
-  private activeByteEstimate(exclude?: ActiveDownload): number {
+  private activeByteEstimate(exclude?: ActiveDownload, agentOnly = false): number {
     let bytes = 0
     for (const download of this.activeDownloads) {
-      if (download === exclude) continue
+      if (download === exclude || (agentOnly && !download.tool)) continue
       bytes += downloadByteEstimate(download.item)
-      if (bytes > this.maxActiveBytes) return bytes
     }
     return bytes
+  }
+
+  private assertToolOwner(owner: ToolOwner | BrowserDownloadOwner): void {
+    this.assertUsable()
+    if (
+      this.finalizedRuns.has(owner.runId) ||
+      this.revokedActivations.has(owner.activationId) ||
+      this.closedToolCalls.has(toolCallKey(owner.runId, owner.toolCallId)) ||
+      ('surfaceId' in owner &&
+        this.closedSurfaces.has(surfaceKey(owner.surfaceId, owner.generation)))
+    ) {
+      throw new BrowserDownloadBrokerError('browser.download.closed', 'definitely_not_dispatched')
+    }
   }
 
   private assertUsable(): void {
@@ -829,38 +745,177 @@ export class BrowserDownloadBroker {
       throw new BrowserDownloadBrokerError('browser.download.closed', 'definitely_not_dispatched')
     }
   }
+
+  private configuredDestination(settings: BrowserDownloadSettingsRecord): string {
+    const destination =
+      settings.locationMode === 'custom'
+        ? (settings.customDirectory ?? '')
+        : this.systemDownloadDirectory
+    if (!destination || !isAbsolute(destination)) {
+      throw new Error('browser.download.destination_unavailable')
+    }
+    // Persisted custom folders may live on removable volumes. Keep the configured path so the
+    // app and Settings remain usable while that volume is offline; each transfer revalidates the
+    // directory immediately before assigning Electron's save path and fails closed if unavailable.
+    return destination
+  }
 }
 
-function createActiveDownload(
-  tool: ActiveTool,
-  guest: GuestRecord,
-  item: DownloadItem,
-  reservation: BrowserArtifactReservation,
+function createActiveDownload(input: {
+  destination: string | null
+  downloadId: string
+  displayName: string
+  guest: GuestRecord
+  item: DownloadItem
+  mimeType: string
+  sourceOrigin: string | null
+  tempPath: string | null
+  tool?: ActiveTool
   finish: (
     download: ActiveDownload,
     state: 'completed' | 'cancelled' | 'interrupted'
-  ) => Promise<void>,
+  ) => Promise<void>
   updated: (download: ActiveDownload) => void
-): ActiveDownload {
+}): ActiveDownload {
   let settle!: () => void
-  const lifetime = new Promise<void>((resolveLifetime) => {
-    settle = once(resolveLifetime)
+  const lifetime = new Promise<void>((resolve) => {
+    settle = once(resolve)
   })
   const download = {} as ActiveDownload
   Object.assign(download, {
-    item,
-    guest,
-    reservation,
+    ...input,
     settle,
     lifetime,
-    tool,
     handleDone: (_event: Event, state: 'completed' | 'cancelled' | 'interrupted') => {
-      void finish(download, state)
+      void input.finish(download, state)
     },
-    handleUpdated: () => updated(download),
+    handleUpdated: () => input.updated(download),
     terminal: false
   })
   return download
+}
+
+function safeCompletedDownloadPath(item: DownloadItem): string {
+  try {
+    const path = item.getSavePath()
+    if (!path || !isAbsolute(path)) throw new Error('browser.download.destination_unavailable')
+    return path
+  } catch {
+    throw new Error('browser.download.destination_unavailable')
+  }
+}
+
+function canonicalDownloadDirectory(value: string): string {
+  if (!value || !isAbsolute(value)) throw new Error('browser.download.destination_unavailable')
+  const metadata = lstatSync(value)
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new Error('browser.download.destination_unavailable')
+  }
+  return realpathSync.native(value)
+}
+
+async function hashRegularFile(path: string): Promise<{ sha256: string; sizeBytes: number }> {
+  const metadata = await lstat(path)
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isFile() ||
+    metadata.size < 0 ||
+    !Number.isSafeInteger(metadata.size)
+  ) {
+    throw new Error('browser.download.invalid_file')
+  }
+  const hash = createHash('sha256')
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(path)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.once('error', reject)
+    stream.once('end', resolve)
+  })
+  return { sha256: hash.digest('hex'), sizeBytes: metadata.size }
+}
+
+async function publishWithoutOverwrite(
+  tempPath: string,
+  destination: string,
+  displayName: string
+): Promise<string> {
+  const safeName = sanitizedDownloadFileName(displayName)
+  for (let index = 0; index < MAX_FILE_NAME_ATTEMPTS; index += 1) {
+    const candidate = join(destination, indexedFileName(safeName, index))
+    try {
+      await publishCandidate(tempPath, candidate)
+      try {
+        await unlink(tempPath)
+      } catch (error) {
+        await removeFile(candidate)
+        throw error
+      }
+      return candidate
+    } catch (error) {
+      if (isNodeError(error, 'EEXIST')) continue
+      throw error
+    }
+  }
+  throw new Error('browser.download.destination_full')
+}
+
+async function publishCandidate(tempPath: string, candidate: string): Promise<void> {
+  try {
+    await link(tempPath, candidate)
+    return
+  } catch (error) {
+    if (isNodeError(error, 'EEXIST') || !isUnsupportedLinkError(error)) throw error
+  }
+
+  try {
+    await copyFile(tempPath, candidate, constants.COPYFILE_EXCL)
+  } catch (error) {
+    if (!isNodeError(error, 'EEXIST')) await removeFile(candidate)
+    throw error
+  }
+}
+
+function isUnsupportedLinkError(error: unknown): boolean {
+  return (
+    isNodeError(error, 'EPERM') ||
+    isNodeError(error, 'ENOSYS') ||
+    isNodeError(error, 'ENOTSUP') ||
+    isNodeError(error, 'EOPNOTSUPP') ||
+    isNodeError(error, 'EXDEV')
+  )
+}
+
+function notifyHistoryChanged(
+  initial: (() => void) | undefined,
+  listeners: ReadonlySet<() => void>
+): void {
+  for (const listener of initial ? [initial, ...listeners] : listeners) {
+    try {
+      listener()
+    } catch {
+      // Notification observers never participate in durable download publication.
+    }
+  }
+}
+
+function indexedFileName(fileName: string, index: number): string {
+  if (index === 0) return fileName
+  const extension = extname(fileName)
+  const stem = parse(fileName).name || 'download'
+  return `${stem} (${index})${extension}`
+}
+
+function publicDownloadReference(record: BrowserDownloadRecord): BrowserDownloadReference {
+  return {
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    downloadId: record.downloadId,
+    displayName: record.displayName,
+    mimeType: record.mimeType,
+    sizeBytes: record.sizeBytes,
+    sha256: record.sha256,
+    createdAt: record.createdAt,
+    source: record.source
+  }
 }
 
 function sanitizedDownloadFileName(value: string): string {
@@ -887,21 +942,19 @@ function sanitizeDownloadCharacters(value: string): string {
 
 function sanitizedDownloadMimeType(value: string): string {
   const normalized = value.split(';', 1)[0]?.trim().toLowerCase() ?? ''
-  const allowed = new Set([
-    'application/json',
-    'application/octet-stream',
-    'application/pdf',
-    'application/zip',
-    'image/gif',
-    'image/jpeg',
-    'image/png',
-    'image/webp',
-    'text/csv',
-    'text/plain',
-    'video/mp4',
-    'video/webm'
-  ])
-  return allowed.has(normalized) ? normalized : 'application/octet-stream'
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}$/u.test(normalized)
+    ? normalized
+    : 'application/octet-stream'
+}
+
+function safeDownloadOrigin(item: DownloadItem): string | null {
+  try {
+    const url = item.getURL()
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : null
+  } catch {
+    return null
+  }
 }
 
 function safeDownloadString(item: DownloadItem, method: 'getFilename' | 'getMimeType'): string {
@@ -949,8 +1002,12 @@ function safeCancel(item: DownloadItem): void {
   try {
     item.cancel()
   } catch {
-    // A terminal DownloadItem may reject cancellation.
+    // Terminal DownloadItems can reject cancellation.
   }
+}
+
+async function removeFile(path: string): Promise<void> {
+  await unlink(path).catch(() => undefined)
 }
 
 function once(callback: () => void): () => void {
@@ -984,12 +1041,11 @@ function positiveBound(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && (value ?? 0) > 0 ? (value as number) : fallback
 }
 
-function ownerBase(
-  owner: BrowserArtifactOwner
-): Omit<BrowserArtifactOwner, 'generation' | 'surfaceId'> {
+function ownerBase(owner: BrowserDownloadOwner): ToolOwner {
   return {
     activationId: owner.activationId,
     capabilityId: owner.capabilityId,
+    conversationId: owner.conversationId,
     runId: owner.runId,
     toolCallId: owner.toolCallId
   }
@@ -1001,4 +1057,13 @@ function surfaceKey(surfaceId: string, generation: number): string {
 
 function toolCallKey(runId: string, toolCallId: string): string {
   return `${runId}\u0000${toolCallId}`
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    typeof (error as NodeJS.ErrnoException).code === 'string' &&
+    (error as NodeJS.ErrnoException).code === code
+  )
 }

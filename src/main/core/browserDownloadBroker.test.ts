@@ -1,15 +1,30 @@
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { DownloadItem, Session, WebContents } from 'electron'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
+  type BrowserDownloadRecord,
+  type BrowserDownloadRegistrationInput,
+  type BrowserDownloadSettingsRecord
+} from '@mycopilot/protocol'
+import { afterEach, describe, expect, it } from 'vitest'
 
-import { BrowserArtifactBroker, type BrowserArtifactOwner } from '../browser/BrowserArtifactBroker'
-import { BrowserDownloadBroker } from '../browser/BrowserDownloadBroker'
+import { BrowserDownloadBroker, type BrowserDownloadOwner } from '../browser/BrowserDownloadBroker'
 
 const temporaryRoots = new Set<string>()
-const OWNER: BrowserArtifactOwner = {
+const OWNER: BrowserDownloadOwner = {
+  conversationId: 'conversation-1',
   runId: 'run-1',
   activationId: 'activation-1',
   capabilityId: 'browser_automation',
@@ -22,33 +37,44 @@ class FakeSession extends EventEmitter {}
 
 class FakeDownloadItem extends EventEmitter {
   cancelled = false
-  paused = false
-  resumed = false
+  saveDialogOptions?: { defaultPath?: string }
   savePath?: string
   receivedBytes = 0
+  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted' = 'progressing'
 
   constructor(
     private readonly filename = 'report.txt',
     private readonly mimeType = 'text/plain',
-    private readonly totalBytes = 4
+    private readonly totalBytes = 4,
+    private readonly url = 'https://example.com/report.txt'
   ) {
     super()
   }
 
-  pause(): void {
-    this.paused = true
-  }
-
-  resume(): void {
-    this.resumed = true
-  }
-
   cancel(): void {
     this.cancelled = true
+    this.state = 'cancelled'
   }
 
   setSavePath(path: string): void {
     this.savePath = path
+  }
+
+  setSaveDialogOptions(options: { defaultPath?: string }): void {
+    this.saveDialogOptions = options
+  }
+
+  getSavePath(): string {
+    return this.savePath ?? ''
+  }
+
+  chooseSavePath(path: string): void {
+    this.savePath = path
+  }
+
+  cancelByUser(): void {
+    this.state = 'cancelled'
+    this.emit('done', {}, 'cancelled')
   }
 
   getFilename(): string {
@@ -67,6 +93,14 @@ class FakeDownloadItem extends EventEmitter {
     return this.receivedBytes
   }
 
+  getState(): typeof this.state {
+    return this.state
+  }
+
+  getURL(): string {
+    return this.url
+  }
+
   update(receivedBytes: number): void {
     this.receivedBytes = receivedBytes
     this.emit('updated', {}, 'progressing')
@@ -76,6 +110,7 @@ class FakeDownloadItem extends EventEmitter {
     if (!this.savePath) throw new Error('Missing managed save path')
     await writeFile(this.savePath, bytes)
     this.receivedBytes = bytes.byteLength
+    this.state = 'completed'
     this.emit('done', {}, 'completed')
   }
 }
@@ -86,18 +121,38 @@ afterEach(async () => {
 })
 
 async function createHarness(
-  options: { maxActiveDownloads?: number; maxSingleDownloadBytes?: number } = {}
+  options: {
+    askWhereToSave?: boolean
+    maxSingleDownloadBytes?: number
+    registerDownload?: (input: BrowserDownloadRegistrationInput) => Promise<BrowserDownloadRecord>
+  } = {}
 ) {
-  const parent = await mkdtemp(join(tmpdir(), 'mycopilot-download-test-'))
-  temporaryRoots.add(parent)
-  const artifacts = new BrowserArtifactBroker({
-    rootDirectory: join(parent, 'browser-automation-artifacts')
-  })
+  const root = await mkdtemp(join(tmpdir(), 'mycopilot-download-test-'))
+  temporaryRoots.add(root)
+  const systemDirectory = join(root, 'Downloads')
+  await mkdir(systemDirectory)
+  const records: BrowserDownloadRecord[] = []
   const session = new FakeSession()
+  const settings: BrowserDownloadSettingsRecord = {
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    locationMode: 'system',
+    customDirectory: null,
+    askWhereToSave: options.askWhereToSave ?? false,
+    revision: 0,
+    updatedAt: 1
+  }
   const broker = new BrowserDownloadBroker({
-    artifacts,
     expectedSession: session as unknown as Session,
-    ...options
+    initialSettings: settings,
+    registerDownload:
+      options.registerDownload ??
+      (async (input) => {
+        const record: BrowserDownloadRecord = { ...input, projectId: 'project-1' }
+        records.push(record)
+        return record
+      }),
+    systemDownloadDirectory: systemDirectory,
+    maxSingleDownloadBytes: options.maxSingleDownloadBytes
   })
   broker.install()
   const guest = {
@@ -107,470 +162,356 @@ async function createHarness(
     isDestroyed: () => false
   } as unknown as WebContents
   broker.registerGuest({ guest, surfaceId: OWNER.surfaceId, generation: OWNER.generation })
-  return { artifacts, broker, guest, session }
+  return { broker, guest, records, root, session, settings, systemDirectory }
 }
 
 function dispatchDownload(session: FakeSession, guest: WebContents, item: FakeDownloadItem): void {
   session.emit('will-download', {}, item as unknown as DownloadItem, guest)
 }
 
-function createRegisteredGuest(
-  broker: BrowserDownloadBroker,
-  session: FakeSession,
-  input: { generation: number; id: number; surfaceId: string }
-): WebContents {
-  const guest = {
-    id: input.id,
-    session,
-    getType: () => 'webview',
-    isDestroyed: () => false
-  } as unknown as WebContents
-  broker.registerGuest({
-    generation: input.generation,
-    guest,
-    surfaceId: input.surfaceId
-  })
-  return guest
+async function waitForManagedPath(item: FakeDownloadItem): Promise<string> {
+  await waitFor(() => Boolean(item.savePath))
+  return item.savePath as string
 }
 
-async function waitForManagedPath(item: FakeDownloadItem): Promise<string> {
+async function waitFor(predicate: () => boolean): Promise<void> {
   for (let turn = 0; turn < 200; turn += 1) {
-    if (item.savePath) return item.savePath
+    if (predicate()) return
     await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
   }
-  throw new Error(`Download was not admitted (cancelled=${String(item.cancelled)})`)
+  throw new Error('Timed out waiting for Browser Download state')
 }
 
 describe('BrowserDownloadBroker', () => {
-  it('claims one exact targetless created guest before admitting its immediate download', async () => {
-    const { artifacts, broker, session } = await createHarness()
-    const lease = broker.beginTargetCreationTool({
-      owner: {
-        activationId: OWNER.activationId,
-        capabilityId: OWNER.capabilityId,
-        runId: OWNER.runId,
-        toolCallId: 'tabs-new-call'
-      }
-    })
-    await lease.ready?.()
-    lease.markDispatched()
-    const created = createRegisteredGuest(broker, session, {
-      generation: 2,
-      id: 52,
-      surfaceId: 'created-surface'
-    })
-    await lease.claimCreatedGuest({
-      action: 'new',
-      generation: 2,
-      guest: created,
-      surfaceId: 'created-surface'
-    })
-
-    const item = new FakeDownloadItem('created.txt')
-    dispatchDownload(session, created, item)
-    await waitForManagedPath(item)
-    await item.complete()
-    await expect(lease.settle()).resolves.toEqual([
-      expect.objectContaining({ displayName: 'created.txt', kind: 'download' })
-    ])
-
-    const second = createRegisteredGuest(broker, session, {
-      generation: 1,
-      id: 53,
-      surfaceId: 'second-created-surface'
-    })
-    await expect(
-      lease.claimCreatedGuest({
-        action: 'new',
-        generation: 1,
-        guest: second,
-        surfaceId: 'second-created-surface'
-      })
-    ).rejects.toMatchObject({ code: 'browser.download.target_closed' })
-    lease.finish()
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('keeps separate one-primary and four-popup budgets for a targetless tabs-new tool', async () => {
-    const { artifacts, broker, session } = await createHarness({ maxActiveDownloads: 1 })
-    const lease = broker.beginTargetCreationTool({
-      owner: {
-        activationId: OWNER.activationId,
-        capabilityId: OWNER.capabilityId,
-        runId: OWNER.runId,
-        toolCallId: 'tabs-new-with-popups'
-      }
-    })
-    await lease.ready?.()
-    lease.markDispatched()
-
-    const primary = createRegisteredGuest(broker, session, {
-      generation: 1,
-      id: 60,
-      surfaceId: 'targetless-primary'
-    })
-    await lease.claimCreatedGuest({
-      action: 'new',
-      generation: 1,
-      guest: primary,
-      surfaceId: 'targetless-primary'
-    })
-
-    for (let index = 0; index < 4; index += 1) {
-      const popup = createRegisteredGuest(broker, session, {
-        generation: 1,
-        id: 61 + index,
-        surfaceId: `targetless-popup-${index + 1}`
-      })
-      await lease.claimCreatedGuest({
-        action: 'popup',
-        generation: 1,
-        guest: popup,
-        surfaceId: `targetless-popup-${index + 1}`
-      })
-    }
-
-    const fifthPopup = createRegisteredGuest(broker, session, {
-      generation: 1,
-      id: 65,
-      surfaceId: 'targetless-popup-5'
-    })
-    await expect(
-      lease.claimCreatedGuest({
-        action: 'popup',
-        generation: 1,
-        guest: fifthPopup,
-        surfaceId: 'targetless-popup-5'
-      })
-    ).rejects.toMatchObject({ code: 'browser.download.target_closed' })
-
-    const secondPrimary = createRegisteredGuest(broker, session, {
-      generation: 1,
-      id: 66,
-      surfaceId: 'targetless-primary-2'
-    })
-    await expect(
-      lease.claimCreatedGuest({
-        action: 'new',
-        generation: 1,
-        guest: secondPrimary,
-        surfaceId: 'targetless-primary-2'
-      })
-    ).rejects.toMatchObject({ code: 'browser.download.target_closed' })
-
-    lease.finish()
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('admits bounded popup children but never an unclaimed manual guest', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
+  it('publishes an Agent download durably and returns only a path-free reference', async () => {
+    const { broker, guest, records, session, systemDirectory } = await createHarness()
     const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
-    lease.markDispatched()
-    const popup = createRegisteredGuest(broker, session, {
-      generation: 1,
-      id: 54,
-      surfaceId: 'popup-surface'
-    })
-    await lease.claimCreatedGuest({
-      action: 'popup',
-      generation: 1,
-      guest: popup,
-      surfaceId: 'popup-surface'
-    })
-
-    const popupItem = new FakeDownloadItem('popup.txt')
-    dispatchDownload(session, popup, popupItem)
-    await waitForManagedPath(popupItem)
-    const manual = createRegisteredGuest(broker, session, {
-      generation: 1,
-      id: 55,
-      surfaceId: 'manual-surface'
-    })
-    const manualItem = new FakeDownloadItem('manual.txt')
-    dispatchDownload(session, manual, manualItem)
-    expect(manualItem.cancelled).toBe(true)
-
-    await popupItem.complete()
-    await expect(lease.settle()).resolves.toHaveLength(1)
-    lease.finish()
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('binds a download to the exact tool and waits for Artifact publication', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
-    const preDispatch = new FakeDownloadItem('manual-before-dispatch.txt')
-    dispatchDownload(session, guest, preDispatch)
-    expect(preDispatch.cancelled).toBe(true)
-    expect(preDispatch.savePath).toBeUndefined()
     lease.markDispatched()
     const item = new FakeDownloadItem('../../report.txt')
-    dispatchDownload(session, guest, item)
-    const managedPath = await waitForManagedPath(item)
-    expect(managedPath).toContain('browser-automation-artifacts')
-    expect(managedPath).not.toContain('../report.txt')
-    expect(item.paused).toBe(false)
-    expect(item.resumed).toBe(false)
 
-    let settled = false
-    const resultPromise = lease.settle().then((result) => {
-      settled = true
-      return result
-    })
-    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
-    expect(settled).toBe(false)
+    dispatchDownload(session, guest, item)
+    const temporaryPath = await waitForManagedPath(item)
+    expect(basename(temporaryPath)).toMatch(/^\.mycopilot-download-.+\.part$/u)
     await item.complete()
-    const [artifact] = await resultPromise
-    expect(artifact).toEqual(
+
+    const [reference] = await lease.settle()
+    expect(reference).toEqual(
       expect.objectContaining({
-        kind: 'download',
         displayName: 'report.txt',
         mimeType: 'text/plain',
         sizeBytes: 4,
-        preview: 'none'
+        source: 'agent'
       })
     )
-    expect(JSON.stringify(artifact)).not.toContain(managedPath)
-    expect(lease.artifacts()).toEqual([artifact])
+    expect(reference?.downloadId).toMatch(/^browser-download:/u)
+    expect(JSON.stringify(reference)).not.toContain(systemDirectory)
+    expect(lease.downloads()).toEqual([reference])
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      conversationId: OWNER.conversationId,
+      runId: OWNER.runId,
+      callId: OWNER.toolCallId,
+      sourceOrigin: 'https://example.com'
+    })
+    await expect(readFile(records[0]!.absolutePath, 'utf8')).resolves.toBe('data')
+    await expect(access(temporaryPath)).rejects.toBeDefined()
+
     lease.finish()
-    expect(broker.snapshot()).toEqual({ downloads: 0, guests: 1, tools: 0, activeBytes: 0 })
-    expect(artifacts.snapshot().artifacts).toBe(1)
     await broker.shutdown()
-    await artifacts.shutdown()
   })
 
-  it('cancels downloads that have no exact active Agent owner', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const item = new FakeDownloadItem()
+  it('persists a manual download without assigning Agent ownership', async () => {
+    const { broker, guest, records, session } = await createHarness()
+    const item = new FakeDownloadItem('manual.txt')
+
     dispatchDownload(session, guest, item)
-    expect(item.cancelled).toBe(true)
-    expect(item.savePath).toBeUndefined()
-    expect(artifacts.snapshot().artifacts).toBe(0)
+    await waitForManagedPath(item)
+    await item.complete(Buffer.from('manual'))
+    await waitFor(() => records.length === 1)
 
-    const unrelatedGuest = { ...guest, id: 99 } as unknown as WebContents
-    const unrelatedItem = new FakeDownloadItem('unrelated.txt')
-    dispatchDownload(session, unrelatedGuest, unrelatedItem)
-    expect(unrelatedItem.cancelled).toBe(true)
-    expect(unrelatedItem.savePath).toBeUndefined()
+    expect(records[0]).toMatchObject({
+      displayName: 'manual.txt',
+      source: 'manual',
+      conversationId: null,
+      runId: null,
+      callId: null
+    })
     await broker.shutdown()
-    await artifacts.shutdown()
   })
 
-  it('reports an advertised or progressing size overflow before tool success', async () => {
-    const { artifacts, broker, guest, session } = await createHarness({
+  it('uses Electron native save selection when ask-where-to-save is enabled', async () => {
+    const { broker, guest, records, root, session, systemDirectory } = await createHarness({
+      askWhereToSave: true
+    })
+    const selectedDirectory = join(root, 'Selected')
+    await mkdir(selectedDirectory)
+    const selectedPath = join(selectedDirectory, 'chosen-name.txt')
+    const item = new FakeDownloadItem('suggested-name.txt')
+
+    dispatchDownload(session, guest, item)
+    await waitFor(() => Boolean(item.saveDialogOptions))
+    expect(item.savePath).toBeUndefined()
+    expect(item.saveDialogOptions).toEqual({
+      defaultPath: join(await realpath(systemDirectory), 'suggested-name.txt')
+    })
+
+    item.chooseSavePath(selectedPath)
+    await item.complete(Buffer.from('chosen'))
+    await waitFor(() => records.length === 1)
+
+    expect(records[0]).toMatchObject({
+      absolutePath: selectedPath,
+      displayName: 'chosen-name.txt',
+      source: 'manual'
+    })
+    await expect(readFile(selectedPath, 'utf8')).resolves.toBe('chosen')
+    await broker.shutdown()
+  })
+
+  it('does not create history when the native save dialog is cancelled', async () => {
+    const { broker, guest, records, session } = await createHarness({ askWhereToSave: true })
+    const item = new FakeDownloadItem('cancelled.txt')
+
+    dispatchDownload(session, guest, item)
+    await waitFor(() => Boolean(item.saveDialogOptions))
+    item.cancelByUser()
+    await waitFor(() => broker.snapshot().downloads === 0)
+
+    expect(records).toEqual([])
+    expect(item.savePath).toBeUndefined()
+    await broker.shutdown()
+  })
+
+  it('keeps a user-selected file when durable history registration fails', async () => {
+    const { broker, guest, root, session } = await createHarness({
+      askWhereToSave: true,
+      registerDownload: async () => {
+        throw new Error('database unavailable')
+      }
+    })
+    const selectedPath = join(root, 'user-owned.txt')
+    const item = new FakeDownloadItem('suggested.txt')
+
+    dispatchDownload(session, guest, item)
+    await waitFor(() => Boolean(item.saveDialogOptions))
+    item.chooseSavePath(selectedPath)
+    await item.complete(Buffer.from('keep me'))
+    await waitFor(() => broker.snapshot().downloads === 0)
+
+    await expect(readFile(selectedPath, 'utf8')).resolves.toBe('keep me')
+    await broker.shutdown()
+  })
+
+  it('persists a valid empty file with its canonical digest', async () => {
+    const { broker, guest, records, session } = await createHarness()
+    const item = new FakeDownloadItem('empty.txt', 'text/plain', 0)
+
+    dispatchDownload(session, guest, item)
+    await waitForManagedPath(item)
+    await item.complete(Buffer.alloc(0))
+    await waitFor(() => records.length === 1)
+
+    expect(records[0]).toMatchObject({
+      displayName: 'empty.txt',
+      sizeBytes: 0,
+      sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    })
+    await broker.shutdown()
+  })
+
+  it('allows ordinary Agent browsing without a conversation but rejects an owned download', async () => {
+    const { broker, guest, records, session } = await createHarness()
+    const ownerWithoutConversation: BrowserDownloadOwner = {
+      runId: OWNER.runId,
+      activationId: OWNER.activationId,
+      capabilityId: OWNER.capabilityId,
+      surfaceId: OWNER.surfaceId,
+      generation: OWNER.generation,
+      toolCallId: OWNER.toolCallId
+    }
+    const browsingLease = broker.beginTool({ guest, owner: ownerWithoutConversation })
+    browsingLease.markDispatched()
+
+    await expect(browsingLease.settle()).resolves.toEqual([])
+    browsingLease.finish()
+
+    const downloadLease = broker.beginTool({
+      guest,
+      owner: { ...ownerWithoutConversation, toolCallId: 'call-2' }
+    })
+    downloadLease.markDispatched()
+    const item = new FakeDownloadItem('ownerless.txt')
+    dispatchDownload(session, guest, item)
+
+    expect(item.cancelled).toBe(true)
+    await expect(downloadLease.settle()).rejects.toMatchObject({
+      code: 'browser.download.registration_failed'
+    })
+    expect(records).toEqual([])
+    downloadLease.finish()
+    await broker.shutdown()
+  })
+
+  it('never reclassifies a download outside an active tool dispatch window as manual', async () => {
+    const { broker, guest, records, session } = await createHarness()
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    const item = new FakeDownloadItem('late.txt')
+
+    dispatchDownload(session, guest, item)
+
+    expect(item.cancelled).toBe(true)
+    await expect(lease.settle()).rejects.toMatchObject({
+      code: 'browser.download.outcome_unknown'
+    })
+    expect(records).toEqual([])
+    lease.finish()
+    await broker.shutdown()
+  })
+
+  it('never overwrites an existing file and records the actual published name', async () => {
+    const { broker, guest, records, session, systemDirectory } = await createHarness()
+    await writeFile(join(systemDirectory, 'report.txt'), 'existing')
+    const item = new FakeDownloadItem('report.txt')
+
+    dispatchDownload(session, guest, item)
+    await waitForManagedPath(item)
+    await item.complete(Buffer.from('new'))
+    await waitFor(() => records.length === 1)
+
+    expect(records[0]?.displayName).toBe('report (1).txt')
+    await expect(readFile(join(systemDirectory, 'report.txt'), 'utf8')).resolves.toBe('existing')
+    await expect(readFile(join(systemDirectory, 'report (1).txt'), 'utf8')).resolves.toBe('new')
+    await broker.shutdown()
+  })
+
+  it('pins an in-flight download to the directory selected when it started', async () => {
+    const { broker, guest, records, root, session, settings, systemDirectory } =
+      await createHarness()
+    const customDirectory = join(root, 'Custom')
+    await mkdir(customDirectory)
+    const item = new FakeDownloadItem('pinned.txt')
+
+    dispatchDownload(session, guest, item)
+    await waitForManagedPath(item)
+    broker.updateSettings({
+      ...settings,
+      locationMode: 'custom',
+      customDirectory,
+      revision: 1,
+      updatedAt: 2
+    })
+    await item.complete()
+    await waitFor(() => records.length === 1)
+
+    expect(records[0]?.absolutePath).toBe(join(await realpath(systemDirectory), 'pinned.txt'))
+    expect(await readdir(customDirectory)).toEqual([])
+    await broker.shutdown()
+  })
+
+  it('keeps Settings usable when a persisted custom directory is temporarily unavailable', async () => {
+    const { broker, guest, records, root, session, settings } = await createHarness()
+    const unavailableDirectory = join(root, 'DisconnectedVolume')
+    broker.updateSettings({
+      ...settings,
+      locationMode: 'custom',
+      customDirectory: unavailableDirectory,
+      revision: 1,
+      updatedAt: 2
+    })
+    expect(broker.downloadDirectory()).toBe(unavailableDirectory)
+
+    const unavailable = new FakeDownloadItem('unavailable.txt')
+    dispatchDownload(session, guest, unavailable)
+    expect(unavailable.cancelled).toBe(true)
+    expect(unavailable.savePath).toBeUndefined()
+    expect(records).toEqual([])
+
+    const recoveredDirectory = join(root, 'Recovered')
+    await mkdir(recoveredDirectory)
+    broker.updateSettings({
+      ...settings,
+      locationMode: 'custom',
+      customDirectory: recoveredDirectory,
+      revision: 2,
+      updatedAt: 3
+    })
+    const recovered = new FakeDownloadItem('recovered.txt')
+    dispatchDownload(session, guest, recovered)
+    await waitForManagedPath(recovered)
+    await recovered.complete(Buffer.from('restored'))
+    await waitFor(() => records.length === 1)
+    await expect(readFile(join(recoveredDirectory, 'recovered.txt'), 'utf8')).resolves.toBe(
+      'restored'
+    )
+    await broker.shutdown()
+  })
+
+  it('rejects an oversized Agent download before publishing bytes', async () => {
+    const { broker, guest, records, session, systemDirectory } = await createHarness({
       maxSingleDownloadBytes: 3
     })
     const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
     lease.markDispatched()
-    const advertisedTooLarge = new FakeDownloadItem('large.bin', 'application/octet-stream', 4)
-    dispatchDownload(session, guest, advertisedTooLarge)
-    expect(advertisedTooLarge.cancelled).toBe(true)
-    await expect(lease.settle()).rejects.toMatchObject({
-      code: 'browser.download.too_large',
-      dispatchCertainty: 'possibly_dispatched'
-    })
-    lease.finish()
+    const item = new FakeDownloadItem('large.bin', 'application/octet-stream', 4)
 
-    const second = broker.beginTool({
-      guest,
-      owner: { ...OWNER, toolCallId: 'call-2' }
-    })
-    await second.ready?.()
-    second.markDispatched()
-    const growing = new FakeDownloadItem('grow.bin', 'application/octet-stream', 0)
-    dispatchDownload(session, guest, growing)
-    await waitForManagedPath(growing)
-    growing.update(4)
-    await expect(second.settle()).rejects.toMatchObject({ code: 'browser.download.too_large' })
-    expect(growing.cancelled).toBe(true)
-    second.finish()
-    expect(artifacts.snapshot().artifacts).toBe(0)
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('propagates caller cancellation and target close without publishing a partial file', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const controller = new AbortController()
-    const lease = broker.beginTool({ guest, owner: OWNER, signal: controller.signal })
-    await lease.ready?.()
-    lease.markDispatched()
-    const item = new FakeDownloadItem()
     dispatchDownload(session, guest, item)
-    await waitForManagedPath(item)
-    controller.abort('cancelled')
-    await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.cancelled' })
     expect(item.cancelled).toBe(true)
+    await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.too_large' })
+    expect(records).toEqual([])
+    expect(await readdir(systemDirectory)).toEqual([])
     lease.finish()
-
-    const targetLease = broker.beginTool({
-      guest,
-      owner: { ...OWNER, toolCallId: 'call-2' }
-    })
-    await targetLease.ready?.()
-    targetLease.markDispatched()
-    const targetItem = new FakeDownloadItem('target.txt')
-    dispatchDownload(session, guest, targetItem)
-    await waitForManagedPath(targetItem)
-    await broker.releaseSurface({ surfaceId: OWNER.surfaceId, generation: OWNER.generation })
-    await expect(targetLease.settle()).rejects.toMatchObject({
-      code: 'browser.download.target_closed'
-    })
-    expect(targetItem.cancelled).toBe(true)
-    expect(artifacts.snapshot().artifacts).toBe(0)
-    targetLease.finish()
     await broker.shutdown()
-    await artifacts.shutdown()
   })
 
-  it('settles an explicitly planned exact target close without reporting target_closed', async () => {
-    const { artifacts, broker, guest } = await createHarness()
+  it('removes the published file when durable registration fails', async () => {
+    const { broker, guest, session, systemDirectory } = await createHarness({
+      registerDownload: async () => {
+        throw new Error('database unavailable')
+      }
+    })
     const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
-    lease.expectTargetClose({ surfaceId: OWNER.surfaceId, generation: OWNER.generation })
     lease.markDispatched()
+    const item = new FakeDownloadItem('unregistered.txt')
 
-    broker.unregisterGuest(guest, OWNER.generation)
-    await expect(lease.settle()).resolves.toEqual([])
-    lease.finish()
-    expect(broker.snapshot()).toMatchObject({ downloads: 0, tools: 0 })
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('does not resume when cancellation wins during asynchronous Artifact reservation', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const originalOpenSession = artifacts.openSession.bind(artifacts)
-    let releaseReservation!: () => void
-    const reservationGate = new Promise<void>((resolveGate) => {
-      releaseReservation = resolveGate
-    })
-    vi.spyOn(artifacts, 'openSession').mockImplementation(async () => {
-      await reservationGate
-      return originalOpenSession()
-    })
-    const controller = new AbortController()
-    const lease = broker.beginTool({ guest, owner: OWNER, signal: controller.signal })
-    lease.markDispatched()
-    const item = new FakeDownloadItem('racing.txt')
-    dispatchDownload(session, guest, item)
-    controller.abort('cancelled')
-    const settled = lease.settle()
-    releaseReservation()
-    await expect(settled).rejects.toMatchObject({ code: 'browser.download.cancelled' })
-    expect(item.cancelled).toBe(true)
-    expect(item.resumed).toBe(false)
-    expect(item.savePath).toBeUndefined()
-    expect(artifacts.snapshot()).toMatchObject({ artifacts: 0, reservations: 0, sessions: 0 })
-    lease.finish()
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('does not resume when cancellation wins after assigning the managed save path', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const controller = new AbortController()
-    const lease = broker.beginTool({ guest, owner: OWNER, signal: controller.signal })
-    await lease.ready?.()
-    lease.markDispatched()
-    const item = new FakeDownloadItem('late-racing.txt')
-    const originalSetSavePath = item.setSavePath.bind(item)
-    vi.spyOn(item, 'setSavePath').mockImplementation((path) => {
-      originalSetSavePath(path)
-      controller.abort('cancelled-after-path')
-    })
-
-    dispatchDownload(session, guest, item)
-    await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.cancelled' })
-    expect(item.savePath).toContain('browser-automation-artifacts')
-    expect(item.cancelled).toBe(true)
-    expect(item.resumed).toBe(false)
-    expect(artifacts.snapshot()).toMatchObject({ artifacts: 0, reservations: 0, sessions: 0 })
-    lease.finish()
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('cancels and fences the exact Tool call without affecting the next call', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
-    lease.markDispatched()
-    const item = new FakeDownloadItem('cancelled-tool.txt')
-    dispatchDownload(session, guest, item)
-    await waitForManagedPath(item)
-
-    await broker.releaseToolCall({ runId: OWNER.runId, toolCallId: OWNER.toolCallId })
-    await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.cancelled' })
-    expect(item.cancelled).toBe(true)
-    expect(() => broker.beginTool({ guest, owner: OWNER })).toThrowError(
-      expect.objectContaining({ code: 'browser.download.closed' })
-    )
-    lease.finish()
-
-    const next = broker.beginTool({
-      guest,
-      owner: { ...OWNER, toolCallId: 'call-2' }
-    })
-    await next.ready?.()
-    next.finish()
-    await broker.shutdown()
-    await artifacts.shutdown()
-  })
-
-  it('retains completed run Artifacts on done, but revoke removes them and fences late writes', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
-    lease.markDispatched()
-    const item = new FakeDownloadItem()
     dispatchDownload(session, guest, item)
     await waitForManagedPath(item)
     await item.complete()
-    const [artifact] = await lease.settle()
-    lease.finish()
-    await broker.finalizeRun(OWNER.runId)
-    expect(artifacts.snapshot().artifacts).toBe(1)
-    await expect(artifacts.readPreview(artifact)).rejects.toMatchObject({
-      code: 'browser.artifact.preview_unavailable'
+    await expect(lease.settle()).rejects.toMatchObject({
+      code: 'browser.download.registration_failed'
     })
-    await broker.releaseCapability(OWNER.activationId)
-    expect(artifacts.snapshot().artifacts).toBe(0)
-    expect(() => broker.beginTool({ guest, owner: OWNER })).toThrowError(
-      expect.objectContaining({ code: 'browser.download.closed' })
-    )
-    await expect(
-      artifacts.storeText({
-        owner: OWNER,
-        kind: 'text',
-        mimeType: 'text/plain',
-        suggestedFileName: 'late.txt',
-        text: 'late'
-      })
-    ).rejects.toMatchObject({ code: 'browser.artifact.closed' })
+    expect(await readdir(systemDirectory)).toEqual([])
+    lease.finish()
     await broker.shutdown()
-    await artifacts.shutdown()
   })
 
-  it('removes listeners and cancels all active transfers at shutdown', async () => {
-    const { artifacts, broker, guest, session } = await createHarness()
-    const lease = broker.beginTool({ guest, owner: OWNER })
-    await lease.ready?.()
-    lease.markDispatched()
-    const item = new FakeDownloadItem()
-    dispatchDownload(session, guest, item)
-    await waitForManagedPath(item)
-    expect(session.listenerCount('will-download')).toBe(1)
-    await broker.shutdown()
-    expect(session.listenerCount('will-download')).toBe(0)
+  it('rejects downloads from guests outside the registered managed surface set', async () => {
+    const { broker, records, session } = await createHarness()
+    const item = new FakeDownloadItem('foreign.txt')
+    const foreignGuest = {
+      id: 99,
+      session,
+      getType: () => 'webview',
+      isDestroyed: () => false
+    } as unknown as WebContents
+
+    dispatchDownload(session, foreignGuest, item)
     expect(item.cancelled).toBe(true)
-    await expect(lease.settle()).rejects.toMatchObject({ code: 'browser.download.cancelled' })
-    await artifacts.shutdown()
+    expect(item.savePath).toBeUndefined()
+    expect(records).toEqual([])
+    await broker.shutdown()
+  })
+
+  it('cancels active transfers and removes temporary files during shutdown', async () => {
+    const { broker, guest, session } = await createHarness()
+    const item = new FakeDownloadItem('active.txt')
+    dispatchDownload(session, guest, item)
+    const temporaryPath = await waitForManagedPath(item)
+    await writeFile(temporaryPath, 'partial')
+
+    await broker.shutdown()
+
+    expect(item.cancelled).toBe(true)
+    expect(session.listenerCount('will-download')).toBe(0)
+    await expect(access(temporaryPath)).rejects.toBeDefined()
   })
 })

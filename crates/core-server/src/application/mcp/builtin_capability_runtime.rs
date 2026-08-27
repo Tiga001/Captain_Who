@@ -1568,6 +1568,7 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 })
                 .transpose()?;
             let authorization_context = ManagedPlaywrightAuthorizationContext {
+                conversation_id: invocation.conversation_id.clone(),
                 run_id: invocation.run_id.clone(),
                 capability_id: invocation.capability_id.as_str().to_string(),
                 activation_id: invocation.activation_id.as_str().to_string(),

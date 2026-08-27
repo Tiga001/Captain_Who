@@ -148,7 +148,6 @@
 }
 
 .agent-template-row__actions button,
-.agent-templates-page__back,
 .agent-templates-page__load-error button {
   display: inline-flex;
   min-height: 34px;
@@ -165,7 +164,6 @@
 }
 
 .agent-template-row__actions button:hover:not(:disabled),
-.agent-templates-page__back:hover,
 .agent-templates-page__load-error button:hover {
   background: var(--mc-color-state-hover);
 }
@@ -176,15 +174,9 @@
 }
 
 .agent-template-row__actions svg,
-.agent-templates-page__back svg,
 .agent-templates-page__load-error svg {
   width: var(--mc-icon-size-base);
   height: var(--mc-icon-size-base);
-}
-
-.agent-templates-page__back {
-  width: fit-content;
-  border: 0;
 }
 
 .agent-template-form {

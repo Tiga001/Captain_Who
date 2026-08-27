@@ -1,7 +1,8 @@
 import {
   parseBrowserArtifactToolProjection,
   type AgentToolResult,
-  type BrowserArtifactReference
+  type BrowserArtifactReference,
+  type BrowserDownloadReference
 } from '@mycopilot/protocol'
 import {
   AppWindow,
@@ -50,7 +51,7 @@ import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { toSafeMcpDisplayText } from '../../../mcp/mcpSafeDisplay'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
-import { BrowserArtifactCards } from './BrowserArtifactCards'
+import { BrowserArtifactCards, BrowserDownloadCards } from './BrowserArtifactCards'
 
 type BrowserToolStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'outcomeUnknown'
 
@@ -444,11 +445,18 @@ function safeProjectedStatus(result: AgentToolResult | undefined): string | null
   return typeof record.status === 'string' ? record.status : null
 }
 
-function safeProjectedArtifacts(result: AgentToolResult | undefined): BrowserArtifactReference[] {
+function safeProjectedResources(result: AgentToolResult | undefined): {
+  artifacts: BrowserArtifactReference[]
+  downloads: BrowserDownloadReference[]
+} {
   try {
-    return parseBrowserArtifactToolProjection(result?.result).artifacts ?? []
+    const projection = parseBrowserArtifactToolProjection(result?.result)
+    return {
+      artifacts: projection.artifacts ?? [],
+      downloads: projection.downloads ?? []
+    }
   } catch {
-    return []
+    return { artifacts: [], downloads: [] }
   }
 }
 
@@ -513,14 +521,14 @@ export function BuiltinCapabilityToolActivity({
 }: BuiltinCapabilityToolActivityProps) {
   const { t } = useFrontendConfig()
   const reason = displayReason ? toSafeMcpDisplayText(displayReason, 512).trim() : ''
-  const artifacts = safeProjectedArtifacts(result)
+  const { artifacts, downloads } = safeProjectedResources(result)
   const status = getStatus(result, settledStatus, cancelled)
   const { iconBadge, iconBadgeTone } = getBrowserToolStatusBadge(status)
 
   return (
     <AgentActivityDisclosure
       className="builtin-capability-tool-activity"
-      hasDetails={Boolean(reason) || artifacts.length > 0}
+      hasDetails={Boolean(reason) || artifacts.length > 0 || downloads.length > 0}
       icon={getBrowserToolIcon(toolName, status)}
       iconBadge={iconBadge}
       iconBadgeTone={iconBadgeTone}
@@ -534,6 +542,7 @@ export function BuiltinCapabilityToolActivity({
         </div>
       ) : null}
       <BrowserArtifactCards artifacts={artifacts} />
+      <BrowserDownloadCards downloads={downloads} />
     </AgentActivityDisclosure>
   )
 }

@@ -1,9 +1,10 @@
-import type {
-  McpBuiltinCapabilityListItem,
-  McpBuiltinCapabilityListOutput,
-  McpServerDetailsView,
-  McpServerListItem,
-  McpServerListOutput
+import {
+  BROWSER_DOWNLOAD_SCHEMA_VERSION,
+  type McpBuiltinCapabilityListItem,
+  type McpBuiltinCapabilityListOutput,
+  type McpServerDetailsView,
+  type McpServerListItem,
+  type McpServerListOutput
 } from '@mycopilot/protocol'
 import { HostInvocationError } from '@mycopilot/host-api'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -19,10 +20,18 @@ const service = vi.hoisted(() => ({
   builtinHook: vi.fn(),
   builtinRefresh: vi.fn(),
   builtinSetAllowed: vi.fn(),
+  chooseBrowserDownloadDirectory: vi.fn(),
+  clearBrowserDownloadHistory: vi.fn(),
+  getBrowserDownloadSettings: vi.fn(),
+  listBrowserDownloadHistory: vi.fn(),
   loadDetails: vi.fn(),
   loadTools: vi.fn(),
+  onBrowserDownloadHistoryChanged: vi.fn(),
   refresh: vi.fn(),
   refreshCatalog: vi.fn(),
+  resetBrowserDownloadDirectory: vi.fn(),
+  setBrowserDownloadAskWhereToSave: vi.fn(),
+  revealBrowserDownload: vi.fn(),
   restartServer: vi.fn(),
   selectExecutable: vi.fn(),
   selectWorkingDirectory: vi.fn(),
@@ -39,6 +48,17 @@ vi.mock('../useMcpManagement', () => ({
 
 vi.mock('../useBuiltinMcpCapabilities', () => ({
   useBuiltinMcpCapabilities: service.builtinHook
+}))
+
+vi.mock('../browserDownloadClient', () => ({
+  chooseBrowserDownloadDirectory: service.chooseBrowserDownloadDirectory,
+  clearBrowserDownloadHistory: service.clearBrowserDownloadHistory,
+  getBrowserDownloadSettings: service.getBrowserDownloadSettings,
+  listBrowserDownloadHistory: service.listBrowserDownloadHistory,
+  onBrowserDownloadHistoryChanged: service.onBrowserDownloadHistoryChanged,
+  resetBrowserDownloadDirectory: service.resetBrowserDownloadDirectory,
+  setBrowserDownloadAskWhereToSave: service.setBrowserDownloadAskWhereToSave,
+  revealBrowserDownload: service.revealBrowserDownload
 }))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -199,11 +219,47 @@ beforeEach(() => {
   service.builtinHook.mockReturnValue(builtinManagement())
   service.builtinRefresh.mockResolvedValue(builtinOutput())
   service.builtinSetAllowed.mockResolvedValue(null)
+  service.chooseBrowserDownloadDirectory.mockResolvedValue(null)
+  service.clearBrowserDownloadHistory.mockResolvedValue(0)
+  service.getBrowserDownloadSettings.mockResolvedValue({
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    locationMode: 'system',
+    displayPath: '~/Downloads',
+    askWhereToSave: false,
+    revision: 0,
+    updatedAt: 0
+  })
+  service.listBrowserDownloadHistory.mockResolvedValue({
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    downloads: [],
+    truncated: false
+  })
+  service.onBrowserDownloadHistoryChanged.mockReturnValue(() => undefined)
   service.loadTools.mockResolvedValue(null)
   service.loadDetails.mockResolvedValue(null)
   service.refresh.mockResolvedValue(null)
   service.selectExecutable.mockResolvedValue(null)
   service.selectWorkingDirectory.mockResolvedValue(null)
+  service.resetBrowserDownloadDirectory.mockResolvedValue({
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    locationMode: 'system',
+    displayPath: '~/Downloads',
+    askWhereToSave: false,
+    revision: 1,
+    updatedAt: 1
+  })
+  service.setBrowserDownloadAskWhereToSave.mockResolvedValue({
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    locationMode: 'system',
+    displayPath: '~/Downloads',
+    askWhereToSave: true,
+    revision: 1,
+    updatedAt: 1
+  })
+  service.revealBrowserDownload.mockResolvedValue({
+    schemaVersion: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    status: 'shown'
+  })
 })
 
 describe('MCP Settings page', () => {
@@ -262,6 +318,57 @@ describe('MCP Settings page', () => {
     expect(service.setServerEnabled).not.toHaveBeenCalled()
     expect(service.startServer).not.toHaveBeenCalled()
     expect(service.authorizeLaunch).not.toHaveBeenCalled()
+  })
+
+  it('opens browser automation settings, toggles native save prompts, and separates history', async () => {
+    service.hook.mockReturnValue(
+      management({
+        status: 'ready',
+        output: output([]),
+        errorMessage: null,
+        isRefreshing: false
+      })
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await screen.getByRole('button', { name: 'mcp.browserDownloads.configure' }).click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'mcp.browserDownloads.section' }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByText('mcp.browserDownloads.history', { exact: true }))
+      .toBeVisible()
+    await expect.element(screen.getByText('~/Downloads')).toBeVisible()
+    await expect
+      .element(screen.getByRole('navigation', { name: 'settings.breadcrumb.label' }))
+      .toBeVisible()
+    expect(screen.getByText('mcp.browserDownloads.empty', { exact: true }).elements()).toHaveLength(
+      0
+    )
+    expect(service.getBrowserDownloadSettings).toHaveBeenCalled()
+    expect(service.listBrowserDownloadHistory).not.toHaveBeenCalled()
+    expect(service.builtinSetAllowed).not.toHaveBeenCalled()
+    expect(service.setServerEnabled).not.toHaveBeenCalled()
+
+    const askWhereToSave = screen.getByRole('switch', {
+      name: 'mcp.browserDownloads.askWhereToSave'
+    })
+    await expect.element(askWhereToSave).toHaveAttribute('aria-checked', 'false')
+    await askWhereToSave.click()
+    await expect.poll(() => service.setBrowserDownloadAskWhereToSave.mock.calls.length).toBe(1)
+    expect(service.setBrowserDownloadAskWhereToSave).toHaveBeenCalledWith(true)
+
+    await screen.getByRole('button', { name: 'mcp.browserDownloads.manage' }).click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'mcp.browserDownloads.history' }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByText('mcp.browserDownloads.empty', { exact: true }))
+      .toBeVisible()
+    expect(service.listBrowserDownloadHistory).toHaveBeenCalledWith('')
+
+    await screen.getByRole('button', { name: 'settings.nav.mcp' }).click()
+    await expect.element(screen.getByRole('heading', { name: 'mcp.section.builtin' })).toBeVisible()
   })
 
   it('shows built-in loading and safe retry independently from external Servers', async () => {

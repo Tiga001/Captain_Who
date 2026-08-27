@@ -4,7 +4,9 @@ import type { McpServerDetailsView, McpServerListItem } from '@mycopilot/protoco
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { useToast } from '../../components/toast/ToastContext'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { SettingsBreadcrumbs } from '../settings/components/SettingsBreadcrumbs'
 import { McpBuiltinCapabilityList } from './McpBuiltinCapabilityList'
+import { BrowserAutomationSettingsPage } from './BrowserAutomationSettingsPage'
 import { McpServerEditor } from './McpServerEditor'
 import { McpServerList, McpServerListRefreshButton } from './McpServerList'
 import {
@@ -18,13 +20,14 @@ import { useBuiltinMcpCapabilities } from './useBuiltinMcpCapabilities'
 import { useMcpManagement } from './useMcpManagement'
 import './McpSettingsPage.css'
 
-type McpSettingsView = 'list' | 'add' | 'edit'
+type McpSettingsView = 'list' | 'add' | 'edit' | 'browserDownloads'
 
 export interface McpSettingsPageProps {
   onDirtyChange?: (dirty: boolean) => void
+  onNavigateSettingsRoot?: () => void
 }
 
-export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
+export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSettingsPageProps) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
   const {
@@ -279,8 +282,46 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
 
   const output = management.state.output
 
+  if (view === 'browserDownloads') {
+    return (
+      <BrowserAutomationSettingsPage
+        onBack={() => setView('list')}
+        onNavigateSettingsRoot={onNavigateSettingsRoot ?? (() => setView('list'))}
+      />
+    )
+  }
+
+  const returnToList = (): void => {
+    setEditorDirty(false)
+    setEditingServerSnapshot(null)
+    setSelectedServerId(null)
+    setView('list')
+  }
+  const subpageLabel =
+    view === 'add'
+      ? t('mcp.add.title')
+      : view === 'edit'
+        ? (editingServerSnapshot?.displayName ??
+          selectedListItem?.displayName ??
+          t('mcp.edit.title'))
+        : null
+
   return (
     <article className="settings-list-page mcp-settings-page">
+      {subpageLabel && (
+        <SettingsBreadcrumbs
+          ariaLabel={t('settings.breadcrumb.label')}
+          items={[
+            {
+              id: 'settings',
+              label: t('settings.breadcrumb.root'),
+              onSelect: onNavigateSettingsRoot ?? returnToList
+            },
+            { id: 'mcp', label: t('settings.nav.mcp'), onSelect: returnToList },
+            { id: view, label: toSafeMcpDisplayText(subpageLabel, 256) }
+          ]}
+        />
+      )}
       <header className="mcp-settings-header">
         <div>
           <h1 ref={pageTitleRef} tabIndex={-1}>
@@ -352,6 +393,7 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
                 )}
                 <McpBuiltinCapabilityList
                   capabilities={builtinState.output.capabilities}
+                  onConfigureBrowserAutomation={() => setView('browserDownloads')}
                   onSetAllowed={(capability, allowed) =>
                     void setBuiltinCapabilityAllowed(capability, allowed)
                   }

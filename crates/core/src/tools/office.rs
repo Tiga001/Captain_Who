@@ -424,7 +424,8 @@ fn office_execution_context(context: &ToolExecutionContext) -> AgentResult<Offic
         context.skill_resources_optional(),
     )
     .with_storage(context.storage_optional())
-    .with_conversation_id(context.conversation_id_optional());
+    .with_conversation_id(context.conversation_id_optional())
+    .with_permissions(context.permissions());
     Ok(OfficeExecutionContext::new(
         context.workspace_root_optional()?,
         context.permissions(),
@@ -1543,7 +1544,8 @@ fn parse_args_with_context(
         context.skill_resources_optional(),
     )
     .with_storage(context.storage_optional())
-    .with_conversation_id(context.conversation_id_optional());
+    .with_conversation_id(context.conversation_id_optional())
+    .with_permissions(context.permissions());
     parse_args_with_model_path_resolver(value, tool_name, |path| {
         agent_file_input_ref_from_model_path(&file_inputs, path).map_err(AgentError::from)
     })

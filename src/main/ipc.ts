@@ -37,7 +37,9 @@ import { registerWorkspaceFilesIpc } from './ipc/workspaceFilesIpc'
 import type { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
 import { registerBrowserSurfaceIpc } from './ipc/browserSurfaceIpc'
 import { registerBrowserArtifactIpc } from './ipc/browserArtifactIpc'
+import { registerBrowserDownloadIpc } from './ipc/browserDownloadIpc'
 import type { BrowserArtifactBroker } from './browser/BrowserArtifactBroker'
+import type { BrowserDownloadBroker } from './browser/BrowserDownloadBroker'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -317,7 +319,8 @@ export function registerHostIpc(
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean,
   browserSurfaceManager?: BrowserSurfaceManager,
   browserArtifactBroker?: BrowserArtifactBroker,
-  notificationLocaleMirror: NotificationLocaleMirror = createVolatileNotificationLocaleMirror()
+  notificationLocaleMirror: NotificationLocaleMirror = createVolatileNotificationLocaleMirror(),
+  browserDownloadBroker?: BrowserDownloadBroker
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
@@ -370,6 +373,9 @@ export function registerHostIpc(
   if (browserArtifactBroker) {
     registerBrowserArtifactIpc(ipcMain, browserArtifactBroker, selectBrowserArtifactExportPath)
   }
+  const disposeBrowserDownloadIpc = browserDownloadBroker
+    ? registerBrowserDownloadIpc(ipcMain, coreServer, browserDownloadBroker)
+    : () => undefined
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )
@@ -377,6 +383,7 @@ export function registerHostIpc(
     disposeNotificationIpc()
     disposeAutomationIpc()
     disposeMcpIpc()
+    disposeBrowserDownloadIpc()
   }
   dispose.beginNotificationShutdown = (): Promise<void> => disposeNotificationIpc.beginShutdown()
   dispose.beginNotificationDelivery = (): void => disposeNotificationIpc.beginDelivery()

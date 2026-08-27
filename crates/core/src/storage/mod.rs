@@ -7,6 +7,7 @@ pub mod agent_prompt_preferences_repository;
 pub mod agent_template_repository;
 pub mod attachment_repository;
 pub mod automation_repository;
+pub mod browser_download_repository;
 pub mod chat_repository;
 pub mod chat_search_repository;
 pub(crate) mod child_context_snapshot_repository;

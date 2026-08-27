@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
+import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { SettingsBreadcrumbs } from '../components/SettingsBreadcrumbs'
 import { ModelForm } from './configuration/ModelForm'
 import { ModelManager } from './configuration/ModelManager'
 import { ModelProviderSettings } from './configuration/ModelProviderSettings'
@@ -11,7 +13,14 @@ import './ConfigurationSettingsPage.css'
 
 type ConfigurationView = 'settings' | 'manager' | 'createModel' | 'editModel'
 
-export function ConfigurationSettingsPage() {
+interface ConfigurationSettingsPageProps {
+  onNavigateSettingsRoot: () => void
+}
+
+export function ConfigurationSettingsPage({
+  onNavigateSettingsRoot
+}: ConfigurationSettingsPageProps) {
+  const { t } = useFrontendConfig()
   const {
     apiToken,
     apiUrl,
@@ -52,24 +61,69 @@ export function ConfigurationSettingsPage() {
 
   if (view === 'manager') {
     return (
-      <ModelManager
-        models={models}
-        onBack={() => setView('settings')}
-        onCreate={openCreateModel}
-        onDelete={deleteModel}
-        onEdit={openEditModel}
-      />
+      <>
+        <SettingsBreadcrumbs
+          ariaLabel={t('settings.breadcrumb.label')}
+          items={[
+            {
+              id: 'settings',
+              label: t('settings.breadcrumb.root'),
+              onSelect: onNavigateSettingsRoot
+            },
+            {
+              id: 'configuration',
+              label: t('settings.page.configuration'),
+              onSelect: () => setView('settings')
+            },
+            { id: 'models', label: t('configuration.modelSettings') }
+          ]}
+        />
+        <ModelManager
+          models={models}
+          onBack={() => setView('settings')}
+          onCreate={openCreateModel}
+          onDelete={deleteModel}
+          onEdit={openEditModel}
+        />
+      </>
     )
   }
 
   if (view === 'createModel' || view === 'editModel') {
     return (
-      <ModelForm
-        model={view === 'editModel' ? editingModel : undefined}
-        providerProfileDescriptors={providerProfileDescriptors}
-        onCancel={() => setView('manager')}
-        onSave={saveModel}
-      />
+      <>
+        <SettingsBreadcrumbs
+          ariaLabel={t('settings.breadcrumb.label')}
+          items={[
+            {
+              id: 'settings',
+              label: t('settings.breadcrumb.root'),
+              onSelect: onNavigateSettingsRoot
+            },
+            {
+              id: 'configuration',
+              label: t('settings.page.configuration'),
+              onSelect: () => setView('settings')
+            },
+            {
+              id: 'models',
+              label: t('configuration.modelSettings'),
+              onSelect: () => setView('manager')
+            },
+            {
+              id: view,
+              label:
+                view === 'editModel' ? t('configuration.editModel') : t('configuration.newModel')
+            }
+          ]}
+        />
+        <ModelForm
+          model={view === 'editModel' ? editingModel : undefined}
+          providerProfileDescriptors={providerProfileDescriptors}
+          onCancel={() => setView('manager')}
+          onSave={saveModel}
+        />
+      </>
     )
   }
 

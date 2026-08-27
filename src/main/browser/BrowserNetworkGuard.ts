@@ -6,7 +6,7 @@ import type {
   Session,
   WebContents
 } from 'electron'
-import { parseBrowserSurfaceBootstrapUrl, type BrowserArtifactReference } from '@mycopilot/protocol'
+import { parseBrowserSurfaceBootstrapUrl, type BrowserDownloadReference } from '@mycopilot/protocol'
 
 import { BrowserNetworkPolicy, type BrowserRiskKind } from './BrowserNetworkPolicy'
 import {
@@ -196,8 +196,8 @@ export class BrowserNetworkOperationLease {
     }
   }
 
-  artifacts(): readonly BrowserArtifactReference[] {
-    return this.downloadLease?.artifacts() ?? []
+  downloads(): readonly BrowserDownloadReference[] {
+    return this.downloadLease?.downloads() ?? []
   }
 
   finish(): void {
@@ -486,6 +486,7 @@ export class BrowserNetworkGuard {
         ? this.downloadBroker.beginTool({
             guest,
             owner: {
+              conversationId: input.authorizationContext.conversationId,
               runId: input.authorizationContext.runId,
               activationId: input.authorizationContext.activationId,
               capabilityId: input.authorizationContext.capabilityId,
@@ -530,6 +531,7 @@ export class BrowserNetworkGuard {
     try {
       active.downloadLease = this.downloadBroker?.beginTargetCreationTool({
         owner: {
+          conversationId: input.authorizationContext.conversationId,
           runId: input.authorizationContext.runId,
           activationId: input.authorizationContext.activationId,
           capabilityId: input.authorizationContext.capabilityId,

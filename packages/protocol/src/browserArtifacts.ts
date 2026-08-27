@@ -8,20 +8,12 @@ import {
   hasAsciiControlCharacter,
   invalidProtocolValue
 } from './skills/validation'
+import { parseBrowserDownloadReference, type BrowserDownloadReference } from './browserDownloads'
 
 export const BROWSER_ARTIFACT_SCHEMA_VERSION = 1 as const
 
 export type BrowserArtifactKind =
-  | 'image'
-  | 'text'
-  | 'json'
-  | 'pdf'
-  | 'trace'
-  | 'video'
-  | 'download'
-  | 'snapshot'
-  | 'console'
-  | 'network'
+  'image' | 'text' | 'json' | 'pdf' | 'trace' | 'video' | 'snapshot' | 'console' | 'network'
 
 export type BrowserArtifactPreview = 'image' | 'text' | 'none'
 
@@ -80,6 +72,7 @@ export interface BrowserArtifactToolProjection {
   contentOmitted: true
   status: 'completed' | 'failed' | 'cancelled' | 'outcome_unknown'
   artifacts?: BrowserArtifactReference[]
+  downloads?: BrowserDownloadReference[]
 }
 
 const ARTIFACT_ID_PATTERN =
@@ -98,7 +91,6 @@ const BROWSER_ARTIFACT_KINDS = [
   'pdf',
   'trace',
   'video',
-  'download',
   'snapshot',
   'console',
   'network'
@@ -255,7 +247,7 @@ export function parseBrowserArtifactToolProjection(value: unknown): BrowserArtif
   const record = expectRecord(value, context)
   expectOnlyKeys(
     record,
-    ['schemaVersion', 'type', 'contentOmitted', 'status', 'artifacts'] as const,
+    ['schemaVersion', 'type', 'contentOmitted', 'status', 'artifacts', 'downloads'] as const,
     context
   )
   expectSchemaVersion(record, BROWSER_ARTIFACT_SCHEMA_VERSION, context)
@@ -278,6 +270,25 @@ export function parseBrowserArtifactToolProjection(value: unknown): BrowserArtif
       throw invalidProtocolValue(`${context}.artifacts`, 'contains duplicate Artifact ids')
     }
   }
+  let downloads: BrowserDownloadReference[] | undefined
+  if (record.downloads !== undefined) {
+    if (
+      !Array.isArray(record.downloads) ||
+      record.downloads.length < 1 ||
+      record.downloads.length > 16
+    ) {
+      throw invalidProtocolValue(`${context}.downloads`, 'must contain one to sixteen references')
+    }
+    downloads = record.downloads.map((download, index) =>
+      parseBrowserDownloadReference(download, `${context}.downloads[${index}]`)
+    )
+    if (downloads.some((download) => download.source !== 'agent')) {
+      throw invalidProtocolValue(`${context}.downloads`, 'must contain only Agent downloads')
+    }
+    if (new Set(downloads.map((download) => download.downloadId)).size !== downloads.length) {
+      throw invalidProtocolValue(`${context}.downloads`, 'contains duplicate Download ids')
+    }
+  }
   return {
     schemaVersion: BROWSER_ARTIFACT_SCHEMA_VERSION,
     type: 'builtin_capability_tool',
@@ -287,6 +298,7 @@ export function parseBrowserArtifactToolProjection(value: unknown): BrowserArtif
       ['completed', 'failed', 'cancelled', 'outcome_unknown'] as const,
       `${context}.status`
     ),
-    ...(artifacts ? { artifacts } : {})
+    ...(artifacts ? { artifacts } : {}),
+    ...(downloads ? { downloads } : {})
   }
 }

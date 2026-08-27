@@ -356,6 +356,43 @@ pub(crate) fn handle_request(
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
+        STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD => {
+            storage_response(request.id, storage.load_browser_download_settings())
+        }
+        STORAGE_SAVE_BROWSER_DOWNLOAD_SETTINGS_METHOD => {
+            let input = match parse_params::<BrowserDownloadSettingsUpdate>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.save_browser_download_settings(input))
+        }
+        STORAGE_REGISTER_BROWSER_DOWNLOAD_METHOD => {
+            let input = match parse_params::<BrowserDownloadRegistration>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.register_browser_download(input))
+        }
+        STORAGE_LIST_BROWSER_DOWNLOADS_METHOD => {
+            let input = match parse_params::<BrowserDownloadListInput>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(request.id, storage.list_browser_downloads(input))
+        }
+        STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD => {
+            let input = match parse_params::<BrowserDownloadIdRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage.load_browser_download(&input.download_id),
+            )
+        }
+        STORAGE_CLEAR_BROWSER_DOWNLOAD_HISTORY_METHOD => {
+            storage_response(request.id, storage.clear_browser_download_history())
+        }
         STORAGE_SAVE_CONVERSATION_META_METHOD => {
             let conversation = match parse_params::<ChatConversationMetaRecord>(request.params) {
                 Ok(conversation) => conversation,
@@ -486,6 +523,12 @@ pub(crate) struct ConversationIdRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttachmentIdRequest {
     pub(crate) attachment_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BrowserDownloadIdRequest {
+    pub(crate) download_id: String,
 }
 
 #[derive(Debug, Deserialize)]

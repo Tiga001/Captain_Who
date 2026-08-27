@@ -83,6 +83,15 @@ import type {
   BrowserArtifactExportOutput,
   BrowserArtifactReadInput,
   BrowserArtifactReadOutput,
+  BrowserDownloadAskWhereToSaveInput,
+  BrowserDownloadHistoryChangedNotification,
+  BrowserDownloadHistoryClearInput,
+  BrowserDownloadHistoryClearOutput,
+  BrowserDownloadHistoryListInput,
+  BrowserDownloadHistoryListOutput,
+  BrowserDownloadIdInput,
+  BrowserDownloadRevealOutput,
+  BrowserDownloadSettingsView,
   BrowserSurfaceActionInput,
   BrowserSurfaceCommand,
   BrowserSurfaceReadyInput,
@@ -214,6 +223,24 @@ export interface AutomationsHostApi {
 
 export interface BrowserHostApi {
   clearBrowsingData(): Promise<void>
+  getDownloadSettings(): Promise<HostInvocationResult<BrowserDownloadSettingsView>>
+  chooseDownloadDirectory(): Promise<HostInvocationResult<BrowserDownloadSettingsView | null>>
+  resetDownloadDirectory(): Promise<HostInvocationResult<BrowserDownloadSettingsView>>
+  setDownloadAskWhereToSave(
+    input: BrowserDownloadAskWhereToSaveInput
+  ): Promise<HostInvocationResult<BrowserDownloadSettingsView>>
+  listDownloadHistory(
+    input: BrowserDownloadHistoryListInput
+  ): Promise<HostInvocationResult<BrowserDownloadHistoryListOutput>>
+  revealDownload(
+    input: BrowserDownloadIdInput
+  ): Promise<HostInvocationResult<BrowserDownloadRevealOutput>>
+  clearDownloadHistory(
+    input: BrowserDownloadHistoryClearInput
+  ): Promise<HostInvocationResult<BrowserDownloadHistoryClearOutput>>
+  onDownloadHistoryChanged(
+    handler: (event: BrowserDownloadHistoryChangedNotification) => void
+  ): () => void
   /** Opens a native save dialog and exports an exact Host-owned Browser Artifact reference. */
   exportArtifact(
     input: BrowserArtifactExportInput

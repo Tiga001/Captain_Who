@@ -1030,6 +1030,13 @@ pub enum AgentFileInputRef {
     GeneratedArtifact { uri: String, path: String },
     /// Exact revision-bound `skill://` URI from an activated Skill.
     SkillResource { uri: String },
+    /// Durable, path-free reference to a browser download registered by the trusted Host.
+    BrowserDownload {
+        reference: String,
+        display_name: String,
+        size_bytes: u64,
+        sha256: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -1065,6 +1072,7 @@ pub enum AgentFileInputSourceKind {
     External,
     GeneratedArtifact,
     SkillResource,
+    BrowserDownload,
 }
 
 /// Presentation-safe execution evidence for a materialized input.

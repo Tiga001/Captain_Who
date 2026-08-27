@@ -772,6 +772,89 @@ pub struct UiPreferencesRecord {
     pub updated_at: i64,
 }
 
+pub const BROWSER_DOWNLOAD_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserDownloadLocationMode {
+    System,
+    Custom,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserDownloadSource {
+    Manual,
+    Agent,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDownloadSettingsRecord {
+    pub schema_version: u32,
+    pub location_mode: BrowserDownloadLocationMode,
+    pub custom_directory: Option<String>,
+    pub ask_where_to_save: bool,
+    pub revision: u64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDownloadSettingsUpdate {
+    pub schema_version: u32,
+    pub location_mode: BrowserDownloadLocationMode,
+    pub custom_directory: Option<String>,
+    pub ask_where_to_save: bool,
+    pub expected_revision: u64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDownloadRegistration {
+    pub schema_version: u32,
+    pub download_id: String,
+    pub source: BrowserDownloadSource,
+    pub display_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub absolute_path: String,
+    pub source_origin: Option<String>,
+    pub conversation_id: Option<String>,
+    pub run_id: Option<String>,
+    pub call_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDownloadRecord {
+    pub schema_version: u32,
+    pub download_id: String,
+    pub source: BrowserDownloadSource,
+    pub display_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub absolute_path: String,
+    pub source_origin: Option<String>,
+    pub conversation_id: Option<String>,
+    pub project_id: Option<String>,
+    pub run_id: Option<String>,
+    pub call_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDownloadListInput {
+    pub schema_version: u32,
+    pub query: String,
+    pub limit: u32,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPromptPreferencesRecord {

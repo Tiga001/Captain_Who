@@ -770,7 +770,7 @@ fn prepare_editor_completion_fixture(
         _runtime: runtime,
         workspace,
         office,
-        plan,
+        plan: *plan,
         completion_hook,
     }
 }
