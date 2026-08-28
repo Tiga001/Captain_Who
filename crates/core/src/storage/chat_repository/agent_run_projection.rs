@@ -323,10 +323,6 @@ fn current_file_write_approval_is_safe(
             .iter()
             .all(|field| safe_integer(&proposal[*field]))
         && current_approval_status_is_safe(&proposal["approvalStatus"])
-        && serde_json::from_value::<crate::AgentFileWriteProposal>(serde_json::Value::Object(
-            proposal.clone(),
-        ))
-        .is_ok()
 }
 
 fn current_skill_materialization_is_safe(

@@ -1,15 +1,10 @@
-use crate::storage::models::AgentFileDraftRecord;
-use crate::tools::apply_patch_paths::validate_text_patch_path;
+use crate::storage::models::AgentFileChangeRecord;
 use crate::{
-    content_revision, expand_system_path, AgentApprovalStatus, AgentFileDraftSnapshot,
-    AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus,
-    AgentPatchPermission, AgentPermissions, AgentProposedAction, AgentWritePermission,
+    AgentApprovalStatus, AgentFileDraftSnapshot, AgentFileWriteMode, AgentFileWriteProposal,
+    AgentFileWriteResult, AgentFileWriteResultStatus, AgentPatchPermission, AgentPermissions,
+    AgentProposedAction, AgentWritePermission,
 };
 use similar::TextDiff;
-use std::fs;
-use std::io::Write;
-use std::path::{Component, Path, PathBuf};
-use tempfile::NamedTempFile;
 
 /// The single approval route used by structured tools that publish file
 /// changes. Path scope and revision checks remain the responsibility of the
@@ -96,65 +91,7 @@ pub fn file_write_action_approval_status(
     }
 }
 
-pub fn apply_file_write(
-    workspace_root: Option<&Path>,
-    proposal: &AgentFileWriteProposal,
-    draft: &AgentFileDraftRecord,
-    permissions: AgentPermissions,
-) -> Result<AgentFileWriteResult, String> {
-    require_write_permission(permissions)?;
-    validate_proposal(proposal, draft)?;
-    validate_text_patch_path(&proposal.file_path).map_err(|error| error.to_string())?;
-    let target = resolve_target(workspace_root, &proposal.file_path, permissions)?;
-    reject_symlink_target(&target)?;
-    validate_base_state(&target, draft.base_revision.as_deref())?;
-
-    let existing_permissions = fs::metadata(&target)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let parent = target
-        .parent()
-        .ok_or_else(|| "文件写入目标缺少父目录。".to_string())?;
-    let mut temp = NamedTempFile::new_in(parent)
-        .map_err(|error| format!("创建文件写入临时文件失败：{error}"))?;
-    temp.write_all(draft.content.as_bytes())
-        .map_err(|error| format!("写入文件草稿失败：{error}"))?;
-    temp.flush()
-        .map_err(|error| format!("刷新文件草稿失败：{error}"))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|error| format!("同步文件草稿失败：{error}"))?;
-    if let Some(file_permissions) = existing_permissions {
-        temp.as_file()
-            .set_permissions(file_permissions)
-            .map_err(|error| format!("保留目标文件权限失败：{error}"))?;
-    }
-
-    if draft.base_revision.is_none() {
-        temp.persist_noclobber(&target)
-            .map_err(|error| format!("目标文件已出现或无法创建：{}", error.error))?;
-    } else {
-        temp.persist(&target)
-            .map_err(|error| format!("原子替换目标文件失败：{}", error.error))?;
-    }
-
-    let revision = content_revision(draft.content.as_bytes());
-    Ok(AgentFileWriteResult {
-        status: AgentFileWriteResultStatus::Applied,
-        draft_id: draft.id.clone(),
-        mode: proposal.mode,
-        file_path: proposal.file_path.clone(),
-        additions: proposal.additions,
-        deletions: proposal.deletions,
-        line_count: proposal.line_count,
-        byte_count: proposal.byte_count,
-        revision: Some(revision),
-        error: None,
-        message: Some("文件草稿已原子写入。".to_string()),
-    })
-}
-
-pub fn file_write_diff(draft: &AgentFileDraftRecord) -> String {
+pub fn file_write_diff(draft: &AgentFileChangeRecord) -> String {
     TextDiff::from_lines(&draft.base_content, &draft.content)
         .unified_diff()
         .header(
@@ -164,9 +101,10 @@ pub fn file_write_diff(draft: &AgentFileDraftRecord) -> String {
         .to_string()
 }
 
-pub fn file_draft_snapshot(draft: &AgentFileDraftRecord) -> Result<AgentFileDraftSnapshot, String> {
-    let mode = serde_json::from_value(serde_json::Value::String(draft.mode.clone()))
-        .map_err(|error| format!("文件草稿 mode 无效：{error}"))?;
+pub fn file_draft_snapshot(
+    draft: &AgentFileChangeRecord,
+) -> Result<AgentFileDraftSnapshot, String> {
+    let mode = file_change_write_mode(draft)?;
     let status = serde_json::from_value(serde_json::Value::String(draft.status.clone()))
         .map_err(|error| format!("文件草稿 status 无效：{error}"))?;
     Ok(AgentFileDraftSnapshot {
@@ -181,8 +119,8 @@ pub fn file_draft_snapshot(draft: &AgentFileDraftRecord) -> Result<AgentFileDraf
         deletions: draft.deletions,
         line_count: draft.line_count,
         byte_count: draft.byte_count,
-        chunk_count: draft.chunk_count,
-        next_chunk_index: draft.next_chunk_index,
+        chunk_count: draft.mutation_count,
+        next_chunk_index: draft.next_mutation_index,
         stats_final: draft.stats_final,
         summary: draft.summary.clone(),
         created_at: draft.created_at,
@@ -211,175 +149,13 @@ pub fn failed_file_write_result(
     }
 }
 
-fn validate_proposal(
-    proposal: &AgentFileWriteProposal,
-    draft: &AgentFileDraftRecord,
-) -> Result<(), String> {
-    if proposal.draft_id != draft.id || proposal.file_path != draft.file_path {
-        return Err("文件写入提案与持久化草稿不匹配。".to_string());
+fn file_change_write_mode(change: &AgentFileChangeRecord) -> Result<AgentFileWriteMode, String> {
+    match (change.operation.as_str(), change.strategy.as_deref()) {
+        ("create", None) => Ok(AgentFileWriteMode::Create),
+        ("update", Some("modify")) => Ok(AgentFileWriteMode::Modify),
+        ("update", Some("rewrite")) => Ok(AgentFileWriteMode::Rewrite),
+        _ => Err("文件变更事务的 operation/strategy 无效。".to_string()),
     }
-    if proposal.id != draft.final_action_id.as_deref().unwrap_or_default() {
-        return Err("文件写入提案的 action id 与草稿不匹配。".to_string());
-    }
-    if file_write_mode_label(proposal.mode) != draft.mode {
-        return Err("文件写入提案的 mode 与草稿不匹配。".to_string());
-    }
-    if proposal.base_revision != draft.base_revision {
-        return Err("文件写入提案的基础 revision 与草稿不匹配。".to_string());
-    }
-    if proposal.additions != draft.additions
-        || proposal.deletions != draft.deletions
-        || proposal.line_count != draft.line_count
-        || proposal.byte_count != draft.byte_count
-    {
-        return Err("文件写入提案的统计信息与草稿不匹配。".to_string());
-    }
-    if !matches!(draft.status.as_str(), "waiting_approval" | "applying") {
-        return Err(format!(
-            "文件草稿当前状态为 {}，不能应用此提案。",
-            draft.status
-        ));
-    }
-    if draft.content.len() > 4 * 1024 * 1024 {
-        return Err("文件草稿超过 4 MiB 限制。".to_string());
-    }
-    if draft.content.contains('\0') {
-        return Err("文件草稿不能包含空字符。".to_string());
-    }
-    Ok(())
-}
-
-fn file_write_mode_label(mode: AgentFileWriteMode) -> &'static str {
-    match mode {
-        AgentFileWriteMode::Create => "create",
-        AgentFileWriteMode::Rewrite => "rewrite",
-        AgentFileWriteMode::Modify => "modify",
-        AgentFileWriteMode::Append => "append",
-        AgentFileWriteMode::Upsert => "upsert",
-    }
-}
-
-fn validate_base_state(target: &Path, expected_revision: Option<&str>) -> Result<(), String> {
-    match expected_revision {
-        Some(expected) => {
-            let current =
-                fs::read(target).map_err(|error| format!("读取文件写入目标失败：{error}"))?;
-            if content_revision(&current) != expected {
-                return Err("目标文件在草稿创建后发生变化。".to_string());
-            }
-        }
-        None if target.exists() => {
-            return Err("目标文件在草稿创建后已出现。".to_string());
-        }
-        None => {}
-    }
-    Ok(())
-}
-
-fn require_write_permission(permissions: AgentPermissions) -> Result<(), String> {
-    if permissions.write == AgentWritePermission::Denied {
-        Err("当前写入权限为 denied，不能应用文件草稿。".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-fn resolve_target(
-    workspace_root: Option<&Path>,
-    file_path: &str,
-    permissions: AgentPermissions,
-) -> Result<PathBuf, String> {
-    let root = workspace_root.map(canonical_workspace_root).transpose()?;
-    let input = if let Some(expanded) = expand_system_path(file_path)? {
-        expanded
-    } else {
-        PathBuf::from(file_path)
-    };
-    let target = if input.is_absolute() {
-        if let Some(root) = root.as_deref() {
-            if input.starts_with(root) || permissions.write == AgentWritePermission::All {
-                normalize_absolute(&input)?
-            } else {
-                return Err("文件写入目标必须位于 workspace 内。".to_string());
-            }
-        } else if permissions.write == AgentWritePermission::All {
-            normalize_absolute(&input)?
-        } else {
-            return Err("写入绝对路径需要 write=all 权限。".to_string());
-        }
-    } else {
-        let root = root.ok_or_else(|| "相对写入路径需要 workspace。".to_string())?;
-        root.join(clean_relative(&input)?)
-    };
-
-    let parent = target
-        .parent()
-        .ok_or_else(|| "文件写入目标缺少父目录。".to_string())?
-        .canonicalize()
-        .map_err(|error| format!("文件写入父目录不可访问：{error}"))?;
-    if let Some(root) = workspace_root.map(canonical_workspace_root).transpose()? {
-        if permissions.write != AgentWritePermission::All && !parent.starts_with(&root) {
-            return Err("文件写入目标必须位于 workspace 内。".to_string());
-        }
-    }
-    Ok(parent.join(
-        target
-            .file_name()
-            .ok_or_else(|| "文件写入目标缺少文件名。".to_string())?,
-    ))
-}
-
-fn canonical_workspace_root(path: &Path) -> Result<PathBuf, String> {
-    let root = path
-        .canonicalize()
-        .map_err(|error| format!("workspace 路径不可访问：{error}"))?;
-    if !root.is_dir() {
-        return Err("workspace 路径不是目录。".to_string());
-    }
-    Ok(root)
-}
-
-fn normalize_absolute(path: &Path) -> Result<PathBuf, String> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            Component::ParentDir => return Err("文件写入路径不能包含 ..。".to_string()),
-        }
-    }
-    Ok(normalized)
-}
-
-fn clean_relative(path: &Path) -> Result<PathBuf, String> {
-    let mut cleaned = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => cleaned.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err("文件写入相对路径不能越过 workspace。".to_string())
-            }
-        }
-    }
-    if cleaned.as_os_str().is_empty() {
-        return Err("文件写入路径不能为空。".to_string());
-    }
-    Ok(cleaned)
-}
-
-fn reject_symlink_target(target: &Path) -> Result<(), String> {
-    if let Ok(metadata) = fs::symlink_metadata(target) {
-        if metadata.file_type().is_symlink() {
-            return Err("文件写入不允许符号链接目标。".to_string());
-        }
-        if !metadata.is_file() {
-            return Err("文件写入目标不是普通文件。".to_string());
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -388,7 +164,6 @@ mod tests {
     use crate::{
         AgentApprovalStatus, AgentCommandPermission, AgentPatchPermission, AgentReadPermission,
     };
-    use tempfile::tempdir;
 
     fn permissions() -> AgentPermissions {
         AgentPermissions {
@@ -401,24 +176,35 @@ mod tests {
         }
     }
 
-    fn draft(file_path: &str, base: &str, content: &str) -> AgentFileDraftRecord {
-        AgentFileDraftRecord {
+    fn draft(file_path: &str, base: &str, content: &str) -> AgentFileChangeRecord {
+        AgentFileChangeRecord {
+            schema_version: 1,
             id: "draft-1".to_string(),
             conversation_id: "conversation-1".to_string(),
             project_id: Some("project-1".to_string()),
             run_id: "run-1".to_string(),
+            source_tool_name: "write_file".to_string(),
+            source_tool_call_id: "call-begin-1".to_string(),
+            source_tool_arguments_digest: "digest-begin-1".to_string(),
+            permission_revision: "permission-1".to_string(),
+            tool_set_revision: "tool-set-1".to_string(),
+            provider_wire_revision: "provider-protocol-v1".to_string(),
+            observation_id: "fobs_fixture".to_string(),
+            observation_json: "{}".to_string(),
             file_path: file_path.to_string(),
-            mode: if base.is_empty() { "create" } else { "rewrite" }.to_string(),
+            operation: if base.is_empty() { "create" } else { "update" }.to_string(),
+            strategy: (!base.is_empty()).then(|| "rewrite".to_string()),
             status: "waiting_approval".to_string(),
-            base_revision: (!base.is_empty()).then(|| content_revision(base.as_bytes())),
+            base_revision: (!base.is_empty()).then(|| crate::content_revision(base.as_bytes())),
             base_content: base.to_string(),
             content: content.to_string(),
+            draft_revision: 1,
+            next_mutation_index: 1,
             additions: 1,
             deletions: u64::from(!base.is_empty()),
             line_count: 1,
             byte_count: content.len() as u64,
-            chunk_count: 1,
-            next_chunk_index: 1,
+            mutation_count: 1,
             stats_final: true,
             summary: Some("test write".to_string()),
             final_action_id: Some("action-1".to_string()),
@@ -428,7 +214,7 @@ mod tests {
         }
     }
 
-    fn proposal(draft: &AgentFileDraftRecord) -> AgentFileWriteProposal {
+    fn proposal(draft: &AgentFileChangeRecord) -> AgentFileWriteProposal {
         AgentFileWriteProposal {
             id: "action-1".to_string(),
             draft_id: draft.id.clone(),
@@ -445,6 +231,7 @@ mod tests {
             line_count: draft.line_count,
             byte_count: draft.byte_count,
             approval_status: AgentApprovalStatus::Approved,
+            execution: Box::new(direct_binding_fixture()),
         }
     }
 
@@ -674,10 +461,14 @@ mod tests {
                 created_at_ms: 1,
                 expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
             },
+            source_tool_name: "apply_patch".to_string(),
             source_call_id: "diff-1".to_string(),
             source_args_digest: digest.clone(),
+            staged_transaction_id: None,
             conversation_id: "conversation-1".to_string(),
+            project_id: None,
             run_id: "run-1".to_string(),
+            staged_transaction_revision: None,
             canonical_target: "/tmp/report.md".to_string(),
             base_content: None,
             target_content: Some(String::new()),
@@ -685,6 +476,7 @@ mod tests {
             receipt: None,
             permission_revision: "permission-v1".to_string(),
             tool_set_revision: "tool-set-v1".to_string(),
+            provider_wire_revision: "provider-wire-v1".to_string(),
         }
     }
 
@@ -708,105 +500,5 @@ mod tests {
         assert!(
             serde_json::from_value::<crate::file_change::FileChangeDirectBinding>(extra).is_err()
         );
-    }
-
-    #[test]
-    fn atomically_creates_file_from_draft() {
-        let root = tempdir().unwrap();
-        let draft = draft("report.md", "", "# Report\n");
-        let result =
-            apply_file_write(Some(root.path()), &proposal(&draft), &draft, permissions()).unwrap();
-
-        assert_eq!(result.status, AgentFileWriteResultStatus::Applied);
-        assert_eq!(
-            fs::read_to_string(root.path().join("report.md")).unwrap(),
-            "# Report\n"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomically_rewrites_file_and_preserves_unix_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = tempdir().unwrap();
-        let target = root.path().join("report.md");
-        fs::write(&target, "old\n").unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o751)).unwrap();
-        let draft = draft("report.md", "old\n", "new\n");
-
-        let result =
-            apply_file_write(Some(root.path()), &proposal(&draft), &draft, permissions()).unwrap();
-
-        assert_eq!(result.status, AgentFileWriteResultStatus::Applied);
-        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
-        assert_eq!(
-            fs::metadata(target).unwrap().permissions().mode() & 0o777,
-            0o751
-        );
-    }
-
-    #[test]
-    fn create_race_is_no_clobber_and_preserves_concurrent_content() {
-        let root = tempdir().unwrap();
-        let draft = draft("report.md", "", "proposed\n");
-        let proposal = proposal(&draft);
-
-        // The proposal was frozen while the target was absent, then another writer created it
-        // before Host publication revalidated the base state.
-        let target = root.path().join("report.md");
-        fs::write(&target, "concurrent\n").unwrap();
-
-        let error =
-            apply_file_write(Some(root.path()), &proposal, &draft, permissions()).unwrap_err();
-
-        assert!(error.contains("已出现"));
-        assert_eq!(fs::read_to_string(target).unwrap(), "concurrent\n");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_leaf_symlink_without_modifying_its_target() {
-        let root = tempdir().unwrap();
-        let real = root.path().join("real.md");
-        let link = root.path().join("report.md");
-        fs::write(&real, "keep\n").unwrap();
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let draft = draft("report.md", "", "replacement\n");
-
-        let error = apply_file_write(Some(root.path()), &proposal(&draft), &draft, permissions())
-            .unwrap_err();
-
-        assert!(error.contains("符号链接"));
-        assert_eq!(fs::read_to_string(real).unwrap(), "keep\n");
-    }
-
-    #[test]
-    fn rejects_rewrite_when_base_revision_changed() {
-        let root = tempdir().unwrap();
-        let target = root.path().join("report.md");
-        fs::write(&target, "old\n").unwrap();
-        let draft = draft("report.md", "old\n", "new\n");
-        fs::write(&target, "changed externally\n").unwrap();
-
-        let error = apply_file_write(Some(root.path()), &proposal(&draft), &draft, permissions())
-            .unwrap_err();
-
-        assert!(error.contains("发生变化"));
-        assert_eq!(fs::read_to_string(target).unwrap(), "changed externally\n");
-    }
-
-    #[test]
-    fn rejects_proposal_that_does_not_match_persisted_draft() {
-        let root = tempdir().unwrap();
-        let draft = draft("report.md", "", "# Report\n");
-        let mut proposal = proposal(&draft);
-        proposal.mode = AgentFileWriteMode::Rewrite;
-
-        let error =
-            apply_file_write(Some(root.path()), &proposal, &draft, permissions()).unwrap_err();
-
-        assert!(error.contains("mode"));
-        assert!(!root.path().join("report.md").exists());
     }
 }

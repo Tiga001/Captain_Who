@@ -528,11 +528,12 @@
           }
         },
         "checkpoint": {
-          "equalsRaw": true,
           "required": {
             "/result/draft/draftId": "draft-1",
-            "/result/tail": "private generated content"
-          }
+            "/result/tailBytes": 25,
+            "/result/tailDigest": "file-change-sha256-v1:cfe1d449ceb41d0c15a4ea729ef2e1374ae0706e1f86d50ad32a12f88e727dda"
+          },
+          "absent": ["/result/tail"]
         }
       }
     },

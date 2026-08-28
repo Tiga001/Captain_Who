@@ -97,6 +97,12 @@ pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
                     diff.remove("execution");
                 }
             }
+            if object.get("type").and_then(Value::as_str) == Some("file_write") {
+                if let Some(file_write) = object.get_mut("fileWrite").and_then(Value::as_object_mut)
+                {
+                    file_write.remove("execution");
+                }
+            }
             for value in object.values_mut() {
                 redact_renderer_mcp_binding_fields(value);
             }

@@ -564,6 +564,16 @@ fn validate_frozen_manual_file_effect_tool_call(
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         }
+        AgentProposedAction::FileWrite { file_write } => {
+            let digest = crate::file_change::proposal_digest(operation)
+                .map_err(|_| "Staged FileChange ToolCall arguments are invalid".to_string())?;
+            if digest != file_write.execution.source_args_digest {
+                return Err(format!(
+                    "启动对账发现 Staged FileChange {action_id} 的冻结 ToolCall 参数与 action 不一致。"
+                ));
+            }
+            file_write.summary.clone()
+        }
         AgentProposedAction::Command { command } => {
             crate::tools::validate_frozen_command_trace_args(command, operation).map_err(
                 |error| {
@@ -1236,76 +1246,162 @@ fn ensure_exact_builtin_capability_initial_audit(
     Ok(())
 }
 
-fn validate_direct_file_change_action_json_pair(
+fn is_current_file_change_action_identity(action_type: &str, tool_name: &str) -> bool {
+    matches!(
+        (action_type, tool_name),
+        ("diff", "apply_patch") | ("file_write", "apply_patch" | "write_file")
+    )
+}
+
+#[derive(Clone, Copy)]
+struct CurrentFileChangeActionIdentity<'a> {
+    run_id: &'a str,
+    conversation_id: Option<&'a str>,
+    tool_call_id: Option<&'a str>,
+    action_type: &'a str,
+    tool_name: &'a str,
+}
+
+fn validate_file_change_action_json_pair(
     frozen_action_json: &str,
     expected_action_json: &str,
     committed_action_json: &str,
-    expected_run_id: &str,
-    expected_conversation_id: Option<&str>,
-    expected_tool_call_id: Option<&str>,
+    identity: CurrentFileChangeActionIdentity<'_>,
 ) -> Result<(), String> {
     if expected_action_json.trim().is_empty()
         || committed_action_json.trim().is_empty()
         || expected_action_json == committed_action_json
         || frozen_action_json != expected_action_json
     {
-        return Err("Direct FileChange action JSON CAS input is invalid".to_string());
+        return Err("FileChange action JSON CAS input is invalid".to_string());
     }
     let prepared = serde_json::from_str::<AgentProposedAction>(expected_action_json)
-        .map_err(|_| "Direct FileChange prepared action JSON is invalid".to_string())?;
+        .map_err(|_| "FileChange prepared action JSON is invalid".to_string())?;
     let committed = serde_json::from_str::<AgentProposedAction>(committed_action_json)
-        .map_err(|_| "Direct FileChange committed action JSON is invalid".to_string())?;
-    let (
-        AgentProposedAction::Diff {
-            diff: prepared_diff,
-        },
-        AgentProposedAction::Diff {
-            diff: committed_diff,
-        },
-    ) = (&prepared, &committed)
-    else {
-        return Err("Direct FileChange action JSON must contain a Diff".to_string());
-    };
-    let operation_matches = match prepared_diff.operation {
-        crate::AgentPatchOperation::Create => {
-            prepared_diff.execution.transaction.operation
-                == crate::file_change::FileChangeOperation::Create
+        .map_err(|_| "FileChange committed action JSON is invalid".to_string())?;
+    if !is_current_file_change_action_identity(identity.action_type, identity.tool_name) {
+        return Err("FileChange action identity is invalid".to_string());
+    }
+    match (&prepared, &committed) {
+        (
+            AgentProposedAction::Diff {
+                diff: prepared_diff,
+            },
+            AgentProposedAction::Diff {
+                diff: committed_diff,
+            },
+        ) if identity.action_type == "diff" && identity.tool_name == "apply_patch" => {
+            let operation_matches = match prepared_diff.operation {
+                crate::AgentPatchOperation::Create => {
+                    prepared_diff.execution.transaction.operation
+                        == crate::file_change::FileChangeOperation::Create
+                }
+                crate::AgentPatchOperation::Update => {
+                    prepared_diff.execution.transaction.operation
+                        == crate::file_change::FileChangeOperation::Update
+                }
+                crate::AgentPatchOperation::Delete => {
+                    prepared_diff.execution.transaction.operation
+                        == crate::file_change::FileChangeOperation::Delete
+                }
+            };
+            let execution_transition_is_valid = committed_diff
+                .execution
+                .is_commit_successor_of(&prepared_diff.execution)
+                || committed_diff
+                    .execution
+                    .is_delete_finalization_successor_of(&prepared_diff.execution);
+            if !execution_transition_is_valid
+                || prepared_diff.id != committed_diff.id
+                || prepared_diff.operation != committed_diff.operation
+                || prepared_diff.file_path != committed_diff.file_path
+                || prepared_diff.patch != committed_diff.patch
+                || prepared_diff.base_revision != committed_diff.base_revision
+                || prepared_diff.summary != committed_diff.summary
+                || prepared_diff.approval_status != committed_diff.approval_status
+                || prepared_diff.id != prepared_diff.execution.source_call_id
+                || prepared_diff.execution.source_tool_name != identity.tool_name
+                || prepared_diff.file_path != prepared_diff.execution.transaction.file_path
+                || prepared_diff.base_revision.as_deref()
+                    != prepared_diff.execution.transaction.base.revision()
+                || !operation_matches
+                || prepared_diff.execution.run_id != identity.run_id
+                || Some(prepared_diff.execution.conversation_id.as_str())
+                    != identity.conversation_id
+                || identity
+                    .tool_call_id
+                    .is_some_and(|call_id| call_id != prepared_diff.id)
+            {
+                return Err(
+                    "Direct FileChange committed action is not the exact prepared successor"
+                        .to_string(),
+                );
+            }
         }
-        crate::AgentPatchOperation::Update => {
-            prepared_diff.execution.transaction.operation
-                == crate::file_change::FileChangeOperation::Update
+        (
+            AgentProposedAction::FileWrite {
+                file_write: prepared_write,
+            },
+            AgentProposedAction::FileWrite {
+                file_write: committed_write,
+            },
+        ) if identity.action_type == "file_write" => {
+            use crate::file_change::FileChangeOperation;
+            let operation_matches = matches!(
+                (
+                    prepared_write.mode,
+                    prepared_write.execution.transaction.operation
+                ),
+                (
+                    crate::AgentFileWriteMode::Create,
+                    FileChangeOperation::Create
+                ) | (
+                    crate::AgentFileWriteMode::Modify | crate::AgentFileWriteMode::Rewrite,
+                    FileChangeOperation::Update
+                )
+            );
+            if !committed_write
+                .execution
+                .is_commit_successor_of(&prepared_write.execution)
+                || prepared_write.id != committed_write.id
+                || prepared_write.draft_id != committed_write.draft_id
+                || prepared_write.mode != committed_write.mode
+                || prepared_write.file_path != committed_write.file_path
+                || prepared_write.base_revision != committed_write.base_revision
+                || prepared_write.summary != committed_write.summary
+                || prepared_write.additions != committed_write.additions
+                || prepared_write.deletions != committed_write.deletions
+                || prepared_write.line_count != committed_write.line_count
+                || prepared_write.byte_count != committed_write.byte_count
+                || prepared_write.approval_status != committed_write.approval_status
+                || prepared_write.id != prepared_write.execution.source_call_id
+                || prepared_write.execution.source_tool_name != identity.tool_name
+                || prepared_write.draft_id
+                    != prepared_write
+                        .execution
+                        .staged_transaction_id
+                        .as_deref()
+                        .unwrap_or_default()
+                || prepared_write.file_path != prepared_write.execution.transaction.file_path
+                || prepared_write.base_revision.as_deref()
+                    != prepared_write.execution.transaction.base.revision()
+                || prepared_write.additions != prepared_write.execution.proposal.additions
+                || prepared_write.deletions != prepared_write.execution.proposal.deletions
+                || !operation_matches
+                || prepared_write.execution.run_id != identity.run_id
+                || Some(prepared_write.execution.conversation_id.as_str())
+                    != identity.conversation_id
+                || identity
+                    .tool_call_id
+                    .is_some_and(|call_id| call_id != prepared_write.id)
+            {
+                return Err(
+                    "Staged FileChange committed action is not the exact prepared successor"
+                        .to_string(),
+                );
+            }
         }
-        crate::AgentPatchOperation::Delete => {
-            prepared_diff.execution.transaction.operation
-                == crate::file_change::FileChangeOperation::Delete
-        }
-    };
-    let execution_transition_is_valid = committed_diff
-        .execution
-        .is_commit_successor_of(&prepared_diff.execution)
-        || committed_diff
-            .execution
-            .is_delete_finalization_successor_of(&prepared_diff.execution);
-    if !execution_transition_is_valid
-        || prepared_diff.id != committed_diff.id
-        || prepared_diff.operation != committed_diff.operation
-        || prepared_diff.file_path != committed_diff.file_path
-        || prepared_diff.patch != committed_diff.patch
-        || prepared_diff.base_revision != committed_diff.base_revision
-        || prepared_diff.summary != committed_diff.summary
-        || prepared_diff.approval_status != committed_diff.approval_status
-        || prepared_diff.id != prepared_diff.execution.source_call_id
-        || prepared_diff.file_path != prepared_diff.execution.transaction.file_path
-        || prepared_diff.base_revision.as_deref()
-            != prepared_diff.execution.transaction.base.revision()
-        || !operation_matches
-        || prepared_diff.execution.run_id != expected_run_id
-        || Some(prepared_diff.execution.conversation_id.as_str()) != expected_conversation_id
-        || expected_tool_call_id.is_some_and(|call_id| call_id != prepared_diff.id)
-    {
-        return Err(
-            "Direct FileChange committed action is not the exact prepared successor".to_string(),
-        );
+        _ => return Err("FileChange action JSON has an invalid current shape".to_string()),
     }
     Ok(())
 }
@@ -1928,13 +2024,13 @@ impl StorageService {
             .map_err(storage_error)
     }
 
-    /// Returns current canonical `executing + diff + apply_patch` audit records for startup
-    /// reconciliation. Payload validation remains the recovery caller's responsibility.
-    pub fn list_executing_apply_patch_diff_action_audits(
+    /// Returns current canonical executing FileChange audit records for startup reconciliation.
+    /// Payload validation remains the recovery caller's responsibility.
+    pub fn list_executing_file_change_action_audits(
         &self,
     ) -> Result<Vec<AgentActionAuditRecord>, String> {
         let connection = self.state.connection()?;
-        agent_action_audit_repository::list_executing_apply_patch_diff_action_audits(&connection)
+        agent_action_audit_repository::list_executing_file_change_action_audits(&connection)
             .map_err(storage_error)
     }
 
@@ -1967,8 +2063,7 @@ impl StorageService {
         expected_action_json: &str,
         committed_action_json: &str,
     ) -> Result<AgentActionAuditJsonCommitOutcome, String> {
-        if identity.action_type != "diff"
-            || identity.tool_name != "apply_patch"
+        if !is_current_file_change_action_identity(&identity.action_type, &identity.tool_name)
             || identity.status != "executing"
             || identity.decision.as_deref() != Some("approved")
             || identity.decision_source.as_deref() != Some("auto")
@@ -1981,13 +2076,17 @@ impl StorageService {
         {
             return Err("automatic Direct FileChange audit identity is invalid".to_string());
         }
-        validate_direct_file_change_action_json_pair(
+        validate_file_change_action_json_pair(
             &identity.action_json,
             expected_action_json,
             committed_action_json,
-            &identity.run_id,
-            identity.conversation_id.as_deref(),
-            None,
+            CurrentFileChangeActionIdentity {
+                run_id: &identity.run_id,
+                conversation_id: identity.conversation_id.as_deref(),
+                tool_call_id: None,
+                action_type: &identity.action_type,
+                tool_name: &identity.tool_name,
+            },
         )?;
         let mut connection = self.state.connection()?;
         agent_action_audit_repository::commit_executing_action_json(
@@ -2053,8 +2152,7 @@ impl StorageService {
         committed_action_json: &str,
         updated_at: i64,
     ) -> Result<AgentPendingActionJsonCommitOutcome, String> {
-        if identity.action_type != "diff"
-            || identity.tool_name != "apply_patch"
+        if !is_current_file_change_action_identity(&identity.action_type, &identity.tool_name)
             || identity.tool_call_id.as_deref().is_none_or(str::is_empty)
             || identity.status != "executing"
             || identity.target_status.is_some()
@@ -2062,13 +2160,17 @@ impl StorageService {
         {
             return Err("manual Direct FileChange pending identity is invalid".to_string());
         }
-        validate_direct_file_change_action_json_pair(
+        validate_file_change_action_json_pair(
             &identity.action_json,
             expected_action_json,
             committed_action_json,
-            &identity.run_id,
-            identity.conversation_id.as_deref(),
-            identity.tool_call_id.as_deref(),
+            CurrentFileChangeActionIdentity {
+                run_id: &identity.run_id,
+                conversation_id: identity.conversation_id.as_deref(),
+                tool_call_id: identity.tool_call_id.as_deref(),
+                action_type: &identity.action_type,
+                tool_name: &identity.tool_name,
+            },
         )?;
         let mut connection = self.state.connection()?;
         let transaction = connection
@@ -3934,6 +4036,7 @@ fn validate_manual_file_effect_settlement_request(
         || (expected_action_type == "skill_materialization"
             && expected_pending_status == "executing")
         || (expected_action_type == "diff" && expected_pending_status == "executing")
+        || (expected_action_type == "file_write" && expected_pending_status == "executing")
         || (expected_action_type == "skill_script" && expected_pending_status == "executing")
         || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing")
         || (expected_action_type == "builtin_mcp_tool_approval"
@@ -4240,6 +4343,25 @@ fn manual_file_effect_identity(
     match action {
         AgentProposedAction::Diff { diff } => {
             Ok(("diff", "apply_patch".to_string(), diff.id.clone(), false))
+        }
+        AgentProposedAction::FileWrite { file_write } => {
+            if file_write.execution.validate().is_err()
+                || !matches!(
+                    file_write.execution.source_tool_name.as_str(),
+                    "apply_patch" | "write_file"
+                )
+                || file_write.id != file_write.execution.source_call_id
+                || file_write.execution.staged_transaction_id.as_deref()
+                    != Some(file_write.draft_id.as_str())
+            {
+                return Err("manual Staged FileChange identity is invalid".to_string());
+            }
+            Ok((
+                "file_write",
+                file_write.execution.source_tool_name.clone(),
+                file_write.id.clone(),
+                false,
+            ))
         }
         AgentProposedAction::Command { command } => Ok((
             "command",

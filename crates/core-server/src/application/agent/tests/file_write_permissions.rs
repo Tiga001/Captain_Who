@@ -26,7 +26,7 @@ fn test_input(permissions: AgentPermissions) -> AgentChatInput {
     input
 }
 
-fn direct_execution_input(
+pub(super) fn direct_execution_input(
     workspace: &Path,
     run_id: &str,
     conversation_id: &str,
@@ -146,6 +146,16 @@ fn bind_direct_execution_to_input(action: &mut AgentProposedAction, input: &Agen
         .tool_set
         .effective_revision
         .clone();
+    diff.execution.provider_wire_revision = input
+        .provider_configuration_revision
+        .clone()
+        .or_else(|| {
+            input.provider_protocol_key.as_ref().map(|protocol| {
+                mycopilot_core::file_change::proposal_digest(protocol)
+                    .expect("digest the exact Provider wire snapshot")
+            })
+        })
+        .expect("Direct execution fixture has Provider wire identity");
     diff.execution
         .validate()
         .expect("Direct execution binding remains internally valid");
@@ -200,21 +210,19 @@ fn assert_direct_change_applied(
 }
 
 fn file_write_action(approval_status: AgentApprovalStatus) -> AgentProposedAction {
-    AgentProposedAction::FileWrite {
-        file_write: AgentFileWriteProposal {
-            id: "write-1".to_string(),
-            draft_id: "draft-1".to_string(),
-            mode: AgentFileWriteMode::Create,
-            file_path: "report.txt".to_string(),
-            base_revision: None,
-            summary: None,
-            additions: 1,
-            deletions: 0,
-            line_count: 1,
-            byte_count: 5,
-            approval_status,
+    let (file_write, _) = staged_file_write_fixture(
+        StagedFileWriteFixtureIdentity {
+            run_id: "run-file-policy",
+            conversation_id: "conversation-file-policy",
+            call_id: "write-1",
+            transaction_id: "draft-1",
         },
-    }
+        ("report.txt", "/tmp/file-policy-test/report.txt"),
+        "hello",
+        "write_file",
+        approval_status,
+    );
+    AgentProposedAction::FileWrite { file_write }
 }
 
 fn apply_patch_action(approval_status: AgentApprovalStatus) -> AgentProposedAction {
@@ -565,9 +573,7 @@ fn automatic_direct_outcome_unknown_keeps_the_claim_executing_without_a_tool_res
 
     assert_eq!(error.code(), Some("agent.apply_patch.recovery_pending"));
     assert!(!target.exists());
-    let claims = storage
-        .list_executing_apply_patch_diff_action_audits()
-        .unwrap();
+    let claims = storage.list_executing_file_change_action_audits().unwrap();
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].status, "executing");
     assert!(claims[0].tool_result_json.is_none());
@@ -628,9 +634,7 @@ fn automatic_direct_post_commit_binding_failure_recovers_without_replaying() {
         "published before binding failure\n"
     );
     let published_metadata = fs::metadata(&target).unwrap();
-    let claims = storage
-        .list_executing_apply_patch_diff_action_audits()
-        .unwrap();
+    let claims = storage.list_executing_file_change_action_audits().unwrap();
     assert_eq!(claims.len(), 1);
     assert!(claims[0].tool_result_json.is_none());
 
@@ -643,7 +647,7 @@ fn automatic_direct_post_commit_binding_failure_recovers_without_replaying() {
         1
     );
     assert!(storage
-        .list_executing_apply_patch_diff_action_audits()
+        .list_executing_file_change_action_audits()
         .unwrap()
         .is_empty());
     let recovered = storage
@@ -726,7 +730,7 @@ fn automatic_direct_reconciles_a_terminal_receipt_after_post_commit_error() {
     assert_eq!(audited[0].result, result.result);
     assert_eq!(audited[0].error, result.error);
     assert!(storage
-        .list_executing_apply_patch_diff_action_audits()
+        .list_executing_file_change_action_audits()
         .unwrap()
         .is_empty());
 }

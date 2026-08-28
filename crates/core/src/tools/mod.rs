@@ -1,6 +1,5 @@
 mod agent_collaboration;
 mod apply_patch;
-pub(crate) mod apply_patch_paths;
 mod attachments;
 mod automation_report;
 mod builtin_capability;
@@ -8,6 +7,7 @@ mod command_session;
 mod context;
 mod conversation_history;
 mod document_text;
+mod file_change_staged;
 mod filesystem;
 mod git_diff;
 mod image_generation;
@@ -1995,16 +1995,24 @@ mod tests {
     }
 
     #[test]
-    fn structured_writers_declare_the_shared_file_write_permission_policy() {
+    fn structured_writers_declare_their_exact_shared_file_write_access() {
         let registry = ToolRegistry::defaults_with_search(None);
 
-        for tool_name in ["apply_patch", "write_file", "skills_materialize_resource"] {
+        // FileChange transactions must remain inspectable and abortable after write authority is
+        // tightened. Their mutating calls still enforce current write authority inside the tool
+        // and again at approval execution. The temporary write_file bridge has the same lifecycle.
+        for tool_name in ["apply_patch", "write_file"] {
             assert_eq!(
                 registry.permission_policy(tool_name),
-                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly),
-                "{tool_name} must opt into the common file-write policy"
+                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite),
+                "{tool_name} must retain only its safe status/abort surface when writes are denied"
             );
         }
+        assert_eq!(
+            registry.permission_policy("skills_materialize_resource"),
+            AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly),
+            "materialization has no read-only settlement action and must disappear when writes are denied"
+        );
         assert_eq!(
             registry.permission_policy("read_file"),
             AgentToolPermissionPolicy::Default

@@ -613,6 +613,10 @@ impl AgentRuntime {
         let mut file_transaction_guard = FileTransactionRunGuard::new(
             transaction_storage.clone(),
             run_id.clone(),
+            trace_conversation_id.clone(),
+            run_context
+                .as_ref()
+                .and_then(|context| context.project_id.clone()),
             cancellation_token.clone(),
         );
         let file_observations = restored_checkpoint
@@ -730,6 +734,16 @@ impl AgentRuntime {
             .with_runtime_services(run_id.clone(), storage)
             .with_file_observation_registry(file_observations)
             .with_file_change_tool_set_revision(effective_tool_set.revision().to_string())
+            .with_file_change_provider_wire_revision(
+                llm_request
+                    .provider_protocol_key
+                    .provider_configuration_revision
+                    .clone()
+                    .unwrap_or_else(|| {
+                        crate::file_change::proposal_digest(&llm_request.provider_protocol_key)
+                            .expect("validated ProviderProtocolKey serializes")
+                    }),
+            )
             .with_skill_resources(skill_resources)
             .with_command_runtime_profile_resolver(command_runtime_profile_resolver)
             .with_command_session_executor(command_session_executor)
@@ -930,8 +944,14 @@ impl AgentRuntime {
                     }
                     let context_compaction_planner =
                         ContextCompactionPlanner::for_tools(&tool_definitions);
-                    let file_transactions =
-                        FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
+                    let file_transactions = FileTransactionState::load(
+                        transaction_storage.as_deref(),
+                        &run_id,
+                        trace_conversation_id.as_deref(),
+                        run_context
+                            .as_ref()
+                            .and_then(|context| context.project_id.as_deref()),
+                    )?;
                     let user_text_blocked = file_transactions.blocks_user_text();
                     let mut compaction_attempts = 0_usize;
                     let (request_context, request_estimate) = loop {
@@ -1765,6 +1785,20 @@ impl AgentRuntime {
                         },
                         reason,
                     };
+                    // Re-load at dispatch time instead of relying on the state observed before
+                    // the model request. An earlier Tool Call in the same provider batch may have
+                    // opened a transaction, and no later call may cross that newly-active fence.
+                    let dispatch_file_transactions = FileTransactionState::load(
+                        transaction_storage.as_deref(),
+                        &run_id,
+                        trace_conversation_id.as_deref(),
+                        run_context
+                            .as_ref()
+                            .and_then(|context| context.project_id.as_deref()),
+                    )?;
+                    let file_transaction_fence_blocked = dispatch_file_transactions
+                        .blocks_user_text()
+                        && !dispatch_file_transactions.allows_tool_call(&call.tool, &call.args);
                     let is_policy_process_tool =
                         call.tool == "run_command" || call.tool == "skills_run_script";
                     let mut prepared_policy_action = None;
@@ -1804,6 +1838,27 @@ impl AgentRuntime {
                                 "recovery": "useEarlierCallResult",
                                 "tool": call.tool,
                                 "semanticFingerprint": semantic_fingerprint,
+                                "executed": false,
+                                "message": message,
+                            })),
+                            error: Some(message),
+                        });
+                        requires_approval = false;
+                        call.approval_status = AgentApprovalStatus::NotRequired;
+                    }
+
+                    if policy_preflight_failure.is_none() && file_transaction_fence_blocked {
+                        let message = "FileChange transaction 尚未结算；当前调用已在副作用前拒绝。请使用 apply_patch 继续或结算返回的 exact transactionId。".to_string();
+                        policy_preflight_failure = Some(AgentToolResult {
+                            exact_archive_file: None,
+                            call_id: call.id.clone(),
+                            tool: call.tool.clone(),
+                            ok: false,
+                            result: Some(json!({
+                                "type": "runtime_guard",
+                                "code": "fileChangeTransactionUnsettled",
+                                "errorCode": "agent.file_change_transaction_unsettled",
+                                "recovery": "continueExactApplyPatchTransaction",
                                 "executed": false,
                                 "message": message,
                             })),
@@ -3196,8 +3251,14 @@ impl AgentRuntime {
                     finish_reason,
                 ));
             }
-            let final_file_transactions =
-                FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
+            let final_file_transactions = FileTransactionState::load(
+                transaction_storage.as_deref(),
+                &run_id,
+                trace_conversation_id.as_deref(),
+                run_context
+                    .as_ref()
+                    .and_then(|context| context.project_id.as_deref()),
+            )?;
             if final_file_transactions.blocks_user_text() {
                 return Err(AgentError::new(
                     "文件事务尚未结算，不能结束当前运行或输出最终回复。",

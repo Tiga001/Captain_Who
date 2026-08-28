@@ -2,7 +2,8 @@ import type {
   AgentActionExecutionOutput,
   AgentApprovalStatus,
   AgentFileWritePreview,
-  AgentProposedAction
+  AgentProposedAction,
+  AgentToolCall
 } from '@mycopilot/protocol'
 import type { ChatFileWritePreview, ChatSkillInstallationView } from '../chat/chatTypes'
 import { getAgentActionId } from './agentActionUtils'
@@ -34,6 +35,36 @@ export function upsertFileWritePreview(
       receivedAt
     },
     (preview) => preview.previewId
+  )
+}
+
+export function bindFileChangePreviewsToCall(
+  previews: ChatFileWritePreview[],
+  call: AgentToolCall
+): ChatFileWritePreview[] {
+  if (call.tool !== 'apply_patch' && call.tool !== 'write_file') return previews
+  const args =
+    call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+      ? (call.args as Record<string, unknown>)
+      : {}
+  const transactionId =
+    typeof args.transactionId === 'string'
+      ? args.transactionId
+      : typeof args.draftId === 'string'
+        ? args.draftId
+        : undefined
+  const filePath = typeof args.filePath === 'string' ? args.filePath : undefined
+  const directApply = call.tool === 'apply_patch' && args.action === 'apply'
+
+  const previewIndex = previews.findIndex((preview) => {
+    if (preview.toolCallId !== undefined) return false
+    const matchesTransaction = transactionId !== undefined && preview.draftId === transactionId
+    const matchesDirectPath = directApply && filePath !== undefined && preview.filePath === filePath
+    return matchesTransaction || matchesDirectPath
+  })
+  if (previewIndex < 0) return previews
+  return previews.map((preview, index) =>
+    index === previewIndex ? { ...preview, toolCallId: call.id } : preview
   )
 }
 

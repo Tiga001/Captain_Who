@@ -80,6 +80,7 @@ pub struct ToolExecutionContext {
     file_observations: Arc<FileObservationRegistry>,
     file_change_permission_revision: String,
     file_change_tool_set_revision: String,
+    file_change_provider_wire_revision: String,
     permissions: AgentPermissions,
     conversation_id: Option<String>,
     project_id: Option<String>,
@@ -107,6 +108,56 @@ pub(super) struct FileObservationRegistryView<'a> {
 }
 
 impl FileObservationRegistryView<'_> {
+    /// Temporary bridge for the published `write_file` entry while it delegates to the canonical
+    /// FileChange store. The Host performs the same descriptor-bound read, but records a distinct
+    /// synthetic read identity so the write Tool Call cannot claim an observation it allegedly
+    /// produced itself. This bridge is removed with the public legacy entry in round 4.
+    pub(super) fn issue_existing_for_write_file_bridge(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+        revision: &str,
+        metadata: &Metadata,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        let source_call_id = format!("write-file-host-read:{call_id}");
+        self.context.file_observations.issue_existing_from_read(
+            crate::file_change::FileObservationOwner::new(&source_call_id, conversation_id, run_id),
+            canonical_target,
+            revision,
+            metadata,
+            parent_metadata,
+        )
+    }
+
+    pub(super) fn issue_missing_for_write_file_bridge(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        let source_call_id = format!("write-file-host-read:{call_id}");
+        self.context.file_observations.issue_missing_from_read(
+            crate::file_change::FileObservationOwner::new(&source_call_id, conversation_id, run_id),
+            canonical_target,
+            parent_metadata,
+        )
+    }
+
     pub(super) fn issue_existing(
         &self,
         conversation_id: &str,
@@ -239,6 +290,7 @@ impl ToolExecutionContext {
             file_change_permission_revision: crate::file_change::proposal_digest(&permissions)
                 .expect("AgentPermissions serialization is infallible"),
             file_change_tool_set_revision: "tool-set-unbound".to_string(),
+            file_change_provider_wire_revision: "provider-wire-unbound".to_string(),
             permissions,
             conversation_id,
             project_id,
@@ -283,6 +335,11 @@ impl ToolExecutionContext {
 
     pub(crate) fn with_file_change_tool_set_revision(mut self, revision: String) -> Self {
         self.file_change_tool_set_revision = revision;
+        self
+    }
+
+    pub(crate) fn with_file_change_provider_wire_revision(mut self, revision: String) -> Self {
+        self.file_change_provider_wire_revision = revision;
         self
     }
 
@@ -484,6 +541,10 @@ impl ToolExecutionContext {
 
     pub(super) fn file_change_permission_revision(&self) -> &str {
         &self.file_change_permission_revision
+    }
+
+    pub(super) fn file_change_provider_wire_revision(&self) -> &str {
+        &self.file_change_provider_wire_revision
     }
 
     pub(super) fn file_change_tool_set_revision(&self) -> &str {

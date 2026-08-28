@@ -546,12 +546,14 @@ pub(crate) fn load_action_audit_record(
         .optional()
 }
 
-/// Lists the exact durable claims that require Direct FileChange startup reconciliation.
+/// Lists the exact durable claims that require FileChange startup reconciliation.
 ///
 /// This is deliberately a storage-only selection over the current canonical columns. It neither
-/// decodes `action_json` nor accepts, upgrades, or reinterprets an older payload shape. Callers
-/// must validate the returned current Direct FileChange envelope before using it as authority.
-pub fn list_executing_apply_patch_diff_action_audits(
+/// decodes `action_json` nor accepts, upgrades, or reinterprets an older payload shape. The
+/// transitional `write_file` name is accepted only for the current `file_write` action whose
+/// private binding identifies the same canonical FileChange executor; callers must validate that
+/// exact envelope before using it as authority.
+pub fn list_executing_file_change_action_audits(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<AgentActionAuditRecord>> {
     let mut statement = connection.prepare(
@@ -563,8 +565,10 @@ pub fn list_executing_apply_patch_diff_action_audits(
                blocked_reason, decision_source
         FROM agent_action_audit
         WHERE status = 'executing'
-          AND action_type = 'diff'
-          AND tool_name = 'apply_patch'
+          AND (
+                (action_type = 'diff' AND tool_name = 'apply_patch')
+             OR (action_type = 'file_write' AND tool_name IN ('apply_patch', 'write_file'))
+          )
         ORDER BY created_at ASC, action_id ASC
         ",
     )?;
@@ -965,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_only_executing_apply_patch_diffs_as_complete_records_in_stable_order() {
+    fn lists_only_current_executing_file_changes_as_complete_records_in_stable_order() {
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
 
@@ -985,9 +989,18 @@ mod tests {
         let mut same_time_earlier_id = executing_auto_diff("a-same-time", r#"{"proposal":"a"}"#);
         same_time_earlier_id.created_at = 20;
         same_time_earlier_id.decided_at = Some(22);
+        let mut staged = executing_auto_diff("staged-current", r#"{"proposal":"staged"}"#);
+        staged.action_type = "file_write".to_string();
+        staged.tool_name = "write_file".to_string();
+        staged.created_at = 15;
 
         // Insert deliberately out of result order so the contract depends on SQL ordering.
-        for record in [&same_time_later_id, &earliest, &same_time_earlier_id] {
+        for record in [
+            &same_time_later_id,
+            &staged,
+            &earliest,
+            &same_time_earlier_id,
+        ] {
             upsert_action_audit_record(&connection, record).unwrap();
         }
 
@@ -1001,18 +1014,29 @@ mod tests {
         other_executing_tool.tool_name = "run_command".to_string();
         upsert_action_audit_record(&connection, &other_executing_tool).unwrap();
 
+        let mut invalid_staged_tool =
+            executing_auto_diff("invalid-staged-tool", r#"{"proposal":"invalid"}"#);
+        invalid_staged_tool.action_type = "file_write".to_string();
+        invalid_staged_tool.tool_name = "run_command".to_string();
+        upsert_action_audit_record(&connection, &invalid_staged_tool).unwrap();
+
         let mut terminal_diff = executing_auto_diff("completed-diff", r#"{"proposal":"terminal"}"#);
         terminal_diff.status = "completed".to_string();
         terminal_diff.completed_at = Some(30);
         upsert_action_audit_record(&connection, &terminal_diff).unwrap();
 
-        let records = list_executing_apply_patch_diff_action_audits(&connection).unwrap();
+        let records = list_executing_file_change_action_audits(&connection).unwrap();
         assert_eq!(
             records
                 .iter()
                 .map(|record| record.action_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["middle-earliest", "a-same-time", "z-same-time"]
+            vec![
+                "middle-earliest",
+                "staged-current",
+                "a-same-time",
+                "z-same-time"
+            ]
         );
 
         let loaded = &records[0];

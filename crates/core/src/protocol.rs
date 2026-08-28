@@ -2207,7 +2207,7 @@ pub struct AgentFileDraftSnapshot {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentFileWritePreview {
     pub preview_id: String,
@@ -2232,7 +2232,13 @@ pub struct AgentFileWritePreview {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+impl std::fmt::Debug for AgentFileWritePreview {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentFileWritePreview([REDACTED])")
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentFileWriteProposal {
     pub id: String,
@@ -2248,6 +2254,15 @@ pub struct AgentFileWriteProposal {
     pub line_count: u64,
     pub byte_count: u64,
     pub approval_status: AgentApprovalStatus,
+    /// Host-private execution authority. Renderer projections must remove this field and obtain
+    /// large Diff pages through the authenticated FileChange RPC.
+    pub execution: Box<crate::file_change::FileChangeDirectBinding>,
+}
+
+impl std::fmt::Debug for AgentFileWriteProposal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentFileWriteProposal([REDACTED])")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -100,6 +100,19 @@ impl FileChangePlan {
         binding: &FileChangeDirectBinding,
         diff: String,
     ) -> FileChangeResultValue<Self> {
+        let plan = Self::from_binding(binding)?;
+        if plan.diff != diff {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+        Ok(plan)
+    }
+
+    /// Rebuilds the authoritative plan from a frozen Host-private execution binding.
+    ///
+    /// Staged FileChanges deliberately do not persist or publish their potentially multi-megabyte
+    /// presentation diff. Recovery can nevertheless reconstruct the exact plan from the frozen
+    /// base/target contents and then verify every digest and statistic carried by the binding.
+    pub fn from_binding(binding: &FileChangeDirectBinding) -> FileChangeResultValue<Self> {
         binding.validate()?;
         let plan = Self {
             operation: binding.transaction.operation,
@@ -108,7 +121,12 @@ impl FileChangePlan {
             target: binding.transaction.target.clone(),
             base_content: binding.base_content.clone(),
             target_content: binding.target_content.clone(),
-            diff,
+            diff: build_diff(
+                &binding.transaction.file_path,
+                binding.transaction.operation,
+                binding.base_content.as_deref().unwrap_or_default(),
+                binding.target_content.as_deref().unwrap_or_default(),
+            ),
             diff_digest: binding.proposal.diff_digest.clone(),
             proposal_digest: binding.proposal.proposal_digest.clone(),
             additions: binding.proposal.additions,

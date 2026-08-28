@@ -11,6 +11,7 @@ import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
 import { revealStoredProjectFile } from '../../../storage/storageClient'
+import type { ChatFileWritePreview } from '../../chatTypes'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import { getSafeApplyPatchFailureMessage } from './applyPatchFailurePresentation'
 import type { SettledToolStatus } from './toolActivityUtils'
@@ -19,6 +20,7 @@ interface ApplyPatchToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
   diff?: AgentDiffProposal
+  preview?: ChatFileWritePreview
   projectId?: string | null
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
@@ -201,15 +203,22 @@ export function getApplyPatchItemView(item: ApplyPatchToolActivityGroupItem) {
   const filePath = patchResult?.filePath ?? item.diff?.filePath ?? getString(args.filePath)
   const patch = item.diff?.patch || getRawString(args.patch) || getGitDiffPatch(resultValue.gitDiff)
   const parsedCounts = patch ? countPatchLines(patch) : getFallbackLineCounts(args, operation)
+  const preview = getStatus(item) === 'running' ? item.preview : undefined
   const additions =
-    getNumber(resultValue.additions) ?? getNumber(args.additions) ?? parsedCounts.additions
+    getNumber(resultValue.additions) ??
+    preview?.additions ??
+    getNumber(args.additions) ??
+    parsedCounts.additions
   const deletions =
-    getNumber(resultValue.deletions) ?? getNumber(args.deletions) ?? parsedCounts.deletions
+    getNumber(resultValue.deletions) ??
+    preview?.deletions ??
+    getNumber(args.deletions) ??
+    parsedCounts.deletions
 
   return {
     additions,
     deletions,
-    filePath,
+    filePath: preview?.filePath ?? filePath,
     message: patchResult?.message ?? '',
     operation,
     status: getStatus(item)

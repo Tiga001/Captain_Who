@@ -4,8 +4,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::command::{AgentCommandExecutionResult, ManagedCommandWorkspaceRegistry};
 use crate::storage::models::{
-    AgentActionAuditRecord, AgentFileDraftChunkRecord, AgentFileDraftOperationRecord,
-    AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
+    AgentActionAuditRecord, AgentFileChangeChunkRecord, AgentFileChangeOperationRecord,
+    AgentFileChangeRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
     AgentRunGuidanceRecord, AgentUnsettledFileEffect, AgentUsageRecordInsert,
     AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord, ChatConversationRecord,
     ChatConversationViewRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
@@ -24,7 +24,7 @@ use crate::storage::{
     conversation_context_adaptation_repository, conversation_fork_repository,
     conversation_history_archive_repository, conversation_history_repository,
     conversation_model_context_repository, conversation_trace_repository,
-    conversation_turn_rewrite_repository, file_draft_repository, guidance_repository,
+    conversation_turn_rewrite_repository, file_change_repository, guidance_repository,
     image_generation_repository, mcp_approval_envelope_repository,
     model_request_observation_repository, notification_repository, now_ms,
     pending_action_repository, preferences_repository, project_repository,
@@ -57,7 +57,7 @@ mod child_agents;
 mod command_sessions;
 mod compaction;
 mod conversations;
-mod file_drafts;
+mod file_changes;
 mod guidance;
 mod image_generation;
 mod lifecycle;

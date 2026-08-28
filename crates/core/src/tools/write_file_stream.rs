@@ -3,11 +3,12 @@ use super::{
     ToolExecutionContext, ToolInputStreamChunk, ToolInputStreamObserver, ToolInputStreamPreview,
 };
 use crate::protocol::AgentFileWritePreview;
-use crate::storage::models::AgentFileDraftRecord;
+use crate::storage::models::AgentFileChangeRecord;
 use crate::storage::now_ms;
 use std::time::{Duration, Instant};
 
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(120);
+const MAX_PREVIEW_PATH_BYTES: usize = 16 * 1024;
 
 #[derive(Default)]
 struct StreamingTextMetrics {
@@ -51,15 +52,24 @@ struct StreamMetadata {
     received_bytes: u64,
 }
 
-pub(crate) struct WriteFileInputStreamObserver {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileChangeStreamProtocol {
+    ApplyPatch,
+    WriteFile,
+}
+
+pub(crate) struct FileChangeInputStreamObserver {
     context: ToolExecutionContext,
+    protocol: FileChangeStreamProtocol,
     parser: TopLevelJsonStringStream,
-    phase: String,
-    phase_complete: bool,
-    draft_id: String,
-    draft_id_complete: bool,
+    action: String,
+    action_complete: bool,
+    transaction_id: String,
+    transaction_id_complete: bool,
+    file_path: String,
+    file_path_complete: bool,
     content: StreamingTextMetrics,
-    draft: Option<AgentFileDraftRecord>,
+    transaction: Option<AgentFileChangeRecord>,
     metadata: StreamMetadata,
     preview_id: Option<String>,
     last_emitted_bytes: u64,
@@ -67,17 +77,28 @@ pub(crate) struct WriteFileInputStreamObserver {
     disabled: bool,
 }
 
-impl WriteFileInputStreamObserver {
-    pub(crate) fn new(context: ToolExecutionContext) -> Self {
+impl FileChangeInputStreamObserver {
+    pub(crate) fn apply_patch(context: ToolExecutionContext) -> Self {
+        Self::new(context, FileChangeStreamProtocol::ApplyPatch)
+    }
+
+    pub(crate) fn write_file(context: ToolExecutionContext) -> Self {
+        Self::new(context, FileChangeStreamProtocol::WriteFile)
+    }
+
+    fn new(context: ToolExecutionContext, protocol: FileChangeStreamProtocol) -> Self {
         Self {
             context,
+            protocol,
             parser: TopLevelJsonStringStream::default(),
-            phase: String::new(),
-            phase_complete: false,
-            draft_id: String::new(),
-            draft_id_complete: false,
+            action: String::new(),
+            action_complete: false,
+            transaction_id: String::new(),
+            transaction_id_complete: false,
+            file_path: String::new(),
+            file_path_complete: false,
             content: StreamingTextMetrics::default(),
-            draft: None,
+            transaction: None,
             metadata: StreamMetadata::default(),
             preview_id: None,
             last_emitted_bytes: 0,
@@ -90,26 +111,65 @@ impl WriteFileInputStreamObserver {
         for event in events {
             match event {
                 JsonStringFieldEvent::Delta { field, value } => match field.as_str() {
-                    "phase" => self.phase.push_str(&value),
-                    "draftId" => self.draft_id.push_str(&value),
+                    "action" if self.protocol == FileChangeStreamProtocol::ApplyPatch => {
+                        self.action.push_str(&value)
+                    }
+                    "phase" if self.protocol == FileChangeStreamProtocol::WriteFile => {
+                        self.action.push_str(&value)
+                    }
+                    "transactionId" if self.protocol == FileChangeStreamProtocol::ApplyPatch => {
+                        self.transaction_id.push_str(&value)
+                    }
+                    "draftId" if self.protocol == FileChangeStreamProtocol::WriteFile => {
+                        self.transaction_id.push_str(&value)
+                    }
+                    "filePath" => self.file_path.push_str(&value),
                     "content" => self.content.push(&value),
                     _ => {}
                 },
                 JsonStringFieldEvent::Completed { field } => match field.as_str() {
-                    "phase" => self.phase_complete = true,
-                    "draftId" => self.draft_id_complete = true,
+                    "action" if self.protocol == FileChangeStreamProtocol::ApplyPatch => {
+                        self.action_complete = true
+                    }
+                    "phase" if self.protocol == FileChangeStreamProtocol::WriteFile => {
+                        self.action_complete = true
+                    }
+                    "transactionId" if self.protocol == FileChangeStreamProtocol::ApplyPatch => {
+                        self.transaction_id_complete = true
+                    }
+                    "draftId" if self.protocol == FileChangeStreamProtocol::WriteFile => {
+                        self.transaction_id_complete = true
+                    }
+                    "filePath" => self.file_path_complete = true,
                     _ => {}
                 },
             }
         }
     }
 
-    fn load_draft_if_ready(&mut self) {
-        if self.disabled || self.draft.is_some() || !self.phase_complete || !self.draft_id_complete
-        {
+    fn load_transaction_if_ready(&mut self) {
+        if self.disabled || self.transaction.is_some() || !self.action_complete {
             return;
         }
-        if self.phase != "append" || self.draft_id.trim().is_empty() {
+
+        if self.protocol == FileChangeStreamProtocol::ApplyPatch && self.action == "apply" {
+            if self.file_path_complete
+                && (self.file_path.trim().is_empty()
+                    || self.file_path.len() > MAX_PREVIEW_PATH_BYTES)
+            {
+                self.disabled = true;
+            }
+            return;
+        }
+
+        if self.action != "append" {
+            self.disabled = true;
+            return;
+        }
+        if !self.transaction_id_complete {
+            return;
+        }
+        if self.transaction_id.trim().is_empty() {
             self.disabled = true;
             return;
         }
@@ -118,26 +178,46 @@ impl WriteFileInputStreamObserver {
             self.disabled = true;
             return;
         };
-        let Ok(Some(draft)) = storage.get_agent_file_draft(self.draft_id.trim()) else {
-            self.disabled = true;
-            return;
-        };
         let Ok(conversation_id) = self.context.conversation_id() else {
             self.disabled = true;
             return;
         };
-        if draft.conversation_id != conversation_id
-            || !matches!(draft.status.as_str(), "drafting" | "ready")
+        let Ok(run_id) = self.context.run_id() else {
+            self.disabled = true;
+            return;
+        };
+        let source_tool_name = match self.protocol {
+            FileChangeStreamProtocol::ApplyPatch => "apply_patch",
+            FileChangeStreamProtocol::WriteFile => "write_file",
+        };
+        let Ok(Some(transaction)) = storage.get_agent_file_change_for_owner(
+            self.transaction_id.trim(),
+            conversation_id,
+            self.context.project_id(),
+            run_id,
+            source_tool_name,
+        ) else {
+            self.disabled = true;
+            return;
+        };
+        if !matches!(transaction.status.as_str(), "drafting" | "ready")
+            || transaction.expires_at <= now_ms()
         {
             self.disabled = true;
             return;
         }
-        self.draft = Some(draft);
+        self.transaction = Some(transaction);
     }
 
     fn preview(&mut self, force: bool) -> Option<AgentFileWritePreview> {
-        self.load_draft_if_ready();
-        let draft = self.draft.as_ref()?;
+        self.load_transaction_if_ready();
+        let direct = self.protocol == FileChangeStreamProtocol::ApplyPatch
+            && self.action == "apply"
+            && self.file_path_complete
+            && !self.file_path.trim().is_empty();
+        if !direct && self.transaction.is_none() {
+            return None;
+        }
         if self.content.byte_count == 0 || self.content.byte_count == self.last_emitted_bytes {
             return None;
         }
@@ -155,7 +235,30 @@ impl WriteFileInputStreamObserver {
                 self.metadata.stream_id, self.metadata.attempt, self.metadata.tool_call_index
             )
         });
-        let line_count = appended_line_count(draft, &self.content);
+        let (draft_id, file_path, additions, deletions, line_count, byte_count) =
+            if let Some(transaction) = self.transaction.as_ref() {
+                (
+                    transaction.id.clone(),
+                    transaction.file_path.clone(),
+                    transaction
+                        .additions
+                        .saturating_add(self.content.line_count()),
+                    transaction.deletions,
+                    appended_line_count(transaction, &self.content),
+                    transaction
+                        .byte_count
+                        .saturating_add(self.content.byte_count),
+                )
+            } else {
+                (
+                    preview_id.clone(),
+                    self.file_path.clone(),
+                    self.content.line_count(),
+                    0,
+                    self.content.line_count(),
+                    self.content.byte_count,
+                )
+            };
         let content_offset_bytes = self.last_emitted_bytes;
         let content_delta = self.content.take_pending_content();
         let preview = AgentFileWritePreview {
@@ -164,12 +267,12 @@ impl WriteFileInputStreamObserver {
             attempt: self.metadata.attempt,
             tool_call_index: self.metadata.tool_call_index,
             tool_call_id: self.metadata.tool_call_id.clone(),
-            draft_id: draft.id.clone(),
-            file_path: draft.file_path.clone(),
-            additions: draft.additions.saturating_add(self.content.line_count()),
-            deletions: draft.deletions,
+            draft_id,
+            file_path,
+            additions,
+            deletions,
             line_count,
-            byte_count: draft.byte_count.saturating_add(self.content.byte_count),
+            byte_count,
             generated_bytes: self.content.byte_count,
             content_offset_bytes,
             content_delta,
@@ -181,7 +284,7 @@ impl WriteFileInputStreamObserver {
     }
 }
 
-impl ToolInputStreamObserver for WriteFileInputStreamObserver {
+impl ToolInputStreamObserver for FileChangeInputStreamObserver {
     fn on_delta(
         &mut self,
         chunk: &ToolInputStreamChunk<'_>,
@@ -201,7 +304,7 @@ impl ToolInputStreamObserver for WriteFileInputStreamObserver {
     }
 }
 
-fn appended_line_count(draft: &AgentFileDraftRecord, generated: &StreamingTextMetrics) -> u64 {
+fn appended_line_count(draft: &AgentFileChangeRecord, generated: &StreamingTextMetrics) -> u64 {
     let existing_newlines = draft.content.bytes().filter(|byte| *byte == b'\n').count() as u64;
     let has_content = !draft.content.is_empty() || generated.has_content;
     let ends_with_newline = if generated.has_content {
@@ -248,23 +351,41 @@ mod tests {
             })
             .unwrap();
         storage
-            .create_agent_file_draft(AgentFileDraftRecord {
+            .create_agent_file_change(AgentFileChangeRecord {
+                schema_version: crate::file_change::FILE_CHANGE_SCHEMA_VERSION,
                 id: "draft-1".to_string(),
                 conversation_id: "conversation-1".to_string(),
                 project_id: None,
                 run_id: "run-1".to_string(),
+                source_tool_name: "write_file".to_string(),
+                source_tool_call_id: "call-begin".to_string(),
+                source_tool_arguments_digest: crate::file_change::proposal_digest(
+                    &serde_json::json!({
+                        "phase": "begin",
+                        "filePath": "src/main.rs",
+                        "mode": "create"
+                    }),
+                )
+                .unwrap(),
+                permission_revision: "permission-1".to_string(),
+                tool_set_revision: "tool-set-1".to_string(),
+                provider_wire_revision: "provider-protocol-v1".to_string(),
+                observation_id: "fobs_preview_fixture".to_string(),
+                observation_json: "{}".to_string(),
                 file_path: "src/main.rs".to_string(),
-                mode: "create".to_string(),
+                operation: "create".to_string(),
+                strategy: None,
                 status: "drafting".to_string(),
                 base_revision: None,
                 base_content: String::new(),
                 content: String::new(),
+                draft_revision: 0,
+                next_mutation_index: 0,
                 additions: 0,
                 deletions: 0,
                 line_count: 0,
                 byte_count: 0,
-                chunk_count: 0,
-                next_chunk_index: 0,
+                mutation_count: 0,
                 stats_final: false,
                 summary: None,
                 final_action_id: None,
@@ -293,7 +414,7 @@ mod tests {
             },
         }))
         .with_runtime_services("run-1".to_string(), Some(storage.clone()));
-        let mut observer = WriteFileInputStreamObserver::new(context);
+        let mut observer = FileChangeInputStreamObserver::write_file(context);
 
         let first = observer
             .on_delta(&ToolInputStreamChunk {
@@ -333,11 +454,96 @@ mod tests {
         );
         assert_eq!(
             storage
-                .get_agent_file_draft("draft-1")
+                .get_agent_file_change("draft-1")
                 .unwrap()
                 .unwrap()
                 .byte_count,
             0
         );
+
+        let mut staged_record = storage.get_agent_file_change("draft-1").unwrap().unwrap();
+        staged_record.id = "transaction-apply-1".to_string();
+        staged_record.source_tool_name = "apply_patch".to_string();
+        staged_record.source_tool_call_id = "call-begin-apply".to_string();
+        staged_record.observation_id = "fobs_preview_fixture".to_string();
+        staged_record.observation_json = "{}".to_string();
+        storage.create_agent_file_change(staged_record).unwrap();
+
+        let mut staged = FileChangeInputStreamObserver::apply_patch(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: Some("conversation-1".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("workspace".to_string()),
+                    root_path: Some(workspace.to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::RequireApproval,
+                    command_safety: Default::default(),
+                    patch: AgentPatchPermission::RequireApproval,
+                    builtin_execution: Default::default(),
+                },
+            }))
+            .with_runtime_services("run-1".to_string(), Some(storage.clone())),
+        );
+        let staged_preview = staged
+            .on_delta(&ToolInputStreamChunk {
+                stream_id: "stream-apply",
+                attempt: 1,
+                tool_call_index: 2,
+                tool_call_id: None,
+                input_delta: r#"{"action":"append","transactionId":"transaction-apply-1","index":0,"expectedDraftRevision":0,"content":"你好\n"}"#,
+                received_bytes: 128,
+            })
+            .unwrap()
+            .unwrap();
+        let ToolInputStreamPreview::FileWrite(staged_preview) = staged_preview;
+        assert_eq!(staged_preview.draft_id, "transaction-apply-1");
+        assert_eq!(staged_preview.content_delta, "你好\n");
+        assert_eq!(
+            storage
+                .get_agent_file_change("transaction-apply-1")
+                .unwrap()
+                .unwrap()
+                .byte_count,
+            0,
+            "a provisional preview must never commit the streamed chunk",
+        );
+
+        let mut direct = FileChangeInputStreamObserver::apply_patch(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: Some("conversation-1".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("workspace".to_string()),
+                    root_path: Some(workspace.to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions::default(),
+            }))
+            .with_runtime_services("run-1".to_string(), Some(storage)),
+        );
+        let direct_preview = direct
+            .on_delta(&ToolInputStreamChunk {
+                stream_id: "stream-direct",
+                attempt: 1,
+                tool_call_index: 3,
+                tool_call_id: None,
+                input_delta: r#"{"action":"apply","operation":"create","filePath":"src/direct.rs","observationId":"fobs_private","content":"fn main() {}\n"}"#,
+                received_bytes: 160,
+            })
+            .unwrap()
+            .unwrap();
+        let ToolInputStreamPreview::FileWrite(direct_preview) = direct_preview;
+        assert_eq!(direct_preview.file_path, "src/direct.rs");
+        assert_eq!(direct_preview.line_count, 1);
+        assert_eq!(direct_preview.content_delta, "fn main() {}\n");
     }
 }

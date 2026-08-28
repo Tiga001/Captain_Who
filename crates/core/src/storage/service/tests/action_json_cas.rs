@@ -71,10 +71,14 @@ fn direct_file_change_json_pair_with_summary(parent: &Path, summary: &str) -> (S
             created_at_ms: now,
             expires_at_ms: now + FILE_OBSERVATION_TTL_MS,
         },
+        source_tool_name: "apply_patch".to_string(),
         source_call_id: "diff-1".to_string(),
         source_args_digest: content_digest(b"args"),
+        staged_transaction_id: None,
         conversation_id: "conversation-1".to_string(),
+        project_id: None,
         run_id: "run-1".to_string(),
+        staged_transaction_revision: None,
         canonical_target,
         base_content: None,
         target_content: Some(content.to_string()),
@@ -82,6 +86,7 @@ fn direct_file_change_json_pair_with_summary(parent: &Path, summary: &str) -> (S
         receipt: None,
         permission_revision: "permission-v1".to_string(),
         tool_set_revision: "tool-set-v1".to_string(),
+        provider_wire_revision: "provider-wire-v1".to_string(),
     };
     prepared_binding.validate().unwrap();
     let committed_binding = prepared_binding
@@ -117,6 +122,39 @@ fn direct_file_change_json_pair_with_summary(parent: &Path, summary: &str) -> (S
         serde_json::to_string(&proposal(prepared_binding)).unwrap(),
         serde_json::to_string(&proposal(committed_binding)).unwrap(),
     )
+}
+
+fn staged_file_change_json_pair(parent: &Path, tool_name: &str) -> (String, String) {
+    let (prepared, committed) = direct_file_change_json_pair(parent);
+    let convert = |raw: String| {
+        let action: AgentProposedAction = serde_json::from_str(&raw).unwrap();
+        let AgentProposedAction::Diff { diff } = action else {
+            unreachable!("fixture is a Direct Diff")
+        };
+        let mut execution = *diff.execution;
+        execution.source_tool_name = tool_name.to_string();
+        execution.staged_transaction_id = Some(execution.transaction.id.clone());
+        execution.staged_transaction_revision = Some(1);
+        execution.validate().unwrap();
+        serde_json::to_string(&AgentProposedAction::FileWrite {
+            file_write: crate::AgentFileWriteProposal {
+                id: diff.id,
+                draft_id: execution.transaction.id.clone(),
+                mode: crate::AgentFileWriteMode::Create,
+                file_path: diff.file_path,
+                base_revision: diff.base_revision,
+                summary: diff.summary,
+                additions: execution.proposal.additions,
+                deletions: execution.proposal.deletions,
+                line_count: 1,
+                byte_count: "after\n".len() as u64,
+                approval_status: diff.approval_status,
+                execution: Box::new(execution),
+            },
+        })
+        .unwrap()
+    };
+    (convert(prepared), convert(committed))
 }
 
 fn manual_diff(action_id: &str, action_json: &str) -> AgentPendingActionRecord {
@@ -161,6 +199,20 @@ fn automatic_diff(action_id: &str, action_json: &str) -> AgentActionAuditRecord 
         blocked_reason: None,
         decision_source: Some("auto".to_string()),
     }
+}
+
+fn manual_staged(action_id: &str, action_json: &str, tool_name: &str) -> AgentPendingActionRecord {
+    let mut record = manual_diff(action_id, action_json);
+    record.action_type = "file_write".to_string();
+    record.tool_name = tool_name.to_string();
+    record
+}
+
+fn automatic_staged(action_id: &str, action_json: &str, tool_name: &str) -> AgentActionAuditRecord {
+    let mut record = automatic_diff(action_id, action_json);
+    record.action_type = "file_write".to_string();
+    record.tool_name = tool_name.to_string();
+    record
 }
 
 fn manual_initial_audit(action_id: &str, action_json: &str) -> AgentActionAuditRecord {
@@ -344,4 +396,47 @@ fn automatic_direct_file_change_json_cas_survives_reopen_and_fails_closed() {
             status: "approved".to_string()
         }
     );
+}
+
+#[test]
+fn staged_file_change_json_cas_accepts_only_the_exact_current_tool_identity() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+
+    for tool_name in ["apply_patch", "write_file"] {
+        let (prepared, committed) = staged_file_change_json_pair(&fixture.root, tool_name);
+        let manual_id = format!("manual-staged-{tool_name}");
+        let manual = manual_staged(&manual_id, &prepared, tool_name);
+        service.store_pending_agent_action(manual.clone()).unwrap();
+        assert_eq!(
+            service
+                .commit_pending_direct_file_change_action_json(&manual, &prepared, &committed, 30,)
+                .unwrap(),
+            AgentPendingActionJsonCommitOutcome::Updated
+        );
+
+        let automatic_id = format!("automatic-staged-{tool_name}");
+        let automatic = automatic_staged(&automatic_id, &prepared, tool_name);
+        assert_eq!(
+            service
+                .claim_agent_action_audit_execution(automatic.clone())
+                .unwrap(),
+            agent_action_audit_repository::AgentActionAuditExecutionClaimOutcome::Claimed
+        );
+        assert_eq!(
+            service
+                .commit_automatic_direct_file_change_action_json(&automatic, &prepared, &committed,)
+                .unwrap(),
+            AgentActionAuditJsonCommitOutcome::Updated
+        );
+    }
+
+    let (prepared, committed) = staged_file_change_json_pair(&fixture.root, "apply_patch");
+    let mismatched = manual_staged("manual-staged-mismatch", &prepared, "write_file");
+    service
+        .store_pending_agent_action(mismatched.clone())
+        .unwrap();
+    assert!(service
+        .commit_pending_direct_file_change_action_json(&mismatched, &prepared, &committed, 30,)
+        .is_err());
 }

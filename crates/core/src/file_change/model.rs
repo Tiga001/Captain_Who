@@ -143,10 +143,20 @@ pub struct FileChangeDirectBinding {
     pub proposal: FileChangeProposal,
     pub observation_id: String,
     pub observation: FileObservationCheckpoint,
+    pub source_tool_name: String,
     pub source_call_id: String,
     pub source_args_digest: String,
+    /// Required-nullable reference to the canonical persistent Staged transaction. Direct
+    /// `action=apply` carries `null`; Staged commit and the temporary `write_file` adapter carry
+    /// the exact transaction id so approval settlement cannot target another draft.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub staged_transaction_id: Option<String>,
     pub conversation_id: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub project_id: Option<String>,
     pub run_id: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub staged_transaction_revision: Option<u64>,
     pub canonical_target: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub base_content: Option<String>,
@@ -162,6 +172,7 @@ pub struct FileChangeDirectBinding {
     pub receipt: Option<FileChangeReceipt>,
     pub permission_revision: String,
     pub tool_set_revision: String,
+    pub provider_wire_revision: String,
 }
 
 impl std::fmt::Debug for FileChangeDirectBinding {
@@ -174,12 +185,18 @@ impl FileChangeDirectBinding {
     pub fn validate(&self) -> FileChangeResultValue<()> {
         if self.schema_version != FILE_CHANGE_SCHEMA_VERSION
             || self.observation_id.trim().is_empty()
+            || !matches!(self.source_tool_name.as_str(), "apply_patch" | "write_file")
             || self.source_call_id.trim().is_empty()
             || !valid_digest(&self.source_args_digest)
             || self.conversation_id.trim().is_empty()
+            || self
+                .project_id
+                .as_deref()
+                .is_some_and(|id| id.trim().is_empty())
             || self.run_id.trim().is_empty()
             || self.permission_revision.trim().is_empty()
             || self.tool_set_revision.trim().is_empty()
+            || self.provider_wire_revision.trim().is_empty()
             || !Path::new(&self.canonical_target).is_absolute()
         {
             return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
@@ -214,6 +231,17 @@ impl FileChangeDirectBinding {
                 }
                 _ => false,
             };
+        let staged_reference_is_valid = match (
+            self.staged_transaction_id.as_deref(),
+            self.staged_transaction_revision,
+        ) {
+            (None, None) => self.source_tool_name == "apply_patch",
+            (Some(transaction_id), Some(_)) => {
+                self.transaction.operation != FileChangeOperation::Delete
+                    && transaction_id == self.transaction.id
+            }
+            _ => false,
+        };
         if self.transaction.id != self.proposal.transaction_id
             || self.proposal.id != self.source_call_id
             || self.transaction.operation != self.proposal.operation
@@ -228,6 +256,7 @@ impl FileChangeDirectBinding {
             )
             || !observation_matches_base
             || !delete_journal_is_valid
+            || !staged_reference_is_valid
         {
             return Err(FileChangeError::new(
                 FileChangeErrorCode::IllegalFieldCombination,

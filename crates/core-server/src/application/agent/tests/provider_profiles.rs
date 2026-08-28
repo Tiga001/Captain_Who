@@ -1138,7 +1138,35 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
             })
             .unwrap();
 
-        let source_trace = completed_trace(source_conversation_id, source_assistant_message_id);
+        let mut source_trace = completed_trace(source_conversation_id, source_assistant_message_id);
+        for item in &mut source_trace.items {
+            match item {
+                ConversationTurnTraceItem::ToolCall {
+                    tool,
+                    provenance,
+                    operation,
+                    ..
+                } => {
+                    *tool = "apply_patch".to_string();
+                    *provenance = AgentToolIdentity::Builtin {
+                        tool_name: "apply_patch".to_string(),
+                    };
+                    *operation = json!({
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "src/history.rs",
+                        "contentBytes": 22,
+                        "contentDigest": mycopilot_core::file_change::content_digest(
+                            b"durable source content",
+                        ),
+                    });
+                }
+                ConversationTurnTraceItem::ToolResult { tool, .. } => {
+                    *tool = "apply_patch".to_string();
+                }
+                _ => {}
+            }
+        }
         let runtime_call_id = history_call_id();
         let model_context_items = vec![
             ConversationModelContextItem {
@@ -1158,10 +1186,12 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                 tool_call_id: None,
                 tool_calls: vec![AgentContextCheckpointToolCall {
                     id: runtime_call_id.clone(),
-                    name: "write_file".to_string(),
+                    name: "apply_patch".to_string(),
                     args: json!({
+                        "action": "apply",
+                        "operation": "create",
                         "filePath": "src/history.rs",
-                        "mode": "create",
+                        "observationId": "fobs_provider_profile_fixture",
                         "content": "durable source content"
                     }),
                     provider_identity: AgentProviderToolCallIdentity {
@@ -1322,9 +1352,22 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
             .start_conversation_turn(input, notifications)
             .expect("reopened collaboration root Fork must admit a human Turn");
         let events = collect_until_done(&mut receiver).await;
-        assert_eq!(events.last().unwrap()["params"]["status"], "completed");
+        let persisted_after_turn = storage.load_conversation(conversation_id).unwrap().unwrap();
+        let persisted_error = rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT error FROM agent_usage_records WHERE run_id = ?1",
+                [&turn.run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events.last().unwrap()["params"]["status"],
+            "completed",
+            "reopened {suffix} Fork failed: {persisted_error:?}"
+        );
 
-        let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
+        let conversation = persisted_after_turn;
         assert_eq!(conversation.messages.len(), 4);
         assert_eq!(conversation.messages[3].id, turn.assistant_message_id);
         assert_eq!(conversation.messages[3].content, "Continued fork answer.");
@@ -2481,7 +2524,7 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
     assert_eq!(events.last().unwrap()["params"]["status"], "failed");
     assert!(service.list_pending_actions().is_empty());
     assert!(storage
-        .list_agent_file_drafts_for_run(&turn.run_id)
+        .list_agent_file_changes_for_run(&turn.run_id)
         .unwrap()
         .is_empty());
     let provider_rows: i64 = rusqlite::Connection::open(&database_path)

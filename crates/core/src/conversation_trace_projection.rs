@@ -295,6 +295,14 @@ fn project_write_file_call(value: &Value) -> (Value, bool) {
         ("mode", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
         ("index", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
         ("summary", DurableTraceProjectionLimits::SUMMARY_CHARS),
+        (
+            "contentDigest",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "editsDigest",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
     ] {
         copy_bounded_field(input, &mut output, key, limit, &mut truncated);
     }
@@ -318,6 +326,10 @@ fn project_write_file_call(value: &Value) -> (Value, bool) {
         output.insert("contentBytes".into(), json!(content.len()));
         output.insert("contentLines".into(), json!(line_count(content)));
         output.insert(
+            "contentDigest".into(),
+            json!(crate::file_change::content_digest(content.as_bytes())),
+        );
+        output.insert(
             "content".into(),
             json!("[write_file chunk omitted from conversation history]"),
         );
@@ -332,6 +344,9 @@ fn project_write_file_call(value: &Value) -> (Value, bool) {
     }
     if let Some(edits) = input.get("edits").and_then(Value::as_array) {
         output.insert("editCount".into(), json!(edits.len()));
+        if let Ok(digest) = crate::file_change::proposal_digest(&Value::Array(edits.clone())) {
+            output.insert("editsDigest".into(), json!(digest));
+        }
         let (additions, deletions) = structured_edit_stats(edits);
         output.insert("additions".into(), json!(additions));
         output.insert("deletions".into(), json!(deletions));
@@ -353,6 +368,16 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
             DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
         ),
         ("filePath", DurableTraceProjectionLimits::PATH_CHARS),
+        (
+            "transactionId",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "expectedDraftRevision",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        ("index", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
+        ("strategy", DurableTraceProjectionLimits::TITLE_CHARS),
         ("summary", DurableTraceProjectionLimits::SUMMARY_CHARS),
         (
             "contentBytes",
@@ -362,6 +387,14 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
             "editCount",
             DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
         ),
+        (
+            "contentDigest",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "editsDigest",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
     ] {
         copy_bounded_field(input, &mut output, key, limit, &mut truncated);
     }
@@ -369,10 +402,21 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
     let (representation, additions, deletions) = if let Some(content) =
         input.get("content").and_then(Value::as_str)
     {
+        output.insert(
+            "contentBytes".into(),
+            json!(u64::try_from(content.len()).unwrap_or(u64::MAX)),
+        );
+        output.insert(
+            "contentDigest".into(),
+            json!(crate::file_change::content_digest(content.as_bytes())),
+        );
         ("content", line_count(content), 0)
     } else if let Some(edits) = input.get("edits").and_then(Value::as_array) {
         let (additions, deletions) = structured_edit_stats(edits);
         output.insert("editCount".into(), json!(edits.len()));
+        if let Ok(digest) = crate::file_change::proposal_digest(&Value::Array(edits.clone())) {
+            output.insert("editsDigest".into(), json!(digest));
+        }
         ("edits", additions, deletions)
     } else if input.get("editCount").and_then(Value::as_u64).is_some() {
         ("edits", 0, 0)
@@ -1433,6 +1477,33 @@ mod tests {
         assert!(projected.get("patch").is_none());
         assert!(projected.get("expectedRevision").is_none());
         assert!(projected.get("observationId").is_none());
+    }
+
+    #[test]
+    fn apply_patch_staged_call_projection_omits_body_and_keeps_bounded_identity() {
+        let private_content = "私密正文\nsecond line\n";
+        let (projected, truncated) = project_apply_patch_call(&json!({
+            "action": "append",
+            "transactionId": "file-change-1",
+            "index": 4,
+            "expectedDraftRevision": "draft-revision-4",
+            "content": private_content,
+        }));
+
+        assert!(truncated);
+        assert_eq!(projected["action"], "append");
+        assert_eq!(projected["transactionId"], "file-change-1");
+        assert_eq!(projected["index"], 4);
+        assert_eq!(projected["expectedDraftRevision"], "draft-revision-4");
+        assert_eq!(projected["contentBytes"], private_content.len());
+        assert_eq!(
+            projected["contentDigest"],
+            crate::file_change::content_digest(private_content.as_bytes())
+        );
+        assert!(projected.get("content").is_none());
+        assert!(!serde_json::to_string(&projected)
+            .unwrap()
+            .contains(private_content));
     }
 
     #[test]

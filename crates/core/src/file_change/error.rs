@@ -54,6 +54,13 @@ pub enum FileChangeErrorCode {
     ObservationOwnerMismatch,
     ObservationPathMismatch,
     ObservationStale,
+    TransactionNotFound,
+    TransactionOwnerMismatch,
+    TransactionExpired,
+    TransactionSettled,
+    DraftRevisionConflict,
+    MutationOutOfOrder,
+    ReplayMismatch,
     Failed,
     Conflict,
     OutcomeUnknown,
@@ -83,7 +90,14 @@ impl FileChangeErrorCode {
             | Self::ObservationExpired
             | Self::ObservationOwnerMismatch
             | Self::ObservationPathMismatch
-            | Self::ObservationStale => FileChangeErrorCategory::Precondition,
+            | Self::ObservationStale
+            | Self::TransactionNotFound
+            | Self::TransactionOwnerMismatch
+            | Self::TransactionExpired
+            | Self::TransactionSettled
+            | Self::DraftRevisionConflict
+            | Self::MutationOutOfOrder
+            | Self::ReplayMismatch => FileChangeErrorCategory::Precondition,
             Self::Failed | Self::Conflict | Self::OutcomeUnknown => {
                 FileChangeErrorCategory::Execution
             }
@@ -113,6 +127,14 @@ impl FileChangeErrorCode {
             | Self::ObservationOwnerMismatch
             | Self::ObservationPathMismatch
             | Self::ObservationStale => FileChangeRecovery::RereadFile,
+            Self::TransactionNotFound
+            | Self::TransactionOwnerMismatch
+            | Self::TransactionExpired
+            | Self::TransactionSettled
+            | Self::ReplayMismatch => FileChangeRecovery::DoNotRetry,
+            Self::DraftRevisionConflict | Self::MutationOutOfOrder => {
+                FileChangeRecovery::InspectAuthoritativeState
+            }
             Self::NoChange => FileChangeRecovery::SkipOrReviseEdit,
             Self::Failed | Self::Conflict => FileChangeRecovery::InspectAuthoritativeState,
             Self::OutcomeUnknown => FileChangeRecovery::DoNotRetry,
@@ -142,6 +164,13 @@ impl FileChangeErrorCode {
             Self::ObservationOwnerMismatch => "该文件读取凭据不属于当前任务，请重新读取。",
             Self::ObservationPathMismatch => "文件读取路径与修改目标不一致，请重新读取准确路径。",
             Self::ObservationStale => "文件在读取后已发生变化，请重新读取后再修改。",
+            Self::TransactionNotFound => "未找到文件修改事务。",
+            Self::TransactionOwnerMismatch => "该文件修改事务不属于当前任务。",
+            Self::TransactionExpired => "文件修改事务已过期。",
+            Self::TransactionSettled => "文件修改事务已结算，后续修改请开始新事务。",
+            Self::DraftRevisionConflict => "文件草稿已发生变化，请先查询当前状态。",
+            Self::MutationOutOfOrder => "文件草稿修改顺序不正确，请使用返回的 nextIndex。",
+            Self::ReplayMismatch => "重试的草稿修改与原请求不一致。",
             Self::Failed => "文件修改失败。",
             Self::Conflict => "文件修改发生冲突。",
             Self::OutcomeUnknown => "无法确认文件修改结果，请先检查文件当前状态。",

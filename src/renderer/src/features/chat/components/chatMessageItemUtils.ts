@@ -878,6 +878,7 @@ export function getApplyPatchGroupItems(
         call,
         cancelled: settledStatus === 'cancelled',
         diff: run.diffs.find((candidate) => candidate.id === call.id),
+        preview: run.fileWritePreviews?.find((preview) => preview.toolCallId === call.id),
         result,
         settledStatus
       }

@@ -628,7 +628,7 @@ async fn permission_revoked_after_precheck_is_blocked_atomically_before_humanroo
                     AND event_kind = 'notification_requested'),
                  (SELECT COUNT(*) FROM automation_notification_outbox
                   WHERE automation_id = ?1 AND automation_run_id IS NULL
-                    AND notification_kind = 'configuration_blocked' AND status = 'pending')",
+                    AND notification_kind = 'configuration_blocked' AND status = 'projected')",
             rusqlite::params![&task.id, &run.id],
             |row| {
                 Ok((
@@ -1093,15 +1093,15 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
         (&project_task.id, 2_i64),
         (&message_task.id, 1_i64),
     ] {
-        let pending = connection
+        let projected = connection
             .query_row(
                 "SELECT COUNT(*) FROM automation_notification_outbox
-                 WHERE automation_id = ?1 AND status = 'pending'",
+                 WHERE automation_id = ?1 AND status = 'projected'",
                 [automation_id],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        assert_eq!(pending, expected_notifications, "{automation_id}");
+        assert_eq!(projected, expected_notifications, "{automation_id}");
     }
     model_server.await.unwrap();
 }

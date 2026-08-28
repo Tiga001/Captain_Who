@@ -118,6 +118,61 @@ describe('LLM retry Renderer projection', () => {
     expect(preview.agentRun?.fileWritePreviews).toHaveLength(1)
   })
 
+  it('binds provisional apply_patch previews to the canonical call and clears them on settlement', () => {
+    const preview = applyAgentEventToChatMessage(runningMessage(), {
+      type: 'file_write_preview_updated',
+      runId: 'run-retry',
+      preview: {
+        previewId: 'stream-2:1:0',
+        streamId: 'stream-2',
+        attempt: 1,
+        toolCallIndex: 0,
+        draftId: 'stream-2:1:0',
+        filePath: 'src/large.ts',
+        additions: 2,
+        deletions: 0,
+        lineCount: 2,
+        byteCount: 18,
+        generatedBytes: 18,
+        contentOffsetBytes: 0,
+        contentDelta: 'private body\nline\n',
+        updatedAt: 10
+      }
+    })
+    const called = applyAgentEventToChatMessage(preview, {
+      type: 'tool_call',
+      runId: 'run-retry',
+      traceSequence: 1,
+      identity: { type: 'builtin', toolName: 'apply_patch' },
+      call: {
+        id: 'call-apply-1',
+        tool: 'apply_patch',
+        args: {
+          action: 'apply',
+          operation: 'create',
+          filePath: 'src/large.ts',
+          contentBytes: 18,
+          contentDigest: 'file-change-sha256-v1:redacted'
+        },
+        approvalStatus: 'required',
+        reason: null
+      }
+    })
+    expect(called.agentRun?.fileWritePreviews?.[0]?.toolCallId).toBe('call-apply-1')
+
+    const settled = applyAgentEventToChatMessage(called, {
+      type: 'tool_result',
+      runId: 'run-retry',
+      result: {
+        callId: 'call-apply-1',
+        tool: 'apply_patch',
+        ok: false,
+        error: 'invalid arguments'
+      }
+    })
+    expect(settled.agentRun?.fileWritePreviews).toEqual([])
+  })
+
   it('rolls back the failed attempt before projecting the reconnected output', () => {
     const firstAttempt = applyAgentEventToChatMessage(runningMessage(), {
       type: 'message_stream_started',

@@ -289,18 +289,17 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     }
     if has_tool(tool_definitions, "apply_patch") {
         rules.push("- apply_patch Direct 适合对单个可 diff 文件做一次性短小 create、update 或 delete。每次 Direct 调用前，即使预期目标不存在，也必须先对准确目标路径使用 read_file 确认当前状态和内容；父目录列表、搜索结果或更早的读取不能替代。create 是 no-clobber，只有 read_file 对该准确路径明确报告目标不存在或无法找到后才能使用 create；目标已存在时，修改必须使用 update，删除则使用 delete。".to_string());
-        rules.push("- 每次 Direct 调用都提交 action=apply、准确 filePath，并原样复制刚才 read_file 返回的 observationId。create 还要提供短小完整 content；update 必须在 content 与 structured edits（replace、insert_before、insert_after、append、prepend）中恰好选择一个，并确认唯一锚点和 oldText；delete 不得提供 content 或 edits。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。较长的完整生成或多步草稿使用 write_file；审批 Diff 由 Host 从冻结目标内容生成，不要提交 raw unified diff。".to_string());
+        rules.push("- 每次 Direct 调用都提交 action=apply、准确 filePath，并原样复制刚才 read_file 返回的 observationId。create 还要提供短小完整 content；update 必须在 content 与 structured edits（replace、insert_before、insert_after、append、prepend）中恰好选择一个，并确认唯一锚点和 oldText；delete 不得提供 content 或 edits。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。审批 Diff 由 Host 从冻结目标内容生成，不要提交 raw unified diff。".to_string());
+        rules.push("- 较长的完整生成或需要多步组装时，使用同一 apply_patch 的 Staged 模式：先对准确路径 read_file，再 action=begin；create 从空草稿开始，update 显式选择 strategy=modify 或 rewrite。之后每次只使用 Host 返回的 transactionId、nextIndex 和 draftRevision 调用 action=append 或 action=edit，最后 action=commit；放弃时 action=abort。不得猜测 id、index 或 revision，不得重复生成已持久化的 chunk。".to_string());
+        rules.push("- action=begin/append/edit 成功后，FileChange transaction 处于未结算状态。在所有未结算 transaction 都获得 commit/abort 结果前，只能继续调用 apply_patch append/edit/commit/abort，禁止输出任何面向用户的进度或完成文字。进入 waiting_approval/applying 后不得再修改草稿；终态后的后续修改必须重新 action=begin。".to_string());
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "write_file") {
-        rules.push("- 创建长报告、Markdown 表格、完整生成文件或分多步修改同一文件时使用 write_file。先 phase=begin；使用 phase=append 写入生成内容，可一次提交或自然分段，并严格使用上次结果的 nextChunkIndex；局部调整草稿可用 phase=edit；完成后调用 phase=finish。不要把完整长文件塞进 apply_patch.content。".to_string());
-        rules.push("- write_file 的 create 要求目标不存在；rewrite 完整重写已有文件；modify 从已有内容开始做结构化编辑；append 保留已有内容并追加；upsert 用于生成型产物，不存在则创建、存在则重写。begin/append/edit 只更新私有草稿；finish 会先完成自动或人工审批，再把真实 applied/rejected/conflict/failed 结果返回给你。".to_string());
-        rules.push("- 任何 begin/append/edit 成功后，当前文件事务为 dirty。在本轮所有 dirty 草稿都调用 finish 或 abort 并获得结果以前，只能继续调用工具，禁止输出任何面向用户的文字，包括进度说明。多个文件都必须分别结算。审批结果返回后，再基于真实结果进行说明。".to_string());
-        rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 的任何 applied/rejected/conflict/failed 结果都会终结当前草稿；后续再次修改同一文件必须重新 phase=begin。".to_string());
+        rules.push("- write_file 是本轮过渡期仍可恢复的旧公开入口；新的长文件或多步修改不得再从 write_file phase=begin 开始，统一使用 apply_patch Staged 模式。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
-        rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确允许的短暂检查或结构化产物转换可以使用有界内联代码；需要复用、审查或修改项目源文件的逻辑仍应先用文件编辑工具保存脚本，再用 run_command 执行。产物观察只记录结果，不授予任何权限。".to_string());
-        rules.push("- 已激活 Skill 若明确规定一条 copy-first 工作流，可以用 run_command 做且只做该工作流要求的临时目录准备、把已获授权读取的固定源字节保真复制到固定且已确认不存在的 Workspace staging 目标、源与 staging 的字节校验、将已验证的 task-owned staging child 在同一文件系统内以目标不存在为前提 create-only 发布到固定 Workspace Skill 目标，以及精确清理该任务创建的临时路径。这项例外不扩大读写范围，不得覆盖或合并已有目标、改变文件内容、猜测路径、绕过审批或路径校验；复制后对内容的任何修改仍必须使用 apply_patch/write_file。".to_string());
+        rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch 创建或编辑文本、代码和配置文件。已激活 Skill 明确允许的短暂检查或结构化产物转换可以使用有界内联代码；需要复用、审查或修改项目源文件的逻辑仍应先用文件编辑工具保存脚本，再用 run_command 执行。产物观察只记录结果，不授予任何权限。".to_string());
+        rules.push("- 已激活 Skill 若明确规定一条 copy-first 工作流，可以用 run_command 做且只做该工作流要求的临时目录准备、把已获授权读取的固定源字节保真复制到固定且已确认不存在的 Workspace staging 目标、源与 staging 的字节校验、将已验证的 task-owned staging child 在同一文件系统内以目标不存在为前提 create-only 发布到固定 Workspace Skill 目标，以及精确清理该任务创建的临时路径。这项例外不扩大读写范围，不得覆盖或合并已有目标、改变文件内容、猜测路径、绕过审批或路径校验；复制后对内容的任何修改仍必须使用 apply_patch。".to_string());
         rules.push("- 第一次普通 run_command 调用就必须根据可信 World State 的 workspace.binding 正确填写 cwd：有 workspace 时可以省略 cwd 以使用 workspace 根目录，也可提供 workspace 相对目录；绝对目录和系统路径别名仍受当前权限约束。没有 workspace 时 cwd 必填且不得省略，即使 command、可执行文件或参数已经使用绝对路径也不得省略；不得先省略再等错误修正，也不得使用 `.` 或相对路径。把 cwd 设为命令应在其中运行的现有目录，通常是目标文件的父目录，并明确指定绝对目录，或使用现行支持的系统路径别名 @home、@desktop、@documents、@downloads 及其安全子路径，例如 @desktop/project-dir；这还要求当前写入范围允许“所有位置”。唯一例外是后端识别的受管 PDF 命令由已激活的 PDF Skill 在 Host-owned 契约中提供私有工作目录；此时按 Skill 指令省略 cwd，不得猜测 Host 路径。".to_string());
         rules.push("- run_command.command 是一个可包含多行的命令字符串；Host 会规范化换行并分别审查 newline、pipeline、&&、|| 和 ; 的每个片段。普通命令需要 heredoc 时必须引用 delimiter（例如 <<'PY'）；受管 Skill 若要求直接调用则遵循 Skill 的更窄规则。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
     }
@@ -339,7 +338,7 @@ fn tool_progress_communication_section() -> String {
     - 工具返回后，如果接下来还要继续调用工具，先简短说明你从结果里确认了什么、下一步要补哪块信息。不要把每个细小工具调用都单独汇报；可以按阶段合并说明。\n\
     - 不展示隐藏推理链，不写冗长心理活动。只说可验证的工作意图、观察到的事实、下一步动作。\n\
     - 如果发现目标已经满足，尤其是 todo 全部 completed、文件已创建、测试已通过或用户要求的产物已生成，应停止继续调用工具，直接给用户总结结果。\n\
-    - write_file 文件事务处于 dirty 或等待审批状态时是唯一例外：此时不得输出进展文字，只能继续工具调用并完成 finish/abort；审批结果返回后再说明进展。\n\
+    - apply_patch FileChange transaction 处于 drafting、ready、waiting_approval 或 applying 时是唯一例外：此时不得输出进展文字，只能继续 apply_patch append/edit/commit/abort；审批或终止结果返回后再说明进展。\n\
     - 工具进展文字要自然、短小、具体，避免“我正在努力处理”一类空泛句子。"
         .to_string()
 }
@@ -736,7 +735,19 @@ mod tests {
         assert!(prompt.contains("content 与 structured edits"));
         assert!(prompt.contains("恰好选择一个"));
         assert!(prompt.contains("delete 不得提供 content 或 edits"));
-        assert!(prompt.contains("较长的完整生成或多步草稿使用 write_file"));
+        assert!(prompt.contains("使用同一 apply_patch 的 Staged 模式"));
+        assert!(prompt.contains("action=begin"));
+        assert!(prompt.contains("transactionId、nextIndex 和 draftRevision"));
+        assert!(prompt.contains("只能继续调用 apply_patch append/edit/commit/abort"));
+        assert!(!prompt.contains("write_file 是本轮过渡期"));
+        let transitional = build_system_prompt(
+            None,
+            &[
+                tool_definition("apply_patch"),
+                tool_definition("write_file"),
+            ],
+        );
+        assert!(transitional.contains("write_file 是本轮过渡期"));
         assert!(prompt.contains("审批 Diff 由 Host 从冻结目标内容生成"));
         assert!(prompt.contains("不要提交 raw unified diff"));
         assert!(prompt.contains("确认唯一锚点和 oldText"));
@@ -852,7 +863,7 @@ mod tests {
         assert!(prompt.contains("create-only 发布到固定 Workspace Skill 目标"));
         assert!(prompt.contains("精确清理该任务创建的临时路径"));
         assert!(prompt.contains("不得覆盖或合并已有目标、改变文件内容"));
-        assert!(prompt.contains("任何修改仍必须使用 apply_patch/write_file"));
+        assert!(prompt.contains("任何修改仍必须使用 apply_patch"));
         assert!(prompt.contains("有 workspace 时可以省略 cwd"));
         assert!(prompt.contains("使用 workspace 根目录"));
         assert!(prompt.contains("第一次普通 run_command 调用就必须"));

@@ -372,7 +372,32 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
         cloned_trace.terminal_status,
         crate::ConversationTurnTraceTerminalStatus::Cancelled
     );
-    assert_eq!(cloned_trace.items, original_trace.items);
+    let original_call_id = format!("call-{run_id}");
+    let cloned_call_id = cloned_trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .expect("forked trace retains the ToolCall");
+    assert_ne!(
+        cloned_call_id, original_call_id,
+        "Fork must allocate a child-owned ToolCall identity"
+    );
+    let mut expected_cloned_items = original_trace.items.clone();
+    for item in &mut expected_cloned_items {
+        match item {
+            ConversationTurnTraceItem::ToolCall { call_id, .. }
+            | ConversationTurnTraceItem::ToolResult { call_id, .. }
+                if call_id == &original_call_id =>
+            {
+                *call_id = cloned_call_id.clone();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(cloned_trace.items, expected_cloned_items);
 
     assert_eq!(
         service

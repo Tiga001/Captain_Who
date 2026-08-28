@@ -5,8 +5,9 @@ use mycopilot_core::skills::{
     SkillInstallationOutcome, SkillInstallationService, SkillUninstallExactRequest,
 };
 use mycopilot_core::storage::models::{
-    AgentActionAuditRecord, AgentFileDraftRecord, AgentPendingActionRecord, ChatConversationRecord,
-    ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
+    AgentActionAuditRecord, AgentFileChangeRecord, AgentPendingActionRecord,
+    ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
+    ProjectRecord,
 };
 use mycopilot_core::{
     AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentCommandSessionListInput,
@@ -44,6 +45,7 @@ mod provider_profiles;
 mod provider_runtime_capability_boundary;
 mod provider_transition;
 mod skills;
+mod staged_file_change_execution;
 mod steering;
 mod terminal_events;
 mod usage_lifecycle;
@@ -256,10 +258,14 @@ fn direct_file_change_fixture(
             created_at_ms: 1,
             expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
         },
+        source_tool_name: "apply_patch".to_string(),
         source_call_id: call_id.to_string(),
         source_args_digest: proposal_digest(&args).expect("digest fixture Tool Call arguments"),
+        staged_transaction_id: None,
         conversation_id: conversation_id.to_string(),
+        project_id: None,
         run_id: run_id.to_string(),
+        staged_transaction_revision: None,
         canonical_target: canonical_target.to_string(),
         base_content: plan.base_content.clone(),
         target_content: plan.target_content.clone(),
@@ -267,6 +273,7 @@ fn direct_file_change_fixture(
         receipt: None,
         permission_revision: "permission-revision-test".to_string(),
         tool_set_revision: "tool-set-revision-test".to_string(),
+        provider_wire_revision: "provider-wire-revision-test".to_string(),
     };
     execution
         .validate()
@@ -296,6 +303,152 @@ fn direct_file_change_fixture(
         },
     };
     (action, call)
+}
+
+struct StagedFileWriteFixtureIdentity<'a> {
+    run_id: &'a str,
+    conversation_id: &'a str,
+    call_id: &'a str,
+    transaction_id: &'a str,
+}
+
+fn staged_file_write_fixture(
+    identity: StagedFileWriteFixtureIdentity<'_>,
+    paths: (&str, &str),
+    content: &str,
+    source_tool_name: &str,
+    approval_status: AgentApprovalStatus,
+) -> (AgentFileWriteProposal, AgentToolCall) {
+    let StagedFileWriteFixtureIdentity {
+        run_id,
+        conversation_id,
+        call_id,
+        transaction_id,
+    } = identity;
+    let (action, _) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        paths,
+        None,
+        Some(content),
+        approval_status,
+    );
+    let AgentProposedAction::Diff { diff } = action else {
+        unreachable!("the fixture constructor returns a Direct Diff")
+    };
+    let mut execution = *diff.execution;
+    execution.transaction.id = transaction_id.to_string();
+    execution.proposal.transaction_id = transaction_id.to_string();
+    execution.source_tool_name = source_tool_name.to_string();
+    execution.staged_transaction_id = Some(transaction_id.to_string());
+    execution.staged_transaction_revision = Some(1);
+    let args = if source_tool_name == "write_file" {
+        json!({
+            "phase": "finish",
+            "draftId": transaction_id,
+        })
+    } else {
+        json!({
+            "action": "commit",
+            "transactionId": transaction_id,
+            "expectedDraftRevision": 1,
+        })
+    };
+    execution.source_args_digest = mycopilot_core::file_change::proposal_digest(&args)
+        .expect("digest staged fixture Tool Call arguments");
+    execution
+        .validate()
+        .expect("valid staged FileChange execution binding");
+    let proposal = AgentFileWriteProposal {
+        id: call_id.to_string(),
+        draft_id: transaction_id.to_string(),
+        mode: AgentFileWriteMode::Create,
+        file_path: paths.0.to_string(),
+        base_revision: None,
+        summary: None,
+        additions: execution.proposal.additions,
+        deletions: execution.proposal.deletions,
+        line_count: content.lines().count() as u64,
+        byte_count: content.len() as u64,
+        approval_status,
+        execution: Box::new(execution),
+    };
+    let call = AgentToolCall {
+        id: call_id.to_string(),
+        tool: source_tool_name.to_string(),
+        args,
+        approval_status,
+        reason: None,
+    };
+    (proposal, call)
+}
+
+fn staged_file_change_record(
+    proposal: &AgentFileWriteProposal,
+    status: &str,
+) -> AgentFileChangeRecord {
+    let execution = &proposal.execution;
+    let operation = match execution.transaction.operation {
+        mycopilot_core::file_change::FileChangeOperation::Create => "create",
+        mycopilot_core::file_change::FileChangeOperation::Update => "update",
+        mycopilot_core::file_change::FileChangeOperation::Delete => {
+            panic!("Staged FileChange fixtures do not support delete")
+        }
+    };
+    let strategy = match proposal.mode {
+        AgentFileWriteMode::Create => None,
+        AgentFileWriteMode::Modify => Some("modify".to_string()),
+        AgentFileWriteMode::Rewrite => Some("rewrite".to_string()),
+        AgentFileWriteMode::Append | AgentFileWriteMode::Upsert => {
+            panic!("legacy presentation modes are not current Staged FileChanges")
+        }
+    };
+    let revision = execution
+        .staged_transaction_revision
+        .expect("Staged fixture has a draft revision");
+    AgentFileChangeRecord {
+        schema_version:
+            mycopilot_core::storage::file_change_repository::AGENT_FILE_CHANGE_SCHEMA_VERSION,
+        id: proposal.draft_id.clone(),
+        conversation_id: execution.conversation_id.clone(),
+        project_id: execution.project_id.clone(),
+        run_id: execution.run_id.clone(),
+        source_tool_name: execution.source_tool_name.clone(),
+        source_tool_call_id: format!("begin-{}", proposal.draft_id),
+        source_tool_arguments_digest: mycopilot_core::file_change::proposal_digest(&json!({
+            "action": "begin",
+            "operation": operation,
+            "filePath": proposal.file_path,
+            "observationId": execution.observation_id,
+        }))
+        .unwrap(),
+        permission_revision: execution.permission_revision.clone(),
+        tool_set_revision: execution.tool_set_revision.clone(),
+        provider_wire_revision: execution.provider_wire_revision.clone(),
+        observation_id: execution.observation_id.clone(),
+        observation_json: serde_json::to_string(&execution.observation).unwrap(),
+        file_path: proposal.file_path.clone(),
+        operation: operation.to_string(),
+        strategy,
+        status: status.to_string(),
+        base_revision: proposal.base_revision.clone(),
+        base_content: execution.base_content.clone().unwrap_or_default(),
+        content: execution.target_content.clone().unwrap(),
+        draft_revision: revision,
+        next_mutation_index: revision,
+        additions: proposal.additions,
+        deletions: proposal.deletions,
+        line_count: proposal.line_count,
+        byte_count: proposal.byte_count,
+        mutation_count: revision,
+        stats_final: true,
+        summary: proposal.summary.clone(),
+        final_action_id: Some(proposal.id.clone()),
+        created_at: 1,
+        updated_at: 1,
+        expires_at: i64::MAX,
+    }
 }
 
 fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {

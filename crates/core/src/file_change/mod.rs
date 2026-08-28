@@ -12,6 +12,7 @@ mod model;
 mod observation;
 mod planner;
 mod policy;
+mod staged;
 
 pub(crate) use bound_io::BoundParent;
 #[cfg(unix)]
@@ -39,6 +40,9 @@ pub use planner::{
     FileChangeBase, FileChangeMutation, FileChangePlan, FileChangePlanRequest, FileChangePlanner,
 };
 pub use policy::{FileChangePathPolicy, ResolvedFileChangeTarget};
+pub use staged::{
+    FileChangeMutationReceipt, FileChangeStagedAction, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION,
+};
 
 #[cfg(test)]
 mod tests;

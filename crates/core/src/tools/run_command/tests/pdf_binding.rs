@@ -22,6 +22,10 @@ fn model_schema_exposes_profiles_without_timeout_or_runtime_authority() {
     assert!(input_path_description.contains("artifact://"));
     assert!(input_item["properties"]["mountPath"].is_object());
     assert!(input_item["properties"].get("source").is_none());
+    assert!(properties["inputs"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("$MYCOPILOT_INPUT_ROOT/<mountPath>"));
     let serialized = serde_json::to_string(&definition.input_schema).unwrap();
     for forbidden in [
         "requiredPackages",
@@ -29,7 +33,6 @@ fn model_schema_exposes_profiles_without_timeout_or_runtime_authority() {
         "pptxgenjs",
         "4.0.1",
         "3.12.0",
-        "MYCOPILOT_INPUT_ROOT",
         "built-in PDF",
     ] {
         assert!(

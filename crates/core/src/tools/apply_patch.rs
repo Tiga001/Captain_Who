@@ -1,4 +1,8 @@
-use super::{AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess, ToolExecutionContext};
+use super::write_file_stream::FileChangeInputStreamObserver;
+use super::{
+    file_change_staged, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
+    ToolExecutionContext, ToolInputStreamObserver,
+};
 use crate::file_change::{
     BoundParent, FileChangeBase, FileChangeCommitter, FileChangeContentState,
     FileChangeDirectBinding, FileChangeEdit, FileChangeError, FileChangeErrorCode,
@@ -9,7 +13,8 @@ use crate::file_change::{
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentDiffProposal, AgentError, AgentPatchOperation, AgentProposedAction,
-    AgentResult, AgentToolCall, AgentToolDefinition, AgentToolSafety, AgentWritePermission,
+    AgentResult, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentWritePermission,
 };
 use crate::revision::content_revision;
 use serde::Deserialize;
@@ -31,24 +36,88 @@ impl AgentTool for ApplyPatchTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Request one short, one-shot Direct create, update, or delete operation for a text/code/config file. Before every Direct call, use read_file on the exact target path—even when you expect it to be absent; a directory listing, search result, or earlier read is not a substitute. Copy the returned observationId into this call. create is no-clobber and is valid only with a missing-state observation; if the target exists, use update or delete instead. Prefer exact structured edits for updates. Use write_file for long generated content or a change that must be assembled in stages. Without a workspace, filePath must be an authorized absolute path or use @home, @desktop, @documents, or @downloads; relative paths are invalid. Never switch to run_command, shell redirection, or a script to bypass file-change approval. The same Tool Call remains active through approval and Host execution, and no file is changed before that boundary."
+            description: "Create or update UTF-8 text files through one strict FileChange protocol. Before action=apply or action=begin, use read_file on the exact target path and copy its observationId. Use action=apply for one short complete create/update/delete. For long content use action=begin, then append/edit with the returned transactionId, nextIndex, and draftRevision, and finally action=commit; settle an unfinished transaction with commit or abort before user-visible narration. create is always no-clobber. Staged delete is not supported. Without a workspace, filePath must be an authorized absolute path or @home, @desktop, @documents, or @downloads. Never use run_command, redirection, or scripts to bypass file-change approval."
                 .to_string(),
             input_schema: patch_input_schema(),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
             requires_approval: true,
-            approval_mode: crate::protocol::AgentToolApprovalMode::Always,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Dynamic,
         }
     }
 
-    fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
-        Err(AgentError::new(
-            "apply_patch 需要用户审批和 Host 执行层，不能由 Agent Runtime 直接应用。",
-        ))
+    fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
+        validate_wire_shape(&args).map_err(file_change_agent_error)?;
+        let source_args_digest = crate::file_change::proposal_digest(&args).map_err(|error| {
+            file_change_agent_error(FileChangeError::with_diagnostic(
+                FileChangeErrorCode::Failed,
+                error.to_string(),
+            ))
+        })?;
+        let args = parse_args(args)?;
+        match args {
+            ApplyPatchArgs::Begin {
+                operation,
+                file_path,
+                observation_id,
+                strategy,
+            } => file_change_staged::begin(
+                context,
+                file_change_staged::StagedSource::new("apply_patch", source_args_digest),
+                operation,
+                strategy,
+                file_path,
+                observation_id,
+                None,
+            ),
+            ApplyPatchArgs::Append {
+                transaction_id,
+                index,
+                expected_draft_revision,
+                content,
+            } => file_change_staged::append(
+                context,
+                "apply_patch",
+                transaction_id,
+                index,
+                expected_draft_revision,
+                content,
+                source_args_digest,
+            ),
+            ApplyPatchArgs::Edit {
+                transaction_id,
+                index,
+                expected_draft_revision,
+                edits,
+            } => file_change_staged::edit(
+                context,
+                "apply_patch",
+                transaction_id,
+                index,
+                expected_draft_revision,
+                edits
+                    .into_iter()
+                    .map(domain_edit)
+                    .collect::<Result<_, _>>()
+                    .map_err(file_change_agent_error)?,
+                source_args_digest,
+            ),
+            ApplyPatchArgs::Status { transaction_id } => {
+                file_change_staged::status(context, "apply_patch", transaction_id)
+            }
+            ApplyPatchArgs::Abort { transaction_id } => {
+                file_change_staged::abort(context, "apply_patch", transaction_id)
+            }
+            ApplyPatchArgs::Apply { .. } | ApplyPatchArgs::Commit { .. } => Err(AgentError::new(
+                "apply_patch apply/commit 需要用户审批和 Host 执行层。",
+            )),
+        }
     }
 
     fn permission_policy(&self) -> AgentToolPermissionPolicy {
-        AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly)
+        // status/abort remain available after write authority is tightened so a dirty transaction
+        // can always be inspected or safely settled. Mutating actions enforce current authority.
+        AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite)
     }
 
     fn proposed_action(
@@ -56,9 +125,45 @@ impl AgentTool for ApplyPatchTool {
         context: &ToolExecutionContext,
         call: &AgentToolCall,
     ) -> AgentResult<AgentProposedAction> {
-        Ok(AgentProposedAction::Diff {
-            diff: direct_proposal_from_call(context, call)?,
-        })
+        validate_wire_shape(&call.args).map_err(file_change_agent_error)?;
+        match parse_args(call.args.clone())? {
+            args @ ApplyPatchArgs::Apply { .. } => Ok(AgentProposedAction::Diff {
+                diff: direct_proposal_from_args(context, call, args)?,
+            }),
+            ApplyPatchArgs::Commit {
+                transaction_id,
+                expected_draft_revision,
+                summary,
+            } => Ok(AgentProposedAction::FileWrite {
+                file_write: file_change_staged::commit(
+                    context,
+                    call,
+                    "apply_patch",
+                    transaction_id,
+                    expected_draft_revision,
+                    summary,
+                )?,
+            }),
+            _ => Err(AgentError::new(
+                "只有 apply_patch action=apply/commit 可以产生审批提案。",
+            )),
+        }
+    }
+
+    fn requires_approval_for_call(&self, args: &Value) -> bool {
+        matches!(
+            args.get("action").and_then(Value::as_str),
+            Some("apply" | "commit")
+        )
+    }
+
+    fn input_stream_observer(
+        &self,
+        context: ToolExecutionContext,
+    ) -> Option<Box<dyn ToolInputStreamObserver>> {
+        Some(Box::new(FileChangeInputStreamObserver::apply_patch(
+            context,
+        )))
     }
 
     fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
@@ -66,28 +171,38 @@ impl AgentTool for ApplyPatchTool {
         let Some(args) = projection.args.as_object_mut() else {
             return projection;
         };
-        if let Some(content) = args
-            .remove("content")
-            .and_then(|value| value.as_str().map(str::len))
-        {
-            args.insert(
-                "content".to_string(),
-                json!("[frozen in private FileChange transaction]"),
-            );
-            args.insert("contentBytes".to_string(), json!(content));
+        if let Some(content) = args.remove("content").and_then(|value| {
+            value.as_str().map(|content| {
+                (
+                    content.len(),
+                    crate::file_change::content_digest(content.as_bytes()),
+                )
+            })
+        }) {
+            args.insert("contentBytes".to_string(), json!(content.0));
+            args.insert("contentDigest".to_string(), json!(content.1));
         }
-        if let Some(edit_count) = args
-            .remove("edits")
-            .and_then(|value| value.as_array().map(Vec::len))
-        {
-            args.insert(
-                "edits".to_string(),
-                json!("[frozen in private FileChange transaction]"),
-            );
-            args.insert("editCount".to_string(), json!(edit_count));
+        if let Some(edits) = args.remove("edits").and_then(|value| {
+            value.as_array().map(|edits| {
+                let digest = crate::file_change::proposal_digest(&Value::Array(edits.clone())).ok();
+                (edits.len(), digest)
+            })
+        }) {
+            args.insert("editCount".to_string(), json!(edits.0));
+            if let Some(digest) = edits.1 {
+                args.insert("editsDigest".to_string(), json!(digest));
+            }
         }
         args.remove("observationId");
         projection
+    }
+
+    fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        file_change_staged::public_result_projection(result)
+    }
+
+    fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        file_change_staged::public_result_projection(result)
     }
 }
 
@@ -97,8 +212,8 @@ fn patch_input_schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["apply"],
-                "description": "Direct mode for one short, complete file change."
+                "enum": ["apply", "begin", "append", "edit", "commit", "status", "abort"],
+                "description": "Direct apply or the persistent Staged transaction lifecycle."
             },
             "operation": {
                 "type": "string",
@@ -113,10 +228,29 @@ fn patch_input_schema() -> Value {
                 "type": "string",
                 "description": "Opaque fobs_ identifier returned by read_file for this exact target."
             },
+            "strategy": {
+                "type": "string",
+                "enum": ["modify", "rewrite"],
+                "description": "Required only by begin/update. modify starts from observed content; rewrite starts empty."
+            },
+            "transactionId": {
+                "type": "string",
+                "description": "Opaque transaction id returned by begin."
+            },
+            "index": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Exact shared mutation index returned as nextIndex."
+            },
+            "expectedDraftRevision": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Exact draftRevision returned by the preceding successful mutation."
+            },
             "content": {
                 "type": "string",
-                "maxLength": 32768,
-                "description": "Complete UTF-8 content for a short create or update. Use write_file for long or staged content."
+                "maxLength": 1048576,
+                "description": "Complete short Direct content or one bounded Staged append chunk."
             },
             "edits": {
                 "type": "array",
@@ -139,32 +273,61 @@ fn patch_input_schema() -> Value {
             },
             "summary": { "type": "string", "description": "Short human-readable summary." }
         },
-        "required": ["action", "operation", "filePath", "observationId"],
+        "required": ["action"],
         "additionalProperties": false
     })
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ApplyPatchArgs {
-    action: DirectAction,
-    operation: FileChangeOperation,
-    file_path: String,
-    observation_id: String,
-    content: Option<String>,
-    edits: Option<Vec<StructuredTextEdit>>,
-    summary: Option<String>,
+#[serde(
+    tag = "action",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum ApplyPatchArgs {
+    Apply {
+        operation: FileChangeOperation,
+        file_path: String,
+        observation_id: String,
+        content: Option<String>,
+        edits: Option<Vec<StructuredTextEdit>>,
+        summary: Option<String>,
+    },
+    Begin {
+        operation: FileChangeOperation,
+        file_path: String,
+        observation_id: String,
+        strategy: Option<file_change_staged::StagedUpdateStrategy>,
+    },
+    Append {
+        transaction_id: String,
+        index: u64,
+        expected_draft_revision: u64,
+        content: String,
+    },
+    Edit {
+        transaction_id: String,
+        index: u64,
+        expected_draft_revision: u64,
+        edits: Vec<StructuredTextEdit>,
+    },
+    Commit {
+        transaction_id: String,
+        expected_draft_revision: u64,
+        summary: Option<String>,
+    },
+    Status {
+        transaction_id: String,
+    },
+    Abort {
+        transaction_id: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DirectAction {
-    Apply,
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StructuredTextEdit {
+pub(super) struct StructuredTextEdit {
     kind: TextEditKind,
     old_text: Option<String>,
     new_text: Option<String>,
@@ -183,15 +346,40 @@ enum TextEditKind {
     Prepend,
 }
 
+fn parse_args(value: Value) -> AgentResult<ApplyPatchArgs> {
+    serde_json::from_value(value).map_err(|_| {
+        file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+    })
+}
+
+#[cfg(test)]
 fn direct_proposal_from_call(
     context: &ToolExecutionContext,
     call: &AgentToolCall,
 ) -> AgentResult<AgentDiffProposal> {
     validate_wire_shape(&call.args).map_err(file_change_agent_error)?;
-    let args: ApplyPatchArgs = serde_json::from_value(call.args.clone()).map_err(|_| {
-        file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
-    })?;
-    let DirectAction::Apply = args.action;
+    let args = parse_args(call.args.clone())?;
+    direct_proposal_from_args(context, call, args)
+}
+
+fn direct_proposal_from_args(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    args: ApplyPatchArgs,
+) -> AgentResult<AgentDiffProposal> {
+    let ApplyPatchArgs::Apply {
+        operation,
+        file_path,
+        observation_id,
+        content,
+        edits,
+        summary,
+    } = args
+    else {
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::InvalidArguments,
+        )));
+    };
     if context.permissions().write == AgentWritePermission::Denied {
         return Err(file_change_agent_error(FileChangeError::new(
             FileChangeErrorCode::PermissionDenied,
@@ -202,26 +390,26 @@ fn direct_proposal_from_call(
         workspace_root.as_deref(),
         context.permissions().write == AgentWritePermission::All,
     )
-    .resolve(&args.file_path)
+    .resolve(&file_path)
     .map_err(file_change_agent_error)?;
     let observation = context
         .file_observations()
         .validate(
-            &args.observation_id,
+            &observation_id,
             context.conversation_id()?,
             context.run_id()?,
             target.absolute_path(),
         )
         .map_err(file_change_agent_error)?;
-    validate_observation_operation(args.operation, observation.state())
+    validate_observation_operation(operation, observation.state())
         .map_err(file_change_agent_error)?;
     let frozen_base =
         freeze_observed_base(context, &target, &observation).map_err(file_change_agent_error)?;
-    let mutation = mutation_from_args(args.operation, args.content, args.edits)
-        .map_err(file_change_agent_error)?;
+    let mutation =
+        mutation_from_args(operation, content, edits).map_err(file_change_agent_error)?;
     let plan = FileChangePlanner
         .plan(FileChangePlanRequest {
-            operation: args.operation,
+            operation,
             file_path: target.display_path(),
             base: frozen_base.as_plan_base(),
             mutation,
@@ -278,8 +466,9 @@ fn direct_proposal_from_call(
         schema_version: FILE_CHANGE_SCHEMA_VERSION,
         transaction,
         proposal,
-        observation_id: args.observation_id,
+        observation_id,
         observation: observation.checkpoint(),
+        source_tool_name: "apply_patch".to_string(),
         source_call_id: call.id.clone(),
         source_args_digest: crate::file_change::proposal_digest(&call.args).map_err(|error| {
             file_change_agent_error(FileChangeError::with_diagnostic(
@@ -287,8 +476,11 @@ fn direct_proposal_from_call(
                 error.to_string(),
             ))
         })?,
+        staged_transaction_id: None,
         conversation_id: context.conversation_id()?.to_string(),
+        project_id: context.project_id().map(ToString::to_string),
         run_id: context.run_id()?.to_string(),
+        staged_transaction_revision: None,
         canonical_target: target.absolute_path().to_string_lossy().into_owned(),
         base_content: plan.base_content.clone(),
         target_content: plan.target_content.clone(),
@@ -296,6 +488,7 @@ fn direct_proposal_from_call(
         receipt: None,
         permission_revision: context.file_change_permission_revision().to_string(),
         tool_set_revision: context.file_change_tool_set_revision().to_string(),
+        provider_wire_revision: context.file_change_provider_wire_revision().to_string(),
     };
     execution.validate().map_err(file_change_agent_error)?;
     context
@@ -313,7 +506,7 @@ fn direct_proposal_from_call(
         file_path: plan.file_path,
         patch: plan.diff,
         base_revision: state_revision(&plan.base).map(str::to_string),
-        summary: sanitize_summary(args.summary),
+        summary: sanitize_summary(summary),
         approval_status: AgentApprovalStatus::Required,
         execution: Box::new(execution),
     })
@@ -330,45 +523,134 @@ fn validate_wire_shape(value: &Value) -> Result<(), FileChangeError> {
             "operation",
             "filePath",
             "observationId",
+            "strategy",
+            "transactionId",
+            "index",
+            "expectedDraftRevision",
             "content",
             "edits",
             "summary",
         ],
     )?;
-    for required in ["action", "operation", "filePath", "observationId"] {
-        if object.get(required).is_none_or(Value::is_null) {
-            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
-        }
-    }
-    for optional in ["content", "edits", "summary"] {
-        if object.get(optional).is_some_and(Value::is_null) {
-            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
-        }
-    }
-    if object.get("action").and_then(Value::as_str) != Some("apply") {
+    if object.is_empty() || object.values().any(Value::is_null) {
         return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
     }
-    let operation = object
-        .get("operation")
+    let action = object
+        .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?;
-    let has_content = object.contains_key("content");
-    let has_edits = object.contains_key("edits");
-    let valid = match operation {
-        "create" => has_content && !has_edits,
-        "update" => has_content ^ has_edits,
-        "delete" => !has_content && !has_edits,
+    let exact = |required: &[&str], optional: &[&str]| {
+        required.iter().all(|key| object.contains_key(*key))
+            && object
+                .keys()
+                .all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str()))
+    };
+    let valid = match action {
+        "apply" => {
+            let operation = object.get("operation").and_then(Value::as_str);
+            match operation {
+                Some("create") => exact(
+                    &[
+                        "action",
+                        "operation",
+                        "filePath",
+                        "observationId",
+                        "content",
+                    ],
+                    &["summary"],
+                ),
+                Some("update") => {
+                    let common = ["action", "operation", "filePath", "observationId"];
+                    (exact(&common, &["content", "summary"])
+                        || exact(&common, &["edits", "summary"]))
+                        && (object.contains_key("content") ^ object.contains_key("edits"))
+                }
+                Some("delete") => exact(
+                    &["action", "operation", "filePath", "observationId"],
+                    &["summary"],
+                ),
+                _ => false,
+            }
+        }
+        "begin" => match object.get("operation").and_then(Value::as_str) {
+            Some("create") => exact(&["action", "operation", "filePath", "observationId"], &[]),
+            Some("update") => {
+                exact(
+                    &[
+                        "action",
+                        "operation",
+                        "filePath",
+                        "observationId",
+                        "strategy",
+                    ],
+                    &[],
+                ) && matches!(
+                    object.get("strategy").and_then(Value::as_str),
+                    Some("modify" | "rewrite")
+                )
+            }
+            _ => false,
+        },
+        "append" => exact(
+            &[
+                "action",
+                "transactionId",
+                "index",
+                "expectedDraftRevision",
+                "content",
+            ],
+            &[],
+        ),
+        "edit" => exact(
+            &[
+                "action",
+                "transactionId",
+                "index",
+                "expectedDraftRevision",
+                "edits",
+            ],
+            &[],
+        ),
+        "commit" => exact(
+            &["action", "transactionId", "expectedDraftRevision"],
+            &["summary"],
+        ),
+        "status" | "abort" => exact(&["action", "transactionId"], &[]),
         _ => false,
     };
     if !valid {
-        Err(FileChangeError::new(
+        return Err(FileChangeError::new(
             FileChangeErrorCode::IllegalFieldCombination,
-        ))
-    } else if let Some(edits) = object.get("edits") {
-        validate_edit_wire_shapes(edits)
-    } else {
-        Ok(())
+        ));
     }
+    for key in [
+        "action",
+        "operation",
+        "filePath",
+        "observationId",
+        "strategy",
+        "transactionId",
+        "content",
+        "summary",
+    ] {
+        if let Some(value) = object.get(key) {
+            if !value.is_string() {
+                return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+            }
+        }
+    }
+    for key in ["index", "expectedDraftRevision"] {
+        if object
+            .get(key)
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+    }
+    if let Some(edits) = object.get("edits") {
+        validate_edit_wire_shapes(edits)?;
+    }
+    Ok(())
 }
 
 fn validate_edit_wire_shapes(value: &Value) -> Result<(), FileChangeError> {
@@ -450,7 +732,7 @@ fn mutation_from_args(
     }
 }
 
-fn domain_edit(edit: StructuredTextEdit) -> Result<FileChangeEdit, FileChangeError> {
+pub(super) fn domain_edit(edit: StructuredTextEdit) -> Result<FileChangeEdit, FileChangeError> {
     let invalid = || FileChangeError::new(FileChangeErrorCode::IllegalFieldCombination);
     match edit.kind {
         TextEditKind::Replace => {
@@ -493,7 +775,7 @@ fn domain_edit(edit: StructuredTextEdit) -> Result<FileChangeEdit, FileChangeErr
     }
 }
 
-fn validate_observation_operation(
+pub(super) fn validate_observation_operation(
     operation: FileChangeOperation,
     state: &FileObservationState,
 ) -> Result<(), FileChangeError> {
@@ -514,9 +796,9 @@ fn validate_observation_operation(
 }
 
 #[derive(Debug)]
-struct FrozenBase {
-    content: Option<String>,
-    revision: Option<String>,
+pub(super) struct FrozenBase {
+    pub(super) content: Option<String>,
+    pub(super) revision: Option<String>,
 }
 
 impl FrozenBase {
@@ -534,13 +816,45 @@ fn freeze_observed_base(
     target: &crate::file_change::ResolvedFileChangeTarget,
     observation: &crate::file_change::FileObservation,
 ) -> Result<FrozenBase, FileChangeError> {
-    freeze_observed_base_with_hook(context, target, observation, || {})
+    freeze_observed_base_with_limit_and_hook(
+        context,
+        target,
+        observation,
+        MAX_EDIT_CONTENT_BYTES,
+        || {},
+    )
 }
 
+pub(super) fn freeze_staged_observed_base(
+    context: &ToolExecutionContext,
+    target: &crate::file_change::ResolvedFileChangeTarget,
+    observation: &crate::file_change::FileObservation,
+    max_bytes: usize,
+) -> Result<FrozenBase, FileChangeError> {
+    freeze_observed_base_with_limit_and_hook(context, target, observation, max_bytes, || {})
+}
+
+#[cfg(test)]
 fn freeze_observed_base_with_hook(
     context: &ToolExecutionContext,
     target: &crate::file_change::ResolvedFileChangeTarget,
     observation: &crate::file_change::FileObservation,
+    after_parent_bind: impl FnOnce(),
+) -> Result<FrozenBase, FileChangeError> {
+    freeze_observed_base_with_limit_and_hook(
+        context,
+        target,
+        observation,
+        MAX_EDIT_CONTENT_BYTES,
+        after_parent_bind,
+    )
+}
+
+fn freeze_observed_base_with_limit_and_hook(
+    context: &ToolExecutionContext,
+    target: &crate::file_change::ResolvedFileChangeTarget,
+    observation: &crate::file_change::FileObservation,
+    max_bytes: usize,
     after_parent_bind: impl FnOnce(),
 ) -> Result<FrozenBase, FileChangeError> {
     context.check_cancelled().map_err(|error| {
@@ -571,7 +885,7 @@ fn freeze_observed_base_with_hook(
             if FileObservationIdentity::from_metadata(&current.metadata) != *identity {
                 return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
             }
-            if current.bytes.len() > MAX_EDIT_CONTENT_BYTES {
+            if current.bytes.len() > max_bytes {
                 return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
             }
             let content = String::from_utf8(current.bytes).map_err(|error| {
@@ -592,7 +906,7 @@ fn freeze_observed_base_with_hook(
     }
 }
 
-fn patch_operation(operation: FileChangeOperation) -> AgentPatchOperation {
+pub(super) fn patch_operation(operation: FileChangeOperation) -> AgentPatchOperation {
     match operation {
         FileChangeOperation::Create => AgentPatchOperation::Create,
         FileChangeOperation::Update => AgentPatchOperation::Update,
@@ -600,20 +914,20 @@ fn patch_operation(operation: FileChangeOperation) -> AgentPatchOperation {
     }
 }
 
-fn state_revision(state: &FileChangeContentState) -> Option<&str> {
+pub(super) fn state_revision(state: &FileChangeContentState) -> Option<&str> {
     match state {
         FileChangeContentState::Missing => None,
         FileChangeContentState::Present { revision, .. } => Some(revision),
     }
 }
 
-fn sanitize_summary(summary: Option<String>) -> Option<String> {
+pub(super) fn sanitize_summary(summary: Option<String>) -> Option<String> {
     summary
         .map(|summary| summary.trim().chars().take(MAX_SUMMARY_CHARS).collect())
         .filter(|summary: &String| !summary.is_empty())
 }
 
-fn file_change_agent_error(error: FileChangeError) -> AgentError {
+pub(super) fn file_change_agent_error(error: FileChangeError) -> AgentError {
     let code = serde_json::to_value(error.code())
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -670,21 +984,51 @@ mod tests {
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn direct_schema_is_portable_strict_and_has_no_raw_patch_or_revision() {
+    fn unified_schema_is_portable_strict_and_has_no_raw_patch_or_revision() {
         let schema = patch_input_schema();
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(
-            schema["required"],
-            json!(["action", "operation", "filePath", "observationId"])
-        );
+        assert_eq!(schema["required"], json!(["action"]));
         assert!(schema.get("oneOf").is_none());
         assert!(schema.get("anyOf").is_none());
         assert!(schema.get("allOf").is_none());
         let properties = schema["properties"].as_object().unwrap();
         assert!(!properties.contains_key("patch"));
         assert!(!properties.contains_key("expectedRevision"));
+        assert!(properties.contains_key("transactionId"));
+        assert!(properties.contains_key("expectedDraftRevision"));
         assert_eq!(properties["edits"]["items"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn staged_wire_enforces_every_exact_action_matrix() {
+        let valid = [
+            json!({"action":"begin","operation":"create","filePath":"a.txt","observationId":"fobs_x"}),
+            json!({"action":"begin","operation":"update","filePath":"a.txt","observationId":"fobs_x","strategy":"modify"}),
+            json!({"action":"begin","operation":"update","filePath":"a.txt","observationId":"fobs_x","strategy":"rewrite"}),
+            json!({"action":"append","transactionId":"file-change-staged-v1:x","index":0,"expectedDraftRevision":0,"content":"x"}),
+            json!({"action":"edit","transactionId":"file-change-staged-v1:x","index":1,"expectedDraftRevision":1,"edits":[{"kind":"append","text":"y"}]}),
+            json!({"action":"commit","transactionId":"file-change-staged-v1:x","expectedDraftRevision":2,"summary":"done"}),
+            json!({"action":"status","transactionId":"file-change-staged-v1:x"}),
+            json!({"action":"abort","transactionId":"file-change-staged-v1:x"}),
+        ];
+        for value in valid {
+            validate_wire_shape(&value).unwrap_or_else(|error| panic!("rejected {value}: {error}"));
+        }
+
+        let invalid = [
+            json!({"action":"begin","operation":"delete","filePath":"a.txt","observationId":"fobs_x"}),
+            json!({"action":"begin","operation":"create","filePath":"a.txt","observationId":"fobs_x","strategy":"rewrite"}),
+            json!({"action":"begin","operation":"update","filePath":"a.txt","observationId":"fobs_x"}),
+            json!({"action":"append","transactionId":"x","index":0,"expectedDraftRevision":null,"content":"x"}),
+            json!({"action":"edit","transactionId":"x","index":0,"expectedDraftRevision":0,"edits":[],"content":"x"}),
+            json!({"action":"commit","transactionId":"x","expected_draft_revision":0}),
+            json!({"action":"status","transactionId":"x","summary":"extra"}),
+            json!({"action":"abort","transactionId":"x","extra":true}),
+        ];
+        for value in invalid {
+            assert!(validate_wire_shape(&value).is_err(), "accepted {value}");
+        }
     }
 
     #[test]
@@ -773,6 +1117,27 @@ mod tests {
         assert!(projected.args.get("observationId").is_none());
         assert_eq!(projected.args["editCount"], 1);
         assert!(!projected.args.to_string().contains("secret content"));
+
+        let staged = AgentToolCall {
+            id: "append-1".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({
+                "action":"append",
+                "transactionId":"transaction-1",
+                "index":0,
+                "expectedDraftRevision":0,
+                "content":"PRIVATE_STAGED_BODY_CANARY"
+            }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let staged_projection = ApplyPatchTool.event_call_projection(&staged);
+        assert_eq!(staged_projection.args["contentBytes"], 26);
+        assert!(staged_projection.args.get("contentDigest").is_some());
+        assert!(!staged_projection
+            .args
+            .to_string()
+            .contains("PRIVATE_STAGED_BODY_CANARY"));
     }
 
     #[test]

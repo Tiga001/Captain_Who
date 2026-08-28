@@ -248,6 +248,56 @@ describe('Renderer-safe Direct file-change proposal contract', () => {
   })
 })
 
+describe('Renderer-safe Staged file-change proposal contract', () => {
+  const fileWrite = {
+    id: 'call-staged-commit',
+    draftId: 'file-change-staged-v1:current',
+    mode: 'rewrite',
+    filePath: 'reports/large.md',
+    baseRevision: 'content-sha256-v1:current',
+    summary: 'Publish the assembled report',
+    additions: 12_000,
+    deletions: 8_000,
+    lineCount: 12_000,
+    byteCount: 4 * 1024 * 1024,
+    approvalStatus: 'required'
+  } as const
+
+  it('round-trips only metadata needed for approval and paged Diff reads', () => {
+    const event = {
+      type: 'approval_required',
+      runId: 'run-owned',
+      action: { type: 'file_write', fileWrite }
+    } as const
+
+    expect(parseAgentEventForHost(event)).toEqual(event)
+    expect(JSON.stringify(parseAgentEventForHost(event))).not.toContain('execution')
+  })
+
+  it('rejects private execution authority and inline large bodies', () => {
+    for (const extra of [
+      {
+        execution: {
+          canonicalTarget: '/private/workspace/reports/large.md',
+          targetContent: 'PRIVATE_STAGED_TARGET_CANARY'
+        }
+      },
+      { patch: 'PRIVATE_STAGED_DIFF_CANARY' }
+    ]) {
+      expect(() =>
+        parseAgentEventForHost({
+          type: 'approval_required',
+          runId: 'run-owned',
+          action: {
+            type: 'file_write',
+            fileWrite: { ...fileWrite, ...extra }
+          }
+        })
+      ).toThrow(/unexpected field/)
+    }
+  })
+})
+
 describe('built-in capability Host-boundary contract', () => {
   it('strictly parses the frozen activation approval and approval event', () => {
     expect(parseAgentBuiltinCapabilityActivationApproval(builtinCapabilityApproval)).toEqual(

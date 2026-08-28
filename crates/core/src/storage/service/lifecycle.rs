@@ -63,10 +63,11 @@ impl StorageService {
 
             match service.state.connection() {
                 Ok(mut connection) => {
-                    if let Err(error) =
-                        file_draft_repository::expire_and_prune_drafts(&mut connection, now_ms())
-                    {
-                        eprintln!("failed to prune expired file drafts: {error}");
+                    if let Err(error) = file_change_repository::expire_and_prune_file_changes(
+                        &mut connection,
+                        now_ms(),
+                    ) {
+                        eprintln!("failed to prune expired file changes: {error}");
                     }
                     if let Err(error) = service.cleanup_orphan_attachment_files(&connection) {
                         eprintln!("failed to cleanup orphan attachment files: {error}");

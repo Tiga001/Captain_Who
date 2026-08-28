@@ -802,48 +802,83 @@ CREATE TABLE provider_continuation_tool_calls (
             FOREIGN KEY (continuation_id)
                 REFERENCES provider_continuations(continuation_id) ON DELETE CASCADE
         );
-CREATE TABLE agent_file_drafts (
+CREATE TABLE agent_file_changes (
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
             project_id TEXT,
             run_id TEXT NOT NULL,
+            source_tool_name TEXT NOT NULL CHECK (
+                source_tool_name IN ('apply_patch', 'write_file')
+            ),
+            source_tool_call_id TEXT NOT NULL,
+            source_tool_arguments_digest TEXT NOT NULL,
+            permission_revision TEXT NOT NULL,
+            tool_set_revision TEXT NOT NULL,
+            provider_wire_revision TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            observation_json TEXT NOT NULL CHECK (json_valid(observation_json)),
             file_path TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            status TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK (operation IN ('create', 'update')),
+            strategy TEXT CHECK (strategy IS NULL OR strategy IN ('modify', 'rewrite')),
+            status TEXT NOT NULL CHECK (status IN (
+                'drafting', 'ready', 'waiting_approval', 'applying',
+                'applied', 'already_applied', 'rejected', 'conflict',
+                'failed', 'outcome_unknown', 'aborted', 'expired'
+            )),
             base_revision TEXT,
             base_content TEXT NOT NULL,
             content TEXT NOT NULL,
-            additions INTEGER NOT NULL DEFAULT 0,
-            deletions INTEGER NOT NULL DEFAULT 0,
-            line_count INTEGER NOT NULL DEFAULT 0,
-            byte_count INTEGER NOT NULL DEFAULT 0,
-            chunk_count INTEGER NOT NULL DEFAULT 0,
-            next_chunk_index INTEGER NOT NULL DEFAULT 0,
-            stats_final INTEGER NOT NULL DEFAULT 0,
+            draft_revision INTEGER NOT NULL CHECK (draft_revision >= 0),
+            next_mutation_index INTEGER NOT NULL CHECK (next_mutation_index >= 0),
+            additions INTEGER NOT NULL DEFAULT 0 CHECK (additions >= 0),
+            deletions INTEGER NOT NULL DEFAULT 0 CHECK (deletions >= 0),
+            line_count INTEGER NOT NULL DEFAULT 0 CHECK (line_count >= 0),
+            byte_count INTEGER NOT NULL DEFAULT 0 CHECK (byte_count >= 0),
+            mutation_count INTEGER NOT NULL DEFAULT 0 CHECK (mutation_count >= 0),
+            stats_final INTEGER NOT NULL DEFAULT 0 CHECK (stats_final IN (0, 1)),
             summary TEXT,
             final_action_id TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL,
+            CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (length(CAST(source_tool_call_id AS BLOB)) BETWEEN 1 AND 2048),
+            CHECK (length(CAST(source_tool_arguments_digest AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (length(CAST(permission_revision AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (length(CAST(tool_set_revision AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (length(CAST(provider_wire_revision AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (length(CAST(file_path AS BLOB)) BETWEEN 1 AND 32768),
+            CHECK (
+                (operation = 'create' AND strategy IS NULL)
+                OR (operation = 'update' AND strategy IN ('modify', 'rewrite'))
+            ),
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
-CREATE TABLE agent_file_draft_chunks (
-            draft_id TEXT NOT NULL,
-            chunk_index INTEGER NOT NULL,
-            content_hash TEXT NOT NULL,
-            byte_count INTEGER NOT NULL,
+CREATE TABLE agent_file_change_chunks (
+            transaction_id TEXT NOT NULL,
+            mutation_index INTEGER NOT NULL CHECK (mutation_index >= 0),
+            content_digest TEXT NOT NULL,
+            byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
             created_at INTEGER NOT NULL,
-            PRIMARY KEY (draft_id, chunk_index),
-            FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
+            PRIMARY KEY (transaction_id, mutation_index),
+            FOREIGN KEY (transaction_id) REFERENCES agent_file_changes(id) ON DELETE CASCADE
         );
-CREATE TABLE agent_file_draft_operations (
-            draft_id TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            operation TEXT NOT NULL,
-            payload_hash TEXT NOT NULL,
+CREATE TABLE agent_file_change_operations (
+            transaction_id TEXT NOT NULL,
+            mutation_index INTEGER NOT NULL CHECK (mutation_index >= 0),
+            source_tool_call_id TEXT NOT NULL,
+            source_tool_arguments_digest TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('append', 'edit')),
+            payload_digest TEXT NOT NULL,
+            draft_revision INTEGER NOT NULL CHECK (draft_revision > 0),
+            receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json)),
             created_at INTEGER NOT NULL,
-            PRIMARY KEY (draft_id, sequence),
-            FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
+            PRIMARY KEY (transaction_id, mutation_index),
+            CHECK (length(CAST(source_tool_call_id AS BLOB)) BETWEEN 1 AND 2048),
+            CHECK (length(CAST(source_tool_arguments_digest AS BLOB)) BETWEEN 1 AND 256),
+            FOREIGN KEY (transaction_id) REFERENCES agent_file_changes(id) ON DELETE CASCADE
         );
 CREATE TABLE agent_nodes (
             agent_id TEXT PRIMARY KEY CHECK (
@@ -3542,9 +3577,10 @@ CREATE INDEX idx_provider_continuations_state
             ON provider_continuations(state, updated_at);
 CREATE INDEX idx_provider_continuation_tool_calls_runtime
             ON provider_continuation_tool_calls(runtime_call_id, continuation_id);
-CREATE INDEX idx_agent_file_drafts_conversation_status ON agent_file_drafts(conversation_id, status);
-CREATE INDEX idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
-CREATE INDEX idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
+CREATE INDEX idx_agent_file_changes_conversation_status ON agent_file_changes(conversation_id, status);
+CREATE INDEX idx_agent_file_changes_project_id ON agent_file_changes(project_id);
+CREATE INDEX idx_agent_file_changes_run_id ON agent_file_changes(run_id);
+CREATE INDEX idx_agent_file_changes_expires_at ON agent_file_changes(expires_at);
 CREATE INDEX idx_composer_drafts_updated_at ON composer_drafts(updated_at);
 CREATE UNIQUE INDEX conversation_trace_command_session_lifecycle_identity
          ON conversation_turn_trace_items (

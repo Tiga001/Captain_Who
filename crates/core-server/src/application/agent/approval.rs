@@ -544,7 +544,7 @@ impl AgentService {
     ) -> Result<AgentFileDraftContentPage, String> {
         let draft = self
             .storage
-            .get_agent_file_draft(draft_id)?
+            .get_agent_file_change(draft_id)?
             .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
         self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
         let snapshot = file_draft_snapshot(&draft)?;
@@ -568,7 +568,7 @@ impl AgentService {
     ) -> Result<AgentFileWriteDiffPage, String> {
         let draft = self
             .storage
-            .get_agent_file_draft(draft_id)?
+            .get_agent_file_change(draft_id)?
             .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
         self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
         let diff = file_write_diff(&draft);
@@ -2052,14 +2052,25 @@ impl AgentService {
             }
             agent_input
         } else if decision_status == AgentApprovalDecisionStatus::Approved
-            && matches!(record.snapshot.action, AgentProposedAction::Diff { .. })
+            && matches!(
+                record.snapshot.action,
+                AgentProposedAction::Diff { .. } | AgentProposedAction::FileWrite { .. }
+            )
         {
+            let effect_kind = if matches!(
+                record.snapshot.action,
+                AgentProposedAction::FileWrite { .. }
+            ) {
+                "staged_file_change"
+            } else {
+                "direct_file_change"
+            };
             match self.settle_manual_file_effect(
                 &record,
                 &call,
                 final_pending_status,
                 tool_result,
-                "direct_file_change",
+                effect_kind,
                 &notifications,
             ) {
                 ManualFileEffectSettlement::Committed {
@@ -2073,13 +2084,13 @@ impl AgentService {
                 }
                 ManualFileEffectSettlement::CommittedAndAdvanced => {
                     return Err(
-                        "Direct file-change receipt was already advanced by another continuation; duplicate continuation was stopped."
+                        "FileChange receipt was already advanced by another continuation; duplicate continuation was stopped."
                             .to_string(),
                     );
                 }
                 ManualFileEffectSettlement::Unsettled => {
                     return Err(
-                        "Direct file change finished without a confirmed durable terminal receipt; inspect the target before retrying."
+                        "FileChange finished without a confirmed durable terminal receipt; inspect the target before retrying."
                             .to_string(),
                     );
                 }
@@ -2211,7 +2222,7 @@ impl AgentService {
                 if let Some(file_write_result) = execution.file_write_result.as_ref() {
                     if let Ok(Some(draft)) = self
                         .storage
-                        .get_agent_file_draft(&file_write_result.draft_id)
+                        .get_agent_file_change(&file_write_result.draft_id)
                     {
                         if let Ok(snapshot) = file_draft_snapshot(&draft) {
                             let _ = notifications.send(agent_event_notification(

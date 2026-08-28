@@ -308,6 +308,41 @@ fn renderer_command_projection_excludes_managed_office_script_authority() {
 }
 
 #[test]
+fn renderer_file_write_projection_excludes_file_change_execution_authority() {
+    const CANARY: &str = "PRIVATE_FILE_CHANGE_EXECUTION_CANARY";
+    let mut projection = serde_json::json!({
+        "type": "file_write",
+        "fileWrite": {
+            "id": "call-commit",
+            "draftId": "transaction-1",
+            "mode": "rewrite",
+            "filePath": "report.md",
+            "baseRevision": null,
+            "summary": null,
+            "additions": 1,
+            "deletions": 0,
+            "lineCount": 1,
+            "byteCount": 8,
+            "approvalStatus": "required",
+            "execution": {
+                "privateTargetContent": CANARY,
+                "privateObservation": CANARY
+            }
+        }
+    });
+
+    redact_renderer_mcp_binding_fields(&mut projection);
+
+    let file_write = projection["fileWrite"].as_object().unwrap();
+    assert!(!file_write.contains_key("execution"));
+    assert_eq!(
+        file_write.get("draftId").and_then(Value::as_str),
+        Some("transaction-1")
+    );
+    assert!(!serde_json::to_string(&projection).unwrap().contains(CANARY));
+}
+
+#[test]
 fn pending_continuation_uses_original_model_args_not_backend_bound_builder_fields() {
     let original_args = serde_json::json!({
         "command": "python scripts/builder.py --output report.docx",

@@ -1386,7 +1386,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
                 }
                 1 => {
                     let draft_id = server_storage
-                        .list_agent_file_drafts_for_run("run-preview")
+                        .list_agent_file_changes_for_run("run-preview")
                         .unwrap()[0]
                         .id
                         .clone();
@@ -1394,7 +1394,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
                 }
                 2 => {
                     let draft_id = server_storage
-                        .list_agent_file_drafts_for_run("run-preview")
+                        .list_agent_file_changes_for_run("run-preview")
                         .unwrap()[0]
                         .id
                         .clone();
@@ -1538,8 +1538,9 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         })
         .expect("write_file append event");
     assert_runtime_owned_tool_call_id(&append_event.id);
-    assert_eq!(append_event.args["content"], "[stored in private draft]");
+    assert!(append_event.args.get("content").is_none());
     assert_eq!(append_event.args["contentBytes"], 28);
+    assert!(append_event.args.get("contentDigest").is_some());
     let append_call_id = append_event.id.clone();
 
     let append_trace = output
@@ -1562,7 +1563,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     assert_eq!(append_trace["contentBytes"], 28);
     assert_eq!(
         storage
-            .list_agent_file_drafts_for_run("run-preview")
+            .list_agent_file_changes_for_run("run-preview")
             .unwrap()[0]
             .status,
         "aborted"

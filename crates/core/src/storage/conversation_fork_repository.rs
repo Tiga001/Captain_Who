@@ -2,7 +2,7 @@ use crate::context::{
     ContextCompactionSummary, ContextContinuitySnapshot, ContextHistoryRef, ContextJournalCursor,
 };
 use crate::storage::models::{
-    AgentFileDraftRecord, AgentRunGuidanceRecord, AttachmentRecord, ChatConversationRecord,
+    AgentFileChangeRecord, AgentRunGuidanceRecord, AttachmentRecord, ChatConversationRecord,
     ChatMessageRecord, ConversationContinuationOriginRecord, ConversationForkPoint,
 };
 use crate::storage::{
@@ -10,7 +10,7 @@ use crate::storage::{
     context_compaction_receipt_repository, context_compaction_repository,
     conversation_context_adaptation_repository, conversation_history_archive_repository,
     conversation_history_open, conversation_model_context_repository,
-    conversation_trace_repository, conversation_turn_rewrite_repository, file_draft_repository,
+    conversation_trace_repository, conversation_turn_rewrite_repository, file_change_repository,
     guidance_repository, model_request_observation_repository, provider_continuation_repository,
     turn_diff_repository, world_state_repository,
 };
@@ -89,13 +89,13 @@ struct ForkGuidance {
 }
 
 #[derive(Debug)]
-struct ForkFileDraft {
-    target: AgentFileDraftRecord,
-    history: file_draft_repository::AgentFileDraftHistorySnapshot,
+struct ForkFileChange {
+    target: AgentFileChangeRecord,
+    history: file_change_repository::AgentFileChangeHistorySnapshot,
 }
 
-impl std::ops::Deref for ForkFileDraft {
-    type Target = AgentFileDraftRecord;
+impl std::ops::Deref for ForkFileChange {
+    type Target = AgentFileChangeRecord;
 
     fn deref(&self) -> &Self::Target {
         &self.target
@@ -145,7 +145,7 @@ struct ConversationHistoryForkPlan {
     traces: Vec<ForkTrace>,
     turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
     guidances: Vec<ForkGuidance>,
-    file_drafts: Vec<ForkFileDraft>,
+    file_changes: Vec<ForkFileChange>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
     compaction_receipts: Vec<ForkContextCompactionReceipt>,
     provider_transition_receipts: Vec<ForkProviderTransitionReceipt>,
@@ -174,7 +174,7 @@ struct ConversationHistoryForkPlanRef<'a> {
     traces: &'a [ForkTrace],
     turn_diffs: &'a [turn_diff_repository::AgentTurnDiffForkCopy],
     guidances: &'a [ForkGuidance],
-    file_drafts: &'a [ForkFileDraft],
+    file_changes: &'a [ForkFileChange],
     summaries: &'a [context_compaction_repository::ContextCompactionSummaryVersion],
     compaction_receipts: &'a [ForkContextCompactionReceipt],
     provider_transition_receipts: &'a [ForkProviderTransitionReceipt],
@@ -197,7 +197,7 @@ impl ConversationHistoryForkPlan {
             traces: &self.traces,
             turn_diffs: &self.turn_diffs,
             guidances: &self.guidances,
-            file_drafts: &self.file_drafts,
+            file_changes: &self.file_changes,
             summaries: &self.summaries,
             compaction_receipts: &self.compaction_receipts,
             provider_transition_receipts: &self.provider_transition_receipts,
@@ -223,7 +223,7 @@ pub(crate) struct ConversationForkPlan {
     traces: Vec<ForkTrace>,
     turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
     guidances: Vec<ForkGuidance>,
-    file_drafts: Vec<ForkFileDraft>,
+    file_changes: Vec<ForkFileChange>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
     compaction_receipts: Vec<ForkContextCompactionReceipt>,
     provider_transition_receipts: Vec<ForkProviderTransitionReceipt>,
@@ -251,7 +251,7 @@ impl ConversationForkPlan {
             traces: &self.traces,
             turn_diffs: &self.turn_diffs,
             guidances: &self.guidances,
-            file_drafts: &self.file_drafts,
+            file_changes: &self.file_changes,
             summaries: &self.summaries,
             compaction_receipts: &self.compaction_receipts,
             provider_transition_receipts: &self.provider_transition_receipts,
@@ -653,15 +653,34 @@ fn preallocate_conversation_prefix_identities(
                 .unwrap_or_else(|| new_id("run"));
             insert_global_replacement(replacements, &trace.run_id, &target_run_id)?;
             run_ids.insert(trace.run_id.clone());
-            for item in &trace.items {
+            for (item_index, item) in trace.items.iter().enumerate() {
+                let call_id = match item {
+                    crate::ConversationTurnTraceItem::ToolCall { call_id, .. }
+                    | crate::ConversationTurnTraceItem::ToolResult { call_id, .. }
+                    | crate::ConversationTurnTraceItem::CommandSessionLifecycle {
+                        call_id, ..
+                    } => Some(call_id),
+                    _ => None,
+                };
+                if let Some(call_id) = call_id {
+                    let target_call_id = replacements.get(call_id).cloned().unwrap_or_else(|| {
+                        crate::llm::model_response_tool_call_id(
+                            &target_run_id,
+                            item_index,
+                            0,
+                            call_id,
+                        )
+                    });
+                    insert_global_replacement(replacements, call_id, &target_call_id)?;
+                }
                 let archive = match item {
                     crate::ConversationTurnTraceItem::ToolResult { archive, .. }
                     | crate::ConversationTurnTraceItem::CommandSessionLifecycle {
                         archive, ..
-                    } => archive,
-                    _ => continue,
+                    } => Some(archive),
+                    _ => None,
                 };
-                if let Some(archive_ref) = archive.archive_ref.as_deref() {
+                if let Some(archive_ref) = archive.and_then(|value| value.archive_ref.as_deref()) {
                     archive_refs.insert(archive_ref.to_string());
                 }
             }
@@ -688,10 +707,16 @@ fn preallocate_conversation_prefix_identities(
         }
     }
     for run_id in run_ids {
-        for draft in file_draft_repository::list_drafts_for_run(connection, &run_id)
+        for change in file_change_repository::list_file_changes_for_run(connection, &run_id)
             .map_err(database_error)?
         {
-            insert_global_replacement(replacements, &draft.id, &new_id("file-draft"))?;
+            insert_global_replacement(replacements, &change.id, &new_id("file-change"))?;
+            let target_observation_id = format!("fobs_{}", Uuid::new_v4().simple());
+            insert_global_replacement(
+                replacements,
+                &change.observation_id,
+                &target_observation_id,
+            )?;
         }
     }
     for archive_ref in archive_refs {
@@ -1054,6 +1079,7 @@ fn build_single_conversation_fork_plan_at_point(
 
     let mut traces = Vec::new();
     let mut run_id_map = HashMap::new();
+    let mut tool_call_id_map = HashMap::new();
     for message in &source_messages {
         let trace = conversation_trace_repository::get_trace_for_message(connection, &message.id)
             .map_err(database_error)?;
@@ -1072,6 +1098,31 @@ fn build_single_conversation_fork_plan_at_point(
                 .cloned()
                 .unwrap_or_else(|| new_id("run"));
             run_id_map.insert(trace.run_id.clone(), new_run_id.clone());
+            for (item_index, item) in trace.items.iter().enumerate() {
+                let call_id = match item {
+                    crate::ConversationTurnTraceItem::ToolCall { call_id, .. }
+                    | crate::ConversationTurnTraceItem::ToolResult { call_id, .. }
+                    | crate::ConversationTurnTraceItem::CommandSessionLifecycle {
+                        call_id, ..
+                    } => Some(call_id),
+                    _ => None,
+                };
+                if let Some(call_id) = call_id {
+                    let target_call_id = global_id_replacements
+                        .get(call_id)
+                        .or_else(|| tool_call_id_map.get(call_id))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            crate::llm::model_response_tool_call_id(
+                                &new_run_id,
+                                item_index,
+                                0,
+                                call_id,
+                            )
+                        });
+                    insert_global_replacement(&mut tool_call_id_map, call_id, &target_call_id)?;
+                }
+            }
             let (trace_created_at, committed_at) = trace_times(connection, &message.id)?;
             let model_context_items =
                 conversation_model_context_repository::get_log_for_message(connection, &message.id)
@@ -1138,75 +1189,175 @@ fn build_single_conversation_fork_plan_at_point(
         )?;
     }
 
-    let mut file_drafts = Vec::new();
-    let mut draft_id_map = HashMap::new();
+    let mut file_changes = Vec::new();
+    let mut file_change_id_map = HashMap::new();
+    let mut file_observation_id_map = HashMap::new();
     for (source_run_id, target_run_id) in &run_id_map {
-        for source_draft in file_draft_repository::list_drafts_for_run(connection, source_run_id)
-            .map_err(database_error)?
+        for source_change in
+            file_change_repository::list_file_changes_for_run(connection, source_run_id)
+                .map_err(database_error)?
         {
-            if source_draft.conversation_id != source.id {
-                return Err("文件草稿的任务归属与历史回复不一致。".to_string().into());
+            if source_change.conversation_id != source.id
+                || source_change.project_id != source.project_id
+                || source_change.run_id != *source_run_id
+                || !matches!(
+                    source_change.source_tool_name.as_str(),
+                    "apply_patch" | "write_file"
+                )
+            {
+                return Err("文件变更事务的任务、项目、运行或工具归属不一致。"
+                    .to_string()
+                    .into());
             }
-            if history_cutoff_at.is_some_and(|cutoff| source_draft.created_at > cutoff) {
+            if history_cutoff_at.is_some_and(|cutoff| source_change.created_at > cutoff) {
                 continue;
             }
-            if history_cutoff_at.is_some_and(|cutoff| source_draft.updated_at > cutoff) {
+            if history_cutoff_at.is_some_and(|cutoff| source_change.updated_at > cutoff) {
                 return Err(ConversationForkError::Other(
-                    "文件草稿在分叉点后发生过不可版本化的变化，无法生成精确历史快照。".to_string(),
+                    "文件变更事务在分叉点后发生过不可版本化的变化，无法生成精确历史快照。"
+                        .to_string(),
                 ));
             }
-            let target_draft_id = global_id_replacements
-                .get(&source_draft.id)
+            let target_transaction_id = global_id_replacements
+                .get(&source_change.id)
                 .cloned()
-                .unwrap_or_else(|| new_id("file-draft"));
-            let history = file_draft_repository::load_draft_history_snapshot(
+                .unwrap_or_else(|| new_id("file-change"));
+            let mut history = file_change_repository::load_file_change_history_snapshot(
                 connection,
-                &source_draft.id,
+                &source_change.id,
                 history_cutoff_at,
             )
             .map_err(database_error)?;
-            if history.chunks.len() as u64 != source_draft.chunk_count
-                || history.chunks.len() as u64 != source_draft.next_chunk_index
-                || history
-                    .chunks
-                    .iter()
-                    .enumerate()
-                    .any(|(index, chunk)| chunk.chunk_index != index as u64)
+            if history.operations.len() as u64 != source_change.mutation_count
+                || history.operations.len() as u64 != source_change.next_mutation_index
+                || history.operations.len() as u64 != source_change.draft_revision
                 || history
                     .operations
                     .iter()
                     .enumerate()
-                    .any(|(index, operation)| operation.sequence != index as u64)
+                    .any(|(index, operation)| operation.mutation_index != index as u64)
+                || history.chunks.iter().any(|chunk| {
+                    history
+                        .operations
+                        .get(chunk.mutation_index as usize)
+                        .is_none_or(|operation| operation.action != "append")
+                })
             {
                 return Err(ConversationForkError::Other(
-                    "文件草稿在分叉点处的 chunk 快照与主记录不一致。".to_string(),
+                    "文件变更事务在分叉点处的 mutation 快照与主记录不一致。".to_string(),
                 ));
             }
-            draft_id_map.insert(source_draft.id.clone(), target_draft_id.clone());
-            file_drafts.push(ForkFileDraft {
-                target: AgentFileDraftRecord {
-                    id: target_draft_id,
+
+            let target_source_tool_call_id = mapped_id(
+                &tool_call_id_map,
+                &source_change.source_tool_call_id,
+                "文件变更 begin Tool Call",
+            )?;
+            let target_observation_id = global_id_replacements
+                .get(&source_change.observation_id)
+                .cloned()
+                .unwrap_or_else(|| format!("fobs_{}", Uuid::new_v4().simple()));
+            file_observation_id_map.insert(
+                source_change.observation_id.clone(),
+                target_observation_id.clone(),
+            );
+            let mut change_replacements = global_id_replacements.clone();
+            change_replacements.extend(run_id_map.clone());
+            change_replacements.extend(tool_call_id_map.clone());
+            change_replacements.insert(source.id.clone(), target_conversation_id.clone());
+            change_replacements.insert(source_change.id.clone(), target_transaction_id.clone());
+            change_replacements.insert(
+                source_change.observation_id.clone(),
+                target_observation_id.clone(),
+            );
+            let target_source_tool_arguments_digest = remapped_file_change_call_digest(
+                &traces,
+                &source_change.source_tool_call_id,
+                &source_change.source_tool_arguments_digest,
+                &source_change.source_tool_name,
+                &change_replacements,
+            )?;
+            for chunk in &mut history.chunks {
+                chunk.transaction_id = target_transaction_id.clone();
+            }
+            for operation in &mut history.operations {
+                operation.source_tool_arguments_digest = remapped_file_change_call_digest(
+                    &traces,
+                    &operation.source_tool_call_id,
+                    &operation.source_tool_arguments_digest,
+                    &source_change.source_tool_name,
+                    &change_replacements,
+                )?;
+                operation.transaction_id = target_transaction_id.clone();
+                operation.source_tool_call_id = mapped_id(
+                    &tool_call_id_map,
+                    &operation.source_tool_call_id,
+                    "文件变更 mutation Tool Call",
+                )?;
+                let mut receipt = serde_json::from_str::<
+                    crate::file_change::FileChangeMutationReceipt,
+                >(&operation.receipt_json)
+                .map_err(|_| {
+                    ConversationForkError::Other("文件变更 mutation receipt 无效。".to_string())
+                })?;
+                receipt.validate().map_err(|_| {
+                    ConversationForkError::Other("文件变更 mutation receipt 无效。".to_string())
+                })?;
+                receipt.transaction_id = target_transaction_id.clone();
+                operation.receipt_json = serde_json::to_string(&receipt).map_err(|_| {
+                    ConversationForkError::Other("无法复制文件变更 mutation receipt。".to_string())
+                })?;
+            }
+
+            let (target_observation_id, target_observation_json) = remap_file_change_observation(
+                &source_change,
+                &target_conversation_id,
+                target_run_id,
+                &target_observation_id,
+                &tool_call_id_map,
+            )?;
+            file_change_id_map.insert(source_change.id.clone(), target_transaction_id.clone());
+            file_changes.push(ForkFileChange {
+                target: AgentFileChangeRecord {
+                    schema_version: source_change.schema_version,
+                    id: target_transaction_id,
                     conversation_id: target_conversation_id.clone(),
                     project_id: source.project_id.clone(),
                     run_id: target_run_id.clone(),
-                    file_path: source_draft.file_path,
-                    mode: source_draft.mode,
-                    status: source_draft.status,
-                    base_revision: source_draft.base_revision,
-                    base_content: source_draft.base_content,
-                    content: source_draft.content,
-                    additions: source_draft.additions,
-                    deletions: source_draft.deletions,
-                    line_count: source_draft.line_count,
-                    byte_count: source_draft.byte_count,
-                    chunk_count: source_draft.chunk_count,
-                    next_chunk_index: source_draft.next_chunk_index,
-                    stats_final: source_draft.stats_final,
-                    summary: source_draft.summary,
-                    final_action_id: source_draft.final_action_id,
-                    created_at: source_draft.created_at,
-                    updated_at: source_draft.updated_at,
-                    expires_at: source_draft.expires_at,
+                    source_tool_name: source_change.source_tool_name,
+                    source_tool_call_id: target_source_tool_call_id,
+                    source_tool_arguments_digest: target_source_tool_arguments_digest,
+                    permission_revision: source_change.permission_revision,
+                    tool_set_revision: source_change.tool_set_revision,
+                    provider_wire_revision: source_change.provider_wire_revision,
+                    observation_id: target_observation_id,
+                    observation_json: target_observation_json,
+                    file_path: source_change.file_path,
+                    operation: source_change.operation,
+                    strategy: source_change.strategy,
+                    status: source_change.status,
+                    base_revision: source_change.base_revision,
+                    base_content: source_change.base_content,
+                    content: source_change.content,
+                    draft_revision: source_change.draft_revision,
+                    next_mutation_index: source_change.next_mutation_index,
+                    additions: source_change.additions,
+                    deletions: source_change.deletions,
+                    line_count: source_change.line_count,
+                    byte_count: source_change.byte_count,
+                    mutation_count: source_change.mutation_count,
+                    stats_final: source_change.stats_final,
+                    summary: source_change.summary,
+                    final_action_id: source_change
+                        .final_action_id
+                        .as_deref()
+                        .map(|call_id| {
+                            mapped_id(&tool_call_id_map, call_id, "文件变更最终 Tool Call")
+                        })
+                        .transpose()?,
+                    created_at: source_change.created_at,
+                    updated_at: source_change.updated_at,
+                    expires_at: source_change.expires_at,
                 },
                 history,
             });
@@ -1301,9 +1452,11 @@ fn build_single_conversation_fork_plan_at_point(
     let mut replacements = global_id_replacements.clone();
     replacements.extend(message_id_map.clone());
     replacements.extend(run_id_map.clone());
+    replacements.extend(tool_call_id_map.clone());
     replacements.extend(attachment_id_map.clone());
     replacements.extend(guidance_id_map);
-    replacements.extend(draft_id_map);
+    replacements.extend(file_change_id_map);
+    replacements.extend(file_observation_id_map);
     replacements.extend(archive_id_map);
     replacements.insert(source.id.clone(), target_conversation_id.clone());
     for version in &summaries {
@@ -1467,7 +1620,7 @@ fn build_single_conversation_fork_plan_at_point(
         traces,
         turn_diffs,
         guidances,
-        file_drafts,
+        file_changes,
         summaries,
         compaction_receipts,
         provider_transition_receipts,
@@ -1483,6 +1636,127 @@ fn build_single_conversation_fork_plan_at_point(
         id_replacements: replacements,
         members: Vec::new(),
     })
+}
+
+fn remapped_file_change_call_digest(
+    traces: &[ForkTrace],
+    source_call_id: &str,
+    source_digest: &str,
+    expected_tool_name: &str,
+    replacements: &HashMap<String, String>,
+) -> Result<String, ConversationForkError> {
+    let mut matching_operations = traces
+        .iter()
+        .flat_map(|trace| trace.trace.items.iter())
+        .filter_map(|item| match item {
+            crate::ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                operation,
+                ..
+            } if call_id == source_call_id && tool == expected_tool_name => Some(operation),
+            _ => None,
+        });
+    let source_operation = matching_operations.next().ok_or_else(|| {
+        ConversationForkError::Other("文件变更事务引用的源 Tool Call 不在分叉历史中。".to_string())
+    })?;
+    if matching_operations.next().is_some() {
+        return Err(ConversationForkError::Other(
+            "文件变更事务引用了重复的源 Tool Call。".to_string(),
+        ));
+    }
+    let computed_source_digest = crate::file_change::proposal_digest(source_operation)
+        .map_err(|_| ConversationForkError::Other("无法验证文件变更 Tool Call。".to_string()))?;
+    if computed_source_digest != source_digest {
+        return Err(ConversationForkError::Other(
+            "文件变更事务的 Tool Call digest 与历史不一致。".to_string(),
+        ));
+    }
+    let mut target_operation = source_operation.clone();
+    rewrite_exact_ids(&mut target_operation, replacements);
+    crate::file_change::proposal_digest(&target_operation)
+        .map_err(|_| ConversationForkError::Other("无法复制文件变更 Tool Call。".to_string()))
+}
+
+fn remap_file_change_observation(
+    source_change: &AgentFileChangeRecord,
+    target_conversation_id: &str,
+    target_run_id: &str,
+    target_observation_id: &str,
+    tool_call_id_map: &HashMap<String, String>,
+) -> Result<(String, String), ConversationForkError> {
+    let source_observation_id = source_change.observation_id.as_str();
+    let source_observation_json = source_change.observation_json.as_str();
+    if source_observation_id.is_empty() || source_observation_json.is_empty() {
+        return Err(ConversationForkError::Other(
+            "文件变更 observation 持久记录不完整。".to_string(),
+        ));
+    }
+    let mut checkpoint = serde_json::from_str::<crate::file_change::FileObservationCheckpoint>(
+        source_observation_json,
+    )
+    .map_err(|_| ConversationForkError::Other("文件变更 observation 持久记录无效。".to_string()))?;
+    let observation_matches_operation = match (&source_change.operation, &checkpoint.state) {
+        (operation, crate::file_change::FileObservationState::Missing) => operation == "create",
+        (operation, crate::file_change::FileObservationState::Existing { revision, .. }) => {
+            operation == "update" && source_change.base_revision.as_deref() == Some(revision)
+        }
+    };
+    if !observation_matches_operation {
+        return Err(ConversationForkError::Other(
+            "文件变更 observation 与 operation/base revision 不一致。".to_string(),
+        ));
+    }
+    let canonical_target = checkpoint.canonical_target.clone();
+    checkpoint
+        .validate_frozen_binding(
+            &source_change.conversation_id,
+            &source_change.run_id,
+            std::path::Path::new(&canonical_target),
+        )
+        .map_err(|_| {
+            ConversationForkError::Other("文件变更 observation 与源事务不一致。".to_string())
+        })?;
+    if checkpoint.observation_id != source_observation_id {
+        return Err(ConversationForkError::Other(
+            "文件变更 observation 标识与源事务不一致。".to_string(),
+        ));
+    }
+    checkpoint.observation_id = target_observation_id.to_string();
+    checkpoint.source_tool_call_id =
+        if let Some(mapped) = tool_call_id_map.get(&checkpoint.source_tool_call_id) {
+            mapped.clone()
+        } else if source_change.source_tool_name == "write_file"
+            && checkpoint.source_tool_call_id
+                == format!("write-file-host-read:{}", source_change.source_tool_call_id)
+        {
+            format!(
+                "write-file-host-read:{}",
+                mapped_id(
+                    tool_call_id_map,
+                    &source_change.source_tool_call_id,
+                    "文件变更 begin Tool Call",
+                )?
+            )
+        } else {
+            return Err(ConversationForkError::Other(
+                "文件读取 observation Tool Call 不在分叉历史中。".to_string(),
+            ));
+        };
+    checkpoint.conversation_id = target_conversation_id.to_string();
+    checkpoint.run_id = target_run_id.to_string();
+    checkpoint
+        .validate_frozen_binding(
+            target_conversation_id,
+            target_run_id,
+            std::path::Path::new(&canonical_target),
+        )
+        .map_err(|_| {
+            ConversationForkError::Other("复制后的文件变更 observation 无效。".to_string())
+        })?;
+    let target_observation_json = serde_json::to_string(&checkpoint)
+        .map_err(|_| ConversationForkError::Other("无法复制文件变更 observation。".to_string()))?;
+    Ok((target_observation_id.to_string(), target_observation_json))
 }
 
 fn history_from_single_plan(
@@ -1509,7 +1783,7 @@ fn history_from_single_plan(
             traces: plan.traces,
             turn_diffs: plan.turn_diffs,
             guidances: plan.guidances,
-            file_drafts: plan.file_drafts,
+            file_changes: plan.file_changes,
             summaries: plan.summaries,
             compaction_receipts: plan.compaction_receipts,
             provider_transition_receipts: plan.provider_transition_receipts,
@@ -1623,7 +1897,7 @@ fn build_message_only_history_plan(
         traces: Vec::new(),
         turn_diffs: Vec::new(),
         guidances: Vec::new(),
-        file_drafts: Vec::new(),
+        file_changes: Vec::new(),
         summaries: Vec::new(),
         compaction_receipts: Vec::new(),
         provider_transition_receipts: Vec::new(),
@@ -2806,12 +3080,13 @@ fn apply_history_facts(
     for turn_diff in history.turn_diffs {
         turn_diff_repository::insert_fork_copy(connection, turn_diff).map_err(database_error)?;
     }
-    for draft in history.file_drafts {
-        file_draft_repository::insert_draft(connection, &draft.target).map_err(database_error)?;
-        file_draft_repository::insert_draft_history_snapshot(
+    for change in history.file_changes {
+        file_change_repository::insert_file_change(connection, &change.target)
+            .map_err(database_error)?;
+        file_change_repository::insert_file_change_history_snapshot(
             connection,
-            &draft.target.id,
-            &draft.history,
+            &change.target.id,
+            &change.history,
         )
         .map_err(database_error)?;
     }

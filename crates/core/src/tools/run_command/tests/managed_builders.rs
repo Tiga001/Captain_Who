@@ -769,9 +769,19 @@ fn third_party_editor_receipt_cannot_unlock_the_host_editor_identity() {
         approval_status: AgentApprovalStatus::Required,
         reason: None,
     };
-    let error = command_request_from_call(&context, &call)
-        .expect_err("third-party receipt cannot authorize managed inputs or the Editor");
-    assert_eq!(error.code(), Some("agent.fileInput.invalidRequest"));
+    let ordinary_without_runtime = command_request_from_call(&context, &call)
+        .expect("a third-party receipt may only leave this as an ordinary approved command");
+    assert!(ordinary_without_runtime.runtime_binding.is_none());
+    assert!(ordinary_without_runtime.managed_office_script.is_none());
+    assert!(ordinary_without_runtime.observe.is_none());
+    assert_eq!(
+        ordinary_without_runtime.risk_level,
+        Some(AgentCommandRiskLevel::Unknown)
+    );
+    assert!(ordinary_without_runtime
+        .inputs
+        .iter()
+        .all(|input| input.mount_path != crate::command::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH));
 
     let mut explicit_args = base_args;
     explicit_args["runtimeProfile"] = json!("presentations");
@@ -784,6 +794,8 @@ fn third_party_editor_receipt_cannot_unlock_the_host_editor_identity() {
     };
     let ordinary = command_request_from_call(&context, &explicit_call)
         .expect("an explicit ordinary Office runtime remains a separate compatibility path");
+    assert!(ordinary.runtime_binding.is_some());
+    assert!(ordinary.managed_office_script.is_none());
     assert!(ordinary
         .inputs
         .iter()

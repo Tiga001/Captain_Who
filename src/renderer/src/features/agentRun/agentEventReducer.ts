@@ -64,6 +64,7 @@ import {
 import {
   applySkillInstallationDecision,
   applySkillInstallationExecution,
+  bindFileChangePreviewsToCall,
   mergeSkillInstallationApprovals,
   removeAgentAction,
   upsertAgentAction,
@@ -529,6 +530,10 @@ export function applyAgentEventToChatMessage(
         ...runWithCleanTimeline,
         status: 'running',
         toolCalls: upsertById(currentRun.toolCalls, agentEvent.call, (call) => call.id),
+        fileWritePreviews: bindFileChangePreviewsToCall(
+          currentRun.fileWritePreviews ?? [],
+          agentEvent.call
+        ),
         webSearchActivities: upsertWebSearchActivityFromCall(currentRun, agentEvent.call),
         readActivities: upsertReadActivityFromCall(currentRun, agentEvent.call),
         timeline: appendToolCallToTimeline(
@@ -568,10 +573,9 @@ export function applyAgentEventToChatMessage(
       readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
       fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),
       fileWritePreviews:
-        agentEvent.result.tool === 'write_file' && !agentEvent.result.ok
+        agentEvent.result.tool === 'write_file' || agentEvent.result.tool === 'apply_patch'
           ? (currentRun.fileWritePreviews ?? []).filter(
-              (preview) =>
-                preview.toolCallId !== undefined && preview.toolCallId !== agentEvent.result.callId
+              (preview) => preview.toolCallId !== agentEvent.result.callId
             )
           : (currentRun.fileWritePreviews ?? [])
     }

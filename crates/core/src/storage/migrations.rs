@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 24;
+pub const STORAGE_SCHEMA_VERSION: i32 = 25;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:875906cdf084705598430f8416ec4aeb95db9f3a42e886139fc985d3709142f1";
+    "sha256:1afca677848e01aa6dc5517600b90ca69a648c517b8daa0db5441e74dd8af7f3";
 
 /// Opens the single supported development schema.
 ///
@@ -264,6 +264,10 @@ mod tests {
             "conversation_turn_traces_one_active_turn",
             "conversation_turn_rewrites",
             "conversation_turn_rewrites_conversation",
+            "agent_file_changes",
+            "agent_file_change_chunks",
+            "agent_file_change_operations",
+            "idx_agent_file_changes_run_id",
             "validate_conversation_turn_rewrite_insert",
             "prevent_conversation_turn_rewrite_update",
             "prevent_conversation_turn_rewrite_delete",
@@ -392,6 +396,29 @@ mod tests {
             assert!(
                 !exists,
                 "retired Goal schema object {retired_goal_object} must stay absent"
+            );
+        }
+
+        for retired_file_draft_object in [
+            "agent_file_drafts",
+            "agent_file_draft_chunks",
+            "agent_file_draft_operations",
+            "idx_agent_file_drafts_conversation_status",
+            "idx_agent_file_drafts_project_id",
+            "idx_agent_file_drafts_expires_at",
+        ] {
+            let exists = connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_schema WHERE name = ?1 AND sql IS NOT NULL",
+                    [retired_file_draft_object],
+                    |_| Ok(()),
+                )
+                .optional()
+                .unwrap()
+                .is_some();
+            assert!(
+                !exists,
+                "retired file-draft object {retired_file_draft_object} must stay absent"
             );
         }
 

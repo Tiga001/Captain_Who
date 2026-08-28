@@ -1101,24 +1101,35 @@ pub struct AgentRunGuidanceRecord {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentFileDraftRecord {
+#[derive(Clone, PartialEq, Eq)]
+pub struct AgentFileChangeRecord {
+    pub schema_version: u32,
     pub id: String,
     pub conversation_id: String,
     pub project_id: Option<String>,
     pub run_id: String,
+    pub source_tool_name: String,
+    pub source_tool_call_id: String,
+    pub source_tool_arguments_digest: String,
+    pub permission_revision: String,
+    pub tool_set_revision: String,
+    pub provider_wire_revision: String,
+    pub observation_id: String,
+    pub observation_json: String,
     pub file_path: String,
-    pub mode: String,
+    pub operation: String,
+    pub strategy: Option<String>,
     pub status: String,
     pub base_revision: Option<String>,
     pub base_content: String,
     pub content: String,
+    pub draft_revision: u64,
+    pub next_mutation_index: u64,
     pub additions: u64,
     pub deletions: u64,
     pub line_count: u64,
     pub byte_count: u64,
-    pub chunk_count: u64,
-    pub next_chunk_index: u64,
+    pub mutation_count: u64,
     pub stats_final: bool,
     pub summary: Option<String>,
     pub final_action_id: Option<String>,
@@ -1127,21 +1138,31 @@ pub struct AgentFileDraftRecord {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentFileDraftChunkRecord {
-    pub draft_id: String,
-    pub chunk_index: u64,
-    pub content_hash: String,
+impl std::fmt::Debug for AgentFileChangeRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentFileChangeRecord([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFileChangeChunkRecord {
+    pub transaction_id: String,
+    pub mutation_index: u64,
+    pub content_digest: String,
     pub byte_count: u64,
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentFileDraftOperationRecord {
-    pub draft_id: String,
-    pub sequence: u64,
-    pub operation: String,
-    pub payload_hash: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFileChangeOperationRecord {
+    pub transaction_id: String,
+    pub mutation_index: u64,
+    pub source_tool_call_id: String,
+    pub source_tool_arguments_digest: String,
+    pub action: String,
+    pub payload_digest: String,
+    pub draft_revision: u64,
+    pub receipt_json: String,
     pub created_at: i64,
 }
 
@@ -1191,13 +1212,52 @@ mod security_tests {
             created_at: 1,
             updated_at: 2,
         };
+        let file_change = AgentFileChangeRecord {
+            schema_version: 1,
+            id: CANARY.to_string(),
+            conversation_id: CANARY.to_string(),
+            project_id: Some(CANARY.to_string()),
+            run_id: CANARY.to_string(),
+            source_tool_name: "apply_patch".to_string(),
+            source_tool_call_id: CANARY.to_string(),
+            source_tool_arguments_digest: CANARY.to_string(),
+            permission_revision: CANARY.to_string(),
+            tool_set_revision: CANARY.to_string(),
+            provider_wire_revision: CANARY.to_string(),
+            observation_id: CANARY.to_string(),
+            observation_json: CANARY.to_string(),
+            file_path: CANARY.to_string(),
+            operation: "create".to_string(),
+            strategy: None,
+            status: "drafting".to_string(),
+            base_revision: None,
+            base_content: CANARY.to_string(),
+            content: CANARY.to_string(),
+            draft_revision: 0,
+            next_mutation_index: 0,
+            additions: 0,
+            deletions: 0,
+            line_count: 1,
+            byte_count: CANARY.len() as u64,
+            mutation_count: 0,
+            stats_final: false,
+            summary: Some(CANARY.to_string()),
+            final_action_id: None,
+            created_at: 1,
+            updated_at: 2,
+            expires_at: 3,
+        };
 
         assert_eq!(format!("{audit:?}"), "AgentActionAuditRecord([REDACTED])");
         assert_eq!(
             format!("{pending:?}"),
             "AgentPendingActionRecord([REDACTED])"
         );
-        assert!(!format!("{audit:?}{pending:?}").contains(CANARY));
+        assert_eq!(
+            format!("{file_change:?}"),
+            "AgentFileChangeRecord([REDACTED])"
+        );
+        assert!(!format!("{audit:?}{pending:?}{file_change:?}").contains(CANARY));
     }
 
     #[test]

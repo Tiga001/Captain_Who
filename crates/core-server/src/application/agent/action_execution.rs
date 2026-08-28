@@ -1071,11 +1071,70 @@ impl AgentService {
                     return Err(AgentError::cancelled());
                 }
                 cancellation_token.check()?;
-                let action = AgentProposedAction::FileWrite {
+                let action_id = file_write.id.clone();
+                let tool_name = file_write.execution.source_tool_name.clone();
+                let prepared_action = AgentProposedAction::FileWrite {
                     file_write: file_write.clone(),
                 };
-                let execution =
-                    approved_file_write_execution(&self.storage, &agent_input, &file_write);
+                match self.claim_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &prepared_action,
+                    created_at,
+                ) {
+                    Ok(outcome) => {
+                        if let Some(result) = resolve_file_effect_claim_outcome(
+                            &action_id,
+                            &tool_name,
+                            "staged_file_change",
+                            outcome,
+                        )? {
+                            return Ok(result);
+                        }
+                    }
+                    Err(error) => {
+                        return Ok(file_effect_audit_persistence_failure(
+                            &action_id,
+                            &tool_name,
+                            "staged_file_change",
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
+                let mut execution = approved_file_write_execution(
+                    &self.storage,
+                    &agent_input,
+                    &run_id,
+                    &file_write,
+                );
+                if direct_file_change_outcome_unknown(&execution) {
+                    return Err(direct_file_change_recovery_pending(&action_id));
+                }
+                let has_committed_receipt = execution.committed_file_change_action.is_some();
+                let committed_action = execution
+                    .committed_file_change_action
+                    .take()
+                    .unwrap_or_else(|| prepared_action.clone());
+                if has_committed_receipt {
+                    if let Err(error) = self.commit_automatic_direct_file_change_action(
+                        &run_id,
+                        conversation_id.as_deref(),
+                        assistant_message_id.as_deref(),
+                        &agent_input,
+                        &prepared_action,
+                        &committed_action,
+                        created_at,
+                    ) {
+                        eprintln!(
+                            "failed to persist a Staged FileChange commit receipt; recovery remains pending: {error}"
+                        );
+                        return Err(direct_file_change_recovery_pending(&action_id));
+                    }
+                }
                 record_turn_file_change_best_effort(
                     &self.storage,
                     &agent_input,
@@ -1085,20 +1144,42 @@ impl AgentService {
                     &file_write.id,
                     execution.file_change.as_ref(),
                 );
-                self.record_auto_action_audit(
+                if let Err(error) = self.finalize_auto_action_execution_audit(
                     &run_id,
-                    conversation_id,
-                    assistant_message_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
                     &agent_input,
-                    action,
-                    &execution.status,
+                    &committed_action,
+                    pending_status_label(execution.final_pending_status),
                     None,
-                    None,
-                    Some(&execution.tool_result),
+                    &execution.tool_result,
                     execution.tool_result.error.as_deref(),
                     created_at,
                     now_ms(),
-                );
+                ) {
+                    eprintln!(
+                        "failed to observe a Staged FileChange terminal audit; reconciling the durable receipt: {error}"
+                    );
+                    let reconciliation = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &committed_action,
+                            created_at,
+                        )
+                        .ok()
+                        .and_then(|outcome| {
+                            reconcile_file_effect_audit_outcome(&action_id, &tool_name, outcome)
+                                .ok()
+                        });
+                    if let Some(FileEffectAuditReconciliation::Terminal(persisted)) = reconciliation
+                    {
+                        return Ok(persisted);
+                    }
+                    return Err(direct_file_change_recovery_pending(&action_id));
+                }
                 drop(deletion_lifecycle);
                 Ok(execution.tool_result)
             }
@@ -1608,7 +1689,7 @@ pub(super) fn cancelled_file_write_outcome_is_durable_or_unknown(
     let AgentProposedAction::FileWrite { file_write } = &record.snapshot.action else {
         return false;
     };
-    match storage.get_agent_file_draft(&file_write.draft_id) {
+    match storage.get_agent_file_change(&file_write.draft_id) {
         Ok(Some(draft)) => draft.status == "rejected",
         Ok(None) => false,
         // A storage read failure makes rollback unsafe: the rejection write may have committed.

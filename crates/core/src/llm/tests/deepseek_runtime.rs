@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
+async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_tool_identity() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -15,13 +15,13 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
                         "message": {
                             "role": "assistant",
                             "content": "",
-                            "reasoning_content": "I should inspect the file first.",
+                            "reasoning_content": "I should begin the staged file change.",
                             "tool_calls": [{
                                 "id": "deepseek-raw-call-1",
                                 "type": "function",
                                 "function": {
-                                    "name": "read_file",
-                                    "arguments": "{\"path\":\"src/lib.rs\"}"
+                                    "name": "apply_patch",
+                                    "arguments": "{\"action\":\"begin\",\"operation\":\"create\",\"filePath\":\"report.md\",\"observationId\":\"fobs_missing_report\"}"
                                 }
                             }]
                         },
@@ -41,13 +41,13 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
                         "message": {
                             "role": "assistant",
                             "content": "",
-                            "reasoning_content": "I should inspect one more file.",
+                            "reasoning_content": "I should append the first staged chunk.",
                             "tool_calls": [{
                                 "id": "deepseek-raw-call-2",
                                 "type": "function",
                                 "function": {
-                                    "name": "read_file",
-                                    "arguments": "{\"path\":\"src/main.rs\"}"
+                                    "name": "apply_patch",
+                                    "arguments": "{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:report\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"# Report\\n\"}"
                                 }
                             }]
                         },
@@ -102,7 +102,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         max_tokens: 1_024,
         temperature: 0.3,
         stream: false,
-        messages: vec![LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs")],
+        messages: vec![LlmMessage::text(LlmMessageRole::User, "Create report.md")],
         tools: tools.clone(),
     };
     let first_response = complete_chat(first_request, AgentCancellationToken::new())
@@ -124,7 +124,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
     );
     assert_eq!(
         deepseek_reasoning_content(&provider_protocol, &first_response.assistant_turn).unwrap(),
-        Some("I should inspect the file first.")
+        Some("I should begin the staged file change.")
     );
 
     let provider_call = first_response.provider_tool_calls()[0].clone();
@@ -142,8 +142,11 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         )])
         .unwrap();
     let first_turn_message = LlmMessage::from_assistant_turn(first_turn);
-    let first_result_message =
-        LlmMessage::tool_result(runtime_call.id.clone(), "{\"ok\":true}", false);
+    let first_result_message = LlmMessage::tool_result(
+        runtime_call.id.clone(),
+        r#"{"transactionId":"file-change-staged-v1:report","draftRevision":0,"nextIndex":0}"#,
+        false,
+    );
     let second_request = LlmChatRequest {
         api_url: format!("http://{address}/chat/completions"),
         api_token: "deepseek-fake-token".to_string(),
@@ -153,7 +156,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         temperature: 0.3,
         stream: false,
         messages: vec![
-            LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs"),
+            LlmMessage::text(LlmMessageRole::User, "Create report.md"),
             first_turn_message.clone(),
             first_result_message.clone(),
         ],
@@ -166,7 +169,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
     assert_eq!(second_response.provider_tool_calls().len(), 1);
     assert_eq!(
         deepseek_reasoning_content(&provider_protocol, &second_response.assistant_turn).unwrap(),
-        Some("I should inspect one more file.")
+        Some("I should append the first staged chunk.")
     );
 
     let second_provider_call = second_response.provider_tool_calls()[0].clone();
@@ -192,11 +195,15 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         temperature: 0.3,
         stream: false,
         messages: vec![
-            LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs"),
+            LlmMessage::text(LlmMessageRole::User, "Create report.md"),
             first_turn_message,
             first_result_message,
             LlmMessage::from_assistant_turn(second_turn),
-            LlmMessage::tool_result(second_runtime_call.id, "{\"ok\":true}", false),
+            LlmMessage::tool_result(
+                second_runtime_call.id,
+                r#"{"transactionId":"file-change-staged-v1:report","draftRevision":1,"nextIndex":1}"#,
+                false,
+            ),
         ],
         tools,
     };
@@ -231,15 +238,20 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         registry.definition_for("write_file").unwrap().input_schema
     );
     let direct_schema = &requests[0]["tools"][1]["function"]["parameters"];
-    assert_eq!(
-        direct_schema["required"],
-        json!(["action", "operation", "filePath", "observationId"])
-    );
+    assert_eq!(direct_schema["required"], json!(["action"]));
     assert_eq!(direct_schema["additionalProperties"], false);
     assert_eq!(
         direct_schema["properties"]["action"]["enum"],
-        json!(["apply"])
+        json!(["apply", "begin", "append", "edit", "commit", "status", "abort"])
     );
+    assert_eq!(
+        direct_schema["properties"]["strategy"]["enum"],
+        json!(["modify", "rewrite"])
+    );
+    assert!(direct_schema["properties"].get("transactionId").is_some());
+    assert!(direct_schema["properties"]
+        .get("expectedDraftRevision")
+        .is_some());
     assert!(direct_schema["properties"].get("patch").is_none());
     assert!(direct_schema["properties"]
         .get("expectedRevision")
@@ -248,7 +260,7 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
     assert_eq!(requests[1]["messages"][1]["content"], "");
     assert_eq!(
         requests[1]["messages"][1]["reasoning_content"],
-        "I should inspect the file first."
+        "I should begin the staged file change."
     );
     assert_eq!(
         requests[1]["messages"][1]["tool_calls"][0]["id"],
@@ -260,11 +272,11 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
     );
     assert_eq!(
         requests[2]["messages"][1]["reasoning_content"],
-        "I should inspect the file first."
+        "I should begin the staged file change."
     );
     assert_eq!(
         requests[2]["messages"][3]["reasoning_content"],
-        "I should inspect one more file."
+        "I should append the first staged chunk."
     );
     assert_eq!(
         requests[2]["messages"][3]["tool_calls"][0]["id"],

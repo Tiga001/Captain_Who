@@ -443,16 +443,13 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
     assert!(apply_patch.requires_approval);
     assert_eq!(
         apply_patch.approval_mode,
-        crate::protocol::AgentToolApprovalMode::Always
+        crate::protocol::AgentToolApprovalMode::Dynamic
     );
     assert!(apply_patch.description.contains("read_file"));
-    assert_eq!(
-        apply_patch.input_schema["required"],
-        json!(["action", "operation", "filePath", "observationId"])
-    );
+    assert_eq!(apply_patch.input_schema["required"], json!(["action"]));
     assert_eq!(
         apply_patch.input_schema["properties"]["action"]["enum"],
-        json!(["apply"])
+        json!(["apply", "begin", "append", "edit", "commit", "status", "abort"])
     );
     assert_eq!(
         apply_patch.input_schema["properties"]["operation"]["enum"],
@@ -469,8 +466,16 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
     assert!(!apply_properties.contains_key("expectedRevision"));
     assert_eq!(
         apply_patch.input_schema["properties"]["content"]["maxLength"],
-        32 * 1024
+        1024 * 1024
     );
+    for field in [
+        "transactionId",
+        "index",
+        "expectedDraftRevision",
+        "strategy",
+    ] {
+        assert!(apply_properties.contains_key(field));
+    }
     assert_eq!(
         apply_patch.input_schema["properties"]["edits"]["items"]["properties"]["kind"]["enum"],
         json!([
@@ -489,7 +494,10 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
         write_file.approval_mode,
         crate::protocol::AgentToolApprovalMode::Dynamic
     );
-    assert!(write_file.description.contains("phase=finish"));
+    assert!(write_file
+        .description
+        .contains("Temporary compatibility entry"));
+    assert!(write_file.description.contains("apply_patch"));
     assert_eq!(write_file.input_schema["required"], json!(["phase"]));
     assert_eq!(
         write_file.input_schema["properties"]["phase"]["enum"],
@@ -620,6 +628,104 @@ fn generic_provider_payloads_preserve_strict_direct_apply_call_and_result_order(
                 payload["messages"][2]["content"][0]["tool_use_id"],
                 "call-direct-apply"
             );
+        }
+    }
+}
+
+#[test]
+fn generic_provider_payloads_preserve_staged_apply_patch_history_and_exact_arguments() {
+    let calls = [
+        (
+            "call-staged-begin",
+            json!({
+                "action": "begin",
+                "operation": "create",
+                "filePath": "report.md",
+                "observationId": "fobs_missing_report"
+            }),
+            r#"{"transactionId":"file-change-staged-v1:report","draftRevision":0,"nextIndex":0}"#,
+        ),
+        (
+            "call-staged-append",
+            json!({
+                "action": "append",
+                "transactionId": "file-change-staged-v1:report",
+                "index": 0,
+                "expectedDraftRevision": 0,
+                "content": "# Report\n"
+            }),
+            r#"{"transactionId":"file-change-staged-v1:report","draftRevision":1,"nextIndex":1}"#,
+        ),
+        (
+            "call-staged-commit",
+            json!({
+                "action": "commit",
+                "transactionId": "file-change-staged-v1:report",
+                "expectedDraftRevision": 1,
+                "summary": "Create report"
+            }),
+            r#"{"status":"applied","filePath":"report.md"}"#,
+        ),
+    ];
+
+    for api_style in [
+        AgentApiStyle::OpenAiCompatible,
+        AgentApiStyle::AnthropicCompatible,
+    ] {
+        let model = if api_style == AgentApiStyle::OpenAiCompatible {
+            "gpt"
+        } else {
+            "claude"
+        };
+        let mut messages = vec![message(LlmMessageRole::User, "Create report.md")];
+        for (id, args, result) in &calls {
+            messages.push(LlmMessage::assistant(
+                "",
+                vec![LlmToolCall {
+                    id: (*id).to_string(),
+                    name: "apply_patch".to_string(),
+                    args: args.clone(),
+                }],
+            ));
+            messages.push(LlmMessage::tool_result(*id, *result, false));
+        }
+        let payload = build_payload(&LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            provider_profile: generic_provider_profile(api_style),
+            provider_protocol: generic_provider_protocol(api_style, model),
+            max_tokens: 1_024,
+            temperature: 0.2,
+            stream: false,
+            messages,
+            tools: Vec::new(),
+        });
+
+        let wire_messages = payload["messages"].as_array().unwrap();
+        assert_eq!(wire_messages.len(), 7);
+        for (index, (id, args, _)) in calls.iter().enumerate() {
+            let assistant = &wire_messages[1 + index * 2];
+            let result = &wire_messages[2 + index * 2];
+            if api_style == AgentApiStyle::OpenAiCompatible {
+                let call = &assistant["tool_calls"][0];
+                assert_eq!(call["id"], *id);
+                assert_eq!(call["function"]["name"], "apply_patch");
+                assert_eq!(
+                    serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap())
+                        .unwrap(),
+                    *args
+                );
+                assert_eq!(result["role"], "tool");
+                assert_eq!(result["tool_call_id"], *id);
+            } else {
+                let call = &assistant["content"][0];
+                assert_eq!(call["type"], "tool_use");
+                assert_eq!(call["id"], *id);
+                assert_eq!(call["name"], "apply_patch");
+                assert_eq!(call["input"], *args);
+                assert_eq!(result["role"], "user");
+                assert_eq!(result["content"][0]["tool_use_id"], *id);
+            }
         }
     }
 }

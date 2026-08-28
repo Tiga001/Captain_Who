@@ -1,6 +1,6 @@
 use super::*;
 use mycopilot_core::storage::models::{
-    AgentFileDraftRecord, ChatConversationMetaRecord, ModelConfigRecord, ModelSettingsRecord,
+    AgentFileChangeRecord, ChatConversationMetaRecord, ModelConfigRecord, ModelSettingsRecord,
     ProjectRecord,
 };
 use mycopilot_core::{
@@ -52,24 +52,35 @@ fn request(
     )
 }
 
-fn draft(id: &str, conversation_id: &str) -> AgentFileDraftRecord {
-    AgentFileDraftRecord {
+fn draft(id: &str, conversation_id: &str) -> AgentFileChangeRecord {
+    AgentFileChangeRecord {
+        schema_version: 1,
         id: id.to_string(),
         conversation_id: conversation_id.to_string(),
         project_id: Some("project-a".to_string()),
         run_id: format!("run-{id}"),
+        source_tool_name: "write_file".to_string(),
+        source_tool_call_id: format!("call-{id}"),
+        source_tool_arguments_digest: format!("digest-{id}"),
+        permission_revision: "permission-1".to_string(),
+        tool_set_revision: "tool-set-1".to_string(),
+        provider_wire_revision: "provider-protocol-v1".to_string(),
+        observation_id: "fobs_transport_fixture".to_string(),
+        observation_json: "{}".to_string(),
         file_path: format!("{id}.txt"),
-        mode: "create".to_string(),
+        operation: "create".to_string(),
+        strategy: None,
         status: "drafting".to_string(),
         base_revision: None,
         base_content: String::new(),
         content: "durable draft content".to_string(),
+        draft_revision: 0,
+        next_mutation_index: 0,
         additions: 1,
         deletions: 0,
         line_count: 1,
         byte_count: 21,
-        chunk_count: 0,
-        next_chunk_index: 0,
+        mutation_count: 0,
         stats_final: true,
         summary: None,
         final_action_id: None,
@@ -154,13 +165,13 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
         .unwrap();
     let child_conversation = child.agent.conversation_id;
     storage
-        .create_agent_file_draft(draft("draft-root", "conversation-root"))
+        .create_agent_file_change(draft("draft-root", "conversation-root"))
         .unwrap();
     storage
-        .create_agent_file_draft(draft("draft-legacy", "conversation-legacy"))
+        .create_agent_file_change(draft("draft-legacy", "conversation-legacy"))
         .unwrap();
     storage
-        .create_agent_file_draft(draft("draft-child", &child_conversation))
+        .create_agent_file_change(draft("draft-child", &child_conversation))
         .unwrap();
     for (conversation_id, attachment_id) in [
         ("conversation-root", "attachment-root"),
