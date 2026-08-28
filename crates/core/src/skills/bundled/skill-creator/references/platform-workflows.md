@@ -41,6 +41,7 @@ happen in the parent; behavioral review happens in a fresh child Run.
 
    The destination itself must be absent, while its parent `skill-creator-tmp-01` must already
    exist.
+
 5. Adapt the starter into `.agents/skills/<skill-directory>/` with ordinary file editing.
 6. Delete only the recorded temporary files, then remove the now-empty task directory.
 
@@ -107,7 +108,7 @@ reading files and recreating their text with file-writing tools.
    count, depth, path, per-file, and total-byte bounds before recursively copying an external tree.
 5. Use ordinary `run_command` with correctly shell-quoted literal paths. Do not use
    `run_command.inputs`, `skills_materialize_resource`, a generated copy script, or
-   `read_file`/`write_file` reconstruction for this copy. The single exception to the literal-path
+   `read_file`/`apply_patch` reconstruction for this copy. The single exception to the literal-path
    rule is the safely joined Installed-store path word described below. Quote only the trusted
    environment prefix with double quotes and encode the validated suffix as a separate POSIX
    single-quoted literal; never interpolate a receipt- or manifest-derived suffix inside double
@@ -224,6 +225,7 @@ destination-present postconditions are mandatory. Any conflict or ambiguous resu
    characters. If `python3` is unavailable, the manifest is incomplete or truncated, any digest
    differs, or this exact validator cannot run, fail closed: do not copy, edit, or call the package
    verified.
+
 6. Create only the manifest-listed directory structure in staging with literal `mkdir` commands.
    Copy every listed file with a literal command of this form:
 
@@ -238,6 +240,7 @@ destination-present postconditions are mandatory. Any conflict or ambiguous resu
    suppress path-bearing diagnostics. Do not use loops, command substitution, broad recursive copy,
    or a generated script. Do not copy the manifest itself, other package-directory entries,
    receipts, locks, or retired-installation records.
+
 7. Before editing, re-scan staging for symlinks and special entries, require its relative file path
    set to equal the manifest list, run the fixed domain-separated validator above against every
    staged file, and compare each staged file byte-for-byte with its immutable source using

@@ -17,13 +17,20 @@ const rendererGolden = JSON.parse(
   )
 ) as { lifecycle: AgentEvent }
 
-const diff = {
-  id: 'diff-observer-contract',
+const fileChange = {
+  schemaVersion: 1,
+  id: 'file-change-observer-contract',
+  transactionId: 'file-change-transaction-observer-contract',
   operation: 'update',
+  updateStrategy: null,
   filePath: 'README.md',
-  patch: '@@ -1 +1 @@\n-old\n+new',
-  baseRevision: null,
+  inlineDiff: { patch: '@@ -1 +1 @@\n-old\n+new', truncated: false },
+  baseRevision: 'content-sha256-v1:base',
   summary: 'Update the heading',
+  additions: 1,
+  deletions: 1,
+  lineCount: 1,
+  byteCount: 3,
   approvalStatus: 'required'
 } as const
 
@@ -53,15 +60,16 @@ const formerlyDroppedEvents = [
     receivedBytes: 42
   },
   {
-    type: 'file_write_preview_updated',
+    type: 'file_change_preview_updated',
     runId,
     preview: {
+      schemaVersion: 1,
       previewId: 'preview-1',
       streamId: 'stream-1',
       attempt: 1,
       toolCallIndex: 0,
       toolCallId: 'call-1',
-      draftId: 'draft-1',
+      transactionId: 'draft-1',
       filePath: 'README.md',
       additions: 1,
       deletions: 1,
@@ -74,7 +82,7 @@ const formerlyDroppedEvents = [
     }
   },
   {
-    type: 'file_write_preview_cleared',
+    type: 'file_change_preview_cleared',
     runId,
     streamId: 'stream-1',
     attempt: 1
@@ -150,8 +158,8 @@ const formerlyDroppedEvents = [
       remainingInputTokens: 118_000
     }
   },
-  { type: 'approval_required', runId, action: { type: 'diff', diff } },
-  { type: 'diff', runId, diff }
+  { type: 'approval_required', runId, action: { type: 'file_change', fileChange } },
+  { type: 'file_change_proposed', runId, fileChange }
 ] satisfies AgentEvent[]
 
 const formerlySupportedEvents = [
@@ -213,22 +221,26 @@ const formerlySupportedEvents = [
     }
   },
   {
-    type: 'file_draft_updated',
+    type: 'file_change_updated',
     runId,
-    draft: {
-      draftId: 'draft-1',
+    fileChange: {
+      schemaVersion: 1,
+      transactionId: 'draft-1',
       conversationId: 'conversation-child',
       projectId: 'project-1',
       filePath: 'README.md',
-      mode: 'modify',
+      operation: 'update',
+      updateStrategy: 'modify',
       status: 'drafting',
+      baseRevision: 'content-sha256-v1:base',
       additions: 1,
       deletions: 1,
       lineCount: 1,
       byteCount: 3,
-      chunkCount: 1,
-      nextChunkIndex: 1,
+      mutationCount: 1,
+      nextMutationIndex: 1,
       statsFinal: false,
+      summary: null,
       createdAt: 10,
       updatedAt: 11
     }
@@ -311,8 +323,8 @@ const allEventTypes = [
   'message_stream_committed',
   'llm_retry',
   'tool_input_progress',
-  'file_write_preview_updated',
-  'file_write_preview_cleared',
+  'file_change_preview_updated',
+  'file_change_preview_cleared',
   'message',
   'guidance_queued',
   'guidance_applied',
@@ -322,12 +334,12 @@ const allEventTypes = [
   'mcp_tool_invocation_state_changed',
   'todo_updated',
   'skill_activated',
-  'file_draft_updated',
+  'file_change_updated',
   'context_window_updated',
   'context_compaction_started',
   'context_compaction_finished',
   'approval_required',
-  'diff',
+  'file_change_proposed',
   'command_started',
   'command_output',
   'command_exited',
@@ -372,6 +384,32 @@ describe('Agent observer event contract', () => {
       expect(parseAgentObserverEventEnvelope(envelope(event)).event).toEqual(canonical)
     }
   )
+
+  it('requires complete owner-safe FileChange preview fields', () => {
+    const current = formerlyDroppedEvents.find(
+      (event) => event.type === 'file_change_preview_updated'
+    )
+    expect(current?.type).toBe('file_change_preview_updated')
+    if (current?.type !== 'file_change_preview_updated') throw new Error('preview fixture missing')
+
+    const missingToolCallId: Partial<typeof current.preview> = { ...current.preview }
+    delete missingToolCallId.toolCallId
+    expect(() => parseAgentEventForHost({ ...current, preview: missingToolCallId })).toThrow(
+      /toolCallId/
+    )
+    expect(() =>
+      parseAgentEventForHost({ ...current, preview: { ...current.preview, transactionId: '' } })
+    ).toThrow(/transactionId/)
+    expect(() =>
+      parseAgentEventForHost({ ...current, preview: { ...current.preview, attempt: 0 } })
+    ).toThrow(/attempt/)
+    expect(() =>
+      parseAgentEventForHost({
+        ...current,
+        preview: { ...current.preview, contentOffsetBytes: 3, generatedBytes: 3 }
+      })
+    ).toThrow(/content byte cursor/)
+  })
 
   it('binds an Error without a Run identity to the trusted observer envelope', () => {
     const parsed = parseAgentObserverEventEnvelope(
@@ -460,7 +498,7 @@ describe('Agent observer event contract', () => {
       success: false,
       status: 'waiting_for_approval',
       content: 'Approval is required.',
-      proposedActions: [{ type: 'diff', diff }]
+      proposedActions: [{ type: 'file_change', fileChange }]
     } satisfies AgentEvent
 
     expect(parseAgentObserverEventEnvelope(envelope(event)).event).toEqual(event)

@@ -1147,13 +1147,13 @@ mod tests {
         let mut deltas = Vec::new();
 
         process_sse_frame(
-            &openai_tool_call_frame_for(None, "call-a", "write_file", "{\"draftId\":\"draft-a\"}"),
+            &openai_tool_call_frame_for(None, "call-a", "test_tool", "{\"id\":\"a\"}"),
             &mut accumulator,
             &mut |delta| deltas.push(delta),
         )
         .unwrap();
         process_sse_frame(
-            &openai_tool_call_frame_for(None, "call-b", "write_file", "{\"draftId\":\"draft-b\"}"),
+            &openai_tool_call_frame_for(None, "call-b", "test_tool", "{\"id\":\"b\"}"),
             &mut accumulator,
             &mut |delta| deltas.push(delta),
         )
@@ -1172,9 +1172,9 @@ mod tests {
         let response = accumulator.finish().unwrap();
         assert_eq!(response.provider_tool_calls().len(), 2);
         assert_eq!(response.provider_tool_calls()[0].id, "call-a");
-        assert_eq!(response.provider_tool_calls()[0].args["draftId"], "draft-a");
+        assert_eq!(response.provider_tool_calls()[0].args["id"], "a");
         assert_eq!(response.provider_tool_calls()[1].id, "call-b");
-        assert_eq!(response.provider_tool_calls()[1].args["draftId"], "draft-b");
+        assert_eq!(response.provider_tool_calls()[1].args["id"], "b");
     }
 
     #[test]
@@ -1241,7 +1241,7 @@ mod tests {
                     "delta":{
                         "tool_calls":[{
                             "index":0,
-                            "function":{"name":"write_file","arguments":""}
+                            "function":{"name":"test_tool","arguments":""}
                         }]
                     }
                 }]

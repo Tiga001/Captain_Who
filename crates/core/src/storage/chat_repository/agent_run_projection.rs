@@ -240,17 +240,11 @@ pub(super) fn current_persisted_approval_is_safe(
                     .as_object()
                     .is_some_and(current_tool_call_is_safe)
         }
-        Some("diff") => {
-            exact_keys(approval, &["type", "diff"])
-                && approval["diff"]
+        Some("file_change") => {
+            exact_keys(approval, &["type", "fileChange"])
+                && approval["fileChange"]
                     .as_object()
-                    .is_some_and(current_diff_is_safe)
-        }
-        Some("file_write") => {
-            exact_keys(approval, &["type", "fileWrite"])
-                && approval["fileWrite"]
-                    .as_object()
-                    .is_some_and(current_file_write_approval_is_safe)
+                    .is_some_and(current_file_change_proposal_is_safe)
         }
         Some("command") => {
             exact_keys(approval, &["type", "command"])
@@ -292,16 +286,19 @@ pub(super) fn current_persisted_approval_is_safe(
     }
 }
 
-fn current_file_write_approval_is_safe(
+fn current_file_change_proposal_is_safe(
     proposal: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
     exact_keys(
         proposal,
         &[
+            "schemaVersion",
             "id",
-            "draftId",
-            "mode",
+            "transactionId",
+            "operation",
+            "updateStrategy",
             "filePath",
+            "inlineDiff",
             "baseRevision",
             "summary",
             "additions",
@@ -310,19 +307,52 @@ fn current_file_write_approval_is_safe(
             "byteCount",
             "approvalStatus",
         ],
-    ) && bounded_string(&proposal["id"], 1_024, false)
-        && bounded_string(&proposal["draftId"], 1_024, false)
-        && matches!(
-            proposal["mode"].as_str(),
-            Some("create" | "rewrite" | "modify" | "append" | "upsert")
-        )
+    ) && proposal["schemaVersion"] == crate::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION
+        && bounded_string(&proposal["id"], 1_024, false)
+        && bounded_string(&proposal["transactionId"], 1_024, false)
+        && current_file_change_operation_fields_are_safe(proposal)
         && bounded_string(&proposal["filePath"], 16 * 1_024, false)
-        && nullable_bounded_string(&proposal["baseRevision"], 1_024, false)
+        && current_file_change_inline_diff_is_safe(&proposal["inlineDiff"])
+        && nullable_bounded_string(&proposal["baseRevision"], 2_048, false)
         && nullable_bounded_string(&proposal["summary"], 16 * 1_024, true)
         && ["additions", "deletions", "lineCount", "byteCount"]
             .iter()
             .all(|field| safe_integer(&proposal[*field]))
-        && current_approval_status_is_safe(&proposal["approvalStatus"])
+        && (proposal["operation"] != "delete"
+            || (proposal["lineCount"] == 0 && proposal["byteCount"] == 0))
+        && matches!(
+            proposal["approvalStatus"].as_str(),
+            Some("required" | "approved")
+        )
+}
+
+fn current_file_change_inline_diff_is_safe(value: &serde_json::Value) -> bool {
+    value.is_null()
+        || value.as_object().is_some_and(|diff| {
+            exact_keys(diff, &["patch", "truncated"])
+                && bounded_string(&diff["patch"], 4 * 1_024 * 1_024, true)
+                && diff["truncated"] == false
+        })
+}
+
+fn current_file_change_operation_fields_are_safe(
+    value: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let operation = value["operation"].as_str();
+    let strategy = value["updateStrategy"].as_str();
+    let inline_diff_is_null = value["inlineDiff"].is_null();
+    let base_revision_is_null = value["baseRevision"].is_null();
+    let strategy_is_safe =
+        value["updateStrategy"].is_null() || matches!(strategy, Some("modify" | "rewrite"));
+    if !strategy_is_safe || !matches!(operation, Some("create" | "update" | "delete")) {
+        return false;
+    }
+    match operation {
+        Some("create") => strategy.is_none() && base_revision_is_null,
+        Some("update") => !base_revision_is_null && (inline_diff_is_null == strategy.is_some()),
+        Some("delete") => strategy.is_none() && !base_revision_is_null && !inline_diff_is_null,
+        _ => false,
+    }
 }
 
 fn current_skill_materialization_is_safe(
@@ -957,30 +987,6 @@ fn current_office_operation_is_safe(
         && bounded_string(&operation["reason"], 16 * 1_024, true)
 }
 
-fn current_diff_is_safe(diff: &serde_json::Map<String, serde_json::Value>) -> bool {
-    exact_keys(
-        diff,
-        &[
-            "id",
-            "operation",
-            "filePath",
-            "patch",
-            "baseRevision",
-            "summary",
-            "approvalStatus",
-        ],
-    ) && bounded_string(&diff["id"], 1_024, false)
-        && matches!(
-            diff["operation"].as_str(),
-            Some("create" | "update" | "delete")
-        )
-        && bounded_string(&diff["filePath"], 16 * 1_024, false)
-        && bounded_string(&diff["patch"], 4 * 1_024 * 1_024, true)
-        && (diff["baseRevision"].is_null() || bounded_string(&diff["baseRevision"], 1_024, false))
-        && (diff["summary"].is_null() || bounded_string(&diff["summary"], 16 * 1_024, true))
-        && current_approval_status_is_safe(&diff["approvalStatus"])
-}
-
 fn current_todo_is_safe(value: &serde_json::Value) -> bool {
     let Some(todo) = value.as_object() else {
         return false;
@@ -1214,62 +1220,92 @@ fn current_command_sessions_are_safe(
         })
 }
 
-fn current_file_draft_is_safe(draft: &serde_json::Map<String, serde_json::Value>) -> bool {
-    let required = [
-        "draftId",
-        "conversationId",
-        "filePath",
-        "mode",
-        "status",
-        "additions",
-        "deletions",
-        "lineCount",
-        "byteCount",
-        "chunkCount",
-        "nextChunkIndex",
-        "statsFinal",
-        "createdAt",
-        "updatedAt",
-    ];
-    exact_required_optional_keys(draft, &required, &["projectId", "baseRevision", "summary"])
-        && bounded_string(&draft["draftId"], 1_024, false)
-        && bounded_string(&draft["conversationId"], 1_024, true)
-        && bounded_string(&draft["filePath"], 16 * 1_024, false)
-        && matches!(
-            draft["mode"].as_str(),
-            Some("create" | "rewrite" | "modify" | "append" | "upsert")
-        )
-        && matches!(
-            draft["status"].as_str(),
-            Some(
-                "drafting"
-                    | "ready"
-                    | "waiting_approval"
-                    | "applying"
-                    | "applied"
-                    | "rejected"
-                    | "conflict"
-                    | "failed"
-                    | "aborted"
-                    | "expired"
-            )
-        )
-        && [
+fn current_file_change_snapshot_is_safe(
+    snapshot: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if !exact_keys(
+        snapshot,
+        &[
+            "schemaVersion",
+            "transactionId",
+            "conversationId",
+            "projectId",
+            "filePath",
+            "operation",
+            "updateStrategy",
+            "status",
+            "baseRevision",
             "additions",
             "deletions",
             "lineCount",
             "byteCount",
-            "chunkCount",
-            "nextChunkIndex",
+            "mutationCount",
+            "nextMutationIndex",
+            "statsFinal",
+            "summary",
+            "createdAt",
+            "updatedAt",
+        ],
+    ) || snapshot["schemaVersion"] != crate::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION
+        || !bounded_string(&snapshot["transactionId"], 1_024, false)
+        || !bounded_string(&snapshot["conversationId"], 1_024, false)
+        || !nullable_bounded_string(&snapshot["projectId"], 1_024, false)
+        || !bounded_string(&snapshot["filePath"], 16 * 1_024, false)
+        || !current_file_change_snapshot_operation_is_safe(snapshot)
+        || !nullable_bounded_string(&snapshot["summary"], 16 * 1_024, true)
+        || ![
+            "additions",
+            "deletions",
+            "lineCount",
+            "byteCount",
+            "mutationCount",
+            "nextMutationIndex",
             "createdAt",
             "updatedAt",
         ]
         .iter()
-        .all(|field| safe_integer(&draft[*field]))
-        && draft["statsFinal"].is_boolean()
-        && optional_bounded_string(draft, "projectId", 1_024, false)
-        && optional_bounded_string(draft, "baseRevision", 1_024, false)
-        && optional_bounded_string(draft, "summary", 16 * 1_024, true)
+        .all(|field| safe_integer(&snapshot[*field]))
+        || snapshot["statsFinal"].as_bool().is_none()
+    {
+        return false;
+    }
+
+    let Some(status) = snapshot["status"].as_str() else {
+        return false;
+    };
+    let stats_final = snapshot["statsFinal"].as_bool().unwrap_or(false);
+    let stats_state_is_safe = match status {
+        "drafting" | "ready" => !stats_final,
+        "waiting_approval" | "applying" | "applied" | "already_applied" | "rejected"
+        | "conflict" | "failed" | "outcome_unknown" | "aborted" | "expired" => stats_final,
+        _ => false,
+    };
+    stats_state_is_safe
+        && snapshot["mutationCount"] == snapshot["nextMutationIndex"]
+        && snapshot["updatedAt"]
+            .as_u64()
+            .zip(snapshot["createdAt"].as_u64())
+            .is_some_and(|(updated_at, created_at)| updated_at >= created_at)
+        && (snapshot["operation"] != "delete"
+            || (snapshot["lineCount"] == 0 && snapshot["byteCount"] == 0))
+}
+
+fn current_file_change_snapshot_operation_is_safe(
+    snapshot: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let operation = snapshot["operation"].as_str();
+    let strategy = snapshot["updateStrategy"].as_str();
+    let strategy_is_safe =
+        snapshot["updateStrategy"].is_null() || matches!(strategy, Some("modify" | "rewrite"));
+    let base_revision_is_safe = nullable_bounded_string(&snapshot["baseRevision"], 2_048, false);
+    strategy_is_safe
+        && base_revision_is_safe
+        && match operation {
+            Some("create") => strategy.is_none() && snapshot["baseRevision"].is_null(),
+            Some("update") => strategy.is_some() && !snapshot["baseRevision"].is_null(),
+            Some("delete") => strategy.is_none() && !snapshot["baseRevision"].is_null(),
+            _ => false,
+        }
 }
 
 fn current_web_source_is_safe(source: &serde_json::Map<String, serde_json::Value>) -> bool {
@@ -1770,8 +1806,8 @@ pub(super) fn current_agent_run_projection_is_safe(
         || !record_array_is_safe(&run["webSearchActivities"], current_web_activity_is_safe)
         || !record_array_is_safe(&run["readActivities"], current_read_activity_is_safe)
         || !record_array_is_safe(&run["approvals"], current_persisted_approval_is_safe)
-        || !record_array_is_safe(&run["diffs"], current_diff_is_safe)
-        || !record_array_is_safe(&run["fileDrafts"], current_file_draft_is_safe)
+        || !record_array_is_safe(&run["diffs"], current_file_change_proposal_is_safe)
+        || !record_array_is_safe(&run["fileDrafts"], current_file_change_snapshot_is_safe)
         || !run["mcpInvocations"].as_array().is_some_and(|invocations| {
             invocations.len() <= MAX_CURRENT_RUN_ITEMS
                 && invocations.iter().all(current_mcp_invocation_is_safe)

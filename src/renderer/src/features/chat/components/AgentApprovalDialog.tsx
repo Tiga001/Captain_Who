@@ -13,6 +13,11 @@ import {
   type ApprovalSubmissionResult
 } from './approvalSubmission'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
+import { getAgentFileChangeDiff } from '../../agent/agentClient'
+
+const FILE_CHANGE_DIFF_PAGE_CHARS = 50_000
+const MAX_FILE_CHANGE_DIFF_PAGES = 256
+const MAX_FILE_CHANGE_DIFF_CHARS = 8 * 1024 * 1024
 
 type StandardAgentProposedAction = Exclude<
   AgentProposedAction,
@@ -50,8 +55,7 @@ interface AgentApprovalDialogProps {
 
 function getApprovalFallbackTitle(action: StandardAgentProposedAction, t: Translate) {
   if (action.type === 'command') return t('agent.approval.dialog.commandTitle')
-  if (action.type === 'diff') return t('agent.approval.dialog.diffTitle')
-  if (action.type === 'file_write') return t('agent.approval.dialog.fileWriteTitle')
+  if (action.type === 'file_change') return t('agent.approval.dialog.diffTitle')
   if (action.type === 'skill_materialization')
     return formatTranslation(t, 'agent.approval.dialog.toolTitle', {
       tool: getToolDisplayName('skills_materialize_resource', t)
@@ -78,9 +82,8 @@ function getApprovalFallbackTitle(action: StandardAgentProposedAction, t: Transl
 }
 
 function getApprovalRequest(action: StandardAgentProposedAction, t: Translate) {
-  if (action.type === 'diff') return action.diff.summary ?? action.diff.patch
-  if (action.type === 'file_write')
-    return action.fileWrite.summary ?? getApprovalFallbackTitle(action, t)
+  if (action.type === 'file_change')
+    return action.fileChange.summary ?? getApprovalFallbackTitle(action, t)
   if (action.type === 'command') return action.command.reason ?? getApprovalFallbackTitle(action, t)
   if (action.type === 'skill_materialization')
     return action.materialization.reason ?? getApprovalFallbackTitle(action, t)
@@ -93,8 +96,7 @@ function getApprovalRequest(action: StandardAgentProposedAction, t: Translate) {
 
 function getApprovalCode(action: StandardAgentProposedAction) {
   if (action.type === 'command') return action.command.command
-  if (action.type === 'diff') return action.diff.filePath
-  if (action.type === 'file_write') return action.fileWrite.filePath
+  if (action.type === 'file_change') return action.fileChange.filePath
   if (action.type === 'skill_materialization') return action.materialization.destination
   if (action.type === 'skill_script')
     return JSON.stringify(
@@ -127,8 +129,7 @@ function getApprovalCode(action: StandardAgentProposedAction) {
 
 function getApprovalPolicyHint(action: StandardAgentProposedAction, t: Translate) {
   if (action.type === 'command') return t('agent.approval.dialog.commandPolicyHint')
-  if (action.type === 'diff') return t('agent.approval.dialog.diffPolicyHint')
-  if (action.type === 'file_write') return t('agent.approval.dialog.diffPolicyHint')
+  if (action.type === 'file_change') return t('agent.approval.dialog.diffPolicyHint')
   if (action.type === 'skill_materialization') return t('agent.approval.dialog.diffPolicyHint')
   if (action.type === 'skill_script') return t('agent.approval.dialog.commandPolicyHint')
   if (action.type === 'office_operation') return t('agent.approval.dialog.diffPolicyHint')
@@ -141,7 +142,7 @@ function getRememberCommandPrefix(action: StandardAgentProposedAction) {
 }
 
 function canRememberForRun(action: StandardAgentProposedAction) {
-  return action.type === 'command' || action.type === 'diff' || action.type === 'file_write'
+  return action.type === 'command' || action.type === 'file_change'
 }
 
 interface StandardAgentApprovalDialogProps {
@@ -162,6 +163,22 @@ function StandardAgentApprovalDialog({
   const { t } = useFrontendConfig()
   const [rejectMessage, setRejectMessage] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [fileChangeDiff, setFileChangeDiff] = useState<{
+    transactionId: string | null
+    content: string
+    error: string
+    loading: boolean
+  }>(() => {
+    if (action.type !== 'file_change') {
+      return { transactionId: null, content: '', error: '', loading: false }
+    }
+    return {
+      transactionId: action.fileChange.transactionId,
+      content: action.fileChange.inlineDiff?.patch ?? '',
+      error: '',
+      loading: action.fileChange.inlineDiff === null
+    }
+  })
   const request = getApprovalRequest(action, t)
   const code = getApprovalCode(action)
   const codeMultiline =
@@ -171,14 +188,106 @@ function StandardAgentApprovalDialog({
   const policyHint = getApprovalPolicyHint(action, t)
   const rememberPrefix = getRememberCommandPrefix(action)
   const showRememberChoice = allowRememberForRun && canRememberForRun(action)
+  const fileChangeTransactionId =
+    action.type === 'file_change' ? action.fileChange.transactionId : null
+  const inlineFileChangeDiff =
+    action.type === 'file_change' ? (action.fileChange.inlineDiff?.patch ?? null) : null
+  const fileChangePreviewError = t('files.preview.error')
 
   useEffect(() => {
     setRejectMessage('')
     setIsSubmitting(false)
   }, [action, messageId])
 
+  useEffect(() => {
+    if (fileChangeTransactionId === null) {
+      setFileChangeDiff({ transactionId: null, content: '', error: '', loading: false })
+      return
+    }
+    if (inlineFileChangeDiff !== null) {
+      setFileChangeDiff({
+        transactionId: fileChangeTransactionId,
+        content: inlineFileChangeDiff,
+        error: '',
+        loading: false
+      })
+      return
+    }
+
+    let cancelled = false
+    setFileChangeDiff({
+      transactionId: fileChangeTransactionId,
+      content: '',
+      error: '',
+      loading: true
+    })
+    void (async () => {
+      const chunks: string[] = []
+      let offset = 0
+      let loadedChars = 0
+      const visitedOffsets = new Set<number>()
+      while (true) {
+        if (visitedOffsets.size >= MAX_FILE_CHANGE_DIFF_PAGES) {
+          throw new Error('FileChange diff page chain exceeded its bound')
+        }
+        if (visitedOffsets.has(offset)) throw new Error('FileChange diff page chain repeated')
+        visitedOffsets.add(offset)
+        const page = await getAgentFileChangeDiff(
+          fileChangeTransactionId,
+          offset,
+          FILE_CHANGE_DIFF_PAGE_CHARS
+        )
+        if (page.transactionId !== fileChangeTransactionId || page.offset !== offset) {
+          throw new Error('FileChange diff page identity mismatch')
+        }
+        loadedChars += page.patch.length
+        if (loadedChars > MAX_FILE_CHANGE_DIFF_CHARS) {
+          throw new Error('FileChange diff exceeded its Renderer review bound')
+        }
+        chunks.push(page.patch)
+        if (!page.truncated) {
+          if (page.nextOffset !== null) {
+            throw new Error('FileChange terminal diff page has a continuation')
+          }
+          break
+        }
+        if (page.nextOffset === null || page.nextOffset <= offset) {
+          throw new Error('FileChange diff page chain is incomplete')
+        }
+        offset = page.nextOffset
+      }
+      if (!cancelled) {
+        setFileChangeDiff({
+          transactionId: fileChangeTransactionId,
+          content: chunks.join(''),
+          error: '',
+          loading: false
+        })
+      }
+    })().catch(() => {
+      if (!cancelled) {
+        setFileChangeDiff({
+          transactionId: fileChangeTransactionId,
+          content: '',
+          error: fileChangePreviewError,
+          loading: false
+        })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [fileChangePreviewError, fileChangeTransactionId, inlineFileChangeDiff])
+
+  const fileChangeDiffCurrent =
+    action.type === 'file_change' &&
+    fileChangeDiff.transactionId === action.fileChange.transactionId
+  const fileChangeDiffReady =
+    action.type !== 'file_change' ||
+    (fileChangeDiffCurrent && !fileChangeDiff.loading && !fileChangeDiff.error)
+
   const approve = (rememberForRun = false) => {
-    if (isSubmitting) return
+    if (isSubmitting || !fileChangeDiffReady) return
     setIsSubmitting(true)
     resetApprovalSubmissionOnFailure(onApprove?.(messageId, action, { rememberForRun }), () =>
       setIsSubmitting(false)
@@ -196,9 +305,21 @@ function StandardAgentApprovalDialog({
   return (
     <ApprovalDialogShell
       approvalKind="standard"
+      approveDisabled={!fileChangeDiffReady}
       approveLabel={t('agent.approval.dialog.approve')}
       code={code}
       codeMultiline={codeMultiline}
+      details={
+        action.type === 'file_change' ? (
+          !fileChangeDiffCurrent || fileChangeDiff.loading ? (
+            <p>{t('files.preview.loading')}</p>
+          ) : fileChangeDiff.error ? (
+            <p role="alert">{fileChangeDiff.error}</p>
+          ) : (
+            <pre>{fileChangeDiff.content}</pre>
+          )
+        ) : undefined
+      }
       isSubmitting={isSubmitting}
       onApprove={() => approve(false)}
       onReject={reject}
@@ -212,7 +333,7 @@ function StandardAgentApprovalDialog({
           ? {
               content: (
                 <span className="agent-approval-dialog__choice-text">
-                  {action.type === 'diff' || action.type === 'file_write'
+                  {action.type === 'file_change'
                     ? t('agent.approval.dialog.approvePatchRemember')
                     : t('agent.approval.dialog.approveRemember')}
                   {rememberPrefix ? (
@@ -224,6 +345,7 @@ function StandardAgentApprovalDialog({
                   ) : null}
                 </span>
               ),
+              disabled: !fileChangeDiffReady,
               onSelect: () => approve(true)
             }
           : undefined

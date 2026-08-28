@@ -1067,10 +1067,10 @@ export function parseAgentObserverEventEnvelope(value: unknown): AgentObserverEv
     throw new Error('Invalid AgentObserverEventEnvelope Command identity')
   }
   if (
-    parsed.event.type === 'file_draft_updated' &&
-    parsed.event.draft.conversationId !== parsed.conversationId
+    parsed.event.type === 'file_change_updated' &&
+    parsed.event.fileChange.conversationId !== parsed.conversationId
   ) {
-    throw new Error('Invalid AgentObserverEventEnvelope file draft identity')
+    throw new Error('Invalid AgentObserverEventEnvelope FileChange identity')
   }
   if (
     parsed.event.type === 'context_window_updated' &&

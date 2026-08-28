@@ -507,7 +507,7 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
     assert!(default_world_state.contains("\"builtinExecution\":\"require_approval\""));
     assert!(full_world_state.contains("\"builtinExecution\":\"auto_approve\""));
     assert!(custom_world_state.contains("\"builtinExecution\":\"auto_approve\""));
-    for name in ["apply_patch", "write_file", "run_command"] {
+    for name in ["apply_patch", "run_command"] {
         assert!(
             custom.initial_tool_set.contains(name),
             "{name} must remain in the stable prefix"
@@ -634,29 +634,27 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
     let automatic = definitions(AgentPatchPermission::AutoApprove, true);
     let without_host = definitions(AgentPatchPermission::AutoApprove, false);
 
-    for name in ["apply_patch", "write_file"] {
-        let manual = manual
-            .iter()
-            .find(|definition| definition.name == name)
-            .unwrap();
-        let automatic = automatic
-            .iter()
-            .find(|definition| definition.name == name)
-            .unwrap();
-        let without_host = without_host
-            .iter()
-            .find(|definition| definition.name == name)
-            .unwrap();
-        assert!(manual.requires_approval);
-        assert_eq!(
-            serde_json::to_value(manual).unwrap(),
-            serde_json::to_value(automatic).unwrap()
-        );
-        assert_eq!(
-            serde_json::to_value(manual).unwrap(),
-            serde_json::to_value(without_host).unwrap()
-        );
-    }
+    let manual_apply_patch = manual
+        .iter()
+        .find(|definition| definition.name == "apply_patch")
+        .unwrap();
+    let automatic_apply_patch = automatic
+        .iter()
+        .find(|definition| definition.name == "apply_patch")
+        .unwrap();
+    let apply_patch_without_host = without_host
+        .iter()
+        .find(|definition| definition.name == "apply_patch")
+        .unwrap();
+    assert!(manual_apply_patch.requires_approval);
+    assert_eq!(
+        serde_json::to_value(manual_apply_patch).unwrap(),
+        serde_json::to_value(automatic_apply_patch).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(manual_apply_patch).unwrap(),
+        serde_json::to_value(apply_patch_without_host).unwrap()
+    );
 
     for name in [
         "skills_materialize_resource",
@@ -715,9 +713,12 @@ fn write_denied_keeps_stable_writers_but_filters_dynamic_write_only_tools() {
         .unwrap()
         .tool_definitions;
 
-    for name in ["apply_patch", "write_file"] {
-        assert!(definitions.iter().any(|definition| definition.name == name));
-    }
+    assert!(definitions
+        .iter()
+        .any(|definition| definition.name == "apply_patch"));
+    assert!(!definitions
+        .iter()
+        .any(|definition| definition.name == "write_file"));
     assert!(!definitions
         .iter()
         .any(|definition| definition.name == "skills_materialize_resource"));

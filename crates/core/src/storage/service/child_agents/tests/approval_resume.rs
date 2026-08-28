@@ -105,7 +105,7 @@ fn audit(
         decision: decision.map(str::to_string),
         status: status.to_string(),
         action_json: action.action_json.clone(),
-        patch_result_json: None,
+        file_change_result_json: None,
         command_result_json: None,
         tool_result_json: None,
         error: None,

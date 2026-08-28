@@ -34,6 +34,24 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    pub fn get_agent_file_change_for_source_call(
+        &self,
+        conversation_id: &str,
+        project_id: Option<&str>,
+        run_id: &str,
+        source_tool_call_id: &str,
+    ) -> Result<Option<AgentFileChangeRecord>, String> {
+        let connection = self.state.connection()?;
+        file_change_repository::get_file_change_for_source_call(
+            &connection,
+            conversation_id,
+            project_id,
+            run_id,
+            source_tool_call_id,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn list_agent_file_changes_for_run(
         &self,
         run_id: &str,

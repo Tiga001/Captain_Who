@@ -46,8 +46,7 @@ pub(crate) struct AgentRunUsageState {
 pub(crate) struct ActionExecutionDecision {
     pub(crate) status: String,
     pub(crate) final_pending_status: PendingActionStatus,
-    pub(crate) patch_result: Option<AgentPatchResult>,
-    pub(crate) file_write_result: Option<AgentFileWriteResult>,
+    pub(crate) file_change_result: Option<AgentFileChangeResult>,
     pub(crate) file_change: Option<AgentTurnFileChange>,
     pub(crate) committed_file_change_action: Option<AgentProposedAction>,
     pub(crate) direct_file_change_finalization: Option<DirectFileChangeFinalization>,
@@ -131,9 +130,7 @@ pub struct AgentActionExecutionOutput {
     pub tool_name: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub patch_result: Option<AgentPatchResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_write_result: Option<AgentFileWriteResult>,
+    pub file_change_result: Option<AgentFileChangeResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_result: Option<AgentCommandExecutionResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,22 +153,20 @@ where
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentFileDraftContentPage {
-    pub draft: AgentFileDraftSnapshot,
+pub struct AgentFileChangeContentPage {
+    pub file_change: AgentFileChangeSnapshot,
     pub content: String,
     pub offset: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<usize>,
     pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentFileWriteDiffPage {
-    pub draft_id: String,
+pub struct AgentFileChangeDiffPage {
+    pub transaction_id: String,
     pub patch: String,
     pub offset: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<usize>,
     pub truncated: bool,
 }

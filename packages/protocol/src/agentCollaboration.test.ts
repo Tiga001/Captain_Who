@@ -517,27 +517,35 @@ describe('agent collaboration protocol', () => {
       parseAgentObserverEventEnvelope({
         ...envelope,
         event: {
-          type: 'file_draft_updated',
+          type: 'file_change_updated',
           runId: 'run-child',
-          draft: {
-            draftId: 'draft-1',
+          fileChange: {
+            schemaVersion: 1,
+            transactionId: 'draft-1',
             conversationId: 'conversation-child',
+            projectId: null,
             filePath: 'src/main.ts',
-            mode: 'rewrite',
+            operation: 'update',
+            updateStrategy: 'rewrite',
             status: 'waiting_approval',
+            baseRevision: 'content-sha256-v1:base',
             additions: 1,
             deletions: 1,
             lineCount: 2,
             byteCount: 20,
-            chunkCount: 1,
-            nextChunkIndex: 1,
+            mutationCount: 1,
+            nextMutationIndex: 1,
             statsFinal: true,
+            summary: null,
             createdAt: 1,
             updatedAt: 2
           }
         }
       }).event
-    ).toMatchObject({ type: 'file_draft_updated', draft: { mode: 'rewrite' } })
+    ).toMatchObject({
+      type: 'file_change_updated',
+      fileChange: { updateStrategy: 'rewrite' }
+    })
     expect(
       parseAgentObserverEventEnvelope({
         ...envelope,
@@ -561,27 +569,32 @@ describe('agent collaboration protocol', () => {
       parseAgentObserverEventEnvelope({
         ...envelope,
         event: {
-          type: 'file_draft_updated',
+          type: 'file_change_updated',
           runId: 'run-child',
-          draft: {
-            draftId: 'draft-foreign',
+          fileChange: {
+            schemaVersion: 1,
+            transactionId: 'draft-foreign',
             conversationId: 'conversation-foreign',
+            projectId: null,
             filePath: 'src/main.ts',
-            mode: 'rewrite',
+            operation: 'update',
+            updateStrategy: 'rewrite',
             status: 'ready',
+            baseRevision: 'content-sha256-v1:base',
             additions: 1,
             deletions: 0,
             lineCount: 1,
             byteCount: 1,
-            chunkCount: 1,
-            nextChunkIndex: 1,
-            statsFinal: true,
+            mutationCount: 1,
+            nextMutationIndex: 1,
+            statsFinal: false,
+            summary: null,
             createdAt: 1,
             updatedAt: 2
           }
         }
       })
-    ).toThrow(/file draft identity/)
+    ).toThrow(/FileChange identity/)
     expect(() =>
       parseAgentObserverEventEnvelope({
         ...envelope,

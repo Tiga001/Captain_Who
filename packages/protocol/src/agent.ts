@@ -18,8 +18,8 @@ export const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
 export const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
 export const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
 export const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
-export const AGENT_READ_FILE_DRAFT_METHOD = 'agent.readFileDraft'
-export const AGENT_GET_FILE_WRITE_DIFF_METHOD = 'agent.getFileWriteDiff'
+export const AGENT_READ_FILE_CHANGE_METHOD = 'agent.readFileChange'
+export const AGENT_GET_FILE_CHANGE_DIFF_METHOD = 'agent.getFileChangeDiff'
 export const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 
 export type AgentMessageRole = 'system' | 'user' | 'assistant'
@@ -120,7 +120,6 @@ export type AgentToolName =
   | 'git_diff'
   | 'todo_update'
   | 'apply_patch'
-  | 'write_file'
   | 'run_command'
   | 'skills_activate'
   | 'skills_list_resources'
@@ -442,26 +441,37 @@ export interface ConversationTurnTrace {
 
 export type AgentTodoStatus = 'pending' | 'in_progress' | 'completed' | 'blocked'
 
-export type AgentPatchOperation = 'create' | 'update' | 'delete'
+export const AGENT_FILE_CHANGE_SCHEMA_VERSION = 1 as const
 
-export type AgentPatchResultStatus = 'applied' | 'failed' | 'conflict' | 'rejected'
+export type AgentFileChangeOperation = 'create' | 'update' | 'delete'
 
-export type AgentFileWriteMode = 'create' | 'rewrite' | 'modify' | 'append' | 'upsert'
+export type AgentFileChangeUpdateStrategy = 'modify' | 'rewrite'
 
-export type AgentFileDraftStatus =
+export type AgentFileChangeStatus =
   | 'drafting'
   | 'ready'
   | 'waiting_approval'
   | 'applying'
   | 'applied'
+  | 'already_applied'
   | 'rejected'
   | 'conflict'
   | 'failed'
+  | 'outcome_unknown'
   | 'aborted'
   | 'expired'
 
-export type AgentFileWriteResultStatus =
-  'applied' | 'failed' | 'conflict' | 'rejected' | 'already_applied'
+export type AgentFileChangeResultStatus =
+  | 'applied'
+  | 'already_applied'
+  | 'failed'
+  | 'conflict'
+  | 'rejected'
+  | 'outcome_unknown'
+  | 'aborted'
+  | 'expired'
+
+export type AgentFileChangeOutcome = 'definitely_not_executed' | 'applied' | 'outcome_unknown'
 
 export type AgentCommandOutputStream = 'stdout' | 'stderr'
 
@@ -760,7 +770,15 @@ export interface AgentTodoState {
   updatedAt: number
 }
 
-export type AgentActionExecutionStatus = 'applied' | 'approved' | 'failed' | 'conflict' | 'rejected'
+export type AgentActionExecutionStatus =
+  | 'applied'
+  | 'approved'
+  | 'failed'
+  | 'conflict'
+  | 'rejected'
+  | 'cancelled'
+  | 'expired'
+  | 'outcome_unknown'
 
 export type AgentCommandPublishedOutputKind = 'image' | 'document'
 
@@ -801,8 +819,7 @@ export interface AgentActionExecutionOutput {
   actionType: string
   toolName: string
   status: AgentActionExecutionStatus
-  patchResult?: AgentPatchResult
-  fileWriteResult?: AgentFileWriteResult
+  fileChangeResult?: AgentFileChangeResult
   commandResult?: AgentCommandExecutionResult
   toolResult?: AgentToolResult
   agentOutput: AgentChatOutput
@@ -1137,44 +1154,55 @@ export interface AgentToolContinuation {
   result: AgentToolResult
 }
 
-/** Renderer-safe diff projection. Host-private file-change execution authority is excluded. */
-export interface AgentDiffProposal {
+/** Renderer-safe projection. Host-private FileChange execution authority is excluded. */
+export interface AgentFileChangeProposal {
+  schemaVersion: typeof AGENT_FILE_CHANGE_SCHEMA_VERSION
   id: string
-  operation: AgentPatchOperation
+  transactionId: string
+  operation: AgentFileChangeOperation
+  updateStrategy: AgentFileChangeUpdateStrategy | null
   filePath: string
-  patch: string
+  /** Complete authoritative Direct diff, or null when the Staged diff must be paged by id. */
+  inlineDiff: AgentGitDiffSnapshot | null
   baseRevision: string | null
   summary: string | null
-  approvalStatus: AgentApprovalStatus
-}
-
-export interface AgentFileDraftSnapshot {
-  draftId: string
-  conversationId: string
-  projectId?: string
-  filePath: string
-  mode: AgentFileWriteMode
-  status: AgentFileDraftStatus
-  baseRevision?: string
   additions: number
   deletions: number
   lineCount: number
   byteCount: number
-  chunkCount: number
-  nextChunkIndex: number
+  approvalStatus: AgentApprovalStatus
+}
+
+export interface AgentFileChangeSnapshot {
+  schemaVersion: typeof AGENT_FILE_CHANGE_SCHEMA_VERSION
+  transactionId: string
+  conversationId: string
+  projectId: string | null
+  filePath: string
+  operation: AgentFileChangeOperation
+  updateStrategy: AgentFileChangeUpdateStrategy | null
+  status: AgentFileChangeStatus
+  baseRevision: string | null
+  additions: number
+  deletions: number
+  lineCount: number
+  byteCount: number
+  mutationCount: number
+  nextMutationIndex: number
   statsFinal: boolean
-  summary?: string
+  summary: string | null
   createdAt: number
   updatedAt: number
 }
 
-export interface AgentFileWritePreview {
+export interface AgentFileChangePreview {
+  schemaVersion: typeof AGENT_FILE_CHANGE_SCHEMA_VERSION
   previewId: string
   streamId: string
   attempt: number
   toolCallIndex: number
-  toolCallId?: string
-  draftId: string
+  toolCallId: string | null
+  transactionId: string
   filePath: string
   additions: number
   deletions: number
@@ -1186,77 +1214,54 @@ export interface AgentFileWritePreview {
   updatedAt: number
 }
 
-export interface AgentFileWriteProposal {
-  id: string
-  draftId: string
-  mode: AgentFileWriteMode
-  filePath: string
-  baseRevision: string | null
-  summary: string | null
-  additions: number
-  deletions: number
-  lineCount: number
-  byteCount: number
-  approvalStatus: AgentApprovalStatus
-}
-
-export interface AgentFileWriteResult {
-  status: AgentFileWriteResultStatus
-  draftId: string
-  mode: AgentFileWriteMode
+export interface AgentFileChangeResult {
+  schemaVersion: typeof AGENT_FILE_CHANGE_SCHEMA_VERSION
+  status: AgentFileChangeResultStatus
+  outcome: AgentFileChangeOutcome
+  transactionId: string
+  operation: AgentFileChangeOperation
+  updateStrategy: AgentFileChangeUpdateStrategy | null
   filePath: string
   additions: number
   deletions: number
   lineCount: number
   byteCount: number
-  revision?: string
-  error?: string
-  message?: string
+  revision: string | null
+  errorCode: string | null
+  error: string | null
+  message: string | null
 }
 
-export interface AgentFileDraftIdInput {
-  draftId: string
+export interface AgentFileChangeIdInput {
+  transactionId: string
   /** Exact root authority for an authorized read-only child observer. */
   observerRootConversationId?: string
 }
 
-export interface AgentFileDraftReadInput extends AgentFileDraftIdInput {
+export interface AgentFileChangeReadInput extends AgentFileChangeIdInput {
   offset?: number
   maxChars?: number
 }
 
-export interface AgentFileDraftContentPage {
-  draft: AgentFileDraftSnapshot
+export interface AgentFileChangeContentPage {
+  fileChange: AgentFileChangeSnapshot
   content: string
   offset: number
-  nextOffset?: number
+  nextOffset: number | null
   truncated: boolean
 }
 
-export interface AgentFileWriteDiffInput extends AgentFileDraftIdInput {
+export interface AgentFileChangeDiffInput extends AgentFileChangeIdInput {
   offset?: number
   maxChars?: number
 }
 
-export interface AgentFileWriteDiffPage {
-  draftId: string
+export interface AgentFileChangeDiffPage {
+  transactionId: string
   patch: string
   offset: number
-  nextOffset?: number
+  nextOffset: number | null
   truncated: boolean
-}
-
-export interface AgentPatchResult {
-  status: AgentPatchResultStatus
-  operation: AgentPatchOperation
-  filePath: string
-  appliedFilePaths: string[]
-  gitDiff?: AgentGitDiffSnapshot
-  gitDiffError?: string
-  /** Stable safe presentation code; Host diagnostics are never exposed here. */
-  errorCode?: string
-  error?: string
-  message?: string
 }
 
 export interface AgentGitDiffSnapshot {
@@ -1990,8 +1995,7 @@ export type AgentProposedAction =
     }
   | { type: 'builtin_mcp_tool_approval'; approval: AgentBuiltinMcpToolApproval }
   | { type: 'browser_risk_approval'; approval: AgentBrowserRiskApproval }
-  | { type: 'diff'; diff: AgentDiffProposal }
-  | { type: 'file_write'; fileWrite: AgentFileWriteProposal }
+  | { type: 'file_change'; fileChange: AgentFileChangeProposal }
   | { type: 'command'; command: AgentCommandActionProjection }
   | { type: 'skill_materialization'; materialization: AgentSkillMaterializationRequest }
   | { type: 'skill_script'; script: AgentSkillScriptRequest }
@@ -2040,12 +2044,12 @@ export type AgentEvent =
       receivedBytes: number
     }
   | {
-      type: 'file_write_preview_updated'
+      type: 'file_change_preview_updated'
       runId: string
-      preview: AgentFileWritePreview
+      preview: AgentFileChangePreview
     }
   | {
-      type: 'file_write_preview_cleared'
+      type: 'file_change_preview_cleared'
       runId: string
       streamId: string
       attempt: number
@@ -2102,7 +2106,7 @@ export type AgentEvent =
       activatedBy: 'user' | 'model'
       skill: ActivatedSkillSummary
     }
-  | { type: 'file_draft_updated'; runId: string; draft: AgentFileDraftSnapshot }
+  | { type: 'file_change_updated'; runId: string; fileChange: AgentFileChangeSnapshot }
   | {
       type: 'context_window_updated'
       runId: string
@@ -2123,7 +2127,7 @@ export type AgentEvent =
       traceSequence: number
     }
   | { type: 'approval_required'; runId: string; action: AgentProposedAction }
-  | { type: 'diff'; runId: string; diff: AgentDiffProposal }
+  | { type: 'file_change_proposed'; runId: string; fileChange: AgentFileChangeProposal }
   | {
       type: 'command_started'
       runId: string

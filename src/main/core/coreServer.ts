@@ -40,10 +40,10 @@ import type {
   CollaborationEventsPage,
   CollaborationEventsRequest,
   CollaborationResyncEnvelope,
-  AgentFileDraftContentPage,
-  AgentFileDraftReadInput,
-  AgentFileWriteDiffInput,
-  AgentFileWriteDiffPage,
+  AgentFileChangeContentPage,
+  AgentFileChangeDiffInput,
+  AgentFileChangeDiffPage,
+  AgentFileChangeReadInput,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
   AgentProviderTransitionPreflightInput,
@@ -250,11 +250,11 @@ import {
   AGENT_COMMAND_SESSIONS_LIST_METHOD,
   AGENT_EVENT_NOTIFICATION_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
-  AGENT_GET_FILE_WRITE_DIFF_METHOD,
+  AGENT_GET_FILE_CHANGE_DIFF_METHOD,
   AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
   AGENT_GET_USAGE_SUMMARY_METHOD,
   AGENT_LIST_PENDING_ACTIONS_METHOD,
-  AGENT_READ_FILE_DRAFT_METHOD,
+  AGENT_READ_FILE_CHANGE_METHOD,
   AGENT_REJECT_ACTION_METHOD,
   AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
   AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD,
@@ -262,6 +262,8 @@ import {
   AGENT_START_CONVERSATION_TURN_METHOD,
   AGENT_STEER_RUN_METHOD,
   parseAgentActionExecutionOutputForHost,
+  parseAgentFileChangeContentPageForHost,
+  parseAgentFileChangeDiffPageForHost,
   parseAutomationAttentionAcknowledgeInput,
   parseAutomationAttentionAcknowledgeOutput,
   parseAutomationAttentionSummaryInput,
@@ -735,8 +737,8 @@ const AGENT_OBSERVER_EVENT_TYPES = {
   message_stream_committed: true,
   llm_retry: true,
   tool_input_progress: true,
-  file_write_preview_updated: true,
-  file_write_preview_cleared: true,
+  file_change_preview_updated: true,
+  file_change_preview_cleared: true,
   message: true,
   guidance_queued: true,
   guidance_applied: true,
@@ -746,12 +748,12 @@ const AGENT_OBSERVER_EVENT_TYPES = {
   mcp_tool_invocation_state_changed: true,
   todo_updated: true,
   skill_activated: true,
-  file_draft_updated: true,
+  file_change_updated: true,
   context_window_updated: true,
   context_compaction_started: true,
   context_compaction_finished: true,
   approval_required: true,
-  diff: true,
+  file_change_proposed: true,
   command_started: true,
   command_output: true,
   command_exited: true,
@@ -1802,18 +1804,28 @@ export class CoreServer {
     )
   }
 
-  readFileDraft(input: AgentFileDraftReadInput): Promise<AgentFileDraftContentPage> {
-    return this.rpc.request<AgentFileDraftContentPage, AgentFileDraftReadInput>(
-      AGENT_READ_FILE_DRAFT_METHOD,
-      input
-    )
+  readFileChange(input: AgentFileChangeReadInput): Promise<AgentFileChangeContentPage> {
+    return this.rpc
+      .request<unknown, AgentFileChangeReadInput>(AGENT_READ_FILE_CHANGE_METHOD, input)
+      .then((value) => {
+        const page = parseAgentFileChangeContentPageForHost(value)
+        if (page.fileChange.transactionId !== input.transactionId) {
+          throw new Error('Invalid FileChange content page identity')
+        }
+        return page
+      })
   }
 
-  getFileWriteDiff(input: AgentFileWriteDiffInput): Promise<AgentFileWriteDiffPage> {
-    return this.rpc.request<AgentFileWriteDiffPage, AgentFileWriteDiffInput>(
-      AGENT_GET_FILE_WRITE_DIFF_METHOD,
-      input
-    )
+  getFileChangeDiff(input: AgentFileChangeDiffInput): Promise<AgentFileChangeDiffPage> {
+    return this.rpc
+      .request<unknown, AgentFileChangeDiffInput>(AGENT_GET_FILE_CHANGE_DIFF_METHOD, input)
+      .then((value) => {
+        const page = parseAgentFileChangeDiffPageForHost(value)
+        if (page.transactionId !== input.transactionId) {
+          throw new Error('Invalid FileChange Diff page identity')
+        }
+        return page
+      })
   }
 
   onAgentEvent(handler: (event: AgentEvent) => void): () => void {

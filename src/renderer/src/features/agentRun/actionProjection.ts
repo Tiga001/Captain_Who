@@ -20,32 +20,20 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
     return null
   }
 
-  if (action.type === 'diff') {
+  if (action.type === 'file_change') {
+    const fileChange = action.fileChange
     return {
-      id: action.diff.id,
+      id: fileChange.id,
       tool: 'apply_patch',
       args: {
-        operation: action.diff.operation,
-        filePath: action.diff.filePath,
-        patch: action.diff.patch,
-        summary: action.diff.summary
+        action: fileChange.inlineDiff === null ? 'commit' : 'apply',
+        transactionId: fileChange.transactionId,
+        operation: fileChange.operation,
+        filePath: fileChange.filePath,
+        summary: fileChange.summary
       },
-      approvalStatus: action.diff.approvalStatus,
-      reason: action.diff.summary
-    }
-  }
-
-  if (action.type === 'file_write') {
-    return {
-      id: action.fileWrite.id,
-      tool: 'write_file',
-      args: {
-        phase: 'finish',
-        draftId: action.fileWrite.draftId,
-        summary: action.fileWrite.summary
-      },
-      approvalStatus: action.fileWrite.approvalStatus,
-      reason: action.fileWrite.summary
+      approvalStatus: fileChange.approvalStatus,
+      reason: fileChange.summary
     }
   }
 
@@ -181,8 +169,8 @@ export function withActionApprovalStatus(
       approval: { ...action.approval, approvalStatus }
     }
   }
-  if (action.type === 'file_write') {
-    return { ...action, fileWrite: { ...action.fileWrite, approvalStatus } }
+  if (action.type === 'file_change') {
+    return { ...action, fileChange: { ...action.fileChange, approvalStatus } }
   }
   if (action.type === 'skill_materialization') {
     return { ...action, materialization: { ...action.materialization, approvalStatus } }
@@ -196,5 +184,5 @@ export function withActionApprovalStatus(
   if (action.type === 'skill_installation') {
     return { ...action, installation: { ...action.installation, approvalStatus } }
   }
-  return { ...action, diff: { ...action.diff, approvalStatus } }
+  return action
 }

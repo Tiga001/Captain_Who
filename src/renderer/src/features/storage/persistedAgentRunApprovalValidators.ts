@@ -34,37 +34,29 @@ export function isToolResult(record: Record<string, unknown>): boolean {
   )
 }
 
-export function isDiff(record: Record<string, unknown>): boolean {
+function isInlineDiff(value: unknown): boolean {
   return (
-    hasExactKeys(record, [
-      'id',
-      'operation',
-      'filePath',
-      'patch',
-      'baseRevision',
-      'summary',
-      'approvalStatus'
-    ]) &&
-    isBoundedString(record.id, 1024) &&
-    (record.operation === 'create' ||
-      record.operation === 'update' ||
-      record.operation === 'delete') &&
-    isBoundedString(record.filePath, 16 * 1024) &&
-    isBoundedString(record.patch, 4 * 1024 * 1024, true) &&
-    (record.baseRevision === null || isBoundedString(record.baseRevision, 1024)) &&
-    (record.summary === null || isBoundedString(record.summary, 16 * 1024, true)) &&
-    isApprovalStatus(record.approvalStatus)
+    value === null ||
+    (isRecord(value) &&
+      hasExactKeys(value, ['patch', 'truncated']) &&
+      isBoundedString(value.patch, 4 * 1024 * 1024, true) &&
+      value.truncated === false)
   )
 }
 
-function isFileWriteProposal(value: unknown): boolean {
+export function isFileChangeProposal(record: Record<string, unknown>): boolean {
+  const operation = record.operation
+  const strategy = record.updateStrategy
+  const inlineDiffIsNull = record.inlineDiff === null
   return (
-    isRecord(value) &&
-    hasExactKeys(value, [
+    hasExactKeys(record, [
+      'schemaVersion',
       'id',
-      'draftId',
-      'mode',
+      'transactionId',
+      'operation',
+      'updateStrategy',
       'filePath',
+      'inlineDiff',
       'baseRevision',
       'summary',
       'additions',
@@ -73,17 +65,26 @@ function isFileWriteProposal(value: unknown): boolean {
       'byteCount',
       'approvalStatus'
     ]) &&
-    isBoundedString(value.id, 1024) &&
-    isBoundedString(value.draftId, 1024) &&
-    ['create', 'rewrite', 'modify', 'append', 'upsert'].includes(value.mode as string) &&
-    isBoundedString(value.filePath, 16 * 1024) &&
-    isNullableBoundedString(value.baseRevision, 1024) &&
-    isNullableBoundedString(value.summary, 16 * 1024, true) &&
-    isSafeInteger(value.additions) &&
-    isSafeInteger(value.deletions) &&
-    isSafeInteger(value.lineCount) &&
-    isSafeInteger(value.byteCount) &&
-    isApprovalStatus(value.approvalStatus)
+    record.schemaVersion === 1 &&
+    isBoundedString(record.id, 1024) &&
+    isBoundedString(record.transactionId, 1024) &&
+    (operation === 'create' || operation === 'update' || operation === 'delete') &&
+    (strategy === null || strategy === 'modify' || strategy === 'rewrite') &&
+    ((operation === 'create' && strategy === null) ||
+      (operation === 'update' && inlineDiffIsNull === (strategy !== null)) ||
+      (operation === 'delete' && strategy === null && !inlineDiffIsNull)) &&
+    isBoundedString(record.filePath, 16 * 1024) &&
+    isInlineDiff(record.inlineDiff) &&
+    (operation !== 'delete' || record.inlineDiff !== null) &&
+    (record.baseRevision === null || isBoundedString(record.baseRevision, 1024)) &&
+    (operation === 'create') === (record.baseRevision === null) &&
+    (record.summary === null || isBoundedString(record.summary, 16 * 1024, true)) &&
+    isSafeInteger(record.additions) &&
+    isSafeInteger(record.deletions) &&
+    isSafeInteger(record.lineCount) &&
+    isSafeInteger(record.byteCount) &&
+    (operation !== 'delete' || (record.lineCount === 0 && record.byteCount === 0)) &&
+    (record.approvalStatus === 'required' || record.approvalStatus === 'approved')
   )
 }
 
@@ -282,10 +283,12 @@ export function isPersistableApproval(record: Record<string, unknown>): boolean 
       return (
         hasExactKeys(record, ['type', 'call']) && isRecord(record.call) && isToolCall(record.call)
       )
-    case 'diff':
-      return hasExactKeys(record, ['type', 'diff']) && isRecord(record.diff) && isDiff(record.diff)
-    case 'file_write':
-      return hasExactKeys(record, ['type', 'fileWrite']) && isFileWriteProposal(record.fileWrite)
+    case 'file_change':
+      return (
+        hasExactKeys(record, ['type', 'fileChange']) &&
+        isRecord(record.fileChange) &&
+        isFileChangeProposal(record.fileChange)
+      )
     case 'command':
       return hasExactKeys(record, ['type', 'command']) && isCommandAction(record.command)
     case 'skill_materialization':
@@ -313,54 +316,68 @@ export function isPersistableApproval(record: Record<string, unknown>): boolean 
 }
 
 export function isFileDraft(record: Record<string, unknown>): boolean {
+  const operation = record.operation
+  const strategy = record.updateStrategy
   return (
-    hasExactKeys(
-      record,
-      [
-        'draftId',
-        'conversationId',
-        'filePath',
-        'mode',
-        'status',
-        'additions',
-        'deletions',
-        'lineCount',
-        'byteCount',
-        'chunkCount',
-        'nextChunkIndex',
-        'statsFinal',
-        'createdAt',
-        'updatedAt'
-      ],
-      ['projectId', 'baseRevision', 'summary']
-    ) &&
-    isBoundedString(record.draftId, 1024) &&
-    isBoundedString(record.conversationId, 1024, true) &&
+    hasExactKeys(record, [
+      'schemaVersion',
+      'transactionId',
+      'conversationId',
+      'projectId',
+      'filePath',
+      'operation',
+      'updateStrategy',
+      'status',
+      'baseRevision',
+      'additions',
+      'deletions',
+      'lineCount',
+      'byteCount',
+      'mutationCount',
+      'nextMutationIndex',
+      'statsFinal',
+      'summary',
+      'createdAt',
+      'updatedAt'
+    ]) &&
+    record.schemaVersion === 1 &&
+    isBoundedString(record.transactionId, 1024) &&
+    isBoundedString(record.conversationId, 1024) &&
+    isNullableBoundedString(record.projectId, 1024) &&
     isBoundedString(record.filePath, 16 * 1024) &&
-    ['create', 'rewrite', 'modify', 'append', 'upsert'].includes(record.mode as string) &&
+    (operation === 'create' || operation === 'update' || operation === 'delete') &&
+    (strategy === null || strategy === 'modify' || strategy === 'rewrite') &&
+    (operation === 'update') === (strategy !== null) &&
     [
       'drafting',
       'ready',
       'waiting_approval',
       'applying',
       'applied',
+      'already_applied',
       'rejected',
       'conflict',
       'failed',
+      'outcome_unknown',
       'aborted',
       'expired'
     ].includes(record.status as string) &&
+    (((record.status === 'drafting' || record.status === 'ready') && record.statsFinal === false) ||
+      (record.status !== 'drafting' && record.status !== 'ready' && record.statsFinal === true)) &&
     isSafeInteger(record.additions) &&
     isSafeInteger(record.deletions) &&
     isSafeInteger(record.lineCount) &&
     isSafeInteger(record.byteCount) &&
-    isSafeInteger(record.chunkCount) &&
-    isSafeInteger(record.nextChunkIndex) &&
+    (operation !== 'delete' || (record.lineCount === 0 && record.byteCount === 0)) &&
+    ((operation === 'create' && record.baseRevision === null) ||
+      (operation !== 'create' && isBoundedString(record.baseRevision, 1024))) &&
+    isSafeInteger(record.mutationCount) &&
+    isSafeInteger(record.nextMutationIndex) &&
+    record.nextMutationIndex === record.mutationCount &&
     typeof record.statsFinal === 'boolean' &&
     isSafeInteger(record.createdAt) &&
     isSafeInteger(record.updatedAt) &&
-    isOptionalBoundedString(record, 'projectId', 1024) &&
-    isOptionalBoundedString(record, 'baseRevision', 1024) &&
-    isOptionalBoundedString(record, 'summary', 16 * 1024, true)
+    (record.updatedAt as number) >= (record.createdAt as number) &&
+    isNullableBoundedString(record.summary, 16 * 1024, true)
   )
 }

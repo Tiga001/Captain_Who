@@ -373,7 +373,7 @@ export function applyAgentEventToChatMessage(
     }
   }
 
-  if (agentEvent.type === 'file_write_preview_updated') {
+  if (agentEvent.type === 'file_change_preview_updated') {
     const receivedAt = Date.now()
     return {
       ...message,
@@ -392,7 +392,7 @@ export function applyAgentEventToChatMessage(
     }
   }
 
-  if (agentEvent.type === 'file_write_preview_cleared') {
+  if (agentEvent.type === 'file_change_preview_cleared') {
     return {
       ...message,
       agentRun: {
@@ -573,7 +573,7 @@ export function applyAgentEventToChatMessage(
       readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
       fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),
       fileWritePreviews:
-        agentEvent.result.tool === 'write_file' || agentEvent.result.tool === 'apply_patch'
+        agentEvent.result.tool === 'apply_patch'
           ? (currentRun.fileWritePreviews ?? []).filter(
               (preview) => preview.toolCallId !== agentEvent.result.callId
             )
@@ -628,7 +628,7 @@ export function applyAgentEventToChatMessage(
     }
   }
 
-  if (agentEvent.type === 'file_draft_updated') {
+  if (agentEvent.type === 'file_change_updated') {
     return {
       ...message,
       status: 'pending',
@@ -637,11 +637,11 @@ export function applyAgentEventToChatMessage(
         status: 'running',
         fileDrafts: upsertById(
           currentRun.fileDrafts ?? [],
-          agentEvent.draft,
-          (draft) => draft.draftId
+          agentEvent.fileChange,
+          (fileChange) => fileChange.transactionId
         ),
         fileWritePreviews: (currentRun.fileWritePreviews ?? []).filter(
-          (preview) => preview.draftId !== agentEvent.draft.draftId
+          (preview) => preview.transactionId !== agentEvent.fileChange.transactionId
         )
       }
     }
@@ -725,11 +725,11 @@ export function applyAgentEventToChatMessage(
     }
   }
 
-  if (agentEvent.type === 'diff') {
-    const call = getActionToolCall({ type: 'diff', diff: agentEvent.diff })
+  if (agentEvent.type === 'file_change_proposed') {
+    const call = getActionToolCall({ type: 'file_change', fileChange: agentEvent.fileChange })
     const runWithDiff = {
       ...currentRun,
-      diffs: upsertById(currentRun.diffs, agentEvent.diff, (diff) => diff.id),
+      diffs: upsertById(currentRun.diffs, agentEvent.fileChange, (fileChange) => fileChange.id),
       toolCalls: call
         ? upsertById(currentRun.toolCalls, call, (candidate) => candidate.id)
         : currentRun.toolCalls

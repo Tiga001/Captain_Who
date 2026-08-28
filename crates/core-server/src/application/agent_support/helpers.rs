@@ -92,16 +92,12 @@ pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
                     command.remove("managedOfficeScript");
                 }
             }
-            if object.get("type").and_then(Value::as_str) == Some("diff") {
-                if let Some(diff) = object.get_mut("diff").and_then(Value::as_object_mut) {
-                    diff.remove("execution");
-                }
-            }
-            if object.get("type").and_then(Value::as_str) == Some("file_write") {
-                if let Some(file_write) = object.get_mut("fileWrite").and_then(Value::as_object_mut)
-                {
-                    file_write.remove("execution");
-                }
+            // `fileChange` is used both by a proposed-action value (`type=file_change`) and by
+            // the standalone `file_change_proposed` event. Do not key this privacy boundary off
+            // either outer discriminator: every Renderer-visible `fileChange` value has the same
+            // public DTO, and `execution` is always Host-only durable recovery authority.
+            if let Some(file_change) = object.get_mut("fileChange").and_then(Value::as_object_mut) {
+                file_change.remove("execution");
             }
             for value in object.values_mut() {
                 redact_renderer_mcp_binding_fields(value);

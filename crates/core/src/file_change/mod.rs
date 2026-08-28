@@ -1,8 +1,7 @@
 //! Canonical single-target text-file mutation primitives.
 //!
-//! This module is deliberately independent from the model-visible `apply_patch` and `write_file`
-//! adapters. During the staged writer consolidation, both adapters can be compared against this
-//! domain model without changing the production tool registry or durable wire formats.
+//! This module is deliberately independent from the model-visible `apply_patch` tool. It defines
+//! the shared domain model used by both Direct and Staged file changes.
 
 mod bound_io;
 mod committer;

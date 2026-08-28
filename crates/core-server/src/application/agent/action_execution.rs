@@ -119,6 +119,22 @@ impl AgentService {
                     cancellation_token,
                 ));
             }
+            if matches!(action, AgentProposedAction::FileChange { .. }) {
+                let Some(checkpoint) = checkpoint else {
+                    return Err(AgentError::structured(
+                        "agent.file_change_auto_checkpoint_missing",
+                        "The automatic FileChange is missing its frozen run checkpoint.",
+                        serde_json::json!({
+                            "type": "file_change",
+                            "code": "autoCheckpointMissing",
+                            "outcome": "definitely_not_executed",
+                            "retryable": false,
+                        }),
+                    ));
+                };
+                refreshed.agent_input =
+                    agent_input_with_run_checkpoint(&refreshed.agent_input, &checkpoint);
+            }
             service
                 .refresh_agent_input_attachment_library(&mut refreshed.agent_input)
                 .map_err(AgentError::new)?;
@@ -140,7 +156,14 @@ impl AgentService {
         let build_input = |tool_result: &AgentToolResult| {
             let mut agent_input = record.agent_input.clone();
             agent_input.approval_decision = Some(AgentApprovalDecision {
-                action_id: record.snapshot.action_id.clone(),
+                action_id: if matches!(
+                    record.snapshot.action,
+                    AgentProposedAction::FileChange { .. }
+                ) {
+                    record.storage_id.clone()
+                } else {
+                    record.snapshot.action_id.clone()
+                },
                 status: AgentApprovalDecisionStatus::Approved,
                 message: None,
             });
@@ -533,7 +556,7 @@ impl AgentService {
             return Err(error);
         }
         match action {
-            AgentProposedAction::Diff { diff } => {
+            AgentProposedAction::FileChange { file_change } => {
                 let deletion_lifecycle = self
                     .deletion_lifecycle
                     .lock()
@@ -542,141 +565,90 @@ impl AgentService {
                     return Err(AgentError::cancelled());
                 }
                 cancellation_token.check()?;
-                let action_id = diff.id.clone();
-                let prepared_action = AgentProposedAction::Diff { diff: diff.clone() };
-                match self.claim_auto_action_execution_audit(
-                    &run_id,
-                    conversation_id.as_deref(),
-                    assistant_message_id.as_deref(),
-                    &agent_input,
-                    &prepared_action,
-                    created_at,
-                ) {
-                    Ok(outcome) => {
-                        if let Some(result) = resolve_file_effect_claim_outcome(
-                            &action_id,
-                            "apply_patch",
-                            "direct_file_change",
-                            outcome,
-                        )? {
-                            return Ok(result);
-                        }
-                    }
-                    Err(error) => {
-                        return Ok(file_effect_audit_persistence_failure(
-                            &action_id,
-                            "apply_patch",
-                            "direct_file_change",
-                            "beforeExecution",
-                            &error,
-                            None,
-                        ));
-                    }
+                let action_id = file_change.id.clone();
+                let prepared_action = AgentProposedAction::FileChange {
+                    file_change: file_change.clone(),
+                };
+                let (Some(conversation_id), Some(assistant_message_id)) =
+                    (conversation_id.as_deref(), assistant_message_id.as_deref())
+                else {
+                    return Err(AgentError::structured(
+                        "agent.file_change_auto_owner_missing",
+                        "The automatic FileChange is missing its durable conversation owner.",
+                        serde_json::json!({
+                            "type": "file_change",
+                            "code": "ownerMissing",
+                            "outcome": "definitely_not_executed",
+                            "retryable": false,
+                        }),
+                    ));
+                };
+                let mut pending = self
+                    .prepare_auto_file_change_action_journal_under_deletion_guard(
+                        &run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        prepared_action,
+                        agent_input.clone(),
+                        &deletion_lifecycle,
+                    )
+                    .map_err(|error| {
+                        eprintln!("automatic FileChange journal preparation failed: {error}");
+                        AgentError::structured(
+                            "agent.file_change_auto_journal_failed",
+                            "The automatic FileChange could not persist its frozen recovery journal.",
+                            serde_json::json!({
+                                "type": "file_change",
+                                "code": "journalUnavailable",
+                                "outcome": "definitely_not_executed",
+                                "retryable": false,
+                            }),
+                        )
+                    })?;
+                if !self
+                    .claim_auto_file_change_dispatch(&mut pending)
+                    .map_err(|_| direct_file_change_recovery_pending(&action_id))?
+                {
+                    return Err(direct_file_change_recovery_pending(&action_id));
                 }
-                let mut execution = prepare_approved_patch_execution_for_input(
-                    &agent_input,
-                    &run_id,
-                    &action_id,
-                    &diff,
+                let call = tool_call_for_pending_record(&pending)
+                    .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
+                let mut execution = action_execution_for_decision(
+                    &self.storage,
+                    &pending,
+                    &call,
+                    AgentApprovalDecisionStatus::Approved,
+                    None,
                 );
                 if direct_file_change_outcome_unknown(&execution) {
                     return Err(direct_file_change_recovery_pending(&action_id));
                 }
-                let has_committed_receipt = execution.committed_file_change_action.is_some();
-                let mut committed_action = execution
-                    .committed_file_change_action
-                    .take()
-                    .unwrap_or_else(|| prepared_action.clone());
-                if has_committed_receipt {
-                    if let Err(error) = self.commit_automatic_direct_file_change_action(
-                        &run_id,
-                        conversation_id.as_deref(),
-                        assistant_message_id.as_deref(),
-                        &agent_input,
-                        &prepared_action,
-                        &committed_action,
-                        created_at,
-                    ) {
-                        eprintln!(
-                            "failed to persist a Direct FileChange commit receipt; recovery remains pending: {error}"
-                        );
-                        return Err(direct_file_change_recovery_pending(&action_id));
-                    }
+                if let Some(committed_action) = execution.committed_file_change_action.take() {
+                    self.commit_pending_file_change_action(&mut pending, committed_action)
+                        .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
                 }
                 if let Some(finalization) = execution.direct_file_change_finalization.take() {
                     let finalized_action = match finalize_direct_file_change_action(
-                        &committed_action,
+                        &pending.snapshot.action,
                         finalization,
                     ) {
                         Ok(action) => action,
-                        Err(error) => {
-                            eprintln!(
-                                "failed to finalize a Direct delete before its terminal audit; recovery remains pending: {error}"
-                            );
+                        Err(_) => {
                             return Err(direct_file_change_recovery_pending(&action_id));
                         }
                     };
-                    if let Err(error) = self.commit_automatic_direct_file_change_action(
-                        &run_id,
-                        conversation_id.as_deref(),
-                        assistant_message_id.as_deref(),
-                        &agent_input,
-                        &committed_action,
-                        &finalized_action,
-                        created_at,
-                    ) {
-                        eprintln!(
-                            "failed to persist a finalized Direct delete receipt; recovery remains pending: {error}"
-                        );
-                        return Err(direct_file_change_recovery_pending(&action_id));
-                    }
-                    committed_action = finalized_action;
+                    self.commit_pending_file_change_action(&mut pending, finalized_action)
+                        .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
                 }
-                record_turn_file_change_best_effort(
-                    &self.storage,
-                    &agent_input,
-                    &run_id,
-                    conversation_id.as_deref(),
-                    assistant_message_id.as_deref(),
-                    &action_id,
-                    execution.file_change.as_ref(),
-                );
-                if let Err(error) = self.finalize_auto_action_execution_audit(
-                    &run_id,
-                    conversation_id.as_deref(),
-                    assistant_message_id.as_deref(),
-                    &agent_input,
-                    &committed_action,
-                    pending_status_label(execution.final_pending_status),
-                    None,
-                    &execution.tool_result,
-                    execution.tool_result.error.as_deref(),
-                    created_at,
-                    now_ms(),
-                ) {
-                    eprintln!(
-                        "failed to observe a Direct FileChange terminal audit; reconciling the durable receipt: {error}"
-                    );
-                    let reconciliation = self
-                        .inspect_auto_action_execution_audit(
-                            &run_id,
-                            conversation_id.as_deref(),
-                            assistant_message_id.as_deref(),
-                            &agent_input,
-                            &committed_action,
-                            created_at,
-                        )
-                        .ok()
-                        .and_then(|outcome| {
-                            reconcile_file_effect_audit_outcome(&action_id, "apply_patch", outcome)
-                                .ok()
-                        });
-                    if let Some(FileEffectAuditReconciliation::Terminal(persisted)) = reconciliation
-                    {
-                        return Ok(persisted);
-                    }
-                    return Err(direct_file_change_recovery_pending(&action_id));
-                }
+                let (fallback_notifications, _fallback_receiver) =
+                    tokio::sync::mpsc::unbounded_channel();
+                let notifications = notifications.as_ref().unwrap_or(&fallback_notifications);
+                self.finalize_auto_file_change_action_journal(
+                    &mut pending,
+                    &execution,
+                    notifications,
+                )
+                .map_err(|_| direct_file_change_recovery_pending(&action_id))?;
                 drop(deletion_lifecycle);
                 Ok(execution.tool_result)
             }
@@ -1061,127 +1033,6 @@ impl AgentService {
                     guard.mark_durably_settled();
                 }
                 Ok(tool_result)
-            }
-            AgentProposedAction::FileWrite { file_write } => {
-                let deletion_lifecycle = self
-                    .deletion_lifecycle
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if deletion_lifecycle.contains_input(&agent_input) {
-                    return Err(AgentError::cancelled());
-                }
-                cancellation_token.check()?;
-                let action_id = file_write.id.clone();
-                let tool_name = file_write.execution.source_tool_name.clone();
-                let prepared_action = AgentProposedAction::FileWrite {
-                    file_write: file_write.clone(),
-                };
-                match self.claim_auto_action_execution_audit(
-                    &run_id,
-                    conversation_id.as_deref(),
-                    assistant_message_id.as_deref(),
-                    &agent_input,
-                    &prepared_action,
-                    created_at,
-                ) {
-                    Ok(outcome) => {
-                        if let Some(result) = resolve_file_effect_claim_outcome(
-                            &action_id,
-                            &tool_name,
-                            "staged_file_change",
-                            outcome,
-                        )? {
-                            return Ok(result);
-                        }
-                    }
-                    Err(error) => {
-                        return Ok(file_effect_audit_persistence_failure(
-                            &action_id,
-                            &tool_name,
-                            "staged_file_change",
-                            "beforeExecution",
-                            &error,
-                            None,
-                        ));
-                    }
-                }
-                let mut execution = approved_file_write_execution(
-                    &self.storage,
-                    &agent_input,
-                    &run_id,
-                    &file_write,
-                );
-                if direct_file_change_outcome_unknown(&execution) {
-                    return Err(direct_file_change_recovery_pending(&action_id));
-                }
-                let has_committed_receipt = execution.committed_file_change_action.is_some();
-                let committed_action = execution
-                    .committed_file_change_action
-                    .take()
-                    .unwrap_or_else(|| prepared_action.clone());
-                if has_committed_receipt {
-                    if let Err(error) = self.commit_automatic_direct_file_change_action(
-                        &run_id,
-                        conversation_id.as_deref(),
-                        assistant_message_id.as_deref(),
-                        &agent_input,
-                        &prepared_action,
-                        &committed_action,
-                        created_at,
-                    ) {
-                        eprintln!(
-                            "failed to persist a Staged FileChange commit receipt; recovery remains pending: {error}"
-                        );
-                        return Err(direct_file_change_recovery_pending(&action_id));
-                    }
-                }
-                record_turn_file_change_best_effort(
-                    &self.storage,
-                    &agent_input,
-                    &run_id,
-                    conversation_id.as_deref(),
-                    assistant_message_id.as_deref(),
-                    &file_write.id,
-                    execution.file_change.as_ref(),
-                );
-                if let Err(error) = self.finalize_auto_action_execution_audit(
-                    &run_id,
-                    conversation_id.as_deref(),
-                    assistant_message_id.as_deref(),
-                    &agent_input,
-                    &committed_action,
-                    pending_status_label(execution.final_pending_status),
-                    None,
-                    &execution.tool_result,
-                    execution.tool_result.error.as_deref(),
-                    created_at,
-                    now_ms(),
-                ) {
-                    eprintln!(
-                        "failed to observe a Staged FileChange terminal audit; reconciling the durable receipt: {error}"
-                    );
-                    let reconciliation = self
-                        .inspect_auto_action_execution_audit(
-                            &run_id,
-                            conversation_id.as_deref(),
-                            assistant_message_id.as_deref(),
-                            &agent_input,
-                            &committed_action,
-                            created_at,
-                        )
-                        .ok()
-                        .and_then(|outcome| {
-                            reconcile_file_effect_audit_outcome(&action_id, &tool_name, outcome)
-                                .ok()
-                        });
-                    if let Some(FileEffectAuditReconciliation::Terminal(persisted)) = reconciliation
-                    {
-                        return Ok(persisted);
-                    }
-                    return Err(direct_file_change_recovery_pending(&action_id));
-                }
-                drop(deletion_lifecycle);
-                Ok(execution.tool_result)
             }
             AgentProposedAction::ToolCall { call } => Ok(AgentToolResult {
                 exact_archive_file: None,
@@ -1682,17 +1533,20 @@ impl AgentService {
     }
 }
 
-pub(super) fn cancelled_file_write_outcome_is_durable_or_unknown(
+pub(super) fn cancelled_staged_file_change_outcome_is_durable_or_unknown(
     storage: &StorageService,
     record: &PendingActionRecord,
 ) -> bool {
-    let AgentProposedAction::FileWrite { file_write } = &record.snapshot.action else {
+    let AgentProposedAction::FileChange { file_change } = &record.snapshot.action else {
         return false;
     };
-    match storage.get_agent_file_change(&file_write.draft_id) {
-        Ok(Some(draft)) => draft.status == "rejected",
+    let Some(transaction_id) = file_change.execution.staged_transaction_id.as_deref() else {
+        return false;
+    };
+    match storage.get_agent_file_change(transaction_id) {
+        Ok(Some(draft)) => draft.status == "aborted",
         Ok(None) => false,
-        // A storage read failure makes rollback unsafe: the rejection write may have committed.
+        // A storage read failure makes rollback unsafe: the abort write may have committed.
         Err(_) => true,
     }
 }

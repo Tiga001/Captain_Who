@@ -147,8 +147,8 @@ pub struct FileChangeDirectBinding {
     pub source_call_id: String,
     pub source_args_digest: String,
     /// Required-nullable reference to the canonical persistent Staged transaction. Direct
-    /// `action=apply` carries `null`; Staged commit and the temporary `write_file` adapter carry
-    /// the exact transaction id so approval settlement cannot target another draft.
+    /// `action=apply` carries `null`; Staged commit carries the exact transaction id so approval
+    /// settlement cannot target another draft.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub staged_transaction_id: Option<String>,
     pub conversation_id: String,
@@ -185,7 +185,7 @@ impl FileChangeDirectBinding {
     pub fn validate(&self) -> FileChangeResultValue<()> {
         if self.schema_version != FILE_CHANGE_SCHEMA_VERSION
             || self.observation_id.trim().is_empty()
-            || !matches!(self.source_tool_name.as_str(), "apply_patch" | "write_file")
+            || self.source_tool_name != "apply_patch"
             || self.source_call_id.trim().is_empty()
             || !valid_digest(&self.source_args_digest)
             || self.conversation_id.trim().is_empty()

@@ -1,6 +1,6 @@
 import type {
   AgentApprovalStatus,
-  AgentFileDraftStatus,
+  AgentFileChangeStatus,
   AgentProposedAction,
   AgentToolCall,
   AgentToolResult
@@ -41,10 +41,10 @@ export function updateDiffApprovalStatus(
   action: AgentProposedAction,
   approvalStatus: AgentApprovalStatus
 ) {
-  if (action.type !== 'diff') return diffs
+  if (action.type !== 'file_change') return diffs
   return upsertById(
-    diffs.map((diff) => (diff.id === action.diff.id ? { ...diff, approvalStatus } : diff)),
-    { ...action.diff, approvalStatus },
+    diffs.map((diff) => (diff.id === action.fileChange.id ? { ...diff, approvalStatus } : diff)),
+    { ...action.fileChange, approvalStatus },
     (diff) => diff.id
   )
 }
@@ -54,37 +54,41 @@ export function updateFileDraftApprovalStatus(
   action: AgentProposedAction,
   approvalStatus: AgentApprovalStatus
 ) {
-  if (action.type !== 'file_write') return fileDrafts
-  const status: AgentFileDraftStatus =
+  if (action.type !== 'file_change' || action.fileChange.inlineDiff !== null) return fileDrafts
+  const fileChange = action.fileChange
+  const status: AgentFileChangeStatus =
     approvalStatus === 'required'
       ? 'waiting_approval'
       : approvalStatus === 'rejected'
         ? 'rejected'
         : 'applying'
   const updated = fileDrafts.map((draft) =>
-    draft.draftId === action.fileWrite.draftId
+    draft.transactionId === fileChange.transactionId
       ? { ...draft, status, statsFinal: true, updatedAt: Date.now() }
       : draft
   )
-  if (updated.some((draft) => draft.draftId === action.fileWrite.draftId)) return updated
+  if (updated.some((draft) => draft.transactionId === fileChange.transactionId)) return updated
   const now = Date.now()
   return [
     ...updated,
     {
-      draftId: action.fileWrite.draftId,
+      schemaVersion: 1 as const,
+      transactionId: fileChange.transactionId,
       conversationId: '',
-      filePath: action.fileWrite.filePath,
-      mode: action.fileWrite.mode,
+      projectId: null,
+      filePath: fileChange.filePath,
+      operation: fileChange.operation,
+      updateStrategy: fileChange.updateStrategy,
       status,
-      baseRevision: action.fileWrite.baseRevision ?? undefined,
-      additions: action.fileWrite.additions,
-      deletions: action.fileWrite.deletions,
-      lineCount: action.fileWrite.lineCount,
-      byteCount: action.fileWrite.byteCount,
-      chunkCount: 0,
-      nextChunkIndex: 0,
+      baseRevision: fileChange.baseRevision,
+      additions: fileChange.additions,
+      deletions: fileChange.deletions,
+      lineCount: fileChange.lineCount,
+      byteCount: fileChange.byteCount,
+      mutationCount: 0,
+      nextMutationIndex: 0,
       statsFinal: true,
-      summary: action.fileWrite.summary ?? undefined,
+      summary: fileChange.summary,
       createdAt: now,
       updatedAt: now
     }
@@ -95,16 +99,16 @@ export function updateFileDraftFromToolResult(
   fileDrafts: NonNullable<ChatAgentRunView['fileDrafts']>,
   result: AgentToolResult
 ) {
-  if (result.tool !== 'write_file' || !result.result || typeof result.result !== 'object') {
+  if (result.tool !== 'apply_patch' || !result.result || typeof result.result !== 'object') {
     return fileDrafts
   }
   const value = result.result as Record<string, unknown>
-  const draftId = typeof value.draftId === 'string' ? value.draftId : ''
-  if (!draftId) return fileDrafts
+  const transactionId = typeof value.transactionId === 'string' ? value.transactionId : ''
+  if (!transactionId) return fileDrafts
   return fileDrafts.map((draft) => {
-    if (draft.draftId !== draftId) return draft
+    if (draft.transactionId !== transactionId) return draft
     const resultStatus = value.status
-    const status: AgentFileDraftStatus =
+    const status: AgentFileChangeStatus =
       resultStatus === 'applied' || resultStatus === 'already_applied'
         ? 'applied'
         : resultStatus === 'conflict'
@@ -136,17 +140,28 @@ export function createRejectedToolResult(
   const call = getActionToolCall(action)
   if (!call) return null
 
-  if (action.type === 'diff') {
+  if (action.type === 'file_change') {
+    const fileChange = action.fileChange
     return {
       callId: call.id,
       tool: 'apply_patch',
       ok: true,
       result: {
+        schemaVersion: 1,
         status: 'rejected',
-        operation: action.diff.operation,
-        filePath: action.diff.filePath,
-        appliedFilePaths: [],
-        message
+        outcome: 'definitely_not_executed',
+        transactionId: fileChange.transactionId,
+        operation: fileChange.operation,
+        updateStrategy: fileChange.updateStrategy,
+        filePath: fileChange.filePath,
+        additions: fileChange.additions,
+        deletions: fileChange.deletions,
+        lineCount: fileChange.lineCount,
+        byteCount: fileChange.byteCount,
+        revision: null,
+        errorCode: 'rejected',
+        error: null,
+        message: message ?? '文件修改已拒绝。'
       }
     }
   }

@@ -263,7 +263,7 @@ fn restorable_checkpoint_fixture_for_pending_tool(
 }
 
 fn restorable_checkpoint_fixture() -> (AgentRunCheckpoint, AgentToolContinuation) {
-    restorable_checkpoint_fixture_for_pending_tool("write_file")
+    restorable_checkpoint_fixture_for_pending_tool("apply_patch")
 }
 
 struct NeverCollaborationExecutor;

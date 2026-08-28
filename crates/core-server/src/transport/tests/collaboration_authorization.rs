@@ -59,7 +59,7 @@ fn draft(id: &str, conversation_id: &str) -> AgentFileChangeRecord {
         conversation_id: conversation_id.to_string(),
         project_id: Some("project-a".to_string()),
         run_id: format!("run-{id}"),
-        source_tool_name: "write_file".to_string(),
+        source_tool_name: "apply_patch".to_string(),
         source_tool_call_id: format!("call-{id}"),
         source_tool_arguments_digest: format!("digest-{id}"),
         permission_revision: "permission-1".to_string(),
@@ -81,9 +81,13 @@ fn draft(id: &str, conversation_id: &str) -> AgentFileChangeRecord {
         line_count: 1,
         byte_count: 21,
         mutation_count: 0,
-        stats_final: true,
+        stats_final: false,
         summary: None,
         final_action_id: None,
+        final_action_arguments_digest: None,
+        final_permission_revision: None,
+        final_tool_set_revision: None,
+        final_provider_wire_revision: None,
         created_at: 1,
         updated_at: 1,
         expires_at: i64::MAX,
@@ -363,12 +367,12 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
             }),
         ),
         (
-            AGENT_READ_FILE_DRAFT_METHOD,
-            serde_json::json!({ "draftId": "draft-child" }),
+            AGENT_READ_FILE_CHANGE_METHOD,
+            serde_json::json!({ "transactionId": "draft-child" }),
         ),
         (
-            AGENT_GET_FILE_WRITE_DIFF_METHOD,
-            serde_json::json!({ "draftId": "draft-child" }),
+            AGENT_GET_FILE_CHANGE_DIFF_METHOD,
+            serde_json::json!({ "transactionId": "draft-child" }),
         ),
         (
             STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
@@ -414,15 +418,15 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
     );
 
     for method in [
-        AGENT_READ_FILE_DRAFT_METHOD,
-        AGENT_GET_FILE_WRITE_DIFF_METHOD,
+        AGENT_READ_FILE_CHANGE_METHOD,
+        AGENT_GET_FILE_CHANGE_DIFF_METHOD,
     ] {
         let exact_observer = request(
             &storage,
             &service,
             method,
             serde_json::json!({
-                "draftId": "draft-child",
+                "transactionId": "draft-child",
                 "observerRootConversationId": "conversation-root"
             }),
         );
@@ -436,7 +440,7 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
             &service,
             method,
             serde_json::json!({
-                "draftId": "draft-child",
+                "transactionId": "draft-child",
                 "observerRootConversationId": "conversation-legacy"
             }),
         );
@@ -485,18 +489,47 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
         let content = request(
             &storage,
             &service,
-            AGENT_READ_FILE_DRAFT_METHOD,
-            serde_json::json!({ "draftId": draft_id }),
+            AGENT_READ_FILE_CHANGE_METHOD,
+            serde_json::json!({ "transactionId": draft_id }),
         );
         assert_eq!(content["result"]["content"], "durable draft content");
 
         let diff = request(
             &storage,
             &service,
-            AGENT_GET_FILE_WRITE_DIFF_METHOD,
-            serde_json::json!({ "draftId": draft_id }),
+            AGENT_GET_FILE_CHANGE_DIFF_METHOD,
+            serde_json::json!({ "transactionId": draft_id }),
         );
         assert!(diff["result"]["patch"].as_str().is_some());
+    }
+
+    for method in [
+        AGENT_READ_FILE_CHANGE_METHOD,
+        AGENT_GET_FILE_CHANGE_DIFF_METHOD,
+    ] {
+        let old_shape = request(
+            &storage,
+            &service,
+            method,
+            serde_json::json!({ "draftId": "draft-root" }),
+        );
+        assert!(
+            old_shape.get("error").is_some(),
+            "old draftId RPC shape must fail closed for {method}"
+        );
+        let extra = request(
+            &storage,
+            &service,
+            method,
+            serde_json::json!({
+                "transactionId": "draft-root",
+                "draftId": "draft-root"
+            }),
+        );
+        assert!(
+            extra.get("error").is_some(),
+            "extra legacy RPC field must fail closed for {method}"
+        );
     }
 
     for attachment_id in ["attachment-root", "attachment-legacy"] {

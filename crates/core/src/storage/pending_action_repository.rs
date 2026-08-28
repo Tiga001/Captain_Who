@@ -647,13 +647,13 @@ mod tests {
     use super::*;
     use crate::storage::migrations;
 
-    fn executing_diff(action_id: &str, action_json: &str) -> AgentPendingActionRecord {
+    fn executing_file_change(action_id: &str, action_json: &str) -> AgentPendingActionRecord {
         AgentPendingActionRecord {
             action_id: action_id.to_string(),
             run_id: "run-1".to_string(),
             conversation_id: Some("conversation-1".to_string()),
             assistant_message_id: Some("message-1".to_string()),
-            action_type: "diff".to_string(),
+            action_type: "file_change".to_string(),
             tool_name: "apply_patch".to_string(),
             tool_call_id: Some(action_id.to_string()),
             status: "executing".to_string(),
@@ -666,12 +666,12 @@ mod tests {
     }
 
     #[test]
-    fn executing_diff_action_json_commit_is_exact_and_idempotent() {
-        const PREPARED: &str = r#"{"type":"diff","credential":"prepared"}"#;
-        const COMMITTED: &str = r#"{"type":"diff","credential":"committed"}"#;
+    fn executing_file_change_action_json_commit_is_exact_and_idempotent() {
+        const PREPARED: &str = r#"{"type":"file_change","credential":"prepared"}"#;
+        const COMMITTED: &str = r#"{"type":"file_change","credential":"committed"}"#;
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
-        let expected = executing_diff("manual-diff", PREPARED);
+        let expected = executing_file_change("manual-file-change", PREPARED);
         assert_eq!(
             store_pending_action(&connection, &expected).unwrap(),
             PendingActionStoreOutcome::Inserted
@@ -691,13 +691,13 @@ mod tests {
         assert_eq!(committed.action_json, COMMITTED);
         assert_eq!(committed.updated_at, 30);
 
-        let stale = executing_diff("stale-manual-diff", PREPARED);
+        let stale = executing_file_change("stale-manual-file-change", PREPARED);
         store_pending_action(&connection, &stale).unwrap();
         assert_eq!(
             commit_executing_action_json(
                 &connection,
                 &stale,
-                r#"{"type":"diff","credential":"older"}"#,
+                r#"{"type":"file_change","credential":"older"}"#,
                 COMMITTED,
                 30,
             )
@@ -712,7 +712,7 @@ mod tests {
             PREPARED
         );
 
-        let mut targeted = executing_diff("targeted-manual-diff", PREPARED);
+        let mut targeted = executing_file_change("targeted-manual-file-change", PREPARED);
         targeted.target_status = Some("completed".to_string());
         store_pending_action(&connection, &targeted).unwrap();
         let mut untargeted_identity = targeted.clone();
@@ -732,7 +732,7 @@ mod tests {
             }
         );
 
-        let mut pending = executing_diff("not-executing-manual-diff", PREPARED);
+        let mut pending = executing_file_change("not-executing-manual-file-change", PREPARED);
         pending.status = "approved".to_string();
         store_pending_action(&connection, &pending).unwrap();
         let mut executing_identity = pending.clone();
@@ -779,7 +779,7 @@ mod tests {
             run_id: "run-1".to_string(),
             conversation_id: Some("conversation-1".to_string()),
             assistant_message_id: Some("message-1".to_string()),
-            action_type: "diff".to_string(),
+            action_type: "file_change".to_string(),
             tool_name: "apply_patch".to_string(),
             tool_call_id: Some("action-1".to_string()),
             status: "pending".to_string(),

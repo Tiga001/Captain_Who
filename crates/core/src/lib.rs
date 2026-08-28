@@ -224,6 +224,12 @@ pub fn validate_frozen_agent_command_args(
     tools::validate_frozen_command_trace_args(frozen, operation)
 }
 
+/// Canonical durable identity for one pending action owned by an exact Run and Tool Call.
+/// Length framing prevents ambiguous identities when either component contains `:`.
+pub fn canonical_pending_action_id(run_id: &str, source_call_id: &str) -> String {
+    format!("v2:{}:{run_id}:{source_call_id}", run_id.len())
+}
+
 pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAssistantTurnCheckpointIdentity,
@@ -246,22 +252,23 @@ pub use protocol::{
     AgentCommandSessionStatus, AgentCommandSessionTranscript, AgentContextCheckpointGroup,
     AgentContextCheckpointImage, AgentContextCheckpointItem, AgentContextCheckpointOrigin,
     AgentContextCheckpointToolCall, AgentContextWindowSnapshot, AgentContextWindowStatus,
-    AgentDiffProposal, AgentError, AgentEvent, AgentExtensionSnapshot, AgentFileDraftSnapshot,
-    AgentFileDraftStatus, AgentFileInputBinding, AgentFileInputEvidence, AgentFileInputRef,
-    AgentFileInputSourceKind, AgentFileInputSpec, AgentFileWriteMode, AgentFileWriteProposal,
-    AgentFileWriteResult, AgentFileWriteResultStatus, AgentGitDiffSnapshot, AgentGuidanceStatus,
-    AgentImageGenerationArtifact, AgentImageGenerationArtifactKind, AgentImageGenerationAudit,
-    AgentImageGenerationFailure, AgentImageGenerationOperation, AgentImageGenerationResult,
-    AgentImageGenerationResultStatus, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentMcpApprovalMode, AgentMcpApprovalPayloadPersistence,
-    AgentMcpArgumentSummary, AgentMcpDispatchCertainty, AgentMcpInvocationDiagnostics,
-    AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary, AgentMcpServerScope,
-    AgentMcpToolApproval, AgentMcpToolApprovalSummary, AgentMcpToolInvocationEvent,
-    AgentMcpToolInvocationIdentity, AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState,
-    AgentMcpToolProvenance, AgentMcpToolRisk, AgentModelRequestInterruptionReason,
-    AgentOfficeOperationRequest, AgentPatchOperation, AgentPatchPermission, AgentPatchResult,
-    AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
-    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentProviderToolCallIdentity,
+    AgentError, AgentEvent, AgentExtensionSnapshot, AgentFileChangeOperation,
+    AgentFileChangeOutcome, AgentFileChangePreview, AgentFileChangeProposal, AgentFileChangeResult,
+    AgentFileChangeResultStatus, AgentFileChangeSnapshot, AgentFileChangeStatus,
+    AgentFileChangeUpdateStrategy, AgentFileInputBinding, AgentFileInputEvidence,
+    AgentFileInputRef, AgentFileInputSourceKind, AgentFileInputSpec, AgentGitDiffSnapshot,
+    AgentGuidanceStatus, AgentImageGenerationArtifact, AgentImageGenerationArtifactKind,
+    AgentImageGenerationAudit, AgentImageGenerationFailure, AgentImageGenerationOperation,
+    AgentImageGenerationResult, AgentImageGenerationResultStatus, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentMcpApprovalMode,
+    AgentMcpApprovalPayloadPersistence, AgentMcpArgumentSummary, AgentMcpDispatchCertainty,
+    AgentMcpInvocationDiagnostics, AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary,
+    AgentMcpServerScope, AgentMcpToolApproval, AgentMcpToolApprovalSummary,
+    AgentMcpToolInvocationEvent, AgentMcpToolInvocationIdentity, AgentMcpToolInvocationOutcome,
+    AgentMcpToolInvocationState, AgentMcpToolProvenance, AgentMcpToolRisk,
+    AgentModelRequestInterruptionReason, AgentOfficeOperationRequest, AgentPatchPermission,
+    AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone,
+    AgentPromptWorkMode, AgentProposedAction, AgentProviderToolCallIdentity,
     AgentQueuedToolCallCheckpoint, AgentReadPermission, AgentResult, AgentRunCheckpoint,
     AgentRunContext, AgentRunStatus, AgentRunToolSetCheckpoint, AgentSearchConfig, AgentSearchMode,
     AgentSkillActivation, AgentSkillDependencyCheck, AgentSkillDependencyKind,
@@ -281,12 +288,13 @@ pub use protocol::{
     BuiltinMcpToolApprovalIdentity, BuiltinMcpToolResourceSummary, BuiltinMcpToolRiskKind,
     ModelCapabilities, ProviderContinuationRef, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
-    AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
-    AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
-    AGENT_OFFICE_REASON_MAX_CHARS, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-    AGENT_SKILL_INSTALLATION_SCHEMA_VERSION, BROWSER_RISK_APPROVAL_SCHEMA_VERSION,
-    BROWSER_RISK_APPROVAL_TTL_SECONDS, BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION,
-    BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS, PROVIDER_CONTINUATION_REF_VERSION,
+    AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+    AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION, AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
+    AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
+    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION, AGENT_SKILL_INSTALLATION_SCHEMA_VERSION,
+    BROWSER_RISK_APPROVAL_SCHEMA_VERSION, BROWSER_RISK_APPROVAL_TTL_SECONDS,
+    BUILTIN_MCP_TOOL_APPROVAL_SCHEMA_VERSION, BUILTIN_MCP_TOOL_APPROVAL_TTL_SECONDS,
+    PROVIDER_CONTINUATION_REF_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{

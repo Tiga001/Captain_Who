@@ -108,56 +108,6 @@ pub(super) struct FileObservationRegistryView<'a> {
 }
 
 impl FileObservationRegistryView<'_> {
-    /// Temporary bridge for the published `write_file` entry while it delegates to the canonical
-    /// FileChange store. The Host performs the same descriptor-bound read, but records a distinct
-    /// synthetic read identity so the write Tool Call cannot claim an observation it allegedly
-    /// produced itself. This bridge is removed with the public legacy entry in round 4.
-    pub(super) fn issue_existing_for_write_file_bridge(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-        canonical_target: &Path,
-        revision: &str,
-        metadata: &Metadata,
-        parent_metadata: &Metadata,
-    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
-        self.validate_owner(conversation_id, run_id)?;
-        let call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
-            crate::file_change::FileChangeError::new(
-                crate::file_change::FileChangeErrorCode::InvalidArguments,
-            )
-        })?;
-        let source_call_id = format!("write-file-host-read:{call_id}");
-        self.context.file_observations.issue_existing_from_read(
-            crate::file_change::FileObservationOwner::new(&source_call_id, conversation_id, run_id),
-            canonical_target,
-            revision,
-            metadata,
-            parent_metadata,
-        )
-    }
-
-    pub(super) fn issue_missing_for_write_file_bridge(
-        &self,
-        conversation_id: &str,
-        run_id: &str,
-        canonical_target: &Path,
-        parent_metadata: &Metadata,
-    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
-        self.validate_owner(conversation_id, run_id)?;
-        let call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
-            crate::file_change::FileChangeError::new(
-                crate::file_change::FileChangeErrorCode::InvalidArguments,
-            )
-        })?;
-        let source_call_id = format!("write-file-host-read:{call_id}");
-        self.context.file_observations.issue_missing_from_read(
-            crate::file_change::FileObservationOwner::new(&source_call_id, conversation_id, run_id),
-            canonical_target,
-            parent_metadata,
-        )
-    }
-
     pub(super) fn issue_existing(
         &self,
         conversation_id: &str,

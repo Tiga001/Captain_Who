@@ -34,7 +34,7 @@
       "builderTemplate": "templates/builder.py",
       "editorTemplate": "templates/editor.py",
       "editingReference": "references/editing-existing.md",
-      "editTools": ["apply_patch", "write_file"],
+      "editTools": ["apply_patch"],
       "executionTool": "run_command",
       "runtimeProfile": "spreadsheets",
       "runtimeProfileBinding": "host_from_materialized_script_receipt",

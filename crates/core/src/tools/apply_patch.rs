@@ -12,9 +12,10 @@ use crate::file_change::{
     FILE_CHANGE_SCHEMA_VERSION,
 };
 use crate::protocol::{
-    AgentApprovalStatus, AgentDiffProposal, AgentError, AgentPatchOperation, AgentProposedAction,
-    AgentResult, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety,
-    AgentWritePermission,
+    AgentApprovalStatus, AgentError, AgentFileChangeOperation, AgentFileChangeProposal,
+    AgentGitDiffSnapshot, AgentProposedAction, AgentResult, AgentToolCall, AgentToolDefinition,
+    AgentToolResult, AgentToolSafety, AgentWritePermission,
+    AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
 };
 use crate::revision::content_revision;
 use serde::Deserialize;
@@ -127,15 +128,15 @@ impl AgentTool for ApplyPatchTool {
     ) -> AgentResult<AgentProposedAction> {
         validate_wire_shape(&call.args).map_err(file_change_agent_error)?;
         match parse_args(call.args.clone())? {
-            args @ ApplyPatchArgs::Apply { .. } => Ok(AgentProposedAction::Diff {
-                diff: direct_proposal_from_args(context, call, args)?,
+            args @ ApplyPatchArgs::Apply { .. } => Ok(AgentProposedAction::FileChange {
+                file_change: direct_proposal_from_args(context, call, args)?,
             }),
             ApplyPatchArgs::Commit {
                 transaction_id,
                 expected_draft_revision,
                 summary,
-            } => Ok(AgentProposedAction::FileWrite {
-                file_write: file_change_staged::commit(
+            } => Ok(AgentProposedAction::FileChange {
+                file_change: file_change_staged::commit(
                     context,
                     call,
                     "apply_patch",
@@ -356,7 +357,7 @@ fn parse_args(value: Value) -> AgentResult<ApplyPatchArgs> {
 fn direct_proposal_from_call(
     context: &ToolExecutionContext,
     call: &AgentToolCall,
-) -> AgentResult<AgentDiffProposal> {
+) -> AgentResult<AgentFileChangeProposal> {
     validate_wire_shape(&call.args).map_err(file_change_agent_error)?;
     let args = parse_args(call.args.clone())?;
     direct_proposal_from_args(context, call, args)
@@ -366,7 +367,7 @@ fn direct_proposal_from_args(
     context: &ToolExecutionContext,
     call: &AgentToolCall,
     args: ApplyPatchArgs,
-) -> AgentResult<AgentDiffProposal> {
+) -> AgentResult<AgentFileChangeProposal> {
     let ApplyPatchArgs::Apply {
         operation,
         file_path,
@@ -500,13 +501,24 @@ fn direct_proposal_from_args(
             target.absolute_path(),
         )
         .map_err(file_change_agent_error)?;
-    Ok(AgentDiffProposal {
+    let target_content = plan.target_content.as_deref().unwrap_or_default();
+    Ok(AgentFileChangeProposal {
+        schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
         id: call.id.clone(),
+        transaction_id: execution.transaction.id.clone(),
         operation: patch_operation(plan.operation),
+        update_strategy: None,
         file_path: plan.file_path,
-        patch: plan.diff,
+        inline_diff: Some(AgentGitDiffSnapshot {
+            patch: plan.diff,
+            truncated: false,
+        }),
         base_revision: state_revision(&plan.base).map(str::to_string),
         summary: sanitize_summary(summary),
+        additions: plan.additions,
+        deletions: plan.deletions,
+        line_count: target_content.lines().count() as u64,
+        byte_count: target_content.len() as u64,
         approval_status: AgentApprovalStatus::Required,
         execution: Box::new(execution),
     })
@@ -906,11 +918,11 @@ fn freeze_observed_base_with_limit_and_hook(
     }
 }
 
-pub(super) fn patch_operation(operation: FileChangeOperation) -> AgentPatchOperation {
+pub(super) fn patch_operation(operation: FileChangeOperation) -> AgentFileChangeOperation {
     match operation {
-        FileChangeOperation::Create => AgentPatchOperation::Create,
-        FileChangeOperation::Update => AgentPatchOperation::Update,
-        FileChangeOperation::Delete => AgentPatchOperation::Delete,
+        FileChangeOperation::Create => AgentFileChangeOperation::Create,
+        FileChangeOperation::Update => AgentFileChangeOperation::Update,
+        FileChangeOperation::Delete => AgentFileChangeOperation::Delete,
     }
 }
 
@@ -1152,12 +1164,18 @@ mod tests {
             json!({"action":"apply","operation":"create","filePath":"created.txt","observationId":missing,"content":"created\n"}),
         )
         .unwrap();
-        assert_eq!(create.operation, AgentPatchOperation::Create);
+        assert_eq!(create.operation, AgentFileChangeOperation::Create);
         assert_eq!(
             create.execution.target_content.as_deref(),
             Some("created\n")
         );
         create.execution.validate().unwrap();
+        create.validate().unwrap();
+        let mut illegal_approval = create.clone();
+        illegal_approval.approval_status = AgentApprovalStatus::NotRequired;
+        assert!(illegal_approval.validate().is_err());
+        illegal_approval.approval_status = AgentApprovalStatus::Rejected;
+        assert!(illegal_approval.validate().is_err());
 
         let existing = observe(&context, "existing.txt");
         let update = proposal(
@@ -1165,12 +1183,13 @@ mod tests {
             json!({"action":"apply","operation":"update","filePath":"existing.txt","observationId":existing,"edits":[{"kind":"replace","oldText":"beta","newText":"gamma"}]}),
         )
         .unwrap();
-        assert_eq!(update.operation, AgentPatchOperation::Update);
+        assert_eq!(update.operation, AgentFileChangeOperation::Update);
         assert_eq!(
             update.execution.target_content.as_deref(),
             Some("alpha\ngamma\n")
         );
         update.execution.validate().unwrap();
+        update.validate().unwrap();
 
         let existing = observe(&context, "existing.txt");
         let delete = proposal(
@@ -1178,9 +1197,10 @@ mod tests {
             json!({"action":"apply","operation":"delete","filePath":"existing.txt","observationId":existing}),
         )
         .unwrap();
-        assert_eq!(delete.operation, AgentPatchOperation::Delete);
+        assert_eq!(delete.operation, AgentFileChangeOperation::Delete);
         assert!(delete.execution.target_content.is_none());
         delete.execution.validate().unwrap();
+        delete.validate().unwrap();
     }
 
     #[test]
@@ -1308,7 +1328,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(alias_direct.operation, AgentPatchOperation::Create);
+        assert_eq!(alias_direct.operation, AgentFileChangeOperation::Create);
         assert!(!std::path::Path::new(&alias_direct.execution.canonical_target).exists());
 
         let relative = proposal(
@@ -1436,7 +1456,10 @@ mod tests {
             .to_string()
     }
 
-    fn proposal(context: &ToolExecutionContext, args: Value) -> AgentResult<AgentDiffProposal> {
+    fn proposal(
+        context: &ToolExecutionContext,
+        args: Value,
+    ) -> AgentResult<AgentFileChangeProposal> {
         let call_id = format!("apply-{}", Uuid::new_v4());
         let bound_context = context.clone().with_tool_call_id(call_id.clone());
         direct_proposal_from_call(

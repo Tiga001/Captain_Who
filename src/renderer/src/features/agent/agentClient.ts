@@ -1,7 +1,7 @@
 import type {
   AgentEvent,
-  AgentFileDraftContentPage,
-  AgentFileWriteDiffPage,
+  AgentFileChangeContentPage,
+  AgentFileChangeDiffPage,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentConversationTurnRewriteInput,
@@ -135,28 +135,28 @@ export function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
   return hostClient.agent.onEvent(handler)
 }
 
-export function readAgentFileDraft(
-  draftId: string,
+export function readAgentFileChange(
+  transactionId: string,
   offset = 0,
   maxChars = 50_000,
   observerRootConversationId?: string
-): Promise<AgentFileDraftContentPage> {
-  return hostClient.agent.readFileDraft({
-    draftId,
+): Promise<AgentFileChangeContentPage> {
+  return hostClient.agent.readFileChange({
+    transactionId,
     offset,
     maxChars,
     ...(observerRootConversationId ? { observerRootConversationId } : {})
   })
 }
 
-export function getAgentFileWriteDiff(
-  draftId: string,
+export function getAgentFileChangeDiff(
+  transactionId: string,
   offset = 0,
   maxChars = 50_000,
   observerRootConversationId?: string
-): Promise<AgentFileWriteDiffPage> {
-  return hostClient.agent.getFileWriteDiff({
-    draftId,
+): Promise<AgentFileChangeDiffPage> {
+  return hostClient.agent.getFileChangeDiff({
+    transactionId,
     offset,
     maxChars,
     ...(observerRootConversationId ? { observerRootConversationId } : {})

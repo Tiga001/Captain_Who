@@ -523,11 +523,11 @@ describe('MCP lifecycle Renderer projection', () => {
       type: 'tool_call',
       runId: RUN_ID,
       traceSequence: 9,
-      identity: { type: 'builtin', toolName: 'write_file' },
+      identity: { type: 'builtin', toolName: 'apply_patch' },
       call: {
-        id: 'write-call',
-        tool: 'write_file',
-        args: { phase: 'finish', draftId: 'draft-1' },
+        id: 'file-change-call',
+        tool: 'apply_patch',
+        args: { action: 'commit', transactionId: 'file-change-1', expectedDraftRevision: 1 },
         approvalStatus: 'required',
         reason: null
       }
@@ -536,13 +536,16 @@ describe('MCP lifecycle Renderer projection', () => {
       type: 'approval_required',
       runId: RUN_ID,
       action: {
-        type: 'file_write',
-        fileWrite: {
-          id: 'write-call',
-          draftId: 'draft-1',
-          mode: 'rewrite',
+        type: 'file_change',
+        fileChange: {
+          schemaVersion: 1,
+          id: 'file-change-call',
+          transactionId: 'file-change-1',
+          operation: 'update',
+          updateStrategy: 'rewrite',
           filePath: 'src/main.ts',
-          baseRevision: null,
+          inlineDiff: null,
+          baseRevision: 'sha256-base',
           summary: null,
           additions: 1,
           deletions: 0,
@@ -554,10 +557,10 @@ describe('MCP lifecycle Renderer projection', () => {
     })
 
     expect(waiting.agentRun?.timeline).toContainEqual({
-      id: 'tool-call-write-call',
+      id: 'tool-call-file-change-call',
       type: 'tool_call',
-      callId: 'write-call',
-      identity: { type: 'builtin', toolName: 'write_file' },
+      callId: 'file-change-call',
+      identity: { type: 'builtin', toolName: 'apply_patch' },
       traceSequence: 9
     })
   })

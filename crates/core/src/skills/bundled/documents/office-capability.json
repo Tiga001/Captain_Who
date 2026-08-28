@@ -30,13 +30,7 @@
       },
       "pdfQaOutput": {
         "operation": "render",
-        "requestRequiredFields": [
-          "operation",
-          "filePath",
-          "outputPath",
-          "outputFormat",
-          "reason"
-        ],
+        "requestRequiredFields": ["operation", "filePath", "outputPath", "outputFormat", "reason"],
         "outputFormat": "pdf",
         "outputPathExtension": ".pdf",
         "outputPathKind": "workspaceRelative",
@@ -49,12 +43,7 @@
         "sourceRevisionField": "outputs[].sourceSha256",
         "rendererRevisionField": "outputs[].rendererRevision",
         "requiredResultFields": ["outputs"],
-        "requiredPdfOutputFields": [
-          "readPath",
-          "pageCount",
-          "sourceSha256",
-          "rendererRevision"
-        ],
+        "requiredPdfOutputFields": ["readPath", "pageCount", "sourceSha256", "rendererRevision"],
         "pathInference": "forbidden",
         "handoff": {
           "skill": "pdf",
@@ -77,7 +66,7 @@
         "editExisting": "editor",
         "inspectRender": "native"
       },
-      "editTools": ["apply_patch", "write_file"],
+      "editTools": ["apply_patch"],
       "executionTool": "run_command",
       "runtimeProfile": "documents",
       "runtimeProfileBinding": "host_from_materialized_script_receipt",
@@ -262,13 +251,7 @@
       "modelAuthoredDocxToPdf": "forbidden"
     },
     "structuralChecks": {
-      "requiredFor": [
-        "comments",
-        "trackedChanges",
-        "fields",
-        "contentControls",
-        "advancedOoxml"
-      ],
+      "requiredFor": ["comments", "trackedChanges", "fields", "contentControls", "advancedOoxml"],
       "renderingSufficient": false,
       "unavailableHandling": "discloseUnverifiedOrFailClosedWhenRequired"
     },

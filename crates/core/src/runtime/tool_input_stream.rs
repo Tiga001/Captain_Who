@@ -33,7 +33,7 @@ impl ToolInputStreamObservers {
         context: &ToolExecutionContext,
         stream_id: &str,
         tool_call_index: usize,
-        tool_call_id: Option<&str>,
+        _tool_call_id: Option<&str>,
         tool: &str,
         input_delta: &str,
         received_bytes: u64,
@@ -57,7 +57,6 @@ impl ToolInputStreamObservers {
                 stream_id,
                 attempt: self.attempt,
                 tool_call_index,
-                tool_call_id,
                 input_delta,
                 received_bytes,
             })?;
@@ -104,7 +103,6 @@ impl ToolInputStreamObservers {
                 stream_id,
                 attempt: self.attempt,
                 tool_call_index,
-                tool_call_id,
                 input_delta: &pending_input,
                 received_bytes,
             })?;

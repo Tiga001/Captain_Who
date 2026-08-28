@@ -1,6 +1,5 @@
 // Tests for runtime message construction and tool-flow helpers.
 use super::*;
-use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::llm::LlmToolCall;
 use crate::protocol::{
     AgentActivatedSkill, AgentAttachmentLibraryContext, AgentAttachmentReference,

@@ -139,11 +139,11 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.clearUsageRecords, (_event, input) =>
     coreServer.clearUsageRecords(input)
   )
-  ipcMain.handle(HOST_CHANNELS.agent.readFileDraft, (_event, input) =>
-    coreServer.readFileDraft(input)
+  ipcMain.handle(HOST_CHANNELS.agent.readFileChange, (_event, input) =>
+    coreServer.readFileChange(input)
   )
-  ipcMain.handle(HOST_CHANNELS.agent.getFileWriteDiff, (_event, input) =>
-    coreServer.getFileWriteDiff(input)
+  ipcMain.handle(HOST_CHANNELS.agent.getFileChangeDiff, (_event, input) =>
+    coreServer.getFileChangeDiff(input)
   )
 }
 

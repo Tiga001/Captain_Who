@@ -12,8 +12,8 @@ use super::{
 };
 use crate::file_change::{FileChangeError, FileChangeErrorCode};
 use crate::protocol::{
-    AgentError, AgentFileWriteMode, AgentProposedAction, AgentResult, AgentToolCall,
-    AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentError, AgentProposedAction, AgentResult, AgentToolCall, AgentToolDefinition,
+    AgentToolResult, AgentToolSafety,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -126,8 +126,8 @@ impl AgentTool for WriteFileTool {
             ));
         };
         let (revision, _) = file_change_staged::write_file_bridge_cursor(context, &draft_id)?;
-        Ok(AgentProposedAction::FileWrite {
-            file_write: file_change_staged::commit(
+        Ok(AgentProposedAction::FileChange {
+            file_change: file_change_staged::commit(
                 context,
                 call,
                 "write_file",
@@ -267,7 +267,7 @@ fn bridge_result_from_value(context: &ToolExecutionContext, value: Value) -> Age
 enum WriteFileArgs {
     Begin {
         file_path: String,
-        mode: AgentFileWriteMode,
+        mode: WriteFileBridgeMode,
         summary: Option<String>,
     },
     Append {
@@ -289,6 +289,18 @@ enum WriteFileArgs {
     Abort {
         draft_id: String,
     },
+}
+
+/// Round-4 internal-only adapter input. It is not part of the Agent protocol or Provider-visible
+/// registry and can be physically removed with the rest of the retired adapter in round 5.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum WriteFileBridgeMode {
+    Create,
+    Rewrite,
+    Modify,
+    Append,
+    Upsert,
 }
 
 fn parse_args(value: Value) -> AgentResult<WriteFileArgs> {

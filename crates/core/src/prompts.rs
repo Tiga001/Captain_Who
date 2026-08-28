@@ -294,9 +294,6 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- action=begin/append/edit 成功后，FileChange transaction 处于未结算状态。在所有未结算 transaction 都获得 commit/abort 结果前，只能继续调用 apply_patch append/edit/commit/abort，禁止输出任何面向用户的进度或完成文字。进入 waiting_approval/applying 后不得再修改草稿；终态后的后续修改必须重新 action=begin。".to_string());
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
-    if has_tool(tool_definitions, "write_file") {
-        rules.push("- write_file 是本轮过渡期仍可恢复的旧公开入口；新的长文件或多步修改不得再从 write_file phase=begin 开始，统一使用 apply_patch Staged 模式。".to_string());
-    }
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch 创建或编辑文本、代码和配置文件。已激活 Skill 明确允许的短暂检查或结构化产物转换可以使用有界内联代码；需要复用、审查或修改项目源文件的逻辑仍应先用文件编辑工具保存脚本，再用 run_command 执行。产物观察只记录结果，不授予任何权限。".to_string());
         rules.push("- 已激活 Skill 若明确规定一条 copy-first 工作流，可以用 run_command 做且只做该工作流要求的临时目录准备、把已获授权读取的固定源字节保真复制到固定且已确认不存在的 Workspace staging 目标、源与 staging 的字节校验、将已验证的 task-owned staging child 在同一文件系统内以目标不存在为前提 create-only 发布到固定 Workspace Skill 目标，以及精确清理该任务创建的临时路径。这项例外不扩大读写范围，不得覆盖或合并已有目标、改变文件内容、猜测路径、绕过审批或路径校验；复制后对内容的任何修改仍必须使用 apply_patch。".to_string());
@@ -739,15 +736,7 @@ mod tests {
         assert!(prompt.contains("action=begin"));
         assert!(prompt.contains("transactionId、nextIndex 和 draftRevision"));
         assert!(prompt.contains("只能继续调用 apply_patch append/edit/commit/abort"));
-        assert!(!prompt.contains("write_file 是本轮过渡期"));
-        let transitional = build_system_prompt(
-            None,
-            &[
-                tool_definition("apply_patch"),
-                tool_definition("write_file"),
-            ],
-        );
-        assert!(transitional.contains("write_file 是本轮过渡期"));
+        assert!(!prompt.contains("write_file"));
         assert!(prompt.contains("审批 Diff 由 Host 从冻结目标内容生成"));
         assert!(prompt.contains("不要提交 raw unified diff"));
         assert!(prompt.contains("确认唯一锚点和 oldText"));

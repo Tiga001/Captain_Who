@@ -1,6 +1,5 @@
 use super::*;
 
-pub use crate::storage::agent_action_audit_repository::AgentActionAuditJsonCommitOutcome;
 pub use crate::storage::pending_action_repository::PendingActionJsonCommitOutcome as AgentPendingActionJsonCommitOutcome;
 
 #[derive(Debug)]
@@ -184,7 +183,7 @@ fn validate_manual_approval_execution_audit(
             .decided_at
             .is_some_and(|decided_at| decided_at > committed_at)
         || audit.completed_at.is_some()
-        || audit.patch_result_json.is_some()
+        || audit.file_change_result_json.is_some()
         || audit.command_result_json.is_some()
         || audit.tool_result_json.is_some()
         || audit.error.is_some()
@@ -413,17 +412,15 @@ fn valid_mcp_terminal_transition(
 fn renderer_action_id_from_pending_record(
     record: &AgentPendingActionRecord,
 ) -> Result<&str, String> {
-    if !record.action_id.starts_with("v2:") {
-        return (!record.action_id.is_empty() && record.action_id.len() <= 256)
-            .then_some(record.action_id.as_str())
-            .ok_or_else(|| "pending action durable identity is malformed".to_string());
-    }
     let prefix = format!("v2:{}:{}:", record.run_id.len(), record.run_id);
     let action_id = record
         .action_id
         .strip_prefix(&prefix)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "pending action durable identity is malformed".to_string())?;
+    if crate::canonical_pending_action_id(&record.run_id, action_id) != record.action_id {
+        return Err("pending action durable identity is malformed".to_string());
+    }
     Ok(action_id)
 }
 
@@ -477,8 +474,7 @@ fn durable_trace_proves_action_precedes(
             approval.identity.call_id.as_str()
         }
         AgentProposedAction::BrowserRiskApproval { approval } => approval.call_id.as_str(),
-        AgentProposedAction::Diff { diff } => diff.id.as_str(),
-        AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
+        AgentProposedAction::FileChange { file_change } => file_change.id.as_str(),
         AgentProposedAction::Command { command } => command.id.as_str(),
         AgentProposedAction::SkillMaterialization { materialization } => {
             materialization.id.as_str()
@@ -551,28 +547,15 @@ fn validate_frozen_manual_file_effect_tool_call(
     }
 
     let reason = match action {
-        AgentProposedAction::Diff { diff } => {
+        AgentProposedAction::FileChange { file_change } => {
             let digest = crate::file_change::proposal_digest(operation)
-                .map_err(|_| "Direct FileChange ToolCall arguments are invalid".to_string())?;
-            if digest != diff.execution.source_args_digest {
+                .map_err(|_| "FileChange ToolCall arguments are invalid".to_string())?;
+            if digest != file_change.execution.source_args_digest {
                 return Err(format!(
-                    "启动对账发现 Direct FileChange {action_id} 的冻结 ToolCall 参数与 action 不一致。"
+                    "启动对账发现 FileChange {action_id} 的冻结 ToolCall 参数与 action 不一致。"
                 ));
             }
-            operation
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        }
-        AgentProposedAction::FileWrite { file_write } => {
-            let digest = crate::file_change::proposal_digest(operation)
-                .map_err(|_| "Staged FileChange ToolCall arguments are invalid".to_string())?;
-            if digest != file_write.execution.source_args_digest {
-                return Err(format!(
-                    "启动对账发现 Staged FileChange {action_id} 的冻结 ToolCall 参数与 action 不一致。"
-                ));
-            }
-            file_write.summary.clone()
+            file_change.summary.clone()
         }
         AgentProposedAction::Command { command } => {
             crate::tools::validate_frozen_command_trace_args(command, operation).map_err(
@@ -670,6 +653,7 @@ fn manual_file_effect_has_authoritative_settlement(
         let action = serde_json::from_str::<AgentProposedAction>(&pending.action_json)
             .map_err(|error| format!("frozen file-effect action is invalid: {error}"))?;
         let is_mcp_action = matches!(action, AgentProposedAction::McpToolCall { .. });
+        let is_file_change = matches!(action, AgentProposedAction::FileChange { .. });
         let (_, expected_tool, expected_call_id, _) = manual_file_effect_identity(&action)?;
 
         let matching_calls = durable_trace
@@ -693,7 +677,9 @@ fn manual_file_effect_has_authoritative_settlement(
             return Err("durable trace must contain one matching ToolCall".to_string());
         }
         let (call_sequence, trace_tool, operation, call_approval_status) = matching_calls[0];
-        let expected_trace_approval_status = if is_mcp_action {
+        let expected_trace_approval_status = if is_mcp_action
+            || (is_file_change && audit.decision_source.as_deref() != Some("auto"))
+        {
             // Provider ToolCalls are immutable. MCP approval is represented by the terminal audit
             // and paired ToolResult rather than rewriting the frozen call from required.
             crate::AgentApprovalStatus::Required
@@ -745,10 +731,11 @@ fn manual_file_effect_has_authoritative_settlement(
             &expected_call,
             &audited_tool_result,
         );
-        if is_mcp_action {
-            // MCP result content is archived independently after the safe terminal audit is
-            // written. Archive metadata belongs to the validated trace, not the redacted audit
-            // ToolResult, so exclude only that trace-owned field from the semantic comparison.
+        if is_mcp_action || is_file_change {
+            // Archive metadata belongs to the validated trace rather than the typed terminal
+            // audit. Current MCP and FileChange projections may attach that private archive
+            // identity after the safe audit ToolResult is frozen, so exclude only this
+            // trace-owned field from the semantic comparison.
             if let (
                 ConversationTurnTraceItem::ToolResult {
                     archive: durable_archive,
@@ -973,7 +960,7 @@ fn terminalize_mcp_action_in_transaction(
             UPDATE agent_action_audit
             SET status = ?2,
                 action_json = '{}',
-                patch_result_json = NULL,
+                file_change_result_json = NULL,
                 command_result_json = NULL,
                 tool_result_json = NULL,
                 error = ?3,
@@ -1159,7 +1146,7 @@ fn validate_builtin_capability_initial_audit(
         && pending.target_status.is_none()
         && audit.decision.is_none()
         && audit.status == "pending"
-        && audit.patch_result_json.is_none()
+        && audit.file_change_result_json.is_none()
         && audit.command_result_json.is_none()
         && audit.tool_result_json.is_none()
         && audit.error.is_none()
@@ -1189,7 +1176,7 @@ fn same_builtin_capability_initial_audit(
         && existing.decision == candidate.decision
         && existing.status == candidate.status
         && existing.action_json == candidate.action_json
-        && existing.patch_result_json == candidate.patch_result_json
+        && existing.file_change_result_json == candidate.file_change_result_json
         && existing.command_result_json == candidate.command_result_json
         && existing.tool_result_json == candidate.tool_result_json
         && existing.error == candidate.error
@@ -1246,11 +1233,80 @@ fn ensure_exact_builtin_capability_initial_audit(
     Ok(())
 }
 
+fn validate_auto_file_change_initial_journal(
+    pending: &AgentPendingActionRecord,
+    audit: &AgentActionAuditRecord,
+) -> Result<(), String> {
+    let action = serde_json::from_str::<AgentProposedAction>(&pending.action_json)
+        .map_err(|_| "automatic FileChange pending action JSON is invalid".to_string())?;
+    let AgentProposedAction::FileChange { file_change } = action else {
+        return Err("automatic FileChange journal requires the current action shape".to_string());
+    };
+    if pending.action_type != "file_change"
+        || pending.tool_name != "apply_patch"
+        || pending.tool_call_id.as_deref() != Some(file_change.id.as_str())
+        || pending.status != "approved"
+        || pending.target_status.is_some()
+        || pending.action_id != audit.action_id
+        || pending.run_id != audit.run_id
+        || pending.conversation_id != audit.conversation_id
+        || pending.assistant_message_id != audit.assistant_message_id
+        || pending.action_type != audit.action_type
+        || pending.tool_name != audit.tool_name
+        || pending.action_json != audit.action_json
+        || pending.created_at != audit.created_at
+        || audit.decision.as_deref() != Some("approved")
+        || audit.status != "approved"
+        || audit.file_change_result_json.is_some()
+        || audit.command_result_json.is_some()
+        || audit.tool_result_json.is_some()
+        || audit.error.is_some()
+        || audit.decided_at != Some(audit.created_at)
+        || audit.completed_at.is_some()
+        || audit.blocked_reason.is_some()
+        || audit.decision_source.as_deref() != Some("auto")
+        || audit.effective_permissions_json.is_none()
+        || file_change.schema_version != crate::file_change::FILE_CHANGE_SCHEMA_VERSION
+        || file_change.approval_status != crate::AgentApprovalStatus::Approved
+        || file_change.execution.source_tool_name != "apply_patch"
+        || file_change.execution.source_call_id != file_change.id
+        || file_change.execution.run_id != pending.run_id
+        || Some(file_change.execution.conversation_id.as_str())
+            != pending.conversation_id.as_deref()
+        || file_change.transaction_id != file_change.execution.transaction.id
+        || file_change.execution.validate().is_err()
+    {
+        return Err("automatic FileChange pending/audit identity is inconsistent".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_exact_auto_file_change_initial_audit(
+    connection: &rusqlite::Connection,
+    audit: &AgentActionAuditRecord,
+) -> Result<(), String> {
+    if agent_action_audit_repository::insert_action_audit_record_if_absent(connection, audit)
+        .map_err(storage_error)?
+    {
+        return Ok(());
+    }
+    let existing =
+        agent_action_audit_repository::load_action_audit_record(connection, &audit.action_id)
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                "automatic FileChange audit disappeared during journal publication".to_string()
+            })?;
+    if !same_builtin_capability_initial_audit(&existing, audit) {
+        return Err(
+            "automatic FileChange action id is already owned by a different audit identity"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn is_current_file_change_action_identity(action_type: &str, tool_name: &str) -> bool {
-    matches!(
-        (action_type, tool_name),
-        ("diff", "apply_patch") | ("file_write", "apply_patch" | "write_file")
-    )
+    action_type == "file_change" && tool_name == "apply_patch"
 }
 
 #[derive(Clone, Copy)]
@@ -1284,120 +1340,84 @@ fn validate_file_change_action_json_pair(
     }
     match (&prepared, &committed) {
         (
-            AgentProposedAction::Diff {
-                diff: prepared_diff,
+            AgentProposedAction::FileChange {
+                file_change: prepared_change,
             },
-            AgentProposedAction::Diff {
-                diff: committed_diff,
+            AgentProposedAction::FileChange {
+                file_change: committed_change,
             },
-        ) if identity.action_type == "diff" && identity.tool_name == "apply_patch" => {
-            let operation_matches = match prepared_diff.operation {
-                crate::AgentPatchOperation::Create => {
-                    prepared_diff.execution.transaction.operation
-                        == crate::file_change::FileChangeOperation::Create
-                }
-                crate::AgentPatchOperation::Update => {
-                    prepared_diff.execution.transaction.operation
-                        == crate::file_change::FileChangeOperation::Update
-                }
-                crate::AgentPatchOperation::Delete => {
-                    prepared_diff.execution.transaction.operation
-                        == crate::file_change::FileChangeOperation::Delete
-                }
-            };
-            let execution_transition_is_valid = committed_diff
-                .execution
-                .is_commit_successor_of(&prepared_diff.execution)
-                || committed_diff
-                    .execution
-                    .is_delete_finalization_successor_of(&prepared_diff.execution);
-            if !execution_transition_is_valid
-                || prepared_diff.id != committed_diff.id
-                || prepared_diff.operation != committed_diff.operation
-                || prepared_diff.file_path != committed_diff.file_path
-                || prepared_diff.patch != committed_diff.patch
-                || prepared_diff.base_revision != committed_diff.base_revision
-                || prepared_diff.summary != committed_diff.summary
-                || prepared_diff.approval_status != committed_diff.approval_status
-                || prepared_diff.id != prepared_diff.execution.source_call_id
-                || prepared_diff.execution.source_tool_name != identity.tool_name
-                || prepared_diff.file_path != prepared_diff.execution.transaction.file_path
-                || prepared_diff.base_revision.as_deref()
-                    != prepared_diff.execution.transaction.base.revision()
-                || !operation_matches
-                || prepared_diff.execution.run_id != identity.run_id
-                || Some(prepared_diff.execution.conversation_id.as_str())
-                    != identity.conversation_id
-                || identity
-                    .tool_call_id
-                    .is_some_and(|call_id| call_id != prepared_diff.id)
-            {
-                return Err(
-                    "Direct FileChange committed action is not the exact prepared successor"
-                        .to_string(),
-                );
-            }
-        }
-        (
-            AgentProposedAction::FileWrite {
-                file_write: prepared_write,
-            },
-            AgentProposedAction::FileWrite {
-                file_write: committed_write,
-            },
-        ) if identity.action_type == "file_write" => {
+        ) if identity.action_type == "file_change" && identity.tool_name == "apply_patch" => {
             use crate::file_change::FileChangeOperation;
             let operation_matches = matches!(
                 (
-                    prepared_write.mode,
-                    prepared_write.execution.transaction.operation
+                    prepared_change.operation,
+                    prepared_change.execution.transaction.operation
                 ),
                 (
-                    crate::AgentFileWriteMode::Create,
+                    crate::AgentFileChangeOperation::Create,
                     FileChangeOperation::Create
                 ) | (
-                    crate::AgentFileWriteMode::Modify | crate::AgentFileWriteMode::Rewrite,
+                    crate::AgentFileChangeOperation::Update,
                     FileChangeOperation::Update
+                ) | (
+                    crate::AgentFileChangeOperation::Delete,
+                    FileChangeOperation::Delete
                 )
             );
-            if !committed_write
+            let strategy_matches = match prepared_change.operation {
+                crate::AgentFileChangeOperation::Update
+                    if prepared_change.execution.staged_transaction_id.is_some() =>
+                {
+                    matches!(
+                        prepared_change.update_strategy,
+                        Some(
+                            crate::AgentFileChangeUpdateStrategy::Modify
+                                | crate::AgentFileChangeUpdateStrategy::Rewrite
+                        )
+                    )
+                }
+                _ => prepared_change.update_strategy.is_none(),
+            };
+            let execution_transition_is_valid = committed_change
                 .execution
-                .is_commit_successor_of(&prepared_write.execution)
-                || prepared_write.id != committed_write.id
-                || prepared_write.draft_id != committed_write.draft_id
-                || prepared_write.mode != committed_write.mode
-                || prepared_write.file_path != committed_write.file_path
-                || prepared_write.base_revision != committed_write.base_revision
-                || prepared_write.summary != committed_write.summary
-                || prepared_write.additions != committed_write.additions
-                || prepared_write.deletions != committed_write.deletions
-                || prepared_write.line_count != committed_write.line_count
-                || prepared_write.byte_count != committed_write.byte_count
-                || prepared_write.approval_status != committed_write.approval_status
-                || prepared_write.id != prepared_write.execution.source_call_id
-                || prepared_write.execution.source_tool_name != identity.tool_name
-                || prepared_write.draft_id
-                    != prepared_write
-                        .execution
-                        .staged_transaction_id
-                        .as_deref()
-                        .unwrap_or_default()
-                || prepared_write.file_path != prepared_write.execution.transaction.file_path
-                || prepared_write.base_revision.as_deref()
-                    != prepared_write.execution.transaction.base.revision()
-                || prepared_write.additions != prepared_write.execution.proposal.additions
-                || prepared_write.deletions != prepared_write.execution.proposal.deletions
+                .is_commit_successor_of(&prepared_change.execution)
+                || committed_change
+                    .execution
+                    .is_delete_finalization_successor_of(&prepared_change.execution);
+            if !execution_transition_is_valid
+                || prepared_change.schema_version != crate::file_change::FILE_CHANGE_SCHEMA_VERSION
+                || prepared_change.id != committed_change.id
+                || prepared_change.transaction_id != committed_change.transaction_id
+                || prepared_change.operation != committed_change.operation
+                || prepared_change.update_strategy != committed_change.update_strategy
+                || prepared_change.file_path != committed_change.file_path
+                || prepared_change.inline_diff != committed_change.inline_diff
+                || prepared_change.base_revision != committed_change.base_revision
+                || prepared_change.summary != committed_change.summary
+                || prepared_change.additions != committed_change.additions
+                || prepared_change.deletions != committed_change.deletions
+                || prepared_change.line_count != committed_change.line_count
+                || prepared_change.byte_count != committed_change.byte_count
+                || prepared_change.approval_status != committed_change.approval_status
+                || prepared_change.id != prepared_change.execution.source_call_id
+                || prepared_change.execution.source_tool_name != "apply_patch"
+                || prepared_change.transaction_id != prepared_change.execution.transaction.id
+                || prepared_change.file_path != prepared_change.execution.transaction.file_path
+                || prepared_change.base_revision.as_deref()
+                    != prepared_change.execution.transaction.base.revision()
+                || prepared_change.additions != prepared_change.execution.proposal.additions
+                || prepared_change.deletions != prepared_change.execution.proposal.deletions
                 || !operation_matches
-                || prepared_write.execution.run_id != identity.run_id
-                || Some(prepared_write.execution.conversation_id.as_str())
+                || !strategy_matches
+                || prepared_change.execution.run_id != identity.run_id
+                || Some(prepared_change.execution.conversation_id.as_str())
                     != identity.conversation_id
                 || identity
                     .tool_call_id
-                    .is_some_and(|call_id| call_id != prepared_write.id)
+                    .is_some_and(|call_id| call_id != prepared_change.id)
             {
                 return Err(
-                    "Staged FileChange committed action is not the exact prepared successor"
-                        .to_string(),
+                    "FileChange committed action is not the exact prepared successor".to_string(),
                 );
             }
         }
@@ -1598,7 +1618,7 @@ impl StorageService {
                 UPDATE agent_action_audit
                 SET status = ?2,
                     action_json = '{}',
-                    patch_result_json = NULL,
+                    file_change_result_json = NULL,
                     command_result_json = NULL,
                     tool_result_json = NULL,
                     error = ?3,
@@ -1915,14 +1935,24 @@ impl StorageService {
         if affected != 1 {
             return Ok(false);
         }
-        resolve_pending_approval_notification_in_transaction(&transaction, &record, updated_at)?;
+        // Unsupported/malformed startup rows must still retire without dispatch, but a non-current
+        // durable identity is never reinterpreted as a Renderer approval id. There is no exact
+        // notification target we can safely resolve for such a row.
+        if expected_action_type.is_some() || renderer_action_id_from_pending_record(&record).is_ok()
+        {
+            resolve_pending_approval_notification_in_transaction(
+                &transaction,
+                &record,
+                updated_at,
+            )?;
+        }
         transaction
             .execute(
                 "
                 UPDATE agent_action_audit
                 SET status = 'failed',
                     action_json = '{}',
-                    patch_result_json = NULL,
+                    file_change_result_json = NULL,
                     command_result_json = NULL,
                     tool_result_json = NULL,
                     error = ?2,
@@ -2024,6 +2054,15 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn get_agent_action_audit(
+        &self,
+        action_id: &str,
+    ) -> Result<Option<AgentActionAuditRecord>, String> {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::load_action_audit_record(&connection, action_id)
+            .map_err(storage_error)
+    }
+
     /// Returns current canonical executing FileChange audit records for startup reconciliation.
     /// Payload validation remains the recovery caller's responsibility.
     pub fn list_executing_file_change_action_audits(
@@ -2050,52 +2089,6 @@ impl StorageService {
         let connection = self.state.connection()?;
         agent_action_audit_repository::claim_action_audit_execution(&connection, &record)
             .map_err(storage_error)
-    }
-
-    /// Persists the committed Direct FileChange credential for an automatically approved action.
-    ///
-    /// This changes only `action_json`; it cannot create an audit row or advance lifecycle/result
-    /// fields. The repository binds the update to the complete immutable automatic-action
-    /// identity and the exact prepared JSON.
-    pub fn commit_automatic_direct_file_change_action_json(
-        &self,
-        identity: &AgentActionAuditRecord,
-        expected_action_json: &str,
-        committed_action_json: &str,
-    ) -> Result<AgentActionAuditJsonCommitOutcome, String> {
-        if !is_current_file_change_action_identity(&identity.action_type, &identity.tool_name)
-            || identity.status != "executing"
-            || identity.decision.as_deref() != Some("approved")
-            || identity.decision_source.as_deref() != Some("auto")
-            || identity.patch_result_json.is_some()
-            || identity.command_result_json.is_some()
-            || identity.tool_result_json.is_some()
-            || identity.error.is_some()
-            || identity.completed_at.is_some()
-            || identity.blocked_reason.is_some()
-        {
-            return Err("automatic Direct FileChange audit identity is invalid".to_string());
-        }
-        validate_file_change_action_json_pair(
-            &identity.action_json,
-            expected_action_json,
-            committed_action_json,
-            CurrentFileChangeActionIdentity {
-                run_id: &identity.run_id,
-                conversation_id: identity.conversation_id.as_deref(),
-                tool_call_id: None,
-                action_type: &identity.action_type,
-                tool_name: &identity.tool_name,
-            },
-        )?;
-        let mut connection = self.state.connection()?;
-        agent_action_audit_repository::commit_executing_action_json(
-            &mut connection,
-            identity,
-            expected_action_json,
-            committed_action_json,
-        )
-        .map_err(storage_error)
     }
 
     pub fn finalize_agent_action_audit_execution(
@@ -2190,7 +2183,7 @@ impl StorageService {
                 | AgentPendingActionJsonCommitOutcome::AlreadyCommitted
         ) {
             let audit_outcome =
-                agent_action_audit_repository::commit_manual_preterminal_action_json_if_present(
+                agent_action_audit_repository::commit_pending_file_change_action_json_if_present(
                     &transaction,
                     identity,
                     expected_action_json,
@@ -2266,6 +2259,138 @@ impl StorageService {
         ensure_exact_builtin_capability_initial_audit(&transaction, &audit)?;
         transaction.commit().map_err(storage_error)?;
         Ok(outcome)
+    }
+
+    /// Atomically persists the hidden auto-approval journal and its frozen audit before a
+    /// FileChange may cross the filesystem effect boundary.
+    ///
+    /// The pending row owns the exact resumable ToolCall/checkpoint envelope. The audit owns the
+    /// one allowed dispatch claim. Neither record is useful alone, so publishing both in one
+    /// immediate transaction prevents a crash from leaving an executable but unrecoverable
+    /// action.
+    pub fn store_auto_file_change_pending_action_with_audit(
+        &self,
+        pending: AgentPendingActionRecord,
+        audit: AgentActionAuditRecord,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        validate_auto_file_change_initial_journal(&pending, &audit)?;
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let outcome = store_pending_action_or_conflict(&transaction, &pending)?;
+        ensure_exact_auto_file_change_initial_audit(&transaction, &audit)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
+    }
+
+    /// Atomically crosses the current automatic FileChange pre-dispatch boundary.
+    ///
+    /// Both the hidden Pending Action and its exact automatic approval audit must still be the
+    /// byte-for-byte approved journal written by
+    /// [`Self::store_auto_file_change_pending_action_with_audit`]. The filesystem committer may
+    /// run only after this transaction returns `true`.
+    pub fn claim_auto_file_change_pending_execution(
+        &self,
+        pending: &AgentPendingActionRecord,
+        approved_audit: &AgentActionAuditRecord,
+        executing_agent_input_json: &str,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        validate_auto_file_change_initial_journal(pending, approved_audit)?;
+        if updated_at < pending.updated_at || executing_agent_input_json.trim().is_empty() {
+            return Err("automatic FileChange executing journal is invalid".to_string());
+        }
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let Some(existing_pending) =
+            pending_action_repository::load_pending_action(&transaction, &pending.action_id)
+                .map_err(storage_error)?
+        else {
+            transaction.commit().map_err(storage_error)?;
+            return Ok(false);
+        };
+        let pending_matches = existing_pending.action_id == pending.action_id
+            && existing_pending.run_id == pending.run_id
+            && existing_pending.conversation_id == pending.conversation_id
+            && existing_pending.assistant_message_id == pending.assistant_message_id
+            && existing_pending.action_type == pending.action_type
+            && existing_pending.tool_name == pending.tool_name
+            && existing_pending.tool_call_id == pending.tool_call_id
+            && existing_pending.status == "approved"
+            && existing_pending.target_status.is_none()
+            && existing_pending.action_json == pending.action_json
+            && existing_pending.agent_input_json == pending.agent_input_json
+            && existing_pending.created_at == pending.created_at;
+        let existing_audit = agent_action_audit_repository::load_action_audit_record(
+            &transaction,
+            &approved_audit.action_id,
+        )
+        .map_err(storage_error)?;
+        let audit_matches = existing_audit.as_ref().is_some_and(|existing| {
+            same_builtin_capability_initial_audit(existing, approved_audit)
+        });
+        if !pending_matches || !audit_matches {
+            transaction.commit().map_err(storage_error)?;
+            return Ok(false);
+        }
+        let pending_changed = pending_action_repository::transition_pending_action(
+            &transaction,
+            &pending.action_id,
+            "approved",
+            "executing",
+            executing_agent_input_json,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        let audit_changed = transaction
+            .execute(
+                "
+                UPDATE agent_action_audit
+                SET status = 'executing'
+                WHERE action_id = ?1
+                  AND status = 'approved'
+                  AND decision = 'approved'
+                  AND decision_source = 'auto'
+                  AND run_id = ?2
+                  AND conversation_id IS ?3
+                  AND assistant_message_id IS ?4
+                  AND action_type = 'file_change'
+                  AND tool_name = 'apply_patch'
+                  AND action_json = ?5
+                  AND created_at = ?6
+                  AND decided_at IS ?7
+                  AND effective_permissions_json IS ?8
+                  AND path_scope IS ?9
+                  AND command_cwd_scope IS ?10
+                  AND file_change_result_json IS NULL
+                  AND command_result_json IS NULL
+                  AND tool_result_json IS NULL
+                  AND error IS NULL
+                  AND completed_at IS NULL
+                  AND blocked_reason IS NULL
+                ",
+                rusqlite::params![
+                    approved_audit.action_id,
+                    approved_audit.run_id,
+                    approved_audit.conversation_id,
+                    approved_audit.assistant_message_id,
+                    approved_audit.action_json,
+                    approved_audit.created_at,
+                    approved_audit.decided_at,
+                    approved_audit.effective_permissions_json,
+                    approved_audit.path_scope,
+                    approved_audit.command_cwd_scope,
+                ],
+            )
+            .map_err(storage_error)?;
+        if pending_changed != 1 || audit_changed != 1 {
+            return Err("automatic FileChange dispatch journal lost its exact CAS".to_string());
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(true)
     }
 
     pub fn store_builtin_capability_pending_action_with_audit_and_notification(
@@ -2588,12 +2713,12 @@ impl StorageService {
         let mut retired_successors = HashSet::new();
         let mut claimed_successors = HashSet::new();
         for record in &interrupted {
-            if record.action_type == "mcp_tool_call"
+            if matches!(record.action_type.as_str(), "mcp_tool_call" | "file_change")
                 && record.status == "executing"
                 && !manual_file_effect_has_authoritative_settlement(&transaction, record)?
             {
                 return Err(format!(
-                    "启动对账拒绝采用缺少权威审计与 ToolResult 证据的 MCP 目标终态：{}",
+                    "启动对账拒绝采用缺少权威审计与 ToolResult 证据的文件副作用目标终态：{}",
                     record.action_id
                 ));
             }
@@ -4014,20 +4139,21 @@ fn validate_manual_file_effect_settlement_request(
     let is_external_mcp_action = matches!(action, AgentProposedAction::McpToolCall { .. });
     let is_builtin_mcp_action =
         matches!(action, AgentProposedAction::BuiltinMcpToolApproval { .. });
+    let is_file_change = matches!(action, AgentProposedAction::FileChange { .. });
     let is_mcp_action = is_external_mcp_action || is_builtin_mcp_action;
     let is_mcp_rejection = is_mcp_action && target_status == "rejected";
+    let is_file_change_cancellation = is_file_change && target_status == "cancelled";
     let valid_decision = if is_mcp_rejection {
         audit.decision.as_deref() == Some("rejected")
+    } else if is_file_change_cancellation {
+        audit.decision.as_deref() == Some("cancelled")
     } else {
         audit.decision.as_deref() == Some("approved")
     };
-    if !valid_decision
-        || audit.decision_source.as_deref() != Some("manual")
-        || audit.patch_result_json.is_some()
-    {
-        return Err(
-            "manual file-effect settlement contains an invalid audit lifecycle".to_string(),
-        );
+    let valid_decision_source = audit.decision_source.as_deref() == Some("manual")
+        || (is_file_change && audit.decision_source.as_deref() == Some("auto"));
+    if !valid_decision || !valid_decision_source {
+        return Err("file-effect settlement contains an invalid audit lifecycle".to_string());
     }
     let (expected_action_type, expected_tool, expected_call_id, is_command) =
         manual_file_effect_identity(&action)?;
@@ -4035,8 +4161,7 @@ fn validate_manual_file_effect_settlement_request(
         || expected_pending_status == "approved"
         || (expected_action_type == "skill_materialization"
             && expected_pending_status == "executing")
-        || (expected_action_type == "diff" && expected_pending_status == "executing")
-        || (expected_action_type == "file_write" && expected_pending_status == "executing")
+        || (expected_action_type == "file_change" && expected_pending_status == "executing")
         || (expected_action_type == "skill_script" && expected_pending_status == "executing")
         || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing")
         || (expected_action_type == "builtin_mcp_tool_approval"
@@ -4061,6 +4186,28 @@ fn validate_manual_file_effect_settlement_request(
         .ok_or_else(|| "manual file-effect terminal audit lacks tool_result_json".to_string())?;
     let tool_result = serde_json::from_str::<AgentToolResult>(tool_result_json)
         .map_err(|error| format!("manual file-effect ToolResult is invalid: {error}"))?;
+    match (is_file_change, audit.file_change_result_json.as_deref()) {
+        (true, Some(result_json)) => {
+            let result = serde_json::from_str::<crate::AgentFileChangeResult>(result_json)
+                .map_err(|_| "FileChange terminal result is invalid".to_string())?;
+            if tool_result.result.as_ref()
+                != Some(
+                    &serde_json::to_value(&result).map_err(|_| {
+                        "FileChange terminal result could not be validated".to_string()
+                    })?,
+                )
+            {
+                return Err("FileChange terminal audit differs from its ToolResult".to_string());
+            }
+        }
+        (true, None) => {
+            return Err("FileChange terminal audit lacks file_change_result_json".to_string())
+        }
+        (false, Some(_)) => {
+            return Err("non-FileChange audit contains file_change_result_json".to_string())
+        }
+        (false, None) => {}
+    }
     let command_handoff = is_command
         && audit.command_result_json.is_none()
         && target_status == "completed"
@@ -4097,7 +4244,7 @@ fn validate_manual_file_effect_settlement_request(
             return Err("MCP durable ToolResult rejection state is inconsistent".to_string());
         }
     }
-    let expected_ok = if is_mcp_action {
+    let expected_ok = if is_mcp_action || is_file_change_cancellation {
         tool_result.ok
     } else {
         target_status == "completed"
@@ -4341,25 +4488,19 @@ fn manual_file_effect_identity(
     action: &AgentProposedAction,
 ) -> Result<(&'static str, String, String, bool), String> {
     match action {
-        AgentProposedAction::Diff { diff } => {
-            Ok(("diff", "apply_patch".to_string(), diff.id.clone(), false))
-        }
-        AgentProposedAction::FileWrite { file_write } => {
-            if file_write.execution.validate().is_err()
-                || !matches!(
-                    file_write.execution.source_tool_name.as_str(),
-                    "apply_patch" | "write_file"
-                )
-                || file_write.id != file_write.execution.source_call_id
-                || file_write.execution.staged_transaction_id.as_deref()
-                    != Some(file_write.draft_id.as_str())
+        AgentProposedAction::FileChange { file_change } => {
+            if file_change.execution.validate().is_err()
+                || file_change.schema_version != crate::file_change::FILE_CHANGE_SCHEMA_VERSION
+                || file_change.execution.source_tool_name != "apply_patch"
+                || file_change.id != file_change.execution.source_call_id
+                || file_change.transaction_id != file_change.execution.transaction.id
             {
-                return Err("manual Staged FileChange identity is invalid".to_string());
+                return Err("manual FileChange identity is invalid".to_string());
             }
             Ok((
-                "file_write",
-                file_write.execution.source_tool_name.clone(),
-                file_write.id.clone(),
+                "file_change",
+                "apply_patch".to_string(),
+                file_change.id.clone(),
                 false,
             ))
         }
@@ -4407,5 +4548,50 @@ fn manual_file_effect_identity(
             false,
         )),
         _ => Err("manual audited settlement does not support this action type".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod pending_action_identity_tests {
+    use super::*;
+
+    fn pending_record(action_id: &str, run_id: &str) -> AgentPendingActionRecord {
+        AgentPendingActionRecord {
+            action_id: action_id.to_string(),
+            run_id: run_id.to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("assistant-1".to_string()),
+            action_type: "file_change".to_string(),
+            tool_name: "apply_patch".to_string(),
+            tool_call_id: Some("call-1".to_string()),
+            status: "pending".to_string(),
+            target_status: None,
+            action_json: "{}".to_string(),
+            agent_input_json: "{}".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn renderer_action_id_requires_exact_current_canonical_framing() {
+        let run_id = "run:1";
+        let canonical = crate::canonical_pending_action_id(run_id, "call:1");
+        let current = pending_record(&canonical, run_id);
+        assert_eq!(
+            renderer_action_id_from_pending_record(&current).unwrap(),
+            "call:1"
+        );
+
+        for malformed in [
+            "call:1".to_string(),
+            "v2:3:run:call:1".to_string(),
+            "v2:5:run:2:".to_string(),
+        ] {
+            assert_eq!(
+                renderer_action_id_from_pending_record(&pending_record(&malformed, run_id)),
+                Err("pending action durable identity is malformed".to_string())
+            );
+        }
     }
 }

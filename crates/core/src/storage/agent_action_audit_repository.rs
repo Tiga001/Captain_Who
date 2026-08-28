@@ -25,19 +25,6 @@ pub enum AgentActionAuditFinalizationOutcome {
     ClaimMissingOrChanged,
 }
 
-/// Outcome of replacing the private Direct FileChange execution credential on an automatic
-/// action audit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentActionAuditJsonCommitOutcome {
-    Updated,
-    AlreadyCommitted,
-    ExpectedActionMismatch,
-    ExecutionStateConflict,
-    NotExecuting { status: String },
-    IdentityConflict { status: String },
-    Missing,
-}
-
 /// Outcome of synchronizing an optional manual preterminal audit with its committed pending
 /// Direct FileChange credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +118,7 @@ pub fn insert_action_audit_record_if_absent(
             decision,
             status,
             action_json,
-            patch_result_json,
+            file_change_result_json,
             command_result_json,
             tool_result_json,
             error,
@@ -157,7 +144,7 @@ pub fn insert_action_audit_record_if_absent(
             &record.decision,
             &record.status,
             &record.action_json,
-            &record.patch_result_json,
+            &record.file_change_result_json,
             &record.command_result_json,
             &record.tool_result_json,
             &record.error,
@@ -174,104 +161,13 @@ pub fn insert_action_audit_record_if_absent(
     Ok(changed == 1)
 }
 
-/// Atomically replaces one automatic audit's exact prepared action JSON with committed JSON.
-///
-/// The action id, complete immutable execution identity, byte-exact prepared JSON, and
-/// `executing` lifecycle state all participate in the CAS. This never inserts a row and never
-/// advances lifecycle or terminal-result columns.
-pub(crate) fn commit_executing_action_json(
-    connection: &mut Connection,
-    identity: &AgentActionAuditRecord,
-    expected_action_json: &str,
-    committed_action_json: &str,
-) -> rusqlite::Result<AgentActionAuditJsonCommitOutcome> {
-    let transaction =
-        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = transaction.execute(
-        "
-        UPDATE agent_action_audit
-        SET action_json = ?21
-        WHERE action_id = ?1
-          AND run_id = ?2
-          AND conversation_id IS ?3
-          AND assistant_message_id IS ?4
-          AND action_type = ?5
-          AND tool_name = ?6
-          AND decision IS ?7
-          AND created_at = ?8
-          AND decided_at IS ?9
-          AND effective_permissions_json IS ?10
-          AND path_scope IS ?11
-          AND command_cwd_scope IS ?12
-          AND decision_source IS ?13
-          AND status = 'executing'
-          AND patch_result_json IS ?14
-          AND command_result_json IS ?15
-          AND tool_result_json IS ?16
-          AND error IS ?17
-          AND completed_at IS ?18
-          AND blocked_reason IS ?19
-          AND action_json = ?20
-        ",
-        params![
-            &identity.action_id,
-            &identity.run_id,
-            &identity.conversation_id,
-            &identity.assistant_message_id,
-            &identity.action_type,
-            &identity.tool_name,
-            &identity.decision,
-            identity.created_at,
-            identity.decided_at,
-            &identity.effective_permissions_json,
-            &identity.path_scope,
-            &identity.command_cwd_scope,
-            &identity.decision_source,
-            &identity.patch_result_json,
-            &identity.command_result_json,
-            &identity.tool_result_json,
-            &identity.error,
-            identity.completed_at,
-            &identity.blocked_reason,
-            expected_action_json,
-            committed_action_json,
-        ],
-    )?;
-    let outcome = if changed == 1 {
-        AgentActionAuditJsonCommitOutcome::Updated
-    } else {
-        match load_action_audit_record(&transaction, &identity.action_id)? {
-            None => AgentActionAuditJsonCommitOutcome::Missing,
-            Some(existing) if !has_same_immutable_execution_identity(&existing, identity) => {
-                AgentActionAuditJsonCommitOutcome::IdentityConflict {
-                    status: existing.status,
-                }
-            }
-            Some(existing) if existing.status != "executing" => {
-                AgentActionAuditJsonCommitOutcome::NotExecuting {
-                    status: existing.status,
-                }
-            }
-            Some(existing) if existing.action_json == committed_action_json => {
-                AgentActionAuditJsonCommitOutcome::AlreadyCommitted
-            }
-            Some(existing) if existing.action_json != expected_action_json => {
-                AgentActionAuditJsonCommitOutcome::ExpectedActionMismatch
-            }
-            Some(_) => AgentActionAuditJsonCommitOutcome::ExecutionStateConflict,
-        }
-    };
-    transaction.commit()?;
-    Ok(outcome)
-}
-
-/// Updates the optional manual preterminal audit in the caller's pending-action transaction.
+/// Updates the exact preterminal FileChange audit in the caller's pending-action transaction.
 ///
 /// Manual initial audit publication is best effort, so absence is a valid outcome. Once a row
 /// exists, however, its complete pending-owner identity and manual preterminal lifecycle are
 /// mandatory; a mismatch must abort the outer transaction rather than leave pending and audit
 /// with different frozen action JSON.
-pub(crate) fn commit_manual_preterminal_action_json_if_present(
+pub(crate) fn commit_pending_file_change_action_json_if_present(
     connection: &Connection,
     pending_identity: &crate::storage::models::AgentPendingActionRecord,
     expected_action_json: &str,
@@ -292,6 +188,7 @@ pub(crate) fn commit_manual_preterminal_action_json_if_present(
           AND (
                 (status = 'pending' AND decision IS NULL AND decision_source = 'manual_pending')
              OR (status IN ('approved', 'cancellation_requested') AND decision_source = 'manual')
+             OR (status = 'executing' AND decision = 'approved' AND decision_source = 'auto')
           )
         ",
         params![
@@ -324,15 +221,16 @@ pub(crate) fn commit_manual_preterminal_action_json_if_present(
             status: existing.status,
         });
     }
-    let is_manual_preterminal = matches!(
+    let is_file_change_preterminal = matches!(
         (
             existing.status.as_str(),
             existing.decision_source.as_deref()
         ),
         ("pending", Some("manual_pending"))
             | ("approved" | "cancellation_requested", Some("manual"))
+            | ("executing", Some("auto"))
     );
-    if !is_manual_preterminal {
+    if !is_file_change_preterminal {
         return Ok(ManualActionAuditJsonCommitOutcome::NotPreterminal {
             status: existing.status,
         });
@@ -356,7 +254,7 @@ pub fn finalize_claimed_action_audit_execution(
         "
         UPDATE agent_action_audit
         SET status = ?2,
-            patch_result_json = ?3,
+            file_change_result_json = ?3,
             command_result_json = ?4,
             tool_result_json = ?5,
             error = ?6,
@@ -381,7 +279,7 @@ pub fn finalize_claimed_action_audit_execution(
         params![
             &record.action_id,
             &record.status,
-            &record.patch_result_json,
+            &record.file_change_result_json,
             &record.command_result_json,
             &record.tool_result_json,
             &record.error,
@@ -423,7 +321,9 @@ pub fn settle_manual_terminal_action_audit(
     let Some(existing) = existing else {
         let mut inserted = terminal.clone();
         inserted.decided_at = inserted.decided_at.or(Some(fallback_decided_at));
-        inserted.decision_source = Some("manual".to_string());
+        inserted.decision_source = inserted
+            .decision_source
+            .or_else(|| Some("manual".to_string()));
         let inserted_record = insert_action_audit_record_if_absent(connection, &inserted)?;
         return Ok(if inserted_record {
             ManualTerminalActionAuditOutcome::Inserted
@@ -456,22 +356,23 @@ pub fn settle_manual_terminal_action_audit(
         });
     }
 
-    if !matches!(
+    let valid_preterminal = match (
         existing.status.as_str(),
-        "pending" | "approved" | "cancellation_requested"
-    ) {
-        return Ok(ManualTerminalActionAuditOutcome::Conflict {
-            existing_status: Some(existing.status),
-            reason: "manual command audit has an invalid pre-terminal status",
-        });
-    }
-    if !matches!(
         existing.decision_source.as_deref(),
-        Some("manual") | Some("manual_pending")
     ) {
+        (
+            "pending" | "approved" | "cancellation_requested",
+            Some("manual") | Some("manual_pending"),
+        ) => true,
+        ("executing", Some("auto")) => {
+            existing.action_type == "file_change" && existing.tool_name == "apply_patch"
+        }
+        _ => false,
+    };
+    if !valid_preterminal {
         return Ok(ManualTerminalActionAuditOutcome::Conflict {
             existing_status: Some(existing.status),
-            reason: "manual command audit has an invalid decision source",
+            reason: "file-effect audit has an invalid pre-terminal status",
         });
     }
 
@@ -484,7 +385,7 @@ pub fn settle_manual_terminal_action_audit(
                 ELSE COALESCE(decision, ?2)
             END,
             status = ?3,
-            patch_result_json = ?4,
+            file_change_result_json = ?4,
             command_result_json = ?5,
             tool_result_json = ?6,
             error = ?7,
@@ -494,21 +395,35 @@ pub fn settle_manual_terminal_action_audit(
             END,
             completed_at = ?9,
             blocked_reason = ?10,
-            decision_source = 'manual'
+            decision_source = ?11
         WHERE action_id = ?1
-          AND status IN ('pending', 'approved', 'cancellation_requested')
+          AND (
+                (
+                    status IN ('pending', 'approved', 'cancellation_requested')
+                    AND decision_source IN ('manual', 'manual_pending')
+                    AND ?11 = 'manual'
+                )
+                OR (
+                    status = 'executing'
+                    AND decision_source = 'auto'
+                    AND action_type = 'file_change'
+                    AND tool_name = 'apply_patch'
+                    AND ?11 = 'auto'
+                )
+          )
         ",
         params![
             &terminal.action_id,
             &terminal.decision,
             &terminal.status,
-            &terminal.patch_result_json,
+            &terminal.file_change_result_json,
             &terminal.command_result_json,
             &terminal.tool_result_json,
             &terminal.error,
             terminal_decided_at,
             terminal.completed_at,
             &terminal.blocked_reason,
+            &terminal.decision_source,
         ],
     )?;
     Ok(if changed == 1 {
@@ -533,7 +448,7 @@ pub(crate) fn load_action_audit_record(
         .query_row(
             "
             SELECT action_id, run_id, conversation_id, assistant_message_id, action_type,
-                   tool_name, decision, status, action_json, patch_result_json,
+                   tool_name, decision, status, action_json, file_change_result_json,
                    command_result_json, tool_result_json, error, created_at, decided_at,
                    completed_at, effective_permissions_json, path_scope, command_cwd_scope,
                    blocked_reason, decision_source
@@ -549,26 +464,21 @@ pub(crate) fn load_action_audit_record(
 /// Lists the exact durable claims that require FileChange startup reconciliation.
 ///
 /// This is deliberately a storage-only selection over the current canonical columns. It neither
-/// decodes `action_json` nor accepts, upgrades, or reinterprets an older payload shape. The
-/// transitional `write_file` name is accepted only for the current `file_write` action whose
-/// private binding identifies the same canonical FileChange executor; callers must validate that
-/// exact envelope before using it as authority.
+/// decodes `action_json` nor accepts, upgrades, or reinterprets any retired payload shape.
 pub fn list_executing_file_change_action_audits(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<AgentActionAuditRecord>> {
     let mut statement = connection.prepare(
         "
         SELECT action_id, run_id, conversation_id, assistant_message_id, action_type,
-               tool_name, decision, status, action_json, patch_result_json,
+               tool_name, decision, status, action_json, file_change_result_json,
                command_result_json, tool_result_json, error, created_at, decided_at,
                completed_at, effective_permissions_json, path_scope, command_cwd_scope,
                blocked_reason, decision_source
         FROM agent_action_audit
         WHERE status = 'executing'
-          AND (
-                (action_type = 'diff' AND tool_name = 'apply_patch')
-             OR (action_type = 'file_write' AND tool_name IN ('apply_patch', 'write_file'))
-          )
+          AND action_type = 'file_change'
+          AND tool_name = 'apply_patch'
         ORDER BY created_at ASC, action_id ASC
         ",
     )?;
@@ -591,7 +501,7 @@ fn action_audit_record_from_row(
         decision: row.get(6)?,
         status: row.get(7)?,
         action_json: row.get(8)?,
-        patch_result_json: row.get(9)?,
+        file_change_result_json: row.get(9)?,
         command_result_json: row.get(10)?,
         tool_result_json: row.get(11)?,
         error: row.get(12)?,
@@ -624,25 +534,6 @@ fn has_same_execution_identity(
         && existing.decision_source == candidate.decision_source
 }
 
-fn has_same_immutable_execution_identity(
-    existing: &AgentActionAuditRecord,
-    candidate: &AgentActionAuditRecord,
-) -> bool {
-    existing.action_id == candidate.action_id
-        && existing.run_id == candidate.run_id
-        && existing.conversation_id == candidate.conversation_id
-        && existing.assistant_message_id == candidate.assistant_message_id
-        && existing.action_type == candidate.action_type
-        && existing.tool_name == candidate.tool_name
-        && existing.decision == candidate.decision
-        && existing.created_at == candidate.created_at
-        && existing.decided_at == candidate.decided_at
-        && existing.effective_permissions_json == candidate.effective_permissions_json
-        && existing.path_scope == candidate.path_scope
-        && existing.command_cwd_scope == candidate.command_cwd_scope
-        && existing.decision_source == candidate.decision_source
-}
-
 fn has_same_manual_frozen_identity(
     existing: &AgentActionAuditRecord,
     candidate: &AgentActionAuditRecord,
@@ -668,7 +559,7 @@ fn has_same_manual_terminal_result(
         && existing.decision == candidate.decision
         && existing.decision_source == candidate.decision_source
         && (candidate.status != "rejected" || existing.decided_at == candidate.decided_at)
-        && existing.patch_result_json == candidate.patch_result_json
+        && existing.file_change_result_json == candidate.file_change_result_json
         && existing.command_result_json == candidate.command_result_json
         && existing.tool_result_json == candidate.tool_result_json
         && existing.error == candidate.error
@@ -715,7 +606,7 @@ pub fn upsert_action_audit_record(
             decision,
             status,
             action_json,
-            patch_result_json,
+            file_change_result_json,
             command_result_json,
             tool_result_json,
             error,
@@ -738,7 +629,7 @@ pub fn upsert_action_audit_record(
             decision = excluded.decision,
             status = excluded.status,
             action_json = excluded.action_json,
-            patch_result_json = excluded.patch_result_json,
+            file_change_result_json = excluded.file_change_result_json,
             command_result_json = excluded.command_result_json,
             tool_result_json = excluded.tool_result_json,
             error = excluded.error,
@@ -761,7 +652,7 @@ pub fn upsert_action_audit_record(
             &record.decision,
             &record.status,
             &record.action_json,
-            &record.patch_result_json,
+            &record.file_change_result_json,
             &record.command_result_json,
             &record.tool_result_json,
             &record.error,
@@ -942,18 +833,18 @@ mod tests {
     use super::*;
     use crate::storage::migrations;
 
-    fn executing_auto_diff(action_id: &str, action_json: &str) -> AgentActionAuditRecord {
+    fn executing_auto_file_change(action_id: &str, action_json: &str) -> AgentActionAuditRecord {
         AgentActionAuditRecord {
             action_id: action_id.to_string(),
             run_id: "run-1".to_string(),
             conversation_id: Some("conversation-1".to_string()),
             assistant_message_id: Some("message-1".to_string()),
-            action_type: "diff".to_string(),
+            action_type: "file_change".to_string(),
             tool_name: "apply_patch".to_string(),
             decision: Some("approved".to_string()),
             status: "executing".to_string(),
             action_json: action_json.to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,
@@ -973,10 +864,11 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
 
-        let mut same_time_later_id = executing_auto_diff("z-same-time", r#"{"proposal":"z"}"#);
+        let mut same_time_later_id =
+            executing_auto_file_change("z-same-time", r#"{"proposal":"z"}"#);
         same_time_later_id.created_at = 20;
         same_time_later_id.decided_at = Some(21);
-        let mut earliest = executing_auto_diff("middle-earliest", r#"{"proposal":"first"}"#);
+        let mut earliest = executing_auto_file_change("middle-earliest", r#"{"proposal":"first"}"#);
         earliest.run_id = "run-earliest".to_string();
         earliest.conversation_id = Some("conversation-earliest".to_string());
         earliest.assistant_message_id = Some("message-earliest".to_string());
@@ -986,12 +878,11 @@ mod tests {
             Some(r#"{"read":"workspace_only","write":"workspace_only"}"#.to_string());
         earliest.path_scope = Some("workspace:/project".to_string());
         earliest.decision_source = Some("auto".to_string());
-        let mut same_time_earlier_id = executing_auto_diff("a-same-time", r#"{"proposal":"a"}"#);
+        let mut same_time_earlier_id =
+            executing_auto_file_change("a-same-time", r#"{"proposal":"a"}"#);
         same_time_earlier_id.created_at = 20;
         same_time_earlier_id.decided_at = Some(22);
-        let mut staged = executing_auto_diff("staged-current", r#"{"proposal":"staged"}"#);
-        staged.action_type = "file_write".to_string();
-        staged.tool_name = "write_file".to_string();
+        let mut staged = executing_auto_file_change("staged-current", r#"{"proposal":"staged"}"#);
         staged.created_at = 15;
 
         // Insert deliberately out of result order so the contract depends on SQL ordering.
@@ -1005,25 +896,25 @@ mod tests {
         }
 
         let mut other_executing_action_type =
-            executing_auto_diff("executing-command", r#"{"proposal":"command"}"#);
+            executing_auto_file_change("executing-command", r#"{"proposal":"command"}"#);
         other_executing_action_type.action_type = "command".to_string();
         upsert_action_audit_record(&connection, &other_executing_action_type).unwrap();
 
         let mut other_executing_tool =
-            executing_auto_diff("executing-other-tool", r#"{"proposal":"tool"}"#);
+            executing_auto_file_change("executing-other-tool", r#"{"proposal":"tool"}"#);
         other_executing_tool.tool_name = "run_command".to_string();
         upsert_action_audit_record(&connection, &other_executing_tool).unwrap();
 
         let mut invalid_staged_tool =
-            executing_auto_diff("invalid-staged-tool", r#"{"proposal":"invalid"}"#);
-        invalid_staged_tool.action_type = "file_write".to_string();
+            executing_auto_file_change("invalid-staged-tool", r#"{"proposal":"invalid"}"#);
         invalid_staged_tool.tool_name = "run_command".to_string();
         upsert_action_audit_record(&connection, &invalid_staged_tool).unwrap();
 
-        let mut terminal_diff = executing_auto_diff("completed-diff", r#"{"proposal":"terminal"}"#);
-        terminal_diff.status = "completed".to_string();
-        terminal_diff.completed_at = Some(30);
-        upsert_action_audit_record(&connection, &terminal_diff).unwrap();
+        let mut terminal_file_change =
+            executing_auto_file_change("completed-file-change", r#"{"proposal":"terminal"}"#);
+        terminal_file_change.status = "completed".to_string();
+        terminal_file_change.completed_at = Some(30);
+        upsert_action_audit_record(&connection, &terminal_file_change).unwrap();
 
         let records = list_executing_file_change_action_audits(&connection).unwrap();
         assert_eq!(
@@ -1043,7 +934,7 @@ mod tests {
         assert_eq!(loaded.run_id, earliest.run_id);
         assert_eq!(loaded.conversation_id, earliest.conversation_id);
         assert_eq!(loaded.assistant_message_id, earliest.assistant_message_id);
-        assert_eq!(loaded.action_type, "diff");
+        assert_eq!(loaded.action_type, "file_change");
         assert_eq!(loaded.tool_name, "apply_patch");
         assert_eq!(loaded.decision, Some("approved".to_string()));
         assert_eq!(loaded.status, "executing");
@@ -1057,104 +948,6 @@ mod tests {
         assert_eq!(loaded.created_at, 5);
         assert_eq!(loaded.decided_at, Some(6));
         assert_eq!(loaded.completed_at, None);
-    }
-
-    #[test]
-    fn automatic_diff_action_json_commit_is_exact_and_idempotent() {
-        const PREPARED: &str = r#"{"type":"diff","credential":"prepared"}"#;
-        const COMMITTED: &str = r#"{"type":"diff","credential":"committed"}"#;
-        let mut connection = Connection::open_in_memory().unwrap();
-        migrations::run_migrations(&connection).unwrap();
-        let expected = executing_auto_diff("automatic-diff", PREPARED);
-        assert_eq!(
-            claim_action_audit_execution(&connection, &expected).unwrap(),
-            AgentActionAuditExecutionClaimOutcome::Claimed
-        );
-
-        assert_eq!(
-            commit_executing_action_json(&mut connection, &expected, PREPARED, COMMITTED).unwrap(),
-            AgentActionAuditJsonCommitOutcome::Updated
-        );
-        assert_eq!(
-            commit_executing_action_json(&mut connection, &expected, PREPARED, COMMITTED).unwrap(),
-            AgentActionAuditJsonCommitOutcome::AlreadyCommitted
-        );
-        assert_eq!(
-            load_action_audit_record(&connection, &expected.action_id)
-                .unwrap()
-                .unwrap()
-                .action_json,
-            COMMITTED
-        );
-
-        let stale = executing_auto_diff("stale-automatic-diff", PREPARED);
-        claim_action_audit_execution(&connection, &stale).unwrap();
-        assert_eq!(
-            commit_executing_action_json(
-                &mut connection,
-                &stale,
-                r#"{"type":"diff","credential":"older"}"#,
-                COMMITTED,
-            )
-            .unwrap(),
-            AgentActionAuditJsonCommitOutcome::ExpectedActionMismatch
-        );
-        assert_eq!(
-            load_action_audit_record(&connection, &stale.action_id)
-                .unwrap()
-                .unwrap()
-                .action_json,
-            PREPARED
-        );
-
-        let mut completed = executing_auto_diff("not-executing-automatic-diff", PREPARED);
-        completed.status = "completed".to_string();
-        completed.completed_at = Some(20);
-        insert_action_audit_record_if_absent(&connection, &completed).unwrap();
-        let mut executing_identity = completed.clone();
-        executing_identity.status = "executing".to_string();
-        executing_identity.completed_at = None;
-        assert_eq!(
-            commit_executing_action_json(
-                &mut connection,
-                &executing_identity,
-                PREPARED,
-                COMMITTED,
-            )
-            .unwrap(),
-            AgentActionAuditJsonCommitOutcome::NotExecuting {
-                status: "completed".to_string()
-            },
-            "a terminal lifecycle can never acquire a new commit credential"
-        );
-
-        let mut approved = executing_auto_diff("approved-automatic-diff", PREPARED);
-        approved.status = "approved".to_string();
-        insert_action_audit_record_if_absent(&connection, &approved).unwrap();
-        let mut approved_identity = approved.clone();
-        approved_identity.status = "executing".to_string();
-        assert_eq!(
-            commit_executing_action_json(&mut connection, &approved_identity, PREPARED, COMMITTED,)
-                .unwrap(),
-            AgentActionAuditJsonCommitOutcome::NotExecuting {
-                status: "approved".to_string()
-            }
-        );
-
-        let mut conflicting_identity = stale.clone();
-        conflicting_identity.run_id = "other-run".to_string();
-        assert_eq!(
-            commit_executing_action_json(
-                &mut connection,
-                &conflicting_identity,
-                PREPARED,
-                COMMITTED,
-            )
-            .unwrap(),
-            AgentActionAuditJsonCommitOutcome::IdentityConflict {
-                status: "executing".to_string()
-            }
-        );
     }
 
     #[test]
@@ -1172,7 +965,7 @@ mod tests {
             decision: Some("approved".to_string()),
             status: "approved".to_string(),
             action_json: "{}".to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,
@@ -1217,7 +1010,7 @@ mod tests {
             decision: Some("approved".to_string()),
             status: "executing".to_string(),
             action_json: r#"{"operation":"set"}"#.to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,
@@ -1269,7 +1062,7 @@ mod tests {
             decision: Some("approved".to_string()),
             status: "executing".to_string(),
             action_json: r#"{"operation":"set"}"#.to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,
@@ -1341,7 +1134,7 @@ mod tests {
             decision: Some("approved".to_string()),
             status: "approved".to_string(),
             action_json: r#"{"type":"mcp_tool_call"}"#.to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,
@@ -1395,12 +1188,12 @@ mod tests {
             run_id: "run-1".to_string(),
             conversation_id: Some("conversation-1".to_string()),
             assistant_message_id: Some("message-1".to_string()),
-            action_type: "file_write".to_string(),
-            tool_name: "write_file".to_string(),
+            action_type: "file_change".to_string(),
+            tool_name: "apply_patch".to_string(),
             decision: Some("approved".to_string()),
             status: "completed".to_string(),
             action_json: "{}".to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: Some(r#"{"callId":"action-2"}"#.to_string()),
             error: None,
@@ -1423,12 +1216,12 @@ mod tests {
         upsert_action_audit_record(&connection, &first).unwrap();
         let mut other_tool = base.clone();
         other_tool.action_id = "action-3".to_string();
-        other_tool.tool_name = "apply_patch".to_string();
+        other_tool.tool_name = "run_command".to_string();
         other_tool.tool_result_json = Some(r#"{"callId":"action-3"}"#.to_string());
         upsert_action_audit_record(&connection, &other_tool).unwrap();
 
         assert_eq!(
-            list_tool_result_json_for_run(&connection, "run-1", "write_file").unwrap(),
+            list_tool_result_json_for_run(&connection, "run-1", "apply_patch").unwrap(),
             vec![
                 r#"{"callId":"action-1"}"#.to_string(),
                 r#"{"callId":"action-2"}"#.to_string()

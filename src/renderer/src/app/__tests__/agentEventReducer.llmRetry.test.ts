@@ -93,16 +93,18 @@ describe('LLM retry Renderer projection', () => {
     expect(toolInput.agentRun?.firstResponseAt).toBeTypeOf('number')
   })
 
-  it('clears retry status when write_file starts streaming a preview', () => {
+  it('clears retry status when apply_patch starts streaming a preview', () => {
     const preview = applyAgentEventToChatMessage(retryingMessage(), {
-      type: 'file_write_preview_updated',
+      type: 'file_change_preview_updated',
       runId: 'run-retry',
       preview: {
+        schemaVersion: 1,
         previewId: 'stream-1:2:0',
         streamId: 'stream-1',
         attempt: 2,
         toolCallIndex: 0,
-        draftId: 'draft-1',
+        toolCallId: null,
+        transactionId: 'draft-1',
         filePath: 'src/main.ts',
         additions: 1,
         deletions: 0,
@@ -120,14 +122,16 @@ describe('LLM retry Renderer projection', () => {
 
   it('binds provisional apply_patch previews to the canonical call and clears them on settlement', () => {
     const preview = applyAgentEventToChatMessage(runningMessage(), {
-      type: 'file_write_preview_updated',
+      type: 'file_change_preview_updated',
       runId: 'run-retry',
       preview: {
+        schemaVersion: 1,
         previewId: 'stream-2:1:0',
         streamId: 'stream-2',
         attempt: 1,
         toolCallIndex: 0,
-        draftId: 'stream-2:1:0',
+        toolCallId: null,
+        transactionId: 'stream-2:1:0',
         filePath: 'src/large.ts',
         additions: 2,
         deletions: 0,
@@ -172,6 +176,40 @@ describe('LLM retry Renderer projection', () => {
     })
     expect(settled.agentRun?.fileWritePreviews).toEqual([])
   })
+
+  it.each(['already_applied', 'outcome_unknown'] as const)(
+    'projects the current FileChange %s terminal status',
+    (status) => {
+      const next = applyAgentEventToChatMessage(runningMessage(), {
+        type: 'file_change_updated',
+        runId: 'run-retry',
+        fileChange: {
+          schemaVersion: 1,
+          transactionId: `file-change-${status}`,
+          conversationId: 'conversation-1',
+          projectId: null,
+          filePath: 'src/main.ts',
+          operation: 'update',
+          updateStrategy: 'modify',
+          status,
+          baseRevision: 'content-sha256-v1:base',
+          additions: 1,
+          deletions: 1,
+          lineCount: 1,
+          byteCount: 4,
+          mutationCount: 1,
+          nextMutationIndex: 1,
+          statsFinal: true,
+          summary: null,
+          createdAt: 10,
+          updatedAt: 11
+        }
+      })
+      expect(next.agentRun?.fileDrafts).toContainEqual(
+        expect.objectContaining({ status, transactionId: `file-change-${status}` })
+      )
+    }
+  )
 
   it('rolls back the failed attempt before projecting the reconnected output', () => {
     const firstAttempt = applyAgentEventToChatMessage(runningMessage(), {

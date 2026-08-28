@@ -1071,8 +1071,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {
@@ -1111,8 +1110,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {
@@ -1151,8 +1149,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {
@@ -1461,8 +1458,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {
@@ -2121,8 +2117,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {
@@ -2161,8 +2156,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {

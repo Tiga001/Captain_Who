@@ -102,14 +102,21 @@ const events = [
     type: 'approval_required',
     runId,
     action: {
-      type: 'diff',
-      diff: {
-        id: 'diff-1',
+      type: 'file_change',
+      fileChange: {
+        schemaVersion: 1,
+        id: 'file-change-1',
+        transactionId: 'file-change-transaction-1',
         operation: 'update',
+        updateStrategy: null,
         filePath: 'README.md',
-        patch: '@@ -1 +1 @@\n-old\n+new',
-        baseRevision: null,
+        inlineDiff: { patch: '@@ -1 +1 @@\n-old\n+new', truncated: false },
+        baseRevision: 'sha256-base',
         summary: 'Update the heading',
+        additions: 1,
+        deletions: 1,
+        lineCount: 1,
+        byteCount: 4,
         approvalStatus: 'required'
       }
     }

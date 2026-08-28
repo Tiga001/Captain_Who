@@ -36,12 +36,11 @@ mod tool_set;
 mod web_fetch;
 mod web_search;
 mod workspace_map;
-mod write_file;
 mod write_file_stream;
 
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::protocol::{
-    AgentError, AgentFileWritePreview, AgentProposedAction, AgentResult, AgentSearchConfig,
+    AgentError, AgentFileChangePreview, AgentProposedAction, AgentResult, AgentSearchConfig,
     AgentSearchMode, AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult,
 };
 use agent_collaboration::{AgentCollaborationTool, AgentCollaborationToolKind};
@@ -104,7 +103,6 @@ pub(crate) use tool_set::{
 use web_fetch::WebFetchTool;
 use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
-use write_file::WriteFileTool;
 
 pub(super) use context::ToolExecutionContext;
 use document_text::{
@@ -140,7 +138,6 @@ pub(crate) fn model_projection_for_persisted_continuation(
 ) -> AgentToolResult {
     match result.tool.as_str() {
         "run_command" => run_command::run_command_model_projection(result),
-        "write_file" => write_file::write_file_model_projection(result),
         "office_document" | "office_spreadsheet" | "office_presentation" => {
             office::office_model_projection(result)
         }
@@ -570,7 +567,6 @@ impl ToolRegistry {
         }
         registry.register(GitDiffTool);
         registry.register(ApplyPatchTool);
-        registry.register(WriteFileTool);
         registry.register(RunCommandTool);
         registry.register_async(CommandSessionTool);
         registry.register(SkillsListResourcesTool);
@@ -784,8 +780,7 @@ impl ToolRegistry {
             AgentProposedAction::BrowserRiskApproval { approval } => {
                 approval.trigger_tool_name.as_str()
             }
-            AgentProposedAction::Diff { .. } => "apply_patch",
-            AgentProposedAction::FileWrite { .. } => "write_file",
+            AgentProposedAction::FileChange { .. } => "apply_patch",
             AgentProposedAction::Command { .. } => "run_command",
             AgentProposedAction::SkillMaterialization { .. } => "skills_materialize_resource",
             AgentProposedAction::SkillScript { .. } => "skills_run_script",
@@ -1383,13 +1378,12 @@ pub(crate) struct ToolInputStreamChunk<'a> {
     pub stream_id: &'a str,
     pub attempt: usize,
     pub tool_call_index: usize,
-    pub tool_call_id: Option<&'a str>,
     pub input_delta: &'a str,
     pub received_bytes: u64,
 }
 
 pub(crate) enum ToolInputStreamPreview {
-    FileWrite(AgentFileWritePreview),
+    FileChange(AgentFileChangePreview),
 }
 
 pub(crate) trait ToolInputStreamObserver: Send {
@@ -1405,9 +1399,9 @@ pub(crate) trait ToolInputStreamObserver: Send {
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachmentKind,
-        AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolSafety,
-        AgentWorkspaceContext, ModelCapabilities,
+        AgentApprovalStatus, AgentAttachmentLibraryContext, AgentAttachmentReference,
+        AgentInputAttachmentKind, AgentRunContext, AgentSearchConfig, AgentSearchMode,
+        AgentToolCall, AgentToolSafety, AgentWorkspaceContext, ModelCapabilities,
     };
     use image::ImageEncoder;
     use serde_json::json;
@@ -2000,14 +1994,12 @@ mod tests {
 
         // FileChange transactions must remain inspectable and abortable after write authority is
         // tightened. Their mutating calls still enforce current write authority inside the tool
-        // and again at approval execution. The temporary write_file bridge has the same lifecycle.
-        for tool_name in ["apply_patch", "write_file"] {
-            assert_eq!(
-                registry.permission_policy(tool_name),
-                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite),
-                "{tool_name} must retain only its safe status/abort surface when writes are denied"
-            );
-        }
+        // and again at approval execution.
+        assert_eq!(
+            registry.permission_policy("apply_patch"),
+            AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite),
+            "apply_patch must retain only its safe status/abort surface when writes are denied"
+        );
         assert_eq!(
             registry.permission_policy("skills_materialize_resource"),
             AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly),
@@ -2020,60 +2012,47 @@ mod tests {
     }
 
     #[test]
-    fn write_file_uses_dynamic_finish_approval() {
+    fn write_file_is_not_registered_or_executable() {
         let registry = ToolRegistry::defaults_with_search(None);
-        let definition = registry.definition_for("write_file").unwrap();
-
-        assert_eq!(
-            definition.approval_mode,
-            crate::protocol::AgentToolApprovalMode::Dynamic
+        assert!(registry.definition_for("write_file").is_none());
+        let result = registry.execute(
+            &ToolExecutionContext::from_run_context(None),
+            &AgentToolCall {
+                id: "legacy-write".to_string(),
+                tool: "write_file".to_string(),
+                args: json!({ "phase": "begin" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
         );
-        assert!(!registry.requires_approval_for_call("write_file", &json!({ "phase": "append" })));
-        assert!(registry.requires_approval_for_call("write_file", &json!({ "phase": "finish" })));
+        assert!(!result.ok);
+        assert_eq!(result.tool, "write_file");
+        assert_eq!(result.error.as_deref(), Some("未知工具：write_file"));
     }
 
     #[test]
     fn approval_restore_reuses_the_live_model_projection_contract() {
         let registry = ToolRegistry::defaults_with_search(None);
-        for result in [
-            AgentToolResult {
-                exact_archive_file: None,
-                call_id: "command-1".to_string(),
-                tool: "run_command".to_string(),
-                ok: true,
-                result: Some(json!({
-                    "command": "printf done",
-                    "cwd": "/workspace",
-                    "exitCode": 0,
-                    "stdout": "done",
-                    "stderr": "",
-                    "durationMs": 12,
-                    "runtime": { "provider": "managed" }
-                })),
-                error: None,
-            },
-            AgentToolResult {
-                exact_archive_file: None,
-                call_id: "write-1".to_string(),
-                tool: "write_file".to_string(),
-                ok: true,
-                result: Some(json!({
-                    "status": "applied",
-                    "draftId": "draft-1",
-                    "filePath": "report.md",
-                    "mode": "create",
-                    "lineCount": 2,
-                    "byteCount": 20,
-                    "revision": "sha256:private"
-                })),
-                error: None,
-            },
-        ] {
-            assert_eq!(
-                serde_json::to_value(registry.model_projection(&result)).unwrap(),
-                serde_json::to_value(model_projection_for_persisted_continuation(&result)).unwrap()
-            );
-        }
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "command-1".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "command": "printf done",
+                "cwd": "/workspace",
+                "exitCode": 0,
+                "stdout": "done",
+                "stderr": "",
+                "durationMs": 12,
+                "runtime": { "provider": "managed" }
+            })),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(registry.model_projection(&result)).unwrap(),
+            serde_json::to_value(model_projection_for_persisted_continuation(&result)).unwrap()
+        );
     }
 
     #[test]

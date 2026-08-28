@@ -216,13 +216,13 @@ pub(crate) fn handle_request(
         AGENT_CLEAR_USAGE_RECORDS_METHOD => {
             handle_agent_clear_usage_records(agent_service, request.id, request.params)
         }
-        AGENT_READ_FILE_DRAFT_METHOD => {
-            let input = match parse_params::<AgentFileDraftReadRequest>(request.params) {
+        AGENT_READ_FILE_CHANGE_METHOD => {
+            let input = match parse_params::<AgentFileChangeReadRequest>(request.params) {
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            match agent_service.read_file_draft(
-                &input.draft_id,
+            match agent_service.read_file_change(
+                &input.transaction_id,
                 input.observer_root_conversation_id.as_deref(),
                 input.offset,
                 input.max_chars,
@@ -231,13 +231,13 @@ pub(crate) fn handle_request(
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
-        AGENT_GET_FILE_WRITE_DIFF_METHOD => {
-            let input = match parse_params::<AgentFileDraftReadRequest>(request.params) {
+        AGENT_GET_FILE_CHANGE_DIFF_METHOD => {
+            let input = match parse_params::<AgentFileChangeReadRequest>(request.params) {
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            match agent_service.get_file_write_diff(
-                &input.draft_id,
+            match agent_service.get_file_change_diff(
+                &input.transaction_id,
                 input.observer_root_conversation_id.as_deref(),
                 input.offset,
                 input.max_chars,

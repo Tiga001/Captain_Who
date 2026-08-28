@@ -1,3 +1,6 @@
+use super::file_write_permissions::{
+    bind_direct_execution_to_input, seed_durable_direct_file_change_owner,
+};
 use super::*;
 
 fn seed_terminal_retry_pending_action(
@@ -1046,7 +1049,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         "",
     );
     let service = AgentService::new(storage.clone());
-    let base_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
@@ -1055,8 +1058,17 @@ fn pending_approval_persists_full_run_checkpoint() {
         "messages": []
     }))
     .unwrap();
+    let run_context = AgentRunContext {
+        conversation_id: Some("conversation-checkpoint".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    base_input.context = Some(run_context.clone());
     let canonical_target = fixture.path().join("report.txt");
-    let (action, pending_call) = direct_file_change_fixture(
+    let (mut action, pending_call) = direct_file_change_fixture(
         "run-checkpoint",
         "conversation-checkpoint",
         "call-checkpoint",
@@ -1068,7 +1080,10 @@ fn pending_approval_persists_full_run_checkpoint() {
     let run_checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-checkpoint".to_string(),
-        pending_action_id: None,
+        pending_action_id: Some(pending_action_storage_id(
+            "run-checkpoint",
+            "call-checkpoint",
+        )),
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
                 role: "system".to_string(),
@@ -1115,7 +1130,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
-        run_context: None,
+        run_context: Some(run_context),
         collaboration_run_snapshot: None,
         model_capabilities: ModelCapabilities::default(),
         provider_profile_config: crate::test_provider_profile_config(),
@@ -1131,6 +1146,15 @@ fn pending_approval_persists_full_run_checkpoint() {
     };
     let mut checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
     save_test_pending_provider_for_input(&storage, &mut checkpoint);
+    bind_direct_execution_to_input(&mut action, &checkpoint);
+    seed_durable_direct_file_change_owner(
+        &storage,
+        &mut checkpoint,
+        "conversation-checkpoint",
+        "assistant-checkpoint",
+        "run-checkpoint",
+        &pending_call,
+    );
     let run_checkpoint = checkpoint
         .resume_checkpoint
         .clone()

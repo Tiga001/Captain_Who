@@ -900,7 +900,6 @@ mod tests {
                 )),
             ),
             ("workspace_map", AgentToolExposure::Stable),
-            ("write_file", AgentToolExposure::Stable),
         ])
         .into_iter()
         .map(|(name, exposure)| (name.to_string(), exposure))

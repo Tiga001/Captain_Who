@@ -9,7 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) use mycopilot_core::command::command_tool_result;
 use mycopilot_core::command::{AgentCommandExecutionResult, CommandPolicyEvaluation};
-use mycopilot_core::file_write::failed_file_write_result;
 use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
@@ -19,16 +18,16 @@ use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AgentApprovalDecisionStatus, AgentAutomationExecutionContext, AgentChatInput, AgentChatMessage,
     AgentChatOutput, AgentCollaborationIdentity, AgentCommandRequest, AgentContextWindowSnapshot,
-    AgentEvent, AgentFileDraftSnapshot, AgentFileWriteMode, AgentFileWriteProposal,
-    AgentFileWriteResult, AgentFileWriteResultStatus, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentModelSelectionSnapshot,
-    AgentPatchResult, AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel,
-    AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode, AgentProposedAction,
-    AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode, AgentToolCall,
-    AgentToolResult, AgentTurnDiffIdentity, AgentTurnFileChange, AgentTurnFileContent, AgentUsage,
-    AgentWorkspaceContext, ContextJournalCursor, ConversationTurnTrace,
-    ConversationTurnTraceTerminalStatus, ModelCapabilities, ProviderProtocolDialect,
-    ProviderProtocolKey, ProviderUsageSemantics,
+    AgentEvent, AgentFileChangeOperation, AgentFileChangeOutcome, AgentFileChangeProposal,
+    AgentFileChangeResult, AgentFileChangeResultStatus, AgentFileChangeSnapshot,
+    AgentFileChangeUpdateStrategy, AgentInputAttachment, AgentInputAttachmentEncoding,
+    AgentInputAttachmentKind, AgentModelSelectionSnapshot, AgentPermissions,
+    AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
+    AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
+    AgentToolCall, AgentToolResult, AgentTurnDiffIdentity, AgentTurnFileChange,
+    AgentTurnFileContent, AgentUsage, AgentWorkspaceContext, ContextJournalCursor,
+    ConversationTurnTrace, ConversationTurnTraceTerminalStatus, ModelCapabilities,
+    ProviderProtocolDialect, ProviderProtocolKey, ProviderUsageSemantics,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,
@@ -57,7 +56,7 @@ pub(super) use types::{
 pub use types::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
-    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentProviderTransitionGetStatusInput,
     AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
     AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
     AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,

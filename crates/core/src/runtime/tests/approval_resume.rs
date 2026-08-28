@@ -295,6 +295,10 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         })
         .expect("target observation read call event");
     let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let pending_action_id = checkpoint
+        .pending_action_id
+        .clone()
+        .expect("FileChange checkpoint must freeze its canonical pending action id");
     let pending_checkpoint_call = checkpoint
         .context_items
         .iter()
@@ -365,7 +369,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     resume_input.skill_activation = Some(activated_skill("SKILL_CHANGED_DURING_RESUME"));
     resume_input.resume_checkpoint = Some(checkpoint);
     resume_input.approval_decision = Some(AgentApprovalDecision {
-        action_id: pending_call_id.clone(),
+        action_id: pending_action_id,
         status: AgentApprovalDecisionStatus::Rejected,
         message: Some("Keep the evidence but revise the report first.".to_string()),
     });
@@ -751,6 +755,10 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
         })
         .expect("target observation read call");
     let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let pending_action_id = checkpoint
+        .pending_action_id
+        .clone()
+        .expect("FileChange checkpoint must freeze its canonical pending action id");
     let pending_checkpoint_call = checkpoint
         .context_items
         .iter()
@@ -783,7 +791,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     resume_input.skill_activation = None;
     resume_input.resume_checkpoint = Some(checkpoint.clone());
     resume_input.approval_decision = Some(AgentApprovalDecision {
-        action_id: pending_call_id.clone(),
+        action_id: pending_action_id,
         status: AgentApprovalDecisionStatus::Approved,
         message: None,
     });

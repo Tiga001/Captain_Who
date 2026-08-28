@@ -1200,10 +1200,7 @@ fn build_single_conversation_fork_plan_at_point(
             if source_change.conversation_id != source.id
                 || source_change.project_id != source.project_id
                 || source_change.run_id != *source_run_id
-                || !matches!(
-                    source_change.source_tool_name.as_str(),
-                    "apply_patch" | "write_file"
-                )
+                || source_change.source_tool_name != "apply_patch"
             {
                 return Err("文件变更事务的任务、项目、运行或工具归属不一致。"
                     .to_string()
@@ -1355,6 +1352,10 @@ fn build_single_conversation_fork_plan_at_point(
                             mapped_id(&tool_call_id_map, call_id, "文件变更最终 Tool Call")
                         })
                         .transpose()?,
+                    final_action_arguments_digest: source_change.final_action_arguments_digest,
+                    final_permission_revision: source_change.final_permission_revision,
+                    final_tool_set_revision: source_change.final_tool_set_revision,
+                    final_provider_wire_revision: source_change.final_provider_wire_revision,
                     created_at: source_change.created_at,
                     updated_at: source_change.updated_at,
                     expires_at: source_change.expires_at,
@@ -1723,26 +1724,14 @@ fn remap_file_change_observation(
         ));
     }
     checkpoint.observation_id = target_observation_id.to_string();
-    checkpoint.source_tool_call_id =
-        if let Some(mapped) = tool_call_id_map.get(&checkpoint.source_tool_call_id) {
-            mapped.clone()
-        } else if source_change.source_tool_name == "write_file"
-            && checkpoint.source_tool_call_id
-                == format!("write-file-host-read:{}", source_change.source_tool_call_id)
-        {
-            format!(
-                "write-file-host-read:{}",
-                mapped_id(
-                    tool_call_id_map,
-                    &source_change.source_tool_call_id,
-                    "文件变更 begin Tool Call",
-                )?
-            )
-        } else {
-            return Err(ConversationForkError::Other(
+    checkpoint.source_tool_call_id = tool_call_id_map
+        .get(&checkpoint.source_tool_call_id)
+        .cloned()
+        .ok_or_else(|| {
+            ConversationForkError::Other(
                 "文件读取 observation Tool Call 不在分叉历史中。".to_string(),
-            ));
-        };
+            )
+        })?;
     checkpoint.conversation_id = target_conversation_id.to_string();
     checkpoint.run_id = target_run_id.to_string();
     checkpoint

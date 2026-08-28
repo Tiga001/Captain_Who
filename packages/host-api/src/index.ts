@@ -38,10 +38,10 @@ import type {
   CollaborationEventsPage,
   CollaborationEventsRequest,
   CollaborationResyncEnvelope,
-  AgentFileDraftContentPage,
-  AgentFileDraftReadInput,
-  AgentFileWriteDiffInput,
-  AgentFileWriteDiffPage,
+  AgentFileChangeContentPage,
+  AgentFileChangeDiffInput,
+  AgentFileChangeDiffPage,
+  AgentFileChangeReadInput,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
   AgentProviderTransitionPreflightInput,
@@ -573,8 +573,8 @@ export interface AgentHostApi {
   cancelAction(input: AgentActionIdRequest): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
-  readFileDraft(input: AgentFileDraftReadInput): Promise<AgentFileDraftContentPage>
-  getFileWriteDiff(input: AgentFileWriteDiffInput): Promise<AgentFileWriteDiffPage>
+  readFileChange(input: AgentFileChangeReadInput): Promise<AgentFileChangeContentPage>
+  getFileChangeDiff(input: AgentFileChangeDiffInput): Promise<AgentFileChangeDiffPage>
   onProviderTransition(handler: (event: AgentProviderTransitionNotification) => void): () => void
   onEvent(handler: (event: AgentEvent) => void): () => void
 }

@@ -1,7 +1,7 @@
 import type {
   AgentActionExecutionOutput,
   AgentApprovalStatus,
-  AgentFileWritePreview,
+  AgentFileChangePreview,
   AgentProposedAction,
   AgentToolCall
 } from '@mycopilot/protocol'
@@ -12,7 +12,7 @@ import { upsertById } from './agentEventReducerShared'
 
 export function upsertFileWritePreview(
   previews: ChatFileWritePreview[],
-  incoming: AgentFileWritePreview,
+  incoming: AgentFileChangePreview,
   receivedAt: number
 ): ChatFileWritePreview[] {
   const existing = previews.find((preview) => preview.previewId === incoming.previewId)
@@ -42,23 +42,19 @@ export function bindFileChangePreviewsToCall(
   previews: ChatFileWritePreview[],
   call: AgentToolCall
 ): ChatFileWritePreview[] {
-  if (call.tool !== 'apply_patch' && call.tool !== 'write_file') return previews
+  if (call.tool !== 'apply_patch') return previews
   const args =
     call.args && typeof call.args === 'object' && !Array.isArray(call.args)
       ? (call.args as Record<string, unknown>)
       : {}
-  const transactionId =
-    typeof args.transactionId === 'string'
-      ? args.transactionId
-      : typeof args.draftId === 'string'
-        ? args.draftId
-        : undefined
+  const transactionId = typeof args.transactionId === 'string' ? args.transactionId : undefined
   const filePath = typeof args.filePath === 'string' ? args.filePath : undefined
   const directApply = call.tool === 'apply_patch' && args.action === 'apply'
 
   const previewIndex = previews.findIndex((preview) => {
-    if (preview.toolCallId !== undefined) return false
-    const matchesTransaction = transactionId !== undefined && preview.draftId === transactionId
+    if (preview.toolCallId !== null) return false
+    const matchesTransaction =
+      transactionId !== undefined && preview.transactionId === transactionId
     const matchesDirectPath = directApply && filePath !== undefined && preview.filePath === filePath
     return matchesTransaction || matchesDirectPath
   })

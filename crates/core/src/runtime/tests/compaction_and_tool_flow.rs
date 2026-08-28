@@ -1220,12 +1220,12 @@ async fn active_run_keeps_earlier_exact_tool_exchanges_across_later_model_sample
 }
 
 #[tokio::test]
-async fn streams_write_file_previews_end_to_end_without_persisting_them() {
+async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
     use crate::protocol::{
         AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
         AgentWritePermission,
     };
-    use crate::storage::models::ChatConversationRecord;
+    use crate::storage::models::{AgentFileChangeRecord, ChatConversationRecord};
     use crate::storage::service::StorageService;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -1283,7 +1283,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
                         "id": id,
                         "type": "function",
                         "function": {
-                            "name": "write_file",
+                            "name": "apply_patch",
                             "arguments": serde_json::to_string(&arguments).unwrap()
                         }
                     }]
@@ -1293,7 +1293,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         })
     }
 
-    async fn write_append_stream(stream: &mut TcpStream, draft_id: &str) {
+    async fn write_append_stream(stream: &mut TcpStream, transaction_id: &str) {
         stream
             .write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -1302,13 +1302,13 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             .unwrap();
         let fragments = [
             format!(
-                "{{\"phase\":\"append\",\"draftId\":\"{draft_id}\",\"index\":0,\"content\":\"line 1\\n"
+                "{{\"action\":\"append\",\"transactionId\":\"{transaction_id}\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"line 1\\n"
             ),
             "line 2\\n".to_string(),
             "line 3\\n".to_string(),
             "line 4\\n\"}".to_string(),
         ];
-        let tool_name_fragments = ["write_", "file", "", ""];
+        let tool_name_fragments = ["apply_", "patch", "", ""];
         for (fragment, tool_name) in fragments.into_iter().zip(tool_name_fragments) {
             let frame = json!({
                 "choices": [{
@@ -1361,48 +1361,73 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             unread_at: None,
         })
         .unwrap();
+    storage
+        .create_agent_file_change(AgentFileChangeRecord {
+            schema_version: crate::file_change::FILE_CHANGE_SCHEMA_VERSION,
+            id: "file-change-preview".to_string(),
+            conversation_id: "conversation-preview".to_string(),
+            project_id: None,
+            run_id: "run-preview".to_string(),
+            source_tool_name: "apply_patch".to_string(),
+            source_tool_call_id: "call-begin".to_string(),
+            source_tool_arguments_digest: crate::file_change::proposal_digest(&json!({
+                "action": "begin",
+                "operation": "create",
+                "filePath": "preview.md",
+                "observationId": "fobs-preview",
+            }))
+            .unwrap(),
+            permission_revision: "permission-v1".to_string(),
+            tool_set_revision: "tool-set-v1".to_string(),
+            provider_wire_revision: "provider-protocol-v1".to_string(),
+            observation_id: "fobs-preview".to_string(),
+            observation_json: "{}".to_string(),
+            file_path: "preview.md".to_string(),
+            operation: "create".to_string(),
+            strategy: None,
+            status: "drafting".to_string(),
+            base_revision: None,
+            base_content: String::new(),
+            content: String::new(),
+            draft_revision: 0,
+            next_mutation_index: 0,
+            additions: 0,
+            deletions: 0,
+            line_count: 0,
+            byte_count: 0,
+            mutation_count: 0,
+            stats_final: false,
+            summary: None,
+            final_action_id: None,
+            final_action_arguments_digest: None,
+            final_permission_revision: None,
+            final_tool_set_revision: None,
+            final_provider_wire_revision: None,
+            created_at: 1,
+            updated_at: 1,
+            expires_at: i64::MAX,
+        })
+        .unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server_storage = storage.clone();
     let server = tokio::spawn(async move {
-        for request_index in 0..4 {
+        for request_index in 0..3 {
             let (mut stream, _) = listener.accept().await.unwrap();
             read_request(&mut stream).await;
             match request_index {
                 0 => {
-                    write_json_response(
-                        &mut stream,
-                        tool_completion(
-                            "call-begin",
-                            json!({
-                                "phase": "begin",
-                                "filePath": "preview.md",
-                                "mode": "create"
-                            }),
-                        ),
-                    )
-                    .await;
+                    write_append_stream(&mut stream, "file-change-preview").await;
                 }
                 1 => {
-                    let draft_id = server_storage
-                        .list_agent_file_changes_for_run("run-preview")
-                        .unwrap()[0]
-                        .id
-                        .clone();
-                    write_append_stream(&mut stream, &draft_id).await;
-                }
-                2 => {
-                    let draft_id = server_storage
-                        .list_agent_file_changes_for_run("run-preview")
-                        .unwrap()[0]
-                        .id
-                        .clone();
                     write_json_response(
                         &mut stream,
                         tool_completion(
                             "call-abort",
-                            json!({ "phase": "abort", "draftId": draft_id }),
+                            json!({
+                                "action": "abort",
+                                "transactionId": "file-change-preview"
+                            }),
                         ),
                     )
                     .await;
@@ -1476,7 +1501,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         skill_discovery: None,
         messages: vec![message("user", "create a preview")],
     };
-    freeze_runtime_test_generic_provider(&mut input, "write-file-preview-stream");
+    freeze_runtime_test_generic_provider(&mut input, "apply-patch-preview-stream");
     let output = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
             input,
@@ -1494,7 +1519,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         .unwrap()
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::FileWritePreviewUpdated { preview, .. } => Some(preview.clone()),
+            AgentEvent::FileChangePreviewUpdated { preview, .. } => Some(preview.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1522,7 +1547,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     assert!(context_snapshots.is_empty());
     assert!(output.events.iter().all(|event| !matches!(
         event,
-        AgentEvent::FileWritePreviewUpdated { .. } | AgentEvent::FileWritePreviewCleared { .. }
+        AgentEvent::FileChangePreviewUpdated { .. } | AgentEvent::FileChangePreviewCleared { .. }
     )));
     assert_eq!(output.content, "done");
     let append_event = output
@@ -1530,13 +1555,13 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         .iter()
         .find_map(|event| match event {
             AgentEvent::ToolCall { call, .. }
-                if call.tool == "write_file" && call.args["phase"] == "append" =>
+                if call.tool == "apply_patch" && call.args["action"] == "append" =>
             {
                 Some(call)
             }
             _ => None,
         })
-        .expect("write_file append event");
+        .expect("apply_patch append event");
     assert_runtime_owned_tool_call_id(&append_event.id);
     assert!(append_event.args.get("content").is_none());
     assert_eq!(append_event.args["contentBytes"], 28);
@@ -1555,11 +1580,8 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             } if call_id == &append_call_id => Some(operation),
             _ => None,
         })
-        .expect("write_file append trace item");
-    assert_eq!(
-        append_trace["content"],
-        "[write_file chunk omitted from conversation history]"
-    );
+        .expect("apply_patch append trace item");
+    assert!(append_trace.get("content").is_none());
     assert_eq!(append_trace["contentBytes"], 28);
     assert_eq!(
         storage

@@ -189,25 +189,35 @@ fn current_persisted_approval_variants_match_the_renderer_projection() {
             }
         }),
         serde_json::json!({
-            "type": "diff",
-            "diff": {
-                "id": "diff-call",
+            "type": "file_change",
+            "fileChange": {
+                "schemaVersion": crate::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+                "id": "direct-change-call",
+                "transactionId": "direct-change-transaction",
                 "operation": "update",
+                "updateStrategy": null,
                 "filePath": "README.md",
-                "patch": "@@ -1 +1 @@",
-                "baseRevision": null,
+                "inlineDiff": {"patch": "@@ -1 +1 @@", "truncated": false},
+                "baseRevision": "content-sha256-v1:base",
                 "summary": "Update README",
+                "additions": 1,
+                "deletions": 1,
+                "lineCount": 1,
+                "byteCount": 16,
                 "approvalStatus": "required"
             }
         }),
         serde_json::json!({
-            "type": "file_write",
-            "fileWrite": {
-                "id": "write-call",
-                "draftId": "draft-1",
-                "mode": "rewrite",
+            "type": "file_change",
+            "fileChange": {
+                "schemaVersion": crate::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+                "id": "staged-change-call",
+                "transactionId": "staged-change-transaction",
+                "operation": "update",
+                "updateStrategy": "rewrite",
                 "filePath": "README.md",
-                "baseRevision": null,
+                "inlineDiff": null,
+                "baseRevision": "content-sha256-v1:base",
                 "summary": "Rewrite README",
                 "additions": 1,
                 "deletions": 1,
@@ -289,29 +299,31 @@ fn current_persisted_approval_variants_match_the_renderer_projection() {
     for approval in &approvals {
         assert!(approval_is_safe(approval), "current approval: {approval}");
     }
-    let mut private_diff = serde_json::json!({
+    let mut private_direct_change = approvals[1].clone();
+    private_direct_change["fileChange"]["execution"] = serde_json::json!({
+        "canonicalTarget": "/private/workspace/README.md",
+        "baseContent": "must remain Host-private"
+    });
+    assert!(!approval_is_safe(&private_direct_change));
+    let mut private_staged_change = approvals[2].clone();
+    private_staged_change["fileChange"]["execution"] = serde_json::json!({
+        "canonicalTarget": "/private/workspace/README.md",
+        "baseContent": "must remain Host-private"
+    });
+    assert!(!approval_is_safe(&private_staged_change));
+    for illegal_status in ["not_required", "rejected"] {
+        let mut illegal_approval_status = approvals[1].clone();
+        illegal_approval_status["fileChange"]["approvalStatus"] = illegal_status.into();
+        assert!(!approval_is_safe(&illegal_approval_status));
+    }
+    assert!(!approval_is_safe(&serde_json::json!({
         "type": "diff",
-        "diff": {
-            "id": "diff-call",
-            "operation": "update",
-            "filePath": "README.md",
-            "patch": "@@ -1 +1 @@",
-            "baseRevision": null,
-            "summary": "Update README",
-            "approvalStatus": "required"
-        }
-    });
-    private_diff["diff"]["execution"] = serde_json::json!({
-        "canonicalTarget": "/private/workspace/README.md",
-        "baseContent": "must remain Host-private"
-    });
-    assert!(!approval_is_safe(&private_diff));
-    let mut private_file_write = approvals[2].clone();
-    private_file_write["fileWrite"]["execution"] = serde_json::json!({
-        "canonicalTarget": "/private/workspace/README.md",
-        "baseContent": "must remain Host-private"
-    });
-    assert!(!approval_is_safe(&private_file_write));
+        "diff": {}
+    })));
+    assert!(!approval_is_safe(&serde_json::json!({
+        "type": "file_write",
+        "fileWrite": {}
+    })));
     assert!(!approval_is_safe(&serde_json::json!({
         "type": "mcp_tool_call",
         "approval": {}

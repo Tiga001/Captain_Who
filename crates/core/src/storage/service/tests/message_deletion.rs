@@ -30,12 +30,12 @@ fn save_assistant_messages(
 
 fn persist_settled_manual_command(
     service: &StorageService,
-    storage_id: &str,
     call_id: &str,
     run_id: &str,
     conversation_id: &str,
     assistant_message_id: &str,
-) {
+) -> String {
+    let storage_id = crate::canonical_pending_action_id(run_id, call_id);
     let action = AgentProposedAction::Command {
         command: crate::AgentCommandRequest {
             id: call_id.to_string(),
@@ -66,7 +66,7 @@ fn persist_settled_manual_command(
         truncated: false,
     };
     let pending = AgentPendingActionRecord {
-        action_id: storage_id.to_string(),
+        action_id: storage_id.clone(),
         run_id: run_id.to_string(),
         conversation_id: Some(conversation_id.to_string()),
         assistant_message_id: Some(assistant_message_id.to_string()),
@@ -103,7 +103,7 @@ fn persist_settled_manual_command(
     service.store_pending_agent_action(pending).unwrap();
 
     let approved_audit = AgentActionAuditRecord {
-        action_id: storage_id.to_string(),
+        action_id: storage_id.clone(),
         run_id: run_id.to_string(),
         conversation_id: Some(conversation_id.to_string()),
         assistant_message_id: Some(assistant_message_id.to_string()),
@@ -112,7 +112,7 @@ fn persist_settled_manual_command(
         decision: Some("approved".to_string()),
         status: "approved".to_string(),
         action_json,
-        patch_result_json: None,
+        file_change_result_json: None,
         command_result_json: None,
         tool_result_json: None,
         error: None,
@@ -230,6 +230,7 @@ fn persist_settled_manual_command(
             12,
         )
         .unwrap();
+    storage_id
 }
 
 #[test]
@@ -266,9 +267,8 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
     };
     assert!(attachment_path.is_file());
 
-    persist_settled_manual_command(
+    let deleted_storage_id = persist_settled_manual_command(
         &service,
-        "receipt-delete",
         "call-delete",
         "run-delete",
         "conversation-delete-owner",
@@ -283,9 +283,8 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
             .len(),
         1
     );
-    persist_settled_manual_command(
+    let retained_storage_id = persist_settled_manual_command(
         &service,
-        "receipt-retain",
         "call-retain",
         "run-retain",
         "conversation-delete-owner",
@@ -312,10 +311,10 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
         .query_row(
             "
             SELECT
-                (SELECT COUNT(*) FROM agent_pending_actions WHERE action_id = 'receipt-delete'),
-                (SELECT COUNT(*) FROM agent_action_audit WHERE action_id = 'receipt-delete')
+                (SELECT COUNT(*) FROM agent_pending_actions WHERE action_id = ?1),
+                (SELECT COUNT(*) FROM agent_action_audit WHERE action_id = ?1)
             ",
-            [],
+            [&deleted_storage_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -323,10 +322,10 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
         .query_row(
             "
             SELECT
-                (SELECT COUNT(*) FROM agent_pending_actions WHERE action_id = 'receipt-retain'),
-                (SELECT COUNT(*) FROM agent_action_audit WHERE action_id = 'receipt-retain')
+                (SELECT COUNT(*) FROM agent_pending_actions WHERE action_id = ?1),
+                (SELECT COUNT(*) FROM agent_action_audit WHERE action_id = ?1)
             ",
-            [],
+            [&retained_storage_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();

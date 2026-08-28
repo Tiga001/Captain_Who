@@ -1,5 +1,5 @@
 import type {
-  AgentDiffProposal,
+  AgentFileChangeProposal,
   AgentToolCall,
   AgentToolIdentity,
   AgentToolResult
@@ -38,7 +38,7 @@ interface AgentToolActivityProps {
   readActivity?: ChatReadActivity
   webActivity?: ChatWebSearchActivity
   call: AgentToolCall
-  diff?: AgentDiffProposal
+  diff?: AgentFileChangeProposal
   mcpInvocation?: ChatMcpToolInvocationView
   observerRootConversationId?: string
   projectId?: string | null

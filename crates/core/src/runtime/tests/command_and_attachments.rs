@@ -733,34 +733,6 @@ fn generated_image_visual_input_is_capability_gated() {
 }
 
 #[test]
-fn file_write_tail_is_available_to_llm_but_not_persisted_in_events() {
-    let result = AgentToolResult {
-        exact_archive_file: None,
-        call_id: "call-write".to_string(),
-        tool: "write_file".to_string(),
-        ok: true,
-        result: Some(json!({
-            "draft": { "draftId": "draft-1" },
-            "tail": "private generated content"
-        })),
-        error: None,
-    };
-
-    let llm_result = canonical_tool_result_for_context(&result);
-    let event_result = redact_tool_result_for_event(&result);
-
-    assert_eq!(
-        llm_result.result.as_ref().unwrap()["tail"],
-        "private generated content"
-    );
-    assert!(event_result.result.as_ref().unwrap().get("tail").is_none());
-    assert_eq!(
-        event_result.result.as_ref().unwrap()["draft"]["draftId"],
-        "draft-1"
-    );
-}
-
-#[test]
 fn parses_plain_and_fenced_tool_calls() {
     let plain = parse_tool_call_request(
         r#"{"type":"tool_call","tool":"search_files","args":{"query":"main"}}"#,
@@ -792,7 +764,7 @@ fn transient_events_are_emitted_without_entering_output_history() {
         attempt: 1,
         tool_call_index: 0,
         tool_call_id: Some("call-1".to_string()),
-        tool: "write_file".to_string(),
+        tool: "apply_patch".to_string(),
         received_bytes: 128,
     });
 

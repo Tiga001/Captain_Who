@@ -2437,9 +2437,8 @@ impl ConversationTraceRecorder {
     /// arguments with a second, presentation-oriented representation.
     pub(crate) fn enrich_tool_call(&mut self, action: &AgentProposedAction) {
         let (call_id, approval_status) = match action {
-            AgentProposedAction::Diff { diff } => (&diff.id, diff.approval_status),
-            AgentProposedAction::FileWrite { file_write } => {
-                (&file_write.id, file_write.approval_status)
+            AgentProposedAction::FileChange { file_change } => {
+                (&file_change.id, file_change.approval_status)
             }
             AgentProposedAction::Command { command } => (&command.id, command.approval_status),
             AgentProposedAction::SkillMaterialization { materialization } => {

@@ -305,11 +305,8 @@ pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentP
         AgentProposedAction::Command { command } => {
             command.approval_status = AgentApprovalStatus::Approved;
         }
-        AgentProposedAction::Diff { diff } => {
-            diff.approval_status = AgentApprovalStatus::Approved;
-        }
-        AgentProposedAction::FileWrite { file_write } => {
-            file_write.approval_status = AgentApprovalStatus::Approved;
+        AgentProposedAction::FileChange { file_change } => {
+            file_change.approval_status = AgentApprovalStatus::Approved;
         }
         AgentProposedAction::ToolCall { call } => {
             call.approval_status = AgentApprovalStatus::Approved;
@@ -364,23 +361,7 @@ pub(super) fn failed_tool_call_result(call: &AgentToolCall, error: AgentError) -
 pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToolResult {
     // The caller must pass the tool-owned event projection. Re-running the durable sanitizer here
     // would erase presentation-only fields such as read_image's bounded thumbnail.
-    let mut redacted = result.clone();
-    if redacted.tool == "write_file" {
-        if let Some(object) = redacted.result.as_mut().and_then(Value::as_object_mut) {
-            object.remove("tail");
-        }
-    }
-    redacted
-}
-
-pub(super) fn file_draft_from_tool_result(
-    result: &AgentToolResult,
-) -> Option<crate::protocol::AgentFileDraftSnapshot> {
-    if result.tool != "write_file" || !result.ok {
-        return None;
-    }
-    let draft = result.result.as_ref()?.get("draft")?.clone();
-    serde_json::from_value(draft).ok()
+    result.clone()
 }
 
 pub(super) fn llm_image_message_from_tool_result(
@@ -853,8 +834,8 @@ mod tests {
                 executor_finished.store(true, Ordering::SeqCst);
                 Ok(AgentToolResult {
                     exact_archive_file: None,
-                    call_id: "write-1".to_string(),
-                    tool: "write_file".to_string(),
+                    call_id: "host-action-1".to_string(),
+                    tool: "host_action".to_string(),
                     ok: false,
                     result: Some(json!({ "cancelled": true })),
                     error: Some("cancelled before commit".to_string()),
@@ -862,8 +843,8 @@ mod tests {
             });
         let action = AgentProposedAction::ToolCall {
             call: AgentToolCall {
-                id: "write-1".to_string(),
-                tool: "write_file".to_string(),
+                id: "host-action-1".to_string(),
+                tool: "host_action".to_string(),
                 args: json!({}),
                 approval_status: AgentApprovalStatus::Approved,
                 reason: None,
@@ -906,8 +887,8 @@ mod tests {
     #[tokio::test]
     async fn host_executor_error_becomes_a_paired_indeterminate_tool_result() {
         let expected_call = AgentToolCall {
-            id: "write-error".to_string(),
-            tool: "write_file".to_string(),
+            id: "host-action-error".to_string(),
+            tool: "host_action".to_string(),
             args: json!({ "filePath": "report.txt" }),
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
@@ -941,8 +922,8 @@ mod tests {
     #[tokio::test]
     async fn host_result_identity_mismatch_is_not_forwarded_as_another_calls_success() {
         let expected_call = AgentToolCall {
-            id: "write-expected".to_string(),
-            tool: "write_file".to_string(),
+            id: "host-action-expected".to_string(),
+            tool: "host_action".to_string(),
             args: json!({ "filePath": "report.txt" }),
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
@@ -953,7 +934,7 @@ mod tests {
         let executor: AgentHostActionExecutor = Arc::new(|_action, _checkpoint, _cancellation| {
             Ok(AgentToolResult {
                 exact_archive_file: None,
-                call_id: "write-wrong".to_string(),
+                call_id: "host-action-wrong".to_string(),
                 tool: "run_command".to_string(),
                 ok: true,
                 result: Some(json!({ "status": "committed" })),
@@ -978,7 +959,7 @@ mod tests {
         assert_eq!(details["errorCode"], "agent.host_result_identity_mismatch");
         assert_eq!(details["code"], "hostResultIdentityMismatch");
         assert_eq!(details["outcome"], "indeterminate");
-        assert_eq!(details["returnedCallId"], "write-wrong");
+        assert_eq!(details["returnedCallId"], "host-action-wrong");
         assert_eq!(details["returnedTool"], "run_command");
     }
 

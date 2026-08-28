@@ -668,8 +668,8 @@ CREATE TABLE agent_action_audit (
             decision TEXT,
             status TEXT NOT NULL,
             action_json TEXT NOT NULL CHECK (json_valid(action_json)),
-            patch_result_json TEXT CHECK (
-                patch_result_json IS NULL OR json_valid(patch_result_json)
+            file_change_result_json TEXT CHECK (
+                file_change_result_json IS NULL OR json_valid(file_change_result_json)
             ),
             command_result_json TEXT CHECK (
                 command_result_json IS NULL OR json_valid(command_result_json)
@@ -808,9 +808,7 @@ CREATE TABLE agent_file_changes (
             conversation_id TEXT NOT NULL,
             project_id TEXT,
             run_id TEXT NOT NULL,
-            source_tool_name TEXT NOT NULL CHECK (
-                source_tool_name IN ('apply_patch', 'write_file')
-            ),
+            source_tool_name TEXT NOT NULL CHECK (source_tool_name = 'apply_patch'),
             source_tool_call_id TEXT NOT NULL,
             source_tool_arguments_digest TEXT NOT NULL,
             permission_revision TEXT NOT NULL,
@@ -839,6 +837,10 @@ CREATE TABLE agent_file_changes (
             stats_final INTEGER NOT NULL DEFAULT 0 CHECK (stats_final IN (0, 1)),
             summary TEXT,
             final_action_id TEXT,
+            final_action_arguments_digest TEXT,
+            final_permission_revision TEXT,
+            final_tool_set_revision TEXT,
+            final_provider_wire_revision TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL,
@@ -846,6 +848,42 @@ CREATE TABLE agent_file_changes (
             CHECK (length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
             CHECK (length(CAST(source_tool_call_id AS BLOB)) BETWEEN 1 AND 2048),
             CHECK (length(CAST(source_tool_arguments_digest AS BLOB)) BETWEEN 1 AND 256),
+            CHECK (
+                (
+                    final_action_id IS NULL
+                    AND final_action_arguments_digest IS NULL
+                    AND final_permission_revision IS NULL
+                    AND final_tool_set_revision IS NULL
+                    AND final_provider_wire_revision IS NULL
+                    AND status IN ('drafting', 'ready', 'aborted', 'expired', 'failed')
+                )
+                OR (
+                    final_action_id IS NOT NULL
+                    AND final_action_arguments_digest IS NOT NULL
+                    AND final_permission_revision IS NOT NULL
+                    AND final_tool_set_revision IS NOT NULL
+                    AND final_provider_wire_revision IS NOT NULL
+                    AND length(CAST(final_action_id AS BLOB)) BETWEEN 1 AND 2048
+                    AND length(CAST(final_action_arguments_digest AS BLOB)) BETWEEN 1 AND 256
+                    AND length(CAST(final_permission_revision AS BLOB)) BETWEEN 1 AND 256
+                    AND length(CAST(final_tool_set_revision AS BLOB)) BETWEEN 1 AND 256
+                    AND length(CAST(final_provider_wire_revision AS BLOB)) BETWEEN 1 AND 256
+                    AND status IN (
+                        'waiting_approval', 'applying', 'applied', 'already_applied',
+                        'rejected', 'conflict', 'failed', 'outcome_unknown', 'aborted', 'expired'
+                    )
+                )
+            ),
+            CHECK (
+                (status IN ('drafting', 'ready') AND stats_final = 0)
+                OR (
+                    status IN (
+                        'waiting_approval', 'applying', 'applied', 'already_applied',
+                        'rejected', 'conflict', 'failed', 'outcome_unknown', 'aborted', 'expired'
+                    )
+                    AND stats_final = 1
+                )
+            ),
             CHECK (length(CAST(permission_revision AS BLOB)) BETWEEN 1 AND 256),
             CHECK (length(CAST(tool_set_revision AS BLOB)) BETWEEN 1 AND 256),
             CHECK (length(CAST(provider_wire_revision AS BLOB)) BETWEEN 1 AND 256),
@@ -3581,6 +3619,8 @@ CREATE INDEX idx_agent_file_changes_conversation_status ON agent_file_changes(co
 CREATE INDEX idx_agent_file_changes_project_id ON agent_file_changes(project_id);
 CREATE INDEX idx_agent_file_changes_run_id ON agent_file_changes(run_id);
 CREATE INDEX idx_agent_file_changes_expires_at ON agent_file_changes(expires_at);
+CREATE UNIQUE INDEX agent_file_changes_source_call_identity
+            ON agent_file_changes(run_id, source_tool_call_id);
 CREATE INDEX idx_composer_drafts_updated_at ON composer_drafts(updated_at);
 CREATE UNIQUE INDEX conversation_trace_command_session_lifecycle_identity
          ON conversation_turn_trace_items (

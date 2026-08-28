@@ -3354,22 +3354,36 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
         Some(&target_content),
         AgentApprovalStatus::Required,
     );
-    let AgentProposedAction::Diff { diff } = &action else {
-        panic!("fixture must produce a Diff action");
+    let AgentProposedAction::FileChange { file_change } = &action else {
+        panic!("fixture must produce a FileChange action");
     };
     assert!(
-        !diff.patch.contains(PRIVATE_WHOLE_FILE_MARKER),
+        !file_change
+            .inline_diff
+            .as_ref()
+            .unwrap()
+            .patch
+            .contains(PRIVATE_WHOLE_FILE_MARKER),
         "the presentation diff fixture must not itself contain the private whole-file marker"
     );
 
-    let renderer_event = agent_event_notification(AgentEvent::Diff {
+    let renderer_event = agent_event_notification(AgentEvent::FileChangeProposed {
         run_id: run_id.to_string(),
-        diff: diff.clone(),
+        file_change: file_change.clone(),
     });
+    let observer_event = child_observer_event_notification(
+        &valid_resume_collaboration_identity(),
+        run_id,
+        "assistant-direct-file-change",
+        AgentEvent::FileChangeProposed {
+            run_id: run_id.to_string(),
+            file_change: file_change.clone(),
+        },
+    );
     assert_eq!(renderer_event["method"], AGENT_EVENT_NAME);
     let pending_snapshot = PendingAgentActionSnapshot {
         action_id: call_id.to_string(),
-        action_type: "diff".to_string(),
+        action_type: "file_change".to_string(),
         tool_name: "apply_patch".to_string(),
         tool_call_id: Some(call_id.to_string()),
         run_id: run_id.to_string(),
@@ -3381,12 +3395,18 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
     };
     let renderer_pending = serde_json::to_value(&pending_snapshot).unwrap();
 
-    assert!(renderer_event["params"]["diff"].get("execution").is_none());
-    assert!(renderer_pending["action"]["diff"]
+    assert!(renderer_event["params"]["fileChange"]
+        .get("execution")
+        .is_none());
+    assert!(observer_event["params"]["event"]["fileChange"]
+        .get("execution")
+        .is_none());
+    assert!(renderer_pending["action"]["fileChange"]
         .get("execution")
         .is_none());
     for (boundary, projection) in [
         ("agent.event", &renderer_event),
+        ("agent observer event", &observer_event),
         ("pending snapshot", &renderer_pending),
     ] {
         let encoded = serde_json::to_string(projection).unwrap();
@@ -3429,16 +3449,19 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
     let durable = pending_storage_record(&record, 2).unwrap();
     let durable_action: Value = serde_json::from_str(&durable.action_json).unwrap();
     assert_eq!(
-        durable_action["diff"]["execution"]["baseContent"],
+        durable_action["fileChange"]["execution"]["baseContent"],
         base_content
     );
     assert_eq!(
-        durable_action["diff"]["execution"]["targetContent"],
+        durable_action["fileChange"]["execution"]["targetContent"],
         target_content
     );
     let restored: AgentProposedAction = serde_json::from_str(&durable.action_json).unwrap();
-    let AgentProposedAction::Diff { diff: restored } = restored else {
-        panic!("durable action must round-trip as a Diff");
+    let AgentProposedAction::FileChange {
+        file_change: restored,
+    } = restored
+    else {
+        panic!("durable action must round-trip as a FileChange");
     };
     restored.execution.validate().unwrap();
     assert_eq!(restored.execution.source_call_id, call_id);
@@ -3452,6 +3475,82 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
         restored.execution.target_content.as_deref(),
         Some(target_content.as_str())
     );
+}
+
+fn seed_interrupted_manual_file_change(
+    storage: &Arc<StorageService>,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    action: AgentProposedAction,
+    call: &AgentToolCall,
+) -> PendingActionRecord {
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(storage, &mut agent_input);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    let storage_id = pending_action_storage_id(run_id, &call.id);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        storage,
+        run_id,
+        Some(&storage_id),
+        call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    freeze_test_pending_provider_configuration(storage, &mut agent_input);
+    seed_durable_pending_owner(
+        storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    let record = PendingActionRecord {
+        storage_id,
+        snapshot: PendingAgentActionSnapshot {
+            action_id: call.id.clone(),
+            action_type: "file_change".to_string(),
+            tool_name: "apply_patch".to_string(),
+            tool_call_id: Some(call.id.clone()),
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some(assistant_message_id.to_string()),
+            action,
+            created_at: 1,
+            status: PendingActionStatus::Executing,
+        },
+        agent_input,
+    };
+    storage
+        .store_pending_agent_action(pending_storage_record(&record, 2).unwrap())
+        .unwrap();
+    assert!(storage
+        .insert_agent_action_audit_if_absent(action_audit_record(
+            &record, None, "pending", None, None, None, None, None, None,
+        ))
+        .unwrap());
+    record
 }
 
 #[test]
@@ -3489,16 +3588,27 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
         "messages": []
     }))
     .unwrap();
+    agent_input.context = Some(AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+    });
     save_test_pending_provider_for_input(&storage, &mut agent_input);
-    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+    let pending_action_id = pending_action_storage_id(run_id, call_id);
+    let mut checkpoint = test_pending_resume_checkpoint_for_call(
         &storage,
         run_id,
-        None,
+        Some(&pending_action_id),
         &call,
         AgentToolIdentity::Builtin {
             tool_name: "apply_patch".to_string(),
         },
-    ));
+    );
+    checkpoint.run_context = agent_input.context.clone();
+    agent_input.resume_checkpoint = Some(checkpoint);
     freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     seed_durable_pending_owner(
         &storage,
@@ -3515,7 +3625,7 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
         storage_id: pending_action_storage_id(run_id, call_id),
         snapshot: PendingAgentActionSnapshot {
             action_id: call_id.to_string(),
-            action_type: "diff".to_string(),
+            action_type: "file_change".to_string(),
             tool_name: "apply_patch".to_string(),
             tool_call_id: Some(call_id.to_string()),
             run_id: run_id.to_string(),
@@ -3543,8 +3653,11 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
     PersistedAgentResumeInput::decode(&candidates[0].agent_input_json)
         .expect("manual crash fixture must retain a current resume input");
     let prepared: AgentProposedAction = serde_json::from_str(&candidates[0].action_json).unwrap();
-    let AgentProposedAction::Diff { diff: prepared } = prepared else {
-        panic!("manual crash fixture must retain a Diff");
+    let AgentProposedAction::FileChange {
+        file_change: prepared,
+    } = prepared
+    else {
+        panic!("manual crash fixture must retain a FileChange");
     };
     prepared.execution.validate().unwrap();
     let resolved = mycopilot_core::file_change::FileChangePathPolicy::new(None, true)
@@ -3552,7 +3665,7 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
         .unwrap();
     let plan = mycopilot_core::file_change::FileChangePlan::from_direct_binding(
         &prepared.execution,
-        prepared.patch.clone(),
+        prepared.inline_diff.as_ref().unwrap().patch.clone(),
     )
     .unwrap();
     assert_eq!(
@@ -3564,7 +3677,7 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
 
     let reconciled_at = mycopilot_core::storage::now_ms();
     assert_eq!(
-        reconcile_interrupted_direct_file_changes(&storage, reconciled_at).unwrap(),
+        reconcile_interrupted_file_changes(&storage, reconciled_at).unwrap(),
         1,
         "the Direct startup pre-pass must recognize the already-published target"
     );
@@ -3611,169 +3724,295 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
     assert_eq!(audit_status, "completed");
     assert_eq!(pending_action_json, audit_action_json);
     let committed: AgentProposedAction = serde_json::from_str(&pending_action_json).unwrap();
-    let AgentProposedAction::Diff { diff } = committed else {
-        panic!("recovered pending action must remain a Diff");
+    let AgentProposedAction::FileChange { file_change } = committed else {
+        panic!("recovered pending action must remain a FileChange");
     };
     assert_eq!(
-        diff.execution.transaction.status,
+        file_change.execution.transaction.status,
         mycopilot_core::file_change::FileChangeStatus::AlreadyApplied
     );
-    assert!(diff.execution.receipt.is_some());
+    assert!(file_change.execution.receipt.is_some());
+}
+
+#[test]
+fn startup_file_change_reconciliation_types_base_divergence_and_unreadable_targets() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        Base,
+        Divergent,
+        #[cfg(unix)]
+        Unreadable,
+    }
+    let mut cases = vec![Case::Base, Case::Divergent];
+    #[cfg(unix)]
+    cases.push(Case::Unreadable);
+
+    for (index, case) in cases.into_iter().enumerate() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let run_id = format!("run-file-change-recovery-{index}");
+        let conversation_id = format!("conversation-file-change-recovery-{index}");
+        let assistant_message_id = format!("assistant-file-change-recovery-{index}");
+        let call_id = format!("call-file-change-recovery-{index}");
+        let canonical_fixture = std::fs::canonicalize(fixture.path()).unwrap();
+        let parent = canonical_fixture.join("observed");
+        std::fs::create_dir(&parent).unwrap();
+        let target_path = parent.join("target.txt");
+        let (action, call) = direct_file_change_fixture(
+            &run_id,
+            &conversation_id,
+            &call_id,
+            ("observed/target.txt", target_path.to_str().unwrap()),
+            None,
+            Some("frozen target\n"),
+            AgentApprovalStatus::Required,
+        );
+        let record = seed_interrupted_manual_file_change(
+            &storage,
+            &run_id,
+            &conversation_id,
+            &assistant_message_id,
+            action,
+            &call,
+        );
+        match case {
+            Case::Base => {}
+            Case::Divergent => std::fs::write(&target_path, "different content\n").unwrap(),
+            #[cfg(unix)]
+            Case::Unreadable => {
+                use std::os::unix::fs::symlink;
+                let frozen_parent = canonical_fixture.join("observed-original");
+                std::fs::rename(&parent, &frozen_parent).unwrap();
+                let redirected_parent = canonical_fixture.join("redirected");
+                std::fs::create_dir(&redirected_parent).unwrap();
+                symlink(&redirected_parent, &parent).unwrap();
+            }
+        }
+
+        assert_eq!(
+            reconcile_interrupted_file_changes(&storage, mycopilot_core::storage::now_ms())
+                .unwrap(),
+            1
+        );
+        let pending = storage
+            .get_pending_agent_action(&record.storage_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.status, "executing");
+        assert_eq!(pending.target_status.as_deref(), Some("failed"));
+        let audit = storage
+            .get_agent_action_audit(&record.storage_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(audit.status, "failed");
+        assert_eq!(audit.decision_source.as_deref(), Some("manual"));
+        let result: AgentFileChangeResult = serde_json::from_str(
+            audit
+                .file_change_result_json
+                .as_deref()
+                .expect("reconciliation persists the typed FileChange result"),
+        )
+        .unwrap();
+        let tool_result: AgentToolResult = serde_json::from_str(
+            audit
+                .tool_result_json
+                .as_deref()
+                .expect("reconciliation persists the exact ToolResult"),
+        )
+        .unwrap();
+        assert!(!tool_result.ok);
+        match case {
+            Case::Base => {
+                assert_eq!(
+                    result.status,
+                    mycopilot_core::AgentFileChangeResultStatus::Failed
+                );
+                assert_eq!(
+                    result.outcome,
+                    mycopilot_core::AgentFileChangeOutcome::DefinitelyNotExecuted
+                );
+            }
+            Case::Divergent => {
+                assert_eq!(
+                    result.status,
+                    mycopilot_core::AgentFileChangeResultStatus::OutcomeUnknown
+                );
+                assert_eq!(
+                    result.outcome,
+                    mycopilot_core::AgentFileChangeOutcome::OutcomeUnknown
+                );
+            }
+            #[cfg(unix)]
+            Case::Unreadable => {
+                assert_eq!(
+                    result.status,
+                    mycopilot_core::AgentFileChangeResultStatus::OutcomeUnknown
+                );
+                assert_eq!(
+                    result.outcome,
+                    mycopilot_core::AgentFileChangeOutcome::OutcomeUnknown
+                );
+            }
+        }
+        storage
+            .reconcile_interrupted_pending_agent_actions(mycopilot_core::storage::now_ms())
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_pending_agent_action(&record.storage_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+    }
 }
 
 #[test]
 fn startup_reconciles_published_manual_staged_file_changes_without_replaying_them() {
-    for source_tool_name in ["apply_patch", "write_file"] {
-        let fixture = tempdir().unwrap();
-        let database_path = fixture.path().join("storage.sqlite");
-        let storage = Arc::new(StorageService::open(&database_path).unwrap());
-        let run_id = format!("run-manual-staged-crash-{source_tool_name}");
-        let conversation_id = format!("conversation-manual-staged-crash-{source_tool_name}");
-        let assistant_message_id = format!("assistant-manual-staged-crash-{source_tool_name}");
-        let call_id = format!("call-manual-staged-crash-{source_tool_name}");
-        let transaction_id = format!("transaction-manual-staged-crash-{source_tool_name}");
-        let target_content = format!("published staged content from {source_tool_name}\n");
-        let target_path = std::fs::canonicalize(fixture.path())
-            .unwrap()
-            .join(format!("manual-staged-{source_tool_name}.txt"));
-        let (file_write, call) = staged_file_write_fixture(
-            StagedFileWriteFixtureIdentity {
-                run_id: &run_id,
-                conversation_id: &conversation_id,
-                call_id: &call_id,
-                transaction_id: &transaction_id,
-            },
-            (
-                &format!("manual-staged-{source_tool_name}.txt"),
-                target_path.to_str().unwrap(),
-            ),
-            &target_content,
-            source_tool_name,
-            AgentApprovalStatus::Required,
-        );
-        let action = AgentProposedAction::FileWrite {
-            file_write: file_write.clone(),
-        };
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let run_id = "run-manual-staged-crash";
+    let conversation_id = "conversation-manual-staged-crash";
+    let assistant_message_id = "assistant-manual-staged-crash";
+    let call_id = "call-manual-staged-crash";
+    let transaction_id = "transaction-manual-staged-crash";
+    let target_content = "published staged content from apply_patch\n";
+    let target_path = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("manual-staged.txt");
+    let (file_change, call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id,
+            conversation_id,
+            call_id,
+            transaction_id,
+        },
+        ("manual-staged.txt", target_path.to_str().unwrap()),
+        target_content,
+        AgentApprovalStatus::Required,
+    );
+    let action = AgentProposedAction::FileChange {
+        file_change: file_change.clone(),
+    };
 
-        // Publication happened before the private action receipt and Staged terminal transition.
-        std::fs::write(&target_path, &target_content).unwrap();
-        let metadata_before = std::fs::metadata(&target_path).unwrap();
-        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
-            "apiUrl": "https://example.test/v1/chat/completions",
-            "apiToken": "test-token",
-            "model": "test-model",
-            "modelCapabilities": { "imageInput": false },
-            "messages": []
-        }))
+    std::fs::write(&target_path, target_content).unwrap();
+    let metadata_before = std::fs::metadata(&target_path).unwrap();
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    let storage_id = pending_action_storage_id(run_id, call_id);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&storage_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    storage
+        .create_agent_file_change(staged_file_change_record(&file_change, "applying"))
         .unwrap();
-        save_test_pending_provider_for_input(&storage, &mut agent_input);
-        let run_context = AgentRunContext {
-            conversation_id: Some(conversation_id.clone()),
-            project_id: None,
-            workspace: None,
-            attachment_library: None,
-            permissions: AgentPermissions::default(),
-            collaboration_identity: None,
-        };
-        agent_input.context = Some(run_context.clone());
-        agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
-            &storage,
-            &run_id,
-            None,
-            &call,
-            AgentToolIdentity::Builtin {
-                tool_name: source_tool_name.to_string(),
-            },
-        ));
-        agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
-        freeze_test_pending_provider_configuration(&storage, &mut agent_input);
-        seed_durable_pending_owner(
-            &storage,
-            &conversation_id,
-            &assistant_message_id,
-            &run_id,
-            &call,
-            AgentToolIdentity::Builtin {
-                tool_name: source_tool_name.to_string(),
-            },
-            1,
-        );
-        storage
-            .create_agent_file_change(staged_file_change_record(&file_write, "applying"))
-            .unwrap();
-        let record = PendingActionRecord {
-            storage_id: pending_action_storage_id(&run_id, &call_id),
-            snapshot: PendingAgentActionSnapshot {
-                action_id: call_id.clone(),
-                action_type: "file_write".to_string(),
-                tool_name: source_tool_name.to_string(),
-                tool_call_id: Some(call_id.clone()),
-                run_id: run_id.clone(),
-                conversation_id: Some(conversation_id.clone()),
-                assistant_message_id: Some(assistant_message_id),
-                action,
-                created_at: 1,
-                status: PendingActionStatus::Executing,
-            },
-            agent_input,
-        };
-        storage
-            .store_pending_agent_action(pending_storage_record(&record, 2).unwrap())
-            .unwrap();
-        assert!(storage
-            .insert_agent_action_audit_if_absent(action_audit_record(
-                &record, None, "pending", None, None, None, None, None, None,
-            ))
-            .unwrap());
+    let record = PendingActionRecord {
+        storage_id,
+        snapshot: PendingAgentActionSnapshot {
+            action_id: call_id.to_string(),
+            action_type: "file_change".to_string(),
+            tool_name: "apply_patch".to_string(),
+            tool_call_id: Some(call_id.to_string()),
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some(assistant_message_id.to_string()),
+            action,
+            created_at: 1,
+            status: PendingActionStatus::Executing,
+        },
+        agent_input,
+    };
+    storage
+        .store_pending_agent_action(pending_storage_record(&record, 2).unwrap())
+        .unwrap();
+    assert!(storage
+        .insert_agent_action_audit_if_absent(action_audit_record(
+            &record, None, "pending", None, None, None, None, None, None,
+        ))
+        .unwrap());
 
-        assert_eq!(
-            reconcile_interrupted_direct_file_changes(&storage, mycopilot_core::storage::now_ms(),)
-                .unwrap(),
-            1
-        );
-        let transaction = storage
-            .get_agent_file_change(&transaction_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(transaction.status, "applied");
-        assert_eq!(
-            std::fs::read_to_string(&target_path).unwrap(),
-            target_content
-        );
-        let metadata_after = std::fs::metadata(&target_path).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(metadata_after.dev(), metadata_before.dev());
-            assert_eq!(metadata_after.ino(), metadata_before.ino());
-        }
-        #[cfg(not(unix))]
-        let _ = (metadata_before, metadata_after);
-
-        let durable = storage
-            .get_pending_agent_action(&record.storage_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(durable.status, "executing");
-        assert_eq!(durable.target_status.as_deref(), Some("completed"));
-        let committed: AgentProposedAction = serde_json::from_str(&durable.action_json).unwrap();
-        let AgentProposedAction::FileWrite { file_write } = committed else {
-            panic!("recovered Staged action must remain FileWrite")
-        };
-        assert_eq!(file_write.execution.source_tool_name, source_tool_name);
-        assert!(file_write.execution.receipt.is_some());
-
-        let _restarted =
-            AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
-                .expect("published Staged FileChange must reconcile without replay");
-        let results = storage
-            .list_agent_tool_results_for_run(&run_id, source_tool_name)
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].call_id, call_id);
-        assert_eq!(results[0].tool, source_tool_name);
-        assert!(results[0].ok);
+    assert_eq!(
+        reconcile_interrupted_file_changes(&storage, mycopilot_core::storage::now_ms()).unwrap(),
+        1
+    );
+    let transaction = storage
+        .get_agent_file_change(transaction_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction.status, "applied");
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        target_content
+    );
+    let metadata_after = std::fs::metadata(&target_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(metadata_after.dev(), metadata_before.dev());
+        assert_eq!(metadata_after.ino(), metadata_before.ino());
     }
+    #[cfg(not(unix))]
+    let _ = (metadata_before, metadata_after);
+
+    let durable = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable.status, "executing");
+    assert_eq!(durable.target_status.as_deref(), Some("completed"));
+    let committed: AgentProposedAction = serde_json::from_str(&durable.action_json).unwrap();
+    let AgentProposedAction::FileChange { file_change } = committed else {
+        panic!("recovered Staged action must remain FileChange")
+    };
+    assert_eq!(file_change.execution.source_tool_name, "apply_patch");
+    assert!(file_change.execution.receipt.is_some());
+
+    let _restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
+        .expect("published Staged FileChange must reconcile without replay");
+    let results = storage
+        .list_agent_tool_results_for_run(run_id, "apply_patch")
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].call_id, call_id);
+    assert_eq!(results[0].tool, "apply_patch");
+    assert!(results[0].ok);
 }
 
 #[test]
@@ -3789,6 +4028,9 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
         "disabled",
         "",
     );
+    // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
+    // not terminalize the fixture trace before its hidden Pending journal exists.
+    let service = AgentService::new(Arc::clone(&storage));
     let run_id = "run-automatic-direct-crash";
     let conversation_id = "conversation-automatic-direct-crash";
     let assistant_message_id = "assistant-automatic-direct-crash";
@@ -3797,52 +4039,81 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
     let target_path = std::fs::canonicalize(fixture.path())
         .unwrap()
         .join("automatic-recovered.txt");
-    let (action, _call) = direct_file_change_fixture(
+    let (action, call) = direct_file_change_fixture(
         run_id,
         conversation_id,
         call_id,
         ("automatic-recovered.txt", target_path.to_str().unwrap()),
         None,
         Some(target_content),
-        AgentApprovalStatus::NotRequired,
+        AgentApprovalStatus::Approved,
     );
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    let storage_id = pending_action_storage_id(run_id, call_id);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&storage_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    let mut hidden = service
+        .prepare_auto_file_change_action_journal(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action,
+            agent_input,
+        )
+        .unwrap();
+    assert!(service
+        .claim_auto_file_change_dispatch(&mut hidden)
+        .unwrap());
+
+    // Simulate a crash after filesystem publication but before the receipt/terminal audit.
     std::fs::write(&target_path, target_content).unwrap();
     let metadata_before = std::fs::metadata(&target_path).unwrap();
-    let audit = AgentActionAuditRecord {
-        action_id: pending_action_storage_id(run_id, call_id),
-        run_id: run_id.to_string(),
-        conversation_id: Some(conversation_id.to_string()),
-        assistant_message_id: Some(assistant_message_id.to_string()),
-        action_type: "diff".to_string(),
-        tool_name: "apply_patch".to_string(),
-        decision: Some("approved".to_string()),
-        status: "executing".to_string(),
-        action_json: serde_json::to_string(&action).unwrap(),
-        patch_result_json: None,
-        command_result_json: None,
-        tool_result_json: None,
-        error: None,
-        created_at: 1,
-        decided_at: Some(1),
-        completed_at: None,
-        effective_permissions_json: Some(
-            serde_json::to_string(&AgentPermissions::default()).unwrap(),
-        ),
-        path_scope: Some("workspace".to_string()),
-        command_cwd_scope: None,
-        blocked_reason: None,
-        decision_source: Some("auto".to_string()),
-    };
-    assert_eq!(
-        storage.claim_agent_action_audit_execution(audit).unwrap(),
-        AgentActionAuditExecutionClaimOutcome::Claimed
-    );
-
-    let candidates = storage.list_executing_file_change_action_audits().unwrap();
+    let candidates = storage
+        .list_interrupted_agent_actions_for_host_reconciliation()
+        .unwrap();
     assert_eq!(candidates.len(), 1);
     let prepared: AgentProposedAction = serde_json::from_str(&candidates[0].action_json).unwrap();
-    let AgentProposedAction::Diff { diff: prepared } = prepared else {
-        panic!("automatic crash fixture must retain a Diff");
+    let AgentProposedAction::FileChange {
+        file_change: prepared,
+    } = prepared
+    else {
+        panic!("automatic crash fixture must retain a FileChange");
     };
     prepared.execution.validate().unwrap();
     let resolved = mycopilot_core::file_change::FileChangePathPolicy::new(None, true)
@@ -3850,7 +4121,7 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
         .unwrap();
     let plan = mycopilot_core::file_change::FileChangePlan::from_direct_binding(
         &prepared.execution,
-        prepared.patch.clone(),
+        prepared.inline_diff.as_ref().unwrap().patch.clone(),
     )
     .unwrap();
     assert_eq!(
@@ -3861,11 +4132,7 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
     );
 
     assert_eq!(
-        reconcile_interrupted_automatic_direct_file_changes(
-            &storage,
-            mycopilot_core::storage::now_ms(),
-        )
-        .unwrap(),
+        reconcile_interrupted_file_changes(&storage, mycopilot_core::storage::now_ms()).unwrap(),
         1,
         "the automatic Direct startup pre-pass must recognize the already-published target"
     );
@@ -3898,129 +4165,136 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
     assert_eq!(status, "completed");
     assert!(tool_result_json.is_some());
     let committed: AgentProposedAction = serde_json::from_str(&action_json).unwrap();
-    let AgentProposedAction::Diff { diff } = committed else {
-        panic!("recovered automatic action must remain a Diff");
+    let AgentProposedAction::FileChange { file_change } = committed else {
+        panic!("recovered automatic action must remain a FileChange");
     };
     assert_eq!(
-        diff.execution.transaction.status,
+        file_change.execution.transaction.status,
         mycopilot_core::file_change::FileChangeStatus::AlreadyApplied
     );
-    assert!(diff.execution.receipt.is_some());
+    assert!(file_change.execution.receipt.is_some());
 }
 
 #[test]
 fn startup_reconciles_published_automatic_staged_file_changes_without_replaying_them() {
-    for source_tool_name in ["apply_patch", "write_file"] {
-        let fixture = tempdir().unwrap();
-        let storage =
-            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-        let run_id = format!("run-automatic-staged-crash-{source_tool_name}");
-        let conversation_id = format!("conversation-automatic-staged-crash-{source_tool_name}");
-        let assistant_message_id = format!("assistant-automatic-staged-crash-{source_tool_name}");
-        let call_id = format!("call-automatic-staged-crash-{source_tool_name}");
-        let transaction_id = format!("transaction-automatic-staged-crash-{source_tool_name}");
-        let target_content = format!("automatically published from {source_tool_name}\n");
-        let relative_path = format!("automatic-staged-{source_tool_name}.txt");
-        let target_path = std::fs::canonicalize(fixture.path())
-            .unwrap()
-            .join(&relative_path);
-        let (file_write, call) = staged_file_write_fixture(
-            StagedFileWriteFixtureIdentity {
-                run_id: &run_id,
-                conversation_id: &conversation_id,
-                call_id: &call_id,
-                transaction_id: &transaction_id,
-            },
-            (&relative_path, target_path.to_str().unwrap()),
-            &target_content,
-            source_tool_name,
-            AgentApprovalStatus::NotRequired,
-        );
-        seed_durable_pending_owner(
-            &storage,
-            &conversation_id,
-            &assistant_message_id,
-            &run_id,
-            &call,
-            AgentToolIdentity::Builtin {
-                tool_name: source_tool_name.to_string(),
-            },
-            1,
-        );
-        storage
-            .create_agent_file_change(staged_file_change_record(&file_write, "applying"))
-            .unwrap();
-        std::fs::write(&target_path, &target_content).unwrap();
-        let metadata_before = std::fs::metadata(&target_path).unwrap();
-        let action = AgentProposedAction::FileWrite { file_write };
-        let audit = AgentActionAuditRecord {
-            action_id: pending_action_storage_id(&run_id, &call_id),
-            run_id: run_id.clone(),
-            conversation_id: Some(conversation_id),
-            assistant_message_id: Some(assistant_message_id),
-            action_type: "file_write".to_string(),
-            tool_name: source_tool_name.to_string(),
-            decision: Some("approved".to_string()),
-            status: "executing".to_string(),
-            action_json: serde_json::to_string(&action).unwrap(),
-            patch_result_json: None,
-            command_result_json: None,
-            tool_result_json: None,
-            error: None,
-            created_at: 1,
-            decided_at: Some(1),
-            completed_at: None,
-            effective_permissions_json: Some(
-                serde_json::to_string(&AgentPermissions::default()).unwrap(),
-            ),
-            path_scope: Some("workspace".to_string()),
-            command_cwd_scope: None,
-            blocked_reason: None,
-            decision_source: Some("auto".to_string()),
-        };
-        assert_eq!(
-            storage.claim_agent_action_audit_execution(audit).unwrap(),
-            AgentActionAuditExecutionClaimOutcome::Claimed
-        );
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
+    // not terminalize the fixture trace before its hidden Pending journal exists.
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-automatic-staged-crash";
+    let conversation_id = "conversation-automatic-staged-crash";
+    let assistant_message_id = "assistant-automatic-staged-crash";
+    let call_id = "call-automatic-staged-crash";
+    let transaction_id = "transaction-automatic-staged-crash";
+    let target_content = "automatically published from apply_patch\n";
+    let relative_path = "automatic-staged.txt";
+    let target_path = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join(relative_path);
+    let (file_change, call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id,
+            conversation_id,
+            call_id,
+            transaction_id,
+        },
+        (relative_path, target_path.to_str().unwrap()),
+        target_content,
+        AgentApprovalStatus::Approved,
+    );
+    let action = AgentProposedAction::FileChange {
+        file_change: file_change.clone(),
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    let storage_id = pending_action_storage_id(run_id, call_id);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&storage_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    storage
+        .create_agent_file_change(staged_file_change_record(&file_change, "applying"))
+        .unwrap();
+    let mut hidden = service
+        .prepare_auto_file_change_action_journal(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action,
+            agent_input,
+        )
+        .unwrap();
+    assert!(service
+        .claim_auto_file_change_dispatch(&mut hidden)
+        .unwrap());
 
-        assert_eq!(
-            reconcile_interrupted_automatic_direct_file_changes(
-                &storage,
-                mycopilot_core::storage::now_ms(),
-            )
-            .unwrap(),
-            1
-        );
-        let transaction = storage
-            .get_agent_file_change(&transaction_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(transaction.status, "applied");
-        assert_eq!(
-            std::fs::read_to_string(&target_path).unwrap(),
-            target_content
-        );
-        let metadata_after = std::fs::metadata(&target_path).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(metadata_after.dev(), metadata_before.dev());
-            assert_eq!(metadata_after.ino(), metadata_before.ino());
-        }
-        #[cfg(not(unix))]
-        let _ = (metadata_before, metadata_after);
-        let results = storage
-            .list_agent_tool_results_for_run(&run_id, source_tool_name)
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].call_id, call_id);
-        assert_eq!(results[0].tool, source_tool_name);
-        assert!(results[0].ok);
-        assert!(storage
-            .list_executing_file_change_action_audits()
-            .unwrap()
-            .is_empty());
+    std::fs::write(&target_path, target_content).unwrap();
+    let metadata_before = std::fs::metadata(&target_path).unwrap();
+    assert_eq!(
+        reconcile_interrupted_file_changes(&storage, mycopilot_core::storage::now_ms()).unwrap(),
+        1
+    );
+    let transaction = storage
+        .get_agent_file_change(transaction_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction.status, "applied");
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        target_content
+    );
+    let metadata_after = std::fs::metadata(&target_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(metadata_after.dev(), metadata_before.dev());
+        assert_eq!(metadata_after.ino(), metadata_before.ino());
     }
+    #[cfg(not(unix))]
+    let _ = (metadata_before, metadata_after);
+    let _restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
+        .expect("published automatic Staged FileChange must reconcile without replay");
+    let results = storage
+        .list_agent_tool_results_for_run(run_id, "apply_patch")
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].call_id, call_id);
+    assert_eq!(results[0].tool, "apply_patch");
+    assert!(results[0].ok);
 }
 
 #[test]
@@ -4028,6 +4302,9 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
+    // not terminalize the fixture trace before its hidden Pending journal exists.
+    let service = AgentService::new(Arc::clone(&storage));
     let run_id = "run-automatic-delete-finalize-crash";
     let conversation_id = "conversation-automatic-delete-finalize-crash";
     let assistant_message_id = "assistant-automatic-delete-finalize-crash";
@@ -4036,7 +4313,7 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
         .unwrap()
         .join("automatic-delete-finalize.txt");
     std::fs::write(&target_path, "private deleted contents\n").unwrap();
-    let (mut action, _call) = direct_file_change_fixture(
+    let (action, call) = direct_file_change_fixture(
         run_id,
         conversation_id,
         call_id,
@@ -4046,24 +4323,78 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
         ),
         Some("private deleted contents\n"),
         None,
-        AgentApprovalStatus::NotRequired,
+        AgentApprovalStatus::Approved,
     );
-    let AgentProposedAction::Diff { diff } = &mut action else {
-        unreachable!("fixture must produce a Diff")
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    let storage_id = pending_action_storage_id(run_id, call_id);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&storage_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    let mut hidden = service
+        .prepare_auto_file_change_action_journal(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action,
+            agent_input,
+        )
+        .unwrap();
+    assert!(service
+        .claim_auto_file_change_dispatch(&mut hidden)
+        .unwrap());
+
+    let mut committed_action = hidden.snapshot.action.clone();
+    let AgentProposedAction::FileChange { file_change } = &mut committed_action else {
+        unreachable!("fixture must produce a FileChange")
     };
     let target =
         mycopilot_core::file_change::FileChangePathPolicy::new(Some(fixture.path()), false)
             .resolve("automatic-delete-finalize.txt")
             .unwrap();
     let plan = mycopilot_core::file_change::FileChangePlan::from_direct_binding(
-        &diff.execution,
-        diff.patch.clone(),
+        &file_change.execution,
+        file_change.inline_diff.as_ref().unwrap().patch.clone(),
     )
     .unwrap();
-    let mut journal = diff.execution.delete_journal.clone().unwrap();
+    let mut journal = file_change.execution.delete_journal.clone().unwrap();
     let commit = mycopilot_core::file_change::FileChangeCommitter
         .commit(
-            &diff.execution.transaction.id,
+            &file_change.execution.transaction.id,
             &target,
             &plan,
             2,
@@ -4076,46 +4407,15 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
         .unwrap()
         .tombstone_path
         .clone();
-    *diff.execution = diff.execution.with_commit(&commit).unwrap();
+    *file_change.execution = file_change.execution.with_commit(&commit).unwrap();
+    service
+        .commit_pending_file_change_action(&mut hidden, committed_action)
+        .unwrap();
     assert!(!target_path.exists());
     assert!(std::path::Path::new(&tombstone_path).exists());
 
-    let audit = AgentActionAuditRecord {
-        action_id: pending_action_storage_id(run_id, call_id),
-        run_id: run_id.to_string(),
-        conversation_id: Some(conversation_id.to_string()),
-        assistant_message_id: Some(assistant_message_id.to_string()),
-        action_type: "diff".to_string(),
-        tool_name: "apply_patch".to_string(),
-        decision: Some("approved".to_string()),
-        status: "executing".to_string(),
-        action_json: serde_json::to_string(&action).unwrap(),
-        patch_result_json: None,
-        command_result_json: None,
-        tool_result_json: None,
-        error: None,
-        created_at: 1,
-        decided_at: Some(1),
-        completed_at: None,
-        effective_permissions_json: Some(
-            serde_json::to_string(&AgentPermissions::default()).unwrap(),
-        ),
-        path_scope: Some("workspace".to_string()),
-        command_cwd_scope: None,
-        blocked_reason: None,
-        decision_source: Some("auto".to_string()),
-    };
     assert_eq!(
-        storage.claim_agent_action_audit_execution(audit).unwrap(),
-        AgentActionAuditExecutionClaimOutcome::Claimed
-    );
-
-    assert_eq!(
-        reconcile_interrupted_automatic_direct_file_changes(
-            &storage,
-            mycopilot_core::storage::now_ms(),
-        )
-        .unwrap(),
+        reconcile_interrupted_file_changes(&storage, mycopilot_core::storage::now_ms()).unwrap(),
         1
     );
     assert!(!target_path.exists());
@@ -4133,14 +4433,122 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
     assert_eq!(status, "completed");
     assert!(tool_result_json.is_some());
     let finalized: AgentProposedAction = serde_json::from_str(&action_json).unwrap();
-    let AgentProposedAction::Diff { diff } = finalized else {
-        unreachable!("finalized action remains a Diff")
+    let AgentProposedAction::FileChange { file_change } = finalized else {
+        unreachable!("finalized action remains a FileChange")
     };
     assert_eq!(
-        diff.execution.delete_journal.as_ref().unwrap().state,
+        file_change.execution.delete_journal.as_ref().unwrap().state,
         mycopilot_core::file_change::FileChangeDeleteJournalState::Finalized
     );
-    assert!(diff.execution.receipt.is_some());
+    assert!(file_change.execution.receipt.is_some());
+}
+
+#[test]
+fn file_change_pending_checkpoint_requires_exact_canonical_pending_action_id() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-file-change-checkpoint-id";
+    let conversation_id = "conversation-file-change-checkpoint-id";
+    let assistant_message_id = "assistant-file-change-checkpoint-id";
+    let call_id = "call-file-change-checkpoint-id";
+    let target = fixture.path().join("checkpoint-id.txt");
+    let (action, call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        ("checkpoint-id.txt", target.to_str().unwrap()),
+        None,
+        Some("checkpoint identity\n"),
+        AgentApprovalStatus::Required,
+    );
+    let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut base_input);
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    base_input.context = Some(run_context.clone());
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    let canonical_id = pending_action_storage_id(run_id, call_id);
+
+    for pending_action_id in [None, Some("v2:tampered")].into_iter() {
+        let mut input = base_input.clone();
+        let mut checkpoint = test_pending_resume_checkpoint_for_call(
+            &storage,
+            run_id,
+            pending_action_id,
+            &call,
+            AgentToolIdentity::Builtin {
+                tool_name: "apply_patch".to_string(),
+            },
+        );
+        checkpoint.run_context = Some(run_context.clone());
+        input.resume_checkpoint = Some(checkpoint);
+        freeze_test_pending_provider_configuration(&storage, &mut input);
+        let error = service
+            .store_pending_action(
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                action.clone(),
+                input,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Pending action frozen Tool Call identity is inconsistent."
+        );
+        assert!(storage.list_pending_agent_actions().unwrap().is_empty());
+    }
+
+    let mut exact_input = base_input;
+    let mut checkpoint = test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(&canonical_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    );
+    checkpoint.run_context = Some(run_context);
+    exact_input.resume_checkpoint = Some(checkpoint);
+    freeze_test_pending_provider_configuration(&storage, &mut exact_input);
+    assert!(service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action,
+            exact_input,
+        )
+        .unwrap());
+    assert_eq!(
+        storage.list_pending_agent_actions().unwrap()[0].action_id,
+        canonical_id
+    );
 }
 
 #[test]
@@ -5257,7 +5665,7 @@ fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
             decision: None,
             status: "pending".to_string(),
             action_json: "{}".to_string(),
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,
@@ -10090,17 +10498,17 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
 }
 
 #[test]
-fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
+fn cancelled_file_change_with_durable_abort_never_rolls_back_to_pending() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_conversation(ChatConversationRecord {
-            id: "conversation-file-write-cancel-failure".to_string(),
+            id: "conversation-file-change-cancel-failure".to_string(),
             project_id: None,
             model_id: Some("model-1".to_string()),
-            title: "File write cancel failure".to_string(),
+            title: "FileChange cancel failure".to_string(),
             messages: vec![ChatMessageRecord {
-                id: "assistant-file-write-cancel-failure".to_string(),
+                id: "assistant-file-change-cancel-failure".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
                 created_at: 1,
@@ -10118,11 +10526,11 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         .unwrap();
     let service = AgentService::new(Arc::clone(&storage));
     service.register_usage_context(
-        "run-file-write-cancel-failure",
+        "run-file-change-cancel-failure",
         AgentRunUsageContext {
-            conversation_id: "missing-file-write-usage-owner".to_string(),
-            assistant_message_id: "assistant-file-write-cancel-failure".to_string(),
-            run_id: "run-file-write-cancel-failure".to_string(),
+            conversation_id: "missing-file-change-usage-owner".to_string(),
+            assistant_message_id: "assistant-file-change-cancel-failure".to_string(),
+            run_id: "run-file-change-cancel-failure".to_string(),
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
@@ -10133,59 +10541,21 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             started_at: 1,
         },
     );
-    let action_id = "file-write-cancel-failure";
+    let action_id = "file-change-cancel-failure";
     let canonical_target = fixture.path().join("cancelled.txt");
-    let (file_write, call) = staged_file_write_fixture(
-        StagedFileWriteFixtureIdentity {
-            run_id: "run-file-write-cancel-failure",
-            conversation_id: "conversation-file-write-cancel-failure",
+    let (file_change, call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id: "run-file-change-cancel-failure",
+            conversation_id: "conversation-file-change-cancel-failure",
             call_id: action_id,
-            transaction_id: "draft-file-write-cancel-failure",
+            transaction_id: "transaction-file-change-cancel-failure",
         },
         ("cancelled.txt", canonical_target.to_str().unwrap()),
         "hello",
-        "write_file",
         AgentApprovalStatus::Required,
     );
     storage
-        .create_agent_file_change(AgentFileChangeRecord {
-            schema_version: 1,
-            id: "draft-file-write-cancel-failure".to_string(),
-            conversation_id: "conversation-file-write-cancel-failure".to_string(),
-            project_id: None,
-            run_id: "run-file-write-cancel-failure".to_string(),
-            source_tool_name: "write_file".to_string(),
-            source_tool_call_id: "file-write-begin-cancel-failure".to_string(),
-            source_tool_arguments_digest: mycopilot_core::file_change::proposal_digest(
-                &json!({"phase": "begin", "mode": "create", "filePath": "cancelled.txt"}),
-            )
-            .unwrap(),
-            permission_revision: file_write.execution.permission_revision.clone(),
-            tool_set_revision: file_write.execution.tool_set_revision.clone(),
-            provider_wire_revision: file_write.execution.provider_wire_revision.clone(),
-            observation_id: file_write.execution.observation_id.clone(),
-            observation_json: serde_json::to_string(&file_write.execution.observation).unwrap(),
-            file_path: "cancelled.txt".to_string(),
-            operation: "create".to_string(),
-            strategy: None,
-            status: "waiting_approval".to_string(),
-            base_revision: None,
-            base_content: String::new(),
-            content: "hello".to_string(),
-            draft_revision: 1,
-            next_mutation_index: 1,
-            additions: 1,
-            deletions: 0,
-            line_count: 1,
-            byte_count: 5,
-            mutation_count: 1,
-            stats_final: true,
-            summary: None,
-            final_action_id: Some(action_id.to_string()),
-            created_at: 1,
-            updated_at: 1,
-            expires_at: i64::MAX,
-        })
+        .create_agent_file_change(staged_file_change_record(&file_change, "waiting_approval"))
         .unwrap();
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
@@ -10197,7 +10567,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
     .unwrap();
     let run_context = AgentRunContext {
         collaboration_identity: None,
-        conversation_id: Some("conversation-file-write-cancel-failure".to_string()),
+        conversation_id: Some("conversation-file-change-cancel-failure".to_string()),
         project_id: None,
         workspace: None,
         attachment_library: None,
@@ -10207,8 +10577,11 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
     save_test_pending_provider_for_input(&storage, &mut agent_input);
     let mut checkpoint = test_pending_resume_checkpoint_for_call(
         &storage,
-        "run-file-write-cancel-failure",
-        None,
+        "run-file-change-cancel-failure",
+        Some(&pending_action_storage_id(
+            "run-file-change-cancel-failure",
+            action_id,
+        )),
         &call,
         AgentToolIdentity::Builtin {
             tool_name: call.tool.clone(),
@@ -10218,9 +10591,9 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
     agent_input.resume_checkpoint = Some(checkpoint);
     append_durable_pending_trace(
         &storage,
-        "conversation-file-write-cancel-failure",
-        "assistant-file-write-cancel-failure",
-        "run-file-write-cancel-failure",
+        "conversation-file-change-cancel-failure",
+        "assistant-file-change-cancel-failure",
+        "run-file-change-cancel-failure",
         &call,
         AgentToolIdentity::Builtin {
             tool_name: call.tool.clone(),
@@ -10229,16 +10602,16 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
     );
     service
         .store_pending_action(
-            "run-file-write-cancel-failure",
-            "conversation-file-write-cancel-failure",
-            "assistant-file-write-cancel-failure",
-            AgentProposedAction::FileWrite { file_write },
+            "run-file-change-cancel-failure",
+            "conversation-file-change-cancel-failure",
+            "assistant-file-change-cancel-failure",
+            AgentProposedAction::FileChange { file_change },
             agent_input,
         )
         .unwrap();
 
     let error = service
-        .cancel_action("run-file-write-cancel-failure", action_id)
+        .cancel_action("run-file-change-cancel-failure", action_id)
         .unwrap_err();
     assert!(
         error.contains("保持 executing"),
@@ -10249,33 +10622,76 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             .pending_actions
             .lock()
             .unwrap_or_else(|lock_error| lock_error.into_inner())
-            [&pending_action_storage_id("run-file-write-cancel-failure", action_id,)]
+            [&pending_action_storage_id("run-file-change-cancel-failure", action_id,)]
             .snapshot
             .status,
         PendingActionStatus::Executing
     );
     assert_eq!(
         storage
-            .get_agent_file_change("draft-file-write-cancel-failure")
+            .get_agent_file_change("transaction-file-change-cancel-failure")
             .unwrap()
             .unwrap()
             .status,
-        "rejected"
+        "aborted"
     );
     assert_eq!(
         storage
-            .get_conversation_turn_trace("assistant-file-write-cancel-failure")
+            .get_conversation_turn_trace("assistant-file-change-cancel-failure")
             .unwrap()
             .unwrap()
             .terminal_status,
         ConversationTurnTraceTerminalStatus::InProgress
     );
     let conversation = storage
-        .load_conversation("conversation-file-write-cancel-failure")
+        .load_conversation("conversation-file-change-cancel-failure")
         .unwrap()
         .unwrap();
     assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
     let reconciled_at = mycopilot_core::storage::now_ms();
+    assert_eq!(
+        reconcile_interrupted_file_changes(&storage, reconciled_at).unwrap(),
+        1,
+        "startup pre-pass must rebuild the exact aborted ToolResult before terminalizing"
+    );
+    let recovered_trace = storage
+        .get_conversation_turn_trace("assistant-file-change-cancel-failure")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered_trace
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ToolResult { call_id, .. }
+                    if call_id == action_id
+            ))
+            .count(),
+        1
+    );
+    let recovered_audit = storage
+        .get_agent_action_audit(&pending_action_storage_id(
+            "run-file-change-cancel-failure",
+            action_id,
+        ))
+        .unwrap()
+        .unwrap();
+    let recovered_result: AgentFileChangeResult = serde_json::from_str(
+        recovered_audit
+            .file_change_result_json
+            .as_deref()
+            .expect("cancel recovery persists its typed FileChange result"),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered_result.status,
+        mycopilot_core::AgentFileChangeResultStatus::Aborted
+    );
+    assert_eq!(
+        recovered_result.outcome,
+        mycopilot_core::AgentFileChangeOutcome::DefinitelyNotExecuted
+    );
     let interrupted = storage
         .reconcile_interrupted_pending_agent_actions(reconciled_at)
         .unwrap();
@@ -10285,7 +10701,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
     assert!(storage.list_pending_agent_actions().unwrap().is_empty());
     assert_eq!(
         storage
-            .get_conversation_turn_trace("assistant-file-write-cancel-failure")
+            .get_conversation_turn_trace("assistant-file-change-cancel-failure")
             .unwrap()
             .unwrap()
             .terminal_status,

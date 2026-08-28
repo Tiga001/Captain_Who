@@ -4,16 +4,17 @@ use super::apply_patch::{
 };
 use super::ToolExecutionContext;
 use crate::file_change::{
-    content_digest, proposal_digest, BoundParent, FileChangeBase, FileChangeDirectBinding,
-    FileChangeEdit, FileChangeError, FileChangeErrorCode, FileChangeMutation,
-    FileChangeMutationReceipt, FileChangeOperation, FileChangeOutcome, FileChangePathPolicy,
-    FileChangePlanRequest, FileChangePlanner, FileChangeProposal, FileChangeStagedAction,
-    FileChangeStatus, FileChangeTransaction, FileObservationCheckpoint,
-    FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
+    content_digest, proposal_digest, FileChangeBase, FileChangeDirectBinding, FileChangeEdit,
+    FileChangeError, FileChangeErrorCode, FileChangeMutation, FileChangeMutationReceipt,
+    FileChangeOperation, FileChangeOutcome, FileChangePathPolicy, FileChangePlanRequest,
+    FileChangePlanner, FileChangeProposal, FileChangeStagedAction, FileChangeStatus,
+    FileChangeTransaction, FileObservationCheckpoint, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION,
+    FILE_CHANGE_SCHEMA_VERSION,
 };
 use crate::protocol::{
-    AgentApprovalStatus, AgentError, AgentFileWriteMode, AgentFileWriteProposal, AgentResult,
-    AgentToolCall, AgentToolResult, AgentWritePermission,
+    AgentApprovalStatus, AgentError, AgentFileChangeProposal, AgentFileChangeUpdateStrategy,
+    AgentResult, AgentToolCall, AgentToolResult, AgentWritePermission,
+    AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
 };
 use crate::revision::content_revision;
 use crate::storage::file_change_repository::{
@@ -72,8 +73,31 @@ pub(super) fn begin(
     observation_id: String,
     initial_summary: Option<String>,
 ) -> AgentResult<Value> {
+    begin_with_hook(
+        context,
+        source,
+        operation,
+        strategy,
+        file_path,
+        observation_id,
+        initial_summary,
+        |_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn begin_with_hook(
+    context: &ToolExecutionContext,
+    source: StagedSource<'_>,
+    operation: FileChangeOperation,
+    strategy: Option<StagedUpdateStrategy>,
+    file_path: String,
+    observation_id: String,
+    initial_summary: Option<String>,
+    after_durable_create: impl FnOnce(&str) -> AgentResult<()>,
+) -> AgentResult<Value> {
     require_write(context)?;
-    if !matches!(source.tool_name, "apply_patch" | "write_file")
+    if source.tool_name != "apply_patch"
         || !matches!(
             (operation, strategy),
             (FileChangeOperation::Create, None)
@@ -90,6 +114,9 @@ pub(super) fn begin(
         return Err(file_change_agent_error(FileChangeError::new(
             FileChangeErrorCode::IllegalFieldCombination,
         )));
+    }
+    if let Some(existing) = begin_replay_for_source_call(context, &source)? {
+        return Ok(existing);
     }
     let target = resolve_target(context, &file_path)?;
     let observation = context
@@ -135,7 +162,7 @@ pub(super) fn begin(
         run_id: context.run_id()?.to_string(),
         source_tool_name: source.tool_name.to_string(),
         source_tool_call_id: context.tool_call_id()?.to_string(),
-        source_tool_arguments_digest: source.args_digest,
+        source_tool_arguments_digest: source.args_digest.clone(),
         permission_revision: context.file_change_permission_revision().to_string(),
         tool_set_revision: context.file_change_tool_set_revision().to_string(),
         provider_wire_revision: context.file_change_provider_wire_revision().to_string(),
@@ -158,6 +185,10 @@ pub(super) fn begin(
         stats_final: false,
         summary: sanitize_summary(initial_summary),
         final_action_id: None,
+        final_action_arguments_digest: None,
+        final_permission_revision: None,
+        final_tool_set_revision: None,
+        final_provider_wire_revision: None,
         created_at: now,
         updated_at: now,
         expires_at: now.saturating_add(DRAFT_TTL_MS),
@@ -174,161 +205,44 @@ pub(super) fn begin(
             target.absolute_path(),
         )
         .map_err(file_change_agent_error)?;
-    context
+    if let Err(error) = context
         .storage()?
         .create_agent_file_change(transaction.clone())
-        .map_err(storage_error)?;
+    {
+        if let Some(existing) = begin_replay_for_source_call(context, &source)? {
+            return Ok(existing);
+        }
+        return Err(storage_error(error));
+    }
+    after_durable_create(&transaction.id)?;
     Ok(transaction_result(&transaction))
 }
 
-/// Temporary published `write_file` bridge. It performs a descriptor-bound Host observation and
-/// then enters the exact same `begin` implementation and canonical store as apply_patch Staged.
-pub(super) fn begin_write_file_bridge(
+fn begin_replay_for_source_call(
     context: &ToolExecutionContext,
-    mode: AgentFileWriteMode,
-    file_path: String,
-    source_args_digest: String,
-    summary: Option<String>,
-) -> AgentResult<Value> {
-    require_write(context)?;
-    let target = resolve_target(context, &file_path)?;
-    let parent = BoundParent::open(&target).map_err(file_change_agent_error)?;
-    let current = parent
-        .read_optional(target.absolute_path())
-        .map_err(file_change_agent_error)?;
-    parent.revalidate().map_err(file_change_agent_error)?;
-    let parent_metadata = parent.parent_metadata().map_err(file_change_agent_error)?;
-    let (operation, strategy, observation) = match current {
-        Some(current) => {
-            if matches!(mode, AgentFileWriteMode::Create) {
-                return Err(file_change_agent_error(FileChangeError::new(
-                    FileChangeErrorCode::FileExists,
-                )));
-            }
-            if current.bytes.len() > MAX_STAGED_FILE_BYTES {
-                return Err(file_change_agent_error(FileChangeError::new(
-                    FileChangeErrorCode::ContentTooLarge,
-                )));
-            }
-            let content = String::from_utf8(current.bytes).map_err(|error| {
-                file_change_agent_error(FileChangeError::with_diagnostic(
-                    FileChangeErrorCode::UnsupportedFileType,
-                    error.to_string(),
-                ))
-            })?;
-            reject_text(&content)?;
-            let revision = content_revision(content.as_bytes());
-            let observation = context
-                .file_observations()
-                .issue_existing_for_write_file_bridge(
-                    context.conversation_id()?,
-                    context.run_id()?,
-                    target.absolute_path(),
-                    &revision,
-                    &current.metadata,
-                    &parent_metadata,
-                )
-                .map_err(file_change_agent_error)?;
-            let strategy = match mode {
-                AgentFileWriteMode::Modify | AgentFileWriteMode::Append => {
-                    StagedUpdateStrategy::Modify
-                }
-                AgentFileWriteMode::Rewrite | AgentFileWriteMode::Upsert => {
-                    StagedUpdateStrategy::Rewrite
-                }
-                AgentFileWriteMode::Create => unreachable!("existing create rejected"),
-            };
-            (FileChangeOperation::Update, Some(strategy), observation)
-        }
-        None => {
-            if matches!(
-                mode,
-                AgentFileWriteMode::Rewrite
-                    | AgentFileWriteMode::Modify
-                    | AgentFileWriteMode::Append
-            ) {
-                return Err(file_change_agent_error(FileChangeError::new(
-                    FileChangeErrorCode::FileMissing,
-                )));
-            }
-            let observation = context
-                .file_observations()
-                .issue_missing_for_write_file_bridge(
-                    context.conversation_id()?,
-                    context.run_id()?,
-                    target.absolute_path(),
-                    &parent_metadata,
-                )
-                .map_err(file_change_agent_error)?;
-            (FileChangeOperation::Create, None, observation)
-        }
+    source: &StagedSource<'_>,
+) -> AgentResult<Option<Value>> {
+    let Some(existing) = context
+        .storage()?
+        .get_agent_file_change_for_source_call(
+            context.conversation_id()?,
+            context.project_id(),
+            context.run_id()?,
+            context.tool_call_id()?,
+        )
+        .map_err(storage_error)?
+    else {
+        return Ok(None);
     };
-    begin(
-        context,
-        StagedSource::new("write_file", source_args_digest),
-        operation,
-        strategy,
-        file_path,
-        observation.id().to_string(),
-        summary,
-    )
-}
-
-pub(super) fn write_file_bridge_cursor(
-    context: &ToolExecutionContext,
-    transaction_id: &str,
-) -> AgentResult<(u64, u64)> {
-    let transaction = load_owned(context, transaction_id, "write_file")?;
-    Ok((transaction.draft_revision, transaction.next_mutation_index))
-}
-
-pub(super) fn write_file_bridge_result(
-    context: &ToolExecutionContext,
-    transaction_id: &str,
-) -> AgentResult<Value> {
-    let transaction = load_owned(context, transaction_id, "write_file")?;
-    let current = transaction_result(&transaction);
-    let mode = match (
-        transaction.operation.as_str(),
-        transaction.strategy.as_deref(),
-    ) {
-        ("create", None) => "create",
-        ("update", Some("modify")) => "modify",
-        ("update", Some("rewrite")) => "rewrite",
-        _ => "upsert",
-    };
-    Ok(json!({
-        "draft": {
-            "draftId": transaction.id,
-            "conversationId": transaction.conversation_id,
-            "projectId": transaction.project_id,
-            "filePath": transaction.file_path,
-            "mode": mode,
-            "status": transaction.status,
-            "baseRevision": transaction.base_revision,
-            "additions": transaction.additions,
-            "deletions": transaction.deletions,
-            "lineCount": transaction.line_count,
-            "byteCount": transaction.byte_count,
-            "chunkCount": transaction.mutation_count,
-            "nextChunkIndex": transaction.next_mutation_index,
-            "statsFinal": transaction.stats_final,
-            "summary": transaction.summary,
-            "createdAt": transaction.created_at,
-            "updatedAt": transaction.updated_at,
-        },
-        "tail": current["tail"],
-        "totalChars": current["totalChars"],
-        "tailStart": current["tailStart"],
-        "tailTruncated": current["tailTruncated"],
-        "transactionState": if is_unsettled(&transaction.status) { "dirty" } else { "settled" },
-        "requiresFinishBeforeResponse": is_unsettled(&transaction.status),
-        "nextAction": if is_unsettled(&transaction.status) {
-            "Continue this write_file bridge transaction, then call phase=finish or phase=abort."
-        } else {
-            "This transaction is settled; begin a new FileChange for later writes."
-        },
-    }))
+    validate_record(&existing)?;
+    if existing.source_tool_name != source.tool_name
+        || existing.source_tool_arguments_digest != source.args_digest
+    {
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::ReplayMismatch,
+        )));
+    }
+    Ok(Some(transaction_result(&existing)))
 }
 
 pub(super) fn append(
@@ -493,15 +407,115 @@ pub(super) fn commit(
     transaction_id: String,
     expected_draft_revision: u64,
     summary: Option<String>,
-) -> AgentResult<AgentFileWriteProposal> {
+) -> AgentResult<AgentFileChangeProposal> {
+    commit_with_hook(
+        context,
+        call,
+        source_tool_name,
+        transaction_id,
+        expected_draft_revision,
+        summary,
+        |_, _| Ok(()),
+    )
+}
+
+fn commit_with_hook(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    source_tool_name: &str,
+    transaction_id: String,
+    expected_draft_revision: u64,
+    summary: Option<String>,
+    after_durable_transition: impl FnOnce(&str, &AgentFileChangeProposal) -> AgentResult<()>,
+) -> AgentResult<AgentFileChangeProposal> {
     require_write(context)?;
+    let final_action_arguments_digest = proposal_digest(&call.args).map_err(internal_file_error)?;
     let mut stored = load_owned(context, &transaction_id, source_tool_name)?;
+    if let Some(replayed) = replay_commit_proposal(
+        context,
+        call,
+        &stored,
+        expected_draft_revision,
+        &final_action_arguments_digest,
+    )? {
+        return Ok(replayed);
+    }
     ensure_mutable(&mut stored, context)?;
     if stored.draft_revision != expected_draft_revision {
         return Err(file_change_agent_error(FileChangeError::new(
             FileChangeErrorCode::DraftRevisionConflict,
         )));
     }
+    stored.summary = sanitize_summary(summary);
+    stored.final_action_id = Some(call.id.clone());
+    stored.final_action_arguments_digest = Some(final_action_arguments_digest);
+    stored.final_permission_revision = Some(context.file_change_permission_revision().to_string());
+    stored.final_tool_set_revision = Some(context.file_change_tool_set_revision().to_string());
+    stored.final_provider_wire_revision =
+        Some(context.file_change_provider_wire_revision().to_string());
+    stored.updated_at = now_ms();
+    let proposal = build_commit_proposal(context, call, &stored, true)?;
+    let expected_status = stored.status.clone();
+    stored.status = "waiting_approval".to_string();
+    stored.stats_final = true;
+    let transitioned = context
+        .storage()?
+        .transition_agent_file_change(
+            &expected_status,
+            expected_draft_revision,
+            stored.next_mutation_index,
+            &stored,
+        )
+        .map_err(storage_error)?;
+    if !transitioned {
+        let current = load_owned(context, &transaction_id, source_tool_name)?;
+        if let Some(replayed) = replay_commit_proposal(
+            context,
+            call,
+            &current,
+            expected_draft_revision,
+            stored
+                .final_action_arguments_digest
+                .as_deref()
+                .expect("commit digest was totalized before CAS"),
+        )? {
+            return Ok(replayed);
+        }
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::DraftRevisionConflict,
+        )));
+    }
+    after_durable_transition(&stored.id, &proposal)?;
+    Ok(proposal)
+}
+
+fn replay_commit_proposal(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    stored: &AgentFileChangeRecord,
+    expected_draft_revision: u64,
+    final_action_arguments_digest: &str,
+) -> AgentResult<Option<AgentFileChangeProposal>> {
+    if stored.status != "waiting_approval" {
+        return Ok(None);
+    }
+    if stored.draft_revision != expected_draft_revision
+        || stored.final_action_id.as_deref() != Some(call.id.as_str())
+        || stored.final_action_arguments_digest.as_deref() != Some(final_action_arguments_digest)
+    {
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::ReplayMismatch,
+        )));
+    }
+    build_commit_proposal(context, call, stored, false).map(Some)
+}
+
+fn build_commit_proposal(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    stored: &AgentFileChangeRecord,
+    revalidate_current_identity: bool,
+) -> AgentResult<AgentFileChangeProposal> {
     let operation = parse_operation(&stored.operation)?;
     let target = resolve_target(context, &stored.file_path)?;
     let checkpoint: FileObservationCheckpoint = serde_json::from_str(&stored.observation_json)
@@ -515,9 +529,11 @@ pub(super) fn commit(
             target.absolute_path(),
         )
         .map_err(file_change_agent_error)?;
-    checkpoint
-        .revalidate_current_identity(target.absolute_path())
-        .map_err(file_change_agent_error)?;
+    if revalidate_current_identity {
+        checkpoint
+            .revalidate_current_identity(target.absolute_path())
+            .map_err(file_change_agent_error)?;
+    }
     let base = match operation {
         FileChangeOperation::Create => FileChangeBase::Missing,
         FileChangeOperation::Update => FileChangeBase::Existing {
@@ -536,7 +552,6 @@ pub(super) fn commit(
             mutation: FileChangeMutation::Complete(stored.content.clone()),
         })
         .map_err(file_change_agent_error)?;
-    let now = now_ms().max(0) as u64;
     let transaction = FileChangeTransaction {
         schema_version: FILE_CHANGE_SCHEMA_VERSION,
         id: stored.id.clone(),
@@ -548,7 +563,7 @@ pub(super) fn commit(
         target: plan.target.clone(),
         proposal_digest: plan.proposal_digest.clone(),
         created_at: stored.created_at.max(0) as u64,
-        updated_at: now,
+        updated_at: stored.updated_at.max(0) as u64,
     };
     let proposal = FileChangeProposal {
         schema_version: FILE_CHANGE_SCHEMA_VERSION,
@@ -569,9 +584,14 @@ pub(super) fn commit(
         proposal,
         observation_id: stored.observation_id.clone(),
         observation: checkpoint,
-        source_tool_name: source_tool_name.to_string(),
+        source_tool_name: "apply_patch".to_string(),
         source_call_id: call.id.clone(),
-        source_args_digest: proposal_digest(&call.args).map_err(internal_file_error)?,
+        source_args_digest: stored
+            .final_action_arguments_digest
+            .clone()
+            .ok_or_else(|| {
+                file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+            })?,
         staged_transaction_id: Some(stored.id.clone()),
         conversation_id: stored.conversation_id.clone(),
         project_id: stored.project_id.clone(),
@@ -582,38 +602,30 @@ pub(super) fn commit(
         target_content: plan.target_content.clone(),
         delete_journal: None,
         receipt: None,
-        permission_revision: context.file_change_permission_revision().to_string(),
-        tool_set_revision: context.file_change_tool_set_revision().to_string(),
-        provider_wire_revision: context.file_change_provider_wire_revision().to_string(),
+        permission_revision: stored.final_permission_revision.clone().ok_or_else(|| {
+            file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+        })?,
+        tool_set_revision: stored.final_tool_set_revision.clone().ok_or_else(|| {
+            file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+        })?,
+        provider_wire_revision: stored.final_provider_wire_revision.clone().ok_or_else(|| {
+            file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+        })?,
     };
     execution.validate().map_err(file_change_agent_error)?;
-    let expected_status = stored.status.clone();
-    stored.status = "waiting_approval".to_string();
-    stored.stats_final = true;
-    stored.summary = sanitize_summary(summary);
-    stored.final_action_id = Some(call.id.clone());
-    stored.updated_at = now as i64;
-    let transitioned = context
-        .storage()?
-        .transition_agent_file_change(
-            &expected_status,
-            expected_draft_revision,
-            stored.next_mutation_index,
-            &stored,
-        )
-        .map_err(storage_error)?;
-    if !transitioned {
-        return Err(file_change_agent_error(FileChangeError::new(
-            FileChangeErrorCode::DraftRevisionConflict,
-        )));
-    }
-    Ok(AgentFileWriteProposal {
+    Ok(AgentFileChangeProposal {
+        schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
         id: call.id.clone(),
-        draft_id: stored.id.clone(),
-        mode: match (operation, stored.strategy.as_deref()) {
-            (FileChangeOperation::Create, None) => AgentFileWriteMode::Create,
-            (FileChangeOperation::Update, Some("modify")) => AgentFileWriteMode::Modify,
-            (FileChangeOperation::Update, Some("rewrite")) => AgentFileWriteMode::Rewrite,
+        transaction_id: stored.id.clone(),
+        operation: super::apply_patch::patch_operation(operation),
+        update_strategy: match (operation, stored.strategy.as_deref()) {
+            (FileChangeOperation::Create, None) => None,
+            (FileChangeOperation::Update, Some("modify")) => {
+                Some(AgentFileChangeUpdateStrategy::Modify)
+            }
+            (FileChangeOperation::Update, Some("rewrite")) => {
+                Some(AgentFileChangeUpdateStrategy::Rewrite)
+            }
             _ => {
                 return Err(file_change_agent_error(FileChangeError::new(
                     FileChangeErrorCode::InvalidArguments,
@@ -621,8 +633,9 @@ pub(super) fn commit(
             }
         },
         file_path: plan.file_path,
+        inline_diff: None,
         base_revision: state_revision(&plan.base).map(str::to_string),
-        summary: stored.summary,
+        summary: stored.summary.clone(),
         additions: plan.additions,
         deletions: plan.deletions,
         line_count: stored.line_count,
@@ -776,6 +789,11 @@ fn load_owned(
     transaction_id: &str,
     source_tool_name: &str,
 ) -> AgentResult<AgentFileChangeRecord> {
+    if source_tool_name != "apply_patch" {
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::InvalidArguments,
+        )));
+    }
     let storage = context.storage()?;
     let Some(transaction) = storage
         .get_agent_file_change(transaction_id)
@@ -793,7 +811,7 @@ fn load_owned(
     if transaction.conversation_id != context.conversation_id()?
         || transaction.project_id.as_deref() != context.project_id()
         || transaction.run_id != context.run_id()?
-        || transaction.source_tool_name != source_tool_name
+        || transaction.source_tool_name != "apply_patch"
     {
         return Err(file_change_agent_error(FileChangeError::new(
             FileChangeErrorCode::TransactionOwnerMismatch,
@@ -881,6 +899,53 @@ fn validate_record(transaction: &AgentFileChangeRecord) -> AgentResult<()> {
         }
         _ => false,
     };
+    let valid_final_action = match (
+        transaction.final_action_id.as_deref(),
+        transaction.final_action_arguments_digest.as_deref(),
+        transaction.final_permission_revision.as_deref(),
+        transaction.final_tool_set_revision.as_deref(),
+        transaction.final_provider_wire_revision.as_deref(),
+    ) {
+        (None, None, None, None, None) => matches!(
+            transaction.status.as_str(),
+            "drafting" | "ready" | "aborted" | "expired" | "failed"
+        ),
+        (
+            Some(id),
+            Some(digest),
+            Some(permission_revision),
+            Some(tool_set_revision),
+            Some(provider_wire_revision),
+        ) => {
+            !id.trim().is_empty()
+                && !digest.trim().is_empty()
+                && !permission_revision.trim().is_empty()
+                && !tool_set_revision.trim().is_empty()
+                && !provider_wire_revision.trim().is_empty()
+                && matches!(
+                    transaction.status.as_str(),
+                    "waiting_approval"
+                        | "applying"
+                        | "applied"
+                        | "already_applied"
+                        | "rejected"
+                        | "conflict"
+                        | "failed"
+                        | "outcome_unknown"
+                        | "aborted"
+                        | "expired"
+                )
+        }
+        _ => false,
+    };
+    let valid_stats_final = match transaction.status.as_str() {
+        "drafting" | "ready" => !transaction.stats_final,
+        "waiting_approval" | "applying" | "applied" | "already_applied" | "rejected"
+        | "conflict" | "failed" | "outcome_unknown" | "aborted" | "expired" => {
+            transaction.stats_final
+        }
+        _ => false,
+    };
     if transaction.id.trim().is_empty()
         || transaction.conversation_id.trim().is_empty()
         || transaction
@@ -888,10 +953,7 @@ fn validate_record(transaction: &AgentFileChangeRecord) -> AgentResult<()> {
             .as_deref()
             .is_some_and(|id| id.trim().is_empty())
         || transaction.run_id.trim().is_empty()
-        || !matches!(
-            transaction.source_tool_name.as_str(),
-            "apply_patch" | "write_file"
-        )
+        || transaction.source_tool_name != "apply_patch"
         || transaction.source_tool_call_id.trim().is_empty()
         || transaction.source_tool_arguments_digest.trim().is_empty()
         || transaction.permission_revision.trim().is_empty()
@@ -901,6 +963,8 @@ fn validate_record(transaction: &AgentFileChangeRecord) -> AgentResult<()> {
         || transaction.observation_json.is_empty()
         || !valid_operation
         || !valid_strategy
+        || !valid_final_action
+        || !valid_stats_final
         || transaction.byte_count != transaction.content.len() as u64
         || transaction.line_count != line_count(&transaction.content)
         || transaction.next_mutation_index != transaction.mutation_count
@@ -972,9 +1036,6 @@ fn redact_result_tail(value: &mut Value) {
             "tailDigest".to_string(),
             json!(content_digest(tail.as_bytes())),
         );
-    }
-    if let Some(draft) = object.get_mut("draft") {
-        redact_result_tail(draft);
     }
 }
 
@@ -1241,35 +1302,96 @@ mod tests {
     #[test]
     fn public_result_projection_keeps_metadata_without_resumability_text() {
         const CANARY: &str = "PRIVATE_STAGED_RESULT_TAIL_CANARY";
-        for payload in [
-            json!({
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "call-append".to_string(),
+            tool: "apply_patch".to_string(),
+            ok: true,
+            result: Some(json!({
                 "transactionId": "transaction-1",
                 "status": "drafting",
                 "tail": CANARY,
-            }),
-            json!({
-                "draft": {
-                    "draftId": "transaction-1",
-                    "status": "drafting",
-                    "tail": CANARY,
-                }
-            }),
-        ] {
-            let raw = AgentToolResult {
-                exact_archive_file: None,
-                call_id: "call-append".to_string(),
-                tool: "apply_patch".to_string(),
-                ok: true,
-                result: Some(payload),
-                error: None,
-            };
-            let projected = public_result_projection(&raw);
-            let encoded = serde_json::to_string(&projected).unwrap();
-            assert!(!encoded.contains(CANARY));
-            assert!(encoded.contains("tailBytes"));
-            assert!(encoded.contains("tailDigest"));
-            assert!(serde_json::to_string(&raw).unwrap().contains(CANARY));
+            })),
+            error: None,
+        };
+        let projected = public_result_projection(&raw);
+        let encoded = serde_json::to_string(&projected).unwrap();
+        assert!(!encoded.contains(CANARY));
+        assert!(encoded.contains("tailBytes"));
+        assert!(encoded.contains("tailDigest"));
+        assert!(serde_json::to_string(&raw).unwrap().contains(CANARY));
+    }
+
+    #[test]
+    fn aborted_and_expired_records_allow_only_complete_or_absent_final_identity() {
+        let fixture = |status: &str| AgentFileChangeRecord {
+            schema_version: AGENT_FILE_CHANGE_SCHEMA_VERSION,
+            id: format!("transaction-{status}"),
+            conversation_id: "conversation-1".to_string(),
+            project_id: None,
+            run_id: "run-1".to_string(),
+            source_tool_name: "apply_patch".to_string(),
+            source_tool_call_id: "call-begin".to_string(),
+            source_tool_arguments_digest: content_digest(b"begin"),
+            permission_revision: "permission-v1".to_string(),
+            tool_set_revision: "tool-set-v1".to_string(),
+            provider_wire_revision: "provider-wire-v1".to_string(),
+            observation_id: "fobs_current".to_string(),
+            observation_json: "{}".to_string(),
+            file_path: "report.md".to_string(),
+            operation: "create".to_string(),
+            strategy: None,
+            status: status.to_string(),
+            base_revision: None,
+            base_content: String::new(),
+            content: String::new(),
+            draft_revision: 0,
+            next_mutation_index: 0,
+            additions: 0,
+            deletions: 0,
+            line_count: 0,
+            byte_count: 0,
+            mutation_count: 0,
+            stats_final: true,
+            summary: None,
+            final_action_id: None,
+            final_action_arguments_digest: None,
+            final_permission_revision: None,
+            final_tool_set_revision: None,
+            final_provider_wire_revision: None,
+            created_at: 1,
+            updated_at: 2,
+            expires_at: 3,
+        };
+
+        for status in ["aborted", "expired"] {
+            let mut record = fixture(status);
+            validate_record(&record).expect("a pre-commit terminal record has no final identity");
+
+            record.final_action_id = Some("call-commit".to_string());
+            record.final_action_arguments_digest = Some(content_digest(b"commit"));
+            record.final_permission_revision = Some("permission-v2".to_string());
+            record.final_tool_set_revision = Some("tool-set-v2".to_string());
+            record.final_provider_wire_revision = Some("provider-wire-v2".to_string());
+            validate_record(&record)
+                .expect("a post-commit terminal record retains its complete frozen identity");
+
+            record.final_provider_wire_revision = None;
+            assert!(
+                validate_record(&record).is_err(),
+                "partial final identity must fail"
+            );
         }
+
+        let mut drafting = fixture("drafting");
+        drafting.stats_final = false;
+        validate_record(&drafting).expect("mutable draft statistics remain provisional");
+        drafting.stats_final = true;
+        assert!(validate_record(&drafting).is_err());
+
+        let mut settled = fixture("aborted");
+        settled.stats_final = false;
+        assert!(validate_record(&settled).is_err());
     }
 
     #[test]
@@ -1280,32 +1402,58 @@ mod tests {
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
         save_conversation(&storage, "conversation-staged");
-        let context = context(
+        let owner_context = context(
             &root,
             storage.clone(),
             "conversation-staged",
             Some("project-staged"),
             "run-staged",
         );
-        let observation = observe(&context, "report.md", "read-staged-create");
-        let begin = begin(
-            &call_context(&context, "begin-staged"),
-            StagedSource::new("apply_patch", content_digest(b"begin-args")),
+        let observation = observe(&owner_context, "report.md", "read-staged-create");
+        let begin_args_digest = content_digest(b"begin-args");
+        let begun = begin(
+            &call_context(&owner_context, "begin-staged"),
+            StagedSource::new("apply_patch", begin_args_digest.clone()),
             FileChangeOperation::Create,
             None,
             "report.md".to_string(),
-            observation,
+            observation.clone(),
             None,
         )
         .unwrap();
-        let transaction_id = begin["transactionId"].as_str().unwrap().to_string();
-        assert_eq!(begin["draftRevision"], 0);
-        assert_eq!(begin["nextIndex"], 0);
-        assert_eq!(begin["requiresCommitBeforeResponse"], true);
+        let transaction_id = begun["transactionId"].as_str().unwrap().to_string();
+        assert_eq!(begun["draftRevision"], 0);
+        assert_eq!(begun["nextIndex"], 0);
+        assert_eq!(begun["requiresCommitBeforeResponse"], true);
+        let begin_replay = begin(
+            &call_context(&owner_context, "begin-staged"),
+            StagedSource::new("apply_patch", begin_args_digest),
+            FileChangeOperation::Create,
+            None,
+            "report.md".to_string(),
+            observation.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(begin_replay, begun);
+        let begin_mismatch = begin(
+            &call_context(&owner_context, "begin-staged"),
+            StagedSource::new("apply_patch", content_digest(b"different-begin-args")),
+            FileChangeOperation::Create,
+            None,
+            "different.md".to_string(),
+            observation,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            begin_mismatch.code(),
+            Some("agent.apply_patch.replay_mismatch")
+        );
 
         let append_args_digest = content_digest(b"append-args");
         let appended = append(
-            &call_context(&context, "append-staged-1"),
+            &call_context(&owner_context, "append-staged-1"),
             "apply_patch",
             transaction_id.clone(),
             0,
@@ -1318,7 +1466,7 @@ mod tests {
         assert_eq!(appended["nextIndex"], 1);
 
         let replay = append(
-            &call_context(&context, "append-staged-retry"),
+            &call_context(&owner_context, "append-staged-retry"),
             "apply_patch",
             transaction_id.clone(),
             0,
@@ -1329,7 +1477,7 @@ mod tests {
         .unwrap();
         assert_eq!(replay, appended);
         let mismatch = append(
-            &call_context(&context, "append-staged-mismatch"),
+            &call_context(&owner_context, "append-staged-mismatch"),
             "apply_patch",
             transaction_id.clone(),
             0,
@@ -1341,7 +1489,7 @@ mod tests {
         assert_eq!(mismatch.code(), Some("agent.apply_patch.replay_mismatch"));
 
         let edited = edit(
-            &call_context(&context, "edit-staged"),
+            &call_context(&owner_context, "edit-staged"),
             "apply_patch",
             transaction_id.clone(),
             1,
@@ -1356,7 +1504,7 @@ mod tests {
         assert_eq!(edited["byteCount"], 11);
 
         let out_of_order = edit(
-            &call_context(&context, "edit-out-of-order"),
+            &call_context(&owner_context, "edit-out-of-order"),
             "apply_patch",
             transaction_id.clone(),
             3,
@@ -1370,7 +1518,7 @@ mod tests {
             Some("agent.apply_patch.mutation_out_of_order")
         );
         let stale = edit(
-            &call_context(&context, "edit-stale"),
+            &call_context(&owner_context, "edit-stale"),
             "apply_patch",
             transaction_id.clone(),
             2,
@@ -1390,13 +1538,56 @@ mod tests {
             args: json!({
                 "action":"commit",
                 "transactionId":transaction_id,
-                "expectedDraftRevision":2
+                "expectedDraftRevision":2,
+                "summary":"Create report"
             }),
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
+        let frozen_proposal = std::cell::RefCell::new(None);
+        let injected = commit_with_hook(
+            &call_context(&owner_context, "commit-staged"),
+            &commit_call,
+            "apply_patch",
+            transaction_id.clone(),
+            2,
+            Some("Create report".to_string()),
+            |durable_transaction_id, proposal| {
+                assert_eq!(durable_transaction_id, transaction_id);
+                frozen_proposal.replace(Some(serde_json::to_value(proposal).unwrap()));
+                Err(AgentError::new(
+                    "injected failure after durable FileChange proposal",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert!(injected
+            .to_string()
+            .contains("injected failure after durable FileChange proposal"));
+        assert_eq!(
+            storage
+                .get_agent_file_change(&transaction_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "waiting_approval"
+        );
+
+        // Simulate a process boundary after the transaction became durable but before its Tool
+        // result/pending receipt was returned. Replay has no in-memory observation and must return
+        // the same frozen proposal instead of creating or revalidating a second transaction.
+        let recovered_storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let recovered_context = context(
+            &root,
+            recovered_storage,
+            "conversation-staged",
+            Some("project-staged"),
+            "run-staged",
+        );
+        fs::write(root.join("report.md"), "concurrent change\n").unwrap();
         let proposal = commit(
-            &call_context(&context, "commit-staged"),
+            &call_context(&recovered_context, "commit-staged"),
             &commit_call,
             "apply_patch",
             transaction_id.clone(),
@@ -1404,7 +1595,14 @@ mod tests {
             Some("Create report".to_string()),
         )
         .unwrap();
-        assert_eq!(proposal.draft_id, transaction_id);
+        assert_eq!(
+            serde_json::to_value(&proposal).unwrap(),
+            frozen_proposal
+                .into_inner()
+                .expect("first frozen proposal was captured after durable transition"),
+            "commit replay must return the exact frozen proposal"
+        );
+        assert_eq!(proposal.transaction_id, transaction_id);
         assert_eq!(proposal.byte_count, 11);
         assert_eq!(
             proposal.execution.target_content.as_deref(),
@@ -1431,10 +1629,22 @@ mod tests {
         );
         assert_eq!(proposal.additions, direct_plan.additions);
         assert_eq!(proposal.deletions, direct_plan.deletions);
-        let settled = append(
-            &call_context(&context, "append-after-commit"),
+        let mut mismatched_commit = commit_call.clone();
+        mismatched_commit.args["summary"] = json!("Different summary");
+        let mismatch = commit(
+            &call_context(&recovered_context, "commit-staged"),
+            &mismatched_commit,
             "apply_patch",
-            proposal.draft_id,
+            transaction_id.clone(),
+            2,
+            Some("Different summary".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.code(), Some("agent.apply_patch.replay_mismatch"));
+        let settled = append(
+            &call_context(&recovered_context, "append-after-commit"),
+            "apply_patch",
+            proposal.transaction_id,
             2,
             2,
             "no".to_string(),
@@ -1454,28 +1664,46 @@ mod tests {
         let database = fixture.path().join("storage.sqlite");
         fs::create_dir_all(&root).unwrap();
 
-        let transaction_id = {
+        let (transaction_id, observation_id) = {
             let storage = Arc::new(StorageService::open(&database).unwrap());
             save_conversation(&storage, "conversation-restart");
             let context = context(
                 &root,
-                storage,
+                storage.clone(),
                 "conversation-restart",
                 Some("project-restart"),
                 "run-restart",
             );
             let observation = observe(&context, "restart.md", "read-restart-create");
-            let begun = begin(
+            let injected = begin_with_hook(
                 &call_context(&context, "begin-restart"),
                 StagedSource::new("apply_patch", content_digest(b"begin-restart")),
                 FileChangeOperation::Create,
                 None,
                 "restart.md".to_string(),
-                observation,
+                observation.clone(),
                 None,
+                |durable_transaction_id| {
+                    assert!(durable_transaction_id.starts_with("file-change-staged-v1:"));
+                    Err(AgentError::new(
+                        "injected failure after durable FileChange begin",
+                    ))
+                },
             )
-            .unwrap();
-            begun["transactionId"].as_str().unwrap().to_string()
+            .unwrap_err();
+            assert!(injected
+                .to_string()
+                .contains("injected failure after durable FileChange begin"));
+            let begun = storage
+                .get_agent_file_change_for_source_call(
+                    "conversation-restart",
+                    Some("project-restart"),
+                    "run-restart",
+                    "begin-restart",
+                )
+                .unwrap()
+                .expect("begin transaction was durable before the injected failure");
+            (begun.id, observation)
         };
 
         let storage = Arc::new(StorageService::open(&database).unwrap());
@@ -1485,6 +1713,27 @@ mod tests {
             "conversation-restart",
             Some("project-restart"),
             "run-restart",
+        );
+        let replayed_begin = begin(
+            &call_context(&context, "begin-restart"),
+            StagedSource::new("apply_patch", content_digest(b"begin-restart")),
+            FileChangeOperation::Create,
+            None,
+            "restart.md".to_string(),
+            observation_id,
+            None,
+        )
+        .unwrap();
+        assert_eq!(replayed_begin["transactionId"], transaction_id);
+        assert_eq!(
+            context
+                .storage()
+                .unwrap()
+                .list_agent_file_changes_for_run("run-restart")
+                .unwrap()
+                .len(),
+            1,
+            "begin replay after restart must not create a second transaction"
         );
         let restored = status(&context, "apply_patch", transaction_id.clone()).unwrap();
         assert_eq!(restored["draftRevision"], 0);

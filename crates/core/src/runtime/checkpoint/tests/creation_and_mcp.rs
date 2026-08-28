@@ -598,8 +598,12 @@ fn mcp_approval_barrier_drops_only_external_calls_and_persists_a_safe_reprepare_
     let secret = "queued-mcp-secret-must-not-persist";
     let pending = LlmToolCall {
         id: canonical_test_call_id(0, "provider-pending"),
-        name: "write_file".to_string(),
-        args: json!({"path": "report.txt"}),
+        name: "apply_patch".to_string(),
+        args: json!({
+            "action": "commit",
+            "transactionId": "transaction-provider-pending",
+            "expectedDraftRevision": 1
+        }),
     };
     let mut batch = ToolCallBatch::from_model_response(
         "checkpoint-validation-run",

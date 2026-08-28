@@ -18,6 +18,6 @@ Use `skills_prepare_install` to inspect a GitHub URL or an authorized local Skil
 7. After the approval flow resolves, report the actual Host result: distinguish an approved and completed installation from a refusal, cancellation, or failure. Never claim that preparation or approval alone means the Skill was installed.
 8. Stop when the result needs a user selection, the source or request is invalid, the source contains no Skill, the inspected Skill does not match the user's stated intent, the Host reports a reference or revision mismatch, or the user explicitly requested inspection only. Explain the returned recovery guidance instead of attempting a workaround.
 
-Never install by calling `curl`, `git clone`, `unzip`, `run_command`, `write_file`, or other generic network, command, or file tools. The backend owns acquisition, validation, immutable preparation, approval, and managed storage.
+Never install by calling `curl`, `git clone`, `unzip`, `run_command`, `apply_patch`, or other generic network, command, or file tools. The backend owns acquisition, validation, immutable preparation, approval, and managed storage.
 
 An approved installation becomes discoverable on the next run. Do not try to activate the newly installed Skill in the current run, and do not start another run automatically.

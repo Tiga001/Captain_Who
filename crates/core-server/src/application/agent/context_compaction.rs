@@ -752,6 +752,7 @@ impl AgentService {
             record,
             agent_input,
             "approved",
+            "manual",
             target_status,
             command_result,
             completed_at,
@@ -774,6 +775,7 @@ impl AgentService {
             record,
             agent_input,
             "rejected",
+            "manual",
             PendingActionStatus::Rejected,
             None,
             completed_at,
@@ -787,6 +789,7 @@ impl AgentService {
         record: &PendingActionRecord,
         agent_input: &AgentChatInput,
         decision: &str,
+        decision_source: &str,
         target_status: PendingActionStatus,
         command_result: Option<&AgentCommandExecutionResult>,
         completed_at: i64,
@@ -841,6 +844,15 @@ impl AgentService {
                 &model_context_items,
                 completed_at,
             )?
+        } else if decision_source == "auto" {
+            self.persist_auto_file_change_audited_result_trace(
+                record,
+                target_status,
+                &continuation.result,
+                &trace,
+                &model_context_items,
+                completed_at,
+            )?
         } else {
             self.persist_manual_audited_result_trace(
                 record,
@@ -886,6 +898,28 @@ impl AgentService {
             }
         }
         Ok(())
+    }
+
+    /// Persists an automatically approved FileChange receipt and its in-progress ToolResult
+    /// projection as one durable fact before returning control to the running model loop.
+    pub(super) fn commit_auto_file_change_audited_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        target_status: PendingActionStatus,
+        completed_at: i64,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
+        self.commit_audited_result_trace_with_continuation_for_decision(
+            record,
+            agent_input,
+            "approved",
+            "auto",
+            target_status,
+            None,
+            completed_at,
+            notifications,
+        )
     }
 
     /// Reconciles a commit-unknown manual command settlement from one authoritative snapshot.

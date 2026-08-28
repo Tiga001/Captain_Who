@@ -35,12 +35,14 @@ pub fn insert_file_change(
             observation_id, observation_json, file_path, operation, strategy, status,
             base_revision, base_content, content, draft_revision, next_mutation_index,
             additions, deletions, line_count, byte_count, mutation_count, stats_final,
-            summary, final_action_id, created_at, updated_at, expires_at
+            summary, final_action_id, final_action_arguments_digest,
+            final_permission_revision, final_tool_set_revision, final_provider_wire_revision,
+            created_at, updated_at, expires_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, ?33
+            ?31, ?32, ?33, ?34, ?35, ?36, ?37
         )
         "#,
         params![
@@ -74,6 +76,10 @@ pub fn insert_file_change(
             change.stats_final,
             change.summary,
             change.final_action_id,
+            change.final_action_arguments_digest,
+            change.final_permission_revision,
+            change.final_tool_set_revision,
+            change.final_provider_wire_revision,
             change.created_at,
             change.updated_at,
             change.expires_at,
@@ -195,7 +201,10 @@ pub fn get_file_change(
                    observation_id, observation_json, file_path, operation, strategy, status,
                    base_revision, base_content, content, draft_revision, next_mutation_index,
                    additions, deletions, line_count, byte_count, mutation_count, stats_final,
-                   summary, final_action_id, created_at, updated_at, expires_at
+                   summary, final_action_id, final_action_arguments_digest,
+                   final_permission_revision, final_tool_set_revision,
+                   final_provider_wire_revision,
+                   created_at, updated_at, expires_at
             FROM agent_file_changes
             WHERE id = ?1
             "#,
@@ -228,7 +237,10 @@ pub fn get_file_change_for_owner(
                    observation_id, observation_json, file_path, operation, strategy, status,
                    base_revision, base_content, content, draft_revision, next_mutation_index,
                    additions, deletions, line_count, byte_count, mutation_count, stats_final,
-                   summary, final_action_id, created_at, updated_at, expires_at
+                   summary, final_action_id, final_action_arguments_digest,
+                   final_permission_revision, final_tool_set_revision,
+                   final_provider_wire_revision,
+                   created_at, updated_at, expires_at
             FROM agent_file_changes
             WHERE id = ?1
               AND conversation_id = ?2
@@ -248,6 +260,44 @@ pub fn get_file_change_for_owner(
         .optional()
 }
 
+/// Loads the one canonical transaction created by an exact `apply_patch` begin Tool Call.
+///
+/// The canonical schema makes `(run_id, source_tool_call_id)` unique. The remaining owner
+/// dimensions are still matched here so a caller can never use the lookup as a cross-project or
+/// cross-conversation transaction oracle.
+pub fn get_file_change_for_source_call(
+    connection: &Connection,
+    conversation_id: &str,
+    project_id: Option<&str>,
+    run_id: &str,
+    source_tool_call_id: &str,
+) -> rusqlite::Result<Option<AgentFileChangeRecord>> {
+    connection
+        .query_row(
+            r#"
+            SELECT schema_version, id, conversation_id, project_id, run_id,
+                   source_tool_name, source_tool_call_id, source_tool_arguments_digest,
+                   permission_revision, tool_set_revision, provider_wire_revision,
+                   observation_id, observation_json, file_path, operation, strategy, status,
+                   base_revision, base_content, content, draft_revision, next_mutation_index,
+                   additions, deletions, line_count, byte_count, mutation_count, stats_final,
+                   summary, final_action_id, final_action_arguments_digest,
+                   final_permission_revision, final_tool_set_revision,
+                   final_provider_wire_revision,
+                   created_at, updated_at, expires_at
+            FROM agent_file_changes
+            WHERE conversation_id = ?1
+              AND project_id IS ?2
+              AND run_id = ?3
+              AND source_tool_name = 'apply_patch'
+              AND source_tool_call_id = ?4
+            "#,
+            params![conversation_id, project_id, run_id, source_tool_call_id],
+            map_file_change,
+        )
+        .optional()
+}
+
 pub fn list_file_changes_for_run(
     connection: &Connection,
     run_id: &str,
@@ -260,7 +310,10 @@ pub fn list_file_changes_for_run(
                observation_id, observation_json, file_path, operation, strategy, status,
                base_revision, base_content, content, draft_revision, next_mutation_index,
                additions, deletions, line_count, byte_count, mutation_count, stats_final,
-               summary, final_action_id, created_at, updated_at, expires_at
+               summary, final_action_id, final_action_arguments_digest,
+               final_permission_revision, final_tool_set_revision,
+               final_provider_wire_revision,
+               created_at, updated_at, expires_at
         FROM agent_file_changes
         WHERE run_id = ?1
         ORDER BY created_at ASC, id ASC
@@ -427,24 +480,28 @@ pub fn update_file_change(
             stats_final = ?13,
             summary = ?14,
             final_action_id = ?15,
-            updated_at = ?16,
-            expires_at = ?17
+            final_action_arguments_digest = ?16,
+            final_permission_revision = ?17,
+            final_tool_set_revision = ?18,
+            final_provider_wire_revision = ?19,
+            updated_at = ?20,
+            expires_at = ?21
         WHERE id = ?1
-          AND schema_version = ?18
-          AND conversation_id = ?19
-          AND project_id IS ?20
-          AND run_id = ?21
-          AND source_tool_name = ?22
-          AND source_tool_call_id = ?23
-          AND source_tool_arguments_digest = ?24
-          AND permission_revision = ?25
-          AND tool_set_revision = ?26
-          AND provider_wire_revision = ?27
-          AND observation_id IS ?28
-          AND observation_json IS ?29
-          AND file_path = ?30
-          AND operation = ?31
-          AND strategy IS ?32
+          AND schema_version = ?22
+          AND conversation_id = ?23
+          AND project_id IS ?24
+          AND run_id = ?25
+          AND source_tool_name = ?26
+          AND source_tool_call_id = ?27
+          AND source_tool_arguments_digest = ?28
+          AND permission_revision = ?29
+          AND tool_set_revision = ?30
+          AND provider_wire_revision = ?31
+          AND observation_id IS ?32
+          AND observation_json IS ?33
+          AND file_path = ?34
+          AND operation = ?35
+          AND strategy IS ?36
         "#,
         params![
             change.id,
@@ -462,6 +519,10 @@ pub fn update_file_change(
             change.stats_final,
             change.summary,
             change.final_action_id,
+            change.final_action_arguments_digest,
+            change.final_permission_revision,
+            change.final_tool_set_revision,
+            change.final_provider_wire_revision,
             change.updated_at,
             change.expires_at,
             change.schema_version,
@@ -502,20 +563,22 @@ pub fn transition_file_change(
         r#"
         UPDATE agent_file_changes SET
             status = ?2, stats_final = ?3, summary = ?4, final_action_id = ?5,
-            updated_at = ?6, expires_at = ?7
+            final_action_arguments_digest = ?6, final_permission_revision = ?7,
+            final_tool_set_revision = ?8, final_provider_wire_revision = ?9,
+            updated_at = ?10, expires_at = ?11
         WHERE id = ?1
-          AND status = ?8
-          AND draft_revision = ?9
-          AND next_mutation_index = ?10
-          AND conversation_id = ?11
-          AND project_id IS ?12
-          AND run_id = ?13
-          AND source_tool_name = ?14
-          AND source_tool_call_id = ?15
-          AND source_tool_arguments_digest = ?16
-          AND permission_revision = ?17
-          AND tool_set_revision = ?18
-          AND provider_wire_revision = ?19
+          AND status = ?12
+          AND draft_revision = ?13
+          AND next_mutation_index = ?14
+          AND conversation_id = ?15
+          AND project_id IS ?16
+          AND run_id = ?17
+          AND source_tool_name = ?18
+          AND source_tool_call_id = ?19
+          AND source_tool_arguments_digest = ?20
+          AND permission_revision = ?21
+          AND tool_set_revision = ?22
+          AND provider_wire_revision = ?23
         "#,
         params![
             change.id,
@@ -523,6 +586,10 @@ pub fn transition_file_change(
             change.stats_final,
             change.summary,
             change.final_action_id,
+            change.final_action_arguments_digest,
+            change.final_permission_revision,
+            change.final_tool_set_revision,
+            change.final_provider_wire_revision,
             change.updated_at,
             change.expires_at,
             expected_status,
@@ -665,9 +732,13 @@ fn map_file_change(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentFileChangeR
         stats_final: row.get(27)?,
         summary: row.get(28)?,
         final_action_id: row.get(29)?,
-        created_at: row.get(30)?,
-        updated_at: row.get(31)?,
-        expires_at: row.get(32)?,
+        final_action_arguments_digest: row.get(30)?,
+        final_permission_revision: row.get(31)?,
+        final_tool_set_revision: row.get(32)?,
+        final_provider_wire_revision: row.get(33)?,
+        created_at: row.get(34)?,
+        updated_at: row.get(35)?,
+        expires_at: row.get(36)?,
     })
 }
 
@@ -744,10 +815,23 @@ mod tests {
             stats_final: false,
             summary: None,
             final_action_id: None,
+            final_action_arguments_digest: None,
+            final_permission_revision: None,
+            final_tool_set_revision: None,
+            final_provider_wire_revision: None,
             created_at: 1,
             updated_at: 1,
             expires_at: 10,
         }
+    }
+
+    fn freeze_final_identity(change: &mut AgentFileChangeRecord, suffix: &str) {
+        change.stats_final = true;
+        change.final_action_id = Some(format!("action-{suffix}"));
+        change.final_action_arguments_digest = Some(format!("action-digest-{suffix}"));
+        change.final_permission_revision = Some(change.permission_revision.clone());
+        change.final_tool_set_revision = Some(change.tool_set_revision.clone());
+        change.final_provider_wire_revision = Some(change.provider_wire_revision.clone());
     }
 
     fn setup() -> Connection {
@@ -970,6 +1054,7 @@ mod tests {
 
         let mut stale = record();
         stale.id = "file-change-stale".to_string();
+        stale.source_tool_call_id = "call-begin-stale".to_string();
         insert_file_change(&connection, &stale).unwrap();
         stale.status = "ready".to_string();
         assert!(!transition_file_change(&connection, "drafting", 1, 0, &stale).unwrap());
@@ -989,13 +1074,17 @@ mod tests {
         insert_file_change(&connection, &unresolved).unwrap();
         let mut applied = record();
         applied.id = "file-change-2".to_string();
+        applied.source_tool_call_id = "call-begin-2".to_string();
         applied.status = "applied".to_string();
         applied.created_at = 2;
+        freeze_final_identity(&mut applied, "applied");
         insert_file_change(&connection, &applied).unwrap();
         let mut applying = record();
         applying.id = "file-change-applying".to_string();
+        applying.source_tool_call_id = "call-begin-applying".to_string();
         applying.status = "applying".to_string();
         applying.created_at = 2;
+        freeze_final_identity(&mut applying, "applying");
         insert_file_change(&connection, &applying).unwrap();
         let mut other_run = record();
         other_run.id = "file-change-3".to_string();
@@ -1053,8 +1142,10 @@ mod tests {
         insert_file_change(&connection, &unresolved).unwrap();
         let mut terminal = record();
         terminal.id = "file-change-terminal".to_string();
+        terminal.source_tool_call_id = "call-begin-terminal".to_string();
         terminal.status = "applied".to_string();
         terminal.expires_at = 10;
+        freeze_final_identity(&mut terminal, "terminal");
         insert_file_change(&connection, &terminal).unwrap();
 
         let (expired, deleted) = expire_and_prune_file_changes(&mut connection, 20).unwrap();

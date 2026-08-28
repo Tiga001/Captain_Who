@@ -86,7 +86,8 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
     let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
     let registry = crate::tools::ToolRegistry::defaults_with_search(None);
-    let tools = ["read_file", "apply_patch", "write_file"]
+    assert!(registry.definition_for("write_file").is_none());
+    let tools = ["read_file", "apply_patch"]
         .into_iter()
         .map(|name| {
             registry
@@ -225,17 +226,12 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
     assert_eq!(requests[0]["reasoning_effort"], "max");
     assert!(requests[0].get("temperature").is_none());
     assert!(requests[0].get("tool_choice").is_none());
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 2);
     assert_eq!(requests[0]["tools"][0]["function"]["name"], "read_file");
     assert_eq!(requests[0]["tools"][1]["function"]["name"], "apply_patch");
-    assert_eq!(requests[0]["tools"][2]["function"]["name"], "write_file");
     assert_eq!(
         requests[0]["tools"][1]["function"]["parameters"],
         registry.definition_for("apply_patch").unwrap().input_schema
-    );
-    assert_eq!(
-        requests[0]["tools"][2]["function"]["parameters"],
-        registry.definition_for("write_file").unwrap().input_schema
     );
     let direct_schema = &requests[0]["tools"][1]["function"]["parameters"];
     assert_eq!(direct_schema["required"], json!(["action"]));

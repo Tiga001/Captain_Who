@@ -4,7 +4,7 @@
 /// payload repository. Keeping it outside the Agent orchestration module lets the reusable
 /// core-server library validate envelope bindings without compiling the complete Agent service.
 pub(crate) fn pending_action_storage_id(run_id: &str, action_id: &str) -> String {
-    format!("v2:{}:{run_id}:{action_id}", run_id.len())
+    mycopilot_core::canonical_pending_action_id(run_id, action_id)
 }
 
 #[cfg(test)]

@@ -861,25 +861,206 @@ fn llm_retry_event_serializes_structured_safe_retry_metadata() {
 }
 
 #[test]
-fn patch_result_requires_current_fields_and_rejects_extra_fields() {
+fn file_change_result_requires_current_fields_and_rejects_illegal_states() {
     let current = json!({
+        "schemaVersion": 1,
         "status": "applied",
+        "outcome": "applied",
+        "transactionId": "fchg-current",
         "operation": "update",
+        "updateStrategy": null,
         "filePath": "src/lib.rs",
-        "appliedFilePaths": ["src/lib.rs"]
+        "additions": 1,
+        "deletions": 1,
+        "lineCount": 10,
+        "byteCount": 100,
+        "revision": "sha256-current",
+        "errorCode": null,
+        "error": null,
+        "message": null
     });
-    serde_json::from_value::<AgentPatchResult>(current.clone()).unwrap();
+    let parsed = serde_json::from_value::<AgentFileChangeResult>(current.clone()).unwrap();
+    assert_eq!(parsed.status, AgentFileChangeResultStatus::Applied);
+    assert_eq!(serde_json::to_value(parsed).unwrap(), current);
 
-    let mut missing_paths = current.clone();
-    missing_paths
+    let mut missing_revision = current.clone();
+    missing_revision.as_object_mut().unwrap().remove("revision");
+    assert!(serde_json::from_value::<AgentFileChangeResult>(missing_revision).is_err());
+
+    let mut extra = current.clone();
+    extra["internalCause"] = json!("must remain private");
+    assert!(serde_json::from_value::<AgentFileChangeResult>(extra).is_err());
+
+    let mut unknown_schema = current.clone();
+    unknown_schema["schemaVersion"] = json!(2);
+    assert!(serde_json::from_value::<AgentFileChangeResult>(unknown_schema).is_err());
+
+    let mut illegal_outcome = current;
+    illegal_outcome["outcome"] = json!("outcome_unknown");
+    illegal_outcome["revision"] = Value::Null;
+    illegal_outcome["errorCode"] = json!("outcome_unknown");
+    assert!(serde_json::from_value::<AgentFileChangeResult>(illegal_outcome).is_err());
+
+    let mut illegal_delete_stats = json!({
+        "schemaVersion": 1,
+        "status": "applied",
+        "outcome": "applied",
+        "transactionId": "fchg-delete-current",
+        "operation": "delete",
+        "updateStrategy": null,
+        "filePath": "src/lib.rs",
+        "additions": 0,
+        "deletions": 10,
+        "lineCount": 1,
+        "byteCount": 1,
+        "revision": null,
+        "errorCode": null,
+        "error": null,
+        "message": null
+    });
+    assert!(serde_json::from_value::<AgentFileChangeResult>(illegal_delete_stats.clone()).is_err());
+    illegal_delete_stats["lineCount"] = json!(0);
+    illegal_delete_stats["byteCount"] = json!(0);
+    assert!(serde_json::from_value::<AgentFileChangeResult>(illegal_delete_stats).is_ok());
+}
+
+#[test]
+fn file_change_preview_and_snapshot_require_complete_current_fields() {
+    let preview = AgentFileChangePreview {
+        schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+        preview_id: "preview-current".to_string(),
+        stream_id: "stream-current".to_string(),
+        attempt: 1,
+        tool_call_index: 0,
+        tool_call_id: None,
+        transaction_id: "file-change-current".to_string(),
+        file_path: "src/lib.rs".to_string(),
+        additions: 1,
+        deletions: 0,
+        line_count: 1,
+        byte_count: 4,
+        generated_bytes: 4,
+        content_offset_bytes: 0,
+        content_delta: "new\n".to_string(),
+        updated_at: 10,
+    };
+    let encoded = serde_json::to_value(&preview).unwrap();
+    assert!(encoded.as_object().unwrap().contains_key("toolCallId"));
+    assert!(encoded["toolCallId"].is_null());
+    serde_json::from_value::<AgentFileChangePreview>(encoded.clone()).unwrap();
+
+    let mut missing_tool_call_id = encoded.clone();
+    missing_tool_call_id
         .as_object_mut()
         .unwrap()
-        .remove("appliedFilePaths");
-    assert!(serde_json::from_value::<AgentPatchResult>(missing_paths).is_err());
+        .remove("toolCallId");
+    assert!(serde_json::from_value::<AgentFileChangePreview>(missing_tool_call_id).is_err());
+    let mut unknown_schema = encoded;
+    unknown_schema["schemaVersion"] = json!(2);
+    assert!(serde_json::from_value::<AgentFileChangePreview>(unknown_schema).is_err());
+    let mut empty_transaction = serde_json::to_value(&preview).unwrap();
+    empty_transaction["transactionId"] = json!("");
+    assert!(serde_json::from_value::<AgentFileChangePreview>(empty_transaction).is_err());
 
-    let mut extra = current;
-    extra["internalCause"] = json!("must remain private");
-    assert!(serde_json::from_value::<AgentPatchResult>(extra).is_err());
+    for status in [
+        AgentFileChangeStatus::AlreadyApplied,
+        AgentFileChangeStatus::OutcomeUnknown,
+    ] {
+        let snapshot = AgentFileChangeSnapshot {
+            schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            transaction_id: "file-change-current".to_string(),
+            conversation_id: "conversation-current".to_string(),
+            project_id: None,
+            file_path: "src/lib.rs".to_string(),
+            operation: AgentFileChangeOperation::Update,
+            update_strategy: Some(AgentFileChangeUpdateStrategy::Modify),
+            status,
+            base_revision: Some("content-sha256-v1:base".to_string()),
+            additions: 1,
+            deletions: 1,
+            line_count: 1,
+            byte_count: 4,
+            mutation_count: 1,
+            next_mutation_index: 1,
+            stats_final: true,
+            summary: None,
+            created_at: 10,
+            updated_at: 11,
+        };
+        let encoded = serde_json::to_value(snapshot).unwrap();
+        serde_json::from_value::<AgentFileChangeSnapshot>(encoded).unwrap();
+    }
+
+    let current_snapshot = json!({
+        "schemaVersion": 1,
+        "transactionId": "file-change-current",
+        "conversationId": "conversation-current",
+        "projectId": null,
+        "filePath": "src/lib.rs",
+        "operation": "update",
+        "updateStrategy": "modify",
+        "status": "applied",
+        "baseRevision": "content-sha256-v1:base",
+        "additions": 1,
+        "deletions": 1,
+        "lineCount": 1,
+        "byteCount": 4,
+        "mutationCount": 1,
+        "nextMutationIndex": 1,
+        "statsFinal": true,
+        "summary": null,
+        "createdAt": 10,
+        "updatedAt": 11
+    });
+    let parsed =
+        serde_json::from_value::<AgentFileChangeSnapshot>(current_snapshot.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), current_snapshot);
+
+    let mut missing_nullable = current_snapshot.clone();
+    missing_nullable
+        .as_object_mut()
+        .unwrap()
+        .remove("projectId");
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(missing_nullable).is_err());
+    let mut extra = current_snapshot.clone();
+    extra["internalCause"] = json!("private");
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(extra).is_err());
+    let mut unknown_schema = current_snapshot.clone();
+    unknown_schema["schemaVersion"] = json!(2);
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(unknown_schema).is_err());
+    let mut illegal_strategy = current_snapshot.clone();
+    illegal_strategy["updateStrategy"] = Value::Null;
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(illegal_strategy).is_err());
+    let mut illegal_base = current_snapshot.clone();
+    illegal_base["operation"] = json!("create");
+    illegal_base["updateStrategy"] = Value::Null;
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(illegal_base).is_err());
+    let mut illegal_terminal = current_snapshot;
+    illegal_terminal["status"] = json!("drafting");
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(illegal_terminal).is_err());
+
+    let illegal_delete_stats = json!({
+        "schemaVersion": 1,
+        "transactionId": "file-change-delete-current",
+        "conversationId": "conversation-current",
+        "projectId": null,
+        "filePath": "src/lib.rs",
+        "operation": "delete",
+        "updateStrategy": null,
+        "status": "applied",
+        "baseRevision": "content-sha256-v1:base",
+        "additions": 0,
+        "deletions": 10,
+        "lineCount": 1,
+        "byteCount": 1,
+        "mutationCount": 1,
+        "nextMutationIndex": 1,
+        "statsFinal": true,
+        "summary": null,
+        "createdAt": 10,
+        "updatedAt": 11
+    });
+    assert!(serde_json::from_value::<AgentFileChangeSnapshot>(illegal_delete_stats).is_err());
 }
 
 #[test]

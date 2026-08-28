@@ -3,10 +3,10 @@ import type {
   AgentCommandOutputStream,
   AgentCommandPublishedOutput,
   AgentCommandSessionStatus,
-  AgentDiffProposal,
+  AgentFileChangeProposal,
   AgentContextCompactionEventOutcome,
-  AgentFileDraftSnapshot,
-  AgentFileWritePreview,
+  AgentFileChangePreview,
+  AgentFileChangeSnapshot,
   AgentInputAttachment,
   AgentObserverInputOrigin,
   AgentLlmRetryCategory,
@@ -72,7 +72,7 @@ export interface ChatWebSearchActivity {
 export type ChatReadActivityKind = 'file' | 'image' | 'word' | 'presentation' | 'spreadsheet'
 
 export type ChatFileWritePreview = Omit<
-  AgentFileWritePreview,
+  AgentFileChangePreview,
   'contentDelta' | 'contentOffsetBytes'
 > & {
   content: string
@@ -224,8 +224,8 @@ export interface ChatAgentRunView {
   approvals: AgentProposedAction[]
   /** Presentation-safe approval history retained after settlement for the chat Timeline. */
   skillInstallations?: ChatSkillInstallationView[]
-  diffs: AgentDiffProposal[]
-  fileDrafts?: AgentFileDraftSnapshot[]
+  diffs: AgentFileChangeProposal[]
+  fileDrafts?: AgentFileChangeSnapshot[]
   fileWritePreviews?: ChatFileWritePreview[]
   /** Ephemeral live process output. Final ToolResults remain the durable source of truth. */
   commandOutputPreviews?: Record<string, ChatCommandOutputPreview>

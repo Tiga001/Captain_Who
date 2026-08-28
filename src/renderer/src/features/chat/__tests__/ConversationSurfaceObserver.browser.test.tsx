@@ -6,10 +6,10 @@ import type { ChatConversation } from '../chatTypes'
 import { EditSummaryCard } from '../components/EditSummaryCard'
 
 const mocks = vi.hoisted(() => ({
-  getAgentFileWriteDiff: vi.fn(),
+  getAgentFileChangeDiff: vi.fn(),
   getTurnDiffSummaries: vi.fn(),
   loadAttachmentImage: vi.fn(),
-  readAgentFileDraft: vi.fn()
+  readAgentFileChange: vi.fn()
 }))
 
 const translations: Record<string, string> = {
@@ -44,8 +44,8 @@ vi.mock('../../gitReview/gitReviewClient', () => ({
 }))
 
 vi.mock('../../agent/agentClient', () => ({
-  getAgentFileWriteDiff: mocks.getAgentFileWriteDiff,
-  readAgentFileDraft: mocks.readAgentFileDraft
+  getAgentFileChangeDiff: mocks.getAgentFileChangeDiff,
+  readAgentFileChange: mocks.readAgentFileChange
 }))
 
 vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
@@ -84,8 +84,8 @@ const commandCall: AgentToolCall = {
 }
 const writeCall: AgentToolCall = {
   id: 'write-call',
-  tool: 'write_file',
-  args: { filePath: 'src/report.ts', mode: 'create' },
+  tool: 'apply_patch',
+  args: { action: 'commit', transactionId: 'draft-child', expectedDraftRevision: 1 },
   approvalStatus: 'approved',
   reason: null
 }
@@ -157,7 +157,7 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
               callId: writeCall.id,
               tool: writeCall.tool,
               ok: true,
-              result: { draftId: 'draft-child', status: 'applied' }
+              result: { transactionId: 'draft-child', status: 'applied' }
             }
           ],
           approvals: [],
@@ -193,19 +193,23 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
           },
           fileDrafts: [
             {
-              draftId: 'draft-child',
+              schemaVersion: 1,
+              transactionId: 'draft-child',
               conversationId: 'child-conversation',
               projectId: 'project-1',
               filePath: 'src/report.ts',
-              mode: 'create',
+              operation: 'create',
+              updateStrategy: null,
+              baseRevision: null,
               status: 'applied',
               additions: 1,
               deletions: 0,
               lineCount: 1,
               byteCount: 20,
-              chunkCount: 1,
-              nextChunkIndex: 1,
+              mutationCount: 1,
+              nextMutationIndex: 1,
               statsFinal: true,
+              summary: null,
               createdAt: 2,
               updatedAt: 3
             }
@@ -248,8 +252,8 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
 }
 
 it('reuses the chat Timeline in observer mode while exposing no child write controls', async () => {
-  mocks.getAgentFileWriteDiff.mockResolvedValue({
-    draftId: 'draft-child',
+  mocks.getAgentFileChangeDiff.mockResolvedValue({
+    transactionId: 'draft-child',
     patch: '+export const child = true',
     offset: 0,
     truncated: false
@@ -302,7 +306,7 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
   await expect
     .element(screen.getByText('+export const child = true', { exact: true }))
     .toBeVisible()
-  expect(mocks.getAgentFileWriteDiff).toHaveBeenCalledWith(
+  expect(mocks.getAgentFileChangeDiff).toHaveBeenCalledWith(
     'draft-child',
     0,
     50_000,

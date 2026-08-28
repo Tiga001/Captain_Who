@@ -18,8 +18,8 @@
     "cancelAction": "agent.cancelAction",
     "getUsageSummary": "agent.getUsageSummary",
     "clearUsageRecords": "agent.clearUsageRecords",
-    "readFileDraft": "agent.readFileDraft",
-    "getFileWriteDiff": "agent.getFileWriteDiff",
+    "readFileChange": "agent.readFileChange",
+    "getFileChangeDiff": "agent.getFileChangeDiff",
     "eventNotification": "agent.event"
   },
   "events": {

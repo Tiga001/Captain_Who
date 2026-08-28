@@ -1,5 +1,5 @@
 import type { AgentProposedAction } from '@mycopilot/protocol'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { AgentApprovalDialog } from '../../features/chat/components/AgentApprovalDialog'
 import '../../styles/global.css'
@@ -7,11 +7,18 @@ import '../../features/chat/ChatConversationPage.approvals.css'
 
 const translations: Record<string, string> = {
   'agent.approval.dialog.approve': '批准',
+  'agent.approval.dialog.approvePatchRemember': '本次运行记住批准',
   'agent.approval.dialog.commandPolicyHint': '确认后执行',
+  'agent.approval.dialog.diffPolicyHint': '完整审阅后执行',
+  'agent.approval.dialog.diffTitle': '修改文件',
   'agent.approval.dialog.reject': '拒绝',
   'agent.approval.dialog.rejectPlaceholder': '说明拒绝原因',
-  'agent.approval.dialog.toolTitle': '运行 {tool}'
+  'agent.approval.dialog.toolTitle': '运行 {tool}',
+  'files.preview.loading': '正在加载完整差异',
+  'files.preview.error': '无法加载完整差异'
 }
+
+const fileChangeRpc = vi.hoisted(() => ({ getDiff: vi.fn() }))
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => translations[key] ?? key })
@@ -21,6 +28,167 @@ vi.mock('../../features/chat/components/toolActivities/toolActivityUtils', () =>
   formatToolDetails: () => '',
   getToolDisplayName: () => 'Skill 脚本'
 }))
+
+vi.mock('../../features/agent/agentClient', () => ({
+  getAgentFileChangeDiff: fileChangeRpc.getDiff
+}))
+
+beforeEach(() => {
+  fileChangeRpc.getDiff.mockReset()
+})
+
+function fileChangeAction(inlineDiff: { patch: string; truncated: false } | null) {
+  return {
+    type: 'file_change',
+    fileChange: {
+      schemaVersion: 1,
+      id: 'file-change-call',
+      transactionId: 'file-change-transaction',
+      operation: 'update',
+      updateStrategy: inlineDiff === null ? 'rewrite' : null,
+      filePath: 'src/main.ts',
+      inlineDiff,
+      baseRevision: 'content-sha256-v1:base',
+      summary: '更新入口文件',
+      additions: 2,
+      deletions: 1,
+      lineCount: 2,
+      byteCount: 18,
+      approvalStatus: 'required'
+    }
+  } satisfies AgentProposedAction
+}
+
+describe('AgentApprovalDialog FileChange approval', () => {
+  it('uses the complete Direct inline Diff without an RPC and enables approval', async () => {
+    const action = fileChangeAction({ patch: '@@ -1 +1 @@\n-old\n+new', truncated: false })
+    const onApprove = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
+
+    await expect.element(screen.getByText(/-old/)).toBeVisible()
+    expect(fileChangeRpc.getDiff).not.toHaveBeenCalled()
+    const approve = screen.getByRole('button', { name: /^1\s*批准$/ })
+    await expect.element(approve).toBeEnabled()
+    await approve.click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, {
+      rememberForRun: false
+    })
+  })
+
+  it('keeps approval disabled until every staged Diff page is loaded in order', async () => {
+    const action = fileChangeAction(null)
+    let resolveFirst!: (page: {
+      transactionId: string
+      patch: string
+      offset: number
+      nextOffset: number | null
+      truncated: boolean
+    }) => void
+    fileChangeRpc.getDiff
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve
+          })
+      )
+      .mockResolvedValueOnce({
+        transactionId: action.fileChange.transactionId,
+        patch: '+second\n',
+        offset: 7,
+        nextOffset: null,
+        truncated: false
+      })
+    const onApprove = vi.fn()
+    const onReject = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    )
+
+    const approve = screen.getByRole('button', { name: /^1\s*批准$/ })
+    const reject = screen.getByRole('button', { name: '拒绝' })
+    await expect.element(approve).toBeDisabled()
+    await expect.element(reject).toBeEnabled()
+    resolveFirst({
+      transactionId: action.fileChange.transactionId,
+      patch: '+first\n',
+      offset: 0,
+      nextOffset: 7,
+      truncated: true
+    })
+
+    await expect.element(screen.getByText(/\+first\n\+second/)).toBeVisible()
+    await expect.element(approve).toBeEnabled()
+    expect(fileChangeRpc.getDiff).toHaveBeenNthCalledWith(
+      1,
+      action.fileChange.transactionId,
+      0,
+      50_000
+    )
+    expect(fileChangeRpc.getDiff).toHaveBeenNthCalledWith(
+      2,
+      action.fileChange.transactionId,
+      7,
+      50_000
+    )
+  })
+
+  it('fails closed on an incomplete page chain while leaving rejection available', async () => {
+    const action = fileChangeAction(null)
+    fileChangeRpc.getDiff.mockResolvedValue({
+      transactionId: action.fileChange.transactionId,
+      patch: '+partial\n',
+      offset: 0,
+      nextOffset: null,
+      truncated: true
+    })
+    const onApprove = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
+
+    await expect.element(screen.getByRole('alert')).toBeVisible()
+    await expect.element(screen.getByRole('button', { name: /^1\s*批准$/ })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: '拒绝' })).toBeEnabled()
+  })
+
+  it('fails closed immediately when the reviewed transaction changes', async () => {
+    const direct = fileChangeAction({ patch: '+already reviewed', truncated: false })
+    const staged = fileChangeAction(null)
+    staged.fileChange.transactionId = 'file-change-transaction-next'
+    fileChangeRpc.getDiff.mockImplementation(() => new Promise(() => undefined))
+    const onApprove = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action: direct, messageId: 'assistant-message-direct' }}
+        onApprove={onApprove}
+      />
+    )
+    await expect.element(screen.getByRole('button', { name: /^1\s*批准$/ })).toBeEnabled()
+
+    await screen.rerender(
+      <AgentApprovalDialog
+        target={{ action: staged, messageId: 'assistant-message-staged' }}
+        onApprove={onApprove}
+      />
+    )
+
+    await expect.element(screen.getByRole('button', { name: /^1\s*批准$/ })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: '拒绝' })).toBeEnabled()
+    expect(onApprove).not.toHaveBeenCalled()
+  })
+})
 
 describe('AgentApprovalDialog Skill script approval', () => {
   it('shows the complete frozen execution snapshot and never offers remember-for-run', async () => {

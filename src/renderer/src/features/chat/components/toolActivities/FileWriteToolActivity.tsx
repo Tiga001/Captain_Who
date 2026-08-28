@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type JSX } from 'react'
 import { ChevronDown, ChevronRight, FilePenLine, LoaderCircle } from 'lucide-react'
-import type { AgentFileDraftSnapshot, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
-import { getAgentFileWriteDiff, readAgentFileDraft } from '../../../agent/agentClient'
+import type { AgentFileChangeSnapshot, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import { getAgentFileChangeDiff, readAgentFileChange } from '../../../agent/agentClient'
 import type { ChatFileWritePreview } from '../../chatTypes'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
@@ -12,7 +12,7 @@ import type { SettledToolStatus } from './toolActivityUtils'
 
 export interface FileWriteToolActivityGroupItem {
   call: AgentToolCall
-  draft?: AgentFileDraftSnapshot
+  draft?: AgentFileChangeSnapshot
   draftId: string
   preview?: ChatFileWritePreview
   result?: AgentToolResult
@@ -144,9 +144,8 @@ function getStatus(item: FileWriteToolActivityGroupItem): FileWriteStatus {
 
 function getOperation(item: FileWriteToolActivityGroupItem): FileWriteOperation {
   const args = getCallArgs(item.call)
-  const mode = item.draft?.mode ?? getString(args.mode)
-  if (mode === 'create') return 'create'
-  if (mode === 'upsert' && !item.draft?.baseRevision) return 'create'
+  const operation = item.draft?.operation ?? getString(args.operation)
+  if (operation === 'create') return 'create'
   return 'update'
 }
 
@@ -268,10 +267,10 @@ function FileWriteEntry({
     let cancelled = false
     const request =
       previewSource === 'diff'
-        ? getAgentFileWriteDiff(item.draftId, 0, 50_000, observerRootConversationId).then(
+        ? getAgentFileChangeDiff(item.draftId, 0, 50_000, observerRootConversationId).then(
             (page) => page.patch
           )
-        : readAgentFileDraft(item.draftId, 0, 50_000, observerRootConversationId).then(
+        : readAgentFileChange(item.draftId, 0, 50_000, observerRootConversationId).then(
             (page) => page.content
           )
     void request

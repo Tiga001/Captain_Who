@@ -113,23 +113,15 @@ impl FileTransactionState {
             transaction.run_id != run_id
                 || conversation_id != Some(transaction.conversation_id.as_str())
                 || transaction.project_id.as_deref() != project_id
-                || !matches!(
-                    transaction.source_tool_name.as_str(),
-                    "apply_patch" | "write_file"
-                )
+                || transaction.source_tool_name != "apply_patch"
         }) {
             return Err(AgentError::new(
                 "FileChange transaction 与当前 conversation/project/run owner 不一致。",
             ));
         }
-        let mut settlements = storage
+        let settlements = storage
             .list_agent_tool_results_for_run(run_id, "apply_patch")
             .map_err(AgentError::new)?;
-        settlements.extend(
-            storage
-                .list_agent_tool_results_for_run(run_id, "write_file")
-                .map_err(AgentError::new)?,
-        );
         Ok(Self {
             transactions,
             settlements,
@@ -165,18 +157,6 @@ impl FileTransactionState {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|action| {
                         matches!(action, "append" | "edit" | "commit" | "status" | "abort")
-                    }),
-            ),
-            // Round-3-only transition: the already-published write_file entry owns no separate
-            // state machine, but an exact transaction it began must remain settleable until that
-            // public entry is removed in round 4. It may never take over an apply_patch record.
-            "write_file" => (
-                object.get("draftId").and_then(serde_json::Value::as_str),
-                object
-                    .get("phase")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|phase| {
-                        matches!(phase, "append" | "edit" | "finish" | "status" | "abort")
                     }),
             ),
             _ => return false,
@@ -315,6 +295,10 @@ mod tests {
             stats_final: false,
             summary: None,
             final_action_id: None,
+            final_action_arguments_digest: None,
+            final_permission_revision: None,
+            final_tool_set_revision: None,
+            final_provider_wire_revision: None,
             created_at: 1,
             updated_at: 1,
             expires_at: i64::MAX,
@@ -367,22 +351,6 @@ mod tests {
                 &json!({ "action": action, "transactionId": "draft-1" }),
             ));
         }
-        let mut transitional = transaction("drafting");
-        transitional.source_tool_name = "write_file".to_string();
-        let transitional = FileTransactionState {
-            transactions: vec![transitional],
-            settlements: Vec::new(),
-        };
-        for phase in ["append", "edit", "finish", "status", "abort"] {
-            assert!(transitional.allows_tool_call(
-                "write_file",
-                &json!({ "phase": phase, "draftId": "draft-1" }),
-            ));
-        }
-        assert!(!transitional.allows_tool_call(
-            "apply_patch",
-            &json!({ "action": "commit", "transactionId": "draft-1" }),
-        ));
         assert!(!state.allows_tool_call(
             "write_file",
             &json!({ "phase": "finish", "draftId": "draft-1" }),
@@ -442,6 +410,7 @@ mod tests {
         assert_eq!(stored.status, "failed");
 
         stored.status = "drafting".to_string();
+        stored.stats_final = false;
         storage.update_agent_file_change(&stored).unwrap();
         let cancellation = AgentCancellationToken::new();
         cancellation.cancel();
@@ -458,6 +427,11 @@ mod tests {
         assert_eq!(stored.status, "aborted");
 
         stored.status = "waiting_approval".to_string();
+        stored.final_action_id = Some("action-waiting".to_string());
+        stored.final_action_arguments_digest = Some("action-digest-waiting".to_string());
+        stored.final_permission_revision = Some(stored.permission_revision.clone());
+        stored.final_tool_set_revision = Some(stored.tool_set_revision.clone());
+        stored.final_provider_wire_revision = Some(stored.provider_wire_revision.clone());
         storage.update_agent_file_change(&stored).unwrap();
         {
             let mut guard = FileTransactionRunGuard::new(
@@ -504,7 +478,14 @@ mod tests {
         let mut mismatched = stored.clone();
         mismatched.id = "draft-owner-mismatch".to_string();
         mismatched.status = "drafting".to_string();
+        mismatched.source_tool_call_id = "call-owner-mismatch".to_string();
         mismatched.project_id = Some("other-project".to_string());
+        mismatched.stats_final = false;
+        mismatched.final_action_id = None;
+        mismatched.final_action_arguments_digest = None;
+        mismatched.final_permission_revision = None;
+        mismatched.final_tool_set_revision = None;
+        mismatched.final_provider_wire_revision = None;
         storage.create_agent_file_change(mismatched).unwrap();
         assert!(FileTransactionState::load(
             Some(storage.as_ref()),

@@ -128,7 +128,7 @@ pub(super) fn publish_inline_file_write_tool_result(
     decision_status: AgentApprovalDecisionStatus,
     tool_result: &AgentToolResult,
 ) -> bool {
-    let should_publish = matches!(action, AgentProposedAction::FileWrite { .. })
+    let should_publish = matches!(action, AgentProposedAction::FileChange { .. })
         || (decision_status == AgentApprovalDecisionStatus::Rejected
             && matches!(action, AgentProposedAction::OfficeOperation { .. }));
     if !should_publish {
@@ -535,23 +535,23 @@ impl AgentService {
             .collect()
     }
 
-    pub fn read_file_draft(
+    pub fn read_file_change(
         &self,
-        draft_id: &str,
+        transaction_id: &str,
         observer_root_conversation_id: Option<&str>,
         offset: Option<usize>,
         max_chars: Option<usize>,
-    ) -> Result<AgentFileDraftContentPage, String> {
+    ) -> Result<AgentFileChangeContentPage, String> {
         let draft = self
             .storage
-            .get_agent_file_change(draft_id)?
-            .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+            .get_agent_file_change(transaction_id)?
+            .ok_or_else(|| format!("未找到文件修改事务：{transaction_id}"))?;
         self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
         let snapshot = file_draft_snapshot(&draft)?;
         let (content, offset, next_offset, truncated) =
             paginate_chars(&draft.content, offset, max_chars);
-        Ok(AgentFileDraftContentPage {
-            draft: snapshot,
+        Ok(AgentFileChangeContentPage {
+            file_change: snapshot,
             content,
             offset,
             next_offset,
@@ -559,22 +559,22 @@ impl AgentService {
         })
     }
 
-    pub fn get_file_write_diff(
+    pub fn get_file_change_diff(
         &self,
-        draft_id: &str,
+        transaction_id: &str,
         observer_root_conversation_id: Option<&str>,
         offset: Option<usize>,
         max_chars: Option<usize>,
-    ) -> Result<AgentFileWriteDiffPage, String> {
+    ) -> Result<AgentFileChangeDiffPage, String> {
         let draft = self
             .storage
-            .get_agent_file_change(draft_id)?
-            .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+            .get_agent_file_change(transaction_id)?
+            .ok_or_else(|| format!("未找到文件修改事务：{transaction_id}"))?;
         self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
         let diff = file_write_diff(&draft);
         let (patch, offset, next_offset, truncated) = paginate_chars(&diff, offset, max_chars);
-        Ok(AgentFileWriteDiffPage {
-            draft_id: draft.id,
+        Ok(AgentFileChangeDiffPage {
+            transaction_id: draft.id,
             patch,
             offset,
             next_offset,
@@ -802,9 +802,9 @@ impl AgentService {
             }
         }
         if let Err(error) = self.finalize_cancelled_pending_action(&record, call) {
-            if cancelled_file_write_outcome_is_durable_or_unknown(&self.storage, &record) {
+            if cancelled_staged_file_change_outcome_is_durable_or_unknown(&self.storage, &record) {
                 return Err(format!(
-                    "{error} 文件草稿的拒绝结果已经持久化或无法安全判定；待审批操作保持 executing 并保留 cancelled 目标终态，等待启动对账，禁止重新执行。"
+                    "{error} 文件草稿的中止结果已经持久化或无法安全判定；待审批操作保持 executing 并保留 cancelled 目标终态，等待启动对账，禁止重新执行。"
                 ));
             }
             if let Err(rollback_error) =
@@ -905,8 +905,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: pending_status_label(PendingActionStatus::Cancelled).to_string(),
-            patch_result: None,
-            file_write_result: None,
+            file_change_result: None,
             command_result: None,
             // Renderer learns the terminal MCP state from the typed lifecycle event above and
             // the approval status. A generic ToolResult would create a second result channel
@@ -934,27 +933,26 @@ impl AgentService {
     ) -> Result<(), String> {
         const REASON: &str = "Pending action was cancelled by the user.";
         call.approval_status = AgentApprovalStatus::Rejected;
-        let execution = if let AgentProposedAction::BuiltinMcpToolApproval { approval } =
-            &record.snapshot.action
-        {
-            ActionExecutionDecision {
+        let execution = match &record.snapshot.action {
+            AgentProposedAction::BuiltinMcpToolApproval { approval } => ActionExecutionDecision {
                 status: "cancelled".to_string(),
                 final_pending_status: PendingActionStatus::Cancelled,
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 file_change: None,
                 committed_file_change_action: None,
                 direct_file_change_finalization: None,
                 tool_result: mycopilot_core::builtin_mcp_tool_cancelled_result(approval),
+            },
+            AgentProposedAction::FileChange { .. } => {
+                cancelled_file_change_execution(&self.storage, record)?
             }
-        } else {
-            action_execution_for_decision(
+            _ => action_execution_for_decision(
                 &self.storage,
                 record,
                 &call,
                 AgentApprovalDecisionStatus::Rejected,
                 Some(REASON),
-            )
+            ),
         };
         let completed_at = now_ms();
         if let (Some(conversation_id), Some(assistant_message_id), Some(checkpoint)) = (
@@ -1007,10 +1005,17 @@ impl AgentService {
             record,
             Some("cancelled"),
             "cancelled",
-            execution.patch_result.as_ref(),
+            execution.file_change_result.as_ref(),
             None,
             Some(&execution.tool_result),
-            Some(REASON),
+            if matches!(
+                record.snapshot.action,
+                AgentProposedAction::FileChange { .. }
+            ) {
+                execution.tool_result.error.as_deref()
+            } else {
+                Some(REASON)
+            },
             Some(completed_at),
             Some(completed_at),
         );
@@ -1592,8 +1597,7 @@ impl AgentService {
             ActionExecutionDecision {
                 status: "failed".to_string(),
                 final_pending_status: PendingActionStatus::Failed,
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 file_change: None,
                 committed_file_change_action: None,
                 direct_file_change_finalization: None,
@@ -1619,8 +1623,7 @@ impl AgentService {
             ActionExecutionDecision {
                 status: "failed".to_string(),
                 final_pending_status: PendingActionStatus::Failed,
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 file_change: None,
                 committed_file_change_action: None,
                 direct_file_change_finalization: None,
@@ -1658,8 +1661,7 @@ impl AgentService {
             ActionExecutionDecision {
                 status: "rejected".to_string(),
                 final_pending_status: PendingActionStatus::Rejected,
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 file_change: None,
                 committed_file_change_action: None,
                 direct_file_change_finalization: None,
@@ -1688,8 +1690,7 @@ impl AgentService {
             ActionExecutionDecision {
                 status: "rejected".to_string(),
                 final_pending_status: PendingActionStatus::Rejected,
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 file_change: None,
                 committed_file_change_action: None,
                 direct_file_change_finalization: None,
@@ -1778,8 +1779,7 @@ impl AgentService {
                 } else {
                     PendingActionStatus::Failed
                 },
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 file_change: None,
                 committed_file_change_action: None,
                 direct_file_change_finalization: None,
@@ -1826,8 +1826,7 @@ impl AgentService {
                     } else {
                         PendingActionStatus::Failed
                     },
-                    patch_result: None,
-                    file_write_result: None,
+                    file_change_result: None,
                     file_change: None,
                     committed_file_change_action: None,
                     direct_file_change_finalization: None,
@@ -1876,8 +1875,7 @@ impl AgentService {
                     } else {
                         PendingActionStatus::Failed
                     },
-                    patch_result: None,
-                    file_write_result: None,
+                    file_change_result: None,
                     file_change: None,
                     committed_file_change_action: None,
                     direct_file_change_finalization: None,
@@ -1909,7 +1907,7 @@ impl AgentService {
         }
         if let Some(committed_action) = execution.committed_file_change_action.take() {
             if let Err(error) =
-                self.commit_manual_direct_file_change_action(&mut record, committed_action)
+                self.commit_pending_file_change_action(&mut record, committed_action)
             {
                 eprintln!(
                     "failed to persist a manual Direct FileChange commit receipt; recovery remains pending: {error}"
@@ -1929,7 +1927,7 @@ impl AgentService {
                 "Direct delete 清理尚未完成；该操作保持恢复中，且未发布 ToolResult。".to_string()
             })?;
             if let Err(error) =
-                self.commit_manual_direct_file_change_action(&mut record, finalized_action)
+                self.commit_pending_file_change_action(&mut record, finalized_action)
             {
                 eprintln!(
                     "failed to persist a finalized manual Direct delete receipt; recovery remains pending: {error}"
@@ -2054,16 +2052,17 @@ impl AgentService {
         } else if decision_status == AgentApprovalDecisionStatus::Approved
             && matches!(
                 record.snapshot.action,
-                AgentProposedAction::Diff { .. } | AgentProposedAction::FileWrite { .. }
+                AgentProposedAction::FileChange { .. }
             )
         {
-            let effect_kind = if matches!(
-                record.snapshot.action,
-                AgentProposedAction::FileWrite { .. }
-            ) {
-                "staged_file_change"
-            } else {
-                "direct_file_change"
+            let effect_kind = match &record.snapshot.action {
+                AgentProposedAction::FileChange { file_change }
+                    if file_change.inline_diff.is_none() =>
+                {
+                    "staged_file_change"
+                }
+                AgentProposedAction::FileChange { .. } => "direct_file_change",
+                _ => unreachable!("FileChange approval branch matched a different action"),
             };
             match self.settle_manual_file_effect(
                 &record,
@@ -2147,7 +2146,7 @@ impl AgentService {
                     AgentApprovalDecisionStatus::Rejected => "rejected",
                 }),
                 &execution.status,
-                execution.patch_result.as_ref(),
+                execution.file_change_result.as_ref(),
                 None,
                 Some(&tool_result),
                 tool_result.error.as_deref(),
@@ -2158,7 +2157,14 @@ impl AgentService {
 
             let mut agent_input = record.agent_input.clone();
             agent_input.approval_decision = Some(AgentApprovalDecision {
-                action_id: record.snapshot.action_id.clone(),
+                action_id: if matches!(
+                    record.snapshot.action,
+                    AgentProposedAction::FileChange { .. }
+                ) {
+                    record.storage_id.clone()
+                } else {
+                    record.snapshot.action_id.clone()
+                },
                 status: decision_status,
                 message: continuation_message.clone(),
             });
@@ -2214,21 +2220,21 @@ impl AgentService {
         {
             // Approved Office operations return earlier and publish exactly one ToolResult from
             // their asynchronous executor. Rejected Office actions reach this synchronous path,
-            // so publish the paired rejection result here just like write_file.
+            // so publish the paired rejection result here just like FileChange.
             if matches!(
                 record.snapshot.action,
-                AgentProposedAction::FileWrite { .. }
+                AgentProposedAction::FileChange { .. }
             ) {
-                if let Some(file_write_result) = execution.file_write_result.as_ref() {
+                if let Some(file_change_result) = execution.file_change_result.as_ref() {
                     if let Ok(Some(draft)) = self
                         .storage
-                        .get_agent_file_change(&file_write_result.draft_id)
+                        .get_agent_file_change(&file_change_result.transaction_id)
                     {
                         if let Ok(snapshot) = file_draft_snapshot(&draft) {
                             let _ = notifications.send(agent_event_notification(
-                                AgentEvent::FileDraftUpdated {
+                                AgentEvent::FileChangeUpdated {
                                     run_id: record.snapshot.run_id.clone(),
-                                    draft: snapshot,
+                                    file_change: snapshot,
                                 },
                             ));
                         }
@@ -2272,8 +2278,7 @@ impl AgentService {
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
             status: execution_status,
-            patch_result: execution.patch_result,
-            file_write_result: execution.file_write_result,
+            file_change_result: execution.file_change_result,
             command_result: None,
             // MCP has a dedicated approval/lifecycle contract. Keep the generic result response
             // for built-ins and runtime extensions only.
@@ -2381,8 +2386,7 @@ impl AgentService {
                 action_type: failed_record.snapshot.action_type,
                 tool_name: failed_record.snapshot.tool_name,
                 status: "failed".to_string(),
-                patch_result: None,
-                file_write_result: None,
+                file_change_result: None,
                 command_result: None,
                 tool_result: None,
                 agent_output: AgentChatOutput {

@@ -39,8 +39,7 @@ export function shouldHydratePendingAgentAction(snapshot: PendingAgentActionSnap
 }
 
 export function getAgentActionApprovalStatus(action: AgentProposedAction) {
-  if (action.type === 'diff') return action.diff.approvalStatus
-  if (action.type === 'file_write') return action.fileWrite.approvalStatus
+  if (action.type === 'file_change') return action.fileChange.approvalStatus
   if (action.type === 'command') return action.command.approvalStatus
   if (action.type === 'skill_materialization') return action.materialization.approvalStatus
   if (action.type === 'skill_script') return action.script.approvalStatus
@@ -54,8 +53,7 @@ export function getAgentActionApprovalStatus(action: AgentProposedAction) {
 }
 
 export function getAgentActionId(action: AgentProposedAction) {
-  if (action.type === 'diff') return action.diff.id
-  if (action.type === 'file_write') return action.fileWrite.id
+  if (action.type === 'file_change') return action.fileChange.id
   if (action.type === 'command') return action.command.id
   if (action.type === 'skill_materialization') return action.materialization.id
   if (action.type === 'skill_script') return action.script.id

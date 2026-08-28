@@ -1,8 +1,10 @@
+use crate::file_change::FileChangeError;
 use crate::storage::models::AgentFileChangeRecord;
 use crate::{
-    AgentApprovalStatus, AgentFileDraftSnapshot, AgentFileWriteMode, AgentFileWriteProposal,
-    AgentFileWriteResult, AgentFileWriteResultStatus, AgentPatchPermission, AgentPermissions,
-    AgentProposedAction, AgentWritePermission,
+    AgentApprovalStatus, AgentFileChangeOperation, AgentFileChangeOutcome, AgentFileChangeProposal,
+    AgentFileChangeResult, AgentFileChangeResultStatus, AgentFileChangeSnapshot,
+    AgentFileChangeUpdateStrategy, AgentPatchPermission, AgentPermissions, AgentProposedAction,
+    AgentWritePermission, AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
 };
 use similar::TextDiff;
 
@@ -72,8 +74,7 @@ pub fn file_write_action_approval_status(
     action: &AgentProposedAction,
 ) -> Option<AgentApprovalStatus> {
     match action {
-        AgentProposedAction::Diff { diff } => Some(diff.approval_status),
-        AgentProposedAction::FileWrite { file_write } => Some(file_write.approval_status),
+        AgentProposedAction::FileChange { file_change } => Some(file_change.approval_status),
         AgentProposedAction::SkillMaterialization { materialization } => {
             Some(materialization.approval_status)
         }
@@ -103,57 +104,87 @@ pub fn file_write_diff(draft: &AgentFileChangeRecord) -> String {
 
 pub fn file_draft_snapshot(
     draft: &AgentFileChangeRecord,
-) -> Result<AgentFileDraftSnapshot, String> {
-    let mode = file_change_write_mode(draft)?;
+) -> Result<AgentFileChangeSnapshot, String> {
+    let (operation, update_strategy) = file_change_operation(draft)?;
     let status = serde_json::from_value(serde_json::Value::String(draft.status.clone()))
         .map_err(|error| format!("文件草稿 status 无效：{error}"))?;
-    Ok(AgentFileDraftSnapshot {
-        draft_id: draft.id.clone(),
+    let snapshot = AgentFileChangeSnapshot {
+        schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+        transaction_id: draft.id.clone(),
         conversation_id: draft.conversation_id.clone(),
         project_id: draft.project_id.clone(),
         file_path: draft.file_path.clone(),
-        mode,
+        operation,
+        update_strategy,
         status,
         base_revision: draft.base_revision.clone(),
         additions: draft.additions,
         deletions: draft.deletions,
         line_count: draft.line_count,
         byte_count: draft.byte_count,
-        chunk_count: draft.mutation_count,
-        next_chunk_index: draft.next_mutation_index,
+        mutation_count: draft.mutation_count,
+        next_mutation_index: draft.next_mutation_index,
         stats_final: draft.stats_final,
         summary: draft.summary.clone(),
         created_at: draft.created_at,
         updated_at: draft.updated_at,
-    })
+    };
+    snapshot.validate().map_err(str::to_string)?;
+    Ok(snapshot)
 }
 
 pub fn failed_file_write_result(
-    proposal: &AgentFileWriteProposal,
-    status: AgentFileWriteResultStatus,
-    error: impl Into<String>,
-) -> AgentFileWriteResult {
-    let error = error.into();
-    AgentFileWriteResult {
+    proposal: &AgentFileChangeProposal,
+    status: AgentFileChangeResultStatus,
+    error: &FileChangeError,
+) -> AgentFileChangeResult {
+    let safe_message = error.failure().message.clone();
+    let error_code = serde_json::to_value(error.code())
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .expect("FileChangeErrorCode has a stable string representation");
+    AgentFileChangeResult {
+        schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
         status,
-        draft_id: proposal.draft_id.clone(),
-        mode: proposal.mode,
+        outcome: if status == AgentFileChangeResultStatus::OutcomeUnknown {
+            AgentFileChangeOutcome::OutcomeUnknown
+        } else {
+            AgentFileChangeOutcome::DefinitelyNotExecuted
+        },
+        transaction_id: proposal.transaction_id.clone(),
+        operation: proposal.operation,
+        update_strategy: proposal.update_strategy,
         file_path: proposal.file_path.clone(),
         additions: proposal.additions,
         deletions: proposal.deletions,
         line_count: proposal.line_count,
         byte_count: proposal.byte_count,
         revision: None,
-        error: Some(error.clone()),
-        message: Some(error),
+        error_code: Some(error_code),
+        error: Some(safe_message.clone()),
+        message: Some(safe_message),
     }
 }
 
-fn file_change_write_mode(change: &AgentFileChangeRecord) -> Result<AgentFileWriteMode, String> {
+fn file_change_operation(
+    change: &AgentFileChangeRecord,
+) -> Result<
+    (
+        AgentFileChangeOperation,
+        Option<AgentFileChangeUpdateStrategy>,
+    ),
+    String,
+> {
     match (change.operation.as_str(), change.strategy.as_deref()) {
-        ("create", None) => Ok(AgentFileWriteMode::Create),
-        ("update", Some("modify")) => Ok(AgentFileWriteMode::Modify),
-        ("update", Some("rewrite")) => Ok(AgentFileWriteMode::Rewrite),
+        ("create", None) => Ok((AgentFileChangeOperation::Create, None)),
+        ("update", Some("modify")) => Ok((
+            AgentFileChangeOperation::Update,
+            Some(AgentFileChangeUpdateStrategy::Modify),
+        )),
+        ("update", Some("rewrite")) => Ok((
+            AgentFileChangeOperation::Update,
+            Some(AgentFileChangeUpdateStrategy::Rewrite),
+        )),
         _ => Err("文件变更事务的 operation/strategy 无效。".to_string()),
     }
 }
@@ -173,65 +204,6 @@ mod tests {
             command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
             builtin_execution: Default::default(),
-        }
-    }
-
-    fn draft(file_path: &str, base: &str, content: &str) -> AgentFileChangeRecord {
-        AgentFileChangeRecord {
-            schema_version: 1,
-            id: "draft-1".to_string(),
-            conversation_id: "conversation-1".to_string(),
-            project_id: Some("project-1".to_string()),
-            run_id: "run-1".to_string(),
-            source_tool_name: "write_file".to_string(),
-            source_tool_call_id: "call-begin-1".to_string(),
-            source_tool_arguments_digest: "digest-begin-1".to_string(),
-            permission_revision: "permission-1".to_string(),
-            tool_set_revision: "tool-set-1".to_string(),
-            provider_wire_revision: "provider-protocol-v1".to_string(),
-            observation_id: "fobs_fixture".to_string(),
-            observation_json: "{}".to_string(),
-            file_path: file_path.to_string(),
-            operation: if base.is_empty() { "create" } else { "update" }.to_string(),
-            strategy: (!base.is_empty()).then(|| "rewrite".to_string()),
-            status: "waiting_approval".to_string(),
-            base_revision: (!base.is_empty()).then(|| crate::content_revision(base.as_bytes())),
-            base_content: base.to_string(),
-            content: content.to_string(),
-            draft_revision: 1,
-            next_mutation_index: 1,
-            additions: 1,
-            deletions: u64::from(!base.is_empty()),
-            line_count: 1,
-            byte_count: content.len() as u64,
-            mutation_count: 1,
-            stats_final: true,
-            summary: Some("test write".to_string()),
-            final_action_id: Some("action-1".to_string()),
-            created_at: 1,
-            updated_at: 1,
-            expires_at: i64::MAX,
-        }
-    }
-
-    fn proposal(draft: &AgentFileChangeRecord) -> AgentFileWriteProposal {
-        AgentFileWriteProposal {
-            id: "action-1".to_string(),
-            draft_id: draft.id.clone(),
-            mode: if draft.base_revision.is_some() {
-                AgentFileWriteMode::Rewrite
-            } else {
-                AgentFileWriteMode::Create
-            },
-            file_path: draft.file_path.clone(),
-            base_revision: draft.base_revision.clone(),
-            summary: draft.summary.clone(),
-            additions: draft.additions,
-            deletions: draft.deletions,
-            line_count: draft.line_count,
-            byte_count: draft.byte_count,
-            approval_status: AgentApprovalStatus::Approved,
-            execution: Box::new(direct_binding_fixture()),
         }
     }
 
@@ -302,18 +274,21 @@ mod tests {
 
     #[test]
     fn structured_file_write_actions_share_one_host_policy_domain() {
-        let draft = draft("report.txt", "", "hello");
-        let file_write = AgentProposedAction::FileWrite {
-            file_write: proposal(&draft),
-        };
-        let diff = AgentProposedAction::Diff {
-            diff: crate::AgentDiffProposal {
+        let file_change = AgentProposedAction::FileChange {
+            file_change: AgentFileChangeProposal {
+                schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
                 id: "diff-1".to_string(),
-                operation: crate::AgentPatchOperation::Create,
+                transaction_id: "transaction-1".to_string(),
+                operation: AgentFileChangeOperation::Create,
+                update_strategy: None,
                 file_path: "report.md".to_string(),
-                patch: "".to_string(),
+                inline_diff: None,
                 base_revision: None,
                 summary: None,
+                additions: 0,
+                deletions: 0,
+                line_count: 0,
+                byte_count: 0,
                 approval_status: AgentApprovalStatus::Required,
                 execution: Box::new(direct_binding_fixture()),
             },
@@ -367,7 +342,7 @@ mod tests {
             }),
         };
 
-        for action in [&file_write, &diff, &materialization, &office] {
+        for action in [&file_change, &materialization, &office] {
             assert!(proposed_action_uses_file_write_policy(action));
             assert!(file_write_action_approval_status(action).is_some());
         }

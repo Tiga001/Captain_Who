@@ -1330,6 +1330,15 @@ pub(super) fn checkpoint_continuation_projection(
             // calls retain `automatic` and therefore fail closed if a bogus action id appears.
             Ok(CheckpointContinuationProjection::BuiltinCapability)
         }
+        (AgentToolIdentity::Builtin { tool_name }, Some(_))
+            if tool_name == "apply_patch"
+                && matches!(
+                    frozen_approval_status,
+                    AgentApprovalStatus::Required | AgentApprovalStatus::Approved
+                ) =>
+        {
+            Ok(CheckpointContinuationProjection::Standard)
+        }
         (
             AgentToolIdentity::Unregistered { .. }
             | AgentToolIdentity::LegacyBuiltinCapability { .. },

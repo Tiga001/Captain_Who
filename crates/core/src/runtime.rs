@@ -38,7 +38,7 @@ use crate::conversation_trace::{
     trace_attachments_from_input, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder,
 };
-use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
+use crate::file_write::{file_draft_snapshot, file_write_approval_route, FileWriteApprovalRoute};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, is_repairable_empty_model_action,
     LlmChatRequest, LlmMessage, LlmMessageRole, LlmStreamEvent,
@@ -69,10 +69,10 @@ use crate::storage::now_ms;
 use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
 use crate::{
-    resolve_provider_runtime_capabilities, AgentCollaborationRuntimeServices,
-    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, ProviderContinuationRequirement,
-    ProviderPrivateReplaySemantics, ProviderUsageSemantics,
+    canonical_pending_action_id, resolve_provider_runtime_capabilities,
+    AgentCollaborationRuntimeServices, ConversationTraceSnapshot, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    ProviderContinuationRequirement, ProviderPrivateReplaySemantics, ProviderUsageSemantics,
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
@@ -98,9 +98,9 @@ use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
     approve_proposed_action, cancellation_preempts_tool_result, cancelled_output, done_event,
     execute_host_action_on_blocking_thread, execute_registered_tool, extract_reason_from_args,
-    failed_tool_call_result, file_draft_from_tool_result, generate_run_id,
-    llm_image_message_from_tool_result, redact_tool_result_for_event, sanitize_max_tokens,
-    sanitize_temperature, state_event, tool_call_bindings_from_response,
+    failed_tool_call_result, generate_run_id, llm_image_message_from_tool_result,
+    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
+    tool_call_bindings_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -1274,7 +1274,7 @@ impl AgentRuntime {
                                     }
                                     LlmStreamEvent::AttemptReset { reason } => {
                                         event_stream.emit_transient(
-                                            AgentEvent::FileWritePreviewCleared {
+                                            AgentEvent::FileChangePreviewCleared {
                                                 run_id: delta_run_id.clone(),
                                                 stream_id: stream_id.clone(),
                                                 attempt: tool_input_stream.attempt(),
@@ -2389,10 +2389,10 @@ impl AgentRuntime {
                                 finish_reason,
                             ));
                         }
-                        if let AgentProposedAction::Diff { diff } = &action {
-                            event_stream.emit(AgentEvent::Diff {
+                        if let AgentProposedAction::FileChange { file_change } = &action {
+                            event_stream.emit(AgentEvent::FileChangeProposed {
                                 run_id: run_id.clone(),
-                                diff: diff.clone(),
+                                file_change: file_change.clone(),
                             });
                         }
                         if matches!(
@@ -2600,6 +2600,11 @@ impl AgentRuntime {
                         {
                             checkpoint.pending_action_id =
                                 Some(approval.identity.action_id.clone());
+                        } else if let AgentProposedAction::FileChange { file_change } = &action {
+                            checkpoint.pending_action_id = Some(canonical_pending_action_id(
+                                &run_id,
+                                &file_change.id,
+                            ));
                         }
                         event_stream.emit(AgentEvent::ApprovalRequired {
                             run_id: run_id.clone(),
@@ -2689,10 +2694,10 @@ impl AgentRuntime {
                                     }
                                     return Err(error);
                                 }
-                                if let AgentProposedAction::Diff { diff } = &action {
-                                    event_stream.emit(AgentEvent::Diff {
+                                if let AgentProposedAction::FileChange { file_change } = &action {
+                                    event_stream.emit(AgentEvent::FileChangeProposed {
                                         run_id: run_id.clone(),
-                                        diff: diff.clone(),
+                                        file_change: file_change.clone(),
                                     });
                                 }
                                 let frozen_pending_action_id = match &action {
@@ -2702,6 +2707,9 @@ impl AgentRuntime {
                                     AgentProposedAction::BuiltinMcpToolApproval { approval } => {
                                         Some(approval.identity.action_id.clone())
                                     }
+                                    AgentProposedAction::FileChange { file_change } => Some(
+                                        canonical_pending_action_id(&run_id, &file_change.id),
+                                    ),
                                     _ => None,
                                 };
                                 let frozen_checkpoint_result =
@@ -3092,18 +3100,22 @@ impl AgentRuntime {
                         ));
                     }
                     if !is_mcp_tool {
+                        if let Some(file_change) = file_change_snapshot_from_tool_result(
+                            exact_history_storage.as_ref(),
+                            &call,
+                            &result,
+                        )? {
+                            event_stream.emit(AgentEvent::FileChangeUpdated {
+                                run_id: run_id.clone(),
+                                file_change,
+                            });
+                        }
                         let event_result =
                             redact_tool_result_for_event(&tool_registry.event_projection(&result));
                         event_stream.emit(AgentEvent::ToolResult {
                             run_id: run_id.clone(),
                             result: event_result.clone(),
                         });
-                        if let Some(draft) = file_draft_from_tool_result(&event_result) {
-                            event_stream.emit(AgentEvent::FileDraftUpdated {
-                                run_id: run_id.clone(),
-                                draft,
-                            });
-                        }
                     }
 
                     active_context.push(
@@ -3307,6 +3319,39 @@ impl AgentRuntime {
             trace_assistant_message_id.as_deref(),
         )
     }
+}
+
+fn file_change_snapshot_from_tool_result(
+    storage: Option<&Arc<StorageService>>,
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+) -> AgentResult<Option<crate::protocol::AgentFileChangeSnapshot>> {
+    if call.tool != "apply_patch" || !result.ok {
+        return Ok(None);
+    }
+    let staged_action = call
+        .args
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|action| matches!(action, "begin" | "append" | "edit" | "status" | "abort"));
+    if !staged_action {
+        return Ok(None);
+    }
+    let transaction_id = result
+        .result
+        .as_ref()
+        .and_then(|value| value.get("transactionId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AgentError::new("FileChange 结果缺少当前事务标识。"))?;
+    let storage = storage.ok_or_else(|| AgentError::new("FileChange 私有存储不可用。"))?;
+    let record = storage
+        .get_agent_file_change(transaction_id)
+        .map_err(AgentError::new)?
+        .ok_or_else(|| AgentError::new("FileChange 当前事务不存在。"))?;
+    file_draft_snapshot(&record)
+        .map(Some)
+        .map_err(AgentError::new)
 }
 
 /// Revalidates every authority-bearing ToolCall identity frozen into a resumed run.

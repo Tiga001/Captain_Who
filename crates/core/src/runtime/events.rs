@@ -37,8 +37,8 @@ pub(super) fn emit_tool_input_preview(
     preview: crate::tools::ToolInputStreamPreview,
 ) {
     match preview {
-        crate::tools::ToolInputStreamPreview::FileWrite(preview) => {
-            event_stream.emit_transient(AgentEvent::FileWritePreviewUpdated {
+        crate::tools::ToolInputStreamPreview::FileChange(preview) => {
+            event_stream.emit_transient(AgentEvent::FileChangePreviewUpdated {
                 run_id: run_id.to_string(),
                 preview,
             });

@@ -1047,14 +1047,15 @@ fn user_guidance_cannot_split_an_open_tool_exchange() {
 }
 
 #[test]
-fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
-    let write_call = AgentToolCall {
-        id: "write-1".into(),
-        tool: "write_file".into(),
+fn staged_and_direct_file_change_projection_keeps_effect_metadata_without_payloads() {
+    let staged_call = AgentToolCall {
+        id: "staged-1".into(),
+        tool: "apply_patch".into(),
         args: json!({
-            "phase": "append",
-            "draftId": "draft-1",
+            "action": "append",
+            "transactionId": "file-change-1",
             "index": 0,
+            "expectedDraftRevision": 0,
             "content": "first\nsecond\nSECRET_WRITE_BODY"
         }),
         approval_status: AgentApprovalStatus::NotRequired,
@@ -1079,26 +1080,24 @@ fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
         reason: None,
     };
     let mut recorder = ConversationTraceRecorder::default();
-    recorder.record_tool_call(&write_call);
+    recorder.record_tool_call(&staged_call);
     recorder.record_tool_result(
-        &write_call,
+        &staged_call,
         &AgentToolResult {
             exact_archive_file: None,
-            call_id: write_call.id.clone(),
-            tool: write_call.tool.clone(),
+            call_id: staged_call.id.clone(),
+            tool: staged_call.tool.clone(),
             ok: true,
             result: Some(json!({
-                "draft": {
-                    "status": "drafting",
-                    "draftId": "draft-1",
-                    "mode": "create",
-                    "filePath": "notes.txt",
-                    "additions": 2,
-                    "deletions": 0,
-                    "lineCount": 2,
-                    "byteCount": 30
-                },
-                "tail": "SECRET_WRITE_BODY"
+                "status": "drafting",
+                "operation": "create",
+                "transactionId": "file-change-1",
+                "filePath": "notes.txt",
+                "additions": 3,
+                "deletions": 0,
+                "lineCount": 3,
+                "byteCount": 30,
+                "privateTail": "SECRET_WRITE_BODY"
             })),
             error: None,
         },
@@ -1112,14 +1111,21 @@ fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
             tool: patch_call.tool.clone(),
             ok: true,
             result: Some(json!({
+                "schemaVersion": 1,
                 "status": "applied",
+                "outcome": "applied",
+                "transactionId": "file-change-direct-1",
                 "operation": "update",
+                "updateStrategy": null,
                 "filePath": "src/lib.rs",
-                "appliedFilePaths": ["src/lib.rs"],
-                "gitDiff": {
-                    "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+new\n+extra\n",
-                    "truncated": false
-                }
+                "additions": 2,
+                "deletions": 1,
+                "lineCount": 2,
+                "byteCount": 9,
+                "revision": "file-revision-sha256-v1:fixture",
+                "errorCode": null,
+                "error": null,
+                "message": "文件已更新。"
             })),
             error: None,
         },
@@ -1138,23 +1144,23 @@ fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
     assert!(!serialized.contains("--- a/src/lib.rs"));
 
     let ConversationTurnTraceItem::ToolCall {
-        operation: write_operation,
+        operation: staged_operation,
         ..
     } = &trace.items[0]
     else {
-        panic!("expected write call");
+        panic!("expected staged call");
     };
-    assert_eq!(write_operation["contentBytes"], 30);
-    assert_eq!(write_operation["contentLines"], 3);
+    assert_eq!(staged_operation["contentBytes"], 30);
+    assert_eq!(staged_operation["additions"], 3);
     let ConversationTurnTraceItem::ToolResult {
-        observation: write_result,
+        observation: staged_result,
         ..
     } = &trace.items[1]
     else {
-        panic!("expected write result");
+        panic!("expected staged result");
     };
-    assert_eq!(write_result["filePath"], "notes.txt");
-    assert_eq!(write_result["additions"], 2);
+    assert_eq!(staged_result["filePath"], "notes.txt");
+    assert_eq!(staged_result["additions"], 3);
 
     let ConversationTurnTraceItem::ToolCall {
         operation: patch_operation,
@@ -1178,7 +1184,8 @@ fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
     assert_eq!(patch_result["status"], "applied");
     assert_eq!(patch_result["additions"], 2);
     assert_eq!(patch_result["deletions"], 1);
-    assert_eq!(patch_result["patchOmittedFromHistory"], true);
+    assert!(patch_result.get("gitDiff").is_none());
+    assert!(patch_result.get("content").is_none());
 }
 
 #[test]

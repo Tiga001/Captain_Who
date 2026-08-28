@@ -426,9 +426,10 @@ fn builds_openai_native_tool_payload_and_tool_result_messages() {
 }
 
 #[test]
-fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
+fn generic_provider_payloads_expose_only_the_current_file_change_tool() {
     let registry = crate::tools::ToolRegistry::defaults_with_search(None);
-    let definitions = ["apply_patch", "write_file"]
+    assert!(registry.definition_for("write_file").is_none());
+    let definitions = ["apply_patch"]
         .into_iter()
         .map(|name| {
             registry
@@ -486,34 +487,6 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
             "prepend"
         ])
     );
-    let write_file = &definitions[1];
-    assert_eq!(write_file.safety, AgentToolSafety::RequiresApproval);
-    assert!(!write_file.requires_workspace);
-    assert!(write_file.requires_approval);
-    assert_eq!(
-        write_file.approval_mode,
-        crate::protocol::AgentToolApprovalMode::Dynamic
-    );
-    assert!(write_file
-        .description
-        .contains("Temporary compatibility entry"));
-    assert!(write_file.description.contains("apply_patch"));
-    assert_eq!(write_file.input_schema["required"], json!(["phase"]));
-    assert_eq!(
-        write_file.input_schema["properties"]["phase"]["enum"],
-        json!(["begin", "append", "edit", "finish", "status", "abort"])
-    );
-    let write_modes = write_file.input_schema["properties"]["mode"]["enum"]
-        .as_array()
-        .unwrap();
-    for current_mode in ["create", "rewrite", "modify", "append"] {
-        assert!(write_modes.iter().any(|mode| mode == current_mode));
-    }
-    assert_eq!(
-        write_file.input_schema["properties"]["edits"]["maxItems"],
-        128
-    );
-
     let request = |api_style, tools: Vec<AgentToolDefinition>| LlmChatRequest {
         api_url: "https://example.test".to_string(),
         api_token: "token".to_string(),
@@ -531,7 +504,7 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
         definitions.clone(),
     ));
     let openai_tools = openai["tools"].as_array().unwrap();
-    assert_eq!(openai_tools.len(), 2);
+    assert_eq!(openai_tools.len(), 1);
     for (projected, definition) in openai_tools.iter().zip(&definitions) {
         assert_eq!(projected["type"], "function");
         assert_eq!(projected["function"]["name"], definition.name);
@@ -546,7 +519,7 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
         definitions.clone(),
     ));
     let anthropic_tools = anthropic["tools"].as_array().unwrap();
-    assert_eq!(anthropic_tools.len(), 2);
+    assert_eq!(anthropic_tools.len(), 1);
     for (projected, definition) in anthropic_tools.iter().zip(&definitions) {
         assert_eq!(projected["name"], definition.name);
         assert_eq!(projected["description"], definition.description);

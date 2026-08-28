@@ -9,7 +9,7 @@ use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
-    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentProviderTransitionGetStatusInput,
     AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
     AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
     AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,
@@ -85,24 +85,24 @@ use mycopilot_core::{
     AgentContextCompactionPrepareOutcome, AgentContextCompactionServices,
     AgentContextWindowObserver, AgentContextWindowSnapshot, AgentContextWindowToolProjection,
     AgentConversationContextState, AgentConversationTraceObserver, AgentError, AgentEvent,
-    AgentEventEmitter, AgentGuidanceStatus, AgentHostActionExecutor, AgentMcpDispatchCertainty,
-    AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary, AgentMcpServerScope,
-    AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState,
-    AgentModelRequestInterruptionReason, AgentModelRequestObserver, AgentPatchResult,
-    AgentPermissions, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
-    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig,
-    AgentSkillInstallationPrepareExecutor, AgentSkillMaterializationRequest,
-    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
-    AgentSkillScriptRequest, AgentSkillScriptResult, AgentSkillScriptSourceKind,
-    AgentSkillScriptTrust, AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue,
-    AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus,
-    AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, AutomationReportKind,
-    AutomationReportSink, BuiltinCapabilityRuntime, CapabilityActivationId, ContextJournalCursor,
-    ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, McpApprovedToolInvocation,
-    McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker, McpToolRuntime,
-    ModelCapabilities, ProviderContinuationVault, ProviderProtocolDialect, ProviderProtocolKey,
+    AgentEventEmitter, AgentFileChangeResult, AgentGuidanceStatus, AgentHostActionExecutor,
+    AgentMcpDispatchCertainty, AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary,
+    AgentMcpServerScope, AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState,
+    AgentModelRequestInterruptionReason, AgentModelRequestObserver, AgentPermissions,
+    AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
+    AgentRuntimeHostServices, AgentSearchConfig, AgentSkillInstallationPrepareExecutor,
+    AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
+    AgentSkillMaterializationResultStatus, AgentSkillScriptRequest, AgentSkillScriptResult,
+    AgentSkillScriptSourceKind, AgentSkillScriptTrust, AgentSteerEnqueueOutcome, AgentSteerInput,
+    AgentSteerInputQueue, AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode,
+    AgentSteerRunResultStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AutomationReportKind, AutomationReportSink, BuiltinCapabilityRuntime, CapabilityActivationId,
+    ContextJournalCursor, ConversationModelContextItem, ConversationTraceSnapshot,
+    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
+    McpToolRuntime, ModelCapabilities, ProviderContinuationVault, ProviderProtocolDialect,
+    ProviderProtocolKey,
 };
 #[cfg(test)]
 use mycopilot_core::{
@@ -679,15 +679,9 @@ impl AgentService {
         let unresolved_command_sessions = storage
             .reconcile_agent_command_sessions_on_startup(now_ms())
             .map_err(|error| format!("failed to reconcile command sessions: {error}"))?;
-        pending_action_store::reconcile_interrupted_direct_file_changes(&storage, now_ms())
-            .map_err(|error| {
-                format!("failed to reconcile interrupted Direct file changes: {error}")
-            })?;
-        pending_action_store::reconcile_interrupted_automatic_direct_file_changes(
-            &storage,
-            now_ms(),
-        )
-        .map_err(|error| format!("failed to reconcile automatic Direct file changes: {error}"))?;
+        pending_action_store::reconcile_interrupted_file_changes(&storage, now_ms()).map_err(
+            |error| format!("failed to reconcile interrupted Direct file changes: {error}"),
+        )?;
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;

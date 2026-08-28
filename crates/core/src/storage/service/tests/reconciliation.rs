@@ -1,5 +1,21 @@
 use super::*;
 
+fn current_pending_storage_id(run_id: &str, source_call_id: &str) -> String {
+    crate::canonical_pending_action_id(run_id, source_call_id)
+}
+
+fn current_pending_action(
+    run_id: &str,
+    source_call_id: &str,
+    conversation_id: &str,
+) -> AgentPendingActionRecord {
+    let storage_id = current_pending_storage_id(run_id, source_call_id);
+    let mut pending = pending_action(&storage_id, conversation_id);
+    pending.run_id = run_id.to_string();
+    pending.tool_call_id = Some(source_call_id.to_string());
+    pending
+}
+
 fn current_model_context_for_trace(
     trace: &ConversationTurnTrace,
 ) -> Vec<crate::ConversationModelContextItem> {
@@ -158,7 +174,6 @@ fn in_progress_result_trace(
 }
 
 fn manual_command_settlement(
-    storage_id: &str,
     call_id: &str,
     conversation_id: &str,
     assistant_message_id: &str,
@@ -168,6 +183,7 @@ fn manual_command_settlement(
     AgentActionAuditRecord,
     ConversationTurnTrace,
 ) {
+    let storage_id = current_pending_storage_id("run-1", call_id);
     let action = AgentProposedAction::Command {
         command: crate::AgentCommandRequest {
             id: call_id.to_string(),
@@ -185,7 +201,7 @@ fn manual_command_settlement(
     };
     let action_json = serde_json::to_string(&action).unwrap();
     let pending = AgentPendingActionRecord {
-        action_id: storage_id.to_string(),
+        action_id: storage_id.clone(),
         run_id: "run-1".to_string(),
         conversation_id: Some(conversation_id.to_string()),
         assistant_message_id: Some(assistant_message_id.to_string()),
@@ -200,7 +216,7 @@ fn manual_command_settlement(
         updated_at: 11,
     };
     let approved_audit = AgentActionAuditRecord {
-        action_id: storage_id.to_string(),
+        action_id: storage_id,
         run_id: "run-1".to_string(),
         conversation_id: Some(conversation_id.to_string()),
         assistant_message_id: Some(assistant_message_id.to_string()),
@@ -209,7 +225,7 @@ fn manual_command_settlement(
         decision: Some("approved".to_string()),
         status: "approved".to_string(),
         action_json,
-        patch_result_json: None,
+        file_change_result_json: None,
         command_result_json: None,
         tool_result_json: None,
         error: None,
@@ -474,7 +490,6 @@ impl ManualNonCommandFileEffect {
 
 fn manual_non_command_file_effect_settlement(
     effect: ManualNonCommandFileEffect,
-    storage_id: &str,
     call_id: &str,
     run_id: &str,
     conversation_id: &str,
@@ -485,11 +500,12 @@ fn manual_non_command_file_effect_settlement(
     AgentActionAuditRecord,
     ConversationTurnTrace,
 ) {
+    let storage_id = current_pending_storage_id(run_id, call_id);
     let action = effect.frozen_action(call_id, false);
     let tool_operation = effect.tool_operation(&action);
     let action_json = serde_json::to_string(&action).unwrap();
     let pending = AgentPendingActionRecord {
-        action_id: storage_id.to_string(),
+        action_id: storage_id.clone(),
         run_id: run_id.to_string(),
         conversation_id: Some(conversation_id.to_string()),
         assistant_message_id: Some(assistant_message_id.to_string()),
@@ -504,7 +520,7 @@ fn manual_non_command_file_effect_settlement(
         updated_at: 11,
     };
     let approved_audit = AgentActionAuditRecord {
-        action_id: storage_id.to_string(),
+        action_id: storage_id,
         run_id: run_id.to_string(),
         conversation_id: Some(conversation_id.to_string()),
         assistant_message_id: Some(assistant_message_id.to_string()),
@@ -513,7 +529,7 @@ fn manual_non_command_file_effect_settlement(
         decision: Some("approved".to_string()),
         status: "approved".to_string(),
         action_json,
-        patch_result_json: None,
+        file_change_result_json: None,
         command_result_json: None,
         tool_result_json: None,
         error: None,
@@ -681,7 +697,7 @@ fn mcp_rejection_settlement(
         decision: None,
         status: "pending".to_string(),
         action_json,
-        patch_result_json: None,
+        file_change_result_json: None,
         command_result_json: None,
         tool_result_json: None,
         error: None,
@@ -925,19 +941,17 @@ fn file_effect_audit(
 }
 
 fn interrupted_file_effect(
-    storage_id: &str,
+    call_id: &str,
     run_id: &str,
     conversation_id: &str,
     assistant_message_id: &str,
     tool_name: &str,
     created_at: i64,
 ) -> AgentPendingActionRecord {
-    let mut pending = pending_action(storage_id, conversation_id);
-    pending.run_id = run_id.to_string();
+    let mut pending = current_pending_action(run_id, call_id, conversation_id);
     pending.assistant_message_id = Some(assistant_message_id.to_string());
     pending.action_type = file_effect_action_type(tool_name).to_string();
     pending.tool_name = tool_name.to_string();
-    pending.tool_call_id = Some(format!("{storage_id}:call"));
     pending.status = "approved".to_string();
     pending.created_at = created_at;
     pending.updated_at = created_at;
@@ -1380,29 +1394,30 @@ fn unsettled_effects_restore_every_auto_file_producer_but_exclude_terminal_recei
         (
             "office_document",
             "run-auto-document",
-            "run-auto-document:document-call",
+            "document-call",
             "conversation-auto-document",
         ),
         (
             "skills_run_script",
             "run-auto-script",
-            "run-auto-script:script-call",
+            "script-call",
             "conversation-auto-script",
         ),
         (
             "skills_materialize_resource",
             "run-auto-materialize",
-            "run-auto-materialize:materialize-call",
+            "materialize-call",
             "conversation-auto-materialize",
         ),
     ];
 
-    for (index, (tool_name, run_id, storage_id, conversation_id)) in cases.iter().enumerate() {
+    for (index, (tool_name, run_id, call_id, conversation_id)) in cases.iter().enumerate() {
+        let storage_id = current_pending_storage_id(run_id, call_id);
         let assistant_message_id = format!("assistant-{run_id}");
         save_assistant_conversation(&service, conversation_id, &assistant_message_id);
         service
             .upsert_agent_action_audit(file_effect_audit(
-                storage_id,
+                &storage_id,
                 run_id,
                 conversation_id,
                 tool_name,
@@ -1412,11 +1427,13 @@ fn unsettled_effects_restore_every_auto_file_producer_but_exclude_terminal_recei
             ))
             .unwrap();
 
-        let terminal_storage_id = format!("{storage_id}:terminal");
+        let terminal_run_id = format!("{run_id}-terminal");
+        let terminal_storage_id =
+            current_pending_storage_id(&terminal_run_id, &format!("{call_id}-terminal"));
         service
             .upsert_agent_action_audit(file_effect_audit(
                 &terminal_storage_id,
-                &format!("{run_id}-terminal"),
+                &terminal_run_id,
                 conversation_id,
                 tool_name,
                 if index % 2 == 0 {
@@ -1447,12 +1464,12 @@ fn unsettled_effects_restore_every_auto_file_producer_but_exclude_terminal_recei
 
     let mut expected = cases
         .iter()
-        .map(|(_, run_id, storage_id, conversation_id)| {
+        .map(|(_, run_id, call_id, conversation_id)| {
             (
                 Some("project-1".to_string()),
                 (*conversation_id).to_string(),
                 (*run_id).to_string(),
-                (*storage_id).to_string(),
+                current_pending_storage_id(run_id, call_id),
             )
         })
         .collect::<Vec<_>>();
@@ -1468,33 +1485,34 @@ fn startup_reconciliation_conservatively_restores_interrupted_manual_file_effect
         (
             "office_document",
             "run-manual-document",
-            "run-manual-document:document-call",
+            "document-call",
             "conversation-manual-document",
             "assistant-manual-document",
         ),
         (
             "skills_run_script",
             "run-manual-script",
-            "run-manual-script:script-call",
+            "script-call",
             "conversation-manual-script",
             "assistant-manual-script",
         ),
     ];
 
-    for (index, (tool_name, run_id, storage_id, conversation_id, assistant_message_id)) in
+    for (index, (tool_name, run_id, call_id, conversation_id, assistant_message_id)) in
         cases.iter().enumerate()
     {
+        let storage_id = current_pending_storage_id(run_id, call_id);
         save_assistant_conversation(&service, conversation_id, assistant_message_id);
         let trace = seed_current_in_progress_tool_trace(
             &service,
             run_id,
             conversation_id,
             assistant_message_id,
-            &format!("{storage_id}:call"),
+            call_id,
             tool_name,
         );
         let mut pending = interrupted_file_effect(
-            storage_id,
+            call_id,
             run_id,
             conversation_id,
             assistant_message_id,
@@ -1505,7 +1523,7 @@ fn startup_reconciliation_conservatively_restores_interrupted_manual_file_effect
         service.store_pending_agent_action(pending).unwrap();
         service
             .upsert_agent_action_audit(file_effect_audit(
-                storage_id,
+                &storage_id,
                 run_id,
                 conversation_id,
                 tool_name,
@@ -1537,12 +1555,12 @@ fn startup_reconciliation_conservatively_restores_interrupted_manual_file_effect
     restored.sort();
     let mut expected = cases
         .iter()
-        .map(|(_, run_id, storage_id, conversation_id, _)| {
+        .map(|(_, run_id, call_id, conversation_id, _)| {
             (
                 Some("project-1".to_string()),
                 (*conversation_id).to_string(),
                 (*run_id).to_string(),
-                (*storage_id).to_string(),
+                current_pending_storage_id(run_id, call_id),
             )
         })
         .collect::<Vec<_>>();
@@ -1550,11 +1568,12 @@ fn startup_reconciliation_conservatively_restores_interrupted_manual_file_effect
     assert_eq!(restored, expected);
 
     let connection = service.state.connection().unwrap();
-    for (_, _, storage_id, _, _) in cases {
+    for (_, run_id, call_id, _, _) in cases {
+        let storage_id = current_pending_storage_id(run_id, call_id);
         let state: (String, Option<String>) = connection
             .query_row(
                 "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
-                [storage_id],
+                [&storage_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
@@ -1567,7 +1586,6 @@ fn seed_approved_command_with_terminal_session(
     service: &StorageService,
     conversation_id: &str,
     assistant_message_id: &str,
-    storage_id: &str,
     call_id: &str,
     session_id: &str,
     status: crate::AgentCommandSessionStatus,
@@ -1578,7 +1596,7 @@ fn seed_approved_command_with_terminal_session(
         AGENT_COMMAND_SESSION_SCHEMA_VERSION,
     };
     let (mut pending, approved, _terminal, _trace) =
-        manual_command_settlement(storage_id, call_id, conversation_id, assistant_message_id);
+        manual_command_settlement(call_id, conversation_id, assistant_message_id);
     save_assistant_conversation(service, conversation_id, assistant_message_id);
     let trace = seed_current_in_progress_tool_trace(
         service,
@@ -1659,14 +1677,13 @@ fn startup_reconciliation_fail_closes_an_approved_command_with_only_a_terminal_s
     let service = fixture.service();
     let conversation_id = "conversation-approved-terminal-session";
     let assistant_message_id = "assistant-approved-terminal-session";
-    let storage_id = "run-1:approved-terminal-session";
     let call_id = "approved-terminal-session";
+    let storage_id = current_pending_storage_id("run-1", call_id);
     let session_id = "cmd_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     seed_approved_command_with_terminal_session(
         &service,
         conversation_id,
         assistant_message_id,
-        storage_id,
         call_id,
         session_id,
         crate::AgentCommandSessionStatus::Exited,
@@ -1702,7 +1719,7 @@ fn startup_reconciliation_fail_closes_an_approved_command_with_only_a_terminal_s
              FROM agent_pending_actions pending
              JOIN agent_action_audit audit ON audit.action_id = pending.action_id
              WHERE pending.action_id = ?1",
-            [storage_id],
+            [&storage_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
@@ -1729,14 +1746,13 @@ fn outcome_unknown_command_session_keeps_the_interrupted_file_effect_fence() {
     let service = fixture.service();
     let conversation_id = "conversation-outcome-unknown-session";
     let assistant_message_id = "assistant-outcome-unknown-session";
-    let storage_id = "run-1:outcome-unknown-session";
     let call_id = "outcome-unknown-session";
+    let storage_id = current_pending_storage_id("run-1", call_id);
     let session_id = "cmd_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     seed_approved_command_with_terminal_session(
         &service,
         conversation_id,
         assistant_message_id,
-        storage_id,
         call_id,
         session_id,
         crate::AgentCommandSessionStatus::OutcomeUnknown,
@@ -1757,7 +1773,7 @@ fn outcome_unknown_command_session_keeps_the_interrupted_file_effect_fence() {
             project_id: Some("project-1".to_string()),
             conversation_id: conversation_id.to_string(),
             run_id: "run-1".to_string(),
-            action_id: storage_id.to_string(),
+            action_id: storage_id,
         }]
     );
 }
@@ -1773,9 +1789,10 @@ fn unsettled_file_effects_preserve_conversation_scope_without_a_project() {
         "assistant-unscoped-auto",
         None,
     );
+    let auto_storage_id = current_pending_storage_id("run-unscoped-auto", "auto-call");
     service
         .upsert_agent_action_audit(file_effect_audit(
-            "run-unscoped-auto:auto-call",
+            &auto_storage_id,
             "run-unscoped-auto",
             "conversation-unscoped-auto",
             "office_spreadsheet",
@@ -1791,16 +1808,18 @@ fn unsettled_file_effects_preserve_conversation_scope_without_a_project() {
         "assistant-unscoped-manual",
         None,
     );
+    let manual_call_id = "manual-call";
+    let manual_storage_id = current_pending_storage_id("run-unscoped-manual", manual_call_id);
     let trace = seed_current_in_progress_tool_trace(
         &service,
         "run-unscoped-manual",
         "conversation-unscoped-manual",
         "assistant-unscoped-manual",
-        "run-unscoped-manual:manual-call:call",
+        manual_call_id,
         "skills_run_script",
     );
     let mut pending = interrupted_file_effect(
-        "run-unscoped-manual:manual-call",
+        manual_call_id,
         "run-unscoped-manual",
         "conversation-unscoped-manual",
         "assistant-unscoped-manual",
@@ -1811,7 +1830,7 @@ fn unsettled_file_effects_preserve_conversation_scope_without_a_project() {
     service.store_pending_agent_action(pending).unwrap();
     service
         .upsert_agent_action_audit(file_effect_audit(
-            "run-unscoped-manual:manual-call",
+            &manual_storage_id,
             "run-unscoped-manual",
             "conversation-unscoped-manual",
             "skills_run_script",
@@ -1835,13 +1854,13 @@ fn unsettled_file_effects_preserve_conversation_scope_without_a_project() {
                 project_id: None,
                 conversation_id: "conversation-unscoped-auto".to_string(),
                 run_id: "run-unscoped-auto".to_string(),
-                action_id: "run-unscoped-auto:auto-call".to_string(),
+                action_id: auto_storage_id,
             },
             AgentUnsettledFileEffect {
                 project_id: None,
                 conversation_id: "conversation-unscoped-manual".to_string(),
                 run_id: "run-unscoped-manual".to_string(),
-                action_id: "run-unscoped-manual:manual-call".to_string(),
+                action_id: manual_storage_id,
             },
         ]
     );
@@ -1853,7 +1872,6 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
     let service = fixture.service();
     let (mut command_pending, command_approved, command_terminal, command_trace) =
         manual_command_settlement(
-            "run-1:settled-command",
             "settled-command",
             "conversation-settled-command",
             "assistant-settled-command",
@@ -1917,17 +1935,16 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
         exact_model_items
     );
 
-    let mut expected_action_ids = vec!["run-1:settled-command".to_string()];
+    let mut expected_action_ids = vec![current_pending_storage_id("run-1", "settled-command")];
     for effect in ManualNonCommandFileEffect::ALL {
         let label = effect.label();
-        let storage_id = format!("run-settled-{label}:{label}-call");
         let call_id = format!("settled-{label}-call");
         let run_id = format!("run-settled-{label}");
+        let storage_id = current_pending_storage_id(&run_id, &call_id);
         let conversation_id = format!("conversation-settled-{label}");
         let assistant_message_id = format!("assistant-settled-{label}");
         let (mut pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
             effect,
-            &storage_id,
             &call_id,
             &run_id,
             &conversation_id,
@@ -2078,14 +2095,13 @@ fn every_manual_non_command_file_effect_settles_atomically_and_idempotently() {
 
     for effect in ManualNonCommandFileEffect::ALL {
         let label = effect.label();
-        let storage_id = format!("run-{label}:{label}-call");
         let call_id = format!("{label}-call");
         let run_id = format!("run-{label}");
+        let storage_id = current_pending_storage_id(&run_id, &call_id);
         let conversation_id = format!("conversation-{label}");
         let assistant_message_id = format!("assistant-{label}");
         let (pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
             effect,
-            &storage_id,
             &call_id,
             &run_id,
             &conversation_id,
@@ -2171,11 +2187,11 @@ fn every_manual_non_command_file_effect_settles_atomically_and_idempotently() {
 fn executing_skill_script_settles_with_its_terminal_tool_receipt() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
-    let storage_id = "run-executing-skill:executing-skill-call";
+    let call_id = "executing-skill-call";
+    let storage_id = current_pending_storage_id("run-executing-skill", call_id);
     let (mut pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
         ManualNonCommandFileEffect::SkillScript,
-        storage_id,
-        "executing-skill-call",
+        call_id,
         "run-executing-skill",
         "conversation-executing-skill",
         "assistant-executing-skill",
@@ -2199,7 +2215,7 @@ fn executing_skill_script_settles_with_its_terminal_tool_receipt() {
         }
     );
     let settled = service
-        .get_pending_agent_action(storage_id)
+        .get_pending_agent_action(&storage_id)
         .unwrap()
         .unwrap();
     assert_eq!(settled.status, "executing");
@@ -2213,14 +2229,13 @@ fn every_manual_non_command_trace_failure_rolls_back_audit_and_pending_target() 
 
     for effect in ManualNonCommandFileEffect::ALL {
         let label = effect.label();
-        let storage_id = format!("run-rollback-{label}:{label}-call");
         let call_id = format!("rollback-{label}-call");
         let run_id = format!("run-rollback-{label}");
+        let storage_id = current_pending_storage_id(&run_id, &call_id);
         let conversation_id = format!("missing-conversation-{label}");
         let assistant_message_id = format!("missing-assistant-{label}");
         let (pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
             effect,
-            &storage_id,
             &call_id,
             &run_id,
             &conversation_id,
@@ -2253,14 +2268,13 @@ fn manual_non_command_settlement_rejects_command_result_json_without_partial_sta
 
     for effect in ManualNonCommandFileEffect::ALL {
         let label = effect.label();
-        let storage_id = format!("run-command-column-{label}:{label}-call");
         let call_id = format!("command-column-{label}-call");
         let run_id = format!("run-command-column-{label}");
+        let storage_id = current_pending_storage_id(&run_id, &call_id);
         let conversation_id = format!("conversation-command-column-{label}");
         let assistant_message_id = format!("assistant-command-column-{label}");
         let (pending, approved, mut terminal, trace) = manual_non_command_file_effect_settlement(
             effect,
-            &storage_id,
             &call_id,
             &run_id,
             &conversation_id,
@@ -2295,14 +2309,13 @@ fn manual_non_command_settlement_strictly_binds_frozen_action_tool_and_call_iden
 
     for effect in ManualNonCommandFileEffect::ALL {
         let label = effect.label();
-        let storage_id = format!("run-identity-{label}:{label}-call");
         let call_id = format!("identity-{label}-call");
         let run_id = format!("run-identity-{label}");
+        let storage_id = current_pending_storage_id(&run_id, &call_id);
         let conversation_id = format!("conversation-identity-{label}");
         let assistant_message_id = format!("assistant-identity-{label}");
         let (pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
             effect,
-            &storage_id,
             &call_id,
             &run_id,
             &conversation_id,
@@ -2402,14 +2415,13 @@ fn manual_non_command_terminal_conflict_preserves_first_atomic_settlement() {
 
     for effect in ManualNonCommandFileEffect::ALL {
         let label = effect.label();
-        let storage_id = format!("run-terminal-conflict-{label}:{label}-call");
         let call_id = format!("terminal-conflict-{label}-call");
         let run_id = format!("run-terminal-conflict-{label}");
+        let storage_id = current_pending_storage_id(&run_id, &call_id);
         let conversation_id = format!("conversation-terminal-conflict-{label}");
         let assistant_message_id = format!("assistant-terminal-conflict-{label}");
         let (pending, approved, terminal, trace) = manual_non_command_file_effect_settlement(
             effect,
-            &storage_id,
             &call_id,
             &run_id,
             &conversation_id,
@@ -2487,8 +2499,8 @@ fn manual_non_command_terminal_conflict_preserves_first_atomic_settlement() {
 fn manual_command_audit_target_and_trace_commit_as_one_idempotent_transaction() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
+    let storage_id = current_pending_storage_id("run-1", "manual-command");
     let (pending, approved, terminal, trace) = manual_command_settlement(
-        "run-1:manual-command",
         "manual-command",
         "conversation-manual-command",
         "assistant-manual-command",
@@ -2525,7 +2537,7 @@ fn manual_command_audit_target_and_trace_commit_as_one_idempotent_transaction() 
             JOIN agent_action_audit audit ON audit.action_id = pending.action_id
             WHERE pending.action_id = ?1
             ",
-            ["run-1:manual-command"],
+            [&storage_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
@@ -2546,7 +2558,6 @@ fn failed_managed_pdf_settlement_preserves_opaque_history_route_across_durable_a
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let (mut pending, mut approved, mut terminal, mut trace) = manual_command_settlement(
-        "run-1:managed-pdf-failure",
         "managed-pdf-failure",
         "conversation-managed-pdf-failure",
         "assistant-managed-pdf-failure",
@@ -2686,7 +2697,6 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let (pending, approved, mut terminal, mut trace) = manual_command_settlement(
-        "run-1:audit-wrapper-command",
         "audit-wrapper-command",
         "conversation-audit-wrapper-command",
         "assistant-audit-wrapper-command",
@@ -2754,7 +2764,6 @@ fn manual_command_settlement_inspection_distinguishes_commit_boundaries() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let (pending, approved, terminal, trace) = manual_command_settlement(
-        "run-1:inspect-command",
         "inspect-command",
         "conversation-inspect-command",
         "assistant-inspect-command",
@@ -2840,8 +2849,8 @@ fn manual_command_settlement_inspection_distinguishes_commit_boundaries() {
 fn manual_command_trace_failure_rolls_back_audit_and_target() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
+    let storage_id = current_pending_storage_id("run-1", "rollback-command");
     let (pending, approved, terminal, trace) = manual_command_settlement(
-        "run-1:rollback-command",
         "rollback-command",
         "conversation-without-message",
         "assistant-without-message",
@@ -2863,7 +2872,7 @@ fn manual_command_trace_failure_rolls_back_audit_and_target() {
             JOIN agent_action_audit audit ON audit.action_id = pending.action_id
             WHERE pending.action_id = ?1
             ",
-            ["run-1:rollback-command"],
+            [&storage_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -2876,7 +2885,6 @@ fn manual_command_terminal_retry_with_different_result_conflicts_without_overwri
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let (pending, approved, terminal, trace) = manual_command_settlement(
-        "run-1:conflict-command",
         "conflict-command",
         "conversation-conflict-command",
         "assistant-conflict-command",
@@ -2914,7 +2922,6 @@ fn concurrent_manual_command_settlement_is_exactly_once_across_storage_instances
     let fixture = StorageFixture::new();
     let first = fixture.service();
     let (pending, approved, terminal, trace) = manual_command_settlement(
-        "run-1:concurrent-command",
         "concurrent-command",
         "conversation-concurrent-command",
         "assistant-concurrent-command",
@@ -3079,7 +3086,6 @@ fn tampered_trace_evidence_never_settles_a_manual_file_effect() {
         ManualTraceReceiptTamper::CallApproval,
     ] {
         let settlement = manual_command_settlement(
-            "run-1:tampered-trace-command",
             "tampered-trace-command",
             "conversation-tampered-trace-command",
             "assistant-tampered-trace-command",
@@ -3094,11 +3100,12 @@ fn tampered_trace_evidence_never_settles_a_manual_file_effect() {
 
         for effect in ManualNonCommandFileEffect::ALL {
             let label = effect.label();
+            let call_id = format!("tampered-trace-{label}-call");
+            let run_id = format!("run-tampered-trace-{label}");
             let settlement = manual_non_command_file_effect_settlement(
                 effect,
-                &format!("run-tampered-trace-{label}:{label}-call"),
-                &format!("tampered-trace-{label}-call"),
-                &format!("run-tampered-trace-{label}"),
+                &call_id,
+                &run_id,
                 &format!("conversation-tampered-trace-{label}"),
                 &format!("assistant-tampered-trace-{label}"),
             );
@@ -3150,16 +3157,12 @@ fn tampered_command_trace_arguments_restore_the_durable_blocker() {
     for (label, tampered_operation) in cases {
         let fixture = StorageFixture::new();
         let service = fixture.service();
-        let storage_id = format!("run-1:tampered-command-{label}");
         let call_id = format!("tampered-command-{label}");
+        let storage_id = current_pending_storage_id("run-1", &call_id);
         let conversation_id = format!("conversation-tampered-command-{label}");
         let assistant_message_id = format!("assistant-tampered-command-{label}");
-        let (mut pending, approved, terminal, mut trace) = manual_command_settlement(
-            &storage_id,
-            &call_id,
-            &conversation_id,
-            &assistant_message_id,
-        );
+        let (mut pending, approved, terminal, mut trace) =
+            manual_command_settlement(&call_id, &conversation_id, &assistant_message_id);
         attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
@@ -3220,16 +3223,12 @@ fn tampered_command_execution_evidence_restores_the_durable_blocker() {
         };
         let fixture = StorageFixture::new();
         let service = fixture.service();
-        let storage_id = format!("run-1:tampered-command-result-{label}");
         let call_id = format!("tampered-command-result-{label}");
+        let storage_id = current_pending_storage_id("run-1", &call_id);
         let conversation_id = format!("conversation-tampered-command-result-{label}");
         let assistant_message_id = format!("assistant-tampered-command-result-{label}");
-        let (mut pending, approved, terminal, trace) = manual_command_settlement(
-            &storage_id,
-            &call_id,
-            &conversation_id,
-            &assistant_message_id,
-        );
+        let (mut pending, approved, terminal, trace) =
+            manual_command_settlement(&call_id, &conversation_id, &assistant_message_id);
         attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
@@ -3305,16 +3304,12 @@ fn command_terminal_outcome_cannot_diverge_from_execution_evidence() {
     ] {
         let fixture = StorageFixture::new();
         let service = fixture.service();
-        let storage_id = format!("run-1:command-outcome-{case}");
         let call_id = format!("command-outcome-{case}");
+        let storage_id = current_pending_storage_id("run-1", &call_id);
         let conversation_id = format!("conversation-command-outcome-{case}");
         let assistant_message_id = format!("assistant-command-outcome-{case}");
-        let (mut pending, approved, terminal, mut trace) = manual_command_settlement(
-            &storage_id,
-            &call_id,
-            &conversation_id,
-            &assistant_message_id,
-        );
+        let (mut pending, approved, terminal, mut trace) =
+            manual_command_settlement(&call_id, &conversation_id, &assistant_message_id);
         attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
@@ -3525,7 +3520,7 @@ fn pre_runtime_failure_fixture(
 ) {
     let conversation_id = "conversation-pre-runtime-failure";
     let assistant_message_id = "assistant-pre-runtime-failure";
-    let action_id = "action-pre-runtime-failure";
+    let source_call_id = "action-pre-runtime-failure";
     let mut stored = conversation(conversation_id, Some("project-1"), assistant_message_id);
     let mut assistant = stored.messages.remove(0);
     assistant.role = "assistant".to_string();
@@ -3559,7 +3554,7 @@ fn pre_runtime_failure_fixture(
         assistant,
     ];
     service.save_conversation(stored).unwrap();
-    let mut pending = pending_action(action_id, conversation_id);
+    let mut pending = current_pending_action("run-1", source_call_id, conversation_id);
     pending.assistant_message_id = Some(assistant_message_id.to_string());
     pending.status = "approved".to_string();
     pending.target_status = Some("completed".to_string());
@@ -3569,7 +3564,7 @@ fn pre_runtime_failure_fixture(
         "run-1",
         conversation_id,
         assistant_message_id,
-        action_id,
+        source_call_id,
         "run_command",
     );
     let in_progress_model_context = current_model_context_for_trace(&in_progress);
@@ -3612,7 +3607,7 @@ fn pre_runtime_continuation_failure_commits_all_terminal_facts_atomically() {
                 conversation_id: pending.conversation_id.clone(),
                 user_message_id: Some("user-pre-runtime-failure".to_string()),
                 assistant_message_id: pending.assistant_message_id.clone(),
-                approval_action_id: Some(pending.action_id.clone()),
+                approval_action_id: pending.tool_call_id.clone(),
                 subject_kind: "prompt_excerpt".to_string(),
                 subject_text: "do work".to_string(),
                 dedupe_key: "approval-pre-runtime-failure".to_string(),
@@ -3867,7 +3862,9 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
     usage.status = Some("running".to_string());
     usage.completed_at = None;
     service.upsert_agent_usage(usage).unwrap();
-    let mut pending = pending_action("action-interrupted", "conversation-interrupted");
+    let source_call_id = "action-interrupted";
+    let storage_id = current_pending_storage_id("run-1", source_call_id);
+    let mut pending = current_pending_action("run-1", source_call_id, "conversation-interrupted");
     pending.assistant_message_id = Some("assistant-interrupted".to_string());
     pending.status = "approved".to_string();
     attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
@@ -3896,7 +3893,7 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
     let pending_row: (String, String) = connection
         .query_row(
             "SELECT status, agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
-            ["action-interrupted"],
+            [&storage_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
@@ -3914,7 +3911,7 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
 }
 
 #[test]
-fn malformed_current_pending_rows_retire_from_durable_identity_without_dispatch() {
+fn malformed_current_pending_rows_with_noncanonical_identity_retire_without_dispatch() {
     for expected_status in ["pending", "approved", "executing"] {
         let fixture = StorageFixture::new();
         let service = fixture.service();
@@ -4167,7 +4164,9 @@ fn startup_reconciliation_preserves_a_durable_terminal_assistant_commit() {
     usage.status = Some("running".to_string());
     usage.completed_at = None;
     service.upsert_agent_usage(usage).unwrap();
-    let mut pending = pending_action("action-terminal", "conversation-terminal");
+    let source_call_id = "action-terminal";
+    let storage_id = current_pending_storage_id("run-1", source_call_id);
+    let mut pending = current_pending_action("run-1", source_call_id, "conversation-terminal");
     pending.assistant_message_id = Some("assistant-terminal".to_string());
     pending.status = "approved".to_string();
     pending.target_status = Some("completed".to_string());
@@ -4180,8 +4179,8 @@ fn startup_reconciliation_preserves_a_durable_terminal_assistant_commit() {
     let connection = service.state.connection().unwrap();
     let pending_status: String = connection
         .query_row(
-            "SELECT status FROM agent_pending_actions WHERE action_id = 'action-terminal'",
-            [],
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
             |row| row.get(0),
         )
         .unwrap();
@@ -4279,13 +4278,15 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
         )
         .unwrap();
 
-    let mut parent = pending_action("parent-action", "conversation-nested");
+    let parent_storage_id = current_pending_storage_id("run-1", "parent-action");
+    let mut parent = current_pending_action("run-1", "parent-action", "conversation-nested");
     parent.assistant_message_id = Some("assistant-nested".to_string());
     parent.status = "executing".to_string();
     parent.target_status = Some("completed".to_string());
     service.store_pending_agent_action(parent).unwrap();
 
-    let mut child = pending_action("child-storage-id", "conversation-nested");
+    let child_storage_id = current_pending_storage_id("run-1", "child-call");
+    let mut child = current_pending_action("run-1", "child-call", "conversation-nested");
     child.assistant_message_id = Some("assistant-nested".to_string());
     child.action_type = "tool_call".to_string();
     child.tool_name = "approval_tool".to_string();
@@ -4306,7 +4307,7 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
 
     assert!(service
         .pending_agent_action_has_unsettled_predecessor(
-            "child-storage-id",
+            &child_storage_id,
             &["parent-action".to_string()],
         )
         .unwrap());
@@ -4317,19 +4318,19 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
 
     assert!(!service
         .pending_agent_action_has_unsettled_predecessor(
-            "child-storage-id",
+            &child_storage_id,
             &["parent-action".to_string()],
         )
         .unwrap());
 
     let pending = service.list_pending_agent_actions().unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].action_id, "child-storage-id");
+    assert_eq!(pending[0].action_id, child_storage_id);
     let connection = service.state.connection().unwrap();
     let parent_status: String = connection
         .query_row(
-            "SELECT status FROM agent_pending_actions WHERE action_id = 'parent-action'",
-            [],
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [&parent_storage_id],
             |row| row.get(0),
         )
         .unwrap();
@@ -4399,7 +4400,7 @@ fn pending_sibling_without_a_durable_result_is_not_a_predecessor() {
         )
         .unwrap();
 
-    let mut sibling = pending_action("sibling-storage-id", conversation_id);
+    let mut sibling = current_pending_action("run-1", "sibling-call", conversation_id);
     sibling.assistant_message_id = Some(assistant_message_id.to_string());
     sibling.action_type = "tool_call".to_string();
     sibling.tool_name = "approval_tool".to_string();
@@ -4417,7 +4418,8 @@ fn pending_sibling_without_a_durable_result_is_not_a_predecessor() {
     .to_string();
     service.store_pending_agent_action(sibling).unwrap();
 
-    let mut successor = pending_action("successor-storage-id", conversation_id);
+    let successor_storage_id = current_pending_storage_id("run-1", "successor-call");
+    let mut successor = current_pending_action("run-1", "successor-call", conversation_id);
     successor.assistant_message_id = Some(assistant_message_id.to_string());
     successor.action_type = "tool_call".to_string();
     successor.tool_name = "approval_tool".to_string();
@@ -4437,7 +4439,7 @@ fn pending_sibling_without_a_durable_result_is_not_a_predecessor() {
 
     assert!(!service
         .pending_agent_action_has_unsettled_predecessor(
-            "successor-storage-id",
+            &successor_storage_id,
             &["sibling-call".to_string()],
         )
         .unwrap());
@@ -4473,7 +4475,9 @@ fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
     usage.completed_at = None;
     service.upsert_agent_usage(usage).unwrap();
 
-    let mut parent = pending_action("invalid-parent", "conversation-invalid-nested");
+    let parent_call_id = "invalid-parent";
+    let parent_storage_id = current_pending_storage_id("run-1", parent_call_id);
+    let mut parent = current_pending_action("run-1", parent_call_id, "conversation-invalid-nested");
     parent.assistant_message_id = Some("assistant-invalid-nested".to_string());
     parent.status = "executing".to_string();
     let parent_trace = seed_current_in_progress_tool_trace(
@@ -4481,21 +4485,22 @@ fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
         "run-1",
         "conversation-invalid-nested",
         "assistant-invalid-nested",
-        "invalid-parent",
+        parent_call_id,
         "run_command",
     );
     attach_current_manual_file_effect_checkpoint(&mut parent, &parent_trace);
     service.store_pending_agent_action(parent).unwrap();
 
-    let mut child = pending_action("invalid-child", "conversation-invalid-nested");
+    let child_call_id = "invalid-child-call";
+    let child_storage_id = current_pending_storage_id("run-1", child_call_id);
+    let mut child = current_pending_action("run-1", child_call_id, "conversation-invalid-nested");
     child.assistant_message_id = Some("assistant-invalid-nested".to_string());
     child.action_type = "tool_call".to_string();
     child.tool_name = "approval_tool".to_string();
-    child.tool_call_id = Some("invalid-child-call".to_string());
     child.action_json = serde_json::json!({
         "type": "tool_call",
         "call": {
-            "id": "invalid-child-call",
+            "id": child_call_id,
             "tool": "approval_tool",
             "args": {},
             "approvalStatus": "required",
@@ -4524,17 +4529,20 @@ fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
         .prepare(
             "SELECT action_id, status, target_status
              FROM agent_pending_actions
-             WHERE action_id IN ('invalid-parent', 'invalid-child')
+             WHERE action_id IN (?1, ?2)
              ORDER BY action_id",
         )
         .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
+        .query_map(
+            rusqlite::params![&parent_storage_id, &child_storage_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -4542,12 +4550,12 @@ fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
         statuses,
         vec![
             (
-                "invalid-child".to_string(),
+                child_storage_id,
                 "cancelled".to_string(),
                 Some("cancelled".to_string())
             ),
             (
-                "invalid-parent".to_string(),
+                parent_storage_id,
                 "failed".to_string(),
                 Some("failed".to_string())
             )
@@ -4593,7 +4601,9 @@ fn startup_reconciliation_keeps_failed_action_outcome_when_assistant_commit_comp
     usage.status = Some("completed".to_string());
     usage.completed_at = Some(40);
     service.upsert_agent_usage(usage).unwrap();
-    let mut pending = pending_action("action-failed", "conversation-failed-action");
+    let source_call_id = "action-failed";
+    let storage_id = current_pending_storage_id("run-1", source_call_id);
+    let mut pending = current_pending_action("run-1", source_call_id, "conversation-failed-action");
     pending.assistant_message_id = Some("assistant-failed-action".to_string());
     pending.status = "approved".to_string();
     pending.target_status = Some("failed".to_string());
@@ -4606,8 +4616,8 @@ fn startup_reconciliation_keeps_failed_action_outcome_when_assistant_commit_comp
     let connection = service.state.connection().unwrap();
     let pending_status: String = connection
         .query_row(
-            "SELECT status FROM agent_pending_actions WHERE action_id = 'action-failed'",
-            [],
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
             |row| row.get(0),
         )
         .unwrap();

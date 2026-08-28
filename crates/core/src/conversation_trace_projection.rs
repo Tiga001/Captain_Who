@@ -35,7 +35,6 @@ impl DurableTraceProjectionLimits {
     pub(crate) const GENERIC_DEPTH: usize = 8;
     pub(crate) const WEB_SEARCH_RESULTS: usize = 10;
     pub(crate) const WEB_FAILED_RESULTS: usize = 10;
-    pub(crate) const FILE_PATHS: usize = 32;
 }
 
 #[derive(Debug)]
@@ -144,7 +143,6 @@ pub(crate) fn project_tool_call(tool: &str, operation: &Value) -> ProjectedValue
                 ),
             ],
         ),
-        "write_file" => project_write_file_call(operation),
         "apply_patch" => project_apply_patch_call(operation),
         "run_command" => {
             // This operation is also verified against the frozen approval action during recovery.
@@ -172,7 +170,6 @@ pub(crate) fn project_tool_result(
     let projected = match tool {
         "web_fetch" => project_web_fetch_result(observation),
         "web_search" => project_web_search_result(observation),
-        "write_file" => project_write_file_result(observation),
         "apply_patch" => project_apply_patch_result(operation, observation),
         "run_command" => project_run_command_result(observation),
         "command_session" => project_command_session_result(observation),
@@ -277,82 +274,6 @@ fn is_manually_audited_operation(tool: &str) -> bool {
 
 fn is_read_tool(tool: &str) -> bool {
     tool.starts_with("read_") || tool == "skills_read_resource"
-}
-
-fn project_write_file_call(value: &Value) -> (Value, bool) {
-    let Some(input) = value.as_object() else {
-        return project_generic_value(value);
-    };
-    let mut output = Map::new();
-    let mut truncated = false;
-    for (key, limit) in [
-        ("phase", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
-        (
-            "draftId",
-            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-        ),
-        ("filePath", DurableTraceProjectionLimits::PATH_CHARS),
-        ("mode", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
-        ("index", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
-        ("summary", DurableTraceProjectionLimits::SUMMARY_CHARS),
-        (
-            "contentDigest",
-            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-        ),
-        (
-            "editsDigest",
-            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-        ),
-    ] {
-        copy_bounded_field(input, &mut output, key, limit, &mut truncated);
-    }
-    if input
-        .get("content")
-        .and_then(Value::as_str)
-        .is_some_and(|content| content == "[write_file chunk omitted from conversation history]")
-    {
-        if let Some(content_bytes) = input.get("contentBytes") {
-            output.insert("contentBytes".into(), content_bytes.clone());
-        }
-        if let Some(content_lines) = input.get("contentLines") {
-            output.insert("contentLines".into(), content_lines.clone());
-        }
-        output.insert(
-            "content".into(),
-            json!("[write_file chunk omitted from conversation history]"),
-        );
-        truncated = true;
-    } else if let Some(content) = input.get("content").and_then(Value::as_str) {
-        output.insert("contentBytes".into(), json!(content.len()));
-        output.insert("contentLines".into(), json!(line_count(content)));
-        output.insert(
-            "contentDigest".into(),
-            json!(crate::file_change::content_digest(content.as_bytes())),
-        );
-        output.insert(
-            "content".into(),
-            json!("[write_file chunk omitted from conversation history]"),
-        );
-        truncated = true;
-    } else if let Some(content_bytes) = input.get("contentBytes") {
-        output.insert("contentBytes".into(), content_bytes.clone());
-        output.insert(
-            "content".into(),
-            json!("[write_file chunk omitted from conversation history]"),
-        );
-        truncated = true;
-    }
-    if let Some(edits) = input.get("edits").and_then(Value::as_array) {
-        output.insert("editCount".into(), json!(edits.len()));
-        if let Ok(digest) = crate::file_change::proposal_digest(&Value::Array(edits.clone())) {
-            output.insert("editsDigest".into(), json!(digest));
-        }
-        let (additions, deletions) = structured_edit_stats(edits);
-        output.insert("additions".into(), json!(additions));
-        output.insert("deletions".into(), json!(deletions));
-        truncated = true;
-    }
-    (Value::Object(output), truncated)
 }
 
 fn project_apply_patch_call(value: &Value) -> (Value, bool) {
@@ -660,111 +581,49 @@ fn project_web_search_entry(value: &Value) -> (Value, bool) {
     )
 }
 
-fn project_write_file_result(value: &Value) -> (Value, bool) {
-    let source = value
-        .get("draft")
-        .and_then(Value::as_object)
-        .or_else(|| value.as_object());
-    let Some(input) = source else {
-        return project_generic_value(value);
-    };
-    project_selected_map(
-        input,
-        &[
-            ("status", DurableTraceProjectionLimits::TITLE_CHARS),
-            (
-                "draftId",
-                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-            ),
-            ("mode", DurableTraceProjectionLimits::TITLE_CHARS),
-            ("filePath", DurableTraceProjectionLimits::PATH_CHARS),
-            (
-                "additions",
-                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-            ),
-            (
-                "deletions",
-                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-            ),
-            (
-                "lineCount",
-                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-            ),
-            (
-                "byteCount",
-                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-            ),
-            (
-                "revision",
-                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-            ),
-            ("error", DurableTraceProjectionLimits::TOOL_ERROR_CHARS),
-            ("message", DurableTraceProjectionLimits::SUMMARY_CHARS),
-        ],
-    )
-}
-
-fn project_apply_patch_result(operation: Option<&Value>, value: &Value) -> (Value, bool) {
+fn project_apply_patch_result(_operation: Option<&Value>, value: &Value) -> (Value, bool) {
     let Some(input) = value.as_object() else {
         return project_generic_value(value);
     };
     let mut output = Map::new();
     let mut truncated = false;
     for (key, limit) in [
+        (
+            "transactionId",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
         ("status", DurableTraceProjectionLimits::TITLE_CHARS),
+        ("outcome", DurableTraceProjectionLimits::TITLE_CHARS),
         (
             "operation",
             DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
         ),
+        ("strategy", DurableTraceProjectionLimits::TITLE_CHARS),
+        ("updateStrategy", DurableTraceProjectionLimits::TITLE_CHARS),
         ("filePath", DurableTraceProjectionLimits::PATH_CHARS),
+        (
+            "revision",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        ("errorCode", DurableTraceProjectionLimits::TITLE_CHARS),
         ("error", DurableTraceProjectionLimits::TOOL_ERROR_CHARS),
         ("message", DurableTraceProjectionLimits::SUMMARY_CHARS),
-        (
-            "gitDiffError",
-            DurableTraceProjectionLimits::TOOL_ERROR_CHARS,
-        ),
     ] {
         copy_bounded_field(input, &mut output, key, limit, &mut truncated);
     }
-    if let Some(paths) = input.get("appliedFilePaths").and_then(Value::as_array) {
-        let (paths, paths_truncated) = bounded_string_array(
-            paths,
-            DurableTraceProjectionLimits::FILE_PATHS,
-            DurableTraceProjectionLimits::PATH_CHARS,
-        );
-        output.insert("appliedFilePaths".into(), Value::Array(paths));
-        truncated |= paths_truncated;
-    }
-    let patch = input
-        .get("gitDiff")
-        .and_then(|value| value.get("patch"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            operation
-                .and_then(|value| value.get("patch"))
-                .and_then(Value::as_str)
-        });
-    let (additions, deletions) = patch.map(unified_diff_stats).unwrap_or_else(|| {
-        let operation_stats = operation.map(operation_stats).unwrap_or((0, 0));
-        if operation_stats == (0, 0) {
-            (
-                input.get("additions").and_then(Value::as_u64).unwrap_or(0),
-                input.get("deletions").and_then(Value::as_u64).unwrap_or(0),
-            )
-        } else {
-            operation_stats
+    for key in [
+        "schemaVersion",
+        "additions",
+        "deletions",
+        "lineCount",
+        "byteCount",
+        "draftRevision",
+        "nextIndex",
+        "mutationCount",
+    ] {
+        if let Some(value) = input.get(key).filter(|value| value.is_u64()) {
+            output.insert(key.to_string(), value.clone());
         }
-    });
-    output.insert("additions".into(), json!(additions));
-    output.insert("deletions".into(), json!(deletions));
-    if input.get("gitDiff").is_some()
-        || input
-            .get("patchOmittedFromHistory")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
-        output.insert("patchOmittedFromHistory".into(), json!(true));
-        truncated = true;
     }
     (Value::Object(output), truncated)
 }
@@ -1391,32 +1250,6 @@ fn line_count(value: &str) -> u64 {
     }
 }
 
-fn unified_diff_stats(patch: &str) -> (u64, u64) {
-    patch.lines().fold((0, 0), |(additions, deletions), line| {
-        if line.starts_with("+++") || line.starts_with("---") {
-            (additions, deletions)
-        } else if line.starts_with('+') {
-            (additions.saturating_add(1), deletions)
-        } else if line.starts_with('-') {
-            (additions, deletions.saturating_add(1))
-        } else {
-            (additions, deletions)
-        }
-    })
-}
-
-fn operation_stats(operation: &Value) -> (u64, u64) {
-    if let Some(patch) = operation.get("patch").and_then(Value::as_str) {
-        unified_diff_stats(patch)
-    } else if let Some(content) = operation.get("content").and_then(Value::as_str) {
-        (line_count(content), 0)
-    } else if let Some(edits) = operation.get("edits").and_then(Value::as_array) {
-        structured_edit_stats(edits)
-    } else {
-        (0, 0)
-    }
-}
-
 fn structured_edit_stats(edits: &[Value]) -> (u64, u64) {
     edits.iter().fold((0, 0), |(additions, deletions), edit| {
         let kind = edit.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -1436,21 +1269,6 @@ fn structured_edit_stats(edits: &[Value]) -> (u64, u64) {
             deletions.saturating_add(deleted),
         )
     })
-}
-
-fn bounded_string_array(input: &[Value], max_items: usize, max_chars: usize) -> (Vec<Value>, bool) {
-    let mut truncated = input.len() > max_items;
-    let output = input
-        .iter()
-        .take(max_items)
-        .filter_map(Value::as_str)
-        .map(|value| {
-            let (value, item_truncated) = sanitize_and_bound_text(value, max_chars, false);
-            truncated |= item_truncated;
-            json!(value)
-        })
-        .collect();
-    (output, truncated)
 }
 
 #[cfg(test)]

@@ -17,7 +17,6 @@ export function formatToolDetails(value: unknown) {
 export function getToolDisplayName(tool: string, t: Translate) {
   const labels: Record<string, TranslationKey> = {
     apply_patch: 'tool.applyPatch',
-    write_file: 'tool.writeFile',
     attachments_list: 'tool.attachmentsList',
     attachments_list_project: 'tool.attachmentsListProject',
     conversation_history: 'tool.conversationHistory',

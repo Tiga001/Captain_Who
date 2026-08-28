@@ -447,38 +447,30 @@
       }
     },
     {
-      "name": "file_draft_runtime_and_presentation_contract",
+      "name": "staged_file_change_runtime_and_presentation_contract",
       "toolResult": {
-        "callId": "call-write-file",
-        "tool": "write_file",
+        "callId": "call-apply-patch-append",
+        "tool": "apply_patch",
         "ok": true,
         "result": {
-          "draft": {
-            "draftId": "draft-1",
-            "conversationId": "conversation-1",
-            "projectId": "project-1",
-            "filePath": "report.md",
-            "mode": "create",
-            "status": "drafting",
-            "additions": 2,
-            "deletions": 0,
-            "lineCount": 2,
-            "byteCount": 20,
-            "chunkCount": 1,
-            "nextChunkIndex": 1,
-            "statsFinal": false,
-            "summary": "Draft report",
-            "createdAt": 1785200000000,
-            "updatedAt": 1785200000100
-          },
+          "transactionId": "transaction-1",
+          "operation": "create",
+          "strategy": null,
+          "filePath": "report.md",
+          "status": "drafting",
+          "draftRevision": 1,
+          "nextIndex": 1,
+          "byteCount": 25,
+          "lineCount": 1,
+          "mutationCount": 1,
+          "additions": 1,
+          "deletions": 0,
           "tail": "private generated content",
           "totalChars": 25,
           "tailStart": 0,
           "tailTruncated": false,
-          "maxDraftBytes": 8388608,
-          "transactionState": "dirty",
-          "requiresFinishBeforeResponse": true,
-          "nextAction": "append_or_finish"
+          "allowedNextActions": ["append", "edit", "commit", "status", "abort"],
+          "requiresCommitBeforeResponse": true
         }
       },
       "stages": {
@@ -488,30 +480,24 @@
             "/result/totalChars": 25,
             "/result/tailStart": 0,
             "/result/tailTruncated": false,
-            "/result/draft/draftId": "draft-1",
-            "/result/nextAction": "append_or_finish"
-          },
-          "absent": [
-            "/result/maxDraftBytes",
-            "/result/draft/conversationId",
-            "/result/draft/projectId",
-            "/result/draft/createdAt",
-            "/result/draft/updatedAt",
-            "/result/draft/additions",
-            "/result/draft/deletions"
-          ]
+            "/result/transactionId": "transaction-1",
+            "/result/draftRevision": 1,
+            "/result/nextIndex": 1,
+            "/result/requiresCommitBeforeResponse": true
+          }
         },
         "rendererEvent": {
           "required": {
-            "/result/draft/draftId": "draft-1",
-            "/result/draft/status": "drafting",
-            "/result/draft/additions": 2,
-            "/result/draft/deletions": 0,
-            "/result/draft/lineCount": 2,
-            "/result/draft/byteCount": 20,
+            "/result/transactionId": "transaction-1",
+            "/result/status": "drafting",
+            "/result/additions": 1,
+            "/result/deletions": 0,
+            "/result/lineCount": 1,
+            "/result/byteCount": 25,
             "/result/totalChars": 25,
             "/result/tailStart": 0,
-            "/result/tailTruncated": false
+            "/result/tailTruncated": false,
+            "/result/tailBytes": 25
           },
           "absent": ["/result/tail"]
         },
@@ -529,7 +515,7 @@
         },
         "checkpoint": {
           "required": {
-            "/result/draft/draftId": "draft-1",
+            "/result/transactionId": "transaction-1",
             "/result/tailBytes": 25,
             "/result/tailDigest": "file-change-sha256-v1:cfe1d449ceb41d0c15a4ea729ef2e1374ae0706e1f86d50ad32a12f88e727dda"
           },

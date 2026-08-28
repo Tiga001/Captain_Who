@@ -538,7 +538,16 @@ export function groupTimelineItems(
       ]
     }
 
-    if (call.tool === 'write_file') {
+    const callArgs =
+      call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+        ? (call.args as Record<string, unknown>)
+        : {}
+    if (
+      call.tool === 'apply_patch' &&
+      ['begin', 'append', 'edit', 'commit', 'status', 'abort'].includes(
+        String(callArgs.action ?? '')
+      )
+    ) {
       let existingIndex = -1
       for (let index = items.length - 1; index >= 0; index -= 1) {
         const candidate = items[index]
@@ -702,15 +711,13 @@ export function getWriteFileDraftId(
 ): string | undefined {
   const args =
     call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
-  if (typeof args.draftId === 'string' && args.draftId) return args.draftId
+  if (typeof args.transactionId === 'string' && args.transactionId) return args.transactionId
   const result = getToolResult(run, call.id)?.result
   if (!result || typeof result !== 'object') return undefined
-  const resultDraftId = (result as Record<string, unknown>).draftId
-  if (typeof resultDraftId === 'string' && resultDraftId) return resultDraftId
-  const draft = (result as Record<string, unknown>).draft
-  if (!draft || typeof draft !== 'object') return undefined
-  const draftId = (draft as Record<string, unknown>).draftId
-  return typeof draftId === 'string' && draftId ? draftId : undefined
+  const resultTransactionId = (result as Record<string, unknown>).transactionId
+  return typeof resultTransactionId === 'string' && resultTransactionId
+    ? resultTransactionId
+    : undefined
 }
 
 export function getLatestWriteFilePreview(
@@ -719,7 +726,7 @@ export function getLatestWriteFilePreview(
 ): ChatFileWritePreview | undefined {
   if (!draftId) return undefined
   return run.fileWritePreviews?.reduce<ChatFileWritePreview | undefined>((latest, preview) => {
-    if (preview.draftId !== draftId) return latest
+    if (preview.transactionId !== draftId) return latest
     return !latest || preview.receivedAt >= latest.receivedAt ? preview : latest
   }, undefined)
 }
@@ -738,7 +745,7 @@ export function getWriteFileGroupItems(
     const itemKey = draftId ?? `pending-${call.id}`
     const existing = itemsByDraft.get(itemKey)
     const draft = draftId
-      ? run.fileDrafts?.find((candidate) => candidate.draftId === draftId)
+      ? run.fileDrafts?.find((candidate) => candidate.transactionId === draftId)
       : undefined
     const preview = getLatestWriteFilePreview(run, draftId)
     const draftIsUnsettled =

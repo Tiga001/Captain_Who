@@ -82,7 +82,7 @@ fn staged_mutation_receipt(transaction_id: &str, index: u64) -> String {
     .unwrap()
 }
 
-fn write_file_bridge_observation(
+fn file_change_observation(
     conversation_id: &str,
     run_id: &str,
     begin_call_id: &str,
@@ -98,7 +98,7 @@ fn write_file_bridge_observation(
     let checkpoint = FileObservationCheckpoint {
         schema_version: FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
         observation_id: observation_id.clone(),
-        source_tool_call_id: format!("write-file-host-read:{begin_call_id}"),
+        source_tool_call_id: begin_call_id.to_string(),
         conversation_id: conversation_id.to_string(),
         run_id: run_id.to_string(),
         canonical_target: canonical_target.to_string(),
@@ -614,20 +614,20 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
             items.extend(staged_tool_exchange(
                 1,
                 "call-file-begin",
-                "write_file",
-                json!({"phase":"begin","mode":"rewrite","filePath":"notes.md"}),
+                "apply_patch",
+                json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))}),
             ));
             items.extend(staged_tool_exchange(
                 3,
                 "call-file-append",
-                "write_file",
-                json!({"phase":"append","draftId":"file-change-source","index":0,"content":"after\n"}),
+                "apply_patch",
+                json!({"action":"append","transactionId":"file-change-source","index":0,"expectedDraftRevision":0,"content":"after\n"}),
             ));
             items.extend(staged_tool_exchange(
                 5,
                 "call-file-commit",
-                "write_file",
-                json!({"phase":"finish","draftId":"file-change-source"}),
+                "apply_patch",
+                json!({"action":"commit","transactionId":"file-change-source","expectedDraftRevision":1}),
             ));
         }
         let trace = ConversationTurnTrace {
@@ -648,11 +648,10 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
         )
         .unwrap();
     }
-    let begin_args = json!({"phase":"begin","mode":"rewrite","filePath":"notes.md"});
-    let append_args =
-        json!({"phase":"append","draftId":"file-change-source","index":0,"content":"after\n"});
+    let begin_args = json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))});
+    let append_args = json!({"action":"append","transactionId":"file-change-source","index":0,"expectedDraftRevision":0,"content":"after\n"});
     let base_revision = crate::content_revision(b"before\n");
-    let (observation_id, observation_json) = write_file_bridge_observation(
+    let (observation_id, observation_json) = file_change_observation(
         &source.id,
         "run-source-1",
         "call-file-begin",
@@ -667,7 +666,7 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
             conversation_id: source.id.clone(),
             project_id: None,
             run_id: "run-source-1".to_string(),
-            source_tool_name: "write_file".to_string(),
+            source_tool_name: "apply_patch".to_string(),
             source_tool_call_id: "call-file-begin".to_string(),
             source_tool_arguments_digest: crate::file_change::proposal_digest(&begin_args).unwrap(),
             permission_revision: "permission-1".to_string(),
@@ -692,6 +691,10 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
             stats_final: true,
             summary: Some("updated notes".to_string()),
             final_action_id: Some("call-file-commit".to_string()),
+            final_action_arguments_digest: Some("commit-arguments-digest".to_string()),
+            final_permission_revision: Some("permission-1".to_string()),
+            final_tool_set_revision: Some("tool-set-1".to_string()),
+            final_provider_wire_revision: Some("provider-protocol-v1".to_string()),
             created_at: 4,
             updated_at: 4,
             expires_at: i64::MAX,
@@ -824,7 +827,7 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
     assert_eq!(
         call_args
             .get(target_operation.source_tool_call_id.as_str())
-            .unwrap()["draftId"],
+            .unwrap()["transactionId"],
         target_change.id
     );
     assert!(file_change_repository::get_file_change_for_owner(
@@ -833,7 +836,7 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
         &plan.target.id,
         None,
         &plan.run_id_map["run-source-1"],
-        "write_file",
+        "apply_patch",
     )
     .unwrap()
     .is_none());
@@ -1102,6 +1105,10 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             stats_final: true,
             summary: Some("replace notes".to_string()),
             final_action_id: Some(COMMIT_CALL_ID.to_string()),
+            final_action_arguments_digest: Some("commit-arguments-digest".to_string()),
+            final_permission_revision: Some("permission-1".to_string()),
+            final_tool_set_revision: Some("tool-set-1".to_string()),
+            final_provider_wire_revision: Some("provider-protocol-v1".to_string()),
             created_at: 35,
             updated_at: 40,
             expires_at: i64::MAX,
@@ -1596,7 +1603,7 @@ fn root_fork_rejects_a_visible_run_draft_mutated_after_the_time_cutoff() {
     let source = source_conversation();
     chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
     let base_revision = crate::content_revision(b"before");
-    let (observation_id, observation_json) = write_file_bridge_observation(
+    let (observation_id, observation_json) = file_change_observation(
         &source.id,
         "run-source-1",
         "call-late-begin",
@@ -1611,7 +1618,7 @@ fn root_fork_rejects_a_visible_run_draft_mutated_after_the_time_cutoff() {
             conversation_id: source.id.clone(),
             project_id: None,
             run_id: "run-source-1".to_string(),
-            source_tool_name: "write_file".to_string(),
+            source_tool_name: "apply_patch".to_string(),
             source_tool_call_id: "call-late-begin".to_string(),
             source_tool_arguments_digest: "not-reached".to_string(),
             permission_revision: "permission-1".to_string(),
@@ -1622,7 +1629,7 @@ fn root_fork_rejects_a_visible_run_draft_mutated_after_the_time_cutoff() {
             file_path: "late.md".to_string(),
             operation: "update".to_string(),
             strategy: Some("rewrite".to_string()),
-            status: "applied".to_string(),
+            status: "drafting".to_string(),
             base_revision: Some(base_revision),
             base_content: "before".to_string(),
             content: "after".to_string(),
@@ -1633,9 +1640,13 @@ fn root_fork_rejects_a_visible_run_draft_mutated_after_the_time_cutoff() {
             line_count: 1,
             byte_count: 5,
             mutation_count: 0,
-            stats_final: true,
+            stats_final: false,
             summary: None,
             final_action_id: None,
+            final_action_arguments_digest: None,
+            final_permission_revision: None,
+            final_tool_set_revision: None,
+            final_provider_wire_revision: None,
             created_at: 30,
             updated_at: 70,
             expires_at: i64::MAX,
@@ -1681,22 +1692,21 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
     let source = source_conversation();
     chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
     let transaction_id = "file-change-plan-snapshot";
-    let begin_args = json!({"phase":"begin","mode":"rewrite","filePath":"snapshot.md"});
-    let append_args =
-        json!({"phase":"append","draftId":transaction_id,"index":0,"content":"planned"});
+    let begin_args = json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"snapshot.md","observationId":format!("fobs_{}", "1".repeat(32))});
+    let append_args = json!({"action":"append","transactionId":transaction_id,"index":0,"expectedDraftRevision":0,"content":"planned"});
     let mut trace_items =
-        staged_tool_exchange(0, "call-plan-begin", "write_file", begin_args.clone());
+        staged_tool_exchange(0, "call-plan-begin", "apply_patch", begin_args.clone());
     trace_items.extend(staged_tool_exchange(
         2,
         "call-plan-append",
-        "write_file",
+        "apply_patch",
         append_args.clone(),
     ));
     trace_items.extend(staged_tool_exchange(
         4,
         "call-plan-commit",
-        "write_file",
-        json!({"phase":"finish","draftId":transaction_id}),
+        "apply_patch",
+        json!({"action":"commit","transactionId":transaction_id,"expectedDraftRevision":1}),
     ));
     conversation_trace_repository::replace_trace(
         &mut connection,
@@ -1715,7 +1725,7 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
     )
     .unwrap();
     let base_revision = crate::content_revision(b"before");
-    let (observation_id, observation_json) = write_file_bridge_observation(
+    let (observation_id, observation_json) = file_change_observation(
         &source.id,
         "run-source-1",
         "call-plan-begin",
@@ -1728,7 +1738,7 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
         conversation_id: source.id.clone(),
         project_id: None,
         run_id: "run-source-1".to_string(),
-        source_tool_name: "write_file".to_string(),
+        source_tool_name: "apply_patch".to_string(),
         source_tool_call_id: "call-plan-begin".to_string(),
         source_tool_arguments_digest: crate::file_change::proposal_digest(&begin_args).unwrap(),
         permission_revision: "permission-1".to_string(),
@@ -1753,6 +1763,10 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
         stats_final: false,
         summary: Some("planned snapshot".to_string()),
         final_action_id: None,
+        final_action_arguments_digest: None,
+        final_permission_revision: None,
+        final_tool_set_revision: None,
+        final_provider_wire_revision: None,
         created_at: 30,
         updated_at: 40,
         expires_at: i64::MAX,
@@ -1808,8 +1822,7 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
     change.next_mutation_index = 2;
     change.mutation_count = 2;
     change.updated_at = 50;
-    let second_args =
-        json!({"phase":"append","draftId":transaction_id,"index":1,"content":"later"});
+    let second_args = json!({"action":"append","transactionId":transaction_id,"index":1,"expectedDraftRevision":1,"content":"later"});
     let second_operation = crate::storage::models::AgentFileChangeOperationRecord {
         transaction_id: transaction_id.to_string(),
         mutation_index: 1,

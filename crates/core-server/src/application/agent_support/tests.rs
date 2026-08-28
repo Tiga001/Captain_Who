@@ -308,15 +308,18 @@ fn renderer_command_projection_excludes_managed_office_script_authority() {
 }
 
 #[test]
-fn renderer_file_write_projection_excludes_file_change_execution_authority() {
+fn renderer_file_change_projection_excludes_all_execution_authority() {
     const CANARY: &str = "PRIVATE_FILE_CHANGE_EXECUTION_CANARY";
-    let mut projection = serde_json::json!({
-        "type": "file_write",
-        "fileWrite": {
+    let file_change_action = serde_json::json!({
+        "type": "file_change",
+        "fileChange": {
+            "schemaVersion": 1,
             "id": "call-commit",
-            "draftId": "transaction-1",
-            "mode": "rewrite",
+            "transactionId": "transaction-1",
+            "operation": "update",
+            "updateStrategy": "rewrite",
             "filePath": "report.md",
+            "inlineDiff": null,
             "baseRevision": null,
             "summary": null,
             "additions": 1,
@@ -325,21 +328,52 @@ fn renderer_file_write_projection_excludes_file_change_execution_authority() {
             "byteCount": 8,
             "approvalStatus": "required",
             "execution": {
-                "privateTargetContent": CANARY,
+                "canonicalTarget": CANARY,
+                "baseContent": CANARY,
+                "targetContent": CANARY,
+                "permissionRevision": CANARY,
+                "toolSetRevision": CANARY,
+                "providerWireRevision": CANARY,
                 "privateObservation": CANARY
             }
         }
     });
+    let projections = [
+        ("proposed action", file_change_action.clone()),
+        (
+            "standalone proposal event",
+            serde_json::json!({
+                "type": "file_change_proposed",
+                "runId": "run-1",
+                "fileChange": file_change_action["fileChange"].clone()
+            }),
+        ),
+        (
+            "nested observer event",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "event": {
+                    "type": "file_change_proposed",
+                    "runId": "run-1",
+                    "fileChange": file_change_action["fileChange"].clone()
+                }
+            }),
+        ),
+    ];
 
-    redact_renderer_mcp_binding_fields(&mut projection);
+    for (boundary, mut projection) in projections {
+        redact_renderer_mcp_binding_fields(&mut projection);
 
-    let file_write = projection["fileWrite"].as_object().unwrap();
-    assert!(!file_write.contains_key("execution"));
-    assert_eq!(
-        file_write.get("draftId").and_then(Value::as_str),
-        Some("transaction-1")
-    );
-    assert!(!serde_json::to_string(&projection).unwrap().contains(CANARY));
+        let serialized = serde_json::to_string(&projection).unwrap();
+        assert!(
+            !serialized.contains("\"execution\"") && !serialized.contains(CANARY),
+            "{boundary} leaked Host-private FileChange authority"
+        );
+        assert!(
+            serialized.contains("transaction-1"),
+            "{boundary} dropped the public FileChange identity"
+        );
+    }
 }
 
 #[test]

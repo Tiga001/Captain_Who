@@ -1,9 +1,9 @@
 import { ChevronDown, Pencil } from 'lucide-react'
 import { useState } from 'react'
 import type {
-  AgentDiffProposal,
-  AgentPatchOperation,
-  AgentPatchResult,
+  AgentFileChangeOperation,
+  AgentFileChangeProposal,
+  AgentFileChangeResult,
   AgentToolCall,
   AgentToolResult
 } from '@mycopilot/protocol'
@@ -19,7 +19,7 @@ import type { SettledToolStatus } from './toolActivityUtils'
 interface ApplyPatchToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
-  diff?: AgentDiffProposal
+  diff?: AgentFileChangeProposal
   preview?: ChatFileWritePreview
   projectId?: string | null
   result?: AgentToolResult
@@ -36,7 +36,7 @@ interface ApplyPatchToolActivityGroupProps {
 export type ApplyPatchStatus =
   'waiting' | 'running' | 'applied' | 'failed' | 'conflict' | 'rejected' | 'cancelled'
 
-const ROW_LABELS: Record<AgentPatchOperation, Record<ApplyPatchStatus, TranslationKey>> = {
+const ROW_LABELS: Record<AgentFileChangeOperation, Record<ApplyPatchStatus, TranslationKey>> = {
   create: {
     waiting: 'agent.patch.create.row.waiting',
     running: 'agent.patch.create.row.running',
@@ -82,7 +82,7 @@ function getNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined
 }
 
-function getOperation(value: unknown): AgentPatchOperation | undefined {
+function getOperation(value: unknown): AgentFileChangeOperation | undefined {
   return value === 'create' || value === 'update' || value === 'delete' ? value : undefined
 }
 
@@ -90,25 +90,31 @@ export function isAbsoluteLocalPath(filePath: string) {
   return filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith('\\\\')
 }
 
-function getPatchResult(result: AgentToolResult | undefined): AgentPatchResult | undefined {
+function getFileChangeResult(
+  result: AgentToolResult | undefined
+): AgentFileChangeResult | undefined {
   if (!isRecord(result?.result)) return undefined
   const status = result.result.status
   const operation = getOperation(result.result.operation)
   const filePath = getString(result.result.filePath)
-  const appliedFilePaths = result.result.appliedFilePaths
   if (
     (status !== 'applied' &&
+      status !== 'already_applied' &&
       status !== 'failed' &&
       status !== 'conflict' &&
-      status !== 'rejected') ||
+      status !== 'rejected' &&
+      status !== 'outcome_unknown' &&
+      status !== 'aborted' &&
+      status !== 'expired') ||
     !operation ||
     !filePath ||
-    !Array.isArray(appliedFilePaths)
+    result.result.schemaVersion !== 1 ||
+    typeof result.result.transactionId !== 'string'
   ) {
     return undefined
   }
 
-  return result.result as unknown as AgentPatchResult
+  return result.result as unknown as AgentFileChangeResult
 }
 
 function getCallArgs(call: AgentToolCall) {
@@ -116,11 +122,18 @@ function getCallArgs(call: AgentToolCall) {
 }
 
 function getStatus(item: ApplyPatchToolActivityGroupItem): ApplyPatchStatus {
-  const patchResult = getPatchResult(item.result)
-  if (patchResult?.status === 'applied') return 'applied'
-  if (patchResult?.status === 'failed') return 'failed'
-  if (patchResult?.status === 'conflict') return 'conflict'
-  if (patchResult?.status === 'rejected') return 'rejected'
+  const fileChangeResult = getFileChangeResult(item.result)
+  if (fileChangeResult?.status === 'applied' || fileChangeResult?.status === 'already_applied')
+    return 'applied'
+  if (fileChangeResult?.status === 'failed') return 'failed'
+  if (fileChangeResult?.status === 'conflict') return 'conflict'
+  if (fileChangeResult?.status === 'rejected') return 'rejected'
+  if (
+    fileChangeResult?.status === 'outcome_unknown' ||
+    fileChangeResult?.status === 'aborted' ||
+    fileChangeResult?.status === 'expired'
+  )
+    return 'failed'
   if (item.result?.ok === false) return 'failed'
   if (item.call.approvalStatus === 'rejected') return 'rejected'
   if (item.cancelled) return 'cancelled'
@@ -177,12 +190,7 @@ function countStructuredEditLines(edits: unknown) {
   )
 }
 
-function getGitDiffPatch(value: unknown) {
-  if (!isRecord(value)) return ''
-  return getRawString(value.patch)
-}
-
-function getFallbackLineCounts(args: Record<string, unknown>, operation: AgentPatchOperation) {
+function getFallbackLineCounts(args: Record<string, unknown>, operation: AgentFileChangeOperation) {
   const structuredCounts = countStructuredEditLines(args.edits)
   if (structuredCounts) return structuredCounts
 
@@ -196,12 +204,12 @@ function getFallbackLineCounts(args: Record<string, unknown>, operation: AgentPa
 
 export function getApplyPatchItemView(item: ApplyPatchToolActivityGroupItem) {
   const args = getCallArgs(item.call)
-  const patchResult = getPatchResult(item.result)
+  const fileChangeResult = getFileChangeResult(item.result)
   const resultValue = isRecord(item.result?.result) ? item.result.result : {}
   const operation =
-    patchResult?.operation ?? item.diff?.operation ?? getOperation(args.operation) ?? 'update'
-  const filePath = patchResult?.filePath ?? item.diff?.filePath ?? getString(args.filePath)
-  const patch = item.diff?.patch || getRawString(args.patch) || getGitDiffPatch(resultValue.gitDiff)
+    fileChangeResult?.operation ?? item.diff?.operation ?? getOperation(args.operation) ?? 'update'
+  const filePath = fileChangeResult?.filePath ?? item.diff?.filePath ?? getString(args.filePath)
+  const patch = item.diff?.inlineDiff?.patch ?? ''
   const parsedCounts = patch ? countPatchLines(patch) : getFallbackLineCounts(args, operation)
   const preview = getStatus(item) === 'running' ? item.preview : undefined
   const additions =
@@ -219,7 +227,7 @@ export function getApplyPatchItemView(item: ApplyPatchToolActivityGroupItem) {
     additions,
     deletions,
     filePath: preview?.filePath ?? filePath,
-    message: patchResult?.message ?? '',
+    message: fileChangeResult?.message ?? '',
     operation,
     status: getStatus(item)
   }

@@ -740,10 +740,13 @@ mod tests {
         let call_id = model_response_tool_call_id("run-previous", 0, 0, provider_call_id);
         let call = AgentToolCall {
             id: call_id.clone(),
-            tool: "write_file".to_string(),
+            tool: "apply_patch".to_string(),
             args: json!({
+                "action": "apply",
+                "operation": "create",
                 "filePath": "src/new.rs",
-                "mode": "create"
+                "observationId": "fobs-history-missing",
+                "content": "pub fn new() {}\n"
             }),
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
@@ -1310,11 +1313,14 @@ mod tests {
         assert_eq!(messages[1].content(), "create a file");
         assert_eq!(messages[2].content(), "I will update the file.");
         assert_eq!(messages[3].role(), LlmMessageRole::Assistant);
-        let write_call = messages[3].tool_calls().next().unwrap();
-        assert_eq!(write_call.name, "write_file");
-        assert_eq!(write_call.args["filePath"], "src/new.rs");
+        let file_change_call = messages[3].tool_calls().next().unwrap();
+        assert_eq!(file_change_call.name, "apply_patch");
+        assert_eq!(file_change_call.args["filePath"], "src/new.rs");
         assert_eq!(messages[4].role(), LlmMessageRole::Tool);
-        assert_eq!(messages[4].tool_call_id(), Some(write_call.id.as_str()));
+        assert_eq!(
+            messages[4].tool_call_id(),
+            Some(file_change_call.id.as_str())
+        );
         assert_eq!(messages[5].content(), "Created src/new.rs.");
         assert!(messages[6]
             .content()

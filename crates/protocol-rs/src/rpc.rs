@@ -43,9 +43,9 @@ pub struct JsonRpcErrorObject {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentFileDraftReadRequest {
-    pub draft_id: String,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentFileChangeReadRequest {
+    pub transaction_id: String,
     pub observer_root_conversation_id: Option<String>,
     pub offset: Option<usize>,
     pub max_chars: Option<usize>,

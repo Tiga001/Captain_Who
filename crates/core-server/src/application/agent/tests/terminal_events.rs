@@ -1903,7 +1903,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
             decision: Some("approved".to_string()),
             status: "approved".to_string(),
             action_json,
-            patch_result_json: None,
+            file_change_result_json: None,
             command_result_json: None,
             tool_result_json: None,
             error: None,

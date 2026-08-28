@@ -184,7 +184,7 @@ fn action_audit(action_id: &str, conversation_id: &str) -> AgentActionAuditRecor
         decision: Some("approved".to_string()),
         status: "completed".to_string(),
         action_json: "{}".to_string(),
-        patch_result_json: None,
+        file_change_result_json: None,
         command_result_json: None,
         tool_result_json: None,
         error: None,

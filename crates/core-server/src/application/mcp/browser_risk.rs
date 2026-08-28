@@ -776,8 +776,7 @@ fn execution_output(
         action_type: "browser_risk_approval".to_string(),
         tool_name: approval.trigger_tool_name.clone(),
         status: status.to_string(),
-        patch_result: None,
-        file_write_result: None,
+        file_change_result: None,
         command_result: None,
         tool_result: None,
         agent_output: AgentChatOutput {

@@ -591,7 +591,7 @@ fn approval_restore_rejects_capability_and_world_state_mismatch() {
 }
 
 #[test]
-fn one_model_response_claims_reason_only_duplicates_once() {
+fn one_model_response_claims_semantically_identical_file_changes_once() {
     let mut batch = ToolCallBatch::from_model_response(
         "claim-run",
         0,
@@ -599,20 +599,24 @@ fn one_model_response_claims_reason_only_duplicates_once() {
         vec![
             LlmToolCall {
                 id: canonical_test_call_id(0, "claim-first"),
-                name: "write_file".to_string(),
+                name: "apply_patch".to_string(),
                 args: json!({
+                    "action": "apply",
+                    "operation": "create",
                     "filePath": "report.txt",
+                    "observationId": "fobs_00000000000000000000000000000000",
                     "content": "same",
-                    "reason": "Create the report"
                 }),
             },
             LlmToolCall {
                 id: canonical_test_call_id(1, "claim-duplicate"),
-                name: "write_file".to_string(),
+                name: "apply_patch".to_string(),
                 args: json!({
-                    "reason": "Write the requested file",
+                    "observationId": "fobs_00000000000000000000000000000000",
                     "content": "same",
-                    "filePath": "report.txt"
+                    "filePath": "report.txt",
+                    "operation": "create",
+                    "action": "apply"
                 }),
             },
         ],
@@ -638,11 +642,11 @@ fn approval_restore_reconstructs_all_seen_calls_from_the_same_model_response() {
     };
     let pending = LlmToolCall {
         id: canonical_test_call_id(1, "restore-pending"),
-        name: "write_file".to_string(),
+        name: "apply_patch".to_string(),
         args: json!({
-            "filePath": "report.txt",
-            "content": "draft",
-            "reason": "Write report"
+            "action": "commit",
+            "transactionId": "transaction-restore-pending",
+            "expectedDraftRevision": 1
         }),
     };
     let duplicate_first = LlmToolCall {
@@ -820,8 +824,12 @@ fn approval_checkpoint_uses_provider_index_when_provider_call_ids_repeat() {
     let provider_calls = vec![
         LlmToolCall {
             id: "provider-reused-id".to_string(),
-            name: "write_file".to_string(),
-            args: json!({ "path": "report.txt" }),
+            name: "apply_patch".to_string(),
+            args: json!({
+                "action": "commit",
+                "transactionId": "transaction-provider-reused",
+                "expectedDraftRevision": 1
+            }),
         },
         LlmToolCall {
             id: "provider-reused-id".to_string(),
@@ -832,8 +840,12 @@ fn approval_checkpoint_uses_provider_index_when_provider_call_ids_repeat() {
     let runtime_calls = [
         LlmToolCall {
             id: canonical_test_call_id(0, "provider-reused-id"),
-            name: "write_file".to_string(),
-            args: json!({ "path": "report.txt" }),
+            name: "apply_patch".to_string(),
+            args: json!({
+                "action": "commit",
+                "transactionId": "transaction-provider-reused",
+                "expectedDraftRevision": 1
+            }),
         },
         LlmToolCall {
             id: canonical_test_call_id(1, "provider-reused-id"),
@@ -912,8 +924,12 @@ fn checkpoint_creation_rejects_invalid_pending_queued_context_and_trace_ids() {
     let invalid_id = "legacy/provider/call".to_string();
     let pending = LlmToolCall {
         id: invalid_id.clone(),
-        name: "write_file".to_string(),
-        args: json!({ "path": "report.txt" }),
+        name: "apply_patch".to_string(),
+        args: json!({
+            "action": "commit",
+            "transactionId": "transaction-invalid-pending",
+            "expectedDraftRevision": 1
+        }),
     };
     let (mut batch, assistant_item) =
         test_batch_and_context_item("create-invalid-pending", "", vec![pending.clone()], false);
@@ -943,8 +959,12 @@ fn checkpoint_creation_rejects_invalid_pending_queued_context_and_trace_ids() {
 
     let valid_pending = LlmToolCall {
         id: canonical_test_call_id(0, "create-valid-pending"),
-        name: "write_file".to_string(),
-        args: json!({ "path": "report.txt" }),
+        name: "apply_patch".to_string(),
+        args: json!({
+            "action": "commit",
+            "transactionId": "transaction-valid-pending",
+            "expectedDraftRevision": 1
+        }),
     };
     let (mut invalid_queue, valid_pending_item) = test_batch_and_context_item(
         "create-invalid-queue",

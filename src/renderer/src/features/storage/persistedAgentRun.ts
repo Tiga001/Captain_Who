@@ -5,8 +5,8 @@ import type {
   ChatMcpToolInvocationView
 } from '../chat/chatTypes'
 import {
-  isDiff,
   isFileDraft,
+  isFileChangeProposal,
   isPersistableApproval,
   isSkillInstallationRequest,
   isToolCall,
@@ -322,7 +322,7 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     !isRecordArray(value.webSearchActivities, isWebSearchActivity) ||
     !isRecordArray(value.readActivities, isReadActivity) ||
     !isRecordArray(value.approvals, isPersistableApproval) ||
-    !isRecordArray(value.diffs, isDiff) ||
+    !isRecordArray(value.diffs, isFileChangeProposal) ||
     !isRecordArray(value.fileDrafts, isFileDraft) ||
     !Array.isArray(value.mcpInvocations) ||
     value.mcpInvocations.length > MAX_STORED_RUN_ITEMS ||

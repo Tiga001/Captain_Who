@@ -1016,8 +1016,8 @@ export function useAgentRunLifecycle({
       if (agentEvent.type === 'tool_input_progress') return
 
       if (
-        agentEvent.type === 'file_write_preview_updated' ||
-        agentEvent.type === 'file_write_preview_cleared'
+        agentEvent.type === 'file_change_preview_updated' ||
+        agentEvent.type === 'file_change_preview_cleared'
       ) {
         updateAssistantMessage(
           conversationId,
