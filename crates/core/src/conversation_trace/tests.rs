@@ -1064,9 +1064,15 @@ fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
         id: "patch-1".into(),
         tool: "apply_patch".into(),
         args: json!({
+            "action": "apply",
             "operation": "update",
             "filePath": "src/lib.rs",
-            "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+new\n+extra\n",
+            "observationId": "fobs_trace_projection",
+            "edits": [{
+                "kind": "replace",
+                "oldText": "old",
+                "newText": "new\nextra"
+            }],
             "summary": "Update the implementation"
         }),
         approval_status: AgentApprovalStatus::Approved,
@@ -1383,14 +1389,20 @@ fn repeated_unchanged_read_failure_keeps_paired_reference_instead_of_duplicate_e
 }
 
 #[test]
-fn approval_checkpoint_keeps_full_patch_while_durable_snapshot_is_bounded() {
+fn approval_checkpoint_keeps_exact_direct_args_while_durable_snapshot_is_bounded() {
     let call = AgentToolCall {
         id: "patch-approval".into(),
         tool: "apply_patch".into(),
         args: json!({
+            "action": "apply",
             "operation": "update",
             "filePath": "src/main.rs",
-            "patch": "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n"
+            "observationId": "fobs_approval_checkpoint",
+            "edits": [{
+                "kind": "replace",
+                "oldText": "old",
+                "newText": "new"
+            }]
         }),
         approval_status: AgentApprovalStatus::Required,
         reason: None,
@@ -1405,10 +1417,12 @@ fn approval_checkpoint_keeps_full_patch_while_durable_snapshot_is_bounded() {
     else {
         panic!("expected checkpoint call");
     };
-    assert!(checkpoint_operation["patch"]
-        .as_str()
-        .unwrap()
-        .contains("-old"));
+    assert_eq!(
+        checkpoint_operation["observationId"],
+        "fobs_approval_checkpoint"
+    );
+    assert_eq!(checkpoint_operation["edits"][0]["oldText"], "old");
+    assert_eq!(checkpoint_operation["edits"][0]["newText"], "new");
 
     let durable = recorder
         .snapshot()
@@ -1420,8 +1434,10 @@ fn approval_checkpoint_keeps_full_patch_while_durable_snapshot_is_bounded() {
     else {
         panic!("expected durable call");
     };
-    assert!(durable_operation.get("patch").is_none());
+    assert!(durable_operation.get("edits").is_none());
+    assert!(durable_operation.get("observationId").is_none());
     assert_eq!(durable_operation["filePath"], "src/main.rs");
+    assert_eq!(durable_operation["editCount"], 1);
     assert_eq!(durable_operation["additions"], 1);
     assert_eq!(durable_operation["deletions"], 1);
 }

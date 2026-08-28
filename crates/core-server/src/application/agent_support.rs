@@ -10,7 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(super) use mycopilot_core::command::command_tool_result;
 use mycopilot_core::command::{AgentCommandExecutionResult, CommandPolicyEvaluation};
 use mycopilot_core::file_write::{apply_file_write, failed_file_write_result};
-use mycopilot_core::patch::apply_unified_diff_in_workspace;
 use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
@@ -51,7 +50,8 @@ pub(super) use types::{
     agent_input_belongs_to_project, pending_status_label, ActionExecutionDecision,
     AgentProviderTransitionDecision, AgentProviderTransitionOperationError,
     AgentProviderTransitionOperationStatus, AgentProviderTransitionReason,
-    AgentProviderTransitionRecovery, AgentRunUsageContext, AgentRunUsageState, PendingActionRecord,
+    AgentProviderTransitionRecovery, AgentRunUsageContext, AgentRunUsageState,
+    DirectFileChangeFinalization, PendingActionRecord,
 };
 pub use types::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,

@@ -230,6 +230,20 @@ async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
         requests[0]["tools"][2]["function"]["parameters"],
         registry.definition_for("write_file").unwrap().input_schema
     );
+    let direct_schema = &requests[0]["tools"][1]["function"]["parameters"];
+    assert_eq!(
+        direct_schema["required"],
+        json!(["action", "operation", "filePath", "observationId"])
+    );
+    assert_eq!(direct_schema["additionalProperties"], false);
+    assert_eq!(
+        direct_schema["properties"]["action"]["enum"],
+        json!(["apply"])
+    );
+    assert!(direct_schema["properties"].get("patch").is_none());
+    assert!(direct_schema["properties"]
+        .get("expectedRevision")
+        .is_none());
     assert_eq!(requests[1]["messages"][1]["role"], "assistant");
     assert_eq!(requests[1]["messages"][1]["content"], "");
     assert_eq!(

@@ -1055,6 +1055,16 @@ fn pending_approval_persists_full_run_checkpoint() {
         "messages": []
     }))
     .unwrap();
+    let canonical_target = fixture.path().join("report.txt");
+    let (action, pending_call) = direct_file_change_fixture(
+        "run-checkpoint",
+        "conversation-checkpoint",
+        "call-checkpoint",
+        ("report.txt", canonical_target.to_str().unwrap()),
+        None,
+        Some("draft report"),
+        AgentApprovalStatus::Required,
+    );
     let run_checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-checkpoint".to_string(),
@@ -1081,7 +1091,7 @@ fn pending_approval_persists_full_run_checkpoint() {
                 tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
                     id: "call-checkpoint".to_string(),
                     name: "apply_patch".to_string(),
-                    args: json!({ "operation": "create", "filePath": "report.txt" }),
+                    args: pending_call.args.clone(),
                     provider_identity: mycopilot_core::AgentProviderToolCallIdentity {
                         provider_tool_index: 0,
                         provider_call_id: "call-checkpoint".to_string(),
@@ -1125,15 +1135,6 @@ fn pending_approval_persists_full_run_checkpoint() {
         .resume_checkpoint
         .clone()
         .expect("test run checkpoint remains attached");
-    let action = AgentProposedAction::ToolCall {
-        call: AgentToolCall {
-            id: "call-checkpoint".to_string(),
-            tool: "apply_patch".to_string(),
-            args: json!({ "operation": "create", "filePath": "report.txt" }),
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        },
-    };
 
     service
         .store_pending_action(

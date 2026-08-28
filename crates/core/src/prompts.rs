@@ -288,8 +288,8 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
     }
     if has_tool(tool_definitions, "apply_patch") {
-        rules.push("- 创建、编辑或删除可 diff 文件必须使用 apply_patch。每次调用 create、update 或 delete 前，都必须先对准确目标路径使用 read_file 确认当前状态和内容；不得把 create 当作存在性探测。只有 read_file 对该准确路径明确报告目标不存在或无法找到后才能使用 create；read_file 确认目标已存在时，修改必须使用 update，删除则使用 delete，绝不能对已有文件使用 create。".to_string());
-        rules.push("- create 直接提供完整 content；update 必须基于刚读取的当前内容，优先提供 structured edits（replace、insert_before、insert_after、append、prepend）或完整 content，并确认唯一锚点和 oldText；delete 在必需的读取后只提供 filePath。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。不要自行计算 unified diff hunk，除非结构化输入无法表达。".to_string());
+        rules.push("- apply_patch Direct 适合对单个可 diff 文件做一次性短小 create、update 或 delete。每次 Direct 调用前，即使预期目标不存在，也必须先对准确目标路径使用 read_file 确认当前状态和内容；父目录列表、搜索结果或更早的读取不能替代。create 是 no-clobber，只有 read_file 对该准确路径明确报告目标不存在或无法找到后才能使用 create；目标已存在时，修改必须使用 update，删除则使用 delete。".to_string());
+        rules.push("- 每次 Direct 调用都提交 action=apply、准确 filePath，并原样复制刚才 read_file 返回的 observationId。create 还要提供短小完整 content；update 必须在 content 与 structured edits（replace、insert_before、insert_after、append、prepend）中恰好选择一个，并确认唯一锚点和 oldText；delete 不得提供 content 或 edits。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。较长的完整生成或多步草稿使用 write_file；审批 Diff 由 Host 从冻结目标内容生成，不要提交 raw unified diff。".to_string());
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "write_file") {
@@ -301,7 +301,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确允许的短暂检查或结构化产物转换可以使用有界内联代码；需要复用、审查或修改项目源文件的逻辑仍应先用文件编辑工具保存脚本，再用 run_command 执行。产物观察只记录结果，不授予任何权限。".to_string());
         rules.push("- 已激活 Skill 若明确规定一条 copy-first 工作流，可以用 run_command 做且只做该工作流要求的临时目录准备、把已获授权读取的固定源字节保真复制到固定且已确认不存在的 Workspace staging 目标、源与 staging 的字节校验、将已验证的 task-owned staging child 在同一文件系统内以目标不存在为前提 create-only 发布到固定 Workspace Skill 目标，以及精确清理该任务创建的临时路径。这项例外不扩大读写范围，不得覆盖或合并已有目标、改变文件内容、猜测路径、绕过审批或路径校验；复制后对内容的任何修改仍必须使用 apply_patch/write_file。".to_string());
-        rules.push("- 普通 run_command 的 cwd 必须根据可信 World State 的 workspace.binding 选择：有 workspace 时可以省略 cwd 以使用 workspace 根目录，也可提供 workspace 相对目录；绝对目录和系统路径别名仍受当前权限约束。没有 workspace 时 cwd 必填且不得省略，即使 command、可执行文件或参数已经使用绝对路径也不得省略；不得使用 `.` 或相对路径。把 cwd 设为命令应在其中运行的现有目录，通常是目标文件的父目录，并明确指定绝对目录，或使用现行支持的系统路径别名 @home、@desktop、@documents、@downloads 及其安全子路径，例如 @desktop/project-dir；这还要求当前写入范围允许“所有位置”。唯一例外是后端识别的受管 PDF 命令由已激活的 PDF Skill 在 Host-owned 契约中提供私有工作目录；此时按 Skill 指令省略 cwd，不得猜测 Host 路径。".to_string());
+        rules.push("- 第一次普通 run_command 调用就必须根据可信 World State 的 workspace.binding 正确填写 cwd：有 workspace 时可以省略 cwd 以使用 workspace 根目录，也可提供 workspace 相对目录；绝对目录和系统路径别名仍受当前权限约束。没有 workspace 时 cwd 必填且不得省略，即使 command、可执行文件或参数已经使用绝对路径也不得省略；不得先省略再等错误修正，也不得使用 `.` 或相对路径。把 cwd 设为命令应在其中运行的现有目录，通常是目标文件的父目录，并明确指定绝对目录，或使用现行支持的系统路径别名 @home、@desktop、@documents、@downloads 及其安全子路径，例如 @desktop/project-dir；这还要求当前写入范围允许“所有位置”。唯一例外是后端识别的受管 PDF 命令由已激活的 PDF Skill 在 Host-owned 契约中提供私有工作目录；此时按 Skill 指令省略 cwd，不得猜测 Host 路径。".to_string());
         rules.push("- run_command.command 是一个可包含多行的命令字符串；Host 会规范化换行并分别审查 newline、pipeline、&&、|| 和 ; 的每个片段。普通命令需要 heredoc 时必须引用 delimiter（例如 <<'PY'）；受管 Skill 若要求直接调用则遵循 Skill 的更窄规则。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
     }
     if has_tool(tool_definitions, "command_session") {
@@ -720,13 +720,25 @@ mod tests {
         ];
         let prompt = build_system_prompt(None, &tools);
 
-        assert!(prompt.contains("每次调用 create、update 或 delete 前"));
+        assert!(prompt.contains("每次 Direct 调用前"));
+        assert!(prompt.contains("apply_patch Direct 适合"));
+        assert!(prompt.contains("一次性短小 create、update 或 delete"));
+        assert!(prompt.contains("即使预期目标不存在"));
         assert!(prompt.contains("先对准确目标路径使用 read_file"));
-        assert!(prompt.contains("不得把 create 当作存在性探测"));
+        assert!(prompt.contains("父目录列表、搜索结果或更早的读取不能替代"));
+        assert!(prompt.contains("create 是 no-clobber"));
         assert!(prompt.contains("明确报告目标不存在或无法找到后才能使用 create"));
         assert!(!prompt.contains("read_file 明确返回 not_found"));
         assert!(prompt.contains("目标已存在时，修改必须使用 update"));
-        assert!(prompt.contains("create 直接提供完整 content"));
+        assert!(prompt.contains("每次 Direct 调用都提交 action=apply"));
+        assert!(prompt.contains("原样复制刚才 read_file 返回的 observationId"));
+        assert!(prompt.contains("create 还要提供短小完整 content"));
+        assert!(prompt.contains("content 与 structured edits"));
+        assert!(prompt.contains("恰好选择一个"));
+        assert!(prompt.contains("delete 不得提供 content 或 edits"));
+        assert!(prompt.contains("较长的完整生成或多步草稿使用 write_file"));
+        assert!(prompt.contains("审批 Diff 由 Host 从冻结目标内容生成"));
+        assert!(prompt.contains("不要提交 raw unified diff"));
         assert!(prompt.contains("确认唯一锚点和 oldText"));
         assert!(!prompt.contains("read_file 返回的 revision"));
         assert!(!prompt.contains("expectedRevision"));
@@ -843,8 +855,10 @@ mod tests {
         assert!(prompt.contains("任何修改仍必须使用 apply_patch/write_file"));
         assert!(prompt.contains("有 workspace 时可以省略 cwd"));
         assert!(prompt.contains("使用 workspace 根目录"));
+        assert!(prompt.contains("第一次普通 run_command 调用就必须"));
         assert!(prompt.contains("没有 workspace 时 cwd 必填且不得省略"));
         assert!(prompt.contains("即使 command、可执行文件或参数已经使用绝对路径也不得省略"));
+        assert!(prompt.contains("不得先省略再等错误修正"));
         assert!(prompt.contains("不得使用 `.` 或相对路径"));
         assert!(prompt.contains("明确指定绝对目录"));
         for alias in ["@home", "@desktop", "@documents", "@downloads"] {

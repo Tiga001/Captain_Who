@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn bounds_large_emoji_graphemes_by_bytes_and_clusters() {
         let family = "👨‍👩‍👧‍👦";
-        let oversized_cluster = format!("{}", family.repeat(80));
+        let oversized_cluster = family.repeat(80);
         let subject = human_root_notification_subject(&oversized_cluster, &[]);
         assert!(subject.text.ends_with('…'));
         assert!(subject.text.len() <= NOTIFICATION_SUBJECT_MAX_BYTES);

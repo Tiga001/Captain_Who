@@ -2,17 +2,19 @@
 use super::{clean_relative_path, relative_display};
 use crate::cancellation::AgentCancellationToken;
 use crate::context::ContextTextBudget;
+use crate::file_change::FileObservationRegistry;
 use crate::file_input::{
     agent_file_input_ref_from_model_path, resolve_verified_agent_file_input_path,
     AgentFileInputExecutionContext,
 };
 use crate::protocol::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentError, AgentPermissions,
-    AgentReadPermission, AgentResult, AgentRunContext, ModelCapabilities,
+    AgentReadPermission, AgentResult, AgentRunContext, AgentWritePermission, ModelCapabilities,
 };
 use crate::resource_locator::ResourceLocator;
 use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
+use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -75,6 +77,9 @@ pub struct ToolExecutionContext {
     cancellation_token: AgentCancellationToken,
     model_capabilities: ModelCapabilities,
     model_image_delivery_budget: Arc<AtomicU64>,
+    file_observations: Arc<FileObservationRegistry>,
+    file_change_permission_revision: String,
+    file_change_tool_set_revision: String,
     permissions: AgentPermissions,
     conversation_id: Option<String>,
     project_id: Option<String>,
@@ -90,6 +95,125 @@ pub struct ToolExecutionContext {
     assistant_message_id: Option<String>,
     model_batch_index: u64,
     steer_input: Option<crate::runtime::AgentSteerInputQueue>,
+}
+
+/// A registry view bound to the Host-authenticated identity of the current dispatch.
+///
+/// `read_file` deliberately does not accept a source call id from model arguments. Issuance
+/// through this view obtains it from `ToolExecutionContext::with_tool_call_id`, while validation
+/// remains bound to the frozen conversation/run owner supplied by the same context.
+pub(super) struct FileObservationRegistryView<'a> {
+    context: &'a ToolExecutionContext,
+}
+
+impl FileObservationRegistryView<'_> {
+    pub(super) fn issue_existing(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+        revision: &str,
+        metadata: &Metadata,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let source_tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        self.context.file_observations.issue_existing_from_read(
+            crate::file_change::FileObservationOwner::new(
+                source_tool_call_id,
+                conversation_id,
+                run_id,
+            ),
+            canonical_target,
+            revision,
+            metadata,
+            parent_metadata,
+        )
+    }
+
+    pub(super) fn issue_missing(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let source_tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        self.context.file_observations.issue_missing_from_read(
+            crate::file_change::FileObservationOwner::new(
+                source_tool_call_id,
+                conversation_id,
+                run_id,
+            ),
+            canonical_target,
+            parent_metadata,
+        )
+    }
+
+    pub(super) fn validate(
+        &self,
+        observation_id: &str,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        self.context.file_observations.validate(
+            observation_id,
+            conversation_id,
+            run_id,
+            canonical_target,
+        )
+    }
+
+    /// Claims a read observation only after the caller has formed and validated its Direct
+    /// proposal. This method is intentionally separate from `validate` so malformed edits do not
+    /// burn an otherwise-current observation.
+    pub(super) fn claim(
+        &self,
+        observation_id: &str,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let consumer_tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        self.context.file_observations.claim(
+            observation_id,
+            conversation_id,
+            run_id,
+            canonical_target,
+            consumer_tool_call_id,
+        )
+    }
+
+    fn validate_owner(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<(), crate::file_change::FileChangeError> {
+        if self.context.conversation_id.as_deref() != Some(conversation_id)
+            || self.context.run_id.as_deref() != Some(run_id)
+        {
+            return Err(crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::ObservationOwnerMismatch,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ToolExecutionContext {
@@ -111,6 +235,10 @@ impl ToolExecutionContext {
             cancellation_token: AgentCancellationToken::new(),
             model_capabilities: ModelCapabilities::default(),
             model_image_delivery_budget: Arc::new(AtomicU64::new(0)),
+            file_observations: Arc::new(FileObservationRegistry::default()),
+            file_change_permission_revision: crate::file_change::proposal_digest(&permissions)
+                .expect("AgentPermissions serialization is infallible"),
+            file_change_tool_set_revision: "tool-set-unbound".to_string(),
             permissions,
             conversation_id,
             project_id,
@@ -151,6 +279,23 @@ impl ToolExecutionContext {
         self.run_id = Some(run_id);
         self.storage = storage;
         self
+    }
+
+    pub(crate) fn with_file_change_tool_set_revision(mut self, revision: String) -> Self {
+        self.file_change_tool_set_revision = revision;
+        self
+    }
+
+    pub(crate) fn with_file_observation_registry(
+        mut self,
+        registry: Arc<FileObservationRegistry>,
+    ) -> Self {
+        self.file_observations = registry;
+        self
+    }
+
+    pub(crate) fn replace_file_change_tool_set_revision(&mut self, revision: String) {
+        self.file_change_tool_set_revision = revision;
     }
 
     /// Binds one registry dispatch to its immutable model tool-call identity.
@@ -327,6 +472,22 @@ impl ToolExecutionContext {
 
     pub(super) fn permissions(&self) -> AgentPermissions {
         self.permissions
+    }
+
+    pub(super) fn file_observations(&self) -> FileObservationRegistryView<'_> {
+        FileObservationRegistryView { context: self }
+    }
+
+    pub(crate) fn file_observation_registry(&self) -> &Arc<FileObservationRegistry> {
+        &self.file_observations
+    }
+
+    pub(super) fn file_change_permission_revision(&self) -> &str {
+        &self.file_change_permission_revision
+    }
+
+    pub(super) fn file_change_tool_set_revision(&self) -> &str {
+        &self.file_change_tool_set_revision
     }
 
     /// Returns the registered attachment capabilities for trusted tool
@@ -536,6 +697,70 @@ impl ToolExecutionContext {
         Ok(canonical)
     }
 
+    /// Resolves an authorized existing path while preserving its final directory entry.
+    ///
+    /// `read_file` opens that entry with `O_NOFOLLOW` on Unix. Canonicalizing the full path here
+    /// would resolve a leaf symlink before the descriptor-level guard could inspect it, reopening
+    /// a check/open race at the exact boundary the guard is intended to close.
+    pub(super) fn resolve_existing_path_preserving_leaf(
+        &self,
+        input_path: &str,
+    ) -> AgentResult<PathBuf> {
+        self.check_cancelled()?;
+        let locator = ResourceLocator::parse(input_path)
+            .map_err(|error| AgentError::new(error.to_string()))?;
+        if locator.is_virtual() {
+            // Managed logical resources already resolve through their own exact, no-symlink
+            // ownership checks. Keep that authority path unchanged.
+            return self.resolve_existing_path(input_path);
+        }
+
+        let input_path = locator.logical_value();
+        if let Some(candidate) = expand_system_path(input_path).map_err(AgentError::new)? {
+            if self.permissions.read != AgentReadPermission::All {
+                return Err(AgentError::new(
+                    "读取系统路径别名需要将读取范围设为“所有位置”。",
+                ));
+            }
+            return canonicalize_parent_preserving_leaf(&candidate);
+        }
+        let candidate = Path::new(input_path);
+        if candidate.is_absolute() {
+            if self.permissions.read != AgentReadPermission::All {
+                return Err(AgentError::new("当前读取权限仅允许访问 workspace 内路径。"));
+            }
+            return canonicalize_parent_preserving_leaf(candidate);
+        }
+
+        let root = self.workspace_root()?;
+        let relative = clean_relative_path(input_path)?;
+        let resolved = canonicalize_parent_preserving_leaf(&root.join(relative))?;
+        if !resolved.starts_with(&root) {
+            return Err(AgentError::new("路径必须位于已选择的 workspace 内。"));
+        }
+        Ok(resolved)
+    }
+
+    pub(super) fn resolve_missing_file_observation_target(
+        &self,
+        input_path: &str,
+    ) -> Result<crate::file_change::ResolvedFileChangeTarget, crate::file_change::FileChangeError>
+    {
+        let workspace_root = self.workspace_root_optional().map_err(|error| {
+            crate::file_change::FileChangeError::with_diagnostic(
+                crate::file_change::FileChangeErrorCode::Failed,
+                error.to_string(),
+            )
+        })?;
+        let allow_outside_workspace = self.permissions.read == AgentReadPermission::All
+            || self.permissions.write == AgentWritePermission::All;
+        crate::file_change::FileChangePathPolicy::new(
+            workspace_root.as_deref(),
+            allow_outside_workspace,
+        )
+        .resolve(input_path)
+    }
+
     pub(super) fn display_path(&self, input_path: &str, file_path: &Path) -> AgentResult<String> {
         self.check_cancelled()?;
         let locator = ResourceLocator::parse(input_path)
@@ -627,6 +852,21 @@ impl ToolExecutionContext {
 
         Ok(reference)
     }
+}
+
+fn canonicalize_parent_preserving_leaf(candidate: &Path) -> AgentResult<PathBuf> {
+    let resolved = match (candidate.parent(), candidate.file_name()) {
+        (Some(parent), Some(file_name)) => parent
+            .canonicalize()
+            .map(|parent| parent.join(file_name))
+            .map_err(|error| AgentError::new(format!("路径不可访问：{error}")))?,
+        _ => candidate
+            .canonicalize()
+            .map_err(|error| AgentError::new(format!("路径不可访问：{error}")))?,
+    };
+    std::fs::symlink_metadata(&resolved)
+        .map_err(|error| AgentError::new(format!("路径不可访问：{error}")))?;
+    Ok(resolved)
 }
 
 fn attachment_id_from_path(input_path: &str) -> AgentResult<String> {

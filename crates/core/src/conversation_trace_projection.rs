@@ -347,35 +347,35 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
     let mut output = Map::new();
     let mut truncated = false;
     for (key, limit) in [
+        ("action", DurableTraceProjectionLimits::TITLE_CHARS),
         (
             "operation",
             DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
         ),
         ("filePath", DurableTraceProjectionLimits::PATH_CHARS),
-        (
-            "baseRevision",
-            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-        ),
-        (
-            "expectedRevision",
-            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
-        ),
         ("summary", DurableTraceProjectionLimits::SUMMARY_CHARS),
+        (
+            "contentBytes",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "editCount",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
     ] {
         copy_bounded_field(input, &mut output, key, limit, &mut truncated);
     }
 
-    let (representation, additions, deletions) = if let Some(patch) =
-        input.get("patch").and_then(Value::as_str)
+    let (representation, additions, deletions) = if let Some(content) =
+        input.get("content").and_then(Value::as_str)
     {
-        let (additions, deletions) = unified_diff_stats(patch);
-        ("patch", additions, deletions)
-    } else if let Some(content) = input.get("content").and_then(Value::as_str) {
         ("content", line_count(content), 0)
     } else if let Some(edits) = input.get("edits").and_then(Value::as_array) {
         let (additions, deletions) = structured_edit_stats(edits);
         output.insert("editCount".into(), json!(edits.len()));
         ("edits", additions, deletions)
+    } else if input.get("editCount").and_then(Value::as_u64).is_some() {
+        ("edits", 0, 0)
     } else if let Some(representation) = input.get("changeRepresentation").and_then(Value::as_str) {
         (
             representation,
@@ -1412,6 +1412,28 @@ fn bounded_string_array(input: &[Value], max_items: usize, max_chars: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_patch_call_projection_keeps_only_current_direct_metadata() {
+        let (projected, _) = project_apply_patch_call(&json!({
+            "action": "apply",
+            "operation": "update",
+            "filePath": "src/lib.rs",
+            "editCount": 2,
+            "patch": "legacy raw patch must not be interpreted",
+            "expectedRevision": "legacy hidden revision",
+            "observationId": "fobs_private"
+        }));
+
+        assert_eq!(projected["action"], "apply");
+        assert_eq!(projected["operation"], "update");
+        assert_eq!(projected["filePath"], "src/lib.rs");
+        assert_eq!(projected["changeRepresentation"], "edits");
+        assert_eq!(projected["editCount"], 2);
+        assert!(projected.get("patch").is_none());
+        assert!(projected.get("expectedRevision").is_none());
+        assert!(projected.get("observationId").is_none());
+    }
 
     #[test]
     fn embedded_data_urls_and_binary_named_fields_are_redacted_recursively() {

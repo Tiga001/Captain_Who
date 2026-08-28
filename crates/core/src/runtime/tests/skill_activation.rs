@@ -1,5 +1,36 @@
 use super::*;
 
+fn missing_file_observation_id(request: &Value, expected_path: &str) -> String {
+    fn find(value: &Value, expected_path: &str) -> Option<String> {
+        match value {
+            Value::Object(object) => {
+                if object.get("path").and_then(Value::as_str) == Some(expected_path)
+                    && object.get("exists").and_then(Value::as_bool) == Some(false)
+                {
+                    return object
+                        .get("observationId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                object.values().find_map(|value| find(value, expected_path))
+            }
+            Value::Array(values) => values.iter().find_map(|value| find(value, expected_path)),
+            Value::String(text) if text.starts_with('{') || text.starts_with('[') => {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .and_then(|value| find(&value, expected_path))
+            }
+            _ => None,
+        }
+    }
+
+    find(request, expected_path).unwrap_or_else(|| {
+        panic!(
+            "Provider request must contain the missing read_file observation for {expected_path}"
+        )
+    })
+}
+
 #[tokio::test]
 async fn model_activation_preserves_exposed_siblings_and_discloses_new_tools_next_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -451,12 +482,37 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let requests_for_server = Arc::clone(&requests);
     let server = tokio::spawn(async move {
-        for request_index in 0..2 {
+        for request_index in 0..3 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_runtime_test_json_request(&mut stream).await;
-            requests_for_server.lock().unwrap().push(request);
-            let response = if request_index == 0 {
-                json!({
+            requests_for_server.lock().unwrap().push(request.clone());
+            let response = match request_index {
+                0 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": matches!(
+                                case,
+                                SkillApprovalResumeProviderCase::DeepSeekExactGrouped
+                            ).then_some("Observe the target before proposing the write."),
+                            "tool_calls": [{
+                                "id": format!("{label}-observe"),
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": serde_json::to_string(&json!({
+                                        "path": "approved.txt"
+                                    })).unwrap()
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                1 => {
+                    let observation_id = missing_file_observation_id(&request, "approved.txt");
+                    json!({
                     "choices": [{
                         "message": {
                             "role": "assistant",
@@ -483,8 +539,10 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                                     "function": {
                                         "name": "apply_patch",
                                         "arguments": serde_json::to_string(&json!({
+                                            "action": "apply",
                                             "operation": "create",
                                             "filePath": "approved.txt",
+                                            "observationId": observation_id,
                                             "content": "approved"
                                         })).unwrap()
                                     }
@@ -514,9 +572,9 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                         },
                         "finish_reason": "tool_calls"
                     }]
-                })
-            } else {
-                json!({
+                    })
+                }
+                _ => json!({
                     "choices": [{
                         "message": {
                             "role": "assistant",
@@ -528,7 +586,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                         },
                         "finish_reason": "stop"
                     }]
-                })
+                }),
             };
             write_runtime_test_json_response(&mut stream, response).await;
         }
@@ -713,7 +771,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
     );
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     let request_tool_names = |request: &Value| {
         request["tools"]
             .as_array()
@@ -723,20 +781,21 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
             .collect::<Vec<_>>()
     };
     assert!(!request_tool_names(&requests[0]).contains(&"read_word".to_string()));
-    assert!(request_tool_names(&requests[1]).contains(&"read_word".to_string()));
-    let resumed_request = serde_json::to_string(&requests[1]).unwrap();
+    assert!(!request_tool_names(&requests[1]).contains(&"read_word".to_string()));
+    assert!(request_tool_names(&requests[2]).contains(&"read_word".to_string()));
+    let resumed_request = serde_json::to_string(&requests[2]).unwrap();
     assert!(resumed_request.contains("agent.tool_requires_skill_activation"));
     assert_eq!(resumed_request.matches(INSTRUCTIONS).count(), 1);
     assert!(!resumed_request.contains("skillActivationBoundary"));
     if matches!(case, SkillApprovalResumeProviderCase::DeepSeekExactGrouped) {
-        let grouped_turn = requests[1]["messages"]
+        let grouped_turn = requests[2]["messages"]
             .as_array()
             .unwrap()
             .iter()
             .find(|message| message["reasoning_content"].as_str() == Some(PROVIDER_REASONING))
             .expect("DeepSeek exact grouped turn must survive Approval resume");
         assert_eq!(grouped_turn["tool_calls"].as_array().unwrap().len(), 4);
-        let provider_result_ids = requests[1]["messages"]
+        let provider_result_ids = requests[2]["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -746,6 +805,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
         assert_eq!(
             provider_result_ids,
             [
+                "deepseek-observe",
                 "deepseek-activate",
                 "deepseek-approval",
                 "deepseek-existing-sibling",
@@ -757,7 +817,8 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                 .list_replayable_for_conversation(&conversation_id, &provider_protocol)
                 .unwrap()
                 .len(),
-            1
+            2,
+            "the target observation and approval batches each retain their exact DeepSeek continuation"
         );
     }
 }

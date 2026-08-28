@@ -974,14 +974,15 @@ fn current_diff_is_safe(diff: &serde_json::Map<String, serde_json::Value>) -> bo
             "approvalStatus",
         ],
     ) && bounded_string(&diff["id"], 1_024, false)
+        && matches!(
+            diff["operation"].as_str(),
+            Some("create" | "update" | "delete")
+        )
         && bounded_string(&diff["filePath"], 16 * 1_024, false)
         && bounded_string(&diff["patch"], 4 * 1_024 * 1_024, true)
         && (diff["baseRevision"].is_null() || bounded_string(&diff["baseRevision"], 1_024, false))
         && (diff["summary"].is_null() || bounded_string(&diff["summary"], 16 * 1_024, true))
-        && serde_json::from_value::<crate::AgentDiffProposal>(serde_json::Value::Object(
-            diff.clone(),
-        ))
-        .is_ok()
+        && current_approval_status_is_safe(&diff["approvalStatus"])
 }
 
 fn current_todo_is_safe(value: &serde_json::Value) -> bool {

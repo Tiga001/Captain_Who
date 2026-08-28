@@ -1178,6 +1178,8 @@ export const koKRTranslations = {
   'agent.patch.failure.notAFile': '대상 경로가 파일이 아닙니다.',
   'agent.patch.failure.readFailed': '대상 파일을 안전하게 읽을 수 없습니다.',
   'agent.patch.failure.invalidRequest': '파일 변경 요청이 잘못되었습니다.',
+  'agent.patch.failure.outcomeUnknown':
+    '변경 결과를 확인할 수 없습니다. 현재 파일 상태를 확인하고 바로 다시 시도하지 마세요.',
   'agent.editSummary.title': '요약 편집',
   'agent.editSummary.editedFiles': '{count} 파일을 편집했습니다.',
   'agent.editSummary.lineStats': '라인 변경',

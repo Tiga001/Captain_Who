@@ -543,7 +543,95 @@ impl AgentService {
                 }
                 cancellation_token.check()?;
                 let action_id = diff.id.clone();
-                let execution = approved_patch_execution_for_input(&agent_input, &action_id, &diff);
+                let prepared_action = AgentProposedAction::Diff { diff: diff.clone() };
+                match self.claim_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &prepared_action,
+                    created_at,
+                ) {
+                    Ok(outcome) => {
+                        if let Some(result) = resolve_file_effect_claim_outcome(
+                            &action_id,
+                            "apply_patch",
+                            "direct_file_change",
+                            outcome,
+                        )? {
+                            return Ok(result);
+                        }
+                    }
+                    Err(error) => {
+                        return Ok(file_effect_audit_persistence_failure(
+                            &action_id,
+                            "apply_patch",
+                            "direct_file_change",
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
+                let mut execution = prepare_approved_patch_execution_for_input(
+                    &agent_input,
+                    &run_id,
+                    &action_id,
+                    &diff,
+                );
+                if direct_file_change_outcome_unknown(&execution) {
+                    return Err(direct_file_change_recovery_pending(&action_id));
+                }
+                let has_committed_receipt = execution.committed_file_change_action.is_some();
+                let mut committed_action = execution
+                    .committed_file_change_action
+                    .take()
+                    .unwrap_or_else(|| prepared_action.clone());
+                if has_committed_receipt {
+                    if let Err(error) = self.commit_automatic_direct_file_change_action(
+                        &run_id,
+                        conversation_id.as_deref(),
+                        assistant_message_id.as_deref(),
+                        &agent_input,
+                        &prepared_action,
+                        &committed_action,
+                        created_at,
+                    ) {
+                        eprintln!(
+                            "failed to persist a Direct FileChange commit receipt; recovery remains pending: {error}"
+                        );
+                        return Err(direct_file_change_recovery_pending(&action_id));
+                    }
+                }
+                if let Some(finalization) = execution.direct_file_change_finalization.take() {
+                    let finalized_action = match finalize_direct_file_change_action(
+                        &committed_action,
+                        finalization,
+                    ) {
+                        Ok(action) => action,
+                        Err(error) => {
+                            eprintln!(
+                                "failed to finalize a Direct delete before its terminal audit; recovery remains pending: {error}"
+                            );
+                            return Err(direct_file_change_recovery_pending(&action_id));
+                        }
+                    };
+                    if let Err(error) = self.commit_automatic_direct_file_change_action(
+                        &run_id,
+                        conversation_id.as_deref(),
+                        assistant_message_id.as_deref(),
+                        &agent_input,
+                        &committed_action,
+                        &finalized_action,
+                        created_at,
+                    ) {
+                        eprintln!(
+                            "failed to persist a finalized Direct delete receipt; recovery remains pending: {error}"
+                        );
+                        return Err(direct_file_change_recovery_pending(&action_id));
+                    }
+                    committed_action = finalized_action;
+                }
                 record_turn_file_change_best_effort(
                     &self.storage,
                     &agent_input,
@@ -553,20 +641,42 @@ impl AgentService {
                     &action_id,
                     execution.file_change.as_ref(),
                 );
-                self.record_auto_action_audit(
+                if let Err(error) = self.finalize_auto_action_execution_audit(
                     &run_id,
-                    conversation_id,
-                    assistant_message_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
                     &agent_input,
-                    AgentProposedAction::Diff { diff },
-                    &execution.status,
-                    execution.patch_result.as_ref(),
+                    &committed_action,
+                    pending_status_label(execution.final_pending_status),
                     None,
-                    Some(&execution.tool_result),
+                    &execution.tool_result,
                     execution.tool_result.error.as_deref(),
                     created_at,
                     now_ms(),
-                );
+                ) {
+                    eprintln!(
+                        "failed to observe a Direct FileChange terminal audit; reconciling the durable receipt: {error}"
+                    );
+                    let reconciliation = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &committed_action,
+                            created_at,
+                        )
+                        .ok()
+                        .and_then(|outcome| {
+                            reconcile_file_effect_audit_outcome(&action_id, "apply_patch", outcome)
+                                .ok()
+                        });
+                    if let Some(FileEffectAuditReconciliation::Terminal(persisted)) = reconciliation
+                    {
+                        return Ok(persisted);
+                    }
+                    return Err(direct_file_change_recovery_pending(&action_id));
+                }
                 drop(deletion_lifecycle);
                 Ok(execution.tool_result)
             }

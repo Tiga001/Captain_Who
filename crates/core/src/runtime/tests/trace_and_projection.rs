@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn read_file_observation_authority_is_model_only_and_never_enters_renderer_events() {
+    let registry = ToolRegistry::defaults_with_search(None);
+    let raw = AgentToolResult {
+        exact_archive_file: None,
+        call_id: "read-observation-boundary".to_string(),
+        tool: "read_file".to_string(),
+        ok: true,
+        result: Some(json!({
+            "path": "missing.txt",
+            "exists": false,
+            "observationId": "fobs_0123456789abcdef0123456789abcdef",
+            "message": "文件不存在。",
+            "continueWith": {
+                "tool": "apply_patch",
+                "args": {
+                    "action": "apply",
+                    "operation": "create",
+                    "filePath": "missing.txt",
+                    "observationId": "fobs_0123456789abcdef0123456789abcdef"
+                }
+            }
+        })),
+        error: None,
+    };
+
+    let model = registry.model_projection(&raw);
+    assert_eq!(
+        model.result.as_ref().unwrap()["observationId"],
+        "fobs_0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(
+        model.result.as_ref().unwrap()["continueWith"]["args"]["observationId"],
+        "fobs_0123456789abcdef0123456789abcdef"
+    );
+
+    let event = redact_tool_result_for_event(&registry.event_projection(&raw));
+    let event_result = event.result.as_ref().unwrap();
+    assert!(event_result.get("observationId").is_none());
+    assert!(event_result["continueWith"]["args"]
+        .get("observationId")
+        .is_none());
+    assert_eq!(event_result["path"], "missing.txt");
+    assert_eq!(event_result["exists"], false);
+}
+
+#[test]
 fn safe_boundary_delivery_uses_one_byte_exact_authenticated_envelope() {
     let delivery = AgentSamplingBoundaryDelivery {
         receipt_id: "receipt-safe".into(),

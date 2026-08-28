@@ -23,7 +23,6 @@ mod llm;
 mod model_request_observation;
 pub mod notification_subject;
 pub mod office;
-pub mod patch;
 mod prompts;
 pub mod protocol;
 mod provider_continuation_store;

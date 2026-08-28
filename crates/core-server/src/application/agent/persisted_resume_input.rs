@@ -472,6 +472,7 @@ mod tests {
             },
             "providerContinuationRefs": [],
             "runWorldState": crate::test_run_world_state(),
+            "pendingActionId": null,
             "pendingToolCallId": "call-persisted-resume",
             "conversationTraceItems": [],
             "conversationModelContextItems": [],

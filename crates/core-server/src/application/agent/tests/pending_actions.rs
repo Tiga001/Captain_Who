@@ -3321,6 +3321,561 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
 }
 
 #[test]
+fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart() {
+    const PRIVATE_WHOLE_FILE_MARKER: &str = "PRIVATE_FILE_CHANGE_CONTENT_MUST_STAY_HOST_SIDE";
+
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+
+    let filler = (1..=12)
+        .map(|index| format!("unchanged line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base_content = format!("{PRIVATE_WHOLE_FILE_MARKER}\n{filler}\npublic status: before\n");
+    let target_content = format!("{PRIVATE_WHOLE_FILE_MARKER}\n{filler}\npublic status: after\n");
+    let run_id = "run-direct-file-change";
+    let conversation_id = "conversation-direct-file-change";
+    let call_id = "call-direct-file-change";
+    let canonical_target = fixture.path().join("report.txt");
+    let (action, call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        ("report.txt", canonical_target.to_str().unwrap()),
+        Some(&base_content),
+        Some(&target_content),
+        AgentApprovalStatus::Required,
+    );
+    let AgentProposedAction::Diff { diff } = &action else {
+        panic!("fixture must produce a Diff action");
+    };
+    assert!(
+        !diff.patch.contains(PRIVATE_WHOLE_FILE_MARKER),
+        "the presentation diff fixture must not itself contain the private whole-file marker"
+    );
+
+    let renderer_event = agent_event_notification(AgentEvent::Diff {
+        run_id: run_id.to_string(),
+        diff: diff.clone(),
+    });
+    assert_eq!(renderer_event["method"], AGENT_EVENT_NAME);
+    let pending_snapshot = PendingAgentActionSnapshot {
+        action_id: call_id.to_string(),
+        action_type: "diff".to_string(),
+        tool_name: "apply_patch".to_string(),
+        tool_call_id: Some(call_id.to_string()),
+        run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        assistant_message_id: Some("assistant-direct-file-change".to_string()),
+        action: action.clone(),
+        created_at: 1,
+        status: PendingActionStatus::Pending,
+    };
+    let renderer_pending = serde_json::to_value(&pending_snapshot).unwrap();
+
+    assert!(renderer_event["params"]["diff"].get("execution").is_none());
+    assert!(renderer_pending["action"]["diff"]
+        .get("execution")
+        .is_none());
+    for (boundary, projection) in [
+        ("agent.event", &renderer_event),
+        ("pending snapshot", &renderer_pending),
+    ] {
+        let encoded = serde_json::to_string(projection).unwrap();
+        for forbidden in [
+            "\"execution\"",
+            "\"baseContent\"",
+            "\"targetContent\"",
+            PRIVATE_WHOLE_FILE_MARKER,
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "{boundary} leaked Host-private FileChange material `{forbidden}`"
+            );
+        }
+    }
+
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(call_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    let record = PendingActionRecord {
+        storage_id: pending_action_storage_id(run_id, call_id),
+        snapshot: pending_snapshot,
+        agent_input,
+    };
+    let durable = pending_storage_record(&record, 2).unwrap();
+    let durable_action: Value = serde_json::from_str(&durable.action_json).unwrap();
+    assert_eq!(
+        durable_action["diff"]["execution"]["baseContent"],
+        base_content
+    );
+    assert_eq!(
+        durable_action["diff"]["execution"]["targetContent"],
+        target_content
+    );
+    let restored: AgentProposedAction = serde_json::from_str(&durable.action_json).unwrap();
+    let AgentProposedAction::Diff { diff: restored } = restored else {
+        panic!("durable action must round-trip as a Diff");
+    };
+    restored.execution.validate().unwrap();
+    assert_eq!(restored.execution.source_call_id, call_id);
+    assert_eq!(restored.execution.conversation_id, conversation_id);
+    assert_eq!(restored.execution.run_id, run_id);
+    assert_eq!(
+        restored.execution.base_content.as_deref(),
+        Some(base_content.as_str())
+    );
+    assert_eq!(
+        restored.execution.target_content.as_deref(),
+        Some(target_content.as_str())
+    );
+}
+
+#[test]
+fn startup_reconciles_published_manual_direct_file_change_without_replaying_it() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let run_id = "run-manual-direct-crash";
+    let conversation_id = "conversation-manual-direct-crash";
+    let assistant_message_id = "assistant-manual-direct-crash";
+    let call_id = "call-manual-direct-crash";
+    let target_content = "published before the durable receipt\n";
+    let target_path = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("manual-recovered.txt");
+    let (action, call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        ("manual-recovered.txt", target_path.to_str().unwrap()),
+        None,
+        Some(target_content),
+        AgentApprovalStatus::Required,
+    );
+
+    // This is the crash window: publication succeeded, but both pending and manual audit still
+    // contain the prepared credential and no terminal ToolResult exists.
+    std::fs::write(&target_path, target_content).unwrap();
+    let metadata_before = std::fs::metadata(&target_path).unwrap();
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        Some(call_id),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+    ));
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        1,
+    );
+    let record = PendingActionRecord {
+        storage_id: pending_action_storage_id(run_id, call_id),
+        snapshot: PendingAgentActionSnapshot {
+            action_id: call_id.to_string(),
+            action_type: "diff".to_string(),
+            tool_name: "apply_patch".to_string(),
+            tool_call_id: Some(call_id.to_string()),
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some(assistant_message_id.to_string()),
+            action,
+            created_at: 1,
+            status: PendingActionStatus::Executing,
+        },
+        agent_input,
+    };
+    storage
+        .store_pending_agent_action(pending_storage_record(&record, 2).unwrap())
+        .unwrap();
+    assert!(storage
+        .insert_agent_action_audit_if_absent(action_audit_record(
+            &record, None, "pending", None, None, None, None, None, None,
+        ))
+        .unwrap());
+
+    let candidates = storage
+        .list_interrupted_agent_actions_for_host_reconciliation()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    PersistedAgentResumeInput::decode(&candidates[0].agent_input_json)
+        .expect("manual crash fixture must retain a current resume input");
+    let prepared: AgentProposedAction = serde_json::from_str(&candidates[0].action_json).unwrap();
+    let AgentProposedAction::Diff { diff: prepared } = prepared else {
+        panic!("manual crash fixture must retain a Diff");
+    };
+    prepared.execution.validate().unwrap();
+    let resolved = mycopilot_core::file_change::FileChangePathPolicy::new(None, true)
+        .resolve(&prepared.execution.canonical_target)
+        .unwrap();
+    let plan = mycopilot_core::file_change::FileChangePlan::from_direct_binding(
+        &prepared.execution,
+        prepared.patch.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        mycopilot_core::file_change::FileChangeCommitter
+            .reconcile(&resolved, &plan, prepared.execution.delete_journal.as_ref())
+            .unwrap(),
+        mycopilot_core::file_change::FileChangeReconciliation::AlreadyApplied
+    );
+
+    let reconciled_at = mycopilot_core::storage::now_ms();
+    assert_eq!(
+        reconcile_interrupted_direct_file_changes(&storage, reconciled_at).unwrap(),
+        1,
+        "the Direct startup pre-pass must recognize the already-published target"
+    );
+    let after_direct = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_direct.status, "executing");
+    assert_eq!(after_direct.target_status.as_deref(), Some("completed"));
+    let _restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
+        .expect("published Direct FileChange must reconcile from its target digest");
+
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        target_content
+    );
+    let metadata_after = std::fs::metadata(&target_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(metadata_after.dev(), metadata_before.dev());
+        assert_eq!(metadata_after.ino(), metadata_before.ino());
+    }
+    #[cfg(not(unix))]
+    let _ = (metadata_before, metadata_after);
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let (pending_status, pending_action_json, audit_status, audit_action_json): (
+        String,
+        String,
+        String,
+        String,
+    ) = connection
+        .query_row(
+            "SELECT pending.status, pending.action_json, audit.status, audit.action_json
+             FROM agent_pending_actions pending
+             JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+             WHERE pending.action_id = ?1",
+            [&record.storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "completed");
+    assert_eq!(audit_status, "completed");
+    assert_eq!(pending_action_json, audit_action_json);
+    let committed: AgentProposedAction = serde_json::from_str(&pending_action_json).unwrap();
+    let AgentProposedAction::Diff { diff } = committed else {
+        panic!("recovered pending action must remain a Diff");
+    };
+    assert_eq!(
+        diff.execution.transaction.status,
+        mycopilot_core::file_change::FileChangeStatus::AlreadyApplied
+    );
+    assert!(diff.execution.receipt.is_some());
+}
+
+#[test]
+fn startup_reconciles_published_automatic_direct_file_change_without_replaying_it() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let run_id = "run-automatic-direct-crash";
+    let conversation_id = "conversation-automatic-direct-crash";
+    let assistant_message_id = "assistant-automatic-direct-crash";
+    let call_id = "call-automatic-direct-crash";
+    let target_content = "automatically published before the durable receipt\n";
+    let target_path = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("automatic-recovered.txt");
+    let (action, _call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        ("automatic-recovered.txt", target_path.to_str().unwrap()),
+        None,
+        Some(target_content),
+        AgentApprovalStatus::NotRequired,
+    );
+    std::fs::write(&target_path, target_content).unwrap();
+    let metadata_before = std::fs::metadata(&target_path).unwrap();
+    let audit = AgentActionAuditRecord {
+        action_id: pending_action_storage_id(run_id, call_id),
+        run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        assistant_message_id: Some(assistant_message_id.to_string()),
+        action_type: "diff".to_string(),
+        tool_name: "apply_patch".to_string(),
+        decision: Some("approved".to_string()),
+        status: "executing".to_string(),
+        action_json: serde_json::to_string(&action).unwrap(),
+        patch_result_json: None,
+        command_result_json: None,
+        tool_result_json: None,
+        error: None,
+        created_at: 1,
+        decided_at: Some(1),
+        completed_at: None,
+        effective_permissions_json: Some(
+            serde_json::to_string(&AgentPermissions::default()).unwrap(),
+        ),
+        path_scope: Some("workspace".to_string()),
+        command_cwd_scope: None,
+        blocked_reason: None,
+        decision_source: Some("auto".to_string()),
+    };
+    assert_eq!(
+        storage.claim_agent_action_audit_execution(audit).unwrap(),
+        AgentActionAuditExecutionClaimOutcome::Claimed
+    );
+
+    let candidates = storage
+        .list_executing_apply_patch_diff_action_audits()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    let prepared: AgentProposedAction = serde_json::from_str(&candidates[0].action_json).unwrap();
+    let AgentProposedAction::Diff { diff: prepared } = prepared else {
+        panic!("automatic crash fixture must retain a Diff");
+    };
+    prepared.execution.validate().unwrap();
+    let resolved = mycopilot_core::file_change::FileChangePathPolicy::new(None, true)
+        .resolve(&prepared.execution.canonical_target)
+        .unwrap();
+    let plan = mycopilot_core::file_change::FileChangePlan::from_direct_binding(
+        &prepared.execution,
+        prepared.patch.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        mycopilot_core::file_change::FileChangeCommitter
+            .reconcile(&resolved, &plan, prepared.execution.delete_journal.as_ref())
+            .unwrap(),
+        mycopilot_core::file_change::FileChangeReconciliation::AlreadyApplied
+    );
+
+    assert_eq!(
+        reconcile_interrupted_automatic_direct_file_changes(
+            &storage,
+            mycopilot_core::storage::now_ms(),
+        )
+        .unwrap(),
+        1,
+        "the automatic Direct startup pre-pass must recognize the already-published target"
+    );
+    let _restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
+        .expect("published automatic Direct FileChange must reconcile from its target digest");
+
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        target_content
+    );
+    let metadata_after = std::fs::metadata(&target_path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(metadata_after.dev(), metadata_before.dev());
+        assert_eq!(metadata_after.ino(), metadata_before.ino());
+    }
+    #[cfg(not(unix))]
+    let _ = (metadata_before, metadata_after);
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let (status, action_json, tool_result_json): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT status, action_json, tool_result_json
+             FROM agent_action_audit WHERE action_id = ?1",
+            [pending_action_storage_id(run_id, call_id)],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "completed");
+    assert!(tool_result_json.is_some());
+    let committed: AgentProposedAction = serde_json::from_str(&action_json).unwrap();
+    let AgentProposedAction::Diff { diff } = committed else {
+        panic!("recovered automatic action must remain a Diff");
+    };
+    assert_eq!(
+        diff.execution.transaction.status,
+        mycopilot_core::file_change::FileChangeStatus::AlreadyApplied
+    );
+    assert!(diff.execution.receipt.is_some());
+}
+
+#[test]
+fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let run_id = "run-automatic-delete-finalize-crash";
+    let conversation_id = "conversation-automatic-delete-finalize-crash";
+    let assistant_message_id = "assistant-automatic-delete-finalize-crash";
+    let call_id = "call-automatic-delete-finalize-crash";
+    let target_path = std::fs::canonicalize(fixture.path())
+        .unwrap()
+        .join("automatic-delete-finalize.txt");
+    std::fs::write(&target_path, "private deleted contents\n").unwrap();
+    let (mut action, _call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        (
+            "automatic-delete-finalize.txt",
+            target_path.to_str().unwrap(),
+        ),
+        Some("private deleted contents\n"),
+        None,
+        AgentApprovalStatus::NotRequired,
+    );
+    let AgentProposedAction::Diff { diff } = &mut action else {
+        unreachable!("fixture must produce a Diff")
+    };
+    let target =
+        mycopilot_core::file_change::FileChangePathPolicy::new(Some(fixture.path()), false)
+            .resolve("automatic-delete-finalize.txt")
+            .unwrap();
+    let plan = mycopilot_core::file_change::FileChangePlan::from_direct_binding(
+        &diff.execution,
+        diff.patch.clone(),
+    )
+    .unwrap();
+    let mut journal = diff.execution.delete_journal.clone().unwrap();
+    let commit = mycopilot_core::file_change::FileChangeCommitter
+        .commit(
+            &diff.execution.transaction.id,
+            &target,
+            &plan,
+            2,
+            Some(&mut journal),
+        )
+        .unwrap();
+    let tombstone_path = commit
+        .delete_journal
+        .as_ref()
+        .unwrap()
+        .tombstone_path
+        .clone();
+    *diff.execution = diff.execution.with_commit(&commit).unwrap();
+    assert!(!target_path.exists());
+    assert!(std::path::Path::new(&tombstone_path).exists());
+
+    let audit = AgentActionAuditRecord {
+        action_id: pending_action_storage_id(run_id, call_id),
+        run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        assistant_message_id: Some(assistant_message_id.to_string()),
+        action_type: "diff".to_string(),
+        tool_name: "apply_patch".to_string(),
+        decision: Some("approved".to_string()),
+        status: "executing".to_string(),
+        action_json: serde_json::to_string(&action).unwrap(),
+        patch_result_json: None,
+        command_result_json: None,
+        tool_result_json: None,
+        error: None,
+        created_at: 1,
+        decided_at: Some(1),
+        completed_at: None,
+        effective_permissions_json: Some(
+            serde_json::to_string(&AgentPermissions::default()).unwrap(),
+        ),
+        path_scope: Some("workspace".to_string()),
+        command_cwd_scope: None,
+        blocked_reason: None,
+        decision_source: Some("auto".to_string()),
+    };
+    assert_eq!(
+        storage.claim_agent_action_audit_execution(audit).unwrap(),
+        AgentActionAuditExecutionClaimOutcome::Claimed
+    );
+
+    assert_eq!(
+        reconcile_interrupted_automatic_direct_file_changes(
+            &storage,
+            mycopilot_core::storage::now_ms(),
+        )
+        .unwrap(),
+        1
+    );
+    assert!(!target_path.exists());
+    assert!(!std::path::Path::new(&tombstone_path).exists());
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let (status, action_json, tool_result_json): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT status, action_json, tool_result_json
+             FROM agent_action_audit WHERE action_id = ?1",
+            [pending_action_storage_id(run_id, call_id)],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "completed");
+    assert!(tool_result_json.is_some());
+    let finalized: AgentProposedAction = serde_json::from_str(&action_json).unwrap();
+    let AgentProposedAction::Diff { diff } = finalized else {
+        unreachable!("finalized action remains a Diff")
+    };
+    assert_eq!(
+        diff.execution.delete_journal.as_ref().unwrap().state,
+        mycopilot_core::file_change::FileChangeDeleteJournalState::Finalized
+    );
+    assert!(diff.execution.receipt.is_some());
+}
+
+#[test]
 fn pending_store_rejects_missing_checkpoint_or_exact_context_before_persistence() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -8179,12 +8734,13 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
     let assistant_message_id = "child-approval-continuation-assistant";
     let call = AgentToolCall {
         id: test_mcp_call_id("child-approval-continuation-call"),
-        tool: "apply_patch".to_string(),
-        args: json!({}),
+        tool: "todo_update".to_string(),
+        args: json!({ "items": [] }),
         approval_status: AgentApprovalStatus::Required,
         reason: None,
     };
-    let provenance = AgentToolIdentity::Builtin {
+    let provenance = AgentToolIdentity::RuntimeExtension {
+        extension_id: "todo".to_string(),
         tool_name: call.tool.clone(),
     };
     let context = AgentRunContext {
@@ -8304,7 +8860,7 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: true,
-            result: Some(json!({ "approved": true })),
+            result: Some(json!({ "revision": 1, "items": [], "updatedAt": admitted_at + 1 })),
             error: None,
         },
     });
@@ -8405,7 +8961,7 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
     service
         .persist_pending_target_status(&approved, PendingActionStatus::Completed)
         .unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     service
         .commit_trace_snapshot_with_continuation(&approved, &agent_input, &notifications)
         .unwrap();
@@ -8484,10 +9040,18 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
             )
             .await;
     });
-    tokio::time::timeout(Duration::from_secs(2), provider_entered)
-        .await
-        .expect("continuation must reach the deterministic Provider boundary")
-        .unwrap();
+    match tokio::time::timeout(Duration::from_secs(2), provider_entered).await {
+        Ok(entered) => entered.unwrap(),
+        Err(error) => {
+            let mut events = Vec::new();
+            while let Ok(event) = receiver.try_recv() {
+                events.push(event);
+            }
+            panic!(
+                "continuation must reach the deterministic Provider boundary: {error:?}; events={events:#?}"
+            );
+        }
+    }
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if dispatcher.observed_waiting_for_approval(&child.agent.agent_id) == Some(false) {
@@ -8692,12 +9256,13 @@ async fn pre_spawn_cancelled_continuation_retries_real_pending_target_and_releas
 
     let call = AgentToolCall {
         id: "pre-spawn-cancelled-continuation-call".to_string(),
-        tool: "apply_patch".to_string(),
-        args: json!({ "scope": "fixture" }),
+        tool: "todo_update".to_string(),
+        args: json!({ "items": [] }),
         approval_status: AgentApprovalStatus::Required,
         reason: None,
     };
-    let provenance = AgentToolIdentity::Builtin {
+    let provenance = AgentToolIdentity::RuntimeExtension {
+        extension_id: "todo".to_string(),
         tool_name: call.tool.clone(),
     };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
@@ -8809,7 +9374,7 @@ async fn pre_spawn_cancelled_continuation_retries_real_pending_target_and_releas
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: true,
-            result: Some(json!({ "approved": true })),
+            result: Some(json!({ "revision": 1, "items": [], "updatedAt": 1 })),
             error: None,
         },
     });

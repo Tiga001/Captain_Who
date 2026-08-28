@@ -861,6 +861,28 @@ fn llm_retry_event_serializes_structured_safe_retry_metadata() {
 }
 
 #[test]
+fn patch_result_requires_current_fields_and_rejects_extra_fields() {
+    let current = json!({
+        "status": "applied",
+        "operation": "update",
+        "filePath": "src/lib.rs",
+        "appliedFilePaths": ["src/lib.rs"]
+    });
+    serde_json::from_value::<AgentPatchResult>(current.clone()).unwrap();
+
+    let mut missing_paths = current.clone();
+    missing_paths
+        .as_object_mut()
+        .unwrap()
+        .remove("appliedFilePaths");
+    assert!(serde_json::from_value::<AgentPatchResult>(missing_paths).is_err());
+
+    let mut extra = current;
+    extra["internalCause"] = json!("must remain private");
+    assert!(serde_json::from_value::<AgentPatchResult>(extra).is_err());
+}
+
+#[test]
 fn agent_permission_meet_is_component_wise_and_never_widens() {
     let full = AgentPermissions {
         read: AgentReadPermission::All,

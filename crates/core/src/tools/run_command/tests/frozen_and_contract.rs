@@ -408,6 +408,12 @@ fn definition_exposes_the_workspace_dependent_cwd_contract() {
     assert!(definition
         .description
         .contains("cwd may be omitted to use the workspace root"));
+    assert!(definition
+        .description
+        .contains("Before the first ordinary call, inspect World State workspace.binding"));
+    assert!(definition
+        .description
+        .contains("When no workspace is selected, the first call must include cwd"));
     assert!(definition.description.contains(
         "must not be omitted even when the command, executable, or arguments already use absolute paths"
     ));
@@ -417,6 +423,19 @@ fn definition_exposes_the_workspace_dependent_cwd_contract() {
     assert!(cwd_description.contains("it also cannot be relative or `.`"));
     assert!(cwd_description.contains("normally the target file's parent"));
     assert_eq!(definition.input_schema["required"], json!(["command"]));
+}
+
+#[test]
+fn definition_forbids_using_commands_as_an_alternate_file_writer() {
+    let description = RunCommandTool.definition().description;
+
+    assert!(description.contains(
+        "Never use run_command, shell redirection, a heredoc, or an inline script as an alternate writer"
+    ));
+    assert!(description.contains("or to bypass file-write approval"));
+    assert!(description.contains("use apply_patch for short Direct changes"));
+    assert!(description.contains("write_file for long or staged content"));
+    assert!(description.contains("managed Skill/Builder workflows retain their narrower"));
 }
 
 #[test]

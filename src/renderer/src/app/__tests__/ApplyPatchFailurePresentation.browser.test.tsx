@@ -12,7 +12,9 @@ const translations: Record<string, string> = {
   'agent.patch.create.row.failed': '新建失败',
   'agent.patch.failure.generic': '无法安全应用这处修改。',
   'agent.patch.failure.conflict': '文件已发生变化，无法安全应用这处修改。',
-  'agent.patch.failure.fileExists': '文件已存在。'
+  'agent.patch.failure.fileExists': '文件已存在。',
+  'agent.patch.failure.staleFile': '文件状态已过期，请重新读取后再试。',
+  'agent.patch.failure.outcomeUnknown': '无法确认修改结果。请先检查文件当前状态，不要直接重试。'
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -33,8 +35,10 @@ function applyPatchCall(): AgentToolCall {
     id: 'patch-create-existing',
     tool: 'apply_patch',
     args: {
+      action: 'apply',
       operation: 'create',
       filePath: 'existing.txt',
+      observationId: 'fobs_missing_target',
       content: 'replacement'
     },
     approvalStatus: 'not_required',
@@ -50,10 +54,13 @@ describe('apply_patch failure presentation', () => {
       tool: call.tool,
       ok: false,
       result: {
-        type: 'structured_edit_error',
+        type: 'file_change',
         code: 'file_exists',
         errorCode: 'agent.apply_patch.file_exists',
-        recovery: 'useUpdateOrChooseAnotherPath'
+        category: 'precondition',
+        message: '文件已存在。',
+        recovery: 'use_update_or_choose_another_path',
+        continueWith: null
       },
       error: INTERNAL_ERROR
     }
@@ -64,6 +71,40 @@ describe('apply_patch failure presentation', () => {
     await expect.element(screen.getByText('文件已存在。', { exact: true })).toBeVisible()
     expect(screen.container.textContent).not.toContain('structured_edit_error')
     expect(screen.container.textContent).not.toContain('/private/workspace/internal.txt')
+  })
+
+  it.each([
+    'observation_required',
+    'observation_expired',
+    'observation_owner_mismatch',
+    'observation_path_mismatch',
+    'observation_stale'
+  ])('maps agent.apply_patch.%s to a safe reread message', async (code) => {
+    const call = applyPatchCall()
+    const privateCause = `PRIVATE_OBSERVATION_CAUSE:${code}:/private/workspace/README.md`
+    const result: AgentToolResult = {
+      callId: call.id,
+      tool: call.tool,
+      ok: false,
+      result: {
+        type: 'file_change',
+        code,
+        errorCode: `agent.apply_patch.${code}`,
+        category: 'precondition',
+        message: privateCause,
+        recovery: 'reread_file'
+      },
+      error: privateCause
+    }
+    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+
+    screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
+
+    await expect
+      .element(screen.getByText('文件状态已过期，请重新读取后再试。', { exact: true }))
+      .toBeVisible()
+    expect(screen.container.textContent).not.toContain(privateCause)
+    expect(screen.container.textContent).not.toContain(code)
   })
 
   it('fails closed for an unknown code instead of rendering backend text', async () => {
@@ -82,6 +123,36 @@ describe('apply_patch failure presentation', () => {
     await expect.element(screen.getByText('无法安全应用这处修改。', { exact: true })).toBeVisible()
     expect(screen.container.textContent).not.toContain('future_internal_failure')
     expect(screen.container.textContent).not.toContain('sensitive provider')
+  })
+
+  it('tells the user to inspect state instead of retrying an outcome-unknown change', async () => {
+    const call = applyPatchCall()
+    const result: AgentToolResult = {
+      callId: call.id,
+      tool: call.tool,
+      ok: false,
+      result: {
+        type: 'file_change',
+        code: 'outcome_unknown',
+        errorCode: 'agent.apply_patch.outcome_unknown',
+        category: 'execution',
+        message: 'private publication diagnostic',
+        recovery: 'do_not_retry'
+      },
+      error: 'private publication diagnostic'
+    }
+    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+
+    screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
+
+    await expect
+      .element(
+        screen.getByText('无法确认修改结果。请先检查文件当前状态，不要直接重试。', {
+          exact: true
+        })
+      )
+      .toBeVisible()
+    expect(screen.container.textContent).not.toContain('private publication diagnostic')
   })
 
   it('does not recover a display code from the raw legacy-shaped error text', async () => {

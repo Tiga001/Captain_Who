@@ -507,6 +507,10 @@ pub(super) fn file_effect_audit_persistence_failure(
     execution_result: Option<&AgentToolResult>,
 ) -> AgentToolResult {
     let execution_attempted = execution_result.is_some();
+    eprintln!(
+        "file-effect audit persistence failed ({effect_type}/{phase}): {}",
+        bounded_audit_error(audit_error)
+    );
     AgentToolResult {
         exact_archive_file: None,
         call_id: call_id.to_string(),
@@ -519,7 +523,6 @@ pub(super) fn file_effect_audit_persistence_failure(
             "phase": phase,
             "executionAttempted": execution_attempted,
             "effectsMayHaveOccurred": execution_attempted,
-            "auditError": bounded_audit_error(audit_error),
             "execution": execution_result,
         })),
         error: Some(if execution_attempted {
@@ -528,6 +531,20 @@ pub(super) fn file_effect_audit_persistence_failure(
             "The file-producing action was not started because its execution claim could not be persisted."
         }.to_string()),
     }
+}
+
+pub(super) fn direct_file_change_recovery_pending(call_id: &str) -> AgentError {
+    AgentError::structured(
+        "agent.apply_patch.recovery_pending",
+        "The file change has no confirmed terminal receipt. Its durable execution claim remains active; inspect the target and restart recovery instead of retrying the same change.",
+        serde_json::json!({
+            "type": "direct_file_change",
+            "code": "recoveryPending",
+            "callId": call_id,
+            "recovery": "inspectState",
+            "effectsMayHaveOccurred": true,
+        }),
+    )
 }
 
 pub(super) enum FileEffectAuditReconciliation {
@@ -837,4 +854,36 @@ pub(super) fn office_operation_tool_result(
         }
     }
     tool_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_effect_audit_failure_never_serializes_internal_cause_canaries() {
+        let result = file_effect_audit_persistence_failure(
+            "call-redaction",
+            "skills_materialize_resource",
+            "skill_materialization",
+            "beforeExecution",
+            "SQLite structured_edit_error RustEnum::ExpectedActionMismatch /private/canary",
+            None,
+        );
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(encoded.contains("auditPersistenceFailed"));
+        assert!(encoded.contains("beforeExecution"));
+        for forbidden in [
+            "auditError",
+            "SQLite",
+            "structured_edit_error",
+            "ExpectedActionMismatch",
+            "/private/canary",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "public ToolResult leaked internal canary `{forbidden}`"
+            );
+        }
+    }
 }

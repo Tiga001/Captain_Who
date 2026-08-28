@@ -1,6 +1,29 @@
 use crate::storage::models::AgentPendingActionRecord;
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// Outcome of replacing the private Direct FileChange execution credential on a manual action.
+///
+/// The replacement is only legal while the exact frozen pending-action identity remains
+/// `executing`. `AlreadyCommitted` is the one idempotent retry outcome; every other non-updated
+/// result tells the Host why it must stop instead of guessing whether the credential was stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingActionJsonCommitOutcome {
+    Updated,
+    AlreadyCommitted,
+    ExpectedActionMismatch,
+    LifecycleConflict {
+        status: String,
+        target_status: Option<String>,
+    },
+    NotExecuting {
+        status: String,
+    },
+    IdentityConflict {
+        status: String,
+    },
+    Missing,
+}
+
 /// Result of publishing an immutable pending-action snapshot.
 ///
 /// `action_id` is the durable idempotency key. Replaying the exact same frozen
@@ -73,6 +96,76 @@ pub fn store_pending_action(
     }
 }
 
+/// Replaces one executing manual action's exact prepared JSON inside the caller's immediate
+/// transaction. The service composes this with the optional manual audit CAS before commit.
+pub(crate) fn commit_executing_action_json(
+    connection: &Connection,
+    identity: &AgentPendingActionRecord,
+    expected_action_json: &str,
+    committed_action_json: &str,
+    updated_at: i64,
+) -> rusqlite::Result<PendingActionJsonCommitOutcome> {
+    let changed = connection.execute(
+        "
+        UPDATE agent_pending_actions
+        SET action_json = ?10,
+            updated_at = ?11
+        WHERE action_id = ?1
+          AND run_id = ?2
+          AND conversation_id IS ?3
+          AND assistant_message_id IS ?4
+          AND action_type = ?5
+          AND tool_name = ?6
+          AND tool_call_id IS ?7
+          AND created_at = ?8
+          AND status = 'executing'
+          AND target_status IS NULL
+          AND action_json = ?9
+        ",
+        params![
+            &identity.action_id,
+            &identity.run_id,
+            &identity.conversation_id,
+            &identity.assistant_message_id,
+            &identity.action_type,
+            &identity.tool_name,
+            &identity.tool_call_id,
+            identity.created_at,
+            expected_action_json,
+            committed_action_json,
+            updated_at,
+        ],
+    )?;
+    let outcome = if changed == 1 {
+        PendingActionJsonCommitOutcome::Updated
+    } else {
+        match load_pending_action(connection, &identity.action_id)? {
+            None => PendingActionJsonCommitOutcome::Missing,
+            Some(existing) if !same_immutable_identity(&existing, identity) => {
+                PendingActionJsonCommitOutcome::IdentityConflict {
+                    status: existing.status,
+                }
+            }
+            Some(existing) if existing.status != "executing" => {
+                PendingActionJsonCommitOutcome::NotExecuting {
+                    status: existing.status,
+                }
+            }
+            Some(existing) if existing.target_status.is_some() => {
+                PendingActionJsonCommitOutcome::LifecycleConflict {
+                    status: existing.status,
+                    target_status: existing.target_status,
+                }
+            }
+            Some(existing) if existing.action_json == committed_action_json => {
+                PendingActionJsonCommitOutcome::AlreadyCommitted
+            }
+            Some(_) => PendingActionJsonCommitOutcome::ExpectedActionMismatch,
+        }
+    };
+    Ok(outcome)
+}
+
 pub(crate) fn load_pending_action(
     connection: &Connection,
     action_id: &str,
@@ -133,6 +226,20 @@ fn same_frozen_identity(
         && existing.status == candidate.status
         && existing.action_json == candidate.action_json
         && existing.agent_input_json == candidate.agent_input_json
+}
+
+fn same_immutable_identity(
+    existing: &AgentPendingActionRecord,
+    candidate: &AgentPendingActionRecord,
+) -> bool {
+    existing.action_id == candidate.action_id
+        && existing.run_id == candidate.run_id
+        && existing.conversation_id == candidate.conversation_id
+        && existing.assistant_message_id == candidate.assistant_message_id
+        && existing.action_type == candidate.action_type
+        && existing.tool_name == candidate.tool_name
+        && existing.tool_call_id == candidate.tool_call_id
+        && existing.created_at == candidate.created_at
 }
 
 pub fn list_interrupted_actions(
@@ -539,6 +646,127 @@ pub fn delete_pending_actions_for_project(
 mod tests {
     use super::*;
     use crate::storage::migrations;
+
+    fn executing_diff(action_id: &str, action_json: &str) -> AgentPendingActionRecord {
+        AgentPendingActionRecord {
+            action_id: action_id.to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "diff".to_string(),
+            tool_name: "apply_patch".to_string(),
+            tool_call_id: Some(action_id.to_string()),
+            status: "executing".to_string(),
+            target_status: None,
+            action_json: action_json.to_string(),
+            agent_input_json: r#"{"checkpoint":"current"}"#.to_string(),
+            created_at: 10,
+            updated_at: 20,
+        }
+    }
+
+    #[test]
+    fn executing_diff_action_json_commit_is_exact_and_idempotent() {
+        const PREPARED: &str = r#"{"type":"diff","credential":"prepared"}"#;
+        const COMMITTED: &str = r#"{"type":"diff","credential":"committed"}"#;
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let expected = executing_diff("manual-diff", PREPARED);
+        assert_eq!(
+            store_pending_action(&connection, &expected).unwrap(),
+            PendingActionStoreOutcome::Inserted
+        );
+
+        assert_eq!(
+            commit_executing_action_json(&connection, &expected, PREPARED, COMMITTED, 30,).unwrap(),
+            PendingActionJsonCommitOutcome::Updated
+        );
+        assert_eq!(
+            commit_executing_action_json(&connection, &expected, PREPARED, COMMITTED, 30,).unwrap(),
+            PendingActionJsonCommitOutcome::AlreadyCommitted
+        );
+        let committed = load_pending_action(&connection, &expected.action_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.action_json, COMMITTED);
+        assert_eq!(committed.updated_at, 30);
+
+        let stale = executing_diff("stale-manual-diff", PREPARED);
+        store_pending_action(&connection, &stale).unwrap();
+        assert_eq!(
+            commit_executing_action_json(
+                &connection,
+                &stale,
+                r#"{"type":"diff","credential":"older"}"#,
+                COMMITTED,
+                30,
+            )
+            .unwrap(),
+            PendingActionJsonCommitOutcome::ExpectedActionMismatch
+        );
+        assert_eq!(
+            load_pending_action(&connection, &stale.action_id)
+                .unwrap()
+                .unwrap()
+                .action_json,
+            PREPARED
+        );
+
+        let mut targeted = executing_diff("targeted-manual-diff", PREPARED);
+        targeted.target_status = Some("completed".to_string());
+        store_pending_action(&connection, &targeted).unwrap();
+        let mut untargeted_identity = targeted.clone();
+        untargeted_identity.target_status = None;
+        assert_eq!(
+            commit_executing_action_json(
+                &connection,
+                &untargeted_identity,
+                PREPARED,
+                COMMITTED,
+                30,
+            )
+            .unwrap(),
+            PendingActionJsonCommitOutcome::LifecycleConflict {
+                status: "executing".to_string(),
+                target_status: Some("completed".to_string()),
+            }
+        );
+
+        let mut pending = executing_diff("not-executing-manual-diff", PREPARED);
+        pending.status = "approved".to_string();
+        store_pending_action(&connection, &pending).unwrap();
+        let mut executing_identity = pending.clone();
+        executing_identity.status = "executing".to_string();
+        assert_eq!(
+            commit_executing_action_json(
+                &connection,
+                &executing_identity,
+                PREPARED,
+                COMMITTED,
+                30,
+            )
+            .unwrap(),
+            PendingActionJsonCommitOutcome::NotExecuting {
+                status: "approved".to_string()
+            }
+        );
+
+        let mut conflicting_identity = stale.clone();
+        conflicting_identity.run_id = "other-run".to_string();
+        assert_eq!(
+            commit_executing_action_json(
+                &connection,
+                &conflicting_identity,
+                PREPARED,
+                COMMITTED,
+                30,
+            )
+            .unwrap(),
+            PendingActionJsonCommitOutcome::IdentityConflict {
+                status: "executing".to_string()
+            }
+        );
+    }
 
     #[test]
     fn stores_lists_and_updates_pending_actions() {

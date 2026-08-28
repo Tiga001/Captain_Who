@@ -1194,6 +1194,8 @@ export const enUSTranslations = {
   'agent.patch.failure.notAFile': 'The target path is not a file.',
   'agent.patch.failure.readFailed': 'The target file could not be read safely.',
   'agent.patch.failure.invalidRequest': 'The file change request is invalid.',
+  'agent.patch.failure.outcomeUnknown':
+    'The result could not be confirmed. Inspect the current file state and do not retry directly.',
   'agent.editSummary.title': 'Edit summary',
   'agent.editSummary.editedFiles': 'Edited {count} files',
   'agent.editSummary.lineStats': 'Line changes',

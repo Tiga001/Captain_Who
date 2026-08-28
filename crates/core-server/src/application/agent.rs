@@ -679,6 +679,15 @@ impl AgentService {
         let unresolved_command_sessions = storage
             .reconcile_agent_command_sessions_on_startup(now_ms())
             .map_err(|error| format!("failed to reconcile command sessions: {error}"))?;
+        pending_action_store::reconcile_interrupted_direct_file_changes(&storage, now_ms())
+            .map_err(|error| {
+                format!("failed to reconcile interrupted Direct file changes: {error}")
+            })?;
+        pending_action_store::reconcile_interrupted_automatic_direct_file_changes(
+            &storage,
+            now_ms(),
+        )
+        .map_err(|error| format!("failed to reconcile automatic Direct file changes: {error}"))?;
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;

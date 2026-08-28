@@ -1,5 +1,54 @@
 use super::*;
 use std::path::{Component, Path};
+#[cfg(test)]
+use std::sync::Mutex;
+
+#[cfg(test)]
+static DIRECT_FILE_CHANGE_OUTCOME_UNKNOWN_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static DIRECT_FILE_CHANGE_POST_COMMIT_BINDING_FAILURE_CALLS: Mutex<Vec<String>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn inject_direct_file_change_outcome_unknown(call_id: &str) {
+    DIRECT_FILE_CHANGE_OUTCOME_UNKNOWN_CALLS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(call_id.to_string());
+}
+
+#[cfg(test)]
+pub(crate) fn inject_direct_file_change_post_commit_binding_failure(call_id: &str) {
+    DIRECT_FILE_CHANGE_POST_COMMIT_BINDING_FAILURE_CALLS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(call_id.to_string());
+}
+
+#[cfg(test)]
+fn take_direct_file_change_outcome_unknown(call_id: &str) -> bool {
+    let mut calls = DIRECT_FILE_CHANGE_OUTCOME_UNKNOWN_CALLS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(index) = calls.iter().position(|candidate| candidate == call_id) else {
+        return false;
+    };
+    calls.swap_remove(index);
+    true
+}
+
+#[cfg(test)]
+fn take_direct_file_change_post_commit_binding_failure(call_id: &str) -> bool {
+    let mut failures = DIRECT_FILE_CHANGE_POST_COMMIT_BINDING_FAILURE_CALLS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(index) = failures.iter().position(|candidate| candidate == call_id) else {
+        return false;
+    };
+    failures.swap_remove(index);
+    true
+}
 
 pub(crate) fn initialize_turn_diff_best_effort(
     storage: &StorageService,
@@ -321,6 +370,13 @@ pub(crate) fn tool_call_for_pending_record(
             },
         )?;
     }
+    if let AgentProposedAction::Diff { diff } = &record.snapshot.action {
+        let digest = mycopilot_core::file_change::proposal_digest(&call.args)
+            .map_err(|_| "待审批 apply_patch ToolCall 无法校验。".to_string())?;
+        if digest != diff.execution.source_args_digest {
+            return Err("待审批 apply_patch ToolCall 与冻结 FileChange 事务不一致。".to_string());
+        }
+    }
     if let AgentProposedAction::BuiltinCapabilityActivation { approval } = &record.snapshot.action {
         mycopilot_core::validate_frozen_builtin_capability_activation_args(approval, &call.args)
             .map_err(|_| {
@@ -383,32 +439,14 @@ pub(crate) fn action_execution_for_decision(
         AgentProposedAction::FileWrite { file_write } => {
             approved_file_write_execution(storage, &record.agent_input, file_write)
         }
-        AgentProposedAction::ToolCall { call } if call.tool == "apply_patch" => {
-            ActionExecutionDecision {
-                status: "failed".to_string(),
-                final_pending_status: PendingActionStatus::Failed,
-                patch_result: None,
-                file_write_result: None,
-                file_change: None,
-                tool_result: AgentToolResult {
-                    exact_archive_file: None,
-                    call_id: call.id.clone(),
-                    tool: call.tool.clone(),
-                    ok: false,
-                    result: Some(json!({
-                        "status": "failed",
-                        "message": "apply_patch approval action must be represented as a diff proposal before execution."
-                    })),
-                    error: Some("apply_patch 审批缺少 diff proposal，不能执行。".to_string()),
-                },
-            }
-        }
         _ => ActionExecutionDecision {
             status: "failed".to_string(),
             final_pending_status: PendingActionStatus::Failed,
             patch_result: None,
             file_write_result: None,
             file_change: None,
+            committed_file_change_action: None,
+            direct_file_change_finalization: None,
             tool_result: tool_result_for_decision(call, decision_status, message),
         },
     };
@@ -438,6 +476,7 @@ pub(crate) fn rejected_action_execution(
             applied_file_paths: Vec::new(),
             git_diff: None,
             git_diff_error: None,
+            error_code: None,
             error: None,
             message: message.map(ToString::to_string),
         };
@@ -448,6 +487,8 @@ pub(crate) fn rejected_action_execution(
             patch_result: Some(patch_result),
             file_write_result: None,
             file_change: None,
+            committed_file_change_action: None,
+            direct_file_change_finalization: None,
             tool_result,
         };
     }
@@ -469,6 +510,8 @@ pub(crate) fn rejected_action_execution(
             patch_result: None,
             file_write_result: Some(result.clone()),
             file_change: None,
+            committed_file_change_action: None,
+            direct_file_change_finalization: None,
             tool_result: file_write_tool_result(&record.snapshot.action_id, true, &result),
         };
     }
@@ -479,6 +522,8 @@ pub(crate) fn rejected_action_execution(
         patch_result: None,
         file_write_result: None,
         file_change: None,
+        committed_file_change_action: None,
+        direct_file_change_finalization: None,
         tool_result: tool_result_for_decision(call, AgentApprovalDecisionStatus::Rejected, message),
     }
 }
@@ -487,73 +532,320 @@ pub(crate) fn approved_patch_execution(
     record: &PendingActionRecord,
     diff: &mycopilot_core::AgentDiffProposal,
 ) -> ActionExecutionDecision {
-    approved_patch_execution_for_input(&record.agent_input, &record.snapshot.action_id, diff)
+    prepare_approved_patch_execution_for_input(
+        &record.agent_input,
+        &record.snapshot.run_id,
+        &record.snapshot.action_id,
+        diff,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn approved_patch_execution_for_input(
     agent_input: &AgentChatInput,
+    run_id: &str,
     action_id: &str,
     diff: &mycopilot_core::AgentDiffProposal,
 ) -> ActionExecutionDecision {
-    let workspace_root = workspace_root_optional(agent_input);
-    let permissions = permissions_from_input(agent_input);
-    let (patch_result, file_change) = match apply_unified_diff_in_workspace(
-        workspace_root.as_deref(),
-        diff.operation,
-        &diff.file_path,
-        &diff.patch,
-        diff.base_revision.as_deref(),
-        permissions,
-    ) {
-        Ok(apply_result) => (
+    let mut decision =
+        prepare_approved_patch_execution_for_input(agent_input, run_id, action_id, diff);
+    if let Some(finalization) = decision.direct_file_change_finalization.take() {
+        if let Err(error) = finalization.finalize() {
+            let failure = mycopilot_core::file_change::FileChangeError::with_diagnostic(
+                mycopilot_core::file_change::FileChangeErrorCode::OutcomeUnknown,
+                error,
+            );
+            decision = failed_direct_patch_decision(diff, action_id, failure);
+        }
+    }
+    decision.committed_file_change_action = None;
+    decision
+}
+
+pub(crate) fn direct_file_change_outcome_unknown(execution: &ActionExecutionDecision) -> bool {
+    execution.patch_result.as_ref().is_some_and(|result| {
+        result.error_code.as_deref() == Some("agent.apply_patch.outcome_unknown")
+    })
+}
+
+pub(crate) fn finalize_direct_file_change_action(
+    action: &AgentProposedAction,
+    finalization: DirectFileChangeFinalization,
+) -> Result<AgentProposedAction, String> {
+    let AgentProposedAction::Diff { diff } = action else {
+        return Err("Direct FileChange delete finalization requires a Diff action".to_string());
+    };
+    let finalized_journal = finalization.finalize()?;
+    let mut finalized_diff = diff.clone();
+    *finalized_diff.execution = diff
+        .execution
+        .with_finalized_delete_journal(finalized_journal)
+        .map_err(|error| error.to_string())?;
+    Ok(AgentProposedAction::Diff {
+        diff: finalized_diff,
+    })
+}
+
+pub(crate) fn prepare_approved_patch_execution_for_input(
+    agent_input: &AgentChatInput,
+    run_id: &str,
+    action_id: &str,
+    diff: &mycopilot_core::AgentDiffProposal,
+) -> ActionExecutionDecision {
+    let execution = execute_direct_file_change(agent_input, run_id, action_id, diff);
+    let (patch_result, file_change, committed_action, finalization) = match execution {
+        Ok(execution) => (
             AgentPatchResult {
                 status: AgentPatchResultStatus::Applied,
                 operation: diff.operation,
                 file_path: diff.file_path.clone(),
-                applied_file_paths: apply_result.file_paths,
+                applied_file_paths: vec![diff.file_path.clone()],
                 git_diff: None,
                 git_diff_error: None,
+                error_code: None,
                 error: None,
                 message: diff.summary.clone(),
             },
-            Some(apply_result.file_change),
+            Some(execution.file_change),
+            Some(AgentProposedAction::Diff {
+                diff: execution.committed_diff,
+            }),
+            execution.finalization,
         ),
-        Err(error) => (
-            AgentPatchResult {
-                status: patch_status_for_error(&error),
-                operation: diff.operation,
-                file_path: diff.file_path.clone(),
-                applied_file_paths: Vec::new(),
-                git_diff: None,
-                git_diff_error: None,
-                error: Some(error),
-                message: None,
-            },
-            None,
-        ),
+        Err(error) => return failed_direct_patch_decision(diff, action_id, error),
     };
 
-    let applied = patch_result.status == AgentPatchResultStatus::Applied;
-    let conflict = patch_result.status == AgentPatchResultStatus::Conflict;
-    let tool_result = patch_tool_result(action_id, applied, &patch_result);
+    let tool_result = patch_tool_result(action_id, true, &patch_result);
     ActionExecutionDecision {
-        status: if applied {
-            "applied".to_string()
-        } else if conflict {
+        status: "applied".to_string(),
+        final_pending_status: PendingActionStatus::Completed,
+        patch_result: Some(patch_result),
+        file_write_result: None,
+        file_change,
+        committed_file_change_action: committed_action,
+        direct_file_change_finalization: finalization,
+        tool_result,
+    }
+}
+
+fn failed_direct_patch_decision(
+    diff: &mycopilot_core::AgentDiffProposal,
+    action_id: &str,
+    error: mycopilot_core::file_change::FileChangeError,
+) -> ActionExecutionDecision {
+    let patch_result = AgentPatchResult {
+        status: patch_status_for_file_change_error(&error),
+        operation: diff.operation,
+        file_path: diff.file_path.clone(),
+        applied_file_paths: Vec::new(),
+        git_diff: None,
+        git_diff_error: None,
+        error_code: Some(file_change_error_code(&error)),
+        error: Some(error.to_string()),
+        message: None,
+    };
+    let conflict = patch_result.status == AgentPatchResultStatus::Conflict;
+    let tool_result = patch_tool_result(action_id, false, &patch_result);
+    ActionExecutionDecision {
+        status: if conflict {
             "conflict".to_string()
         } else {
             "failed".to_string()
         },
-        final_pending_status: if applied {
-            PendingActionStatus::Completed
-        } else {
-            PendingActionStatus::Failed
-        },
+        final_pending_status: PendingActionStatus::Failed,
         patch_result: Some(patch_result),
         file_write_result: None,
-        file_change,
+        file_change: None,
+        committed_file_change_action: None,
+        direct_file_change_finalization: None,
         tool_result,
     }
+}
+
+struct DirectFileChangeExecution {
+    file_change: AgentTurnFileChange,
+    committed_diff: mycopilot_core::AgentDiffProposal,
+    finalization: Option<DirectFileChangeFinalization>,
+}
+
+fn execute_direct_file_change(
+    agent_input: &AgentChatInput,
+    run_id: &str,
+    action_id: &str,
+    diff: &mycopilot_core::AgentDiffProposal,
+) -> Result<DirectFileChangeExecution, mycopilot_core::file_change::FileChangeError> {
+    use mycopilot_core::file_change::{
+        FileChangeCommitter, FileChangeError, FileChangeErrorCode, FileChangeOperation,
+        FileChangePathPolicy, FileChangePlan,
+    };
+
+    let binding = &diff.execution;
+    binding.validate()?;
+    let context = agent_input
+        .context
+        .as_ref()
+        .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::PermissionDenied))?;
+    let conversation_id = context
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::PermissionDenied))?;
+    let permissions = permissions_from_input(agent_input);
+    let permission_revision =
+        mycopilot_core::file_change::proposal_digest(&permissions).map_err(|error| {
+            FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
+        })?;
+    if binding.source_call_id != action_id
+        || binding.run_id != run_id
+        || binding.conversation_id != conversation_id
+        || binding.permission_revision != permission_revision
+        || patch_operation_for_file_change(binding.transaction.operation) != diff.operation
+        || binding.transaction.file_path != diff.file_path
+        || binding.transaction.base.revision() != diff.base_revision.as_deref()
+    {
+        return Err(FileChangeError::new(
+            FileChangeErrorCode::IllegalFieldCombination,
+        ));
+    }
+    if let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() {
+        if checkpoint.tool_set.effective_revision != binding.tool_set_revision {
+            return Err(FileChangeError::new(
+                FileChangeErrorCode::IllegalFieldCombination,
+            ));
+        }
+    }
+    let workspace_root = workspace_root_optional(agent_input);
+    let target = FileChangePathPolicy::new(
+        workspace_root.as_deref(),
+        permissions.write == mycopilot_core::AgentWritePermission::All,
+    )
+    .resolve(&diff.file_path)?;
+    if target.absolute_path().to_string_lossy() != binding.canonical_target {
+        return Err(FileChangeError::new(
+            FileChangeErrorCode::ObservationPathMismatch,
+        ));
+    }
+    let plan = FileChangePlan::from_direct_binding(binding, diff.patch.clone())?;
+    let committer = FileChangeCommitter;
+    binding
+        .observation
+        .revalidate_current_identity(target.absolute_path())?;
+    #[cfg(test)]
+    if take_direct_file_change_outcome_unknown(action_id) {
+        return Err(FileChangeError::new(FileChangeErrorCode::OutcomeUnknown));
+    }
+    let committed_at = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+    let commit = match plan.operation {
+        FileChangeOperation::Delete => {
+            let mut journal = binding.delete_journal.clone().ok_or_else(|| {
+                FileChangeError::new(FileChangeErrorCode::IllegalFieldCombination)
+            })?;
+            committer.commit_fresh(
+                &binding.transaction.id,
+                &target,
+                &plan,
+                committed_at,
+                Some(&mut journal),
+            )?
+        }
+        FileChangeOperation::Create | FileChangeOperation::Update => {
+            committer.commit_fresh(&binding.transaction.id, &target, &plan, committed_at, None)?
+        }
+    };
+    #[cfg(test)]
+    let commit = {
+        let mut commit = commit;
+        if take_direct_file_change_post_commit_binding_failure(action_id) {
+            commit
+                .receipt
+                .file_path
+                .push_str("#injected-binding-failure");
+        }
+        commit
+    };
+    if commit.receipt.proposal_digest != binding.proposal.proposal_digest {
+        return Err(FileChangeError::with_diagnostic(
+            FileChangeErrorCode::OutcomeUnknown,
+            "post-commit receipt proposal digest mismatch",
+        ));
+    }
+    let committed_binding = binding.with_commit(&commit).map_err(|error| {
+        FileChangeError::with_diagnostic(
+            FileChangeErrorCode::OutcomeUnknown,
+            format!(
+                "post-commit binding validation failed: code={:?}, diagnostic={:?}",
+                error.code(),
+                error.diagnostic()
+            ),
+        )
+    })?;
+    let mut committed_diff = diff.clone();
+    committed_diff.execution = Box::new(committed_binding);
+    let finalization = commit
+        .delete_journal
+        .map(|journal| DirectFileChangeFinalization {
+            target,
+            journal,
+            finalized_at: committed_at,
+        });
+    Ok(DirectFileChangeExecution {
+        committed_diff,
+        finalization,
+        file_change: AgentTurnFileChange {
+            path: diff.file_path.clone(),
+            before: binding
+                .base_content
+                .clone()
+                .map(AgentTurnFileContent::Text)
+                .unwrap_or(AgentTurnFileContent::Missing),
+            after: binding
+                .target_content
+                .clone()
+                .map(AgentTurnFileContent::Text)
+                .unwrap_or(AgentTurnFileContent::Missing),
+        },
+    })
+}
+
+fn patch_operation_for_file_change(
+    operation: mycopilot_core::file_change::FileChangeOperation,
+) -> mycopilot_core::AgentPatchOperation {
+    match operation {
+        mycopilot_core::file_change::FileChangeOperation::Create => {
+            mycopilot_core::AgentPatchOperation::Create
+        }
+        mycopilot_core::file_change::FileChangeOperation::Update => {
+            mycopilot_core::AgentPatchOperation::Update
+        }
+        mycopilot_core::file_change::FileChangeOperation::Delete => {
+            mycopilot_core::AgentPatchOperation::Delete
+        }
+    }
+}
+
+fn patch_status_for_file_change_error(
+    error: &mycopilot_core::file_change::FileChangeError,
+) -> AgentPatchResultStatus {
+    use mycopilot_core::file_change::FileChangeErrorCode;
+    if matches!(
+        error.code(),
+        FileChangeErrorCode::FileExists
+            | FileChangeErrorCode::FileMissing
+            | FileChangeErrorCode::RevisionConflict
+            | FileChangeErrorCode::Conflict
+            | FileChangeErrorCode::ObservationStale
+    ) {
+        AgentPatchResultStatus::Conflict
+    } else {
+        AgentPatchResultStatus::Failed
+    }
+}
+
+fn file_change_error_code(error: &mycopilot_core::file_change::FileChangeError) -> String {
+    let code = serde_json::to_value(error.code())
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "failed".to_string());
+    format!("agent.apply_patch.{code}")
 }
 
 pub(crate) fn approved_file_write_execution(
@@ -655,6 +947,8 @@ fn file_write_decision(
         patch_result: None,
         file_write_result: Some(result.clone()),
         file_change,
+        committed_file_change_action: None,
+        direct_file_change_finalization: None,
         tool_result: file_write_tool_result(&proposal.id, applied, &result),
     }
 }
@@ -671,19 +965,6 @@ pub(crate) fn file_write_tool_result(
         ok,
         result: Some(json!(result)),
         error: if ok { None } else { result.error.clone() },
-    }
-}
-
-pub(crate) fn patch_status_for_error(error: &str) -> AgentPatchResultStatus {
-    if error.contains("审批前已发生变化")
-        || error.contains("baseRevision")
-        || error.contains("git apply --check")
-        || error.contains("patch does not apply")
-        || error.contains("patch failed")
-    {
-        AgentPatchResultStatus::Conflict
-    } else {
-        AgentPatchResultStatus::Failed
     }
 }
 

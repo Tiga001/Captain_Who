@@ -1,5 +1,8 @@
 use super::*;
 
+pub use crate::storage::agent_action_audit_repository::AgentActionAuditJsonCommitOutcome;
+pub use crate::storage::pending_action_repository::PendingActionJsonCommitOutcome as AgentPendingActionJsonCommitOutcome;
+
 #[derive(Debug)]
 struct DurablePendingTraceSnapshot {
     snapshot: crate::ConversationTraceSnapshot,
@@ -548,6 +551,19 @@ fn validate_frozen_manual_file_effect_tool_call(
     }
 
     let reason = match action {
+        AgentProposedAction::Diff { diff } => {
+            let digest = crate::file_change::proposal_digest(operation)
+                .map_err(|_| "Direct FileChange ToolCall arguments are invalid".to_string())?;
+            if digest != diff.execution.source_args_digest {
+                return Err(format!(
+                    "启动对账发现 Direct FileChange {action_id} 的冻结 ToolCall 参数与 action 不一致。"
+                ));
+            }
+            operation
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        }
         AgentProposedAction::Command { command } => {
             crate::tools::validate_frozen_command_trace_args(command, operation).map_err(
                 |error| {
@@ -1220,6 +1236,80 @@ fn ensure_exact_builtin_capability_initial_audit(
     Ok(())
 }
 
+fn validate_direct_file_change_action_json_pair(
+    frozen_action_json: &str,
+    expected_action_json: &str,
+    committed_action_json: &str,
+    expected_run_id: &str,
+    expected_conversation_id: Option<&str>,
+    expected_tool_call_id: Option<&str>,
+) -> Result<(), String> {
+    if expected_action_json.trim().is_empty()
+        || committed_action_json.trim().is_empty()
+        || expected_action_json == committed_action_json
+        || frozen_action_json != expected_action_json
+    {
+        return Err("Direct FileChange action JSON CAS input is invalid".to_string());
+    }
+    let prepared = serde_json::from_str::<AgentProposedAction>(expected_action_json)
+        .map_err(|_| "Direct FileChange prepared action JSON is invalid".to_string())?;
+    let committed = serde_json::from_str::<AgentProposedAction>(committed_action_json)
+        .map_err(|_| "Direct FileChange committed action JSON is invalid".to_string())?;
+    let (
+        AgentProposedAction::Diff {
+            diff: prepared_diff,
+        },
+        AgentProposedAction::Diff {
+            diff: committed_diff,
+        },
+    ) = (&prepared, &committed)
+    else {
+        return Err("Direct FileChange action JSON must contain a Diff".to_string());
+    };
+    let operation_matches = match prepared_diff.operation {
+        crate::AgentPatchOperation::Create => {
+            prepared_diff.execution.transaction.operation
+                == crate::file_change::FileChangeOperation::Create
+        }
+        crate::AgentPatchOperation::Update => {
+            prepared_diff.execution.transaction.operation
+                == crate::file_change::FileChangeOperation::Update
+        }
+        crate::AgentPatchOperation::Delete => {
+            prepared_diff.execution.transaction.operation
+                == crate::file_change::FileChangeOperation::Delete
+        }
+    };
+    let execution_transition_is_valid = committed_diff
+        .execution
+        .is_commit_successor_of(&prepared_diff.execution)
+        || committed_diff
+            .execution
+            .is_delete_finalization_successor_of(&prepared_diff.execution);
+    if !execution_transition_is_valid
+        || prepared_diff.id != committed_diff.id
+        || prepared_diff.operation != committed_diff.operation
+        || prepared_diff.file_path != committed_diff.file_path
+        || prepared_diff.patch != committed_diff.patch
+        || prepared_diff.base_revision != committed_diff.base_revision
+        || prepared_diff.summary != committed_diff.summary
+        || prepared_diff.approval_status != committed_diff.approval_status
+        || prepared_diff.id != prepared_diff.execution.source_call_id
+        || prepared_diff.file_path != prepared_diff.execution.transaction.file_path
+        || prepared_diff.base_revision.as_deref()
+            != prepared_diff.execution.transaction.base.revision()
+        || !operation_matches
+        || prepared_diff.execution.run_id != expected_run_id
+        || Some(prepared_diff.execution.conversation_id.as_str()) != expected_conversation_id
+        || expected_tool_call_id.is_some_and(|call_id| call_id != prepared_diff.id)
+    {
+        return Err(
+            "Direct FileChange committed action is not the exact prepared successor".to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl StorageService {
     /// Settles the hidden dispatch journal for one automatically authorized MCP invocation.
     ///
@@ -1838,6 +1928,16 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    /// Returns current canonical `executing + diff + apply_patch` audit records for startup
+    /// reconciliation. Payload validation remains the recovery caller's responsibility.
+    pub fn list_executing_apply_patch_diff_action_audits(
+        &self,
+    ) -> Result<Vec<AgentActionAuditRecord>, String> {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::list_executing_apply_patch_diff_action_audits(&connection)
+            .map_err(storage_error)
+    }
+
     pub fn insert_agent_action_audit_if_absent(
         &self,
         record: AgentActionAuditRecord,
@@ -1854,6 +1954,49 @@ impl StorageService {
         let connection = self.state.connection()?;
         agent_action_audit_repository::claim_action_audit_execution(&connection, &record)
             .map_err(storage_error)
+    }
+
+    /// Persists the committed Direct FileChange credential for an automatically approved action.
+    ///
+    /// This changes only `action_json`; it cannot create an audit row or advance lifecycle/result
+    /// fields. The repository binds the update to the complete immutable automatic-action
+    /// identity and the exact prepared JSON.
+    pub fn commit_automatic_direct_file_change_action_json(
+        &self,
+        identity: &AgentActionAuditRecord,
+        expected_action_json: &str,
+        committed_action_json: &str,
+    ) -> Result<AgentActionAuditJsonCommitOutcome, String> {
+        if identity.action_type != "diff"
+            || identity.tool_name != "apply_patch"
+            || identity.status != "executing"
+            || identity.decision.as_deref() != Some("approved")
+            || identity.decision_source.as_deref() != Some("auto")
+            || identity.patch_result_json.is_some()
+            || identity.command_result_json.is_some()
+            || identity.tool_result_json.is_some()
+            || identity.error.is_some()
+            || identity.completed_at.is_some()
+            || identity.blocked_reason.is_some()
+        {
+            return Err("automatic Direct FileChange audit identity is invalid".to_string());
+        }
+        validate_direct_file_change_action_json_pair(
+            &identity.action_json,
+            expected_action_json,
+            committed_action_json,
+            &identity.run_id,
+            identity.conversation_id.as_deref(),
+            None,
+        )?;
+        let mut connection = self.state.connection()?;
+        agent_action_audit_repository::commit_executing_action_json(
+            &mut connection,
+            identity,
+            expected_action_json,
+            committed_action_json,
+        )
+        .map_err(storage_error)
     }
 
     pub fn finalize_agent_action_audit_execution(
@@ -1897,6 +2040,87 @@ impl StorageService {
             )),
             _ => Ok(outcome),
         }
+    }
+
+    /// Persists the committed Direct FileChange credential for a manually approved action.
+    ///
+    /// Only the private `action_json` and its monotonic update timestamp change. The pending row
+    /// must retain the exact frozen owner/Tool identity and remain `executing`.
+    pub fn commit_pending_direct_file_change_action_json(
+        &self,
+        identity: &AgentPendingActionRecord,
+        expected_action_json: &str,
+        committed_action_json: &str,
+        updated_at: i64,
+    ) -> Result<AgentPendingActionJsonCommitOutcome, String> {
+        if identity.action_type != "diff"
+            || identity.tool_name != "apply_patch"
+            || identity.tool_call_id.as_deref().is_none_or(str::is_empty)
+            || identity.status != "executing"
+            || identity.target_status.is_some()
+            || updated_at < identity.updated_at
+        {
+            return Err("manual Direct FileChange pending identity is invalid".to_string());
+        }
+        validate_direct_file_change_action_json_pair(
+            &identity.action_json,
+            expected_action_json,
+            committed_action_json,
+            &identity.run_id,
+            identity.conversation_id.as_deref(),
+            identity.tool_call_id.as_deref(),
+        )?;
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let outcome = pending_action_repository::commit_executing_action_json(
+            &transaction,
+            identity,
+            expected_action_json,
+            committed_action_json,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        if matches!(
+            outcome,
+            AgentPendingActionJsonCommitOutcome::Updated
+                | AgentPendingActionJsonCommitOutcome::AlreadyCommitted
+        ) {
+            let audit_outcome =
+                agent_action_audit_repository::commit_manual_preterminal_action_json_if_present(
+                    &transaction,
+                    identity,
+                    expected_action_json,
+                    committed_action_json,
+                )
+                .map_err(storage_error)?;
+            match audit_outcome {
+                agent_action_audit_repository::ManualActionAuditJsonCommitOutcome::Updated
+                | agent_action_audit_repository::ManualActionAuditJsonCommitOutcome::AlreadyCommitted
+                | agent_action_audit_repository::ManualActionAuditJsonCommitOutcome::Absent => {}
+                agent_action_audit_repository::ManualActionAuditJsonCommitOutcome::ExpectedActionMismatch => {
+                    return Err("manual Direct FileChange audit action JSON changed before commit"
+                        .to_string());
+                }
+                agent_action_audit_repository::ManualActionAuditJsonCommitOutcome::NotPreterminal {
+                    status,
+                } => {
+                    return Err(format!(
+                        "manual Direct FileChange audit is no longer preterminal: status={status}"
+                    ));
+                }
+                agent_action_audit_repository::ManualActionAuditJsonCommitOutcome::IdentityConflict {
+                    status,
+                } => {
+                    return Err(format!(
+                        "manual Direct FileChange audit identity conflict: status={status}"
+                    ));
+                }
+            }
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
     }
 
     /// Publishes an actionable approval and its user notification as one visibility boundary.
@@ -2172,6 +2396,17 @@ impl StorageService {
     pub fn list_pending_agent_actions(&self) -> Result<Vec<AgentPendingActionRecord>, String> {
         let connection = self.state.connection()?;
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
+    }
+
+    /// Lists crash-interrupted rows for the Host's typed pre-reconciliation pass.
+    ///
+    /// Callers may inspect current-format private action receipts before the generic startup
+    /// terminalizer runs. This is read-only and does not make an interrupted action replayable.
+    pub fn list_interrupted_agent_actions_for_host_reconciliation(
+        &self,
+    ) -> Result<Vec<AgentPendingActionRecord>, String> {
+        let connection = self.state.connection()?;
+        pending_action_repository::list_interrupted_actions(&connection).map_err(storage_error)
     }
 
     /// Loads one frozen approval fact by its backend-framed id. Renderer-facing callers must use
@@ -3698,6 +3933,7 @@ fn validate_manual_file_effect_settlement_request(
         || expected_pending_status == "approved"
         || (expected_action_type == "skill_materialization"
             && expected_pending_status == "executing")
+        || (expected_action_type == "diff" && expected_pending_status == "executing")
         || (expected_action_type == "skill_script" && expected_pending_status == "executing")
         || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing")
         || (expected_action_type == "builtin_mcp_tool_approval"
@@ -4002,6 +4238,9 @@ fn manual_file_effect_identity(
     action: &AgentProposedAction,
 ) -> Result<(&'static str, String, String, bool), String> {
     match action {
+        AgentProposedAction::Diff { diff } => {
+            Ok(("diff", "apply_patch".to_string(), diff.id.clone(), false))
+        }
         AgentProposedAction::Command { command } => Ok((
             "command",
             "run_command".to_string(),

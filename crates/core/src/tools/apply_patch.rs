@@ -1,23 +1,21 @@
-use super::apply_patch_diff::{
-    build_unified_diff, edit_error, sanitize_patch, validate_patch_operation,
-    StructuredEditErrorCode,
-};
-use super::apply_patch_paths::sanitize_file_path;
-#[cfg(test)]
-use super::apply_patch_paths::validate_text_patch_path;
-use super::{
-    clean_relative_path, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
-    ToolExecutionContext,
+use super::{AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess, ToolExecutionContext};
+use crate::file_change::{
+    BoundParent, FileChangeBase, FileChangeCommitter, FileChangeContentState,
+    FileChangeDirectBinding, FileChangeEdit, FileChangeError, FileChangeErrorCode,
+    FileChangeMutation, FileChangeOperation, FileChangeOutcome, FileChangePathPolicy,
+    FileChangePlanRequest, FileChangePlanner, FileChangeProposal, FileChangeStatus,
+    FileChangeTransaction, FileObservationIdentity, FileObservationState,
+    FILE_CHANGE_SCHEMA_VERSION,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentDiffProposal, AgentError, AgentPatchOperation, AgentProposedAction,
-    AgentResult, AgentToolCall, AgentToolDefinition, AgentToolSafety,
+    AgentResult, AgentToolCall, AgentToolDefinition, AgentToolSafety, AgentWritePermission,
 };
 use crate::revision::content_revision;
 use serde::Deserialize;
-use serde_json::{json, Value};
-use std::fs;
-use std::path::{Path, PathBuf};
+use serde_json::{json, Map, Value};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 const MAX_SUMMARY_CHARS: usize = 2_000;
 const MAX_EDIT_CONTENT_BYTES: usize = 240_000;
@@ -33,7 +31,8 @@ impl AgentTool for ApplyPatchTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Request one create, update, or delete operation for a text/code/config file. Before calling create, update, or delete, use read_file on the exact target to confirm its current state and content. Never use create as an existence probe: call create only after read_file explicitly reports that the exact target does not exist or cannot be found. If read_file finds an existing target, use update for edits or delete for deletion; never use create for an existing file. Prefer structured content/edits; Rust generates the unified diff. update supports replace, insert_before, insert_after, append, and prepend. The same tool call remains active through approval and host execution. This tool never writes before host approval.".to_string(),
+            description: "Request one short, one-shot Direct create, update, or delete operation for a text/code/config file. Before every Direct call, use read_file on the exact target path—even when you expect it to be absent; a directory listing, search result, or earlier read is not a substitute. Copy the returned observationId into this call. create is no-clobber and is valid only with a missing-state observation; if the target exists, use update or delete instead. Prefer exact structured edits for updates. Use write_file for long generated content or a change that must be assembled in stages. Without a workspace, filePath must be an authorized absolute path or use @home, @desktop, @documents, or @downloads; relative paths are invalid. Never switch to run_command, shell redirection, or a script to bypass file-change approval. The same Tool Call remains active through approval and Host execution, and no file is changed before that boundary."
+                .to_string(),
             input_schema: patch_input_schema(),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
@@ -44,7 +43,7 @@ impl AgentTool for ApplyPatchTool {
 
     fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
         Err(AgentError::new(
-            "apply_patch 需要用户审批和 host 执行层，不能由 agent runtime 自动应用。",
+            "apply_patch 需要用户审批和 Host 执行层，不能由 Agent Runtime 直接应用。",
         ))
     }
 
@@ -58,8 +57,37 @@ impl AgentTool for ApplyPatchTool {
         call: &AgentToolCall,
     ) -> AgentResult<AgentProposedAction> {
         Ok(AgentProposedAction::Diff {
-            diff: diff_proposal_from_call(context, call)?,
+            diff: direct_proposal_from_call(context, call)?,
         })
+    }
+
+    fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        let mut projection = call.clone();
+        let Some(args) = projection.args.as_object_mut() else {
+            return projection;
+        };
+        if let Some(content) = args
+            .remove("content")
+            .and_then(|value| value.as_str().map(str::len))
+        {
+            args.insert(
+                "content".to_string(),
+                json!("[frozen in private FileChange transaction]"),
+            );
+            args.insert("contentBytes".to_string(), json!(content));
+        }
+        if let Some(edit_count) = args
+            .remove("edits")
+            .and_then(|value| value.as_array().map(Vec::len))
+        {
+            args.insert(
+                "edits".to_string(),
+                json!("[frozen in private FileChange transaction]"),
+            );
+            args.insert("editCount".to_string(), json!(edit_count));
+        }
+        args.remove("observationId");
+        projection
     }
 }
 
@@ -67,51 +95,75 @@ fn patch_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["apply"],
+                "description": "Direct mode for one short, complete file change."
+            },
             "operation": {
                 "type": "string",
                 "enum": ["create", "update", "delete"],
-                "description": "Requested operation. Read the exact target with read_file first. create uses content and is valid only after read_file explicitly reports that target does not exist or cannot be found; an existing target must use update for edits. update uses edits or complete content; delete only needs filePath after the required read."
+                "description": "Read the exact target with read_file first and pass its observationId. create requires a missing observation and content; update requires an existing observation and exactly one of content or edits; delete requires an existing observation and no content or edits."
             },
-            "filePath": { "type": "string", "description": "Workspace-relative path, absolute local path, or a system alias such as @desktop/file.txt when permissions allow it." },
-            "content": { "type": "string", "maxLength": 32768, "description": "Complete UTF-8 file content for small files only. Required for create; optional for update. Use write_file for content above 32 KiB or content that should be generated in chunks." },
+            "filePath": {
+                "type": "string",
+                "description": "The exact path passed to read_file: workspace-relative, an authorized absolute local path, or a supported system alias."
+            },
+            "observationId": {
+                "type": "string",
+                "description": "Opaque fobs_ identifier returned by read_file for this exact target."
+            },
+            "content": {
+                "type": "string",
+                "maxLength": 32768,
+                "description": "Complete UTF-8 content for a short create or update. Use write_file for long or staged content."
+            },
             "edits": {
                 "type": "array",
                 "minItems": 1,
-                "description": "Ordered structured edits for update. Prefer these over writing a unified diff.",
+                "maxItems": 128,
+                "description": "Ordered exact edits for update. replace requires one exact match unless replaceAll is explicitly true.",
                 "items": {
                     "type": "object",
                     "properties": {
                         "kind": { "type": "string", "enum": ["replace", "insert_before", "insert_after", "append", "prepend"] },
-                        "oldText": { "type": "string", "description": "Exact text to replace when kind=replace." },
-                        "newText": { "type": "string", "description": "Replacement text when kind=replace." },
-                        "anchor": { "type": "string", "description": "Exact unique anchor when kind=insert_before or insert_after." },
-                        "text": { "type": "string", "description": "Text to insert when kind is insert_before, insert_after, append, or prepend." },
-                        "replaceAll": { "type": "boolean", "description": "For replace only. Defaults to false; false requires oldText to occur exactly once." }
+                        "oldText": { "type": "string" },
+                        "newText": { "type": "string" },
+                        "anchor": { "type": "string" },
+                        "text": { "type": "string" },
+                        "replaceAll": { "type": "boolean" }
                     },
-                    "required": ["kind"]
+                    "required": ["kind"],
+                    "additionalProperties": false
                 }
             },
-            "patch": { "type": "string", "description": "Legacy advanced input: a complete unified diff. Do not use when content or edits can express the change." },
-            "summary": { "type": "string", "description": "Short human-readable summary of the proposed change." }
+            "summary": { "type": "string", "description": "Short human-readable summary." }
         },
-        "required": ["operation", "filePath"]
+        "required": ["action", "operation", "filePath", "observationId"],
+        "additionalProperties": false
     })
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApplyPatchArgs {
-    operation: AgentPatchOperation,
+    action: DirectAction,
+    operation: FileChangeOperation,
     file_path: String,
+    observation_id: String,
     content: Option<String>,
     edits: Option<Vec<StructuredTextEdit>>,
-    expected_revision: Option<String>,
-    patch: Option<String>,
     summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
+enum DirectAction {
+    Apply,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StructuredTextEdit {
     kind: TextEditKind,
     old_text: Option<String>,
@@ -131,365 +183,428 @@ enum TextEditKind {
     Prepend,
 }
 
-fn diff_proposal_from_call(
+fn direct_proposal_from_call(
     context: &ToolExecutionContext,
     call: &AgentToolCall,
 ) -> AgentResult<AgentDiffProposal> {
-    let args: ApplyPatchArgs = serde_json::from_value(call.args.clone())
-        .map_err(|error| AgentError::new(format!("apply_patch 参数无效：{error}")))?;
-    let file_path = sanitize_file_path(&args.file_path, context.permissions().write)?;
-    let (patch, base_revision) = build_patch(context, &file_path, &args)?;
-    validate_patch_operation(&patch, &file_path, args.operation)?;
-    let summary = sanitize_summary(args.summary);
+    validate_wire_shape(&call.args).map_err(file_change_agent_error)?;
+    let args: ApplyPatchArgs = serde_json::from_value(call.args.clone()).map_err(|_| {
+        file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+    })?;
+    let DirectAction::Apply = args.action;
+    if context.permissions().write == AgentWritePermission::Denied {
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::PermissionDenied,
+        )));
+    }
+    let workspace_root = context.workspace_root_optional()?;
+    let target = FileChangePathPolicy::new(
+        workspace_root.as_deref(),
+        context.permissions().write == AgentWritePermission::All,
+    )
+    .resolve(&args.file_path)
+    .map_err(file_change_agent_error)?;
+    let observation = context
+        .file_observations()
+        .validate(
+            &args.observation_id,
+            context.conversation_id()?,
+            context.run_id()?,
+            target.absolute_path(),
+        )
+        .map_err(file_change_agent_error)?;
+    validate_observation_operation(args.operation, observation.state())
+        .map_err(file_change_agent_error)?;
+    let frozen_base =
+        freeze_observed_base(context, &target, &observation).map_err(file_change_agent_error)?;
+    let mutation = mutation_from_args(args.operation, args.content, args.edits)
+        .map_err(file_change_agent_error)?;
+    let plan = FileChangePlanner
+        .plan(FileChangePlanRequest {
+            operation: args.operation,
+            file_path: target.display_path(),
+            base: frozen_base.as_plan_base(),
+            mutation,
+        })
+        .map_err(file_change_agent_error)?;
+    if plan
+        .target_content
+        .as_ref()
+        .is_some_and(|content| content.len() > MAX_EDIT_CONTENT_BYTES)
+    {
+        return Err(file_change_agent_error(FileChangeError::new(
+            FileChangeErrorCode::ContentTooLarge,
+        )));
+    }
 
+    let now = now_ms();
+    let transaction_id = format!("file-change-direct-v1:{}", Uuid::new_v4());
+    let transaction = FileChangeTransaction {
+        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        id: transaction_id.clone(),
+        operation: plan.operation,
+        file_path: plan.file_path.clone(),
+        status: FileChangeStatus::WaitingApproval,
+        outcome: FileChangeOutcome::DefinitelyNotExecuted,
+        base: plan.base.clone(),
+        target: plan.target.clone(),
+        proposal_digest: plan.proposal_digest.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    let proposal = FileChangeProposal {
+        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        id: call.id.clone(),
+        transaction_id,
+        operation: plan.operation,
+        file_path: plan.file_path.clone(),
+        base: plan.base.clone(),
+        target: plan.target.clone(),
+        diff_digest: plan.diff_digest.clone(),
+        proposal_digest: plan.proposal_digest.clone(),
+        additions: plan.additions,
+        deletions: plan.deletions,
+    };
+    let delete_journal = if plan.operation == FileChangeOperation::Delete {
+        Some(
+            FileChangeCommitter
+                .prepare_delete(&transaction.id, &target, &plan, now)
+                .map_err(file_change_agent_error)?,
+        )
+    } else {
+        None
+    };
+    let execution = FileChangeDirectBinding {
+        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        transaction,
+        proposal,
+        observation_id: args.observation_id,
+        observation: observation.checkpoint(),
+        source_call_id: call.id.clone(),
+        source_args_digest: crate::file_change::proposal_digest(&call.args).map_err(|error| {
+            file_change_agent_error(FileChangeError::with_diagnostic(
+                FileChangeErrorCode::Failed,
+                error.to_string(),
+            ))
+        })?,
+        conversation_id: context.conversation_id()?.to_string(),
+        run_id: context.run_id()?.to_string(),
+        canonical_target: target.absolute_path().to_string_lossy().into_owned(),
+        base_content: plan.base_content.clone(),
+        target_content: plan.target_content.clone(),
+        delete_journal,
+        receipt: None,
+        permission_revision: context.file_change_permission_revision().to_string(),
+        tool_set_revision: context.file_change_tool_set_revision().to_string(),
+    };
+    execution.validate().map_err(file_change_agent_error)?;
+    context
+        .file_observations()
+        .claim(
+            &execution.observation_id,
+            context.conversation_id()?,
+            context.run_id()?,
+            target.absolute_path(),
+        )
+        .map_err(file_change_agent_error)?;
     Ok(AgentDiffProposal {
         id: call.id.clone(),
-        operation: args.operation,
-        file_path,
-        patch,
-        base_revision,
-        summary,
+        operation: patch_operation(plan.operation),
+        file_path: plan.file_path,
+        patch: plan.diff,
+        base_revision: state_revision(&plan.base).map(str::to_string),
+        summary: sanitize_summary(args.summary),
         approval_status: AgentApprovalStatus::Required,
+        execution: Box::new(execution),
     })
 }
 
-fn build_patch(
-    context: &ToolExecutionContext,
-    file_path: &str,
-    args: &ApplyPatchArgs,
-) -> AgentResult<(String, Option<String>)> {
-    if let Some(patch) = args.patch.as_ref() {
-        if args.content.is_some() || args.edits.is_some() {
-            return Err(edit_error(
-                StructuredEditErrorCode::ConflictingInput,
-                "patch 不能和 content 或 edits 同时提供。",
+fn validate_wire_shape(value: &Value) -> Result<(), FileChangeError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?;
+    reject_unknown_keys(
+        object,
+        &[
+            "action",
+            "operation",
+            "filePath",
+            "observationId",
+            "content",
+            "edits",
+            "summary",
+        ],
+    )?;
+    for required in ["action", "operation", "filePath", "observationId"] {
+        if object.get(required).is_none_or(Value::is_null) {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+    }
+    for optional in ["content", "edits", "summary"] {
+        if object.get(optional).is_some_and(Value::is_null) {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+    }
+    if object.get("action").and_then(Value::as_str) != Some("apply") {
+        return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+    }
+    let operation = object
+        .get("operation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?;
+    let has_content = object.contains_key("content");
+    let has_edits = object.contains_key("edits");
+    let valid = match operation {
+        "create" => has_content && !has_edits,
+        "update" => has_content ^ has_edits,
+        "delete" => !has_content && !has_edits,
+        _ => false,
+    };
+    if !valid {
+        Err(FileChangeError::new(
+            FileChangeErrorCode::IllegalFieldCombination,
+        ))
+    } else if let Some(edits) = object.get("edits") {
+        validate_edit_wire_shapes(edits)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_edit_wire_shapes(value: &Value) -> Result<(), FileChangeError> {
+    let edits = value
+        .as_array()
+        .filter(|edits| !edits.is_empty() && edits.len() <= 128)
+        .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?;
+    for edit in edits {
+        let object = edit
+            .as_object()
+            .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?;
+        reject_unknown_keys(
+            object,
+            &["kind", "oldText", "newText", "anchor", "text", "replaceAll"],
+        )?;
+        if object.values().any(Value::is_null) {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+        let kind = object
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?;
+        let exact = |required: &[&str], optional: &[&str]| {
+            required.iter().all(|key| object.contains_key(*key))
+                && object
+                    .keys()
+                    .all(|key| required.contains(&key.as_str()) || optional.contains(&key.as_str()))
+        };
+        let valid = match kind {
+            "replace" => exact(&["kind", "oldText", "newText"], &["replaceAll"]),
+            "insert_before" | "insert_after" => exact(&["kind", "anchor", "text"], &[]),
+            "append" | "prepend" => exact(&["kind", "text"], &[]),
+            _ => false,
+        };
+        if !valid {
+            return Err(FileChangeError::new(
+                FileChangeErrorCode::IllegalFieldCombination,
             ));
         }
-        let base_revision = match args.operation {
-            AgentPatchOperation::Create => None,
-            AgentPatchOperation::Update | AgentPatchOperation::Delete => {
-                let current = read_current_text(context, file_path)?;
-                validate_expected_revision(&current, args.expected_revision.as_deref())?;
-                Some(content_revision(current.as_bytes()))
-            }
-        };
-        return Ok((sanitize_patch(patch.clone())?, base_revision));
-    }
-
-    match args.operation {
-        AgentPatchOperation::Create => {
-            if args.edits.is_some() {
-                return Err(edit_error(
-                    StructuredEditErrorCode::InvalidCreate,
-                    "create 只接受完整 content，不接受 edits。",
-                ));
-            }
-            let content = args.content.as_deref().ok_or_else(|| {
-                edit_error(
-                    StructuredEditErrorCode::MissingContent,
-                    "create 操作必须提供完整 content。",
-                )
-            })?;
-            validate_inline_content_size(content)?;
-            let target = target_path_for_create(context, file_path)?;
-            if target.exists() {
-                return Err(edit_error(
-                    StructuredEditErrorCode::FileExists,
-                    "文件已存在。",
-                ));
-            }
-            Ok((
-                build_unified_diff(file_path, AgentPatchOperation::Create, "", content)?,
-                None,
-            ))
-        }
-        AgentPatchOperation::Update => {
-            let current = read_current_text(context, file_path)?;
-            validate_expected_revision(&current, args.expected_revision.as_deref())?;
-            let base_revision = content_revision(current.as_bytes());
-            let updated = match (args.content.as_deref(), args.edits.as_deref()) {
-                (Some(_), Some(_)) => {
-                    return Err(edit_error(
-                        StructuredEditErrorCode::ConflictingInput,
-                        "update 的 content 和 edits 只能提供一种。",
-                    ))
-                }
-                (Some(content), None) => {
-                    validate_inline_content_size(content)?;
-                    content.to_string()
-                }
-                (None, Some(edits)) if !edits.is_empty() => {
-                    apply_structured_edits(&current, edits)?
-                }
-                _ => {
-                    return Err(edit_error(
-                        StructuredEditErrorCode::MissingEdit,
-                        "update 必须提供 content 或至少一个 structured edit。",
-                    ))
-                }
-            };
-            validate_content_size(&updated)?;
-            if updated == current {
-                return Err(edit_error(
-                    StructuredEditErrorCode::NoChange,
-                    "编辑后的内容与当前文件完全相同。",
-                ));
-            }
-            Ok((
-                build_unified_diff(file_path, AgentPatchOperation::Update, &current, &updated)?,
-                Some(base_revision),
-            ))
-        }
-        AgentPatchOperation::Delete => {
-            if args.content.is_some() || args.edits.is_some() {
-                return Err(edit_error(
-                    StructuredEditErrorCode::InvalidDelete,
-                    "delete 只需要 filePath，不接受 content 或 edits。",
-                ));
-            }
-            let current = read_current_text(context, file_path)?;
-            validate_expected_revision(&current, args.expected_revision.as_deref())?;
-            let base_revision = content_revision(current.as_bytes());
-            Ok((
-                build_unified_diff(file_path, AgentPatchOperation::Delete, &current, "")?,
-                Some(base_revision),
-            ))
-        }
-    }
-}
-
-fn read_current_text(context: &ToolExecutionContext, file_path: &str) -> AgentResult<String> {
-    context.check_cancelled()?;
-    let resolved = context.resolve_existing_path(file_path)?;
-    let metadata = fs::metadata(&resolved).map_err(|error| {
-        edit_error(
-            StructuredEditErrorCode::ReadFailed,
-            format!("读取目标文件元数据失败：{error}"),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(edit_error(
-            StructuredEditErrorCode::NotAFile,
-            "目标路径不是文件。",
-        ));
-    }
-    if metadata.len() > MAX_EDIT_CONTENT_BYTES as u64 {
-        return Err(edit_error(
-            StructuredEditErrorCode::FileTooLarge,
-            format!(
-                "目标文件为 {} bytes，超过结构化编辑限制 {} bytes。",
-                metadata.len(),
-                MAX_EDIT_CONTENT_BYTES
-            ),
-        ));
-    }
-    let content = fs::read_to_string(&resolved).map_err(|error| {
-        edit_error(
-            StructuredEditErrorCode::ReadFailed,
-            format!("读取 UTF-8 文件失败：{error}"),
-        )
-    })?;
-    context.check_cancelled()?;
-    Ok(content)
-}
-
-fn target_path_for_create(context: &ToolExecutionContext, file_path: &str) -> AgentResult<PathBuf> {
-    let path = Path::new(file_path);
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    Ok(context
-        .workspace_root()?
-        .join(clean_relative_path(file_path)?))
-}
-
-fn validate_expected_revision(content: &str, expected: Option<&str>) -> AgentResult<()> {
-    let Some(expected) = expected.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
-    let actual = content_revision(content.as_bytes());
-    if expected != actual {
-        return Err(edit_error(
-            StructuredEditErrorCode::StaleFile,
-            format!(
-                "文件已发生变化：expectedRevision={expected}，currentRevision={actual}。请重新读取后再编辑。"
-            ),
-        ));
     }
     Ok(())
 }
 
-fn validate_content_size(content: &str) -> AgentResult<()> {
-    if content.len() > MAX_EDIT_CONTENT_BYTES {
-        return Err(edit_error(
-            StructuredEditErrorCode::ContentTooLarge,
-            format!(
-                "编辑内容为 {} bytes，超过 {} bytes 限制。",
-                content.len(),
-                MAX_EDIT_CONTENT_BYTES
-            ),
-        ));
+fn reject_unknown_keys(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), FileChangeError> {
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        Err(FileChangeError::new(FileChangeErrorCode::UnknownField))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
-fn validate_inline_content_size(content: &str) -> AgentResult<()> {
-    if content.len() > MAX_INLINE_CONTENT_BYTES {
-        return Err(edit_error(
-            StructuredEditErrorCode::UseStagedWrite,
-            format!(
-                "完整 content 为 {} bytes，超过 apply_patch 的 {} bytes 内联限制；请使用 write_file 分块生成草稿。",
-                content.len(),
-                MAX_INLINE_CONTENT_BYTES
-            ),
-        ));
+fn mutation_from_args(
+    operation: FileChangeOperation,
+    content: Option<String>,
+    edits: Option<Vec<StructuredTextEdit>>,
+) -> Result<FileChangeMutation, FileChangeError> {
+    match operation {
+        FileChangeOperation::Create | FileChangeOperation::Update if content.is_some() => {
+            let content = content.expect("checked content presence");
+            if content.len() > MAX_INLINE_CONTENT_BYTES {
+                return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
+            }
+            Ok(FileChangeMutation::Complete(content))
+        }
+        FileChangeOperation::Update => Ok(FileChangeMutation::Edits(
+            edits
+                .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?
+                .into_iter()
+                .map(domain_edit)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        FileChangeOperation::Delete => Ok(FileChangeMutation::Delete),
+        FileChangeOperation::Create => Err(FileChangeError::new(
+            FileChangeErrorCode::IllegalFieldCombination,
+        )),
     }
-    validate_content_size(content)
 }
 
-fn apply_structured_edits(current: &str, edits: &[StructuredTextEdit]) -> AgentResult<String> {
-    let mut content = current.to_string();
-    for (index, edit) in edits.iter().enumerate() {
-        content = apply_structured_edit(content, edit, index)?;
-        validate_content_size(&content)?;
-    }
-    Ok(content)
-}
-
-fn apply_structured_edit(
-    mut content: String,
-    edit: &StructuredTextEdit,
-    index: usize,
-) -> AgentResult<String> {
+fn domain_edit(edit: StructuredTextEdit) -> Result<FileChangeEdit, FileChangeError> {
+    let invalid = || FileChangeError::new(FileChangeErrorCode::IllegalFieldCombination);
     match edit.kind {
         TextEditKind::Replace => {
-            reject_unexpected_fields(edit, &["oldText", "newText", "replaceAll"], index)?;
-            let old_text = required_edit_text(edit.old_text.as_deref(), "oldText", index, false)?;
-            let new_text = required_edit_text(edit.new_text.as_deref(), "newText", index, true)?;
-            let count = content.match_indices(old_text).count();
-            if count == 0 {
-                return Err(edit_match_error(
-                    StructuredEditErrorCode::MatchNotFound,
-                    index,
-                    "oldText",
-                    0,
-                ));
+            if edit.anchor.is_some() || edit.text.is_some() {
+                return Err(invalid());
             }
-            if edit.replace_all.unwrap_or(false) {
-                content = content.replace(old_text, new_text);
-            } else if count == 1 {
-                content = content.replacen(old_text, new_text, 1);
-            } else {
-                return Err(edit_match_error(
-                    StructuredEditErrorCode::AmbiguousMatch,
-                    index,
-                    "oldText",
-                    count,
-                ));
-            }
+            Ok(FileChangeEdit::Replace {
+                old_text: edit.old_text.ok_or_else(invalid)?,
+                new_text: edit.new_text.ok_or_else(invalid)?,
+                replace_all: edit.replace_all.unwrap_or(false),
+            })
         }
         TextEditKind::InsertBefore | TextEditKind::InsertAfter => {
-            reject_unexpected_fields(edit, &["anchor", "text"], index)?;
-            let anchor = required_edit_text(edit.anchor.as_deref(), "anchor", index, false)?;
-            let text = required_edit_text(edit.text.as_deref(), "text", index, true)?;
-            let matches = content.match_indices(anchor).collect::<Vec<_>>();
-            if matches.is_empty() {
-                return Err(edit_match_error(
-                    StructuredEditErrorCode::MatchNotFound,
-                    index,
-                    "anchor",
-                    0,
-                ));
+            if edit.old_text.is_some() || edit.new_text.is_some() || edit.replace_all.is_some() {
+                return Err(invalid());
             }
-            if matches.len() > 1 {
-                return Err(edit_match_error(
-                    StructuredEditErrorCode::AmbiguousMatch,
-                    index,
-                    "anchor",
-                    matches.len(),
-                ));
+            let anchor = edit.anchor.ok_or_else(invalid)?;
+            let text = edit.text.ok_or_else(invalid)?;
+            if matches!(edit.kind, TextEditKind::InsertBefore) {
+                Ok(FileChangeEdit::InsertBefore { anchor, text })
+            } else {
+                Ok(FileChangeEdit::InsertAfter { anchor, text })
             }
-            let mut insertion = matches[0].0;
-            if matches!(edit.kind, TextEditKind::InsertAfter) {
-                insertion += anchor.len();
-            }
-            content.insert_str(insertion, text);
         }
-        TextEditKind::Append => {
-            reject_unexpected_fields(edit, &["text"], index)?;
-            let text = required_edit_text(edit.text.as_deref(), "text", index, true)?;
-            content.push_str(text);
-        }
-        TextEditKind::Prepend => {
-            reject_unexpected_fields(edit, &["text"], index)?;
-            let text = required_edit_text(edit.text.as_deref(), "text", index, true)?;
-            content.insert_str(0, text);
+        TextEditKind::Append | TextEditKind::Prepend => {
+            if edit.old_text.is_some()
+                || edit.new_text.is_some()
+                || edit.anchor.is_some()
+                || edit.replace_all.is_some()
+            {
+                return Err(invalid());
+            }
+            let text = edit.text.ok_or_else(invalid)?;
+            if matches!(edit.kind, TextEditKind::Append) {
+                Ok(FileChangeEdit::Append { text })
+            } else {
+                Ok(FileChangeEdit::Prepend { text })
+            }
         }
     }
-    Ok(content)
 }
 
-fn required_edit_text<'a>(
-    value: Option<&'a str>,
-    field: &str,
-    index: usize,
-    allow_empty: bool,
-) -> AgentResult<&'a str> {
-    let value = value.ok_or_else(|| {
-        edit_error(
-            StructuredEditErrorCode::InvalidEdit,
-            format!("edits[{index}].{field} 是必填字段。"),
-        )
+fn validate_observation_operation(
+    operation: FileChangeOperation,
+    state: &FileObservationState,
+) -> Result<(), FileChangeError> {
+    match (operation, state) {
+        (FileChangeOperation::Create, FileObservationState::Missing)
+        | (
+            FileChangeOperation::Update | FileChangeOperation::Delete,
+            FileObservationState::Existing { .. },
+        ) => Ok(()),
+        (FileChangeOperation::Create, FileObservationState::Existing { .. }) => {
+            Err(FileChangeError::new(FileChangeErrorCode::FileExists))
+        }
+        (
+            FileChangeOperation::Update | FileChangeOperation::Delete,
+            FileObservationState::Missing,
+        ) => Err(FileChangeError::new(FileChangeErrorCode::FileMissing)),
+    }
+}
+
+#[derive(Debug)]
+struct FrozenBase {
+    content: Option<String>,
+    revision: Option<String>,
+}
+
+impl FrozenBase {
+    fn as_plan_base(&self) -> FileChangeBase<'_> {
+        match (&self.content, &self.revision) {
+            (None, None) => FileChangeBase::Missing,
+            (Some(content), Some(revision)) => FileChangeBase::Existing { content, revision },
+            _ => unreachable!("frozen base content and revision are total"),
+        }
+    }
+}
+
+fn freeze_observed_base(
+    context: &ToolExecutionContext,
+    target: &crate::file_change::ResolvedFileChangeTarget,
+    observation: &crate::file_change::FileObservation,
+) -> Result<FrozenBase, FileChangeError> {
+    freeze_observed_base_with_hook(context, target, observation, || {})
+}
+
+fn freeze_observed_base_with_hook(
+    context: &ToolExecutionContext,
+    target: &crate::file_change::ResolvedFileChangeTarget,
+    observation: &crate::file_change::FileObservation,
+    after_parent_bind: impl FnOnce(),
+) -> Result<FrozenBase, FileChangeError> {
+    context.check_cancelled().map_err(|error| {
+        FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
     })?;
-    if !allow_empty && value.is_empty() {
-        return Err(edit_error(
-            StructuredEditErrorCode::InvalidEdit,
-            format!("edits[{index}].{field} 不能为空。"),
-        ));
+    let parent = BoundParent::open(target)?;
+    after_parent_bind();
+    let current = parent.read_optional(target.absolute_path())?;
+    // The held descriptor prevents redirection; this pathname revalidation only proves that the
+    // authorized target still names that descriptor before a proposal can expose its Diff.
+    parent.revalidate()?;
+    let parent_metadata = parent.parent_metadata()?;
+    if !observation.parent_identity_matches(&parent_metadata) {
+        return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
     }
-    Ok(value)
+    match (observation.state(), current) {
+        (FileObservationState::Missing, None) => Ok(FrozenBase {
+            content: None,
+            revision: None,
+        }),
+        (FileObservationState::Missing, Some(_)) => {
+            Err(FileChangeError::new(FileChangeErrorCode::FileExists))
+        }
+        (FileObservationState::Existing { .. }, None) => {
+            Err(FileChangeError::new(FileChangeErrorCode::FileMissing))
+        }
+        (FileObservationState::Existing { revision, identity }, Some(current)) => {
+            if FileObservationIdentity::from_metadata(&current.metadata) != *identity {
+                return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
+            }
+            if current.bytes.len() > MAX_EDIT_CONTENT_BYTES {
+                return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
+            }
+            let content = String::from_utf8(current.bytes).map_err(|error| {
+                FileChangeError::with_diagnostic(
+                    FileChangeErrorCode::UnsupportedFileType,
+                    error.to_string(),
+                )
+            })?;
+            let actual_revision = content_revision(content.as_bytes());
+            if actual_revision != *revision {
+                return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
+            }
+            Ok(FrozenBase {
+                content: Some(content),
+                revision: Some(actual_revision),
+            })
+        }
+    }
 }
 
-fn reject_unexpected_fields(
-    edit: &StructuredTextEdit,
-    allowed: &[&str],
-    index: usize,
-) -> AgentResult<()> {
-    let supplied = [
-        ("oldText", edit.old_text.is_some()),
-        ("newText", edit.new_text.is_some()),
-        ("anchor", edit.anchor.is_some()),
-        ("text", edit.text.is_some()),
-        ("replaceAll", edit.replace_all.is_some()),
-    ];
-    let unexpected = supplied
-        .into_iter()
-        .filter_map(|(field, present)| (present && !allowed.contains(&field)).then_some(field))
-        .collect::<Vec<_>>();
-    if !unexpected.is_empty() {
-        return Err(edit_error(
-            StructuredEditErrorCode::InvalidEdit,
-            format!(
-                "edits[{index}] 包含不适用于当前 kind 的字段：{}。",
-                unexpected.join(", ")
-            ),
-        ));
+fn patch_operation(operation: FileChangeOperation) -> AgentPatchOperation {
+    match operation {
+        FileChangeOperation::Create => AgentPatchOperation::Create,
+        FileChangeOperation::Update => AgentPatchOperation::Update,
+        FileChangeOperation::Delete => AgentPatchOperation::Delete,
     }
-    Ok(())
 }
 
-fn edit_match_error(
-    code: StructuredEditErrorCode,
-    index: usize,
-    field: &str,
-    count: usize,
-) -> AgentError {
-    edit_error(
-        code,
-        format!(
-            "edits[{index}].{field} 在当前文件中匹配 {count} 次；请重新读取文件并提供唯一、精确的文本。"
-        ),
-    )
+fn state_revision(state: &FileChangeContentState) -> Option<&str> {
+    match state {
+        FileChangeContentState::Missing => None,
+        FileChangeContentState::Present { revision, .. } => Some(revision),
+    }
 }
 
 fn sanitize_summary(summary: Option<String>) -> Option<String> {
@@ -498,474 +613,487 @@ fn sanitize_summary(summary: Option<String>) -> Option<String> {
         .filter(|summary: &String| !summary.is_empty())
 }
 
+fn file_change_agent_error(error: FileChangeError) -> AgentError {
+    let code = serde_json::to_value(error.code())
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "failed".to_string());
+    AgentError::structured(
+        format!("agent.apply_patch.{code}"),
+        error.to_string(),
+        json!({
+            "type": "file_change",
+            "code": error.failure().code,
+            "category": error.failure().category,
+            "message": error.failure().message,
+            "recovery": error.failure().recovery,
+            "continueWith": if matches!(
+                error.code(),
+                FileChangeErrorCode::ObservationRequired
+                    | FileChangeErrorCode::ObservationExpired
+                    | FileChangeErrorCode::ObservationOwnerMismatch
+                    | FileChangeErrorCode::ObservationPathMismatch
+                    | FileChangeErrorCode::ObservationStale
+                    | FileChangeErrorCode::RevisionConflict
+            ) {
+                json!({"tool": "read_file", "args": {"path": "<exact filePath>"}})
+            } else {
+                Value::Null
+            }
+        }),
+    )
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentApprovalStatus, AgentCommandPermission, AgentPermissions, AgentReadPermission,
-        AgentRunContext, AgentToolCall, AgentWritePermission,
+        AgentCommandPermission, AgentPermissions, AgentReadPermission, AgentRunContext,
+        AgentWorkspaceContext,
     };
+    use crate::tools::ToolRegistry;
     use serde_json::json;
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn input_schema_does_not_expose_expected_revision() {
+    fn direct_schema_is_portable_strict_and_has_no_raw_patch_or_revision() {
         let schema = patch_input_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["required"],
+            json!(["action", "operation", "filePath", "observationId"])
+        );
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema.get("allOf").is_none());
         let properties = schema["properties"].as_object().unwrap();
-
+        assert!(!properties.contains_key("patch"));
         assert!(!properties.contains_key("expectedRevision"));
+        assert_eq!(properties["edits"]["items"]["additionalProperties"], false);
     }
 
     #[test]
-    fn definition_requires_read_before_selecting_the_patch_operation() {
-        let definition = ApplyPatchTool.definition();
-
-        assert!(definition.description.contains(
-            "Before calling create, update, or delete, use read_file on the exact target"
-        ));
-        assert!(definition
-            .description
-            .contains("Never use create as an existence probe"));
-        assert!(definition
-            .description
-            .contains("call create only after read_file explicitly reports that the exact target does not exist or cannot be found"));
-        assert!(definition
-            .description
-            .contains("If read_file finds an existing target, use update for edits"));
-
-        let operation_description = definition.input_schema["properties"]["operation"]
-            ["description"]
-            .as_str()
-            .unwrap();
-        assert!(operation_description.contains("Read the exact target with read_file first"));
-        assert!(operation_description.contains(
-            "read_file explicitly reports that target does not exist or cannot be found"
-        ));
+    fn strict_wire_rejects_missing_null_unknown_snake_case_raw_patch_and_bad_combinations() {
+        let valid = json!({
+            "action": "apply", "operation": "delete", "filePath": "a.txt",
+            "observationId": "fobs_example"
+        });
+        let invalid = [
+            json!({"operation":"delete","filePath":"a.txt","observationId":"fobs_example"}),
+            json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":null}),
+            json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":"fobs_example","extra":true}),
+            json!({"action":"apply","operation":"delete","file_path":"a.txt","observationId":"fobs_example"}),
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"fobs_example","patch":"@@"}),
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"fobs_example","content":"x","edits":[]}),
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"fobs_example","edits":[{"kind":"replace","oldText":"a","newText":"b","replaceAll":null}]}),
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"fobs_example","edits":[{"kind":"append","text":"x","extra":true}]}),
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"fobs_example","edits":[{"kind":"insert_before","text":"x"}]}),
+            json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":"fobs_example","content":"x"}),
+        ];
+        assert!(validate_wire_shape(&valid).is_ok());
+        for value in invalid {
+            assert!(validate_wire_shape(&value).is_err(), "accepted {value}");
+        }
     }
 
     #[test]
-    fn builds_diff_proposal_for_text_patch() {
+    fn registry_entry_returns_stable_typed_errors_for_invalid_direct_json() {
         let workspace = TestWorkspace::new();
-        workspace.write("src/main.rs", "fn main() {}\n");
+        let context = workspace.context();
+        let registry = ToolRegistry::defaults_with_search(None);
+        let cases = [
+            (
+                json!({"action":1,"operation":"delete","filePath":"a.txt","observationId":"fobs_x"}),
+                "agent.apply_patch.invalid_arguments",
+            ),
+            (
+                json!({"action":"apply","operation":"delete","filePath":"","observationId":"fobs_x"}),
+                "agent.apply_patch.invalid_arguments",
+            ),
+            (
+                json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":""}),
+                "agent.apply_patch.observation_required",
+            ),
+            (
+                json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"fobs_x","patch":"@@"}),
+                "agent.apply_patch.unknown_field",
+            ),
+            (
+                json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":"fobs_x","summary":null}),
+                "agent.apply_patch.invalid_arguments",
+            ),
+        ];
+
+        for (args, expected_code) in cases {
+            let call = AgentToolCall {
+                id: format!("invalid-{}", Uuid::new_v4()),
+                tool: "apply_patch".to_string(),
+                args,
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let error = registry.proposed_action(&context, &call).unwrap_err();
+            assert_eq!(error.code(), Some(expected_code));
+            assert!(!error.to_string().contains("serde"));
+            assert!(!error.to_string().contains("structured_edit_error"));
+        }
+    }
+
+    #[test]
+    fn renderer_event_projection_excludes_content_edits_and_observation_authority() {
         let call = AgentToolCall {
-            id: "tool-1".to_string(),
+            id: "apply-1".to_string(),
             tool: "apply_patch".to_string(),
             args: json!({
-                "operation": "update",
-                "filePath": "src/main.rs",
-                "patch": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-fn main() {}\n+fn main() { println!(\"hi\"); }",
-                "summary": "Add greeting"
+                "action":"apply",
+                "operation":"update",
+                "filePath":"a.txt",
+                "observationId":"fobs_secret",
+                "edits":[{"kind":"append","text":"secret content"}]
             }),
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
+        let projected = ApplyPatchTool.event_call_projection(&call);
+        assert!(projected.args.get("observationId").is_none());
+        assert_eq!(projected.args["editCount"], 1);
+        assert!(!projected.args.to_string().contains("secret content"));
+    }
+
+    #[test]
+    fn camel_case_create_update_delete_form_frozen_transactions() {
+        let workspace = TestWorkspace::new();
+        workspace.write("existing.txt", "alpha\nbeta\n");
         let context = workspace.context();
-        let proposal = diff_proposal_from_call(&context, &call).unwrap();
 
-        assert_eq!(proposal.id, "tool-1");
-        assert_eq!(proposal.operation, AgentPatchOperation::Update);
-        assert_eq!(proposal.file_path, "src/main.rs");
+        let missing = observe(&context, "created.txt");
+        let create = proposal(
+            &context,
+            json!({"action":"apply","operation":"create","filePath":"created.txt","observationId":missing,"content":"created\n"}),
+        )
+        .unwrap();
+        assert_eq!(create.operation, AgentPatchOperation::Create);
         assert_eq!(
-            proposal.base_revision,
-            Some(content_revision(b"fn main() {}\n"))
+            create.execution.target_content.as_deref(),
+            Some("created\n")
         );
-        assert!(proposal.patch.ends_with('\n'));
-        assert_eq!(proposal.summary.as_deref(), Some("Add greeting"));
-        assert_eq!(proposal.approval_status, AgentApprovalStatus::Required);
-    }
+        create.execution.validate().unwrap();
 
-    #[test]
-    fn structured_create_generates_valid_diff() {
-        let workspace = TestWorkspace::new();
-        let call = tool_call(json!({
-            "operation": "create",
-            "filePath": "quicksort.py",
-            "content": "def quick_sort(values):\n    return sorted(values)\n"
-        }));
-
-        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
-
-        assert!(proposal
-            .patch
-            .starts_with("--- /dev/null\n+++ b/quicksort.py\n"));
-        assert!(proposal.patch.contains("+def quick_sort(values):"));
-        assert_eq!(proposal.base_revision, None);
-        assert_git_apply_check(&workspace.root, &proposal.patch);
-    }
-
-    #[test]
-    fn structured_create_supports_empty_file() {
-        let workspace = TestWorkspace::new();
-        let call = tool_call(json!({
-            "operation": "create",
-            "filePath": "empty.txt",
-            "content": ""
-        }));
-
-        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
-
-        assert!(proposal.patch.contains("new file mode 100644"));
-        assert_git_apply_check(&workspace.root, &proposal.patch);
-    }
-
-    #[test]
-    fn structured_create_reports_existing_file_with_safe_typed_error() {
-        let workspace = TestWorkspace::new();
-        workspace.write("existing.txt", "keep me\n");
-        let call = tool_call(json!({
-            "operation": "create",
-            "filePath": "existing.txt",
-            "content": "replacement\n"
-        }));
-
-        let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
-
-        assert_eq!(error.to_string(), "文件已存在。");
-        assert_eq!(error.code(), Some("agent.apply_patch.file_exists"));
-        let details = error.details().expect("typed structured-edit details");
-        assert_eq!(details["type"], "structured_edit_error");
-        assert_eq!(details["code"], "file_exists");
-        assert_eq!(details["errorCode"], "agent.apply_patch.file_exists");
-        assert_eq!(details["recovery"], "useUpdateOrChooseAnotherPath");
-        assert!(!error.to_string().contains("structured_edit_error"));
-        assert!(!error.to_string().contains("file_exists"));
-    }
-
-    #[test]
-    fn structured_create_resolves_system_alias_without_workspace() {
-        let alias = format!(
-            "@home/.my-copilot-no-workspace-{}.txt",
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
-            collaboration_identity: None,
-            conversation_id: None,
-            project_id: None,
-            workspace: None,
-            attachment_library: None,
-            permissions: AgentPermissions {
-                read: AgentReadPermission::All,
-                write: AgentWritePermission::All,
-                command: AgentCommandPermission::RequireApproval,
-                command_safety: Default::default(),
-                patch: Default::default(),
-                builtin_execution: Default::default(),
-            },
-        }));
-        let call = tool_call(json!({
-            "operation": "create",
-            "filePath": alias,
-            "content": "hello\n"
-        }));
-
-        let proposal = diff_proposal_from_call(&context, &call).unwrap();
-
-        assert!(Path::new(&proposal.file_path).is_absolute());
-        assert!(proposal.patch.starts_with("--- /dev/null\n+++ /"));
-    }
-
-    #[test]
-    fn structured_update_supports_append_and_insert_after() {
-        let workspace = TestWorkspace::new();
-        let initial = "def quick_sort(values):\n    return sorted(values)\n";
-        workspace.write("quicksort.py", initial);
-        let call = tool_call(json!({
-            "operation": "update",
-            "filePath": "quicksort.py",
-            "expectedRevision": content_revision(initial.as_bytes()),
-            "edits": [
-                {
-                    "kind": "insert_after",
-                    "anchor": "def quick_sort(values):\n",
-                    "text": "    values = list(values)\n"
-                },
-                {
-                    "kind": "append",
-                    "text": "\nif __name__ == \"__main__\":\n    print(quick_sort([3, 1, 2]))\n"
-                }
-            ]
-        }));
-
-        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
-
+        let existing = observe(&context, "existing.txt");
+        let update = proposal(
+            &context,
+            json!({"action":"apply","operation":"update","filePath":"existing.txt","observationId":existing,"edits":[{"kind":"replace","oldText":"beta","newText":"gamma"}]}),
+        )
+        .unwrap();
+        assert_eq!(update.operation, AgentPatchOperation::Update);
         assert_eq!(
-            proposal.base_revision,
-            Some(content_revision(initial.as_bytes()))
+            update.execution.target_content.as_deref(),
+            Some("alpha\ngamma\n")
         );
-        assert!(proposal.patch.contains("+    values = list(values)"));
-        assert!(proposal.patch.contains("+if __name__ == \"__main__\":"));
-        assert_git_apply_check(&workspace.root, &proposal.patch);
+        update.execution.validate().unwrap();
+
+        let existing = observe(&context, "existing.txt");
+        let delete = proposal(
+            &context,
+            json!({"action":"apply","operation":"delete","filePath":"existing.txt","observationId":existing}),
+        )
+        .unwrap();
+        assert_eq!(delete.operation, AgentPatchOperation::Delete);
+        assert!(delete.execution.target_content.is_none());
+        delete.execution.validate().unwrap();
     }
 
     #[test]
-    fn structured_update_supports_replace_insert_before_and_prepend() {
+    fn observation_must_be_exact_and_current() {
         let workspace = TestWorkspace::new();
-        let initial = "section:\nold value\nfooter\n";
-        workspace.write("notes.txt", initial);
-        let call = tool_call(json!({
-            "operation": "update",
-            "filePath": "notes.txt",
-            "edits": [
-                {
-                    "kind": "prepend",
-                    "text": "title\n"
-                },
-                {
-                    "kind": "insert_before",
-                    "anchor": "footer\n",
-                    "text": "before footer\n"
-                },
-                {
-                    "kind": "replace",
-                    "oldText": "old value",
-                    "newText": "new value"
-                }
-            ]
-        }));
-
-        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
-
-        assert_eq!(
-            proposal.base_revision,
-            Some(content_revision(initial.as_bytes()))
-        );
-        assert!(proposal.patch.contains("+title"));
-        assert!(proposal.patch.contains("+before footer"));
-        assert!(proposal.patch.contains("-old value"));
-        assert!(proposal.patch.contains("+new value"));
-        assert_git_apply_check(&workspace.root, &proposal.patch);
-    }
-
-    #[test]
-    fn structured_replace_reports_missing_match() {
-        let workspace = TestWorkspace::new();
-        workspace.write("notes.txt", "current value\n");
-        let call = tool_call(json!({
-            "operation": "update",
-            "filePath": "notes.txt",
-            "edits": [{
-                "kind": "replace",
-                "oldText": "missing value",
-                "newText": "new value"
-            }]
-        }));
-
-        let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
-
-        assert_eq!(error.code(), Some("agent.apply_patch.match_not_found"));
-        assert_eq!(error.details().unwrap()["code"], "match_not_found");
-        assert_eq!(error.details().unwrap()["recovery"], "rereadFile");
-        assert!(error.to_string().contains("匹配 0 次"));
-        assert!(!error.to_string().contains("structured_edit_error"));
-    }
-
-    #[test]
-    fn structured_delete_freezes_the_current_base_revision() {
-        let workspace = TestWorkspace::new();
-        let initial = "remove me\n";
-        workspace.write("obsolete.txt", initial);
-        let call = tool_call(json!({
-            "operation": "delete",
-            "filePath": "obsolete.txt"
-        }));
-
-        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
-
-        assert_eq!(proposal.operation, AgentPatchOperation::Delete);
-        assert_eq!(
-            proposal.base_revision,
-            Some(content_revision(initial.as_bytes()))
-        );
-        assert!(proposal
-            .patch
-            .starts_with("--- a/obsolete.txt\n+++ /dev/null\n"));
-        assert!(proposal.patch.contains("-remove me"));
-        assert_git_apply_check(&workspace.root, &proposal.patch);
-    }
-
-    #[test]
-    fn structured_update_reports_ambiguous_anchor() {
-        let workspace = TestWorkspace::new();
-        workspace.write("notes.txt", "same\nsame\n");
-        let call = tool_call(json!({
-            "operation": "update",
-            "filePath": "notes.txt",
-            "edits": [{
-                "kind": "insert_after",
-                "anchor": "same",
-                "text": " updated"
-            }]
-        }));
-
-        let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
-
-        assert_eq!(error.code(), Some("agent.apply_patch.ambiguous_match"));
-        assert_eq!(error.details().unwrap()["code"], "ambiguous_match");
-        assert_eq!(error.details().unwrap()["recovery"], "rereadFile");
-        assert!(error.to_string().contains("匹配 2 次"));
-        assert!(!error.to_string().contains("structured_edit_error"));
-    }
-
-    #[test]
-    fn structured_update_rejects_stale_revision() {
-        let workspace = TestWorkspace::new();
-        workspace.write("notes.txt", "current\n");
-        let call = tool_call(json!({
-            "operation": "update",
-            "filePath": "notes.txt",
-            "expectedRevision": content_revision(b"old\n"),
-            "edits": [{
-                "kind": "replace",
-                "oldText": "current",
-                "newText": "updated"
-            }]
-        }));
-
-        let error = diff_proposal_from_call(&workspace.context(), &call).unwrap_err();
-
-        assert_eq!(error.code(), Some("agent.apply_patch.stale_file"));
-        assert_eq!(error.details().unwrap()["code"], "stale_file");
-        assert_eq!(error.details().unwrap()["recovery"], "rereadFile");
-        assert!(error.to_string().contains("currentRevision="));
-        assert!(!error.to_string().contains("structured_edit_error"));
-    }
-
-    #[test]
-    fn generated_diff_handles_file_without_trailing_newline() {
-        let workspace = TestWorkspace::new();
-        workspace.write("notes.txt", "first");
-        let call = tool_call(json!({
-            "operation": "update",
-            "filePath": "notes.txt",
-            "edits": [{
-                "kind": "append",
-                "text": "\nsecond\n"
-            }]
-        }));
-
-        let proposal = diff_proposal_from_call(&workspace.context(), &call).unwrap();
-
-        assert!(proposal.patch.contains("\\ No newline at end of file"));
-        assert_git_apply_check(&workspace.root, &proposal.patch);
-    }
-
-    #[test]
-    fn accepts_common_text_file_names_and_extensions() {
-        for path in [
-            ".env",
-            ".gitignore",
-            "Dockerfile",
-            "CMakeLists.txt",
-            "README.md",
-            "notebook.ipynb",
-            "data.csv",
-            "types.d.ts",
-            "src/App.tsx",
-        ] {
-            assert!(validate_text_patch_path(path).is_ok(), "{path}");
-        }
-    }
-
-    #[test]
-    fn rejects_office_and_pdf_paths() {
-        for path in ["report.pdf", "slides.pptx", "sheet.xlsx", "legacy.doc"] {
-            let error = validate_text_patch_path(path).unwrap_err();
-
-            assert!(error.to_string().contains("专用编辑工具"), "{path}");
-        }
-    }
-
-    #[test]
-    fn rejects_non_unified_patch() {
-        let error = sanitize_patch("replace hello with world".to_string()).unwrap_err();
-
-        assert!(error.to_string().contains("unified diff"));
-        assert!(!error.to_string().contains("apply_patch.patch"));
-    }
-
-    #[test]
-    fn rejects_patch_for_different_file() {
-        let error = validate_patch_operation(
-            "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            "src/main.rs",
-            AgentPatchOperation::Update,
+        workspace.write("a.txt", "before\n");
+        workspace.write("b.txt", "other\n");
+        let context = workspace.context();
+        let observation = observe(&context, "a.txt");
+        let missing = proposal(
+            &context,
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":"missing","content":"after\n"}),
         )
         .unwrap_err();
-
-        assert!(error.to_string().contains("不匹配"));
-        assert!(!error.to_string().contains("apply_patch.patch"));
+        assert_eq!(
+            missing.code(),
+            Some("agent.apply_patch.observation_required")
+        );
+        let wrong_path = proposal(
+            &context,
+            json!({"action":"apply","operation":"update","filePath":"b.txt","observationId":observation,"content":"after\n"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_path.code(),
+            Some("agent.apply_patch.observation_path_mismatch")
+        );
+        workspace.write("a.txt", "changed concurrently\n");
+        let stale = proposal(
+            &context,
+            json!({"action":"apply","operation":"update","filePath":"a.txt","observationId":observation,"content":"after\n"}),
+        )
+        .unwrap_err();
+        assert_eq!(stale.code(), Some("agent.apply_patch.observation_stale"));
     }
 
     #[test]
-    fn validates_create_update_and_delete_headers() {
-        assert!(validate_patch_operation(
-            "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\n",
-            "new.txt",
-            AgentPatchOperation::Create,
+    fn malformed_proposal_does_not_burn_observation_but_valid_proposal_claims_it_once() {
+        let workspace = TestWorkspace::new();
+        workspace.write("once.txt", "before\n");
+        let context = workspace.context();
+        let observation = observe(&context, "once.txt");
+        let malformed = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"once.txt",
+                "observationId":observation,
+                "edits":[{"kind":"replace","oldText":"missing","newText":"after"}]
+            }),
         )
-        .is_ok());
-        assert!(validate_patch_operation(
-            "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n",
-            "file.txt",
-            AgentPatchOperation::Update,
-        )
-        .is_ok());
-        assert!(validate_patch_operation(
-            "--- a/file.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
-            "file.txt",
-            AgentPatchOperation::Delete,
-        )
-        .is_ok());
-    }
+        .unwrap_err();
+        assert_eq!(malformed.code(), Some("agent.apply_patch.match_not_found"));
 
-    fn tool_call(args: Value) -> AgentToolCall {
-        AgentToolCall {
-            id: "tool-structured".to_string(),
-            tool: "apply_patch".to_string(),
-            args,
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        }
-    }
-
-    fn assert_git_apply_check(root: &Path, patch: &str) {
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .arg("apply")
-            .arg("--check")
-            .arg("--whitespace=nowarn")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(patch.as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{patch}",
-            String::from_utf8_lossy(&output.stderr)
+        proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"once.txt",
+                "observationId":observation,
+                "content":"after\n"
+            }),
+        )
+        .unwrap();
+        let replay = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"once.txt",
+                "observationId":observation,
+                "content":"another\n"
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            replay.code(),
+            Some("agent.apply_patch.observation_required")
         );
+    }
+
+    #[test]
+    fn create_existing_returns_safe_file_exists() {
+        let workspace = TestWorkspace::new();
+        workspace.write("exists.txt", "keep\n");
+        let context = workspace.context();
+        let observation = observe(&context, "exists.txt");
+        let error = proposal(
+            &context,
+            json!({"action":"apply","operation":"create","filePath":"exists.txt","observationId":observation,"content":"replace\n"}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), Some("agent.apply_patch.file_exists"));
+        assert_eq!(error.to_string(), "文件已存在。");
+    }
+
+    #[test]
+    fn no_workspace_absolute_succeeds_and_relative_fails_before_effects() {
+        let workspace = TestWorkspace::new();
+        let context = workspace.context_without_workspace();
+        let absolute = workspace.root.canonicalize().unwrap().join("absolute.txt");
+        let observation = observe(&context, absolute.to_str().unwrap());
+        assert!(proposal(
+            &context,
+            json!({"action":"apply","operation":"create","filePath":absolute,"observationId":observation,"content":"ok\n"})
+        )
+        .is_ok());
+
+        let alias = format!(
+            "@home/.mycopilot-file-observation-test-{}-{}",
+            std::process::id(),
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let alias_observation = observe(&context, &alias);
+        let alias_direct = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":alias,
+                "observationId":alias_observation,
+                "content":"not published by proposal construction\n"
+            }),
+        )
+        .unwrap();
+        assert_eq!(alias_direct.operation, AgentPatchOperation::Create);
+        assert!(!std::path::Path::new(&alias_direct.execution.canonical_target).exists());
+
+        let relative = proposal(
+            &context,
+            json!({"action":"apply","operation":"create","filePath":"relative.txt","observationId":"fobs_missing","content":"no\n"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            relative.code(),
+            Some("agent.apply_patch.workspace_required")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_freeze_cannot_follow_a_swapped_ancestor_or_leaf() {
+        let workspace = TestWorkspace::new();
+        workspace.write("parent/target.txt", "authorized base\n");
+        workspace.write("outside/target.txt", "outside secret\n");
+        let context = workspace.context();
+        let target = FileChangePathPolicy::new(Some(&workspace.root), true)
+            .resolve("parent/target.txt")
+            .unwrap();
+        let observation_id = observe(&context, "parent/target.txt");
+        let observation = context
+            .file_observations()
+            .validate(
+                &observation_id,
+                context.conversation_id().unwrap(),
+                context.run_id().unwrap(),
+                target.absolute_path(),
+            )
+            .unwrap();
+        let original_parent = workspace.root.join("parent");
+        let displaced_parent = workspace.root.join("displaced");
+        let outside_parent = workspace.root.join("outside");
+        let error = freeze_observed_base_with_hook(&context, &target, &observation, || {
+            fs::rename(&original_parent, &displaced_parent).unwrap();
+            symlink(&outside_parent, &original_parent).unwrap();
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error.code(),
+            FileChangeErrorCode::SymlinkForbidden | FileChangeErrorCode::Conflict
+        ));
+        assert_eq!(
+            fs::read_to_string(outside_parent.join("target.txt")).unwrap(),
+            "outside secret\n"
+        );
+
+        let workspace = TestWorkspace::new();
+        workspace.write("target.txt", "authorized base\n");
+        workspace.write("outside.txt", "outside secret\n");
+        let context = workspace.context();
+        let target = FileChangePathPolicy::new(Some(&workspace.root), true)
+            .resolve("target.txt")
+            .unwrap();
+        let observation_id = observe(&context, "target.txt");
+        let observation = context
+            .file_observations()
+            .validate(
+                &observation_id,
+                context.conversation_id().unwrap(),
+                context.run_id().unwrap(),
+                target.absolute_path(),
+            )
+            .unwrap();
+        let leaf = workspace.root.join("target.txt");
+        let outside = workspace.root.join("outside.txt");
+        let error = freeze_observed_base_with_hook(&context, &target, &observation, || {
+            fs::remove_file(&leaf).unwrap();
+            symlink(&outside, &leaf).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), FileChangeErrorCode::SymlinkForbidden);
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside secret\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_freeze_rejects_a_raced_hard_link_before_building_a_diff() {
+        let workspace = TestWorkspace::new();
+        workspace.write("target.txt", "authorized base\n");
+        workspace.write("outside.txt", "outside secret\n");
+        let context = workspace.context();
+        let target = FileChangePathPolicy::new(Some(&workspace.root), true)
+            .resolve("target.txt")
+            .unwrap();
+        let observation_id = observe(&context, "target.txt");
+        let observation = context
+            .file_observations()
+            .validate(
+                &observation_id,
+                context.conversation_id().unwrap(),
+                context.run_id().unwrap(),
+                target.absolute_path(),
+            )
+            .unwrap();
+        let leaf = workspace.root.join("target.txt");
+        let outside = workspace.root.join("outside.txt");
+        let error = freeze_observed_base_with_hook(&context, &target, &observation, || {
+            fs::remove_file(&leaf).unwrap();
+            fs::hard_link(&outside, &leaf).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), FileChangeErrorCode::HardLinkForbidden);
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside secret\n");
+    }
+
+    fn observe(context: &ToolExecutionContext, path: &str) -> String {
+        let result = ToolRegistry::defaults_with_search(None).execute(
+            context,
+            &AgentToolCall {
+                id: format!("read-{}", Uuid::new_v4()),
+                tool: "read_file".to_string(),
+                args: json!({"path":path}),
+                approval_status: AgentApprovalStatus::Approved,
+                reason: None,
+            },
+        );
+        assert!(result.ok, "{}", result.error.unwrap_or_default());
+        result.result.unwrap()["observationId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn proposal(context: &ToolExecutionContext, args: Value) -> AgentResult<AgentDiffProposal> {
+        let call_id = format!("apply-{}", Uuid::new_v4());
+        let bound_context = context.clone().with_tool_call_id(call_id.clone());
+        direct_proposal_from_call(
+            &bound_context,
+            &AgentToolCall {
+                id: call_id,
+                tool: "apply_patch".to_string(),
+                args,
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        )
     }
 
     struct TestWorkspace {
-        root: PathBuf,
+        root: std::path::PathBuf,
     }
 
     impl TestWorkspace {
         fn new() -> Self {
             let root = std::env::temp_dir().join(format!(
-                "my-copilot-agent-structured-edit-{}",
+                "mycopilot-direct-file-change-{}",
                 TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = fs::remove_dir_all(&root);
@@ -980,25 +1108,35 @@ mod tests {
         }
 
         fn context(&self) -> ToolExecutionContext {
+            self.context_with_workspace(Some(self.root.clone()))
+        }
+
+        fn context_without_workspace(&self) -> ToolExecutionContext {
+            self.context_with_workspace(None)
+        }
+
+        fn context_with_workspace(&self, root: Option<std::path::PathBuf>) -> ToolExecutionContext {
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
                 collaboration_identity: None,
-                conversation_id: None,
+                conversation_id: Some("direct-test-conversation".to_string()),
                 project_id: None,
-                workspace: Some(crate::protocol::AgentWorkspaceContext {
+                workspace: root.map(|root| AgentWorkspaceContext {
                     project_id: None,
                     display_name: Some("test".to_string()),
-                    root_path: Some(self.root.to_string_lossy().to_string()),
+                    root_path: Some(root.to_string_lossy().to_string()),
                 }),
                 attachment_library: None,
                 permissions: AgentPermissions {
-                    read: AgentReadPermission::WorkspaceOnly,
-                    write: AgentWritePermission::WorkspaceOnly,
+                    read: AgentReadPermission::All,
+                    write: AgentWritePermission::All,
                     command: AgentCommandPermission::RequireApproval,
                     command_safety: Default::default(),
                     patch: Default::default(),
                     builtin_execution: Default::default(),
                 },
             }))
+            .with_runtime_services("direct-test-run".to_string(), None)
+            .with_file_change_tool_set_revision("tool-set-test-v1".to_string())
         }
     }
 

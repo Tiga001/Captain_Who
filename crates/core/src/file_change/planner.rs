@@ -1,6 +1,8 @@
 use super::digest::{content_digest, diff_digest, proposal_digest};
 use super::error::{FileChangeError, FileChangeErrorCode, FileChangeResultValue};
-use super::model::{FileChangeContentState, FileChangeEdit, FileChangeOperation};
+use super::model::{
+    FileChangeContentState, FileChangeDirectBinding, FileChangeEdit, FileChangeOperation,
+};
 use crate::content_revision;
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
@@ -92,6 +94,28 @@ impl FileChangePlan {
         } else {
             Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
         }
+    }
+
+    pub fn from_direct_binding(
+        binding: &FileChangeDirectBinding,
+        diff: String,
+    ) -> FileChangeResultValue<Self> {
+        binding.validate()?;
+        let plan = Self {
+            operation: binding.transaction.operation,
+            file_path: binding.transaction.file_path.clone(),
+            base: binding.transaction.base.clone(),
+            target: binding.transaction.target.clone(),
+            base_content: binding.base_content.clone(),
+            target_content: binding.target_content.clone(),
+            diff,
+            diff_digest: binding.proposal.diff_digest.clone(),
+            proposal_digest: binding.proposal.proposal_digest.clone(),
+            additions: binding.proposal.additions,
+            deletions: binding.proposal.deletions,
+        };
+        plan.validate()?;
+        Ok(plan)
     }
 }
 

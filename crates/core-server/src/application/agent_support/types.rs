@@ -49,7 +49,26 @@ pub(crate) struct ActionExecutionDecision {
     pub(crate) patch_result: Option<AgentPatchResult>,
     pub(crate) file_write_result: Option<AgentFileWriteResult>,
     pub(crate) file_change: Option<AgentTurnFileChange>,
+    pub(crate) committed_file_change_action: Option<AgentProposedAction>,
+    pub(crate) direct_file_change_finalization: Option<DirectFileChangeFinalization>,
     pub(crate) tool_result: AgentToolResult,
+}
+
+pub(crate) struct DirectFileChangeFinalization {
+    pub(crate) target: mycopilot_core::file_change::ResolvedFileChangeTarget,
+    pub(crate) journal: mycopilot_core::file_change::FileChangeDeleteJournal,
+    pub(crate) finalized_at: u64,
+}
+
+impl DirectFileChangeFinalization {
+    pub(crate) fn finalize(
+        mut self,
+    ) -> Result<mycopilot_core::file_change::FileChangeDeleteJournal, String> {
+        mycopilot_core::file_change::FileChangeCommitter
+            .finalize_delete(&self.target, &mut self.journal, self.finalized_at)
+            .map_err(|error| error.to_string())?;
+        Ok(self.journal)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

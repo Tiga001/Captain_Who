@@ -17,6 +17,9 @@ use crate::conversation_trace::{
     canonical_tool_result_for_context, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder, ConversationTurnTraceItem,
 };
+use crate::file_change::{
+    FileChangePathPolicy, FileObservationCheckpoint, FileObservationRegistry, FileObservationState,
+};
 use crate::llm::{
     validate_model_tool_call_id, validate_provider_tool_call_id, LlmAssistantTurn,
     LlmRuntimeToolCallBinding, LlmToolCall,
@@ -26,7 +29,7 @@ use crate::protocol::{
     AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
     AgentProviderToolCallIdentity, AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint,
     AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, AgentToolIdentity,
-    ModelCapabilities, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    AgentWritePermission, ModelCapabilities, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::resolve_provider_runtime_capabilities;
@@ -38,6 +41,8 @@ use crate::world_state::{
 };
 use crate::AGENT_COLLABORATION_TOOL_NAMES;
 use std::collections::{BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(super) struct QueuedToolCall {
@@ -449,6 +454,7 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) provider_profile_config: ProviderProfileConfig,
     pub(super) provider_protocol_key: ProviderProtocolKey,
     pub(super) provider_continuation_refs: Vec<crate::protocol::ProviderContinuationRef>,
+    pub(super) file_observations: Arc<FileObservationRegistry>,
 }
 
 pub(super) struct RunCheckpointState<'a> {
@@ -467,9 +473,18 @@ pub(super) struct RunCheckpointState<'a> {
     pub(super) provider_protocol_key: &'a ProviderProtocolKey,
 }
 
+#[cfg(test)]
 pub(super) fn create_run_checkpoint(
     run_id: &str,
     state: RunCheckpointState<'_>,
+) -> AgentResult<AgentRunCheckpoint> {
+    create_run_checkpoint_with_file_observations(run_id, state, &FileObservationRegistry::default())
+}
+
+pub(super) fn create_run_checkpoint_with_file_observations(
+    run_id: &str,
+    state: RunCheckpointState<'_>,
+    file_observations: &FileObservationRegistry,
 ) -> AgentResult<AgentRunCheckpoint> {
     let RunCheckpointState {
         context,
@@ -536,22 +551,30 @@ pub(super) fn create_run_checkpoint(
         collaboration_run_snapshot.as_ref(),
     )?;
     let provider_continuation_refs = context.provider_continuation_refs()?;
+    let mut queued_tool_calls = tool_batch
+        .queue
+        .iter()
+        .map(|queued| {
+            queued_tool_call_checkpoint(
+                queued,
+                &assistant_turn_identity.assistant_turn_id,
+                provider_runtime_capabilities.allows_encrypted_checkpoint_rehydration(),
+            )
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
+    attach_queued_file_observations(
+        &mut queued_tool_calls,
+        file_observations,
+        run_id,
+        run_context,
+        &context_items,
+    )?;
     Ok(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         context_items,
         next_model_request_index,
-        queued_tool_calls: tool_batch
-            .queue
-            .iter()
-            .map(|queued| {
-                queued_tool_call_checkpoint(
-                    queued,
-                    &assistant_turn_identity.assistant_turn_id,
-                    provider_runtime_capabilities.allows_encrypted_checkpoint_rehydration(),
-                )
-            })
-            .collect::<AgentResult<Vec<_>>>()?,
+        queued_tool_calls,
         deferred_external_tool_call_count: tool_batch.deferred_external_tool_call_count,
         suppressed_narration: tool_batch.suppressed_narration,
         extension_snapshots,
@@ -571,6 +594,261 @@ pub(super) fn create_run_checkpoint(
         next_conversation_trace_sequence,
         conversation_trace_truncated,
     })
+}
+
+fn attach_queued_file_observations(
+    queued_calls: &mut [AgentQueuedToolCallCheckpoint],
+    registry: &FileObservationRegistry,
+    run_id: &str,
+    run_context: Option<&AgentRunContext>,
+    context_items: &[AgentContextCheckpointItem],
+) -> AgentResult<()> {
+    let mut observation_ids = BTreeSet::new();
+    let mut source_call_ids = BTreeSet::new();
+    for queued in queued_calls {
+        let Some((observation_id, canonical_target, conversation_id)) =
+            queued_apply_patch_observation_request(&queued.call, run_context)?
+        else {
+            queued.file_observation = None;
+            continue;
+        };
+        if !observation_ids.insert(observation_id.to_string()) {
+            return Err(AgentError::new(
+                "无法创建运行检查点：多个 queued apply_patch 重复引用同一文件观察。",
+            ));
+        }
+        let checkpoint = registry
+            .checkpoint_exact(observation_id, conversation_id, run_id, &canonical_target)
+            .map_err(|_| {
+                AgentError::new("无法创建运行检查点：queued apply_patch 缺少当前且匹配的文件观察。")
+            })?;
+        if !source_call_ids.insert(checkpoint.source_tool_call_id.clone()) {
+            return Err(AgentError::new(
+                "无法创建运行检查点：多个文件观察重复绑定同一 read_file 调用。",
+            ));
+        }
+        validate_observation_source(context_items, &checkpoint, run_context, "创建")?;
+        queued.file_observation = Some(checkpoint);
+    }
+    Ok(())
+}
+
+fn restore_queued_file_observations(
+    queued_calls: &[AgentQueuedToolCallCheckpoint],
+    run_id: &str,
+    run_context: Option<&AgentRunContext>,
+    context_items: &[AgentContextCheckpointItem],
+) -> AgentResult<Arc<FileObservationRegistry>> {
+    let mut checkpoints = Vec::new();
+    let mut observation_ids = BTreeSet::new();
+    let mut source_call_ids = BTreeSet::new();
+    let mut expected_conversation_id = None;
+    for queued in queued_calls {
+        match (
+            queued_apply_patch_observation_request(&queued.call, run_context)?,
+            queued.file_observation.as_ref(),
+        ) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(AgentError::new(
+                    "无法恢复运行检查点：非 apply_patch 调用包含额外的文件观察。",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(AgentError::new(
+                    "无法恢复运行检查点：queued apply_patch 缺少文件观察。",
+                ));
+            }
+            (Some((observation_id, canonical_target, conversation_id)), Some(checkpoint)) => {
+                if checkpoint.observation_id != observation_id
+                    || Path::new(&checkpoint.canonical_target) != canonical_target
+                    || checkpoint.conversation_id != conversation_id
+                    || checkpoint.run_id != run_id
+                    || !observation_ids.insert(checkpoint.observation_id.clone())
+                    || !source_call_ids.insert(checkpoint.source_tool_call_id.clone())
+                {
+                    return Err(AgentError::new(
+                        "无法恢复运行检查点：queued apply_patch 的文件观察身份、路径或所有者不匹配。",
+                    ));
+                }
+                match expected_conversation_id {
+                    Some(expected) if expected != conversation_id => {
+                        return Err(AgentError::new(
+                            "无法恢复运行检查点：文件观察属于不同会话。",
+                        ));
+                    }
+                    None => expected_conversation_id = Some(conversation_id),
+                    _ => {}
+                }
+                validate_observation_source(context_items, checkpoint, run_context, "恢复")?;
+                checkpoints.push(checkpoint.clone());
+            }
+        }
+    }
+    if checkpoints.is_empty() {
+        return Ok(Arc::new(FileObservationRegistry::default()));
+    }
+    let conversation_id = expected_conversation_id.expect("non-empty checkpoints have an owner");
+    FileObservationRegistry::from_checkpoints(checkpoints, conversation_id, run_id)
+        .map(Arc::new)
+        .map_err(|_| AgentError::new("无法恢复运行检查点：文件观察已过期或结构无效。"))
+}
+
+fn queued_apply_patch_observation_request<'a>(
+    call: &'a AgentContextCheckpointToolCall,
+    run_context: Option<&'a AgentRunContext>,
+) -> AgentResult<Option<(&'a str, PathBuf, &'a str)>> {
+    if call.name != "apply_patch" {
+        return Ok(None);
+    }
+    let object = call
+        .args
+        .as_object()
+        .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 参数不是严格对象。"))?;
+    if object.get("action").and_then(serde_json::Value::as_str) != Some("apply") {
+        return Err(AgentError::new(
+            "运行检查点中的 queued apply_patch 缺少当前 action。",
+        ));
+    }
+    let observation_id = object
+        .get("observationId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 缺少 observationId。"))?;
+    let file_path = object
+        .get("filePath")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 缺少 filePath。"))?;
+    let run_context = run_context.ok_or_else(|| {
+        AgentError::new("运行检查点中的 queued apply_patch 缺少冻结的运行上下文。")
+    })?;
+    let conversation_id = run_context
+        .conversation_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AgentError::new("运行检查点中的 queued apply_patch 缺少 conversationId。")
+        })?;
+    let workspace_root = run_context
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.root_path.as_deref())
+        .map(PathBuf::from);
+    let target = FileChangePathPolicy::new(
+        workspace_root.as_deref(),
+        run_context.permissions.write == AgentWritePermission::All,
+    )
+    .resolve(file_path)
+    .map_err(|_| AgentError::new("运行检查点中的 queued apply_patch 文件路径无法安全解析。"))?;
+    Ok(Some((
+        observation_id,
+        target.absolute_path().to_path_buf(),
+        conversation_id,
+    )))
+}
+
+fn validate_observation_source(
+    context_items: &[AgentContextCheckpointItem],
+    checkpoint: &FileObservationCheckpoint,
+    run_context: Option<&AgentRunContext>,
+    operation: &str,
+) -> AgentResult<()> {
+    validate_model_tool_call_id(&checkpoint.source_tool_call_id)?;
+    let run_context = run_context.ok_or_else(|| {
+        AgentError::new(format!(
+            "无法{operation}运行检查点：文件观察缺少冻结的运行上下文。"
+        ))
+    })?;
+    let matching_read_calls = context_items
+        .iter()
+        .filter(|item| item.role == "assistant")
+        .flat_map(|item| item.tool_calls.iter())
+        .filter(|call| call.id == checkpoint.source_tool_call_id && call.name == "read_file")
+        .collect::<Vec<_>>();
+    let read_call_path_matches = matching_read_calls.first().is_some_and(|call| {
+        call.args
+            .as_object()
+            .and_then(|args| args.get("path"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .and_then(|path| resolve_checkpoint_file_target(run_context, path).ok())
+            .is_some_and(|target| Path::new(&checkpoint.canonical_target) == target)
+    });
+    let matching_results = context_items
+        .iter()
+        .filter(|item| {
+            item.role == "tool"
+                && !item.is_error
+                && item.tool_call_id.as_deref() == Some(&checkpoint.source_tool_call_id)
+                && serde_json::from_str::<serde_json::Value>(&item.content)
+                    .ok()
+                    .is_some_and(|value| {
+                        observation_result_matches_checkpoint(&value, checkpoint, run_context)
+                    })
+        })
+        .count();
+    if matching_read_calls.len() != 1 || !read_call_path_matches || matching_results != 1 {
+        return Err(AgentError::new(format!(
+            "无法{operation}运行检查点：文件观察没有绑定唯一、同路径且已完成的 read_file 调用。"
+        )));
+    }
+    Ok(())
+}
+
+fn observation_result_matches_checkpoint(
+    value: &serde_json::Value,
+    checkpoint: &FileObservationCheckpoint,
+    run_context: &AgentRunContext,
+) -> bool {
+    let Some(result) = value.as_object() else {
+        return false;
+    };
+    if result
+        .get("observationId")
+        .and_then(serde_json::Value::as_str)
+        != Some(&checkpoint.observation_id)
+    {
+        return false;
+    }
+    let Some(result_target) = result
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .and_then(|path| resolve_checkpoint_file_target(run_context, path).ok())
+    else {
+        return false;
+    };
+    if result_target != Path::new(&checkpoint.canonical_target) {
+        return false;
+    }
+    match &checkpoint.state {
+        FileObservationState::Missing => {
+            result.get("exists").and_then(serde_json::Value::as_bool) == Some(false)
+                && !result.contains_key("revision")
+        }
+        FileObservationState::Existing { revision, .. } => {
+            result.get("exists").and_then(serde_json::Value::as_bool) == Some(true)
+                && result.get("revision").and_then(serde_json::Value::as_str) == Some(revision)
+        }
+    }
+}
+
+fn resolve_checkpoint_file_target(
+    run_context: &AgentRunContext,
+    file_path: &str,
+) -> Result<PathBuf, crate::file_change::FileChangeError> {
+    let workspace_root = run_context
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.root_path.as_deref())
+        .map(PathBuf::from);
+    FileChangePathPolicy::new(
+        workspace_root.as_deref(),
+        run_context.permissions.write == AgentWritePermission::All,
+    )
+    .resolve(file_path)
+    .map(|target| target.absolute_path().to_path_buf())
 }
 
 fn validate_assistant_turn_identity(
@@ -782,6 +1060,12 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     validate_context_checkpoint_tool_call_ids(&checkpoint.context_items)?;
     validate_queued_checkpoint_tool_call_ids(&checkpoint.queued_tool_calls)?;
     validate_conversation_trace_tool_call_ids(&checkpoint.conversation_trace_items)?;
+    let file_observations = restore_queued_file_observations(
+        &checkpoint.queued_tool_calls,
+        run_id,
+        checkpoint.run_context.as_ref(),
+        &checkpoint.context_items,
+    )?;
     if checkpoint.pending_tool_call_id != continuation.call.id {
         return Err(AgentError::new(format!(
             "无法恢复运行检查点：待审批调用 `{}` 与续跑结果 `{}` 不一致。",
@@ -959,6 +1243,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         provider_profile_config,
         provider_protocol_key,
         provider_continuation_refs,
+        file_observations,
     })
 }
 
@@ -1366,6 +1651,7 @@ fn queued_tool_call_checkpoint(
             args: call.checkpoint_call.args.clone(),
             provider_identity: call.provider_identity()?,
         },
+        file_observation: None,
         assistant_content: call.assistant_content.clone(),
         group_id: call.group_id.clone(),
         assistant_turn_id: assistant_turn_id.to_string(),

@@ -1115,6 +1115,7 @@ export const zhTWTranslations = {
   'agent.patch.failure.notAFile': '目標路徑不是檔案。',
   'agent.patch.failure.readFailed': '無法安全讀取目標檔案。',
   'agent.patch.failure.invalidRequest': '文件修改請求無效。',
+  'agent.patch.failure.outcomeUnknown': '無法確認修改結果。請先檢查檔案目前狀態，不要直接重試。',
   'agent.editSummary.title': '編輯摘要',
   'agent.editSummary.editedFiles': '已編輯 {count} 個文件',
   'agent.editSummary.lineStats': '行數變化',

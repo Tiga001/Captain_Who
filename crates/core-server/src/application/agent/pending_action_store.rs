@@ -718,6 +718,63 @@ impl AgentService {
             .store_pending_agent_action(pending_storage_record(record, now_ms())?)
     }
 
+    /// Advances one manual Direct FileChange from its prepared credential to the exact durable
+    /// commit receipt. Only this monotonic private-action transition is permitted while the row
+    /// remains `executing`; public approval fields and the original ToolCall stay immutable.
+    pub(super) fn commit_manual_direct_file_change_action(
+        &self,
+        record: &mut PendingActionRecord,
+        committed_action: AgentProposedAction,
+    ) -> Result<(), String> {
+        use mycopilot_core::storage::service::AgentPendingActionJsonCommitOutcome;
+
+        let prepared_action = record.snapshot.action.clone();
+        let expected_action_json = serde_json::to_string(&prepared_action)
+            .map_err(|_| "Direct FileChange prepared action could not be encoded".to_string())?;
+        let committed_action_json = serde_json::to_string(&committed_action)
+            .map_err(|_| "Direct FileChange commit receipt could not be encoded".to_string())?;
+        let updated_at = now_ms();
+        let identity = pending_storage_record(record, updated_at)?;
+        let outcome = self.storage.commit_pending_direct_file_change_action_json(
+            &identity,
+            &expected_action_json,
+            &committed_action_json,
+            updated_at,
+        )?;
+        if !matches!(
+            outcome,
+            AgentPendingActionJsonCommitOutcome::Updated
+                | AgentPendingActionJsonCommitOutcome::AlreadyCommitted
+        ) {
+            return Err(format!(
+                "Direct FileChange commit receipt could not acquire its exact pending-action CAS: {outcome:?}"
+            ));
+        }
+
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = pending_actions.get_mut(&record.storage_id).ok_or_else(|| {
+            "Direct FileChange pending action disappeared after its commit receipt was persisted"
+                .to_string()
+        })?;
+        let current_action_json = serde_json::to_string(&current.snapshot.action)
+            .map_err(|_| "Direct FileChange in-memory action could not be encoded".to_string())?;
+        if current.snapshot.status != PendingActionStatus::Executing
+            || (current_action_json != expected_action_json
+                && current_action_json != committed_action_json)
+        {
+            return Err(
+                "Direct FileChange in-memory pending identity changed after durable commit"
+                    .to_string(),
+            );
+        }
+        current.snapshot.action = committed_action.clone();
+        record.snapshot.action = committed_action;
+        Ok(())
+    }
+
     pub(super) fn persist_pending_status(
         &self,
         record: &PendingActionRecord,
@@ -1205,6 +1262,59 @@ impl AgentService {
         self.storage.claim_agent_action_audit_execution(audit)
     }
 
+    /// Replaces an automatic Direct FileChange's prepared execution credential with the exact
+    /// committed receipt while retaining the same durable `executing` claim.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn commit_automatic_direct_file_change_action(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        agent_input: &AgentChatInput,
+        prepared_action: &AgentProposedAction,
+        committed_action: &AgentProposedAction,
+        created_at: i64,
+    ) -> Result<(), String> {
+        use mycopilot_core::storage::service::AgentActionAuditJsonCommitOutcome;
+
+        let expected_action_json = serde_json::to_string(prepared_action)
+            .map_err(|_| "Direct FileChange prepared action could not be encoded".to_string())?;
+        let committed_action_json = serde_json::to_string(committed_action)
+            .map_err(|_| "Direct FileChange commit receipt could not be encoded".to_string())?;
+        let identity = auto_action_audit_record(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            prepared_action,
+            "executing",
+            None,
+            None,
+            None,
+            None,
+            created_at,
+            None,
+        );
+        let outcome = self
+            .storage
+            .commit_automatic_direct_file_change_action_json(
+                &identity,
+                &expected_action_json,
+                &committed_action_json,
+            )?;
+        if matches!(
+            outcome,
+            AgentActionAuditJsonCommitOutcome::Updated
+                | AgentActionAuditJsonCommitOutcome::AlreadyCommitted
+        ) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Direct FileChange commit receipt could not acquire its exact automatic audit CAS: {outcome:?}"
+            ))
+        }
+    }
+
     /// Commits the result only if the exact frozen receipt still owns the `executing` state.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn finalize_auto_action_execution_audit(
@@ -1585,6 +1695,567 @@ pub(super) fn load_persisted_pending_actions(
         pending_actions.insert(storage_id.clone(), pending_record);
     }
     Ok(pending_actions)
+}
+
+/// Recovers only Direct FileChanges whose current target state proves that the frozen mutation
+/// already committed before the process stopped. This pass never replays a mutation. Prepared
+/// rows whose target still equals the base, divergent targets, and malformed receipts remain for
+/// the generic fail-closed startup terminalizer.
+pub(super) fn reconcile_interrupted_direct_file_changes(
+    storage: &Arc<StorageService>,
+    reconciled_at: i64,
+) -> Result<usize, String> {
+    use mycopilot_core::file_change::{
+        FileChangeCommitter, FileChangeOperation, FileChangePlan, FileChangeReconciliation,
+    };
+    use mycopilot_core::storage::service::{
+        AgentPendingActionJsonCommitOutcome, AgentPendingActionResultCommitOutcome,
+    };
+
+    let committed_at = u64::try_from(reconciled_at)
+        .map_err(|_| "Direct FileChange reconciliation timestamp is invalid".to_string())?;
+    let candidates = storage.list_interrupted_agent_actions_for_host_reconciliation()?;
+    let mut recovered = 0usize;
+    for mut durable in candidates {
+        if durable.status != "executing"
+            || durable.target_status.is_some()
+            || durable.action_type != "diff"
+            || durable.tool_name != "apply_patch"
+        {
+            continue;
+        }
+        let decoded = match PersistedAgentResumeInput::decode(&durable.agent_input_json) {
+            Ok(decoded) => decoded,
+            Err(_) => continue,
+        };
+        let prepared_action_json = durable.action_json.clone();
+        let mut action = match serde_json::from_str::<AgentProposedAction>(&durable.action_json) {
+            Ok(action @ AgentProposedAction::Diff { .. }) => action,
+            _ => continue,
+        };
+        let mut diff = match &action {
+            AgentProposedAction::Diff { diff } => diff.clone(),
+            _ => unreachable!("Direct FileChange candidate was matched above"),
+        };
+        if diff.execution.validate().is_err()
+            || diff.execution.run_id != durable.run_id
+            || Some(diff.execution.conversation_id.as_str()) != durable.conversation_id.as_deref()
+            || durable.tool_call_id.as_deref() != Some(diff.id.as_str())
+        {
+            continue;
+        }
+        let plan = match FileChangePlan::from_direct_binding(&diff.execution, diff.patch.clone()) {
+            Ok(plan) => plan,
+            Err(_) => continue,
+        };
+        let target = match resolve_direct_file_change_recovery_target(
+            &diff.execution.canonical_target,
+            &plan.file_path,
+        ) {
+            Some(target) => target,
+            None => continue,
+        };
+        finalize_recovered_manual_direct_delete(
+            storage,
+            &mut durable,
+            &mut action,
+            &mut diff,
+            &target,
+            committed_at,
+            reconciled_at,
+        )?;
+        let committer = FileChangeCommitter;
+        let reconciliation =
+            match committer.reconcile(&target, &plan, diff.execution.delete_journal.as_ref()) {
+                Ok(reconciliation) => reconciliation,
+                Err(_) => continue,
+            };
+        if reconciliation != FileChangeReconciliation::AlreadyApplied {
+            continue;
+        }
+
+        if diff.execution.is_prepared() {
+            let commit = match plan.operation {
+                FileChangeOperation::Delete => {
+                    let mut journal = diff.execution.delete_journal.clone().ok_or_else(|| {
+                        "prepared Direct delete is missing its durable journal".to_string()
+                    })?;
+                    committer
+                        .commit(
+                            &diff.execution.transaction.id,
+                            &target,
+                            &plan,
+                            committed_at,
+                            Some(&mut journal),
+                        )
+                        .map_err(|error| error.to_string())?
+                }
+                FileChangeOperation::Create | FileChangeOperation::Update => committer
+                    .commit(
+                        &diff.execution.transaction.id,
+                        &target,
+                        &plan,
+                        committed_at,
+                        None,
+                    )
+                    .map_err(|error| error.to_string())?,
+            };
+            *diff.execution = diff.execution.with_commit(&commit).map_err(|error| {
+                format!("Direct FileChange recovery receipt is invalid: {error}")
+            })?;
+            action = AgentProposedAction::Diff { diff: diff.clone() };
+            let committed_action_json = serde_json::to_string(&action).map_err(|_| {
+                "Direct FileChange recovery receipt could not be encoded".to_string()
+            })?;
+            let outcome = storage.commit_pending_direct_file_change_action_json(
+                &durable,
+                &prepared_action_json,
+                &committed_action_json,
+                reconciled_at,
+            )?;
+            if !matches!(
+                outcome,
+                AgentPendingActionJsonCommitOutcome::Updated
+                    | AgentPendingActionJsonCommitOutcome::AlreadyCommitted
+            ) {
+                return Err(format!(
+                    "Direct FileChange recovery lost its pending receipt CAS: {outcome:?}"
+                ));
+            }
+            durable.action_json = committed_action_json;
+            durable.updated_at = reconciled_at;
+        } else if diff.execution.receipt.is_none() {
+            continue;
+        }
+        finalize_recovered_manual_direct_delete(
+            storage,
+            &mut durable,
+            &mut action,
+            &mut diff,
+            &target,
+            committed_at,
+            reconciled_at,
+        )?;
+
+        let snapshot = PendingAgentActionSnapshot {
+            action_id: diff.id.clone(),
+            action_type: durable.action_type.clone(),
+            tool_name: durable.tool_name.clone(),
+            tool_call_id: durable.tool_call_id.clone(),
+            run_id: durable.run_id.clone(),
+            conversation_id: durable.conversation_id.clone(),
+            assistant_message_id: durable.assistant_message_id.clone(),
+            action: action.clone(),
+            created_at: durable.created_at,
+            status: PendingActionStatus::Executing,
+        };
+        let record = PendingActionRecord {
+            storage_id: durable.action_id.clone(),
+            snapshot,
+            agent_input: decoded.agent_input,
+        };
+        if tool_call_for_pending_record(&record).is_err() {
+            continue;
+        }
+        let patch_result = AgentPatchResult {
+            status: mycopilot_core::AgentPatchResultStatus::Applied,
+            operation: diff.operation,
+            file_path: diff.file_path.clone(),
+            applied_file_paths: vec![diff.file_path.clone()],
+            git_diff: None,
+            git_diff_error: None,
+            error_code: None,
+            error: None,
+            message: diff.summary.clone(),
+        };
+        let tool_result = patch_tool_result(&diff.id, true, &patch_result);
+        let assistant_message_id = durable.assistant_message_id.as_deref().ok_or_else(|| {
+            "Direct FileChange recovery is missing its Assistant owner".to_string()
+        })?;
+        let trace = storage
+            .get_conversation_turn_trace(assistant_message_id)?
+            .ok_or_else(|| "Direct FileChange recovery is missing its durable trace".to_string())?;
+        let model_context_items = storage
+            .get_conversation_model_context_log(assistant_message_id)?
+            .ok_or_else(|| {
+                "Direct FileChange recovery is missing its durable model context".to_string()
+            })?
+            .items;
+        let recovered_snapshot =
+            mycopilot_core::conversation_trace_snapshot_with_recovered_tool_result(
+                &trace,
+                model_context_items,
+                &tool_result,
+            )?;
+        let conversation_id = durable.conversation_id.as_deref().ok_or_else(|| {
+            "Direct FileChange recovery is missing its conversation owner".to_string()
+        })?;
+        let recovered_trace = recovered_snapshot.in_progress_trace(
+            &durable.run_id,
+            conversation_id,
+            assistant_message_id,
+        );
+        let recovered_model_context = recovered_snapshot.committed_prefix().model_context_items;
+        let audit = action_audit_record(
+            &record,
+            Some("approved"),
+            "completed",
+            None,
+            None,
+            Some(&tool_result),
+            None,
+            Some(durable.updated_at),
+            Some(reconciled_at),
+        );
+        match storage.commit_pending_agent_action_audited_result_trace_with_model_context(
+            &audit,
+            "executing",
+            "completed",
+            &recovered_trace,
+            &recovered_model_context,
+            reconciled_at,
+        )? {
+            AgentPendingActionResultCommitOutcome::Committed { .. }
+            | AgentPendingActionResultCommitOutcome::Idempotent => {}
+        }
+        recovered = recovered.saturating_add(1);
+    }
+    Ok(recovered)
+}
+
+/// Reconciles automatic Direct FileChange audit claims from target digests without replaying a
+/// mutation. A terminal ToolResult is published only after the frozen target proves the commit.
+pub(super) fn reconcile_interrupted_automatic_direct_file_changes(
+    storage: &Arc<StorageService>,
+    reconciled_at: i64,
+) -> Result<usize, String> {
+    use mycopilot_core::file_change::{
+        FileChangeCommitter, FileChangeOperation, FileChangePlan, FileChangeReconciliation,
+    };
+    use mycopilot_core::storage::service::AgentActionAuditJsonCommitOutcome;
+
+    let committed_at = u64::try_from(reconciled_at).map_err(|_| {
+        "automatic Direct FileChange reconciliation timestamp is invalid".to_string()
+    })?;
+    let candidates = storage.list_executing_apply_patch_diff_action_audits()?;
+    let mut recovered = 0usize;
+    for mut audit in candidates {
+        let prepared_action_json = audit.action_json.clone();
+        let mut action = match serde_json::from_str::<AgentProposedAction>(&audit.action_json) {
+            Ok(action @ AgentProposedAction::Diff { .. }) => action,
+            _ => continue,
+        };
+        let mut diff = match &action {
+            AgentProposedAction::Diff { diff } => diff.clone(),
+            _ => unreachable!("automatic Direct FileChange candidate was matched above"),
+        };
+        if diff.execution.validate().is_err()
+            || diff.execution.run_id != audit.run_id
+            || diff.execution.conversation_id
+                != audit.conversation_id.as_deref().unwrap_or_default()
+            || audit.action_id != pending_action_storage_id(&audit.run_id, &diff.id)
+            || audit.decision.as_deref() != Some("approved")
+            || audit.decision_source.as_deref() != Some("auto")
+        {
+            continue;
+        }
+        let plan = match FileChangePlan::from_direct_binding(&diff.execution, diff.patch.clone()) {
+            Ok(plan) => plan,
+            Err(_) => continue,
+        };
+        let target = match resolve_direct_file_change_recovery_target(
+            &diff.execution.canonical_target,
+            &plan.file_path,
+        ) {
+            Some(target) => target,
+            None => continue,
+        };
+        finalize_recovered_automatic_direct_delete(
+            storage,
+            &mut audit,
+            &mut action,
+            &mut diff,
+            &target,
+            committed_at,
+        )?;
+        let committer = FileChangeCommitter;
+        if committer
+            .reconcile(&target, &plan, diff.execution.delete_journal.as_ref())
+            .ok()
+            != Some(FileChangeReconciliation::AlreadyApplied)
+        {
+            continue;
+        }
+        if diff.execution.is_prepared() {
+            let commit = match plan.operation {
+                FileChangeOperation::Delete => {
+                    let mut journal = diff.execution.delete_journal.clone().ok_or_else(|| {
+                        "prepared automatic Direct delete is missing its journal".to_string()
+                    })?;
+                    committer
+                        .commit(
+                            &diff.execution.transaction.id,
+                            &target,
+                            &plan,
+                            committed_at,
+                            Some(&mut journal),
+                        )
+                        .map_err(|error| error.to_string())?
+                }
+                FileChangeOperation::Create | FileChangeOperation::Update => committer
+                    .commit(
+                        &diff.execution.transaction.id,
+                        &target,
+                        &plan,
+                        committed_at,
+                        None,
+                    )
+                    .map_err(|error| error.to_string())?,
+            };
+            *diff.execution = diff.execution.with_commit(&commit).map_err(|error| {
+                format!("automatic Direct FileChange recovery receipt is invalid: {error}")
+            })?;
+            action = AgentProposedAction::Diff { diff: diff.clone() };
+            let committed_action_json = serde_json::to_string(&action).map_err(|_| {
+                "automatic Direct FileChange recovery receipt could not be encoded".to_string()
+            })?;
+            let outcome = storage.commit_automatic_direct_file_change_action_json(
+                &audit,
+                &prepared_action_json,
+                &committed_action_json,
+            )?;
+            if !matches!(
+                outcome,
+                AgentActionAuditJsonCommitOutcome::Updated
+                    | AgentActionAuditJsonCommitOutcome::AlreadyCommitted
+            ) {
+                return Err(format!(
+                    "automatic Direct FileChange recovery lost its audit receipt CAS: {outcome:?}"
+                ));
+            }
+            audit.action_json = committed_action_json;
+        } else if diff.execution.receipt.is_none() {
+            continue;
+        }
+        finalize_recovered_automatic_direct_delete(
+            storage,
+            &mut audit,
+            &mut action,
+            &mut diff,
+            &target,
+            committed_at,
+        )?;
+
+        let patch_result = AgentPatchResult {
+            status: mycopilot_core::AgentPatchResultStatus::Applied,
+            operation: diff.operation,
+            file_path: diff.file_path.clone(),
+            applied_file_paths: vec![diff.file_path.clone()],
+            git_diff: None,
+            git_diff_error: None,
+            error_code: None,
+            error: None,
+            message: diff.summary.clone(),
+        };
+        let tool_result = patch_tool_result(&diff.id, true, &patch_result);
+        audit.status = "completed".to_string();
+        audit.patch_result_json = None;
+        audit.command_result_json = None;
+        audit.tool_result_json = Some(serialize_json(&tool_result));
+        audit.error = None;
+        audit.completed_at = Some(reconciled_at);
+        audit.blocked_reason = None;
+        match storage.finalize_agent_action_audit_execution(audit)? {
+            AgentActionAuditFinalizationOutcome::Finalized => {}
+            AgentActionAuditFinalizationOutcome::ClaimMissingOrChanged => {
+                return Err(
+                    "automatic Direct FileChange recovery lost its terminal audit CAS".to_string(),
+                );
+            }
+        }
+        recovered = recovered.saturating_add(1);
+    }
+    Ok(recovered)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_recovered_manual_direct_delete(
+    storage: &StorageService,
+    durable: &mut mycopilot_core::storage::models::AgentPendingActionRecord,
+    action: &mut AgentProposedAction,
+    diff: &mut mycopilot_core::AgentDiffProposal,
+    target: &mycopilot_core::file_change::ResolvedFileChangeTarget,
+    finalized_at: u64,
+    updated_at: i64,
+) -> Result<(), String> {
+    use mycopilot_core::storage::service::AgentPendingActionJsonCommitOutcome;
+
+    let Some(finalized_action) = finalized_direct_delete_action(action, target, finalized_at)?
+    else {
+        return Ok(());
+    };
+    let expected_action_json = serde_json::to_string(action)
+        .map_err(|_| "Direct delete recovery action could not be encoded".to_string())?;
+    if durable.action_json != expected_action_json {
+        return Err("Direct delete recovery action changed before finalization".to_string());
+    }
+    let finalized_action_json = serde_json::to_string(&finalized_action)
+        .map_err(|_| "finalized Direct delete action could not be encoded".to_string())?;
+    let outcome = storage.commit_pending_direct_file_change_action_json(
+        durable,
+        &expected_action_json,
+        &finalized_action_json,
+        updated_at,
+    )?;
+    if !matches!(
+        outcome,
+        AgentPendingActionJsonCommitOutcome::Updated
+            | AgentPendingActionJsonCommitOutcome::AlreadyCommitted
+    ) {
+        return Err(format!(
+            "Direct delete recovery lost its finalization CAS: {outcome:?}"
+        ));
+    }
+    let AgentProposedAction::Diff {
+        diff: finalized_diff,
+    } = &finalized_action
+    else {
+        unreachable!("Direct delete finalization preserves the Diff action")
+    };
+    *diff = finalized_diff.clone();
+    *action = finalized_action;
+    durable.action_json = finalized_action_json;
+    durable.updated_at = updated_at;
+    Ok(())
+}
+
+fn finalize_recovered_automatic_direct_delete(
+    storage: &StorageService,
+    audit: &mut mycopilot_core::storage::models::AgentActionAuditRecord,
+    action: &mut AgentProposedAction,
+    diff: &mut mycopilot_core::AgentDiffProposal,
+    target: &mycopilot_core::file_change::ResolvedFileChangeTarget,
+    finalized_at: u64,
+) -> Result<(), String> {
+    use mycopilot_core::storage::service::AgentActionAuditJsonCommitOutcome;
+
+    let Some(finalized_action) = finalized_direct_delete_action(action, target, finalized_at)?
+    else {
+        return Ok(());
+    };
+    let expected_action_json = serde_json::to_string(action)
+        .map_err(|_| "automatic Direct delete recovery action could not be encoded".to_string())?;
+    if audit.action_json != expected_action_json {
+        return Err(
+            "automatic Direct delete recovery action changed before finalization".to_string(),
+        );
+    }
+    let finalized_action_json = serde_json::to_string(&finalized_action)
+        .map_err(|_| "finalized automatic Direct delete action could not be encoded".to_string())?;
+    let outcome = storage.commit_automatic_direct_file_change_action_json(
+        audit,
+        &expected_action_json,
+        &finalized_action_json,
+    )?;
+    if !matches!(
+        outcome,
+        AgentActionAuditJsonCommitOutcome::Updated
+            | AgentActionAuditJsonCommitOutcome::AlreadyCommitted
+    ) {
+        return Err(format!(
+            "automatic Direct delete recovery lost its finalization CAS: {outcome:?}"
+        ));
+    }
+    let AgentProposedAction::Diff {
+        diff: finalized_diff,
+    } = &finalized_action
+    else {
+        unreachable!("Direct delete finalization preserves the Diff action")
+    };
+    *diff = finalized_diff.clone();
+    *action = finalized_action;
+    audit.action_json = finalized_action_json;
+    Ok(())
+}
+
+fn finalized_direct_delete_action(
+    action: &AgentProposedAction,
+    target: &mycopilot_core::file_change::ResolvedFileChangeTarget,
+    finalized_at: u64,
+) -> Result<Option<AgentProposedAction>, String> {
+    use mycopilot_core::file_change::{FileChangeDeleteJournalState, FileChangeOperation};
+
+    let AgentProposedAction::Diff { diff } = action else {
+        return Ok(None);
+    };
+    if diff.execution.transaction.operation != FileChangeOperation::Delete
+        || diff.execution.receipt.is_none()
+    {
+        return Ok(None);
+    }
+    let journal = diff
+        .execution
+        .delete_journal
+        .clone()
+        .ok_or_else(|| "committed Direct delete is missing its recovery journal".to_string())?;
+    match journal.state {
+        FileChangeDeleteJournalState::Finalized => Ok(None),
+        FileChangeDeleteJournalState::Tombstoned => {
+            let finalization = DirectFileChangeFinalization {
+                target: target.clone(),
+                journal,
+                finalized_at,
+            };
+            finalize_direct_file_change_action(action, finalization).map(Some)
+        }
+        FileChangeDeleteJournalState::Prepared | FileChangeDeleteJournalState::RolledBack => {
+            Err("committed Direct delete has an invalid recovery journal state".to_string())
+        }
+    }
+}
+
+/// Recreates the original path-policy binding from the frozen display path and canonical target.
+///
+/// A normal execution resolves a workspace-relative `file_path`, so the committer deliberately
+/// binds its receipt to that relative display path. Startup recovery only retains the canonical
+/// target and must not resolve it as an absolute display path, because that would produce a
+/// different transaction identity. For relative paths, derive the only workspace root that could
+/// have produced both frozen values, resolve through the normal policy again, and require the
+/// canonical path to match exactly.
+fn resolve_direct_file_change_recovery_target(
+    canonical_target: &str,
+    file_path: &str,
+) -> Option<mycopilot_core::file_change::ResolvedFileChangeTarget> {
+    use std::path::Component;
+
+    let frozen_path = Path::new(file_path);
+    let target = if frozen_path.is_absolute() {
+        mycopilot_core::file_change::FileChangePathPolicy::new(None, true)
+            .resolve(file_path)
+            .ok()?
+    } else {
+        let mut workspace_root = Path::new(canonical_target).to_path_buf();
+        let mut normal_components = 0usize;
+        for component in frozen_path.components() {
+            match component {
+                Component::Normal(_) => {
+                    normal_components = normal_components.saturating_add(1);
+                    if !workspace_root.pop() {
+                        return None;
+                    }
+                }
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+            }
+        }
+        if normal_components == 0 {
+            return None;
+        }
+        mycopilot_core::file_change::FileChangePathPolicy::new(Some(&workspace_root), false)
+            .resolve(file_path)
+            .ok()?
+    };
+    (target.absolute_path().to_string_lossy() == canonical_target).then_some(target)
 }
 
 fn retire_unsupported_or_malformed_pending_action(
@@ -2108,10 +2779,6 @@ pub(super) fn path_scope_for_action(
                 .output_path
                 .as_deref()
                 .or(office_operation.prepared.request.document_path.as_deref())),
-        AgentProposedAction::ToolCall { call } if call.tool == "apply_patch" => call
-            .args
-            .get("filePath")
-            .and_then(serde_json::Value::as_str),
         _ => None,
     }?;
     Some(scope_for_path(input, path))

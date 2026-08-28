@@ -6,7 +6,9 @@ use crate::protocol::{
 use crate::revision::{compose_content_revision, ContentRevisionHasher};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs::{self, File, Metadata};
+#[cfg(not(unix))]
+use std::fs::{self, OpenOptions};
+use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::SystemTime;
 
@@ -15,6 +17,7 @@ const MODEL_RESULT_METADATA_RESERVE_TOKENS: u64 = 2_000;
 const PATH_IS_DIRECTORY_ERROR_CODE: &str = "read_file.path_is_directory";
 const PATH_IS_DIRECTORY_CODE: &str = "path_is_directory";
 const PATH_IS_DIRECTORY_MESSAGE: &str = "read_file 只能读取普通文本文件。";
+const SYMLINK_FORBIDDEN_MESSAGE: &str = "read_file 不允许读取符号链接。";
 
 pub(super) struct ReadFileTool;
 
@@ -30,18 +33,19 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read an authorized regular UTF-8 text file. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. Paths may be workspace-relative, absolute, use a supported system alias, or reference @attachments; the current read permission is enforced at execution time. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
+            description: "Read an authorized regular UTF-8 text file. Immediately before every apply_patch Direct create, update, or delete, call read_file on that exact target path—even when you expect it to be absent; do not substitute a parent-directory listing, workspace_map, search result, or earlier read. A not-found result for that exact path establishes the missing state required by create. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "A regular UTF-8 text file only: workspace-relative path, absolute local path, @home/@desktop/@documents/@downloads, an exact @attachments/... readPath, a browser-download:... reference, or a published artifact://... URI. For a directory, call workspace_map with this path as focusPath instead. Availability depends on the current read permission and resource ownership." },
                     "startLine": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line. Omit to start at the beginning." },
-                    "startByte": { "type": "integer", "minimum": 0, "description": "Continuation cursor. Pass nextStartByte from a previous truncated result; do not combine with startLine." },
-                    "expectedRevision": { "type": "string", "description": "Optional continuation guard. Pass the exact revision from the previous page so a changed file cannot be silently spliced into the same read." },
+                    "startByte": { "type": "integer", "minimum": 0, "description": "Continuation cursor. Pass nextStartByte from a previous truncated result together with that page's expectedRevision; do not combine with startLine." },
+                    "expectedRevision": { "type": "string", "description": "Required whenever startByte is present. Pass the exact revision from the previous page so pages from different file versions cannot be spliced." },
                     "maxLines": { "type": "integer", "minimum": 1, "description": "Optional soft strategy bound. There is no fixed maximum; the output token budget still applies." }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -51,69 +55,7 @@ impl AgentTool for ReadFileTool {
     }
 
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
-        context.check_cancelled()?;
-        let args: ReadFileArgs = serde_json::from_value(args)
-            .map_err(|error| AgentError::new(format!("read_file 参数无效：{error}")))?;
-        args.validate()?;
-        let path = args.path()?;
-        let file_path = context.resolve_existing_path(path)?;
-        let display_path = context.display_path(path, &file_path)?;
-        let display_path = if display_path.is_empty() {
-            ".".to_string()
-        } else {
-            display_path
-        };
-        let path_metadata = fs::metadata(&file_path)
-            .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
-        if path_metadata.is_dir() {
-            return Err(path_is_directory_error(&display_path));
-        }
-        if !path_metadata.is_file() {
-            return Err(AgentError::new("read_file 只能读取普通文本文件。"));
-        }
-        let mut file = File::open(&file_path)
-            .map_err(|error| AgentError::new(format!("打开文件失败：{error}")))?;
-        let initial_metadata = file
-            .metadata()
-            .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
-        if initial_metadata.is_dir() {
-            return Err(path_is_directory_error(&display_path));
-        }
-        if !initial_metadata.is_file() {
-            return Err(AgentError::new("read_file 只能读取普通文本文件。"));
-        }
-
-        let requested_start_line = u64::try_from(args.start_line.unwrap_or(1)).unwrap_or(u64::MAX);
-        let inspection = inspect_text_file(
-            &mut file,
-            context,
-            &initial_metadata,
-            requested_start_line,
-            args.start_byte,
-        )?;
-        if let Some(expected_revision) = args.expected_revision.as_deref() {
-            if expected_revision != inspection.revision {
-                return Err(AgentError::new(
-                    "read_file 续读失败：文件 revision 已变化，请从开头重新读取。",
-                ));
-            }
-        }
-        let fragment = read_fragment(
-            &mut file,
-            context,
-            &inspection,
-            args.max_lines
-                .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
-        )?;
-        ensure_file_unchanged(&file, &inspection.identity)?;
-
-        fit_read_file_page_to_model_budget(
-            context,
-            display_path,
-            &inspection,
-            &fragment.content,
-            fragment.stop_reason,
-        )
+        execute_read_file_with_hook(context, args, || {})
     }
 
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
@@ -122,13 +64,113 @@ impl AgentTool for ReadFileTool {
             read_file_model_projection(result.result.as_ref()),
         )
     }
+
+    fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let mut projected = self.trace_projection(result);
+        let Some(value) = projected.result.as_mut().and_then(Value::as_object_mut) else {
+            return projected;
+        };
+        value.remove("observationId");
+        if let Some(args) = value
+            .get_mut("continueWith")
+            .and_then(Value::as_object_mut)
+            .and_then(|continuation| continuation.get_mut("args"))
+            .and_then(Value::as_object_mut)
+        {
+            args.remove("observationId");
+        }
+        projected
+    }
+}
+
+fn execute_read_file_with_hook(
+    context: &ToolExecutionContext,
+    args: Value,
+    before_open: impl FnOnce(),
+) -> AgentResult<Value> {
+    context.check_cancelled()?;
+    let args: ReadFileArgs = serde_json::from_value(args).map_err(|_| {
+        AgentError::structured(
+            "agent.read_file.invalid_arguments",
+            "read_file 参数无效。",
+            json!({
+                "type": "file_read",
+                "code": "invalid_arguments",
+                "message": "read_file 参数无效。",
+                "recovery": "correct_arguments"
+            }),
+        )
+    })?;
+    args.validate()?;
+    let path = args.path()?;
+    let file_path = match context.resolve_existing_path_preserving_leaf(path) {
+        Ok(file_path) => file_path,
+        Err(read_error) => {
+            if let Some(result) = missing_file_observation(context, path)? {
+                return Ok(result);
+            }
+            return Err(read_error);
+        }
+    };
+    let display_path = context.display_path(path, &file_path)?;
+    let display_path = if display_path.is_empty() {
+        ".".to_string()
+    } else {
+        display_path
+    };
+    let mut opened = open_regular_text_file_with_hook(&file_path, &display_path, before_open)?;
+    let initial_metadata = opened.initial_metadata().clone();
+
+    let requested_start_line = u64::try_from(args.start_line.unwrap_or(1)).unwrap_or(u64::MAX);
+    let inspection = inspect_text_file(
+        opened.file_mut(),
+        context,
+        &initial_metadata,
+        requested_start_line,
+        args.start_byte,
+    )?;
+    if let Some(expected_revision) = args.expected_revision.as_deref() {
+        if expected_revision != inspection.revision {
+            return Err(AgentError::new(
+                "read_file 续读失败：文件 revision 已变化，请从开头重新读取。",
+            ));
+        }
+    }
+    let fragment = read_fragment(
+        opened.file_mut(),
+        context,
+        &inspection,
+        args.max_lines
+            .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
+    )?;
+    opened.ensure_current(&inspection.identity)?;
+    let parent_metadata = opened.parent_metadata()?;
+    let observation = context
+        .file_observations()
+        .issue_existing(
+            context.conversation_id()?,
+            context.run_id()?,
+            &file_path,
+            &inspection.revision,
+            &initial_metadata,
+            &parent_metadata,
+        )
+        .map_err(file_observation_error)?;
+
+    fit_read_file_page_to_model_budget(
+        context,
+        display_path,
+        &inspection,
+        &fragment.content,
+        fragment.stop_reason,
+        observation.id(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadFileArgs {
     path: Option<String>,
-    file_path: Option<String>,
     start_line: Option<usize>,
     start_byte: Option<u64>,
     expected_revision: Option<String>,
@@ -139,7 +181,6 @@ impl ReadFileArgs {
     fn path(&self) -> AgentResult<&str> {
         self.path
             .as_deref()
-            .or(self.file_path.as_deref())
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| AgentError::new("read_file.path 不能为空。"))
@@ -154,6 +195,16 @@ impl ReadFileArgs {
         if self.start_line == Some(0) || self.max_lines == Some(0) {
             return Err(AgentError::new(
                 "read_file.startLine 和 maxLines 必须是大于 0 的整数。",
+            ));
+        }
+        if self.start_byte.is_some() != self.expected_revision.is_some()
+            || self
+                .expected_revision
+                .as_deref()
+                .is_some_and(|revision| revision.trim().is_empty())
+        {
+            return Err(AgentError::new(
+                "read_file.startByte 与 expectedRevision 必须一起使用。",
             ));
         }
         Ok(())
@@ -178,6 +229,9 @@ fn read_file_model_projection(source: Option<&Value>) -> Option<Value> {
             "nextStartByte",
             "nextStartLine",
             "continueWith",
+            "exists",
+            "observationId",
+            "message",
         ],
     );
     if let (Some(Value::Object(output)), Some(source)) = (projected.as_mut(), source) {
@@ -230,8 +284,16 @@ fn fit_read_file_page_to_model_budget(
     inspection: &TextFileInspection,
     content: &str,
     stop_reason: FragmentStopReason,
+    observation_id: &str,
 ) -> AgentResult<Value> {
-    let full = build_read_file_page(context, &display_path, inspection, content, stop_reason);
+    let full = build_read_file_page(
+        context,
+        &display_path,
+        inspection,
+        content,
+        stop_reason,
+        observation_id,
+    );
     // Production runtime always supplies the fixed 10K result budget. Smaller budgets are used
     // only by focused pagination tests and embedded callers as a content-page strategy; treating
     // them as a complete provider-message ceiling would leave no room for even the cursor.
@@ -265,6 +327,7 @@ fn fit_read_file_page_to_model_budget(
             inspection,
             &content[..boundaries[middle]],
             FragmentStopReason::OutputBudget,
+            observation_id,
         );
         if read_file_page_fits_model_budget(context, &candidate)? {
             lower = middle;
@@ -281,6 +344,7 @@ fn fit_read_file_page_to_model_budget(
             inspection,
             &content[..first_character_end],
             FragmentStopReason::OutputBudget,
+            observation_id,
         );
         if !read_file_page_fits_model_budget(context, &smallest_progressing_page)? {
             return Err(AgentError::new(
@@ -296,6 +360,7 @@ fn fit_read_file_page_to_model_budget(
         inspection,
         &content[..boundaries[lower]],
         FragmentStopReason::OutputBudget,
+        observation_id,
     ))
 }
 
@@ -305,6 +370,7 @@ fn build_read_file_page(
     inspection: &TextFileInspection,
     content: &str,
     stop_reason: FragmentStopReason,
+    observation_id: &str,
 ) -> Value {
     let positions = measure_positions(inspection.start.line, inspection.start.column, content);
     let next_byte = inspection
@@ -316,6 +382,8 @@ fn build_read_file_page(
 
     json!({
         "path": display_path,
+        "exists": true,
+        "observationId": observation_id,
         "revision": inspection.revision,
         "startLine": inspection.start.line,
         "startColumn": inspection.start.column,
@@ -337,6 +405,91 @@ fn build_read_file_page(
     })
 }
 
+fn missing_file_observation(
+    context: &ToolExecutionContext,
+    input_path: &str,
+) -> AgentResult<Option<Value>> {
+    missing_file_observation_with_hook(context, input_path, || {})
+}
+
+fn missing_file_observation_with_hook(
+    context: &ToolExecutionContext,
+    input_path: &str,
+    before_missing_check: impl FnOnce(),
+) -> AgentResult<Option<Value>> {
+    let target = match context.resolve_missing_file_observation_target(input_path) {
+        Ok(target) => target,
+        // This fallback may only replace the original read error after the Host has positively
+        // established an authorized missing target. Path-policy rejection (including ancestor
+        // symlinks) is not evidence of absence and must not mask an existing read denial.
+        Err(_) => return Ok(None),
+    };
+    #[cfg(unix)]
+    let parent_metadata = {
+        let parent = match crate::file_change::BoundReadParent::bind(target.absolute_path()) {
+            Ok(parent) => parent,
+            Err(_) => return Ok(None),
+        };
+        before_missing_check();
+        match parent.is_current_missing_leaf() {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Ok(None),
+        }
+        parent
+            .parent_metadata()
+            .map_err(|_| AgentError::new("read_file 无法验证目标文件的父目录。"))?
+    };
+    #[cfg(not(unix))]
+    let parent_metadata = {
+        before_missing_check();
+        match fs::symlink_metadata(target.absolute_path()) {
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Ok(None),
+        }
+        fs::metadata(target.parent())
+            .map_err(|_| AgentError::new("read_file 无法验证目标文件的父目录。"))?
+    };
+    let observation = context
+        .file_observations()
+        .issue_missing(
+            context.conversation_id()?,
+            context.run_id()?,
+            target.absolute_path(),
+            &parent_metadata,
+        )
+        .map_err(file_observation_error)?;
+    Ok(Some(json!({
+        "path": input_path,
+        "exists": false,
+        "observationId": observation.id(),
+        "message": "文件不存在。",
+        "continueWith": {
+            "tool": "apply_patch",
+            "args": {
+                "action": "apply",
+                "operation": "create",
+                "filePath": input_path,
+                "observationId": observation.id()
+            }
+        }
+    })))
+}
+
+fn file_observation_error(error: crate::file_change::FileChangeError) -> AgentError {
+    AgentError::structured(
+        "agent.read_file.observation_failed",
+        error.to_string(),
+        json!({
+            "type": "file_observation",
+            "code": error.failure().code,
+            "category": error.failure().category,
+            "message": error.failure().message,
+            "recovery": error.failure().recovery,
+        }),
+    )
+}
+
 fn read_file_page_fits_model_budget(
     context: &ToolExecutionContext,
     source: &Value,
@@ -350,6 +503,144 @@ fn read_file_page_fits_model_budget(
         <= context.text_output_budget().max_tokens())
 }
 
+struct OpenedTextFile {
+    file: File,
+    initial_metadata: Metadata,
+    #[cfg(unix)]
+    parent: crate::file_change::BoundReadParent,
+    #[cfg(not(unix))]
+    path: std::path::PathBuf,
+}
+
+impl OpenedTextFile {
+    fn file_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    fn initial_metadata(&self) -> &Metadata {
+        &self.initial_metadata
+    }
+
+    fn ensure_current(&self, expected_identity: &FileIdentity) -> AgentResult<()> {
+        ensure_file_unchanged(&self.file, expected_identity)?;
+        #[cfg(unix)]
+        match self
+            .parent
+            .is_current_leaf(&self.file, &self.initial_metadata)
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(file_changed_error()),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(symlink_forbidden_error());
+            }
+            Err(_) => return Err(file_changed_error()),
+        }
+        #[cfg(not(unix))]
+        {
+            let named = fs::symlink_metadata(&self.path).map_err(|_| file_changed_error())?;
+            if named.file_type().is_symlink() || !expected_identity.matches(&named) {
+                return Err(file_changed_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn parent_metadata(&self) -> AgentResult<Metadata> {
+        #[cfg(unix)]
+        {
+            self.parent
+                .parent_metadata()
+                .map_err(|_| AgentError::new("read_file 无法验证目标文件的父目录。"))
+        }
+        #[cfg(not(unix))]
+        {
+            let parent = self
+                .path
+                .parent()
+                .ok_or_else(|| AgentError::new("read_file 无法确定目标文件的父目录。"))?;
+            fs::metadata(parent)
+                .map_err(|_| AgentError::new("read_file 无法验证目标文件的父目录。"))
+        }
+    }
+}
+
+fn open_regular_text_file_with_hook(
+    path: &std::path::Path,
+    display_path: &str,
+    before_open: impl FnOnce(),
+) -> AgentResult<OpenedTextFile> {
+    #[cfg(unix)]
+    {
+        let parent = crate::file_change::BoundReadParent::bind(path).map_err(map_open_error)?;
+        // Test-only callers use this hook to deterministically race the already-bound parent or
+        // leaf. Production passes a no-op.
+        before_open();
+        let file = parent.open_leaf().map_err(map_open_error)?;
+        let initial_metadata = file
+            .metadata()
+            .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
+        ensure_regular_file(&initial_metadata, display_path)?;
+        Ok(OpenedTextFile {
+            file,
+            initial_metadata,
+            parent,
+        })
+    }
+
+    #[cfg(not(unix))]
+    {
+        let path_metadata = fs::symlink_metadata(path)
+            .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
+        if path_metadata.file_type().is_symlink() {
+            return Err(symlink_forbidden_error());
+        }
+        ensure_regular_file(&path_metadata, display_path)?;
+        let path_identity = FileIdentity::from_metadata(&path_metadata);
+        before_open();
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(map_open_error)?;
+        let initial_metadata = file
+            .metadata()
+            .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
+        ensure_regular_file(&initial_metadata, display_path)?;
+        if !path_identity.matches(&initial_metadata) {
+            return Err(file_changed_error());
+        }
+        Ok(OpenedTextFile {
+            file,
+            initial_metadata,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn ensure_regular_file(metadata: &Metadata, display_path: &str) -> AgentResult<()> {
+    if metadata.is_dir() {
+        return Err(path_is_directory_error(display_path));
+    }
+    if !metadata.is_file() {
+        return Err(AgentError::new("read_file 只能读取普通文本文件。"));
+    }
+    Ok(())
+}
+
+fn map_open_error(error: std::io::Error) -> AgentError {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return symlink_forbidden_error();
+    }
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return file_changed_error();
+    }
+    AgentError::new(format!("打开文件失败：{error}"))
+}
+
+fn symlink_forbidden_error() -> AgentError {
+    AgentError::new(SYMLINK_FORBIDDEN_MESSAGE)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FileCursor {
     byte: u64,
@@ -357,18 +648,33 @@ struct FileCursor {
     column: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FileIdentity {
     length: u64,
     modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
 }
 
 impl FileIdentity {
     fn from_metadata(metadata: &Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
         Self {
             length: metadata.len(),
             modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
         }
+    }
+
+    fn matches(&self, metadata: &Metadata) -> bool {
+        self == &Self::from_metadata(metadata)
     }
 }
 
@@ -775,12 +1081,7 @@ fn ensure_file_unchanged(file: &File, expected: &FileIdentity) -> AgentResult<()
     let current = file
         .metadata()
         .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
-    if current.len() != expected.length
-        || expected
-            .modified
-            .zip(current.modified().ok())
-            .is_some_and(|(expected, current)| expected != current)
-    {
+    if !expected.matches(&current) {
         return Err(file_changed_error());
     }
     Ok(())
@@ -794,12 +1095,15 @@ fn file_changed_error() -> AgentError {
 mod tests {
     use super::super::{ToolExecutionContext, ToolRegistry};
     use super::{
-        PATH_IS_DIRECTORY_CODE, PATH_IS_DIRECTORY_ERROR_CODE, PATH_IS_DIRECTORY_MESSAGE,
-        STREAM_BUFFER_BYTES,
+        execute_read_file_with_hook, missing_file_observation_with_hook,
+        open_regular_text_file_with_hook, ReadFileArgs, PATH_IS_DIRECTORY_CODE,
+        PATH_IS_DIRECTORY_ERROR_CODE, PATH_IS_DIRECTORY_MESSAGE, STREAM_BUFFER_BYTES,
+        SYMLINK_FORBIDDEN_MESSAGE,
     };
     use crate::context::{ContextCapacityDetector, ContextTextBudget};
     use crate::protocol::{
-        AgentApiStyle, AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
+        AgentApiStyle, AgentApprovalStatus, AgentPermissions, AgentRunContext, AgentToolCall,
+        AgentWorkspaceContext, AgentWritePermission,
     };
     use crate::revision::content_revision;
     use serde_json::{json, Value};
@@ -816,11 +1120,27 @@ mod tests {
 
         assert_eq!(definition.input_schema["type"], "object");
         assert_eq!(definition.input_schema["required"], json!(["path"]));
+        assert_eq!(definition.input_schema["additionalProperties"], false);
         assert!(definition.input_schema.get("anyOf").is_none());
         assert!(definition.input_schema["properties"]
             .get("filePath")
             .is_none());
         assert!(definition.description.contains("regular UTF-8 text file"));
+        assert!(definition
+            .description
+            .contains("Immediately before every apply_patch Direct create, update, or delete"));
+        assert!(definition
+            .description
+            .contains("call read_file on that exact target path"));
+        assert!(definition
+            .description
+            .contains("A not-found result for that exact path establishes the missing state"));
+        assert!(definition
+            .description
+            .contains("Without a workspace, relative paths are invalid"));
+        for alias in ["@home", "@desktop", "@documents", "@downloads"] {
+            assert!(definition.description.contains(alias));
+        }
         let path_description = definition.input_schema["properties"]["path"]["description"]
             .as_str()
             .unwrap();
@@ -871,13 +1191,155 @@ mod tests {
     }
 
     #[test]
-    fn runtime_still_accepts_the_legacy_file_path_alias() {
+    fn hidden_file_path_alias_is_rejected_with_safe_error() {
         let fixture = TestWorkspace::new();
         fixture.write_file("legacy.txt", "legacy alias");
+        let registry = ToolRegistry::defaults_with_search(None);
+        let result = registry.execute(
+            &fixture.context(),
+            &AgentToolCall {
+                id: "call-hidden-alias".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "filePath": "legacy.txt" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
 
-        let value = execute(&fixture.context(), json!({ "filePath": "legacy.txt" }));
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some("read_file 参数无效。"));
+        assert_eq!(result.result.unwrap()["code"], "invalid_arguments");
+    }
 
-        assert_eq!(value["content"], "legacy alias");
+    #[test]
+    fn existing_and_missing_reads_return_actionable_fresh_observations() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("present.txt", "present\n");
+        let context = fixture.context();
+        let existing = execute(&context, json!({ "path": "present.txt" }));
+        let missing = execute(&context, json!({ "path": "missing.txt" }));
+
+        assert_eq!(existing["exists"], true);
+        assert!(existing["observationId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("fobs_")));
+        assert_eq!(missing["exists"], false);
+        assert_eq!(missing["message"], "文件不存在。");
+        assert!(missing["observationId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("fobs_")));
+        assert_eq!(
+            missing["continueWith"]["args"]["observationId"],
+            missing["observationId"]
+        );
+        assert_ne!(existing["observationId"], missing["observationId"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_leaf_creation_race_does_not_issue_an_observation() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("inside/keep.txt", "keep\n");
+        let target = fixture.root.join("inside/new.txt");
+        let context = fixture
+            .context()
+            .with_tool_call_id("call-missing-leaf-race".to_string());
+
+        let result = missing_file_observation_with_hook(&context, "inside/new.txt", || {
+            fs::write(&target, "appeared\n").unwrap();
+        })
+        .unwrap();
+
+        assert!(
+            result.is_none(),
+            "a raced leaf must not receive an observation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_ancestor_symlink_swap_does_not_issue_an_observation() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TestWorkspace::new();
+        fixture.write_file("inside/keep.txt", "keep\n");
+        let outside = tempfile::TempDir::new().unwrap();
+        let inside = fixture.root.join("inside");
+        let displaced = fixture.root.join("inside-displaced");
+        let context = fixture
+            .context()
+            .with_tool_call_id("call-missing-ancestor-race".to_string());
+
+        let result = missing_file_observation_with_hook(&context, "inside/new.txt", || {
+            fs::rename(&inside, &displaced).unwrap();
+            symlink(outside.path(), &inside).unwrap();
+        })
+        .unwrap();
+
+        assert!(
+            result.is_none(),
+            "a raced ancestor must not receive a missing observation"
+        );
+    }
+
+    #[test]
+    fn write_all_can_observe_an_outside_missing_target_without_blind_read_access() {
+        let fixture = TestWorkspace::new();
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: Some("read-file-write-only-conversation".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: AgentPermissions {
+                write: AgentWritePermission::All,
+                ..Default::default()
+            },
+        }))
+        .with_runtime_services("read-file-write-only-run".to_string(), None);
+        let registry = ToolRegistry::defaults_with_search(None);
+        // macOS commonly exposes the temporary directory through `/var -> /private/var`.
+        // FileChange intentionally rejects every ancestor symlink, so use the canonical parent
+        // here to exercise the no-workspace absolute-path permission case rather than the
+        // separately covered symlink rejection case.
+        let canonical_root = fixture.root.canonicalize().unwrap();
+        let missing_path = canonical_root.join("missing.txt");
+        let missing = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-write-only-missing".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "path": missing_path }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+        assert!(missing.ok, "{:?}", missing.error);
+        let missing = missing.result.unwrap();
+        assert_eq!(missing["exists"], false);
+        assert_eq!(missing["message"], "文件不存在。");
+        assert!(missing["observationId"]
+            .as_str()
+            .unwrap()
+            .starts_with("fobs_"));
+
+        fixture.write_file("existing.txt", "must remain unread\n");
+        let existing = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-write-only-existing".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "path": canonical_root.join("existing.txt") }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+        assert!(!existing.ok);
+        assert!(existing.result.is_none());
+        assert!(existing
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("读取权限")));
     }
 
     #[test]
@@ -957,7 +1419,11 @@ mod tests {
         let next_start_byte = first["nextStartByte"].as_u64().unwrap();
         let second = execute(
             &context,
-            json!({ "path": "notes.txt", "startByte": next_start_byte }),
+            json!({
+                "path": "notes.txt",
+                "startByte": next_start_byte,
+                "expectedRevision": first["revision"]
+            }),
         );
 
         assert_eq!(
@@ -969,6 +1435,23 @@ mod tests {
             content
         );
         assert_eq!(second["truncated"], false);
+    }
+
+    #[test]
+    fn continuation_cursor_and_revision_are_an_exact_pair() {
+        let missing_revision: ReadFileArgs = serde_json::from_value(json!({
+            "path": "notes.txt",
+            "startByte": 10
+        }))
+        .unwrap();
+        assert!(missing_revision.validate().is_err());
+
+        let revision_without_cursor: ReadFileArgs = serde_json::from_value(json!({
+            "path": "notes.txt",
+            "expectedRevision": "sha256:example"
+        }))
+        .unwrap();
+        assert!(revision_without_cursor.validate().is_err());
     }
 
     #[test]
@@ -1137,7 +1620,11 @@ mod tests {
         let call = AgentToolCall {
             id: "call-invalid-cursor".to_string(),
             tool: "read_file".to_string(),
-            args: json!({ "path": "unicode.txt", "startByte": 1 }),
+            args: json!({
+                "path": "unicode.txt",
+                "startByte": 1,
+                "expectedRevision": crate::content_revision("天地".as_bytes())
+            }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         };
@@ -1166,6 +1653,88 @@ mod tests {
 
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("只支持 UTF-8 文本"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_symlink_is_rejected_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TestWorkspace::new();
+        fixture.write_file("target.txt", "must not be exposed\n");
+        symlink(
+            fixture.root.join("target.txt"),
+            fixture.root.join("link.txt"),
+        )
+        .unwrap();
+        let registry = ToolRegistry::defaults_with_search(None);
+        let result = registry.execute(
+            &fixture.context(),
+            &AgentToolCall {
+                id: "call-read-leaf-symlink".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "path": "link.txt" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some(SYMLINK_FORBIDDEN_MESSAGE));
+        assert!(result.result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_symlink_swap_between_metadata_and_open_is_rejected_safely() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TestWorkspace::new();
+        fixture.write_file("target.txt", "must not be exposed\n");
+        fixture.write_file("victim.txt", "safe contents\n");
+        let target = fixture.root.join("target.txt");
+        let victim = fixture.root.join("victim.txt");
+
+        let error = open_regular_text_file_with_hook(&victim, "victim.txt", || {
+            fs::remove_file(&victim).unwrap();
+            symlink(&target, &victim).unwrap();
+        })
+        .err()
+        .expect("a raced leaf symlink must fail");
+
+        assert_eq!(error.to_string(), SYMLINK_FORBIDDEN_MESSAGE);
+        assert!(!error.to_string().contains("Too many symbolic links"));
+        assert!(!error.to_string().contains("ELOOP"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_symlink_swap_cannot_expose_content_or_issue_an_observation() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TestWorkspace::new();
+        fixture.write_file("inside/victim.txt", "authorized contents\n");
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(
+            outside.path().join("victim.txt"),
+            "outside secret sentinel\n",
+        )
+        .unwrap();
+        let inside = fixture.root.join("inside");
+        let displaced = fixture.root.join("inside-displaced");
+        let context = fixture
+            .context()
+            .with_tool_call_id("call-read-ancestor-swap".to_string());
+
+        let error =
+            execute_read_file_with_hook(&context, json!({ "path": "inside/victim.txt" }), || {
+                fs::rename(&inside, &displaced).unwrap();
+                symlink(outside.path(), &inside).unwrap();
+            })
+            .expect_err("a swapped ancestor must fail before returning content or an observation");
+
+        assert_eq!(error.to_string(), SYMLINK_FORBIDDEN_MESSAGE);
+        assert!(!error.to_string().contains("outside secret sentinel"));
     }
 
     fn execute(context: &ToolExecutionContext, args: Value) -> Value {
@@ -1209,7 +1778,7 @@ mod tests {
         fn context(&self) -> ToolExecutionContext {
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
                 collaboration_identity: None,
-                conversation_id: None,
+                conversation_id: Some("read-file-test-conversation".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
                     project_id: None,
@@ -1219,6 +1788,7 @@ mod tests {
                 attachment_library: None,
                 permissions: Default::default(),
             }))
+            .with_runtime_services("read-file-test-run".to_string(), None)
         }
     }
 

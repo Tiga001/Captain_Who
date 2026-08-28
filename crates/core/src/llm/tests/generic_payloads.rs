@@ -448,12 +448,25 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
     assert!(apply_patch.description.contains("read_file"));
     assert_eq!(
         apply_patch.input_schema["required"],
-        json!(["operation", "filePath"])
+        json!(["action", "operation", "filePath", "observationId"])
+    );
+    assert_eq!(
+        apply_patch.input_schema["properties"]["action"]["enum"],
+        json!(["apply"])
     );
     assert_eq!(
         apply_patch.input_schema["properties"]["operation"]["enum"],
         json!(["create", "update", "delete"])
     );
+    assert_eq!(apply_patch.input_schema["additionalProperties"], false);
+    assert_eq!(
+        apply_patch.input_schema["properties"]["edits"]["items"]["additionalProperties"],
+        false
+    );
+    let apply_properties = apply_patch.input_schema["properties"].as_object().unwrap();
+    assert!(apply_properties.contains_key("observationId"));
+    assert!(!apply_properties.contains_key("patch"));
+    assert!(!apply_properties.contains_key("expectedRevision"));
     assert_eq!(
         apply_patch.input_schema["properties"]["content"]["maxLength"],
         32 * 1024
@@ -531,6 +544,83 @@ fn generic_provider_payloads_freeze_current_file_write_tool_contract() {
         assert_eq!(projected["description"], definition.description);
         assert_eq!(projected["input_schema"], definition.input_schema);
         assert_eq!(projected.as_object().unwrap().len(), 3);
+    }
+}
+
+#[test]
+fn generic_provider_payloads_preserve_strict_direct_apply_call_and_result_order() {
+    let args = json!({
+        "action": "apply",
+        "operation": "update",
+        "filePath": "README.md",
+        "observationId": "fobs_current_read",
+        "edits": [{
+            "kind": "replace",
+            "oldText": "old heading",
+            "newText": "new heading"
+        }],
+        "summary": "Update the heading"
+    });
+
+    for api_style in [
+        AgentApiStyle::OpenAiCompatible,
+        AgentApiStyle::AnthropicCompatible,
+    ] {
+        let model = if api_style == AgentApiStyle::OpenAiCompatible {
+            "gpt"
+        } else {
+            "claude"
+        };
+        let request = LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            provider_profile: generic_provider_profile(api_style),
+            provider_protocol: generic_provider_protocol(api_style, model),
+            max_tokens: 1_024,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![
+                message(LlmMessageRole::User, "Update README.md"),
+                LlmMessage::assistant(
+                    "",
+                    vec![LlmToolCall {
+                        id: "call-direct-apply".to_string(),
+                        name: "apply_patch".to_string(),
+                        args: args.clone(),
+                    }],
+                ),
+                LlmMessage::tool_result("call-direct-apply", r#"{"status":"applied"}"#, false),
+            ],
+            tools: Vec::new(),
+        };
+
+        let payload = build_payload(&request);
+        if api_style == AgentApiStyle::OpenAiCompatible {
+            assert_eq!(payload["messages"][1]["role"], "assistant");
+            assert_eq!(
+                payload["messages"][1]["tool_calls"][0]["function"]["name"],
+                "apply_patch"
+            );
+            let wire_args: Value = serde_json::from_str(
+                payload["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(wire_args, args);
+            assert_eq!(payload["messages"][2]["role"], "tool");
+            assert_eq!(payload["messages"][2]["tool_call_id"], "call-direct-apply");
+        } else {
+            assert_eq!(payload["messages"][1]["role"], "assistant");
+            assert_eq!(payload["messages"][1]["content"][0]["type"], "tool_use");
+            assert_eq!(payload["messages"][1]["content"][0]["name"], "apply_patch");
+            assert_eq!(payload["messages"][1]["content"][0]["input"], args);
+            assert_eq!(payload["messages"][2]["role"], "user");
+            assert_eq!(
+                payload["messages"][2]["content"][0]["tool_use_id"],
+                "call-direct-apply"
+            );
+        }
     }
 }
 

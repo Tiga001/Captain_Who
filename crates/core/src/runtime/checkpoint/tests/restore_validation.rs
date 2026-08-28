@@ -1,4 +1,388 @@
 use super::*;
+use crate::file_change::FileObservationOwner;
+
+#[test]
+fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observation() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("example.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    let target = target.canonicalize().unwrap();
+    let workspace = directory.path().canonicalize().unwrap();
+    let target_metadata = std::fs::metadata(&target).unwrap();
+    let parent_metadata = std::fs::metadata(&workspace).unwrap();
+    let run_id = "checkpoint-validation-run";
+    let conversation_id = "conversation-observation";
+    let source_call_id = canonical_test_call_id(7, "provider-read-observation");
+    let queued_call_id = canonical_test_call_id(8, "provider-queued-apply-patch");
+    let registry = FileObservationRegistry::default();
+    let observation = registry
+        .issue_existing_from_read(
+            FileObservationOwner::new(&source_call_id, conversation_id, run_id),
+            &target,
+            "revision-before",
+            &target_metadata,
+            &parent_metadata,
+        )
+        .unwrap();
+    let extra_observation = registry
+        .issue_missing_from_read(
+            FileObservationOwner::new(
+                &canonical_test_call_id(9, "provider-extra-read"),
+                conversation_id,
+                run_id,
+            ),
+            &workspace.join("unreferenced.txt"),
+            &parent_metadata,
+        )
+        .unwrap();
+    let run_context = AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: Some(crate::protocol::AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("Observation workspace".to_string()),
+            root_path: Some(workspace.display().to_string()),
+        }),
+        attachment_library: None,
+        permissions: crate::protocol::AgentPermissions {
+            read: crate::protocol::AgentReadPermission::WorkspaceOnly,
+            write: crate::protocol::AgentWritePermission::WorkspaceOnly,
+            ..crate::protocol::AgentPermissions::default()
+        },
+    };
+    let context_items = vec![
+        AgentContextCheckpointItem {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: source_call_id.clone(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "example.txt" }),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 7,
+                    provider_call_id: "provider-read-observation".to_string(),
+                    runtime_call_id: source_call_id.clone(),
+                },
+            }],
+            is_error: false,
+            sources: vec!["model_response".to_string()],
+            scope: "run".to_string(),
+            retention: "retained".to_string(),
+            group: None,
+            origin: None,
+        },
+        AgentContextCheckpointItem {
+            role: "tool".to_string(),
+            content: json!({
+                "path": "example.txt",
+                "exists": true,
+                "revision": "revision-before",
+                "observationId": observation.id(),
+                "content": "before\n"
+            })
+            .to_string(),
+            images: Vec::new(),
+            tool_call_id: Some(source_call_id.clone()),
+            tool_calls: Vec::new(),
+            is_error: false,
+            sources: vec!["tool_result".to_string()],
+            scope: "run".to_string(),
+            retention: "retained".to_string(),
+            group: None,
+            origin: None,
+        },
+    ];
+    let mut queued = vec![AgentQueuedToolCallCheckpoint {
+        call: AgentContextCheckpointToolCall {
+            id: queued_call_id.clone(),
+            name: "apply_patch".to_string(),
+            args: json!({
+                "action": "apply",
+                "operation": "update",
+                "filePath": "example.txt",
+                "observationId": observation.id(),
+                "content": "after\n"
+            }),
+            provider_identity: AgentProviderToolCallIdentity {
+                provider_tool_index: 8,
+                provider_call_id: "provider-queued-apply-patch".to_string(),
+                runtime_call_id: queued_call_id,
+            },
+        },
+        file_observation: None,
+        assistant_content: String::new(),
+        group_id: "group-observation".to_string(),
+        assistant_turn_id: "assistant-turn-observation".to_string(),
+        provider_tool_index: 8,
+    }];
+
+    attach_queued_file_observations(
+        &mut queued,
+        &registry,
+        run_id,
+        Some(&run_context),
+        &context_items,
+    )
+    .unwrap();
+    let frozen = queued[0]
+        .file_observation
+        .as_ref()
+        .expect("queued apply_patch freezes its exact observation");
+    assert_eq!(frozen.observation_id, observation.id());
+    assert_eq!(frozen.source_tool_call_id, source_call_id);
+
+    let restored =
+        restore_queued_file_observations(&queued, run_id, Some(&run_context), &context_items)
+            .unwrap();
+    assert!(restored
+        .validate(observation.id(), conversation_id, run_id, target.as_path(),)
+        .is_ok());
+    assert_eq!(
+        restored
+            .validate(
+                extra_observation.id(),
+                conversation_id,
+                run_id,
+                &workspace.join("unreferenced.txt"),
+            )
+            .unwrap_err()
+            .code(),
+        crate::file_change::FileChangeErrorCode::ObservationRequired
+    );
+
+    let mut missing = serde_json::to_value(&queued[0]).unwrap();
+    missing.as_object_mut().unwrap().remove("fileObservation");
+    assert!(serde_json::from_value::<AgentQueuedToolCallCheckpoint>(missing).is_err());
+}
+
+#[test]
+fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("example.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    let target = target.canonicalize().unwrap();
+    let workspace = directory.path().canonicalize().unwrap();
+    let parent_metadata = std::fs::metadata(&workspace).unwrap();
+    let target_metadata = std::fs::metadata(&target).unwrap();
+    let run_id = "checkpoint-validation-run";
+    let conversation_id = "conversation-observation";
+    let source_call_id = canonical_test_call_id(7, "provider-read-observation");
+    let registry = FileObservationRegistry::default();
+    let observation = registry
+        .issue_existing_from_read(
+            FileObservationOwner::new(&source_call_id, conversation_id, run_id),
+            &target,
+            "revision-before",
+            &target_metadata,
+            &parent_metadata,
+        )
+        .unwrap();
+    let run_context = AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: Some(crate::protocol::AgentWorkspaceContext {
+            project_id: None,
+            display_name: None,
+            root_path: Some(workspace.display().to_string()),
+        }),
+        attachment_library: None,
+        permissions: crate::protocol::AgentPermissions {
+            write: crate::protocol::AgentWritePermission::WorkspaceOnly,
+            ..crate::protocol::AgentPermissions::default()
+        },
+    };
+    let context_items = vec![
+        AgentContextCheckpointItem {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: source_call_id.clone(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "example.txt" }),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 7,
+                    provider_call_id: "provider-read-observation".to_string(),
+                    runtime_call_id: source_call_id.clone(),
+                },
+            }],
+            is_error: false,
+            sources: Vec::new(),
+            scope: "run".to_string(),
+            retention: "retained".to_string(),
+            group: None,
+            origin: None,
+        },
+        AgentContextCheckpointItem {
+            role: "tool".to_string(),
+            content: json!({
+                "path": "example.txt",
+                "exists": true,
+                "revision": "revision-before",
+                "observationId": observation.id()
+            })
+            .to_string(),
+            images: Vec::new(),
+            tool_call_id: Some(source_call_id),
+            tool_calls: Vec::new(),
+            is_error: false,
+            sources: Vec::new(),
+            scope: "run".to_string(),
+            retention: "retained".to_string(),
+            group: None,
+            origin: None,
+        },
+    ];
+    let queued_call_id = canonical_test_call_id(8, "provider-queued-apply-patch");
+    let mut queued = vec![AgentQueuedToolCallCheckpoint {
+        call: AgentContextCheckpointToolCall {
+            id: queued_call_id.clone(),
+            name: "apply_patch".to_string(),
+            args: json!({
+                "action": "apply",
+                "operation": "update",
+                "filePath": "example.txt",
+                "observationId": observation.id(),
+                "content": "after\n"
+            }),
+            provider_identity: AgentProviderToolCallIdentity {
+                provider_tool_index: 8,
+                provider_call_id: "provider-queued-apply-patch".to_string(),
+                runtime_call_id: queued_call_id,
+            },
+        },
+        file_observation: None,
+        assistant_content: String::new(),
+        group_id: "group-observation".to_string(),
+        assistant_turn_id: "assistant-turn-observation".to_string(),
+        provider_tool_index: 8,
+    }];
+    attach_queued_file_observations(
+        &mut queued,
+        &registry,
+        run_id,
+        Some(&run_context),
+        &context_items,
+    )
+    .unwrap();
+
+    let mut missing = queued.clone();
+    missing[0].file_observation = None;
+    assert!(
+        restore_queued_file_observations(&missing, run_id, Some(&run_context), &context_items,)
+            .is_err()
+    );
+
+    let mut extra = queued.clone();
+    extra[0].call.name = "read_file".to_string();
+    assert!(
+        restore_queued_file_observations(&extra, run_id, Some(&run_context), &context_items,)
+            .is_err()
+    );
+
+    let duplicate = vec![queued[0].clone(), queued[0].clone()];
+    assert!(restore_queued_file_observations(
+        &duplicate,
+        run_id,
+        Some(&run_context),
+        &context_items,
+    )
+    .is_err());
+
+    for mutate in [
+        |checkpoint: &mut FileObservationCheckpoint| checkpoint.schema_version += 1,
+        |checkpoint: &mut FileObservationCheckpoint| {
+            checkpoint.conversation_id = "other-conversation".to_string()
+        },
+        |checkpoint: &mut FileObservationCheckpoint| {
+            checkpoint.canonical_target = "/tmp/tampered.txt".to_string()
+        },
+        |checkpoint: &mut FileObservationCheckpoint| {
+            checkpoint.source_tool_call_id = canonical_test_call_id(6, "unknown-read")
+        },
+        |checkpoint: &mut FileObservationCheckpoint| {
+            checkpoint.created_at_ms = 0;
+            checkpoint.expires_at_ms = crate::file_change::FILE_OBSERVATION_TTL_MS;
+        },
+    ] {
+        let mut tampered = queued.clone();
+        mutate(
+            tampered[0]
+                .file_observation
+                .as_mut()
+                .expect("fixture observation"),
+        );
+        assert!(restore_queued_file_observations(
+            &tampered,
+            run_id,
+            Some(&run_context),
+            &context_items,
+        )
+        .is_err());
+    }
+
+    let other_target = workspace.join("other.txt");
+    std::fs::write(&other_target, "other\n").unwrap();
+    let mut coordinated_path_tamper = queued.clone();
+    coordinated_path_tamper[0].call.args["filePath"] = json!("other.txt");
+    coordinated_path_tamper[0]
+        .file_observation
+        .as_mut()
+        .expect("fixture observation")
+        .canonical_target = other_target.display().to_string();
+    assert!(restore_queued_file_observations(
+        &coordinated_path_tamper,
+        run_id,
+        Some(&run_context),
+        &context_items,
+    )
+    .is_err());
+
+    let mut mismatched_source_path = context_items.clone();
+    mismatched_source_path[0].tool_calls[0].args["path"] = json!("other.txt");
+    assert!(restore_queued_file_observations(
+        &queued,
+        run_id,
+        Some(&run_context),
+        &mismatched_source_path,
+    )
+    .is_err());
+
+    for result_tamper in [
+        json!({
+            "path": "other.txt",
+            "exists": true,
+            "revision": "revision-before",
+            "observationId": observation.id()
+        }),
+        json!({
+            "path": "example.txt",
+            "exists": false,
+            "observationId": observation.id()
+        }),
+        json!({
+            "path": "example.txt",
+            "exists": true,
+            "revision": "tampered-revision",
+            "observationId": observation.id()
+        }),
+    ] {
+        let mut tampered_context = context_items.clone();
+        tampered_context[1].content = result_tamper.to_string();
+        assert!(restore_queued_file_observations(
+            &queued,
+            run_id,
+            Some(&run_context),
+            &tampered_context,
+        )
+        .is_err());
+    }
+}
 
 #[test]
 fn checkpoint_restore_requires_current_provider_protocol_revision_before_dispatch() {

@@ -522,8 +522,10 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
                 id: "denied-stable-write".to_string(),
                 tool: "apply_patch".to_string(),
                 args: json!({
+                    "action": "apply",
                     "operation": "create",
                     "filePath": "denied.txt",
+                    "observationId": "fobs_not_reached_because_write_is_denied",
                     "content": "must not be written"
                 }),
                 approval_status: AgentApprovalStatus::NotRequired,
@@ -531,7 +533,8 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
             },
         )
         .unwrap_err();
-    assert!(error.to_string().contains("denied"));
+    assert_eq!(error.code(), Some("agent.apply_patch.permission_denied"));
+    assert_eq!(error.to_string(), "当前权限不允许修改此文件。");
 }
 
 #[test]

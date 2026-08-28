@@ -25,6 +25,31 @@ pub enum AgentActionAuditFinalizationOutcome {
     ClaimMissingOrChanged,
 }
 
+/// Outcome of replacing the private Direct FileChange execution credential on an automatic
+/// action audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentActionAuditJsonCommitOutcome {
+    Updated,
+    AlreadyCommitted,
+    ExpectedActionMismatch,
+    ExecutionStateConflict,
+    NotExecuting { status: String },
+    IdentityConflict { status: String },
+    Missing,
+}
+
+/// Outcome of synchronizing an optional manual preterminal audit with its committed pending
+/// Direct FileChange credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManualActionAuditJsonCommitOutcome {
+    Updated,
+    AlreadyCommitted,
+    Absent,
+    ExpectedActionMismatch,
+    NotPreterminal { status: String },
+    IdentityConflict { status: String },
+}
+
 /// Result of advancing a manually approved command audit to its terminal receipt.
 ///
 /// Manual actions may have an older `pending`, `approved`, or `cancellation_requested` audit from
@@ -147,6 +172,176 @@ pub fn insert_action_audit_record_if_absent(
         ],
     )?;
     Ok(changed == 1)
+}
+
+/// Atomically replaces one automatic audit's exact prepared action JSON with committed JSON.
+///
+/// The action id, complete immutable execution identity, byte-exact prepared JSON, and
+/// `executing` lifecycle state all participate in the CAS. This never inserts a row and never
+/// advances lifecycle or terminal-result columns.
+pub(crate) fn commit_executing_action_json(
+    connection: &mut Connection,
+    identity: &AgentActionAuditRecord,
+    expected_action_json: &str,
+    committed_action_json: &str,
+) -> rusqlite::Result<AgentActionAuditJsonCommitOutcome> {
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = transaction.execute(
+        "
+        UPDATE agent_action_audit
+        SET action_json = ?21
+        WHERE action_id = ?1
+          AND run_id = ?2
+          AND conversation_id IS ?3
+          AND assistant_message_id IS ?4
+          AND action_type = ?5
+          AND tool_name = ?6
+          AND decision IS ?7
+          AND created_at = ?8
+          AND decided_at IS ?9
+          AND effective_permissions_json IS ?10
+          AND path_scope IS ?11
+          AND command_cwd_scope IS ?12
+          AND decision_source IS ?13
+          AND status = 'executing'
+          AND patch_result_json IS ?14
+          AND command_result_json IS ?15
+          AND tool_result_json IS ?16
+          AND error IS ?17
+          AND completed_at IS ?18
+          AND blocked_reason IS ?19
+          AND action_json = ?20
+        ",
+        params![
+            &identity.action_id,
+            &identity.run_id,
+            &identity.conversation_id,
+            &identity.assistant_message_id,
+            &identity.action_type,
+            &identity.tool_name,
+            &identity.decision,
+            identity.created_at,
+            identity.decided_at,
+            &identity.effective_permissions_json,
+            &identity.path_scope,
+            &identity.command_cwd_scope,
+            &identity.decision_source,
+            &identity.patch_result_json,
+            &identity.command_result_json,
+            &identity.tool_result_json,
+            &identity.error,
+            identity.completed_at,
+            &identity.blocked_reason,
+            expected_action_json,
+            committed_action_json,
+        ],
+    )?;
+    let outcome = if changed == 1 {
+        AgentActionAuditJsonCommitOutcome::Updated
+    } else {
+        match load_action_audit_record(&transaction, &identity.action_id)? {
+            None => AgentActionAuditJsonCommitOutcome::Missing,
+            Some(existing) if !has_same_immutable_execution_identity(&existing, identity) => {
+                AgentActionAuditJsonCommitOutcome::IdentityConflict {
+                    status: existing.status,
+                }
+            }
+            Some(existing) if existing.status != "executing" => {
+                AgentActionAuditJsonCommitOutcome::NotExecuting {
+                    status: existing.status,
+                }
+            }
+            Some(existing) if existing.action_json == committed_action_json => {
+                AgentActionAuditJsonCommitOutcome::AlreadyCommitted
+            }
+            Some(existing) if existing.action_json != expected_action_json => {
+                AgentActionAuditJsonCommitOutcome::ExpectedActionMismatch
+            }
+            Some(_) => AgentActionAuditJsonCommitOutcome::ExecutionStateConflict,
+        }
+    };
+    transaction.commit()?;
+    Ok(outcome)
+}
+
+/// Updates the optional manual preterminal audit in the caller's pending-action transaction.
+///
+/// Manual initial audit publication is best effort, so absence is a valid outcome. Once a row
+/// exists, however, its complete pending-owner identity and manual preterminal lifecycle are
+/// mandatory; a mismatch must abort the outer transaction rather than leave pending and audit
+/// with different frozen action JSON.
+pub(crate) fn commit_manual_preterminal_action_json_if_present(
+    connection: &Connection,
+    pending_identity: &crate::storage::models::AgentPendingActionRecord,
+    expected_action_json: &str,
+    committed_action_json: &str,
+) -> rusqlite::Result<ManualActionAuditJsonCommitOutcome> {
+    let changed = connection.execute(
+        "
+        UPDATE agent_action_audit
+        SET action_json = ?9
+        WHERE action_id = ?1
+          AND run_id = ?2
+          AND conversation_id IS ?3
+          AND assistant_message_id IS ?4
+          AND action_type = ?5
+          AND tool_name = ?6
+          AND created_at = ?7
+          AND action_json = ?8
+          AND (
+                (status = 'pending' AND decision IS NULL AND decision_source = 'manual_pending')
+             OR (status IN ('approved', 'cancellation_requested') AND decision_source = 'manual')
+          )
+        ",
+        params![
+            &pending_identity.action_id,
+            &pending_identity.run_id,
+            &pending_identity.conversation_id,
+            &pending_identity.assistant_message_id,
+            &pending_identity.action_type,
+            &pending_identity.tool_name,
+            pending_identity.created_at,
+            expected_action_json,
+            committed_action_json,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(ManualActionAuditJsonCommitOutcome::Updated);
+    }
+    let Some(existing) = load_action_audit_record(connection, &pending_identity.action_id)? else {
+        return Ok(ManualActionAuditJsonCommitOutcome::Absent);
+    };
+    if existing.action_id != pending_identity.action_id
+        || existing.run_id != pending_identity.run_id
+        || existing.conversation_id != pending_identity.conversation_id
+        || existing.assistant_message_id != pending_identity.assistant_message_id
+        || existing.action_type != pending_identity.action_type
+        || existing.tool_name != pending_identity.tool_name
+        || existing.created_at != pending_identity.created_at
+    {
+        return Ok(ManualActionAuditJsonCommitOutcome::IdentityConflict {
+            status: existing.status,
+        });
+    }
+    let is_manual_preterminal = matches!(
+        (
+            existing.status.as_str(),
+            existing.decision_source.as_deref()
+        ),
+        ("pending", Some("manual_pending"))
+            | ("approved" | "cancellation_requested", Some("manual"))
+    );
+    if !is_manual_preterminal {
+        return Ok(ManualActionAuditJsonCommitOutcome::NotPreterminal {
+            status: existing.status,
+        });
+    }
+    Ok(if existing.action_json == committed_action_json {
+        ManualActionAuditJsonCommitOutcome::AlreadyCommitted
+    } else {
+        ManualActionAuditJsonCommitOutcome::ExpectedActionMismatch
+    })
 }
 
 /// Commits a final result only for the exact pre-execution receipt that is still `executing`.
@@ -346,33 +541,65 @@ pub(crate) fn load_action_audit_record(
             WHERE action_id = ?1
             ",
             params![action_id],
-            |row| {
-                Ok(AgentActionAuditRecord {
-                    action_id: row.get(0)?,
-                    run_id: row.get(1)?,
-                    conversation_id: row.get(2)?,
-                    assistant_message_id: row.get(3)?,
-                    action_type: row.get(4)?,
-                    tool_name: row.get(5)?,
-                    decision: row.get(6)?,
-                    status: row.get(7)?,
-                    action_json: row.get(8)?,
-                    patch_result_json: row.get(9)?,
-                    command_result_json: row.get(10)?,
-                    tool_result_json: row.get(11)?,
-                    error: row.get(12)?,
-                    created_at: row.get(13)?,
-                    decided_at: row.get(14)?,
-                    completed_at: row.get(15)?,
-                    effective_permissions_json: row.get(16)?,
-                    path_scope: row.get(17)?,
-                    command_cwd_scope: row.get(18)?,
-                    blocked_reason: row.get(19)?,
-                    decision_source: row.get(20)?,
-                })
-            },
+            action_audit_record_from_row,
         )
         .optional()
+}
+
+/// Lists the exact durable claims that require Direct FileChange startup reconciliation.
+///
+/// This is deliberately a storage-only selection over the current canonical columns. It neither
+/// decodes `action_json` nor accepts, upgrades, or reinterprets an older payload shape. Callers
+/// must validate the returned current Direct FileChange envelope before using it as authority.
+pub fn list_executing_apply_patch_diff_action_audits(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<AgentActionAuditRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT action_id, run_id, conversation_id, assistant_message_id, action_type,
+               tool_name, decision, status, action_json, patch_result_json,
+               command_result_json, tool_result_json, error, created_at, decided_at,
+               completed_at, effective_permissions_json, path_scope, command_cwd_scope,
+               blocked_reason, decision_source
+        FROM agent_action_audit
+        WHERE status = 'executing'
+          AND action_type = 'diff'
+          AND tool_name = 'apply_patch'
+        ORDER BY created_at ASC, action_id ASC
+        ",
+    )?;
+    let records = statement
+        .query_map([], action_audit_record_from_row)?
+        .collect();
+    records
+}
+
+fn action_audit_record_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AgentActionAuditRecord> {
+    Ok(AgentActionAuditRecord {
+        action_id: row.get(0)?,
+        run_id: row.get(1)?,
+        conversation_id: row.get(2)?,
+        assistant_message_id: row.get(3)?,
+        action_type: row.get(4)?,
+        tool_name: row.get(5)?,
+        decision: row.get(6)?,
+        status: row.get(7)?,
+        action_json: row.get(8)?,
+        patch_result_json: row.get(9)?,
+        command_result_json: row.get(10)?,
+        tool_result_json: row.get(11)?,
+        error: row.get(12)?,
+        created_at: row.get(13)?,
+        decided_at: row.get(14)?,
+        completed_at: row.get(15)?,
+        effective_permissions_json: row.get(16)?,
+        path_scope: row.get(17)?,
+        command_cwd_scope: row.get(18)?,
+        blocked_reason: row.get(19)?,
+        decision_source: row.get(20)?,
+    })
 }
 
 fn has_same_execution_identity(
@@ -387,6 +614,25 @@ fn has_same_execution_identity(
         && existing.tool_name == candidate.tool_name
         && existing.decision == candidate.decision
         && existing.action_json == candidate.action_json
+        && existing.effective_permissions_json == candidate.effective_permissions_json
+        && existing.path_scope == candidate.path_scope
+        && existing.command_cwd_scope == candidate.command_cwd_scope
+        && existing.decision_source == candidate.decision_source
+}
+
+fn has_same_immutable_execution_identity(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    existing.action_id == candidate.action_id
+        && existing.run_id == candidate.run_id
+        && existing.conversation_id == candidate.conversation_id
+        && existing.assistant_message_id == candidate.assistant_message_id
+        && existing.action_type == candidate.action_type
+        && existing.tool_name == candidate.tool_name
+        && existing.decision == candidate.decision
+        && existing.created_at == candidate.created_at
+        && existing.decided_at == candidate.decided_at
         && existing.effective_permissions_json == candidate.effective_permissions_json
         && existing.path_scope == candidate.path_scope
         && existing.command_cwd_scope == candidate.command_cwd_scope
@@ -691,6 +937,201 @@ pub fn delete_action_audit_for_project(
 mod tests {
     use super::*;
     use crate::storage::migrations;
+
+    fn executing_auto_diff(action_id: &str, action_json: &str) -> AgentActionAuditRecord {
+        AgentActionAuditRecord {
+            action_id: action_id.to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "diff".to_string(),
+            tool_name: "apply_patch".to_string(),
+            decision: Some("approved".to_string()),
+            status: "executing".to_string(),
+            action_json: action_json.to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: None,
+            error: None,
+            created_at: 10,
+            decided_at: Some(10),
+            completed_at: None,
+            effective_permissions_json: Some(r#"{"write":"workspace_only"}"#.to_string()),
+            path_scope: Some("workspace".to_string()),
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("auto".to_string()),
+        }
+    }
+
+    #[test]
+    fn lists_only_executing_apply_patch_diffs_as_complete_records_in_stable_order() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+
+        let mut same_time_later_id = executing_auto_diff("z-same-time", r#"{"proposal":"z"}"#);
+        same_time_later_id.created_at = 20;
+        same_time_later_id.decided_at = Some(21);
+        let mut earliest = executing_auto_diff("middle-earliest", r#"{"proposal":"first"}"#);
+        earliest.run_id = "run-earliest".to_string();
+        earliest.conversation_id = Some("conversation-earliest".to_string());
+        earliest.assistant_message_id = Some("message-earliest".to_string());
+        earliest.created_at = 5;
+        earliest.decided_at = Some(6);
+        earliest.effective_permissions_json =
+            Some(r#"{"read":"workspace_only","write":"workspace_only"}"#.to_string());
+        earliest.path_scope = Some("workspace:/project".to_string());
+        earliest.decision_source = Some("auto".to_string());
+        let mut same_time_earlier_id = executing_auto_diff("a-same-time", r#"{"proposal":"a"}"#);
+        same_time_earlier_id.created_at = 20;
+        same_time_earlier_id.decided_at = Some(22);
+
+        // Insert deliberately out of result order so the contract depends on SQL ordering.
+        for record in [&same_time_later_id, &earliest, &same_time_earlier_id] {
+            upsert_action_audit_record(&connection, record).unwrap();
+        }
+
+        let mut other_executing_action_type =
+            executing_auto_diff("executing-command", r#"{"proposal":"command"}"#);
+        other_executing_action_type.action_type = "command".to_string();
+        upsert_action_audit_record(&connection, &other_executing_action_type).unwrap();
+
+        let mut other_executing_tool =
+            executing_auto_diff("executing-other-tool", r#"{"proposal":"tool"}"#);
+        other_executing_tool.tool_name = "run_command".to_string();
+        upsert_action_audit_record(&connection, &other_executing_tool).unwrap();
+
+        let mut terminal_diff = executing_auto_diff("completed-diff", r#"{"proposal":"terminal"}"#);
+        terminal_diff.status = "completed".to_string();
+        terminal_diff.completed_at = Some(30);
+        upsert_action_audit_record(&connection, &terminal_diff).unwrap();
+
+        let records = list_executing_apply_patch_diff_action_audits(&connection).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.action_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["middle-earliest", "a-same-time", "z-same-time"]
+        );
+
+        let loaded = &records[0];
+        assert_eq!(loaded.run_id, earliest.run_id);
+        assert_eq!(loaded.conversation_id, earliest.conversation_id);
+        assert_eq!(loaded.assistant_message_id, earliest.assistant_message_id);
+        assert_eq!(loaded.action_type, "diff");
+        assert_eq!(loaded.tool_name, "apply_patch");
+        assert_eq!(loaded.decision, Some("approved".to_string()));
+        assert_eq!(loaded.status, "executing");
+        assert_eq!(loaded.action_json, earliest.action_json);
+        assert_eq!(
+            loaded.effective_permissions_json,
+            earliest.effective_permissions_json
+        );
+        assert_eq!(loaded.path_scope, earliest.path_scope);
+        assert_eq!(loaded.decision_source, Some("auto".to_string()));
+        assert_eq!(loaded.created_at, 5);
+        assert_eq!(loaded.decided_at, Some(6));
+        assert_eq!(loaded.completed_at, None);
+    }
+
+    #[test]
+    fn automatic_diff_action_json_commit_is_exact_and_idempotent() {
+        const PREPARED: &str = r#"{"type":"diff","credential":"prepared"}"#;
+        const COMMITTED: &str = r#"{"type":"diff","credential":"committed"}"#;
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let expected = executing_auto_diff("automatic-diff", PREPARED);
+        assert_eq!(
+            claim_action_audit_execution(&connection, &expected).unwrap(),
+            AgentActionAuditExecutionClaimOutcome::Claimed
+        );
+
+        assert_eq!(
+            commit_executing_action_json(&mut connection, &expected, PREPARED, COMMITTED).unwrap(),
+            AgentActionAuditJsonCommitOutcome::Updated
+        );
+        assert_eq!(
+            commit_executing_action_json(&mut connection, &expected, PREPARED, COMMITTED).unwrap(),
+            AgentActionAuditJsonCommitOutcome::AlreadyCommitted
+        );
+        assert_eq!(
+            load_action_audit_record(&connection, &expected.action_id)
+                .unwrap()
+                .unwrap()
+                .action_json,
+            COMMITTED
+        );
+
+        let stale = executing_auto_diff("stale-automatic-diff", PREPARED);
+        claim_action_audit_execution(&connection, &stale).unwrap();
+        assert_eq!(
+            commit_executing_action_json(
+                &mut connection,
+                &stale,
+                r#"{"type":"diff","credential":"older"}"#,
+                COMMITTED,
+            )
+            .unwrap(),
+            AgentActionAuditJsonCommitOutcome::ExpectedActionMismatch
+        );
+        assert_eq!(
+            load_action_audit_record(&connection, &stale.action_id)
+                .unwrap()
+                .unwrap()
+                .action_json,
+            PREPARED
+        );
+
+        let mut completed = executing_auto_diff("not-executing-automatic-diff", PREPARED);
+        completed.status = "completed".to_string();
+        completed.completed_at = Some(20);
+        insert_action_audit_record_if_absent(&connection, &completed).unwrap();
+        let mut executing_identity = completed.clone();
+        executing_identity.status = "executing".to_string();
+        executing_identity.completed_at = None;
+        assert_eq!(
+            commit_executing_action_json(
+                &mut connection,
+                &executing_identity,
+                PREPARED,
+                COMMITTED,
+            )
+            .unwrap(),
+            AgentActionAuditJsonCommitOutcome::NotExecuting {
+                status: "completed".to_string()
+            },
+            "a terminal lifecycle can never acquire a new commit credential"
+        );
+
+        let mut approved = executing_auto_diff("approved-automatic-diff", PREPARED);
+        approved.status = "approved".to_string();
+        insert_action_audit_record_if_absent(&connection, &approved).unwrap();
+        let mut approved_identity = approved.clone();
+        approved_identity.status = "executing".to_string();
+        assert_eq!(
+            commit_executing_action_json(&mut connection, &approved_identity, PREPARED, COMMITTED,)
+                .unwrap(),
+            AgentActionAuditJsonCommitOutcome::NotExecuting {
+                status: "approved".to_string()
+            }
+        );
+
+        let mut conflicting_identity = stale.clone();
+        conflicting_identity.run_id = "other-run".to_string();
+        assert_eq!(
+            commit_executing_action_json(
+                &mut connection,
+                &conflicting_identity,
+                PREPARED,
+                COMMITTED,
+            )
+            .unwrap(),
+            AgentActionAuditJsonCommitOutcome::IdentityConflict {
+                status: "executing".to_string()
+            }
+        );
+    }
 
     #[test]
     fn upserts_action_audit_record() {

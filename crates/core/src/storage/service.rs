@@ -84,6 +84,7 @@ pub use managed_artifacts::{
     MAX_MANAGED_DOCUMENT_ARTIFACT_BYTES,
 };
 pub use pending_actions::{
+    AgentActionAuditJsonCommitOutcome, AgentPendingActionJsonCommitOutcome,
     AgentPendingActionResultCommitOutcome, AgentPendingActionSettlementInspection,
     AgentWakeApprovalWaitOutcome, McpActionTerminalizationRequest,
     McpAutoActionJournalTerminalOutcome, McpStartupActionTerminalOutcome,

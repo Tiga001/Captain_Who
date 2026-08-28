@@ -18,6 +18,8 @@ use std::sync::atomic::Ordering;
 // here as an explicit Consumer Projection Limit; document Tools themselves must still return the
 // complete extracted text so Exact History can archive it.
 const ATTACHMENT_CONTEXT_TEXT_MAX_CHARS: usize = 40_000;
+const ATTACHMENT_PREPROCESSING_CONVERSATION_ID: &str = "host:attachment-preprocessing";
+const ATTACHMENT_PREPROCESSING_RUN_ID: &str = "host:attachment-preprocessing:run";
 
 pub(super) struct AttachmentContext {
     pub(super) text: String,
@@ -55,7 +57,10 @@ fn build_attachment_context_in_workspace(
     let registry = ToolRegistry::defaults_with_search(None);
     let tool_context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
         collaboration_identity: None,
-        conversation_id: None,
+        // Stable text readers now issue a run-owned FileObservation for every successful read.
+        // Attachment preprocessing is an isolated Host consumer with a fresh registry, so bind
+        // it to an explicit internal owner instead of weakening read_file's totality contract.
+        conversation_id: Some(ATTACHMENT_PREPROCESSING_CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
             project_id: None,
@@ -64,7 +69,8 @@ fn build_attachment_context_in_workspace(
         }),
         attachment_library: None,
         permissions: Default::default(),
-    }));
+    }))
+    .with_runtime_services(ATTACHMENT_PREPROCESSING_RUN_ID.to_string(), None);
     let mut sections = Vec::new();
     let mut images = Vec::new();
 
@@ -511,6 +517,29 @@ fn attachment_extension(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_attachment_preprocessing_has_an_internal_observation_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = "ATTACHMENT_OBSERVATION_OWNER_MARKER";
+        let attachment = AgentInputAttachment {
+            id: "attachment-owner-test".to_string(),
+            kind: AgentInputAttachmentKind::File,
+            name: "notes.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: marker.len() as u64,
+            encoding: AgentInputAttachmentEncoding::Utf8,
+            data: marker.to_string(),
+            truncated: None,
+        };
+
+        let context =
+            build_attachment_context_in_workspace(&[attachment], None, directory.path()).unwrap();
+
+        assert!(context.text.contains(marker));
+        assert!(!context.text.contains("缺少 conversationId"));
+        assert!(!context.text.contains("缺少 runId"));
+    }
 
     #[test]
     fn attachment_text_limit_is_explicit_and_utf8_safe() {

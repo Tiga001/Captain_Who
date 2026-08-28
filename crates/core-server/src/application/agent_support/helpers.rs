@@ -92,6 +92,11 @@ pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
                     command.remove("managedOfficeScript");
                 }
             }
+            if object.get("type").and_then(Value::as_str) == Some("diff") {
+                if let Some(diff) = object.get_mut("diff").and_then(Value::as_object_mut) {
+                    diff.remove("execution");
+                }
+            }
             for value in object.values_mut() {
                 redact_renderer_mcp_binding_fields(value);
             }

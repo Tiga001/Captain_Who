@@ -6,21 +6,23 @@ type ApplyPatchFailureStatus = 'failed' | 'conflict'
 
 const APPLY_PATCH_ERROR_TRANSLATIONS: Readonly<Record<string, TranslationKey>> = {
   'agent.apply_patch.file_exists': 'agent.patch.failure.fileExists',
-  'agent.apply_patch.stale_file': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.file_missing': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.revision_conflict': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.observation_required': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.observation_expired': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.observation_owner_mismatch': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.observation_path_mismatch': 'agent.patch.failure.staleFile',
+  'agent.apply_patch.observation_stale': 'agent.patch.failure.staleFile',
   'agent.apply_patch.match_not_found': 'agent.patch.failure.matchNotFound',
   'agent.apply_patch.ambiguous_match': 'agent.patch.failure.ambiguousMatch',
-  'agent.apply_patch.file_too_large': 'agent.patch.failure.tooLarge',
   'agent.apply_patch.content_too_large': 'agent.patch.failure.tooLarge',
-  'agent.apply_patch.use_staged_write': 'agent.patch.failure.tooLarge',
   'agent.apply_patch.no_change': 'agent.patch.failure.noChange',
-  'agent.apply_patch.not_a_file': 'agent.patch.failure.notAFile',
-  'agent.apply_patch.read_failed': 'agent.patch.failure.readFailed',
-  'agent.apply_patch.conflicting_input': 'agent.patch.failure.invalidRequest',
-  'agent.apply_patch.invalid_create': 'agent.patch.failure.invalidRequest',
-  'agent.apply_patch.missing_content': 'agent.patch.failure.invalidRequest',
-  'agent.apply_patch.missing_edit': 'agent.patch.failure.invalidRequest',
-  'agent.apply_patch.invalid_delete': 'agent.patch.failure.invalidRequest',
-  'agent.apply_patch.invalid_edit': 'agent.patch.failure.invalidRequest'
+  'agent.apply_patch.not_regular_file': 'agent.patch.failure.notAFile',
+  'agent.apply_patch.invalid_arguments': 'agent.patch.failure.invalidRequest',
+  'agent.apply_patch.unknown_field': 'agent.patch.failure.invalidRequest',
+  'agent.apply_patch.illegal_field_combination': 'agent.patch.failure.invalidRequest',
+  'agent.apply_patch.conflict': 'agent.patch.failure.conflict',
+  'agent.apply_patch.outcome_unknown': 'agent.patch.failure.outcomeUnknown'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

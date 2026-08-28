@@ -1,3 +1,4 @@
+use super::bound_io::{BoundParent, BoundUpdateExchange};
 use super::digest::{content_digest, valid_digest};
 use super::error::{FileChangeError, FileChangeErrorCode, FileChangeResultValue};
 use super::model::{
@@ -7,12 +8,10 @@ use super::model::{
 use super::planner::FileChangePlan;
 use super::policy::ResolvedFileChangeTarget;
 use crate::content_revision;
-use crate::durable_fs::{atomic_rename_noreplace, atomic_replace, sync_directory};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions, Permissions};
-use std::io::{self, Read, Write};
+use std::fs::Permissions;
+use std::io;
 use std::path::Path;
-use tempfile::NamedTempFile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,7 +117,7 @@ impl FileChangeCommitter {
                 FileChangeErrorCode::IllegalFieldCombination,
             ));
         }
-        target.revalidate()?;
+        let parent = BoundParent::open(target)?;
         let base_digest = required_digest(&plan.base)?;
         let target_path = target.absolute_path().to_string_lossy().to_string();
         let suffix = delete_journal_suffix(
@@ -130,10 +129,8 @@ impl FileChangeCommitter {
         let tombstone = target
             .parent()
             .join(format!(".file-change-delete-{suffix}.tombstone"));
-        match fs::symlink_metadata(&tombstone) {
-            Ok(_) => return Err(FileChangeError::new(FileChangeErrorCode::Conflict)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error, false)),
+        if parent.read_optional(&tombstone)?.is_some() {
+            return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
         }
         let journal = FileChangeDeleteJournal {
             schema_version: FILE_CHANGE_SCHEMA_VERSION,
@@ -186,12 +183,92 @@ impl FileChangeCommitter {
         }
     }
 
+    /// Executes a transaction that is authoritatively known not to have started yet.
+    ///
+    /// `commit` is deliberately idempotent for commit-unknown recovery and may adopt an exact
+    /// target as `already_applied`. A live approval path must not make that inference: another
+    /// actor can produce the same bytes while approval is pending. This entry point requires the
+    /// frozen Base to still be current and rejects an exact Target as a conflict instead.
+    pub fn commit_fresh(
+        &self,
+        transaction_id: &str,
+        target: &ResolvedFileChangeTarget,
+        plan: &FileChangePlan,
+        committed_at: u64,
+        mut delete_journal: Option<&mut FileChangeDeleteJournal>,
+    ) -> FileChangeResultValue<FileChangeCommit> {
+        validate_transaction_and_plan(transaction_id, target, plan)?;
+        match self.reconcile(target, plan, delete_journal.as_deref())? {
+            FileChangeReconciliation::DefinitelyNotExecuted => {}
+            FileChangeReconciliation::AlreadyApplied | FileChangeReconciliation::OutcomeUnknown => {
+                return Err(FileChangeError::new(fresh_conflict_code(plan.operation)));
+            }
+        }
+        let first_attempt = self.commit(
+            transaction_id,
+            target,
+            plan,
+            committed_at,
+            delete_journal.as_deref_mut(),
+        );
+        let (commit, reconciled_after_attempt) = match first_attempt {
+            Ok(commit) => (commit, false),
+            Err(error) if error.code() == FileChangeErrorCode::OutcomeUnknown => {
+                // The initial fresh-state check proved that this transaction had not started. An
+                // outcome-unknown error returned after entering `commit` may therefore be
+                // reconciled idempotently without adopting an unrelated pre-existing Target.
+                (
+                    self.reconcile_attempted_outcome_unknown(
+                        transaction_id,
+                        target,
+                        plan,
+                        committed_at,
+                        delete_journal,
+                        error,
+                    )?,
+                    true,
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        if commit.status == FileChangeStatus::AlreadyApplied && !reconciled_after_attempt {
+            Err(FileChangeError::new(fresh_conflict_code(plan.operation)))
+        } else {
+            Ok(commit)
+        }
+    }
+
+    pub(crate) fn reconcile_attempted_outcome_unknown(
+        &self,
+        transaction_id: &str,
+        target: &ResolvedFileChangeTarget,
+        plan: &FileChangePlan,
+        committed_at: u64,
+        delete_journal: Option<&mut FileChangeDeleteJournal>,
+        original_error: FileChangeError,
+    ) -> FileChangeResultValue<FileChangeCommit> {
+        let reconciliation = self
+            .reconcile(target, plan, delete_journal.as_deref())
+            .map_err(|_| FileChangeError::new(FileChangeErrorCode::OutcomeUnknown))?;
+        match reconciliation {
+            FileChangeReconciliation::AlreadyApplied => self
+                .commit(transaction_id, target, plan, committed_at, delete_journal)
+                .map_err(|_| FileChangeError::new(FileChangeErrorCode::OutcomeUnknown)),
+            FileChangeReconciliation::DefinitelyNotExecuted => {
+                Err(FileChangeError::new(FileChangeErrorCode::Failed))
+            }
+            FileChangeReconciliation::OutcomeUnknown => Err(original_error),
+        }
+    }
+
     pub fn finalize_delete(
         &self,
+        target: &ResolvedFileChangeTarget,
         journal: &mut FileChangeDeleteJournal,
         now: u64,
     ) -> FileChangeResultValue<()> {
         journal.validate()?;
+        validate_delete_target(target, journal)?;
         if journal.state == FileChangeDeleteJournalState::Finalized {
             return Ok(());
         }
@@ -200,18 +277,23 @@ impl FileChangeCommitter {
                 FileChangeErrorCode::IllegalFieldCombination,
             ));
         }
-        if read_optional(journal.tombstone())?.is_none() {
-            if read_optional(Path::new(&journal.target_path))?.is_some() {
-                return Err(FileChangeError::new(FileChangeErrorCode::OutcomeUnknown));
-            }
-            sync_after_publication(journal.tombstone().parent())?;
+        let parent = BoundParent::open(target)?;
+        if parent.read_optional(journal.tombstone())?.is_none() {
+            // `Tombstoned` is persisted only with the exact commit receipt. If the recovery file
+            // is already absent, cleanup either completed before the caller observed its result or
+            // another authorized cleanup removed it. A newly created target belongs to a later
+            // transaction and must never be removed or used to roll this delete back.
+            sync_after_publication(&parent)?;
             journal.state = FileChangeDeleteJournalState::Finalized;
             journal.updated_at = now;
             return Ok(());
         }
-        ensure_path_digest(journal.tombstone(), &journal.base_digest)?;
-        fs::remove_file(journal.tombstone()).map_err(|error| io_error(error, false))?;
-        sync_after_publication(journal.tombstone().parent())?;
+        ensure_path_digest(&parent, journal.tombstone(), &journal.base_digest)?;
+        parent.revalidate()?;
+        parent
+            .remove(journal.tombstone())
+            .map_err(|error| io_error(error, false))?;
+        sync_after_publication(&parent)?;
         journal.state = FileChangeDeleteJournalState::Finalized;
         journal.updated_at = now;
         Ok(())
@@ -219,10 +301,12 @@ impl FileChangeCommitter {
 
     pub fn rollback_delete(
         &self,
+        target: &ResolvedFileChangeTarget,
         journal: &mut FileChangeDeleteJournal,
         now: u64,
     ) -> FileChangeResultValue<()> {
         journal.validate()?;
+        validate_delete_target(target, journal)?;
         if journal.state == FileChangeDeleteJournalState::RolledBack {
             return Ok(());
         }
@@ -231,10 +315,10 @@ impl FileChangeCommitter {
                 FileChangeErrorCode::IllegalFieldCombination,
             ));
         }
-        let target = Path::new(&journal.target_path);
-        if let Some(current) = read_optional(target)? {
+        let parent = BoundParent::open(target)?;
+        if let Some(current) = parent.read_optional(target.absolute_path())? {
             if state_digest_matches(&journal.base_digest, &current.bytes)
-                && read_optional(journal.tombstone())?.is_none()
+                && parent.read_optional(journal.tombstone())?.is_none()
             {
                 journal.state = FileChangeDeleteJournalState::RolledBack;
                 journal.updated_at = now;
@@ -242,9 +326,12 @@ impl FileChangeCommitter {
             }
             return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
         }
-        ensure_path_digest(journal.tombstone(), &journal.base_digest)?;
-        atomic_rename_noreplace(journal.tombstone(), target).map_err(rename_conflict_error)?;
-        sync_after_publication(target.parent())?;
+        ensure_path_digest(&parent, journal.tombstone(), &journal.base_digest)?;
+        parent.revalidate()?;
+        parent
+            .rename_noreplace(journal.tombstone(), target.absolute_path())
+            .map_err(rename_conflict_error)?;
+        sync_after_publication(&parent)?;
         journal.state = FileChangeDeleteJournalState::RolledBack;
         journal.updated_at = now;
         Ok(())
@@ -256,7 +343,17 @@ impl FileChangeCommitter {
         plan: &FileChangePlan,
         delete_journal: Option<&FileChangeDeleteJournal>,
     ) -> FileChangeResultValue<FileChangeReconciliation> {
-        let current = read_optional(target.absolute_path())?;
+        let parent = BoundParent::open(target)?;
+        self.reconcile_bound(&parent, plan, delete_journal)
+    }
+
+    fn reconcile_bound(
+        &self,
+        parent: &BoundParent<'_>,
+        plan: &FileChangePlan,
+        delete_journal: Option<&FileChangeDeleteJournal>,
+    ) -> FileChangeResultValue<FileChangeReconciliation> {
+        let current = parent.read_optional(parent.target_path())?;
         match plan.operation {
             FileChangeOperation::Create => match current {
                 None => Ok(FileChangeReconciliation::DefinitelyNotExecuted),
@@ -279,7 +376,7 @@ impl FileChangeCommitter {
                     Ok(FileChangeReconciliation::DefinitelyNotExecuted)
                 }
                 Some(_) => Ok(FileChangeReconciliation::OutcomeUnknown),
-                None => self.reconcile_deleted(plan, delete_journal),
+                None => self.reconcile_deleted(parent, plan, delete_journal),
             },
         }
     }
@@ -291,19 +388,35 @@ impl FileChangeCommitter {
         plan: &FileChangePlan,
         committed_at: u64,
     ) -> FileChangeResultValue<FileChangeCommit> {
-        target.revalidate()?;
-        match fs::symlink_metadata(target.absolute_path()) {
-            Ok(_) => return Err(FileChangeError::new(FileChangeErrorCode::FileExists)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(error, false)),
+        let parent = BoundParent::open(target)?;
+        match self.reconcile_bound(&parent, plan, None)? {
+            FileChangeReconciliation::AlreadyApplied => {
+                sync_after_publication(&parent)?;
+                return Ok(applied_commit(
+                    transaction_id,
+                    target,
+                    plan,
+                    committed_at,
+                    FileChangeStatus::AlreadyApplied,
+                    None,
+                ));
+            }
+            FileChangeReconciliation::DefinitelyNotExecuted => {}
+            FileChangeReconciliation::OutcomeUnknown => {
+                return Err(FileChangeError::new(FileChangeErrorCode::FileExists));
+            }
+        }
+        if parent.read_optional(target.absolute_path())?.is_some() {
+            return Err(FileChangeError::new(FileChangeErrorCode::FileExists));
         }
         let target_content = required_target_content(plan)?;
-        let staged = stage_content(target.parent(), target_content, None)?;
-        target.revalidate()?;
-        atomic_rename_noreplace(staged.as_ref(), target.absolute_path())
+        let staged = parent.stage(target_content, None)?;
+        parent.revalidate()?;
+        parent
+            .publish_noreplace(staged, target.absolute_path())
             .map_err(|error| io_error(error, true))?;
         // Once publication succeeds, a directory sync failure makes the durable outcome unknown.
-        sync_after_publication(Some(target.parent()))?;
+        sync_after_publication(&parent)?;
         Ok(applied_commit(
             transaction_id,
             target,
@@ -321,27 +434,97 @@ impl FileChangeCommitter {
         plan: &FileChangePlan,
         committed_at: u64,
     ) -> FileChangeResultValue<FileChangeCommit> {
-        target.revalidate()?;
-        let first = read_required(target.absolute_path())?;
+        self.commit_update_inner(transaction_id, target, plan, committed_at, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn commit_update_with_before_exchange(
+        &self,
+        transaction_id: &str,
+        target: &ResolvedFileChangeTarget,
+        plan: &FileChangePlan,
+        committed_at: u64,
+        before_exchange: impl FnOnce(),
+    ) -> FileChangeResultValue<FileChangeCommit> {
+        validate_transaction_and_plan(transaction_id, target, plan)?;
+        self.commit_update_inner(transaction_id, target, plan, committed_at, before_exchange)
+    }
+
+    fn commit_update_inner(
+        &self,
+        transaction_id: &str,
+        target: &ResolvedFileChangeTarget,
+        plan: &FileChangePlan,
+        committed_at: u64,
+        before_exchange: impl FnOnce(),
+    ) -> FileChangeResultValue<FileChangeCommit> {
+        let parent = BoundParent::open(target)?;
+        match self.reconcile_bound(&parent, plan, None)? {
+            FileChangeReconciliation::AlreadyApplied => {
+                sync_after_publication(&parent)?;
+                return Ok(applied_commit(
+                    transaction_id,
+                    target,
+                    plan,
+                    committed_at,
+                    FileChangeStatus::AlreadyApplied,
+                    None,
+                ));
+            }
+            FileChangeReconciliation::DefinitelyNotExecuted => {}
+            FileChangeReconciliation::OutcomeUnknown => {
+                return Err(FileChangeError::new(FileChangeErrorCode::RevisionConflict));
+            }
+        }
+        let first = parent.read_required(target.absolute_path())?;
         ensure_state_matches(&plan.base, &first.bytes)?;
         let target_content = required_target_content(plan)?;
-        let staged = stage_content(
-            target.parent(),
-            target_content,
-            Some(first.permissions.clone()),
-        )?;
+        let staged = parent.stage(target_content, Some(first.permissions.clone()))?;
 
-        // Bind publication to a freshly checked revision. The replace itself changes the directory
-        // entry atomically and never follows a leaf symlink.
-        target.revalidate()?;
-        let second = read_required(target.absolute_path())?;
+        // Atomically retain whatever generation occupies the target at the publication
+        // linearization point. Verification therefore cannot overwrite-and-forget a write that
+        // lands after this final Base read.
+        parent.revalidate()?;
+        let second = parent.read_required(target.absolute_path())?;
         ensure_state_matches(&plan.base, &second.bytes)?;
         if !same_permissions(&first.permissions, &second.permissions) {
             return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
         }
-        atomic_replace(staged.as_ref(), target.absolute_path())
+        parent.revalidate()?;
+        before_exchange();
+        let exchanged = parent
+            .publish_exchange(staged, target.absolute_path())
             .map_err(|error| io_error(error, false))?;
-        sync_after_publication(Some(target.parent()))?;
+
+        let displaced_validation = parent.read_exchanged(&exchanged).and_then(|displaced| {
+            if !parent.same_file_identity(&second, &displaced) {
+                return Err(FileChangeError::new(FileChangeErrorCode::RevisionConflict));
+            }
+            ensure_state_matches(&plan.base, &displaced.bytes)?;
+            if !same_permissions(&second.permissions, &displaced.permissions) {
+                return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
+            }
+            Ok(())
+        });
+        if let Err(validation_error) = displaced_validation {
+            return match rollback_update_exchange(
+                &parent,
+                target.absolute_path(),
+                plan,
+                &second.permissions,
+                exchanged,
+            ) {
+                Ok(()) => Err(validation_error),
+                Err(rollback_error) => Err(rollback_error),
+            };
+        }
+
+        // Only the exact, verified Base generation may be unlinked. From the exchange onward,
+        // cleanup or durability failures are commit-unknown because Target was already visible.
+        parent
+            .remove_exchanged(exchanged)
+            .map_err(outcome_unknown_io)?;
+        sync_after_publication(&parent)?;
         Ok(applied_commit(
             transaction_id,
             target,
@@ -361,9 +544,10 @@ impl FileChangeCommitter {
         journal: &mut FileChangeDeleteJournal,
     ) -> FileChangeResultValue<FileChangeCommit> {
         validate_delete_journal(transaction_id, target, plan, journal)?;
+        let parent = BoundParent::open(target)?;
         match journal.state {
             FileChangeDeleteJournalState::Tombstoned | FileChangeDeleteJournalState::Finalized => {
-                if self.reconcile(target, plan, Some(journal))?
+                if self.reconcile_bound(&parent, plan, Some(journal))?
                     != FileChangeReconciliation::AlreadyApplied
                 {
                     return Err(FileChangeError::new(FileChangeErrorCode::OutcomeUnknown));
@@ -381,7 +565,7 @@ impl FileChangeCommitter {
                 return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
             }
             FileChangeDeleteJournalState::Prepared => {
-                match self.reconcile(target, plan, Some(journal))? {
+                match self.reconcile_bound(&parent, plan, Some(journal))? {
                     FileChangeReconciliation::AlreadyApplied => {
                         journal.state = FileChangeDeleteJournalState::Tombstoned;
                         journal.updated_at = committed_at;
@@ -396,7 +580,7 @@ impl FileChangeCommitter {
                     }
                     FileChangeReconciliation::DefinitelyNotExecuted => {}
                     FileChangeReconciliation::OutcomeUnknown => {
-                        let code = if read_optional(target.absolute_path())?.is_some() {
+                        let code = if parent.read_optional(target.absolute_path())?.is_some() {
                             FileChangeErrorCode::RevisionConflict
                         } else {
                             FileChangeErrorCode::OutcomeUnknown
@@ -407,14 +591,16 @@ impl FileChangeCommitter {
             }
         }
 
-        target.revalidate()?;
-        let current = read_required(target.absolute_path())?;
+        parent.revalidate()?;
+        let current = parent.read_required(target.absolute_path())?;
         ensure_state_matches(&plan.base, &current.bytes)?;
-        atomic_rename_noreplace(target.absolute_path(), journal.tombstone())
+        parent.revalidate()?;
+        parent
+            .rename_noreplace(target.absolute_path(), journal.tombstone())
             .map_err(rename_conflict_error)?;
-        if let Err(error) = ensure_path_digest(journal.tombstone(), &journal.base_digest) {
-            let restored = atomic_rename_noreplace(journal.tombstone(), target.absolute_path());
-            let _ = sync_directory(target.parent());
+        if let Err(error) = ensure_path_digest(&parent, journal.tombstone(), &journal.base_digest) {
+            let restored = parent.rename_noreplace(journal.tombstone(), target.absolute_path());
+            let _ = parent.sync();
             return if restored.is_ok() {
                 Err(FileChangeError::with_diagnostic(
                     FileChangeErrorCode::Conflict,
@@ -427,7 +613,7 @@ impl FileChangeCommitter {
                 ))
             };
         }
-        sync_after_publication(Some(target.parent()))?;
+        sync_after_publication(&parent)?;
         journal.state = FileChangeDeleteJournalState::Tombstoned;
         journal.updated_at = committed_at;
         Ok(applied_commit(
@@ -442,6 +628,7 @@ impl FileChangeCommitter {
 
     fn reconcile_deleted(
         &self,
+        parent: &BoundParent<'_>,
         plan: &FileChangePlan,
         journal: Option<&FileChangeDeleteJournal>,
     ) -> FileChangeResultValue<FileChangeReconciliation> {
@@ -449,12 +636,17 @@ impl FileChangeCommitter {
             return Ok(FileChangeReconciliation::OutcomeUnknown);
         };
         journal.validate()?;
+        if journal.target_path != parent.target_path().to_string_lossy() {
+            return Err(FileChangeError::new(
+                FileChangeErrorCode::IllegalFieldCombination,
+            ));
+        }
         if journal.proposal_digest != plan.proposal_digest {
             return Ok(FileChangeReconciliation::OutcomeUnknown);
         }
         match journal.state {
             FileChangeDeleteJournalState::Tombstoned => {
-                let tombstone = read_optional(journal.tombstone())?;
+                let tombstone = parent.read_optional(journal.tombstone())?;
                 if tombstone
                     .as_ref()
                     .is_some_and(|file| content_digest(&file.bytes) == journal.base_digest)
@@ -465,15 +657,13 @@ impl FileChangeCommitter {
                 }
             }
             FileChangeDeleteJournalState::Finalized => {
-                match fs::symlink_metadata(journal.tombstone()) {
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        Ok(FileChangeReconciliation::AlreadyApplied)
-                    }
-                    Ok(_) | Err(_) => Ok(FileChangeReconciliation::OutcomeUnknown),
+                match parent.read_optional(journal.tombstone())? {
+                    None => Ok(FileChangeReconciliation::AlreadyApplied),
+                    Some(_) => Ok(FileChangeReconciliation::OutcomeUnknown),
                 }
             }
             FileChangeDeleteJournalState::Prepared => {
-                let tombstone = read_optional(journal.tombstone())?;
+                let tombstone = parent.read_optional(journal.tombstone())?;
                 if tombstone
                     .as_ref()
                     .is_some_and(|file| content_digest(&file.bytes) == journal.base_digest)
@@ -487,6 +677,14 @@ impl FileChangeCommitter {
                 Ok(FileChangeReconciliation::OutcomeUnknown)
             }
         }
+    }
+}
+
+fn fresh_conflict_code(operation: FileChangeOperation) -> FileChangeErrorCode {
+    match operation {
+        FileChangeOperation::Create => FileChangeErrorCode::FileExists,
+        FileChangeOperation::Update => FileChangeErrorCode::RevisionConflict,
+        FileChangeOperation::Delete => FileChangeErrorCode::OutcomeUnknown,
     }
 }
 
@@ -540,6 +738,19 @@ fn validate_delete_journal(
     Ok(())
 }
 
+fn validate_delete_target(
+    target: &ResolvedFileChangeTarget,
+    journal: &FileChangeDeleteJournal,
+) -> FileChangeResultValue<()> {
+    if journal.target_path == target.absolute_path().to_string_lossy() {
+        Ok(())
+    } else {
+        Err(FileChangeError::new(
+            FileChangeErrorCode::IllegalFieldCombination,
+        ))
+    }
+}
+
 fn required_target_content(plan: &FileChangePlan) -> FileChangeResultValue<&str> {
     plan.target_content
         .as_deref()
@@ -565,79 +776,12 @@ fn delete_journal_suffix(
         .unwrap_or_else(|| "invalid".to_string())
 }
 
-fn stage_content(
-    parent: &Path,
-    content: &str,
-    permissions: Option<Permissions>,
-) -> FileChangeResultValue<tempfile::TempPath> {
-    let mut staged = NamedTempFile::new_in(parent).map_err(staging_error)?;
-    staged
-        .write_all(content.as_bytes())
-        .and_then(|()| staged.flush())
-        .and_then(|()| staged.as_file().sync_all())
-        .map_err(staging_error)?;
-    if let Some(permissions) = permissions {
-        staged
-            .as_file()
-            .set_permissions(permissions)
-            .and_then(|()| staged.as_file().sync_all())
-            .map_err(staging_error)?;
-    }
-    Ok(staged.into_temp_path())
-}
-
-struct CurrentFile {
-    bytes: Vec<u8>,
-    permissions: Permissions,
-}
-
-fn read_required(path: &Path) -> FileChangeResultValue<CurrentFile> {
-    read_optional(path)?.ok_or_else(|| FileChangeError::new(FileChangeErrorCode::FileMissing))
-}
-
-fn read_optional(path: &Path) -> FileChangeResultValue<Option<CurrentFile>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(FileChangeError::new(FileChangeErrorCode::SymlinkForbidden));
-        }
-        Ok(metadata) => validate_open_metadata(&metadata)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error(error, false)),
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(open_error(error)),
-    };
-    let before = file.metadata().map_err(|error| {
-        FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
-    })?;
-    validate_open_metadata(&before)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| {
-        FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
-    })?;
-    let after = file.metadata().map_err(|error| {
-        FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
-    })?;
-    if !same_open_file(&before, &after) || after.len() != bytes.len() as u64 {
-        return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
-    }
-    Ok(Some(CurrentFile {
-        bytes,
-        permissions: after.permissions(),
-    }))
-}
-
-fn ensure_path_digest(path: &Path, expected: &str) -> FileChangeResultValue<()> {
-    let current = read_required(path)?;
+fn ensure_path_digest(
+    parent: &BoundParent<'_>,
+    path: &Path,
+    expected: &str,
+) -> FileChangeResultValue<()> {
+    let current = parent.read_required(path)?;
     if state_digest_matches(expected, &current.bytes) {
         Ok(())
     } else {
@@ -699,9 +843,57 @@ fn applied_commit(
     }
 }
 
-fn sync_after_publication(parent: Option<&Path>) -> FileChangeResultValue<()> {
-    let parent = parent.ok_or_else(|| FileChangeError::new(FileChangeErrorCode::OutcomeUnknown))?;
-    sync_directory(parent).map_err(|error| {
+fn rollback_update_exchange(
+    parent: &BoundParent<'_>,
+    target: &Path,
+    plan: &FileChangePlan,
+    staged_permissions: &Permissions,
+    mut exchanged: BoundUpdateExchange,
+) -> FileChangeResultValue<()> {
+    parent
+        .rollback_exchange(&mut exchanged, target)
+        .map_err(outcome_unknown_io)?;
+
+    // The exchange syscall is atomic, but a second actor may have changed Target after our first
+    // exchange. Only discard the private entry when it is provably our staged Target generation;
+    // otherwise every unverified generation remains linked and the caller receives commit-unknown.
+    let restored_staged = parent.read_exchanged(&exchanged).map_err(|error| {
+        outcome_unknown_diagnostic(format!("rollback verification failed: {error}"))
+    })?;
+    let staged_identity_matches = parent
+        .exchanged_is_staged_target(&exchanged, &restored_staged)
+        .map_err(outcome_unknown_io)?;
+    if !staged_identity_matches
+        || !state_matches(&plan.target, &restored_staged.bytes)
+        || !same_permissions(staged_permissions, &restored_staged.permissions)
+    {
+        return Err(outcome_unknown_diagnostic(
+            "rollback was concurrently interfered with; preserved every unverified generation",
+        ));
+    }
+
+    // At this point the target name has been restored and the private name is exactly our staged
+    // inode, so removing it cannot discard the concurrent generation that caused validation to
+    // fail.
+    parent
+        .remove_exchanged(exchanged)
+        .map_err(outcome_unknown_io)?;
+    sync_after_publication(parent)
+}
+
+fn outcome_unknown_io(error: io::Error) -> FileChangeError {
+    outcome_unknown_diagnostic(error.to_string())
+}
+
+fn outcome_unknown_diagnostic(diagnostic: impl Into<String>) -> FileChangeError {
+    FileChangeError::with_diagnostic(
+        FileChangeErrorCode::OutcomeUnknown,
+        diagnostic.into().into_boxed_str(),
+    )
+}
+
+fn sync_after_publication(parent: &BoundParent<'_>) -> FileChangeResultValue<()> {
+    parent.sync().map_err(|error| {
         FileChangeError::with_diagnostic(FileChangeErrorCode::OutcomeUnknown, error.to_string())
     })
 }
@@ -716,15 +908,6 @@ fn io_error(error: io::Error, no_replace: bool) -> FileChangeError {
     FileChangeError::with_diagnostic(code, error.to_string())
 }
 
-fn staging_error(error: io::Error) -> FileChangeError {
-    let code = if error.kind() == io::ErrorKind::PermissionDenied {
-        FileChangeErrorCode::PermissionDenied
-    } else {
-        FileChangeErrorCode::Failed
-    };
-    FileChangeError::with_diagnostic(code, error.to_string())
-}
-
 fn rename_conflict_error(error: io::Error) -> FileChangeError {
     let code = match error.kind() {
         io::ErrorKind::AlreadyExists => FileChangeErrorCode::Conflict,
@@ -733,41 +916,6 @@ fn rename_conflict_error(error: io::Error) -> FileChangeError {
         _ => FileChangeErrorCode::Failed,
     };
     FileChangeError::with_diagnostic(code, error.to_string())
-}
-
-fn open_error(error: io::Error) -> FileChangeError {
-    #[cfg(unix)]
-    if error.raw_os_error() == Some(libc::ELOOP) {
-        return FileChangeError::with_diagnostic(
-            FileChangeErrorCode::SymlinkForbidden,
-            error.to_string(),
-        );
-    }
-    io_error(error, false)
-}
-
-fn validate_open_metadata(metadata: &fs::Metadata) -> FileChangeResultValue<()> {
-    if !metadata.is_file() {
-        return Err(FileChangeError::new(FileChangeErrorCode::NotRegularFile));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
-            return Err(FileChangeError::new(FileChangeErrorCode::HardLinkForbidden));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn same_open_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.len() == right.len()
-        && left.mtime() == right.mtime()
-        && left.mtime_nsec() == right.mtime_nsec()
 }
 
 #[cfg(unix)]
@@ -779,9 +927,4 @@ fn same_permissions(left: &Permissions, right: &Permissions) -> bool {
 #[cfg(not(unix))]
 fn same_permissions(left: &Permissions, right: &Permissions) -> bool {
     left.readonly() == right.readonly()
-}
-
-#[cfg(not(unix))]
-fn same_open_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }

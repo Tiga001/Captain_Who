@@ -49,6 +49,11 @@ pub enum FileChangeErrorCode {
     MatchNotFound,
     AmbiguousMatch,
     NoChange,
+    ObservationRequired,
+    ObservationExpired,
+    ObservationOwnerMismatch,
+    ObservationPathMismatch,
+    ObservationStale,
     Failed,
     Conflict,
     OutcomeUnknown,
@@ -73,7 +78,12 @@ impl FileChangeErrorCode {
             | Self::RevisionConflict
             | Self::MatchNotFound
             | Self::AmbiguousMatch
-            | Self::NoChange => FileChangeErrorCategory::Precondition,
+            | Self::NoChange
+            | Self::ObservationRequired
+            | Self::ObservationExpired
+            | Self::ObservationOwnerMismatch
+            | Self::ObservationPathMismatch
+            | Self::ObservationStale => FileChangeErrorCategory::Precondition,
             Self::Failed | Self::Conflict | Self::OutcomeUnknown => {
                 FileChangeErrorCategory::Execution
             }
@@ -97,7 +107,12 @@ impl FileChangeErrorCode {
             Self::FileMissing
             | Self::RevisionConflict
             | Self::MatchNotFound
-            | Self::AmbiguousMatch => FileChangeRecovery::RereadFile,
+            | Self::AmbiguousMatch
+            | Self::ObservationRequired
+            | Self::ObservationExpired
+            | Self::ObservationOwnerMismatch
+            | Self::ObservationPathMismatch
+            | Self::ObservationStale => FileChangeRecovery::RereadFile,
             Self::NoChange => FileChangeRecovery::SkipOrReviseEdit,
             Self::Failed | Self::Conflict => FileChangeRecovery::InspectAuthoritativeState,
             Self::OutcomeUnknown => FileChangeRecovery::DoNotRetry,
@@ -122,6 +137,11 @@ impl FileChangeErrorCode {
             Self::MatchNotFound => "未找到要修改的准确内容。",
             Self::AmbiguousMatch => "要修改的内容不唯一，请提供更精确的上下文。",
             Self::NoChange => "修改后的内容与当前文件相同。",
+            Self::ObservationRequired => "修改前必须重新读取准确的目标文件。",
+            Self::ObservationExpired => "文件读取凭据已过期，请重新读取后再修改。",
+            Self::ObservationOwnerMismatch => "该文件读取凭据不属于当前任务，请重新读取。",
+            Self::ObservationPathMismatch => "文件读取路径与修改目标不一致，请重新读取准确路径。",
+            Self::ObservationStale => "文件在读取后已发生变化，请重新读取后再修改。",
             Self::Failed => "文件修改失败。",
             Self::Conflict => "文件修改发生冲突。",
             Self::OutcomeUnknown => "无法确认文件修改结果，请先检查文件当前状态。",

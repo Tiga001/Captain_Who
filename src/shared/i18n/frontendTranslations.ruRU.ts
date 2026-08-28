@@ -1211,6 +1211,8 @@ export const ruRUTranslations = {
   'agent.patch.failure.notAFile': 'Целевой путь не является файлом.',
   'agent.patch.failure.readFailed': 'Целевой файл не удалось безопасно прочитать.',
   'agent.patch.failure.invalidRequest': 'Запрос на изменение файла недействителен.',
+  'agent.patch.failure.outcomeUnknown':
+    'Результат изменения невозможно подтвердить. Проверьте текущее состояние файла и не повторяйте операцию сразу.',
   'agent.editSummary.title': 'Изменить сводку',
   'agent.editSummary.editedFiles': 'Отредактировано {count} файлов',
   'agent.editSummary.lineStats': 'Изменения в строке',

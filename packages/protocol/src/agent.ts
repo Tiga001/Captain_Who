@@ -1137,6 +1137,7 @@ export interface AgentToolContinuation {
   result: AgentToolResult
 }
 
+/** Renderer-safe diff projection. Host-private file-change execution authority is excluded. */
 export interface AgentDiffProposal {
   id: string
   operation: AgentPatchOperation
@@ -1252,6 +1253,8 @@ export interface AgentPatchResult {
   appliedFilePaths: string[]
   gitDiff?: AgentGitDiffSnapshot
   gitDiffError?: string
+  /** Stable safe presentation code; Host diagnostics are never exposed here. */
+  errorCode?: string
   error?: string
   message?: string
 }

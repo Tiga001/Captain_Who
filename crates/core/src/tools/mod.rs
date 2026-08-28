@@ -1,6 +1,5 @@
 mod agent_collaboration;
 mod apply_patch;
-mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
 mod attachments;
 mod automation_report;
@@ -2103,7 +2102,8 @@ mod tests {
                 project_attachments: Vec::new(),
             }),
             permissions: Default::default(),
-        }));
+        }))
+        .with_runtime_services("attachment-read-run".to_string(), None);
         let registry = ToolRegistry::defaults_with_search(None);
 
         let list_result = registry.execute(
@@ -2267,7 +2267,7 @@ mod tests {
 
         let allowed = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
             collaboration_identity: None,
-            conversation_id: None,
+            conversation_id: Some("absolute-read-conversation".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
                 project_id: None,
@@ -2279,7 +2279,8 @@ mod tests {
                 read: crate::protocol::AgentReadPermission::All,
                 ..Default::default()
             },
-        }));
+        }))
+        .with_runtime_services("absolute-read-run".to_string(), None);
         let result = registry.execute(&allowed, &call);
         assert!(result.ok, "{:?}", result.error);
         assert_eq!(result.result.unwrap()["content"], "outside content");

@@ -528,6 +528,7 @@ mod tests {
                 base_revision: None,
                 summary: None,
                 approval_status: AgentApprovalStatus::Required,
+                execution: Box::new(direct_binding_fixture()),
             },
         };
         let materialization = AgentProposedAction::SkillMaterialization {
@@ -612,6 +613,101 @@ mod tests {
                 },
             }
         ));
+    }
+
+    fn direct_binding_fixture() -> crate::file_change::FileChangeDirectBinding {
+        use crate::file_change::{
+            FileChangeContentState, FileChangeDirectBinding, FileChangeOperation,
+            FileChangeOutcome, FileChangeProposal, FileChangeStatus, FileChangeTransaction,
+            FileObservationCheckpoint, FileObservationIdentity, FileObservationState,
+            FILE_CHANGE_SCHEMA_VERSION, FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
+            FILE_OBSERVATION_TTL_MS,
+        };
+
+        let digest = format!("file-change-sha256-v1:{}", "0".repeat(64));
+        let target = FileChangeContentState::Present {
+            revision: "revision".to_string(),
+            digest: digest.clone(),
+            byte_count: 0,
+        };
+        let transaction = FileChangeTransaction {
+            schema_version: FILE_CHANGE_SCHEMA_VERSION,
+            id: "transaction-1".to_string(),
+            operation: FileChangeOperation::Create,
+            file_path: "report.md".to_string(),
+            status: FileChangeStatus::WaitingApproval,
+            outcome: FileChangeOutcome::DefinitelyNotExecuted,
+            base: FileChangeContentState::Missing,
+            target: target.clone(),
+            proposal_digest: digest.clone(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        FileChangeDirectBinding {
+            schema_version: FILE_CHANGE_SCHEMA_VERSION,
+            transaction,
+            proposal: FileChangeProposal {
+                schema_version: FILE_CHANGE_SCHEMA_VERSION,
+                id: "diff-1".to_string(),
+                transaction_id: "transaction-1".to_string(),
+                operation: FileChangeOperation::Create,
+                file_path: "report.md".to_string(),
+                base: FileChangeContentState::Missing,
+                target,
+                diff_digest: digest.clone(),
+                proposal_digest: digest.clone(),
+                additions: 0,
+                deletions: 0,
+            },
+            observation_id: format!("fobs_{}", "0".repeat(32)),
+            observation: FileObservationCheckpoint {
+                schema_version: FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
+                observation_id: format!("fobs_{}", "0".repeat(32)),
+                source_tool_call_id: "read-fixture".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                run_id: "run-1".to_string(),
+                canonical_target: "/tmp/report.md".to_string(),
+                state: FileObservationState::Missing,
+                parent_identity: FileObservationIdentity::from_metadata(
+                    &std::fs::metadata("/tmp").expect("test temporary directory metadata"),
+                ),
+                created_at_ms: 1,
+                expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
+            },
+            source_call_id: "diff-1".to_string(),
+            source_args_digest: digest.clone(),
+            conversation_id: "conversation-1".to_string(),
+            run_id: "run-1".to_string(),
+            canonical_target: "/tmp/report.md".to_string(),
+            base_content: None,
+            target_content: Some(String::new()),
+            delete_journal: None,
+            receipt: None,
+            permission_revision: "permission-v1".to_string(),
+            tool_set_revision: "tool-set-v1".to_string(),
+        }
+    }
+
+    #[test]
+    fn direct_binding_persistence_requires_observation_journal_and_receipt() {
+        let encoded = serde_json::to_value(direct_binding_fixture()).unwrap();
+        assert!(encoded.get("observation").is_some());
+        assert_eq!(encoded["deleteJournal"], serde_json::Value::Null);
+        assert_eq!(encoded["receipt"], serde_json::Value::Null);
+
+        for missing in ["observation", "deleteJournal", "receipt"] {
+            let mut malformed = encoded.clone();
+            malformed.as_object_mut().unwrap().remove(missing);
+            assert!(
+                serde_json::from_value::<crate::file_change::FileChangeDirectBinding>(malformed)
+                    .is_err()
+            );
+        }
+        let mut extra = encoded;
+        extra["internalCause"] = serde_json::json!("must not be accepted");
+        assert!(
+            serde_json::from_value::<crate::file_change::FileChangeDirectBinding>(extra).is_err()
+        );
     }
 
     #[test]

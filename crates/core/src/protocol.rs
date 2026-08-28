@@ -266,7 +266,8 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 10 freezes built-in execution approval authority alongside every other permission
+/// Version 11 totalizes unconsumed `read_file` observations referenced by queued `apply_patch`
+/// calls. Version 10 froze built-in execution approval authority alongside every other permission
 /// dimension. Version 9 froze model-visible Agent collaboration selector capabilities and removed the
 /// retired Provider-specific Skill-activation sibling deferral bit. Tools exposed in the request
 /// that produced a batch remain executable under that frozen ToolSet; newly activated Skill
@@ -274,7 +275,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 10;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -333,7 +334,7 @@ pub struct AgentRunCheckpoint {
     /// Approval-record identity when it differs from the Provider Tool Call identity. External MCP
     /// and built-in capability activation both use an application UUID here. Tool kind and
     /// projection authority always come from the frozen typed Tool provenance, never this field.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub pending_action_id: Option<String>,
     pub pending_tool_call_id: String,
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
@@ -454,6 +455,12 @@ pub struct AgentContextCheckpointGroup {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentQueuedToolCallCheckpoint {
     pub call: AgentContextCheckpointToolCall,
+    /// Exact unconsumed Host observation referenced by a queued `apply_patch` call.
+    ///
+    /// This key is required for every queued call. It is `null` for every other tool, preventing a
+    /// missing field from being interpreted as an older checkpoint shape.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub file_observation: Option<crate::file_change::FileObservationCheckpoint>,
     pub assistant_content: String,
     pub group_id: String,
     /// Reference into `AgentRunCheckpoint.assistant_turn_identity.tool_call_identities`.
@@ -2150,7 +2157,7 @@ pub struct AgentImageGenerationResult {
     pub failure: Option<AgentImageGenerationFailure>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDiffProposal {
     pub id: String,
@@ -2162,6 +2169,17 @@ pub struct AgentDiffProposal {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub summary: Option<String>,
     pub approval_status: AgentApprovalStatus,
+    /// Host-private, versioned execution authority for Direct file changes.
+    ///
+    /// Core Server removes this field from every Renderer projection. The presentation `patch`
+    /// above is never sufficient authority for execution.
+    pub execution: Box<crate::file_change::FileChangeDirectBinding>,
+}
+
+impl std::fmt::Debug for AgentDiffProposal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentDiffProposal([REDACTED])")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -2252,17 +2270,20 @@ pub struct AgentFileWriteResult {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPatchResult {
     pub status: AgentPatchResultStatus,
     pub operation: AgentPatchOperation,
     pub file_path: String,
-    #[serde(default)]
     pub applied_file_paths: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<AgentGitDiffSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff_error: Option<String>,
+    /// Stable, presentation-safe FileChange error identity. Internal diagnostics never enter
+    /// this DTO. Successful and user-rejected results retain the existing shape by omitting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

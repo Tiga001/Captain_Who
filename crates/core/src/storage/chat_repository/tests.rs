@@ -289,6 +289,23 @@ fn current_persisted_approval_variants_match_the_renderer_projection() {
     for approval in approvals {
         assert!(approval_is_safe(&approval), "current approval: {approval}");
     }
+    let mut private_diff = serde_json::json!({
+        "type": "diff",
+        "diff": {
+            "id": "diff-call",
+            "operation": "update",
+            "filePath": "README.md",
+            "patch": "@@ -1 +1 @@",
+            "baseRevision": null,
+            "summary": "Update README",
+            "approvalStatus": "required"
+        }
+    });
+    private_diff["diff"]["execution"] = serde_json::json!({
+        "canonicalTarget": "/private/workspace/README.md",
+        "baseContent": "must remain Host-private"
+    });
+    assert!(!approval_is_safe(&private_diff));
     assert!(!approval_is_safe(&serde_json::json!({
         "type": "mcp_tool_call",
         "approval": {}

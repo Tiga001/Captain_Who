@@ -1,5 +1,36 @@
 use super::*;
 
+fn missing_file_observation_id(request: &Value, expected_path: &str) -> String {
+    fn find(value: &Value, expected_path: &str) -> Option<String> {
+        match value {
+            Value::Object(object) => {
+                if object.get("path").and_then(Value::as_str) == Some(expected_path)
+                    && object.get("exists").and_then(Value::as_bool) == Some(false)
+                {
+                    return object
+                        .get("observationId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                object.values().find_map(|value| find(value, expected_path))
+            }
+            Value::Array(values) => values.iter().find_map(|value| find(value, expected_path)),
+            Value::String(text) if text.starts_with('{') || text.starts_with('[') => {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .and_then(|value| find(&value, expected_path))
+            }
+            _ => None,
+        }
+    }
+
+    find(request, expected_path).unwrap_or_else(|| {
+        panic!(
+            "Provider request must contain the missing read_file observation for {expected_path}"
+        )
+    })
+}
+
 #[tokio::test]
 async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     use crate::protocol::{
@@ -100,37 +131,47 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
                                     "read-before",
                                     "read_file",
                                     json!({ "path": "source.txt" })
-                                )
-                            ]
-                        },
-                        "finish_reason": "tool_calls"
-                    }]
-                }),
-                1 => json!({
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": "I have the evidence and will prepare the report.",
-                            "tool_calls": [
-                                native_tool_call(
-                                    "patch-approval",
-                                    "apply_patch",
-                                    json!({
-                                        "operation": "create",
-                                        "filePath": "report.txt",
-                                        "content": "draft report"
-                                    })
                                 ),
                                 native_tool_call(
-                                    "read-queued",
+                                    "read-report-before",
                                     "read_file",
-                                    json!({ "path": "queued.txt" })
+                                    json!({ "path": "report.txt" })
                                 )
                             ]
                         },
                         "finish_reason": "tool_calls"
                     }]
                 }),
+                1 => {
+                    let observation_id = missing_file_observation_id(&request, "report.txt");
+                    json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "I have the evidence and will prepare the report.",
+                                "tool_calls": [
+                                    native_tool_call(
+                                        "patch-approval",
+                                        "apply_patch",
+                                        json!({
+                                            "action": "apply",
+                                            "operation": "create",
+                                            "filePath": "report.txt",
+                                            "observationId": observation_id,
+                                            "content": "draft report"
+                                        })
+                                    ),
+                                    native_tool_call(
+                                        "read-queued",
+                                        "read_file",
+                                        json!({ "path": "queued.txt" })
+                                    )
+                                ]
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    })
+                }
                 _ => {
                     *server_final_request.lock().unwrap() = Some(request);
                     json!({
@@ -241,6 +282,18 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             _ => None,
         })
         .expect("first read call event");
+    let read_target_call_id = waiting
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. }
+                if call.tool == "read_file" && call.args["path"] == "report.txt" =>
+            {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .expect("target observation read call event");
     let pending_call_id = checkpoint.pending_tool_call_id.clone();
     let pending_checkpoint_call = checkpoint
         .context_items
@@ -253,6 +306,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     for call_id in [
         &todo_call_id,
         &read_before_call_id,
+        &read_target_call_id,
         &pending_call_id,
         &queued_call_id,
     ] {
@@ -262,15 +316,16 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         [
             &todo_call_id,
             &read_before_call_id,
+            &read_target_call_id,
             &pending_call_id,
             &queued_call_id,
         ]
         .into_iter()
         .collect::<std::collections::HashSet<_>>()
         .len(),
-        4
+        5
     );
-    for completed_call_id in [&todo_call_id, &read_before_call_id] {
+    for completed_call_id in [&todo_call_id, &read_before_call_id, &read_target_call_id] {
         assert!(waiting.events.iter().any(|event| matches!(
             event,
             AgentEvent::ToolResult { result, .. }
@@ -360,6 +415,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     for call_id in [
         &todo_call_id,
         &read_before_call_id,
+        &read_target_call_id,
         &pending_call_id,
         &queued_call_id,
     ] {
@@ -368,6 +424,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     for provider_call_id in [
         "todo-before",
         "read-before",
+        "read-report-before",
         "patch-approval",
         "read-queued",
     ] {
@@ -380,6 +437,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     for call_id in [
         &todo_call_id,
         &read_before_call_id,
+        &read_target_call_id,
         &pending_call_id,
         &queued_call_id,
     ] {
@@ -520,16 +578,24 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
                         "message": {
                             "role": "assistant",
                             "content": "",
-                            "tool_calls": [native_tool_call(
-                                "read-skill-resource",
-                                "skills_read_resource",
-                                json!({ "uri": resource_uri.as_str() })
-                            )]
+                            "tool_calls": [
+                                native_tool_call(
+                                    "read-skill-resource",
+                                    "skills_read_resource",
+                                    json!({ "uri": resource_uri.as_str() })
+                                ),
+                                native_tool_call(
+                                    "read-report-before-materialize",
+                                    "read_file",
+                                    json!({ "path": "report.txt" })
+                                )
+                            ]
                         },
                         "finish_reason": "tool_calls"
                     }]
                 }),
                 1 => {
+                    let observation_id = missing_file_observation_id(&request, "report.txt");
                     *captured_second_request.lock().unwrap() = Some(request);
                     json!({
                     "choices": [{
@@ -540,8 +606,10 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
                                 "materialize-after-read",
                                 "apply_patch",
                                 json!({
+                                    "action": "apply",
                                     "operation": "create",
                                     "filePath": "report.txt",
+                                    "observationId": observation_id,
                                     "content": "report"
                                 })
                             )]
@@ -670,13 +738,36 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             _ => None,
         })
         .expect("Skill resource read call");
+    let target_read_call_id = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. }
+                if call.tool == "read_file" && call.args["path"] == "report.txt" =>
+            {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .expect("target observation read call");
     let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let pending_checkpoint_call = checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .find(|call| call.id == pending_call_id)
+        .cloned()
+        .expect("checkpoint must freeze the strict apply_patch call");
     assert_runtime_owned_tool_call_id(&resource_read_call_id);
+    assert_runtime_owned_tool_call_id(&target_read_call_id);
     assert_runtime_owned_tool_call_id(&pending_call_id);
     assert_ne!(resource_read_call_id, pending_call_id);
+    assert_ne!(target_read_call_id, pending_call_id);
     let model_request_messages = serde_json::to_string(&model_request["messages"]).unwrap();
     assert!(model_request_messages.contains(&resource_read_call_id));
+    assert!(model_request_messages.contains(&target_read_call_id));
     assert!(!model_request_messages.contains("read-skill-resource"));
+    assert!(!model_request_messages.contains("read-report-before-materialize"));
     let checkpoint_json = serde_json::to_string(checkpoint).unwrap();
     assert!(checkpoint_json.contains(RESOURCE_MARKER));
     assert!(!serde_json::to_string(&output.events)
@@ -699,12 +790,8 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     resume_input.tool_continuation = Some(AgentToolContinuation {
         call: AgentToolCall {
             id: pending_call_id.clone(),
-            tool: "apply_patch".to_string(),
-            args: json!({
-                "operation": "create",
-                "filePath": "report.txt",
-                "content": "report"
-            }),
+            tool: pending_checkpoint_call.name,
+            args: pending_checkpoint_call.args,
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
         },
@@ -756,8 +843,10 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     let resumed_request = resumed_request.lock().unwrap().clone().unwrap();
     let resumed_messages = serde_json::to_string(&resumed_request["messages"]).unwrap();
     assert!(resumed_messages.contains(&resource_read_call_id));
+    assert!(resumed_messages.contains(&target_read_call_id));
     assert!(resumed_messages.contains(&pending_call_id));
     assert!(!resumed_messages.contains("read-skill-resource"));
+    assert!(!resumed_messages.contains("read-report-before-materialize"));
     assert!(!resumed_messages.contains("materialize-after-read"));
     assert!(resumed_messages.contains("applied"));
     assert!(resumed_messages.contains(RESOURCE_MARKER));
@@ -768,7 +857,11 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     assert!(!serde_json::to_string(trace)
         .unwrap()
         .contains(RESOURCE_MARKER));
-    for call_id in [&resource_read_call_id, &pending_call_id] {
+    for call_id in [
+        &resource_read_call_id,
+        &target_read_call_id,
+        &pending_call_id,
+    ] {
         assert!(trace.items.iter().any(|item| matches!(
             item,
             ConversationTurnTraceItem::ToolCall {

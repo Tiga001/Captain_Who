@@ -943,6 +943,8 @@ impl AgentService {
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
+                committed_file_change_action: None,
+                direct_file_change_finalization: None,
                 tool_result: mycopilot_core::builtin_mcp_tool_cancelled_result(approval),
             }
         } else {
@@ -1128,7 +1130,7 @@ impl AgentService {
         );
         let decided_at = now_ms();
         let (
-            record,
+            mut record,
             call,
             approved_process_guard,
             approved_materialization_guard,
@@ -1586,13 +1588,15 @@ impl AgentService {
             }
         }
         let mut builtin_activation_settlement = None;
-        let execution = if let Some(error) = provider_continuation_error.as_deref() {
+        let mut execution = if let Some(error) = provider_continuation_error.as_deref() {
             ActionExecutionDecision {
                 status: "failed".to_string(),
                 final_pending_status: PendingActionStatus::Failed,
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
+                committed_file_change_action: None,
+                direct_file_change_finalization: None,
                 tool_result: AgentToolResult {
                     exact_archive_file: None,
                     call_id: call.id.clone(),
@@ -1618,6 +1622,8 @@ impl AgentService {
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
+                committed_file_change_action: None,
+                direct_file_change_finalization: None,
                 tool_result: AgentToolResult {
                     exact_archive_file: None,
                     call_id: approval.identity.call_id.clone(),
@@ -1655,6 +1661,8 @@ impl AgentService {
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
+                committed_file_change_action: None,
+                direct_file_change_finalization: None,
                 tool_result,
             }
         } else if decision_status == AgentApprovalDecisionStatus::Rejected && is_builtin_mcp_action
@@ -1683,6 +1691,8 @@ impl AgentService {
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
+                committed_file_change_action: None,
+                direct_file_change_finalization: None,
                 tool_result,
             }
         } else if let AgentProposedAction::BuiltinCapabilityActivation { approval } =
@@ -1771,6 +1781,8 @@ impl AgentService {
                 patch_result: None,
                 file_write_result: None,
                 file_change: None,
+                committed_file_change_action: None,
+                direct_file_change_finalization: None,
                 tool_result,
             }
         } else if decision_status == AgentApprovalDecisionStatus::Approved {
@@ -1817,6 +1829,8 @@ impl AgentService {
                     patch_result: None,
                     file_write_result: None,
                     file_change: None,
+                    committed_file_change_action: None,
+                    direct_file_change_finalization: None,
                     tool_result,
                 }
             } else if let AgentProposedAction::SkillMaterialization { materialization } =
@@ -1865,6 +1879,8 @@ impl AgentService {
                     patch_result: None,
                     file_write_result: None,
                     file_change: None,
+                    committed_file_change_action: None,
+                    direct_file_change_finalization: None,
                     tool_result,
                 }
             } else {
@@ -1885,6 +1901,45 @@ impl AgentService {
                 message.as_deref(),
             )
         };
+        if direct_file_change_outcome_unknown(&execution) {
+            return Err(
+                "无法确认文件修改结果；该操作保持恢复中，且未发布 ToolResult。请先检查文件状态。"
+                    .to_string(),
+            );
+        }
+        if let Some(committed_action) = execution.committed_file_change_action.take() {
+            if let Err(error) =
+                self.commit_manual_direct_file_change_action(&mut record, committed_action)
+            {
+                eprintln!(
+                    "failed to persist a manual Direct FileChange commit receipt; recovery remains pending: {error}"
+                );
+                return Err(
+                    "文件修改的提交凭据尚未安全保存；该操作保持恢复中，且未发布 ToolResult。"
+                        .to_string(),
+                );
+            }
+        }
+        if let Some(finalization) = execution.direct_file_change_finalization.take() {
+            let finalized_action = finalize_direct_file_change_action(
+                &record.snapshot.action,
+                finalization,
+            )
+            .map_err(|_| {
+                "Direct delete 清理尚未完成；该操作保持恢复中，且未发布 ToolResult。".to_string()
+            })?;
+            if let Err(error) =
+                self.commit_manual_direct_file_change_action(&mut record, finalized_action)
+            {
+                eprintln!(
+                    "failed to persist a finalized manual Direct delete receipt; recovery remains pending: {error}"
+                );
+                return Err(
+                    "Direct delete 清理凭据尚未安全保存；该操作保持恢复中，且未发布 ToolResult。"
+                        .to_string(),
+                );
+            }
+        }
         let mut final_pending_status = execution.final_pending_status;
         let mut tool_result = execution.tool_result.clone();
         let mut execution_status = execution.status.clone();
@@ -1996,6 +2051,39 @@ impl AgentService {
                 }
             }
             agent_input
+        } else if decision_status == AgentApprovalDecisionStatus::Approved
+            && matches!(record.snapshot.action, AgentProposedAction::Diff { .. })
+        {
+            match self.settle_manual_file_effect(
+                &record,
+                &call,
+                final_pending_status,
+                tool_result,
+                "direct_file_change",
+                &notifications,
+            ) {
+                ManualFileEffectSettlement::Committed {
+                    agent_input,
+                    tool_result: settled_result,
+                    pending_status,
+                } => {
+                    final_pending_status = pending_status;
+                    tool_result = settled_result;
+                    *agent_input
+                }
+                ManualFileEffectSettlement::CommittedAndAdvanced => {
+                    return Err(
+                        "Direct file-change receipt was already advanced by another continuation; duplicate continuation was stopped."
+                            .to_string(),
+                    );
+                }
+                ManualFileEffectSettlement::Unsettled => {
+                    return Err(
+                        "Direct file change finished without a confirmed durable terminal receipt; inspect the target before retrying."
+                            .to_string(),
+                    );
+                }
+            }
         } else if is_approved_materialization {
             match self.settle_manual_file_effect(
                 &record,

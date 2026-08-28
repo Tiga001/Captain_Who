@@ -1223,6 +1223,8 @@ export const itITTranslations = {
   'agent.patch.failure.readFailed':
     'Non è stato possibile leggere il file di destinazione in modo sicuro.',
   'agent.patch.failure.invalidRequest': 'La richiesta di modifica del file non è valida.',
+  'agent.patch.failure.outcomeUnknown':
+    'Non è stato possibile confermare il risultato. Controlla lo stato attuale del file e non riprovare direttamente.',
   'agent.editSummary.title': 'Modifica riepilogo',
   'agent.editSummary.editedFiles': 'Modificati {count} file',
   'agent.editSummary.lineStats': 'Cambiamenti di linea',

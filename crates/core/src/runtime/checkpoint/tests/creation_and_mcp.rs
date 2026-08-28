@@ -844,6 +844,7 @@ fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
         "providerContinuationRefs",
         "runContext",
         "collaborationRunSnapshot",
+        "pendingActionId",
         "conversationTraceItems",
         "conversationModelContextItems",
         "nextConversationTraceSequence",
@@ -860,6 +861,7 @@ fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
 
     assert!(canonical["runContext"].is_null());
     assert!(canonical["collaborationRunSnapshot"].is_null());
+    assert!(canonical["pendingActionId"].is_null());
 
     let mut missing_provider_identity = canonical.clone();
     missing_provider_identity["contextItems"][0]["toolCalls"][0]

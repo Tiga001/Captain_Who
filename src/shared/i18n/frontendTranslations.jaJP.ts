@@ -1205,6 +1205,8 @@ export const jaJPTranslations = {
   'agent.patch.failure.notAFile': 'ターゲットのパスはファイルではありません。',
   'agent.patch.failure.readFailed': '対象ファイルを安全に読み込むことができませんでした。',
   'agent.patch.failure.invalidRequest': 'ファイル変更要求は無効です。',
+  'agent.patch.failure.outcomeUnknown':
+    '変更結果を確認できません。現在のファイル状態を確認し、そのまま再試行しないでください。',
   'agent.editSummary.title': '概要を編集する',
   'agent.editSummary.editedFiles': '編集された {count} ファイル',
   'agent.editSummary.lineStats': '回線変更',

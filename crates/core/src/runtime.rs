@@ -76,9 +76,10 @@ use crate::{
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
-    checkpoint_continuation_projection, continuation_result_sequence, create_run_checkpoint,
-    restore_run_checkpoint_with_model_projection, CheckpointContinuationProjection, QueuedToolCall,
-    RestoredRunCheckpoint, RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
+    checkpoint_continuation_projection, continuation_result_sequence,
+    create_run_checkpoint_with_file_observations, restore_run_checkpoint_with_model_projection,
+    CheckpointContinuationProjection, QueuedToolCall, RestoredRunCheckpoint, RunCheckpointState,
+    ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{
@@ -614,6 +615,10 @@ impl AgentRuntime {
             run_id.clone(),
             cancellation_token.clone(),
         );
+        let file_observations = restored_checkpoint
+            .as_ref()
+            .map(|checkpoint| Arc::clone(&checkpoint.file_observations))
+            .unwrap_or_else(|| Arc::new(crate::file_change::FileObservationRegistry::default()));
         let PreparedLlmRequest {
             template: llm_request,
             context: mut active_context,
@@ -723,6 +728,8 @@ impl AgentRuntime {
             .with_cancellation(cancellation_token.clone())
             .with_model_capabilities(model_capabilities)
             .with_runtime_services(run_id.clone(), storage)
+            .with_file_observation_registry(file_observations)
+            .with_file_change_tool_set_revision(effective_tool_set.revision().to_string())
             .with_skill_resources(skill_resources)
             .with_command_runtime_profile_resolver(command_runtime_profile_resolver)
             .with_command_session_executor(command_session_executor)
@@ -894,6 +901,9 @@ impl AgentRuntime {
                         permitted_tool_definitions.iter().cloned(),
                         &runtime_extensions.active_tool_capabilities()?,
                     )?;
+                    tool_context.replace_file_change_tool_set_revision(
+                        effective_tool_set.revision().to_string(),
+                    );
                     if effective_tool_set.stable_revision() != stable_tool_revision {
                         return Err(AgentError::new(
                             "运行期间稳定工具前缀发生变化；为防止缓存和执行契约漂移，当前运行已停止。",
@@ -2393,7 +2403,7 @@ impl AgentRuntime {
                             let trace = conversation_trace
                                 .lock()
                                 .unwrap_or_else(|error| error.into_inner());
-                            create_run_checkpoint(
+                            create_run_checkpoint_with_file_observations(
                                 &run_id,
                                 RunCheckpointState {
                                     context: &active_context,
@@ -2412,6 +2422,7 @@ impl AgentRuntime {
                                     provider_profile_config: &llm_request.provider_profile_config,
                                     provider_protocol_key: &llm_request.provider_protocol_key,
                                 },
+                                tool_context.file_observation_registry(),
                             )
                         };
                         let mut checkpoint = match checkpoint_result {
@@ -2645,7 +2656,7 @@ impl AgentRuntime {
                                                 let trace = conversation_trace
                                                     .lock()
                                                     .unwrap_or_else(|error| error.into_inner());
-                                                create_run_checkpoint(
+                                                create_run_checkpoint_with_file_observations(
                                                     &run_id,
                                                     RunCheckpointState {
                                                         context: &active_context,
@@ -2667,6 +2678,7 @@ impl AgentRuntime {
                                                         provider_protocol_key:
                                                             &llm_request.provider_protocol_key,
                                                     },
+                                                    tool_context.file_observation_registry(),
                                                 )
                                                 .map(|mut checkpoint| {
                                                     checkpoint.pending_action_id =

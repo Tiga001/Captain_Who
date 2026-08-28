@@ -1128,6 +1128,7 @@ export const zhCNTranslations = {
   'agent.patch.failure.notAFile': '目标路径不是文件。',
   'agent.patch.failure.readFailed': '无法安全读取目标文件。',
   'agent.patch.failure.invalidRequest': '文件修改请求无效。',
+  'agent.patch.failure.outcomeUnknown': '无法确认修改结果。请先检查文件当前状态，不要直接重试。',
   'agent.editSummary.title': '编辑摘要',
   'agent.editSummary.editedFiles': '已编辑 {count} 个文件',
   'agent.editSummary.lineStats': '行数变化',

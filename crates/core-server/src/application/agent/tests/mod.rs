@@ -109,6 +109,195 @@ fn command_request(id: &str, command: &str) -> AgentCommandRequest {
     }
 }
 
+fn direct_file_change_fixture(
+    run_id: &str,
+    conversation_id: &str,
+    call_id: &str,
+    paths: (&str, &str),
+    base_content: Option<&str>,
+    target_content: Option<&str>,
+    approval_status: AgentApprovalStatus,
+) -> (AgentProposedAction, AgentToolCall) {
+    use mycopilot_core::file_change::{
+        proposal_digest, FileChangeBase, FileChangeCommitter, FileChangeDirectBinding,
+        FileChangeMutation, FileChangeOperation, FileChangeOutcome, FileChangePathPolicy,
+        FileChangePlanRequest, FileChangePlanner, FileChangeProposal, FileChangeStatus,
+        FileChangeTransaction, FileObservationCheckpoint, FileObservationIdentity,
+        FileObservationState, FILE_CHANGE_SCHEMA_VERSION,
+        FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION, FILE_OBSERVATION_TTL_MS,
+    };
+
+    let (file_path, canonical_target) = paths;
+    let operation = match (base_content, target_content) {
+        (None, Some(_)) => FileChangeOperation::Create,
+        (Some(_), Some(_)) => FileChangeOperation::Update,
+        (Some(_), None) => FileChangeOperation::Delete,
+        (None, None) => panic!("a file-change fixture must have a base or target"),
+    };
+    let base_revision =
+        base_content.map(|content| mycopilot_core::content_revision(content.as_bytes()));
+    let base = match (base_content, base_revision.as_deref()) {
+        (Some(content), Some(revision)) => FileChangeBase::Existing { content, revision },
+        (None, None) => FileChangeBase::Missing,
+        _ => unreachable!("fixture base content and revision are total"),
+    };
+    let mutation = match (operation, target_content) {
+        (FileChangeOperation::Delete, None) => FileChangeMutation::Delete,
+        (_, Some(content)) => FileChangeMutation::Complete(content.to_string()),
+        _ => unreachable!("fixture operation and target content are consistent"),
+    };
+    let plan = FileChangePlanner
+        .plan(FileChangePlanRequest {
+            operation,
+            file_path,
+            base,
+            mutation,
+        })
+        .expect("valid test FileChange plan");
+
+    let observation_digest = proposal_digest(&call_id).expect("digest observation fixture id");
+    let observation_hex = observation_digest
+        .rsplit_once(':')
+        .expect("content revision has a digest suffix")
+        .1;
+    let observation_id = format!("fobs_{}", &observation_hex[..32]);
+    let mut args = json!({
+        "action": "apply",
+        "operation": match operation {
+            FileChangeOperation::Create => "create",
+            FileChangeOperation::Update => "update",
+            FileChangeOperation::Delete => "delete",
+        },
+        "filePath": file_path,
+        "observationId": observation_id,
+    });
+    if let Some(content) = target_content {
+        args["content"] = Value::String(content.to_string());
+    }
+
+    let transaction_id = format!("file-change-direct-v1:{call_id}");
+    let transaction = FileChangeTransaction {
+        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        id: transaction_id.clone(),
+        operation,
+        file_path: plan.file_path.clone(),
+        status: FileChangeStatus::WaitingApproval,
+        outcome: FileChangeOutcome::DefinitelyNotExecuted,
+        base: plan.base.clone(),
+        target: plan.target.clone(),
+        proposal_digest: plan.proposal_digest.clone(),
+        created_at: 1,
+        updated_at: 1,
+    };
+    let proposal = FileChangeProposal {
+        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        id: call_id.to_string(),
+        transaction_id,
+        operation,
+        file_path: plan.file_path.clone(),
+        base: plan.base.clone(),
+        target: plan.target.clone(),
+        diff_digest: plan.diff_digest.clone(),
+        proposal_digest: plan.proposal_digest.clone(),
+        additions: plan.additions,
+        deletions: plan.deletions,
+    };
+    let delete_journal = if operation == FileChangeOperation::Delete {
+        let canonical_path = std::path::Path::new(canonical_target);
+        let workspace = canonical_path
+            .parent()
+            .expect("Direct delete fixture target has a parent");
+        let target = FileChangePathPolicy::new(Some(workspace), false)
+            .resolve(file_path)
+            .expect("resolve Direct delete fixture target");
+        Some(
+            FileChangeCommitter
+                .prepare_delete(&transaction.id, &target, &plan, 1)
+                .expect("prepare Direct delete fixture journal"),
+        )
+    } else {
+        None
+    };
+    let canonical_path = std::path::Path::new(canonical_target);
+    let parent_metadata = std::fs::metadata(
+        canonical_path
+            .parent()
+            .expect("Direct fixture target has a parent"),
+    )
+    .or_else(|_| std::fs::metadata(std::env::temp_dir()))
+    .expect("Direct fixture parent metadata");
+    let observation_state = match &plan.base {
+        mycopilot_core::file_change::FileChangeContentState::Missing => {
+            FileObservationState::Missing
+        }
+        mycopilot_core::file_change::FileChangeContentState::Present { revision, .. } => {
+            let target_metadata = std::fs::metadata(canonical_path)
+                .unwrap_or_else(|_| std::fs::metadata(canonical_path.parent().unwrap()).unwrap());
+            FileObservationState::Existing {
+                revision: revision.clone(),
+                identity: FileObservationIdentity::from_metadata(&target_metadata),
+            }
+        }
+    };
+    let execution = FileChangeDirectBinding {
+        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        transaction,
+        proposal,
+        observation_id: observation_id.clone(),
+        observation: FileObservationCheckpoint {
+            schema_version: FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
+            observation_id: observation_id.clone(),
+            source_tool_call_id: format!("read-{call_id}"),
+            conversation_id: conversation_id.to_string(),
+            run_id: run_id.to_string(),
+            canonical_target: canonical_target.to_string(),
+            state: observation_state,
+            parent_identity: FileObservationIdentity::from_metadata(&parent_metadata),
+            created_at_ms: 1,
+            expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
+        },
+        source_call_id: call_id.to_string(),
+        source_args_digest: proposal_digest(&args).expect("digest fixture Tool Call arguments"),
+        conversation_id: conversation_id.to_string(),
+        run_id: run_id.to_string(),
+        canonical_target: canonical_target.to_string(),
+        base_content: plan.base_content.clone(),
+        target_content: plan.target_content.clone(),
+        delete_journal,
+        receipt: None,
+        permission_revision: "permission-revision-test".to_string(),
+        tool_set_revision: "tool-set-revision-test".to_string(),
+    };
+    execution
+        .validate()
+        .expect("valid direct execution binding");
+
+    let call = AgentToolCall {
+        id: call_id.to_string(),
+        tool: "apply_patch".to_string(),
+        args,
+        approval_status,
+        reason: None,
+    };
+    let action = AgentProposedAction::Diff {
+        diff: mycopilot_core::AgentDiffProposal {
+            id: call_id.to_string(),
+            operation: match operation {
+                FileChangeOperation::Create => mycopilot_core::AgentPatchOperation::Create,
+                FileChangeOperation::Update => mycopilot_core::AgentPatchOperation::Update,
+                FileChangeOperation::Delete => mycopilot_core::AgentPatchOperation::Delete,
+            },
+            file_path: plan.file_path,
+            patch: plan.diff,
+            base_revision: plan.base.revision().map(ToString::to_string),
+            summary: Some("test Direct file change".to_string()),
+            approval_status,
+            execution: Box::new(execution),
+        },
+    };
+    (action, call)
+}
+
 fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {
     let call_id = history_call_id();
     ConversationTurnTrace {

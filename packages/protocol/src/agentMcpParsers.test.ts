@@ -205,6 +205,49 @@ const resultSizeSummary = {
   omittedEncodedBytes: 128
 } as const
 
+describe('Renderer-safe Direct file-change proposal contract', () => {
+  const diff = {
+    id: 'diff-direct-current',
+    operation: 'update',
+    filePath: 'README.md',
+    patch: '@@ -1 +1 @@\n-old\n+new',
+    baseRevision: 'content-sha256-v1:current',
+    summary: 'Update the heading',
+    approvalStatus: 'required'
+  } as const
+
+  it('round-trips only the public diff projection', () => {
+    const event = {
+      type: 'approval_required',
+      runId: 'run-owned',
+      action: { type: 'diff', diff }
+    } as const
+
+    expect(parseAgentEventForHost(event)).toEqual(event)
+    expect(JSON.stringify(parseAgentEventForHost(event))).not.toContain('execution')
+  })
+
+  it('rejects Host-private execution authority instead of adding it to the public DTO', () => {
+    expect(() =>
+      parseAgentEventForHost({
+        type: 'approval_required',
+        runId: 'run-owned',
+        action: {
+          type: 'diff',
+          diff: {
+            ...diff,
+            execution: {
+              schemaVersion: 1,
+              canonicalTarget: '/private/workspace/README.md',
+              baseContent: 'PRIVATE_BASE_CONTENT'
+            }
+          }
+        }
+      })
+    ).toThrow(/unexpected field execution/)
+  })
+})
+
 describe('built-in capability Host-boundary contract', () => {
   it('strictly parses the frozen activation approval and approval event', () => {
     expect(parseAgentBuiltinCapabilityActivationApproval(builtinCapabilityApproval)).toEqual(

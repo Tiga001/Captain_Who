@@ -467,6 +467,10 @@ fn committer_creates_without_clobber_and_reconciles() {
         committer.reconcile(&target, &plan, None).unwrap(),
         FileChangeReconciliation::AlreadyApplied
     );
+    let recovered = committer
+        .commit("transaction-create", &target, &plan, 11, None)
+        .expect("reconcile a create published before a lost receipt");
+    assert_eq!(recovered.status, FileChangeStatus::AlreadyApplied);
 
     let raced_target = resolve(root.path(), "raced.txt");
     let raced_plan = create_plan(&raced_target, "planned\n");
@@ -478,6 +482,113 @@ fn committer_creates_without_clobber_and_reconciles() {
     assert_eq!(
         fs::read_to_string(raced_target.absolute_path()).unwrap(),
         "concurrent\n"
+    );
+}
+
+#[test]
+fn fresh_commit_never_adopts_an_external_exact_target() {
+    let root = TempDir::new().expect("tempdir");
+    let committer = FileChangeCommitter;
+
+    let create_target = resolve(root.path(), "create-exact.txt");
+    let create_plan = create_plan(&create_target, "approved\n");
+    fs::write(create_target.absolute_path(), "approved\n").expect("external exact create");
+    assert_code(
+        committer.commit_fresh(
+            "transaction-create-fresh",
+            &create_target,
+            &create_plan,
+            14,
+            None,
+        ),
+        FileChangeErrorCode::FileExists,
+    );
+
+    let update_target = resolve(root.path(), "update-exact.txt");
+    fs::write(update_target.absolute_path(), "base\n").expect("update base");
+    let update_plan = update_plan(&update_target, "base\n", "approved\n");
+    fs::write(update_target.absolute_path(), "approved\n").expect("external exact update");
+    assert_code(
+        committer.commit_fresh(
+            "transaction-update-fresh",
+            &update_target,
+            &update_plan,
+            15,
+            None,
+        ),
+        FileChangeErrorCode::RevisionConflict,
+    );
+
+    let delete_target = resolve(root.path(), "delete-external.txt");
+    fs::write(delete_target.absolute_path(), "base\n").expect("delete base");
+    let delete_plan = delete_plan(&delete_target, "base\n");
+    let mut journal = committer
+        .prepare_delete("transaction-delete-fresh", &delete_target, &delete_plan, 16)
+        .expect("prepared delete journal");
+    fs::remove_file(delete_target.absolute_path()).expect("external delete");
+    assert_code(
+        committer.commit_fresh(
+            "transaction-delete-fresh",
+            &delete_target,
+            &delete_plan,
+            17,
+            Some(&mut journal),
+        ),
+        FileChangeErrorCode::OutcomeUnknown,
+    );
+    assert_eq!(journal.state, FileChangeDeleteJournalState::Prepared);
+}
+
+#[test]
+fn attempted_outcome_unknown_reconciles_exact_publication_without_reapplying() {
+    let root = TempDir::new().expect("tempdir");
+    let committer = FileChangeCommitter;
+    let target = resolve(root.path(), "published-unknown.txt");
+    let plan = create_plan(&target, "published once\n");
+
+    // Fault injection at the filesystem boundary: publication is visible, but the first caller
+    // did not receive its receipt (for example, the parent-directory sync returned an error).
+    fs::write(target.absolute_path(), "published once\n").expect("simulate publication");
+    let recovered = committer
+        .reconcile_attempted_outcome_unknown(
+            "transaction-published-unknown",
+            &target,
+            &plan,
+            18,
+            None,
+            FileChangeError::new(FileChangeErrorCode::OutcomeUnknown),
+        )
+        .expect("the attempted mutation is reconciled from its exact target");
+
+    assert_eq!(recovered.status, FileChangeStatus::AlreadyApplied);
+    assert_eq!(
+        fs::read_to_string(target.absolute_path()).unwrap(),
+        "published once\n"
+    );
+}
+
+#[test]
+fn attempted_outcome_unknown_stays_unknown_for_a_divergent_target() {
+    let root = TempDir::new().expect("tempdir");
+    let committer = FileChangeCommitter;
+    let target = resolve(root.path(), "divergent-unknown.txt");
+    let plan = create_plan(&target, "approved\n");
+    fs::write(target.absolute_path(), "different actor\n").expect("divergent publication");
+
+    assert_code(
+        committer.reconcile_attempted_outcome_unknown(
+            "transaction-divergent-unknown",
+            &target,
+            &plan,
+            19,
+            None,
+            FileChangeError::new(FileChangeErrorCode::OutcomeUnknown),
+        ),
+        FileChangeErrorCode::OutcomeUnknown,
+    );
+    assert_eq!(
+        fs::read_to_string(target.absolute_path()).unwrap(),
+        "different actor\n"
     );
 }
 
@@ -534,6 +645,10 @@ fn committer_updates_atomically_and_rejects_revision_conflicts() {
         .commit("transaction-update", &target, &plan, 20, None)
         .expect("commit update");
     assert_eq!(fs::read_to_string(&path).unwrap(), "updated\n");
+    let recovered = committer
+        .commit("transaction-update", &target, &plan, 21, None)
+        .expect("reconcile an update published before a lost receipt");
+    assert_eq!(recovered.status, FileChangeStatus::AlreadyApplied);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -550,6 +665,101 @@ fn committer_updates_atomically_and_rejects_revision_conflicts() {
         FileChangeErrorCode::RevisionConflict,
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), "concurrent\n");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn update_exchange_rolls_back_a_race_after_the_last_base_check() {
+    let root = TempDir::new().expect("tempdir");
+    let path = root.path().join("update-race.txt");
+    let concurrent = root.path().join("concurrent-generation.txt");
+    fs::write(&path, "base\n").expect("base file");
+    fs::write(&concurrent, "concurrent writer\n").expect("concurrent generation");
+    let target = resolve(root.path(), "update-race.txt");
+    let plan = update_plan(&target, "base\n", "approved target\n");
+
+    let result = FileChangeCommitter.commit_update_with_before_exchange(
+        "transaction-update-race",
+        &target,
+        &plan,
+        22,
+        || fs::rename(&concurrent, &path).expect("replace target in the publication window"),
+    );
+
+    assert_code(result, FileChangeErrorCode::RevisionConflict);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "concurrent writer\n");
+    assert!(
+        fs::read_dir(root.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".file-change-stage-")),
+        "a verified rollback must clean only its own staged Target"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn update_exchange_failpoint_fails_closed_before_publication() {
+    let root = TempDir::new().expect("tempdir");
+    let path = root.path().join("unsupported-exchange.txt");
+    fs::write(&path, "base\n").expect("base file");
+    let target = resolve(root.path(), "unsupported-exchange.txt");
+    let plan = update_plan(&target, "base\n", "approved target\n");
+
+    super::bound_io::fail_exchange_call(1);
+    assert_code(
+        FileChangeCommitter.commit("transaction-exchange-failure", &target, &plan, 23, None),
+        FileChangeErrorCode::Failed,
+    );
+
+    assert_eq!(fs::read_to_string(&path).unwrap(), "base\n");
+    assert!(
+        fs::read_dir(root.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".file-change-stage-")),
+        "an unsupported initial exchange must leave no publication or staging entry"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn update_rollback_failure_preserves_the_displaced_concurrent_generation() {
+    let root = TempDir::new().expect("tempdir");
+    let path = root.path().join("rollback-unknown.txt");
+    let concurrent = root.path().join("rollback-concurrent.txt");
+    fs::write(&path, "base\n").expect("base file");
+    fs::write(&concurrent, "concurrent writer\n").expect("concurrent generation");
+    let target = resolve(root.path(), "rollback-unknown.txt");
+    let plan = update_plan(&target, "base\n", "approved target\n");
+
+    // The first exchange publishes Target and retains the raced generation. Inject a failure into
+    // the rollback exchange itself; the unverified concurrent inode must remain linked.
+    super::bound_io::fail_exchange_call(2);
+    let result = FileChangeCommitter.commit_update_with_before_exchange(
+        "transaction-rollback-unknown",
+        &target,
+        &plan,
+        24,
+        || fs::rename(&concurrent, &path).expect("replace target in the publication window"),
+    );
+    assert_code(result, FileChangeErrorCode::OutcomeUnknown);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "approved target\n");
+
+    let recovery_contents = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".file-change-stage-")
+        })
+        .map(|entry| fs::read_to_string(entry.path()).expect("read retained recovery generation"))
+        .collect::<Vec<_>>();
+    assert_eq!(recovery_contents, vec!["concurrent writer\n"]);
 }
 
 #[cfg(unix)]
@@ -569,6 +779,30 @@ fn committer_rejects_a_replaced_parent_directory_identity_before_publication() {
         FileChangeErrorCode::Conflict,
     );
     assert!(!parent.join("new.txt").exists());
+    assert!(!displaced_parent.join("new.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn committer_rejects_an_ancestor_symlink_swap_without_touching_the_destination() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().expect("tempdir");
+    let parent = root.path().join("parent");
+    let displaced_parent = root.path().join("displaced-parent");
+    let outside = root.path().join("outside");
+    fs::create_dir(&parent).expect("parent");
+    fs::create_dir(&outside).expect("outside");
+    let target = resolve(root.path(), "parent/new.txt");
+    let plan = create_plan(&target, "must not escape\n");
+
+    fs::rename(&parent, &displaced_parent).expect("displace parent");
+    symlink(&outside, &parent).expect("redirect parent");
+    assert_code(
+        FileChangeCommitter.commit("transaction-parent-symlink", &target, &plan, 23, None),
+        FileChangeErrorCode::SymlinkForbidden,
+    );
+    assert!(!outside.join("new.txt").exists());
     assert!(!displaced_parent.join("new.txt").exists());
 }
 
@@ -597,7 +831,7 @@ fn delete_journal_supports_reconciliation_rollback_and_finalization() {
         FileChangeReconciliation::AlreadyApplied
     );
     committer
-        .rollback_delete(&mut journal, 32)
+        .rollback_delete(&target, &mut journal, 32)
         .expect("rollback delete");
     assert_eq!(fs::read_to_string(&path).unwrap(), "delete me\n");
     assert_eq!(journal.state, FileChangeDeleteJournalState::RolledBack);
@@ -618,7 +852,7 @@ fn delete_journal_supports_reconciliation_rollback_and_finalization() {
     let tombstone = second.tombstone_path.clone();
     assert!(Path::new(&tombstone).exists());
     committer
-        .finalize_delete(&mut second, 35)
+        .finalize_delete(&target, &mut second, 35)
         .expect("finalize delete");
     assert_eq!(second.state, FileChangeDeleteJournalState::Finalized);
     assert!(!Path::new(&tombstone).exists());
@@ -655,8 +889,133 @@ fn prepared_delete_journal_reconciles_a_completed_rename_after_a_crash() {
     assert_eq!(recovered.status, FileChangeStatus::AlreadyApplied);
     assert_eq!(journal.state, FileChangeDeleteJournalState::Tombstoned);
     committer
-        .finalize_delete(&mut journal, 42)
+        .finalize_delete(&target, &mut journal, 42)
         .expect("finalize recovered delete");
+}
+
+#[test]
+fn delete_finalization_recovers_after_unlink_without_removing_a_new_target() {
+    let root = TempDir::new().expect("tempdir");
+    let path = root.path().join("finalize-crash.txt");
+    fs::write(&path, "deleted generation\n").expect("delete base");
+    let target = resolve(root.path(), "finalize-crash.txt");
+    let plan = delete_plan(&target, "deleted generation\n");
+    let committer = FileChangeCommitter;
+    let mut journal = committer
+        .prepare_delete("transaction-finalize-crash", &target, &plan, 43)
+        .expect("prepare journal");
+    committer
+        .commit(
+            "transaction-finalize-crash",
+            &target,
+            &plan,
+            44,
+            Some(&mut journal),
+        )
+        .expect("commit delete");
+
+    // Simulate a crash after tombstone unlink but before the finalized journal was persisted.
+    fs::remove_file(&journal.tombstone_path).expect("unlink tombstone");
+    fs::write(&path, "new generation\n").expect("concurrent new target");
+    committer
+        .finalize_delete(&target, &mut journal, 45)
+        .expect("missing recovery file is an idempotent finalized state");
+
+    assert_eq!(journal.state, FileChangeDeleteJournalState::Finalized);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "new generation\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_finalize_rejects_a_parent_symlink_swap_and_preserves_both_directories() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().expect("tempdir");
+    let parent = root.path().join("parent");
+    let displaced_parent = root.path().join("displaced-parent");
+    let outside = root.path().join("outside");
+    fs::create_dir(&parent).expect("parent");
+    fs::create_dir(&outside).expect("outside");
+    let path = parent.join("delete.txt");
+    fs::write(&path, "delete me\n").expect("delete file");
+    let target = resolve(root.path(), "parent/delete.txt");
+    let plan = delete_plan(&target, "delete me\n");
+    let committer = FileChangeCommitter;
+    let mut journal = committer
+        .prepare_delete("transaction-finalize-race", &target, &plan, 43)
+        .expect("prepare delete");
+    committer
+        .commit(
+            "transaction-finalize-race",
+            &target,
+            &plan,
+            44,
+            Some(&mut journal),
+        )
+        .expect("tombstone target");
+    let tombstone_name = Path::new(&journal.tombstone_path)
+        .file_name()
+        .expect("tombstone name")
+        .to_owned();
+
+    fs::rename(&parent, &displaced_parent).expect("displace parent");
+    fs::write(outside.join(&tombstone_name), "outside decoy\n").expect("outside decoy");
+    symlink(&outside, &parent).expect("redirect parent");
+
+    assert_code(
+        committer.finalize_delete(&target, &mut journal, 45),
+        FileChangeErrorCode::SymlinkForbidden,
+    );
+    assert_eq!(journal.state, FileChangeDeleteJournalState::Tombstoned);
+    assert_eq!(
+        fs::read_to_string(displaced_parent.join(&tombstone_name)).unwrap(),
+        "delete me\n"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join(&tombstone_name)).unwrap(),
+        "outside decoy\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_finalize_rejects_a_tombstone_leaf_symlink_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().expect("tempdir");
+    let path = root.path().join("delete.txt");
+    let outside = root.path().join("outside.txt");
+    let displaced_tombstone = root.path().join("displaced-tombstone");
+    fs::write(&path, "delete me\n").expect("delete file");
+    fs::write(&outside, "outside\n").expect("outside file");
+    let target = resolve(root.path(), "delete.txt");
+    let plan = delete_plan(&target, "delete me\n");
+    let committer = FileChangeCommitter;
+    let mut journal = committer
+        .prepare_delete("transaction-finalize-leaf-race", &target, &plan, 46)
+        .expect("prepare delete");
+    committer
+        .commit(
+            "transaction-finalize-leaf-race",
+            &target,
+            &plan,
+            47,
+            Some(&mut journal),
+        )
+        .expect("tombstone target");
+
+    fs::rename(&journal.tombstone_path, &displaced_tombstone).expect("displace tombstone");
+    symlink(&outside, &journal.tombstone_path).expect("replace tombstone with symlink");
+    assert_code(
+        committer.finalize_delete(&target, &mut journal, 48),
+        FileChangeErrorCode::SymlinkForbidden,
+    );
+    assert_eq!(journal.state, FileChangeDeleteJournalState::Tombstoned);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "outside\n");
+    assert_eq!(
+        fs::read_to_string(&displaced_tombstone).unwrap(),
+        "delete me\n"
+    );
 }
 
 #[test]
@@ -755,7 +1114,7 @@ fn persistent_shapes_reject_unknown_journal_fields() {
         .expect("redirected journal");
     redirected.tombstone_path = decoy.to_string_lossy().to_string();
     assert_code(
-        FileChangeCommitter.finalize_delete(&mut redirected, 3),
+        FileChangeCommitter.finalize_delete(&target, &mut redirected, 3),
         FileChangeErrorCode::IllegalFieldCombination,
     );
     assert_eq!(fs::read_to_string(decoy).unwrap(), "base");

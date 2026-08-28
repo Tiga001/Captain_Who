@@ -1227,6 +1227,8 @@ export const frFRTranslations = {
   'agent.patch.failure.notAFile': "Le chemin cible n'est pas un fichier.",
   'agent.patch.failure.readFailed': "Le fichier cible n'a pas pu être lu en toute sécurité.",
   'agent.patch.failure.invalidRequest': "La demande de modification de fichier n'est pas valide.",
+  'agent.patch.failure.outcomeUnknown':
+    "Le résultat n'a pas pu être confirmé. Vérifiez l'état actuel du fichier et ne réessayez pas directement.",
   'agent.editSummary.title': 'Modifier le résumé',
   'agent.editSummary.editedFiles': '{count} fichiers modifiés',
   'agent.editSummary.lineStats': 'Changements de ligne',
