@@ -67,7 +67,7 @@ function message(toolCalls: AgentToolCall[]): ChatMessage {
       toolCalls,
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: toolCalls.map((toolCall) => ({
         id: `timeline-${toolCall.id}`,
         type: 'tool_call' as const,

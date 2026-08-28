@@ -249,10 +249,7 @@ export class BrowserFileBroker {
       input.paths.length > this.maxFilesPerSelection ||
       input.paths.some(
         (path) =>
-          typeof path !== 'string' ||
-          path.length < 1 ||
-          path.length > 8_192 ||
-          !isAbsolute(path)
+          typeof path !== 'string' || path.length < 1 || path.length > 8_192 || !isAbsolute(path)
       )
     ) {
       throw new BrowserFileBrokerError('browser.file.invalid_file')

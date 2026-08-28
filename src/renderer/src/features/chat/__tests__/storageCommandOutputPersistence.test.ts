@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import type { AgentCommandArtifactObservation, AgentProposedAction } from '@mycopilot/protocol'
-import type { ChatMessage } from '../chatTypes'
+import type { ChatAgentRunView, ChatMessage } from '../chatTypes'
 
 const storage = vi.hoisted(() => ({
   loadConversation: vi.fn(),
@@ -12,7 +12,8 @@ vi.mock('../../../host/hostClient', () => ({
 }))
 
 const { loadConversation, saveChatMessageState } = await import('../../storage/storageClient')
-const { parsePersistedAgentRun } = await import('../../storage/persistedAgentRun')
+const { parsePersistedAgentRun, stringifyPersistedAgentRun } =
+  await import('../../storage/persistedAgentRun')
 
 const artifactCoverage = {
   rootsScanned: 1,
@@ -227,7 +228,7 @@ it('keeps live command output transient while persisting the final tool result',
         }
       ],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       commandOutputPreviews: {
         'command-call': {
           callId: 'command-call',
@@ -292,7 +293,7 @@ it('preserves a multiline command exactly through persistence and hydration', as
       ],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [
         {
           id: 'tool-call-multiline-command-call',
@@ -370,7 +371,7 @@ it('rejects a nonterminal command session in durable chat state', async () => {
           ],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: [{ id: 'tool-call-command-call', type: 'tool_call', callId: 'command-call' }],
           commandSessions: {
             'command-call': {
@@ -452,7 +453,7 @@ it('persists and reloads only immutable command terminal metadata', async () => 
         }
       ],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       commandOutputPreviews: {
         'command-call': {
           callId: 'command-call',
@@ -611,7 +612,7 @@ it('persists settled Skill installation activity across a conversation reload', 
       toolResults: [],
       approvals: [],
       skillInstallations: [skillInstallation],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: []
     }
   }
@@ -665,14 +666,44 @@ function currentStoredRun(overrides: Record<string, unknown> = {}) {
     webSearchActivities: [],
     readActivities: [],
     approvals: [],
-    diffs: [],
-    fileDrafts: [],
+    fileChangeProposals: [],
+    fileChanges: [],
     mcpInvocations: [],
     messageStreamCheckpoints: {},
     timeline: [],
     ...overrides
   }
 }
+
+it('keeps FileChange source and Diff text out of ordinary Renderer persistence', () => {
+  const canary = 'FILE_CHANGE_PRIVATE_CANARY_4f80d20e'
+  const proposal = {
+    schemaVersion: 1 as const,
+    id: 'file-change-current',
+    transactionId: 'file-change-transaction-current',
+    operation: 'update' as const,
+    updateStrategy: null,
+    filePath: 'README.md',
+    inlineDiff: { patch: `@@ -1 +1 @@\n-old\n+${canary}`, truncated: false },
+    baseRevision: 'content-sha256-v1:current',
+    summary: 'Update README',
+    additions: 1,
+    deletions: 1,
+    lineCount: 1,
+    byteCount: canary.length,
+    approvalStatus: 'required' as const
+  }
+  const run = currentStoredRun({
+    approvals: [{ type: 'file_change', fileChange: proposal }],
+    fileChangeProposals: [proposal]
+  }) as ChatAgentRunView
+
+  const encoded = stringifyPersistedAgentRun(run)
+  expect(encoded).not.toContain(canary)
+  const persisted = JSON.parse(encoded ?? '')
+  expect(persisted.fileChangeProposals).toEqual([])
+  expect(persisted.approvals).toEqual([])
+})
 
 it('persists and restores a safe model request interruption without provider diagnostics', async () => {
   const message: ChatMessage = {
@@ -690,7 +721,7 @@ it('persists and restores a safe model request interruption without provider dia
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [],
       interruption: { reason: 'service_connection_failed' }
     }
@@ -1134,7 +1165,7 @@ it('persists the current safe MCP projection and excludes its approval payload',
       toolCalls: [],
       toolResults: [],
       approvals: [storedMcpApprovalAction(callId)],
-      diffs: [],
+      fileChangeProposals: [],
       mcpInvocations: [
         {
           ...runningMcpInvocation(),
@@ -1191,7 +1222,7 @@ it('excludes Host-owned built-in activation approval anchors and recovers them o
       ],
       toolResults: [],
       approvals: [action],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [
         {
           id: `tool-call-${action.approval.callId}`,
@@ -1239,7 +1270,7 @@ it('excludes process-owned browser risk approvals without deleting the original 
       ],
       toolResults: [],
       approvals: [action],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [
         {
           id: `tool-call-${action.approval.callId}`,

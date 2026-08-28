@@ -71,7 +71,7 @@ export interface ChatWebSearchActivity {
 
 export type ChatReadActivityKind = 'file' | 'image' | 'word' | 'presentation' | 'spreadsheet'
 
-export type ChatFileWritePreview = Omit<
+export type ChatFileChangePreview = Omit<
   AgentFileChangePreview,
   'contentDelta' | 'contentOffsetBytes'
 > & {
@@ -224,9 +224,9 @@ export interface ChatAgentRunView {
   approvals: AgentProposedAction[]
   /** Presentation-safe approval history retained after settlement for the chat Timeline. */
   skillInstallations?: ChatSkillInstallationView[]
-  diffs: AgentFileChangeProposal[]
-  fileDrafts?: AgentFileChangeSnapshot[]
-  fileWritePreviews?: ChatFileWritePreview[]
+  fileChangeProposals: AgentFileChangeProposal[]
+  fileChanges?: AgentFileChangeSnapshot[]
+  fileChangePreviews?: ChatFileChangePreview[]
   /** Ephemeral live process output. Final ToolResults remain the durable source of truth. */
   commandOutputPreviews?: Record<string, ChatCommandOutputPreview>
   /**

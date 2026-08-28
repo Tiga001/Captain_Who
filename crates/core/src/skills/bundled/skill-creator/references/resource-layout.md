@@ -57,4 +57,3 @@ available through the platform contract. If the workflow works clearly without a
 Use UTF-8 text, portable relative paths, and regular files. Do not use symlinks, path traversal,
 special files, or generated dependency trees. Never treat a package revision as publisher identity
 or permission; it proves content identity only.
-

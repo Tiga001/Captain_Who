@@ -400,7 +400,7 @@ fn next_turn_loads_backend_trace_and_never_parses_agent_run_json() {
             unread_at: None,
         })
         .unwrap();
-    let mut trace = completed_trace("conversation-history", "assistant-history");
+    let mut trace = completed_trace("conversation-history", "assistant-history", 18);
     trace.items.clear();
     storage
         .replace_conversation_turn_trace(&trace, 1, 2)
@@ -586,7 +586,7 @@ fn terminal_assistant_without_trace_is_rejected_and_current_failed_trace_is_acce
     assert!(error.contains("conversation_history_corrupt"));
     assert!(!error.contains("Legacy final answer"));
 
-    let mut failed_trace = completed_trace("conversation-legacy", "assistant-error");
+    let mut failed_trace = completed_trace("conversation-legacy", "assistant-error", 18);
     failed_trace.items.clear();
     failed_trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
     failed_trace.terminal_error = Some("permission denied".to_string());
@@ -603,7 +603,7 @@ fn terminal_assistant_without_trace_is_rejected_and_current_failed_trace_is_acce
 
 #[test]
 fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
-    let mut trace = completed_trace("conversation-interrupted", "assistant-interrupted");
+    let mut trace = completed_trace("conversation-interrupted", "assistant-interrupted", 18);
     trace.items.clear();
     trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
     let conversation = ChatConversationRecord {
@@ -637,7 +637,7 @@ fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
 
 #[test]
 fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace() {
-    let trace = completed_trace("conversation-exact-history", "assistant-exact-history");
+    let trace = completed_trace("conversation-exact-history", "assistant-exact-history", 19);
     let runtime_call_id = history_call_id();
     let model_items = vec![
         mycopilot_core::ConversationModelContextItem {
@@ -657,10 +657,12 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
             tool_call_id: None,
             tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
                 id: runtime_call_id.clone(),
-                name: "write_file".to_string(),
+                name: "apply_patch".to_string(),
                 args: json!({
+                    "action": "apply",
+                    "operation": "create",
                     "filePath": "src/history.rs",
-                    "mode": "create",
+                    "observationId": "fobs_exact_history",
                     "content": "EXACT_WRITE_CONTENT"
                 }),
                 provider_identity: mycopilot_core::AgentProviderToolCallIdentity {

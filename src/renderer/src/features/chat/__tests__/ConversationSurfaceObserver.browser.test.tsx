@@ -161,7 +161,7 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
             }
           ],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           activatedSkills: [
             {
               id: skillId,
@@ -191,7 +191,7 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
               ]
             }
           },
-          fileDrafts: [
+          fileChanges: [
             {
               schemaVersion: 1,
               transactionId: 'draft-child',
@@ -256,6 +256,7 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
     transactionId: 'draft-child',
     patch: '+export const child = true',
     offset: 0,
+    nextOffset: null,
     truncated: false
   })
   const screen = await render(
@@ -302,7 +303,10 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
   expect(screen.container.querySelector('.agent-activity--run-command')).not.toBeNull()
   expect(screen.container.querySelector('.mcp-tool-activity')).not.toBeNull()
   expect(screen.container.querySelector('.office-artifact-card')).not.toBeNull()
-  await screen.container.querySelector<HTMLButtonElement>('.file-write-activity__toggle')?.click()
+  await screen.container
+    .querySelector<HTMLButtonElement>('.agent-activity--file-change > summary')
+    ?.click()
+  await screen.container.querySelector<HTMLButtonElement>('.file-change-activity__toggle')?.click()
   await expect
     .element(screen.getByText('+export const child = true', { exact: true }))
     .toBeVisible()

@@ -5,16 +5,16 @@ import type {
   AgentProposedAction,
   AgentToolCall
 } from '@mycopilot/protocol'
-import type { ChatFileWritePreview, ChatSkillInstallationView } from '../chat/chatTypes'
+import type { ChatFileChangePreview, ChatSkillInstallationView } from '../chat/chatTypes'
 import { getAgentActionId } from './agentActionUtils'
 import { withActionApprovalStatus } from './actionProjection'
 import { upsertById } from './agentEventReducerShared'
 
-export function upsertFileWritePreview(
-  previews: ChatFileWritePreview[],
+export function upsertFileChangePreview(
+  previews: ChatFileChangePreview[],
   incoming: AgentFileChangePreview,
   receivedAt: number
-): ChatFileWritePreview[] {
+): ChatFileChangePreview[] {
   const existing = previews.find((preview) => preview.previewId === incoming.previewId)
   const { contentDelta, contentOffsetBytes, ...snapshot } = incoming
   let content = existing?.content ?? ''
@@ -39,9 +39,9 @@ export function upsertFileWritePreview(
 }
 
 export function bindFileChangePreviewsToCall(
-  previews: ChatFileWritePreview[],
+  previews: ChatFileChangePreview[],
   call: AgentToolCall
-): ChatFileWritePreview[] {
+): ChatFileChangePreview[] {
   if (call.tool !== 'apply_patch') return previews
   const args =
     call.args && typeof call.args === 'object' && !Array.isArray(call.args)

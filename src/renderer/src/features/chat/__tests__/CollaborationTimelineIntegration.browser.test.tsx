@@ -98,7 +98,7 @@ function conversation(): ChatConversation {
           ],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: [
             {
               id: 'trace-message-0',

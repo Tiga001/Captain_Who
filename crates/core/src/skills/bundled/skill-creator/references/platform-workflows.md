@@ -12,8 +12,10 @@ The discoverable location is:
 ```
 
 Use a normal workspace command to create the directory before writing files. Quote the validated
-literal path and do not combine directory creation with unrelated commands. Then use ordinary file
-editing for `SKILL.md` and its resources.
+literal path and do not combine directory creation with unrelated commands. Then call `read_file`
+on each exact target to obtain its current observation and use `apply_patch`: create only from a
+missing observation, update only from an existing observation, and use Staged actions for long
+resources. Create is no-clobber; never use a command, redirection, or script as an alternate writer.
 
 Workspace Skill directories and files must be regular, non-symlink paths. `SKILL.md` must use the
 exact filename, UTF-8 text, YAML frontmatter, and non-empty Markdown instructions.
@@ -42,7 +44,8 @@ happen in the parent; behavioral review happens in a fresh child Run.
    The destination itself must be absent, while its parent `skill-creator-tmp-01` must already
    exist.
 
-5. Adapt the starter into `.agents/skills/<skill-directory>/` with ordinary file editing.
+5. Adapt the starter into `.agents/skills/<skill-directory>/` with exact-path `read_file` followed
+   by `apply_patch` Direct or Staged actions.
 6. Delete only the recorded temporary files, then remove the now-empty task directory.
 
 Do not materialize directly into `.agents`: the Host rejects reserved destination components. Do
@@ -132,8 +135,9 @@ reading files and recreating their text with file-writing tools.
    require the staged path set to equal the manifest list, validate each staged file against its
    manifest digest, and use `cmp` for every source/destination pair. A nonzero or ambiguous result
    is failure, even if command output is truncated.
-9. Apply intentional edits only inside staging. Use patching for existing files and file creation
-   only for genuinely new resources; never reconstruct unchanged source files.
+9. Apply intentional edits only inside staging. Read each exact target first, then use
+   `apply_patch` update for existing files and create only for genuinely new resources; use Staged
+   actions for long content. Never reconstruct unchanged source files.
 10. Immediately before publish, repeat the non-symlink checks for the task directory, staged child,
     `.agents`, and `.agents/skills`; repeat the same-filesystem check; and again require the final
     child to satisfy both `! -e` and `! -L`. Then use the guarded no-clobber command below. If this

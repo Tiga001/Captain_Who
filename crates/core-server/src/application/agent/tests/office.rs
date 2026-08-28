@@ -1195,7 +1195,10 @@ fn automatic_office_authorization_failure_returns_paired_structured_tool_result(
     assert!(!result.ok);
     assert_eq!(result.call_id, "office-authorization-denied");
     assert_eq!(result.tool, "office_spreadsheet");
-    assert_eq!(result.result.as_ref().unwrap()["type"], "file_write_policy");
+    assert_eq!(
+        result.result.as_ref().unwrap()["type"],
+        "file_change_policy"
+    );
     assert_eq!(
         result.result.as_ref().unwrap()["code"],
         "explicitApprovalRequired"
@@ -1628,7 +1631,7 @@ fn rejected_office_action_publishes_exactly_one_paired_tool_result_event() {
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
     assert!(
-        super::super::approval::publish_inline_file_write_tool_result(
+        super::super::approval::publish_inline_file_change_tool_result(
             &notifications,
             "run-office-rejected-event",
             &action,
@@ -1639,7 +1642,7 @@ fn rejected_office_action_publishes_exactly_one_paired_tool_result_event() {
     // An approved Office action is published by its asynchronous executor. The inline path must
     // refuse it even if future control-flow changes accidentally reach this helper.
     assert!(
-        !super::super::approval::publish_inline_file_write_tool_result(
+        !super::super::approval::publish_inline_file_change_tool_result(
             &notifications,
             "run-office-rejected-event",
             &action,

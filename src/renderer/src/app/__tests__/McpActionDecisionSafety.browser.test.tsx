@@ -105,7 +105,7 @@ function Harness({ action }: { action: AgentProposedAction }) {
             toolCalls: [],
             toolResults: [],
             approvals: [action],
-            diffs: [],
+            fileChangeProposals: [],
             timeline: []
           }
         }

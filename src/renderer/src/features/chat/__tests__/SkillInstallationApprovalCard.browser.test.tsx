@@ -81,7 +81,7 @@ describe('SkillInstallationApprovalCard', () => {
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: []
         }}
       />
@@ -175,7 +175,7 @@ describe('SkillInstallationApprovalCard', () => {
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: [],
           skillInstallations: [{ action: expiredAction, status: 'waiting_for_approval' }]
         }}
@@ -194,7 +194,7 @@ describe('SkillInstallationApprovalCard', () => {
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: []
     }
     const inspection = await render(
@@ -290,7 +290,7 @@ describe('SkillInstallationApprovalCard', () => {
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: []
         }}
       />

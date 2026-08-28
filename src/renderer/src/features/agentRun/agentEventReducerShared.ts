@@ -15,9 +15,9 @@ function createAgentRun(
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
-    fileDrafts: [],
-    fileWritePreviews: [],
+    fileChangeProposals: [],
+    fileChanges: [],
+    fileChangePreviews: [],
     messageStreamCheckpoints: {},
     webSearchActivities: [],
     readActivities: [],
@@ -50,12 +50,14 @@ export function ensureAgentRun(
     ...(Array.isArray(currentRun.skillInstallations)
       ? { skillInstallations: currentRun.skillInstallations }
       : {}),
-    diffs: Array.isArray(currentRun.diffs) ? currentRun.diffs : [],
+    fileChangeProposals: Array.isArray(currentRun.fileChangeProposals)
+      ? currentRun.fileChangeProposals
+      : [],
     timeline: Array.isArray(currentRun.timeline) ? currentRun.timeline : [],
     readActivities: Array.isArray(currentRun.readActivities) ? currentRun.readActivities : [],
-    fileDrafts: Array.isArray(currentRun.fileDrafts) ? currentRun.fileDrafts : [],
-    fileWritePreviews: Array.isArray(currentRun.fileWritePreviews)
-      ? currentRun.fileWritePreviews
+    fileChanges: Array.isArray(currentRun.fileChanges) ? currentRun.fileChanges : [],
+    fileChangePreviews: Array.isArray(currentRun.fileChangePreviews)
+      ? currentRun.fileChangePreviews
       : [],
     messageStreamCheckpoints:
       currentRun.messageStreamCheckpoints &&

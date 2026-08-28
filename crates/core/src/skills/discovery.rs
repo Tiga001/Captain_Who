@@ -7,6 +7,7 @@ use super::model::{
 use super::prepared::PreparedSkillPackage;
 use super::service::finalize_catalog;
 use super::source::WorkspaceSkillSource;
+use super::tool_reference_lint::unsupported_model_tool_reference;
 use super::workspace::{
     percent_encode, relative_display, resolve_workspace_skills_root, validate_skill_directory_name,
     ByteBudget, ScanBudget, WorkspaceRootError, WorkspaceSkillsRoot, MAX_SKILL_CATALOG_BYTES,
@@ -139,6 +140,39 @@ pub(super) fn list_workspace_source(
                 SkillDiagnosticCode::DefaultedName,
                 SkillDiagnosticSeverity::Warning,
                 format!("Skill frontmatter has no name; using directory name `{directory_name}`."),
+            ));
+        }
+
+        if let Some(tool_name) = unsupported_model_tool_reference(package.instructions()) {
+            diagnostics.push(diagnostic(
+                &skill_file,
+                SkillDiagnosticCode::UnsupportedToolReference,
+                SkillDiagnosticSeverity::Warning,
+                format!(
+                    "Skill instructions reference unsupported model tool `{tool_name}`; update the Skill to use `apply_patch`. The instructions were not rewritten."
+                ),
+            ));
+        }
+        for resource in package.resources() {
+            if matches!(
+                resource.descriptor().kind(),
+                super::model::SkillResourceKind::Asset | super::model::SkillResourceKind::Script
+            ) {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(resource.bytes()) else {
+                continue;
+            };
+            let Some(tool_name) = unsupported_model_tool_reference(text) else {
+                continue;
+            };
+            diagnostics.push(diagnostic(
+                &skill_directory.join(resource.descriptor().path()),
+                SkillDiagnosticCode::UnsupportedToolReference,
+                SkillDiagnosticSeverity::Warning,
+                format!(
+                    "Skill resource references unsupported model tool `{tool_name}`; update the Skill to use `apply_patch`. The resource was not rewritten."
+                ),
             ));
         }
 
@@ -626,6 +660,102 @@ mod tests {
             catalog.diagnostics()[0].severity(),
             SkillDiagnosticSeverity::Warning
         );
+    }
+
+    #[test]
+    fn workspace_skill_reports_retired_model_tool_without_rewriting_or_hiding_it() {
+        let workspace = tempdir().unwrap();
+        let contents = concat!(
+            "---\n",
+            "name: retired-writer\n",
+            "description: Exercises unsupported tool diagnostics.\n",
+            "---\n",
+            "# Instructions\n",
+            "Read the target, then call `write_file` with the replacement.\n",
+        );
+        let skill_path = write_skill(workspace.path(), "retired-writer", contents.as_bytes());
+        let service = SkillsService::new();
+
+        let catalog = service
+            .list_workspace("workspace", workspace.path())
+            .unwrap();
+
+        assert_eq!(catalog.skills().len(), 1);
+        let diagnostic = catalog
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code() == SkillDiagnosticCode::UnsupportedToolReference)
+            .expect("unsupported model tool reference should be diagnosed");
+        assert_eq!(diagnostic.severity(), SkillDiagnosticSeverity::Warning);
+        assert!(
+            diagnostic
+                .path()
+                .ends_with(".agents/skills/retired-writer/SKILL.md"),
+            "unexpected diagnostic location: {}",
+            diagnostic.path()
+        );
+        assert!(diagnostic.message().contains("`write_file`"));
+        assert!(diagnostic.message().contains("`apply_patch`"));
+        assert_eq!(fs::read_to_string(skill_path).unwrap(), contents);
+
+        let selection = catalog.skills()[0].selection();
+        let resolved = service
+            .resolve_workspace_skill("workspace", workspace.path(), &selection)
+            .unwrap();
+        assert!(resolved.instructions().contains("`write_file`"));
+    }
+
+    #[test]
+    fn workspace_skill_reports_retired_model_tool_in_revision_bound_resources() {
+        let workspace = tempdir().unwrap();
+        let skill_directory = workspace
+            .path()
+            .join(AGENTS_DIRECTORY)
+            .join(SKILLS_DIRECTORY)
+            .join("resource-lint");
+        fs::create_dir_all(skill_directory.join("references")).unwrap();
+        fs::write(
+            skill_directory.join(SKILL_FILE_NAME),
+            b"---\nname: resource-lint\ndescription: Resource lint fixture.\n---\n# Instructions\nRead the reference.\n",
+        )
+        .unwrap();
+        let reference = skill_directory.join("references/workflow.md");
+        let reference_contents = b"Call `write_file` to publish the result.\n";
+        fs::write(&reference, reference_contents).unwrap();
+
+        let catalog = SkillsService::new()
+            .list_workspace("workspace", workspace.path())
+            .unwrap();
+
+        let diagnostic = catalog
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code() == SkillDiagnosticCode::UnsupportedToolReference)
+            .expect("resource tool reference should be diagnosed");
+        assert!(diagnostic.path().ends_with("references/workflow.md"));
+        assert!(diagnostic.message().contains("`apply_patch`"));
+        assert_eq!(fs::read(reference).unwrap(), reference_contents);
+    }
+
+    #[test]
+    fn workspace_skill_lint_does_not_confuse_builder_write_file_apis_with_model_tools() {
+        let workspace = tempdir().unwrap();
+        let contents = concat!(
+            "---\n",
+            "name: builder-api\n",
+            "description: Uses a current artifact builder API.\n",
+            "---\n",
+            "# Instructions\n",
+            "Export with `workbook.xlsx.writeFile(outputPath)`.\n",
+        );
+        write_skill(workspace.path(), "builder-api", contents.as_bytes());
+
+        let catalog = SkillsService::new()
+            .list_workspace("workspace", workspace.path())
+            .unwrap();
+
+        assert_eq!(catalog.skills().len(), 1);
+        assert!(catalog.diagnostics().is_empty());
     }
 
     #[test]

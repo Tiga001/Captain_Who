@@ -26,6 +26,7 @@ mod script_runtime;
 mod service;
 mod source;
 mod source_resolution;
+mod tool_reference_lint;
 mod workspace;
 
 pub(crate) use digest::activation_revision_for_identities;

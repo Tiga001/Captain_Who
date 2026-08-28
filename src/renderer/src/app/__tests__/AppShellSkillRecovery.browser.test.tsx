@@ -85,8 +85,10 @@ const testState = vi.hoisted(() => ({
   projects: [{ id: 'project-a', name: 'Project A', path: '/workspace/a', createdAt: 1 }]
 }))
 
+const frontendConfig = vi.hoisted(() => ({ t: (key: string) => key }))
+
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => frontendConfig
 }))
 
 vi.mock('../../config/ModelSettingsProvider', () => ({
@@ -170,14 +172,14 @@ vi.mock('../../features/agent/agentClient', () => ({
   getContextWindowSnapshot: testState.getContextWindowSnapshot,
   getProviderTransitionStatus: testState.getProviderTransitionStatus,
   getAgentCommandSession: testState.getAgentCommandSession,
-  getAgentFileWriteDiff: vi.fn(),
+  getAgentFileChangeDiff: vi.fn(),
   listAgentCommandSessions: testState.listAgentCommandSessions,
   listPendingAgentActions: testState.listPendingAgentActions,
   onAgentEvent: testState.onAgentEvent,
   onProviderTransition: testState.onProviderTransition,
   preflightProviderTransition: testState.preflightProviderTransition,
   rejectAgentAction: vi.fn(),
-  readAgentFileDraft: vi.fn(),
+  readAgentFileChange: vi.fn(),
   rewriteConversationTurn: testState.rewriteConversationTurn,
   startConversationTurn: testState.startConversationTurn,
   startProviderTransition: testState.startProviderTransition,
@@ -688,7 +690,7 @@ function commitSuccessfulRewrite(
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: []
         }
       },
@@ -813,7 +815,7 @@ function storedConversation(): ChatConversation {
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: [],
           activatedSkills: [
             {
@@ -857,7 +859,7 @@ function storedConversationWithRun(
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: []
         }
       }
@@ -1307,7 +1309,7 @@ describe('automation conversation navigation', () => {
         toolCalls: [],
         toolResults: [],
         approvals: [],
-        diffs: [],
+        fileChangeProposals: [],
         timeline: []
       }
     }

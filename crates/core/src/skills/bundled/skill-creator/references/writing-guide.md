@@ -64,4 +64,3 @@ When editing an existing Skill:
 - remove stale examples and links;
 - keep user authorization separate from workflow advice;
 - state unsupported behavior instead of inventing a workaround.
-

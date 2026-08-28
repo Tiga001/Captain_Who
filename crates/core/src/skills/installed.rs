@@ -18,6 +18,7 @@ use super::resource_runtime::{
 };
 use super::service::finalize_catalog;
 use super::source::SkillSource;
+use super::tool_reference_lint::unsupported_model_tool_reference;
 use super::workspace::ByteBudget;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,13 +64,37 @@ impl InstalledSkillSource {
         &self,
         receipt: &InstalledSkillReceipt,
         byte_budget: &mut ByteBudget,
-    ) -> Result<ResolvedSkillPackage, InstalledPackageLoadError> {
+    ) -> Result<InstalledCatalogPackage, InstalledPackageLoadError> {
         let snapshot = self
             .store
             .load_package_with_budget(&receipt.package, byte_budget)
             .map_err(|error| store_package_error(error, &receipt.package.relative_path))?;
-        build_resolved_package(&self.source_id, receipt, snapshot)
-            .map_err(InstalledPackageLoadError::Invalid)
+        let mut model_readable_resources = Vec::new();
+        for descriptor in snapshot.resources.entries() {
+            if matches!(
+                descriptor.kind(),
+                super::model::SkillResourceKind::Asset | super::model::SkillResourceKind::Script
+            ) {
+                continue;
+            }
+            // Resource lint is advisory catalog metadata. Catalog eligibility is
+            // intentionally manifest-only, so a resource that cannot be read or
+            // verified here must not hide an otherwise valid descriptor. The
+            // authoritative resolve path still loads and verifies every
+            // revision-bound resource before activation.
+            let Ok(bytes) = self.store.load_resource(&receipt.package, descriptor) else {
+                continue;
+            };
+            if std::str::from_utf8(&bytes).is_ok() {
+                model_readable_resources.push((descriptor.path().to_string(), bytes));
+            }
+        }
+        let package = build_resolved_package(&self.source_id, receipt, snapshot)
+            .map_err(InstalledPackageLoadError::Invalid)?;
+        Ok(InstalledCatalogPackage {
+            package,
+            model_readable_resources,
+        })
     }
 
     #[cfg(test)]
@@ -133,7 +158,41 @@ impl SkillSource for InstalledSkillSource {
         let mut package_budget = self.store.package_catalog_budget();
         for receipt in index.receipts {
             match self.load_package_for_catalog(&receipt, &mut package_budget) {
-                Ok(package) => skills.push(package.descriptor().clone()),
+                Ok(loaded) => {
+                    let package = loaded.package;
+                    let location = match package.descriptor().provenance() {
+                        SkillProvenance::Installed { relative_path, .. } => relative_path.clone(),
+                        _ => "installations".to_string(),
+                    };
+                    if let Some(tool_name) =
+                        unsupported_model_tool_reference(package.instructions())
+                    {
+                        diagnostics.push(SkillDiagnostic::new(
+                            SkillDiagnosticCode::UnsupportedToolReference,
+                            SkillDiagnosticSeverity::Warning,
+                            format!(
+                                "Skill instructions reference unsupported model tool `{tool_name}`; update the Skill to use `apply_patch`. The installed package was not rewritten."
+                            ),
+                            location.clone(),
+                        ));
+                    }
+                    for (resource_path, bytes) in loaded.model_readable_resources {
+                        let text = std::str::from_utf8(&bytes)
+                            .expect("catalog resource collection retains only UTF-8 bytes");
+                        let Some(tool_name) = unsupported_model_tool_reference(text) else {
+                            continue;
+                        };
+                        diagnostics.push(SkillDiagnostic::new(
+                            SkillDiagnosticCode::UnsupportedToolReference,
+                            SkillDiagnosticSeverity::Warning,
+                            format!(
+                                "Skill resource references unsupported model tool `{tool_name}`; update the Skill to use `apply_patch`. The installed package was not rewritten."
+                            ),
+                            format!("{location}/{resource_path}"),
+                        ));
+                    }
+                    skills.push(package.descriptor().clone());
+                }
                 Err(error) => {
                     let issue = error.into_issue();
                     if issue.code == SkillDiagnosticCode::CatalogTooLarge {
@@ -273,6 +332,11 @@ impl SkillSource for InstalledSkillSource {
             reader,
         })
     }
+}
+
+struct InstalledCatalogPackage {
+    package: ResolvedSkillPackage,
+    model_readable_resources: Vec<(String, Vec<u8>)>,
 }
 
 struct InstalledSkillResourceReader {
@@ -924,6 +988,70 @@ mod tests {
         assert_eq!(catalog.skills().len(), 1);
         assert!(catalog.diagnostics().is_empty());
         assert!(!catalog.truncated());
+    }
+
+    #[test]
+    fn installed_skill_reports_retired_model_tool_without_rewriting_or_hiding_it() {
+        let fixture = tempdir().unwrap();
+        let source = skill_document(
+            "retired-writer",
+            "Read the target, then call `write_file` with the replacement.",
+        );
+        install(fixture.path(), INSTALLATION_ID, source.as_bytes());
+        let service = SkillsService::new()
+            .with_installed_source(fixture.path())
+            .unwrap();
+
+        let catalog = service.list().unwrap();
+
+        assert_eq!(catalog.skills().len(), 1);
+        let diagnostic = catalog
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code() == SkillDiagnosticCode::UnsupportedToolReference)
+            .expect("unsupported model tool reference should be diagnosed");
+        assert_eq!(diagnostic.severity(), SkillDiagnosticSeverity::Warning);
+        assert!(diagnostic.path().ends_with("/SKILL.md"));
+        assert!(diagnostic.message().contains("`write_file`"));
+        assert!(diagnostic.message().contains("`apply_patch`"));
+
+        let resolved = service.resolve(&catalog.skills()[0].selection()).unwrap();
+        assert!(resolved.instructions().contains("`write_file`"));
+        assert_eq!(resolved.source_text(), source);
+    }
+
+    #[test]
+    fn installed_skill_reports_retired_model_tool_in_verified_resources() {
+        let fixture = tempdir().unwrap();
+        let source = skill_document("resource-lint", "Read the workflow reference.");
+        let reference = b"Use `write_file` to publish the final output.\n";
+        let (format_version, revision, package_root) = write_manifest_package(
+            fixture.path(),
+            source.as_bytes(),
+            &[("references/workflow.md", reference)],
+        );
+        write_receipt_value(
+            fixture.path(),
+            INSTALLATION_ID,
+            &receipt_json_with_format(INSTALLATION_ID, format_version, &revision),
+        );
+        let service = SkillsService::new()
+            .with_installed_source(fixture.path())
+            .unwrap();
+
+        let catalog = service.list().unwrap();
+
+        let diagnostic = catalog
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code() == SkillDiagnosticCode::UnsupportedToolReference)
+            .expect("verified resource tool reference should be diagnosed");
+        assert!(diagnostic.path().ends_with("references/workflow.md"));
+        assert!(diagnostic.message().contains("`apply_patch`"));
+        assert_eq!(
+            fs::read(package_root.join("references/workflow.md")).unwrap(),
+            reference
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::file_write_permissions::{
+use super::file_change_permissions::{
     bind_direct_execution_to_input, seed_durable_direct_file_change_owner,
 };
 use super::*;

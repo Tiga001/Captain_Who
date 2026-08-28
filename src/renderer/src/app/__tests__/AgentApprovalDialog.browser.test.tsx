@@ -7,13 +7,16 @@ import '../../features/chat/ChatConversationPage.approvals.css'
 
 const translations: Record<string, string> = {
   'agent.approval.dialog.approve': '批准',
-  'agent.approval.dialog.approvePatchRemember': '本次运行记住批准',
+  'agent.approval.dialog.approveFileChangeRemember': '本次运行记住批准',
   'agent.approval.dialog.commandPolicyHint': '确认后执行',
-  'agent.approval.dialog.diffPolicyHint': '完整审阅后执行',
-  'agent.approval.dialog.diffTitle': '修改文件',
+  'agent.approval.dialog.fileChangePolicyHint': '完整审阅后执行',
+  'agent.approval.dialog.fileChangeTitle': '修改文件',
   'agent.approval.dialog.reject': '拒绝',
   'agent.approval.dialog.rejectPlaceholder': '说明拒绝原因',
   'agent.approval.dialog.toolTitle': '运行 {tool}',
+  'agent.fileChange.togglePreview': '文件修改差异分页',
+  'files.pdf.nextPage': '下一页',
+  'files.pdf.previousPage': '上一页',
   'files.preview.loading': '正在加载完整差异',
   'files.preview.error': '无法加载完整差异'
 }
@@ -117,6 +120,7 @@ describe('AgentApprovalDialog FileChange approval', () => {
     const reject = screen.getByRole('button', { name: '拒绝' })
     await expect.element(approve).toBeDisabled()
     await expect.element(reject).toBeEnabled()
+    await vi.waitFor(() => expect(fileChangeRpc.getDiff).toHaveBeenCalledTimes(1))
     resolveFirst({
       transactionId: action.fileChange.transactionId,
       patch: '+first\n',
@@ -125,20 +129,55 @@ describe('AgentApprovalDialog FileChange approval', () => {
       truncated: true
     })
 
-    await expect.element(screen.getByText(/\+first\n\+second/)).toBeVisible()
+    await expect.element(screen.getByText(/\+first/)).toBeVisible()
+    expect(screen.getByText(/\+second/).query()).toBeNull()
+    await expect.element(screen.getByText('1 / 2')).toBeVisible()
     await expect.element(approve).toBeEnabled()
     expect(fileChangeRpc.getDiff).toHaveBeenNthCalledWith(
       1,
       action.fileChange.transactionId,
       0,
-      50_000
+      50_000,
+      undefined
     )
     expect(fileChangeRpc.getDiff).toHaveBeenNthCalledWith(
       2,
       action.fileChange.transactionId,
       7,
-      50_000
+      50_000,
+      undefined
     )
+
+    await screen.getByRole('button', { name: '下一页' }).click()
+    await expect.element(screen.getByText(/\+second/)).toBeVisible()
+    expect(screen.getByText(/\+first/).query()).toBeNull()
+    await expect.element(screen.getByText('2 / 2')).toBeVisible()
+  })
+
+  it('loads a child staged Diff through its exact observer root conversation', async () => {
+    const action = fileChangeAction(null)
+    fileChangeRpc.getDiff.mockResolvedValue({
+      transactionId: action.fileChange.transactionId,
+      patch: '+reviewed by root\n',
+      offset: 0,
+      nextOffset: null,
+      truncated: false
+    })
+    const screen = await render(
+      <AgentApprovalDialog
+        observerRootConversationId="conversation-root"
+        target={{ action, messageId: 'child-approval' }}
+      />
+    )
+
+    await expect.element(screen.getByText(/reviewed by root/)).toBeVisible()
+    expect(fileChangeRpc.getDiff).toHaveBeenCalledWith(
+      action.fileChange.transactionId,
+      0,
+      50_000,
+      'conversation-root'
+    )
+    await expect.element(screen.getByRole('button', { name: /^1\s*批准$/ })).toBeEnabled()
   })
 
   it('fails closed on an incomplete page chain while leaving rejection available', async () => {

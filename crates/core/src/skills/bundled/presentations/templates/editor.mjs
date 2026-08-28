@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/explicit-function-return-type -- This executable template exposes JavaScript runtime callbacks. */
+
 /**
  * Fixed Managed Editor for an existing PowerPoint presentation.
  *
@@ -25,6 +27,7 @@ await editPresentation({
   destination: output(requiredValue('--output')),
   mode: 'saveAs',
   edit(deck) {
+    void deck
     // BEGIN EDIT REGION
     // Copy stable targets verbatim from the latest `office_presentation` inspect result.
     // Do not invent paths or use positional shape indexes when an inspected id exists.

@@ -315,7 +315,7 @@ export function isPersistableApproval(record: Record<string, unknown>): boolean 
   }
 }
 
-export function isFileDraft(record: Record<string, unknown>): boolean {
+export function isFileChangeSnapshot(record: Record<string, unknown>): boolean {
   const operation = record.operation
   const strategy = record.updateStrategy
   return (

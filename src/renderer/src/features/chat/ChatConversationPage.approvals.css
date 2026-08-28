@@ -57,6 +57,44 @@
   border-radius: var(--mc-radius-lg);
 }
 
+.agent-approval-dialog__file-change-diff {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.agent-approval-dialog__file-change-diff pre {
+  margin: 0;
+  overflow: auto;
+}
+
+.agent-approval-dialog__file-change-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+}
+
+.agent-approval-dialog__file-change-pagination button {
+  display: inline-flex;
+  width: 28px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  color: var(--mc-color-text-secondary);
+  background: transparent;
+  border: 0.5px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-sm);
+  cursor: pointer;
+}
+
+.agent-approval-dialog__file-change-pagination button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .agent-skill-installation-approval__details {
   display: grid;
   margin: 0;

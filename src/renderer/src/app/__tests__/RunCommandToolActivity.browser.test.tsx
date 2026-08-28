@@ -444,7 +444,7 @@ describe('RunCommandToolActivity', () => {
       toolCalls: [call],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [{ id: 'tool-timeline-command', type: 'tool_call', callId: call.id }],
       commandOutputPreviews: {
         [call.id]: {

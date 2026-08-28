@@ -95,8 +95,8 @@ function runningObserver(
       webSearchActivities: [],
       readActivities: [],
       approvals: [],
-      diffs: [],
-      fileDrafts: [],
+      fileChangeProposals: [],
+      fileChanges: [],
       mcpInvocations: [],
       messageStreamCheckpoints: {},
       timeline: []

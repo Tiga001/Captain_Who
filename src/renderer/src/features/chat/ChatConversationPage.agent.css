@@ -854,19 +854,26 @@
   }
 }
 
-.apply-patch-activity__details {
+.agent-activity--file-change {
+  display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
-.apply-patch-activity__item {
+.file-change-activity__details {
+  gap: 6px;
+}
+
+.file-change-activity__item {
   display: grid;
   min-width: 0;
   gap: 2px;
 }
 
-.apply-patch-activity__item-line {
+.file-change-activity__summary,
+.file-change-activity__item-line {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   min-width: 0;
   max-width: 100%;
   gap: 6px;
@@ -874,50 +881,39 @@
   line-height: var(--mc-line-height-relaxed);
 }
 
-.apply-patch-activity__item-line > span {
-  font-size: inherit;
-  font-weight: inherit;
+.file-change-activity__item-line {
+  align-items: baseline;
 }
 
-.apply-patch-activity__reason-toggle {
-  display: inline-grid;
+.file-change-activity__icon {
+  display: inline-flex;
   flex: 0 0 auto;
-  align-self: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  margin: 0 0 0 -4px;
-  place-items: center;
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
   color: var(--mc-color-icon-muted);
-  background: transparent;
-  border: 0;
-  border-radius: var(--mc-radius-sm);
-  cursor: pointer;
 }
 
-.apply-patch-activity__reason-toggle:hover,
-.apply-patch-activity__reason-toggle:focus-visible {
-  color: var(--mc-color-icon-default);
-  background: var(--mc-color-surface-muted);
+.file-change-activity__icon svg,
+.file-change-activity__toggle svg {
+  width: 100%;
+  height: 100%;
+  stroke-width: var(--mc-icon-stroke-medium);
 }
 
-.apply-patch-activity__reason-toggle svg {
-  width: 12px;
-  height: 12px;
-  transition: transform 0.15s ease;
+.file-change-activity__spinner {
+  animation: mc-agent-todo-spin 1s linear infinite;
 }
 
-.apply-patch-activity__reason-toggle[aria-expanded='true'] svg {
-  transform: rotate(180deg);
-}
-
-.apply-patch-activity__path {
+.file-change-activity__path {
+  flex: 0 1 auto;
   min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--mc-color-text-accent) !important;
+  overflow: hidden;
+  color: var(--mc-color-text-accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-button.apply-patch-activity__path {
+button.file-change-activity__path {
   padding: 0;
   border: 0;
   appearance: none;
@@ -928,103 +924,17 @@ button.apply-patch-activity__path {
   text-align: left;
 }
 
-button.apply-patch-activity__path:hover,
-button.apply-patch-activity__path:focus-visible {
+button.file-change-activity__path:hover,
+button.file-change-activity__path:focus-visible {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
-.apply-patch-activity__additions,
-.apply-patch-activity__deletions {
-  flex: 0 0 auto;
-  font-variant-numeric: tabular-nums;
-}
-
-.apply-patch-activity__additions {
-  color: var(--mc-color-diff-addition-text) !important;
-}
-
-.apply-patch-activity__deletions {
-  color: var(--mc-color-diff-deletion-text) !important;
-}
-
-.apply-patch-activity__note {
-  padding-left: 0;
-  color: var(--mc-color-text-danger) !important;
-  font-size: var(--mc-font-size-chat-metadata);
-}
-
-.apply-patch-activity__rejection-reason {
-  margin: 0;
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-chat-metadata);
-  line-height: var(--mc-line-height-relaxed);
-}
-
-.agent-activity--file-write {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
-}
-
-.file-write-activity__details {
-  gap: 6px;
-}
-
-.file-write-activity__item {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.file-write-activity__summary,
-.file-write-activity__item-line {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  max-width: 100%;
-  gap: 6px;
-  color: var(--mc-color-text-muted);
-  line-height: var(--mc-line-height-relaxed);
-}
-
-.file-write-activity__item-line {
-  align-items: baseline;
-}
-
-.file-write-activity__icon {
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: var(--mc-icon-size-sm);
-  height: var(--mc-icon-size-sm);
-  color: var(--mc-color-icon-muted);
-}
-
-.file-write-activity__icon svg,
-.file-write-activity__toggle svg {
-  width: 100%;
-  height: 100%;
-  stroke-width: var(--mc-icon-stroke-medium);
-}
-
-.file-write-activity__spinner {
-  animation: mc-agent-todo-spin 1s linear infinite;
-}
-
-.file-write-activity__path {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--mc-color-text-accent);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-write-activity__item-line .file-write-activity__path {
+.file-change-activity__item-line .file-change-activity__path {
   color: var(--mc-color-text-accent);
 }
 
-.file-write-activity__stats {
+.file-change-activity__stats {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: baseline;
@@ -1032,20 +942,20 @@ button.apply-patch-activity__path:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-.file-write-activity__additions {
+.file-change-activity__additions {
   color: var(--mc-color-diff-addition-text) !important;
 }
 
-.file-write-activity__deletions {
+.file-change-activity__deletions {
   color: var(--mc-color-diff-deletion-text) !important;
 }
 
-.file-write-activity__error {
+.file-change-activity__error {
   color: var(--mc-color-text-danger) !important;
 }
 
-.file-write-activity__error-note,
-.file-write-activity__rejection-reason {
+.file-change-activity__error-note,
+.file-change-activity__rejection-reason {
   margin: 0;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-chat-metadata);
@@ -1053,11 +963,11 @@ button.apply-patch-activity__path:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.file-write-activity__error-note {
+.file-change-activity__error-note {
   color: var(--mc-color-text-danger) !important;
 }
 
-.file-write-activity__toggle {
+.file-change-activity__toggle {
   display: inline-grid;
   flex: 0 0 auto;
   width: 18px;
@@ -1071,13 +981,13 @@ button.apply-patch-activity__path:focus-visible {
   cursor: pointer;
 }
 
-.file-write-activity__toggle:hover,
-.file-write-activity__toggle:focus-visible {
+.file-change-activity__toggle:hover,
+.file-change-activity__toggle:focus-visible {
   color: var(--mc-color-icon-default);
   background: var(--mc-color-surface-muted);
 }
 
-.file-write-activity__preview {
+.file-change-activity__preview {
   max-height: 280px;
   overflow: auto;
   border: 1px solid var(--mc-color-border-subtle);
@@ -1085,13 +995,13 @@ button.apply-patch-activity__path:focus-visible {
   background: var(--mc-color-surface-muted);
 }
 
-.file-write-activity__preview > span {
+.file-change-activity__preview > span {
   display: block;
   padding: 10px 12px;
   font-size: var(--mc-font-size-chat-metadata);
 }
 
-.file-write-activity__preview pre {
+.file-change-activity__preview pre {
   min-width: max-content;
   padding: 10px 12px;
   margin: 0;
@@ -1099,4 +1009,17 @@ button.apply-patch-activity__path:focus-visible {
   font-size: var(--mc-font-size-chat-metadata);
   line-height: var(--mc-line-height-relaxed);
   white-space: pre;
+}
+
+.file-change-activity__preview > button {
+  padding: 6px 12px;
+  color: var(--mc-color-text-accent);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.file-change-activity__preview > button:disabled {
+  color: var(--mc-color-text-muted);
+  cursor: default;
 }

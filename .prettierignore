@@ -4,3 +4,6 @@ dist
 target
 pnpm-lock.yaml
 Cargo.lock
+
+# Pinned generated upstream catalog; preserve its reviewed source layout and avoid formatter churn.
+crates/core-server/resources/playwright-upstream-catalog-0.0.79.json

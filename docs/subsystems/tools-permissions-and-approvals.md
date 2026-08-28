@@ -34,7 +34,7 @@ last_verified: 2026-08-24
 当前注册面可按以下族理解：
 
 - 文件与检索：attachments、`read_*`、workspace/search、web、Git；
-- 写入与执行：`apply_patch`、`write_file`、`run_command`、`command_session`；
+- 写入与执行：唯一文件修改 Tool `apply_patch`，以及 `run_command`、`command_session`；
 - Office 与图像：三个 Office Tool、`image_generation`；
 - Skills：resource list/read/materialize、script preflight/run、install prepare/commit，以及运行扩展 `skills_activate`；
 - 历史与协作：`conversation_history`、spawn/send/followup/wait/list/interrupt；
@@ -48,16 +48,16 @@ last_verified: 2026-08-24
 
 `AgentPermissions` 是后端权威值：
 
-| 维度           | 当前值                              | 说明                                                              |
-| -------------- | ----------------------------------- | ----------------------------------------------------------------- |
-| read           | `workspace_only` / `all`            | 工作区、附件与受管引用；`all` 才允许受支持的外部绝对路径/系统别名 |
-| write          | `denied` / `workspace_only` / `all` | 控制所有 file-write 域 Tool；可见性不代表写权限                   |
-| command        | `require_approval` / `auto_approve` | 用户正常审批偏好                                                  |
-| command safety | `guarded` / `full_access`           | 独立的风险上限；always-denied 操作不因 full access 放行           |
-| patch          | `require_approval` / `auto_approve` | 结构化文件/Office 写入是否弹窗，仍保留路径与 revision 校验        |
-| builtin execution | `require_approval` / `auto_approve` | 应用可证明来源的内置 Skill/Capability 是否弹窗；不扩大其他权限 |
+| 维度              | 当前值                              | 说明                                                              |
+| ----------------- | ----------------------------------- | ----------------------------------------------------------------- |
+| read              | `workspace_only` / `all`            | 工作区、附件与受管引用；`all` 才允许受支持的外部绝对路径/系统别名 |
+| write             | `denied` / `workspace_only` / `all` | 控制所有 file-write 域 Tool；可见性不代表写权限                   |
+| command           | `require_approval` / `auto_approve` | 用户正常审批偏好                                                  |
+| command safety    | `guarded` / `full_access`           | 独立的风险上限；always-denied 操作不因 full access 放行           |
+| patch             | `require_approval` / `auto_approve` | 结构化文件/Office 写入是否弹窗，仍保留路径与 revision 校验        |
+| builtin execution | `require_approval` / `auto_approve` | 应用可证明来源的内置 Skill/Capability 是否弹窗；不扩大其他权限    |
 
-模板、项目、父 Agent 和动态 policy 之间使用逐维 `meet`，只能收紧不能扩权。Tool 用 `AgentToolPermissionPolicy::Default` 或 `FileWrite(ReadWrite|WriteOnly)` 声明权限域；禁止在 Runtime 中维护第二份按 Tool 名判断的易漂移 allowlist。
+模板、项目、父 Agent 和动态 policy 之间使用逐维 `meet`，只能收紧不能扩权。Tool 用 `AgentToolPermissionPolicy::Default` 或 `FileChange(ReadWrite|WriteOnly)` 声明权限域；禁止在 Runtime 中维护第二份按 Tool 名判断的易漂移 allowlist。
 
 `builtin execution=auto_approve` 只把人工点击替换成 Host 自动批准。它不改变 Tool
 定义、顺序或 schema，也不扩大 read/write/command/network/path 权限。自动路径仍创建同一 typed
@@ -69,10 +69,10 @@ action，复核 source/manifest/revision/digest，建立一次性 grant 或 dura
 
 Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更新时把 Composer 的三种模式解析成完整 `AgentPermissions`，同时保存安全 DTO；Run 入队时再把这份权限冻结进 `config_snapshot_json`：
 
-| 模式      | 当前解析                                                                                                |
-| --------- | ------------------------------------------------------------------------------------------------------- |
-| `default` | workspace read/write；command、patch、builtin execution 需审批；`guarded`                                                  |
-| `full`    | read/write all；command、patch、builtin execution auto approve；`full_access`，且用户设置必须仍启用 Full                   |
+| 模式      | 当前解析                                                                                                                  |
+| --------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `default` | workspace read/write；command、patch、builtin execution 需审批；`guarded`                                                 |
+| `full`    | read/write all；command、patch、builtin execution auto approve；`full_access`，且用户设置必须仍启用 Full                  |
 | `custom`  | 复制当前自定义 read/write/command/patch/builtin execution，但无条件把 command safety 收紧为 `guarded`，且 Custom 必须启用 |
 
 未来 Run 使用冻结权限，当前用户偏好只作为撤销上限，绝不能重新解析出更宽权限。Full/Custom 会在 scheduler precheck 和 HumanRoot `BEGIN IMMEDIATE` admission 事务中再次检查；若权限在两个检查之间被关闭，Task 与未 admission Run 在该事务内变为 blocked/failed，Conversation、message 和 Trace 不会写入。重新开启偏好不会自动修复已 blocked Task，用户必须提交一次有效更新。
@@ -89,7 +89,7 @@ Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更�
 
 解析过程执行规范化、父目录与 symlink/reparse 检查、conversation grant 校验、文件 identity/revision 校验，并为命令/Office 创建私有只读输入 mount。当前一次文件输入最多 16 项，单项 64 MiB、合计 128 MiB；视觉输入单项上限为 8 MiB。URI 是稳定引用，不是裸本地路径，不能被字符串替换绕过授权。
 
-写入继续执行：目标 scope、无 symlink 父链、基础 revision、创建/覆盖模式和原子发布检查。`write_file` 使用受管 draft，当前单 draft 4 MiB；`apply_patch` Core Server 层 patch 上限 512 KiB，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过这些检查。
+文件修改只通过 `apply_patch`：Direct 模式用于一次性 create/update/delete，Staged 模式使用同一 FileChange transaction/store 分块组装，当前单事务目标上限 4 MiB。两种模式都绑定准确 `read_file` observation、目标 scope、无 symlink 父链、基础 revision、frozen target/diff digest 和原子发布检查；create 始终 no-clobber，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过 proposal、Pending、Checkpoint、dispatch claim 或执行前复核。
 
 ## 审批状态机
 
@@ -112,7 +112,7 @@ model ToolCall
   -> persist canonical result, projections, audit and resumed Run
 ```
 
-当前 typed proposed action 包括普通 ToolCall、外部 MCP Server Tool、内置 Capability 激活、内置 MCP 敏感调用、Browser risk、Diff、FileWrite、Command、Skill materialization/script/installation 和 Office operation。
+当前 typed proposed action 包括普通 ToolCall、外部 MCP Server Tool、内置 Capability 激活、内置 MCP 敏感调用、Browser risk、FileChange、Command、Skill materialization/script/installation 和 Office operation。Direct 与 Staged 文件修改共用同一个 FileChange proposal/result，不存在 Diff/FileWrite 双 action。
 
 “无需弹窗”不一定等于“直接执行”。自动 MCP Server 调用或需要冻结资源的动作仍必须先 prepare，以便 Core Server 获得一次性的权威 payload、TOCTOU 校验和审计身份。
 
@@ -169,7 +169,7 @@ Tool 声明两类 settlement：
 - Registry/trait/projection：`crates/core/src/tools/mod.rs`
 - Effective toolset：`crates/core/src/tools/tool_set.rs`
 - 权限和 proposed action：`crates/core/src/protocol.rs`
-- 文件输入/写入/patch：`crates/core/src/file_input.rs`、`file_write.rs`、`patch.rs`
+- 文件输入与修改：`crates/core/src/file_input.rs`、`crates/core/src/file_change/`、`crates/core/src/tools/apply_patch.rs`
 - 命令策略：`crates/core/src/command/policy.rs`、`risk.rs`、`spawn_plan.rs`
 - Runtime 审批边界：`crates/core/src/runtime.rs`、`runtime/checkpoint/`
 - Pending action：`crates/core/src/storage/service/pending_actions.rs`
@@ -185,7 +185,7 @@ Tool 声明两类 settlement：
 - `crates/core/src/tools/run_command/tests/`
 - `crates/core/src/runtime/tests/approval_resume.rs`
 - `crates/core/src/runtime/checkpoint/tests/`
-- `crates/core-server/src/application/agent/tests/file_write_permissions.rs`
+- `crates/core-server/src/application/agent/tests/file_change_permissions.rs`
 - `crates/core-server/src/application/agent/tests/pending_actions.rs`
 - `crates/core-server/src/application/agent/tests/mcp_approval_lifecycle.rs`
 - `crates/core-server/src/application/agent/tests/cancellation.rs`

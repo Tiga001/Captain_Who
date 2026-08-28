@@ -31,12 +31,12 @@ use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, Artifact
 use mycopilot_core::command::{
     AgentCommandExecutionResult, CommandAuthorizationSource, CommandRunGuard, CommandRunState,
 };
-use mycopilot_core::file_input::AgentFileInputExecutionContext;
-use mycopilot_core::file_write::{
-    file_draft_snapshot, file_write_action_approval_status, file_write_approval_route,
-    file_write_authorized, file_write_diff, proposed_action_uses_file_write_policy,
-    FileWriteApprovalRoute, FileWriteAuthorizationSource,
+use mycopilot_core::file_change_support::{
+    file_change_action_approval_status, file_change_approval_route, file_change_authorized,
+    file_change_diff, file_change_snapshot, proposed_action_uses_file_change_policy,
+    FileChangeApprovalRoute, FileChangeAuthorizationSource,
 };
+use mycopilot_core::file_input::AgentFileInputExecutionContext;
 use mycopilot_core::image_generation::{ImageGenerationExecutionService, ImageGenerationOperation};
 use mycopilot_core::office::{
     resolve_office_engine, OfficeCliDiscoveryOptions, OfficeEngine, OfficeEngineError,

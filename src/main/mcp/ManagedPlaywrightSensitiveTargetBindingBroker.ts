@@ -536,11 +536,19 @@ function validatePreparedFiles(
         name.length > 255 ||
         name.includes('/') ||
         name.includes('\\') ||
-        /[\u0000-\u001f\u007f]/u.test(name)
+        containsForbiddenFilenameControlCharacter(name)
     )
   ) {
     throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
   }
+}
+
+function containsForbiddenFilenameControlCharacter(name: string): boolean {
+  for (let index = 0; index < name.length; index += 1) {
+    const codeUnit = name.charCodeAt(index)
+    if (codeUnit <= 0x1f || codeUnit === 0x7f) return true
+  }
+  return false
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

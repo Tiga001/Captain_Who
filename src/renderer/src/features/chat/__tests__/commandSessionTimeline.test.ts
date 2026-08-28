@@ -26,7 +26,7 @@ function createRun(result?: AgentToolResult): ChatAgentRunView {
     toolCalls: [call],
     toolResults: result ? [result] : [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: [{ id: 'command-session-timeline', type: 'tool_call', callId: call.id }]
   }
 }

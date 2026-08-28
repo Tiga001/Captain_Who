@@ -1526,7 +1526,7 @@ impl AgentService {
     }
 }
 
-fn file_change_result_for_audit(
+pub(super) fn file_change_result_for_audit(
     record: &PendingActionRecord,
     tool_result: &AgentToolResult,
 ) -> Result<Option<AgentFileChangeResult>, String> {

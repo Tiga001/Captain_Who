@@ -54,12 +54,11 @@ const scenarioState = vi.hoisted<CollaborationScenarioState>(() => ({
   resyncListeners: new Set()
 }))
 
-vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({
-    language: 'en-US',
-    t: (key: keyof typeof enUSTranslations) => enUSTranslations[key]
-  })
-}))
+vi.mock('../../config/FrontendConfigProvider', () => {
+  const t = (key: keyof typeof enUSTranslations) => enUSTranslations[key]
+  const config = { language: 'en-US', t }
+  return { useFrontendConfig: () => config }
+})
 
 vi.mock('../../config/ModelSettingsProvider', () => ({
   useModelSettings: () => ({
@@ -244,7 +243,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   getContextWindowSnapshot: vi.fn().mockResolvedValue({ snapshot: null }),
   getProviderTransitionStatus: vi.fn().mockResolvedValue({ operations: [] }),
   getAgentCommandSession: vi.fn(),
-  getAgentFileWriteDiff: vi.fn(),
+  getAgentFileChangeDiff: vi.fn(),
   listAgentCommandSessions: vi.fn().mockResolvedValue({ sessions: [] }),
   listPendingAgentActions: vi.fn().mockResolvedValue([]),
   onAgentEvent: (listener: (event: AgentEvent) => void) => {
@@ -253,7 +252,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   },
   onProviderTransition: vi.fn(() => () => undefined),
   preflightProviderTransition: vi.fn(),
-  readAgentFileDraft: vi.fn(),
+  readAgentFileChange: vi.fn(),
   rejectAgentAction: vi.fn(),
   rewriteConversationTurn: vi.fn(),
   startConversationTurn: vi.fn(),
@@ -350,7 +349,7 @@ function rootConversation(conversationId: string, loaded = true): ChatConversati
               toolCalls: [],
               toolResults: [],
               approvals: [],
-              diffs: [],
+              fileChangeProposals: [],
               timeline: [
                 {
                   id: `trace-${conversationId}-delegation`,

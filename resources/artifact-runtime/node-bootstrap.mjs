@@ -3,7 +3,10 @@
 import { realpathSync } from 'node:fs'
 import Module, { isBuiltin, registerHooks } from 'node:module'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
-import { initialize as initializeManagedLoader, resolve as resolveManagedLoader } from './node-loader.mjs'
+import {
+  initialize as initializeManagedLoader,
+  resolve as resolveManagedLoader
+} from './node-loader.mjs'
 
 const moduleRoot = process.env.MYCOPILOT_ARTIFACT_NODE_MODULES
 if (!moduleRoot) {

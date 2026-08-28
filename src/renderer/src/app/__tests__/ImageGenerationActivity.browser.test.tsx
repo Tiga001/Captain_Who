@@ -78,7 +78,7 @@ function run(toolCalls: AgentToolCall[], toolResults: AgentToolResult[]): ChatAg
     toolCalls,
     toolResults,
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: []
   }
 }

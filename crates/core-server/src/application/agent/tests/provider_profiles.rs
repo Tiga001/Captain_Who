@@ -1138,7 +1138,8 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
             })
             .unwrap();
 
-        let mut source_trace = completed_trace(source_conversation_id, source_assistant_message_id);
+        let mut source_trace =
+            completed_trace(source_conversation_id, source_assistant_message_id, 18);
         for item in &mut source_trace.items {
             match item {
                 ConversationTurnTraceItem::ToolCall {
@@ -2482,11 +2483,12 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
                     "id": "provider-vault-unavailable-call",
                     "type": "function",
                     "function": {
-                        "name": "write_file",
+                        "name": "apply_patch",
                         "arguments": serde_json::to_string(&json!({
-                            "phase": "begin",
+                            "action": "begin",
+                            "operation": "create",
                             "filePath": "must-not-create.md",
-                            "mode": "create"
+                            "observationId": "fobs_provider_vault_unavailable"
                         })).unwrap()
                     }
                 }]

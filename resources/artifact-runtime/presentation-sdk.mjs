@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type -- This runtime SDK publishes JavaScript contracts to managed editor scripts. */
+
 import { writeFile } from 'node:fs/promises'
 
 const PLAN_ENV = 'MYCOPILOT_PRESENTATION_EDIT_PLAN'
@@ -90,8 +92,13 @@ function validateWholeSlideOrdering(operations) {
   const structural = operations
     .map((operation, index) => ({ operation, index }))
     .filter(({ operation }) => isWholeSlideOperation(operation))
-  if (structural.length > 1 || (structural.length === 1 && structural[0].index !== operations.length - 1)) {
-    throw new Error('a presentation edit may contain at most one whole-slide operation and it must be last')
+  if (
+    structural.length > 1 ||
+    (structural.length === 1 && structural[0].index !== operations.length - 1)
+  ) {
+    throw new Error(
+      'a presentation edit may contain at most one whole-slide operation and it must be last'
+    )
   }
 }
 
@@ -171,7 +178,13 @@ function facade(operations) {
       )
     },
 
-    add({ parent, elementType, copyFrom = null, position: requestedPosition = null, properties = {} }) {
+    add({
+      parent,
+      elementType,
+      copyFrom = null,
+      position: requestedPosition = null,
+      properties = {}
+    }) {
       pushOperation(
         operations,
         record('add', {
@@ -251,15 +264,24 @@ function facade(operations) {
       }
       const { categories, series } = properties
       if (!Array.isArray(categories) || !Array.isArray(series)) {
-        throw new TypeError('updateChart properties.categories and properties.series must be arrays')
+        throw new TypeError(
+          'updateChart properties.categories and properties.series must be arrays'
+        )
       }
       if (categories.length === 0 || series.length === 0 || series.length > 32) {
         throw new RangeError('updateChart requires categories and between 1 and 32 series')
       }
       const encodedCategories = categories.map((value, index) => {
         const category = String(value)
-        if (category.length === 0 || category.includes(',') || category.includes('\n') || category.includes('\r')) {
-          throw new TypeError(`updateChart categories[${index}] cannot be empty or contain commas/newlines`)
+        if (
+          category.length === 0 ||
+          category.includes(',') ||
+          category.includes('\n') ||
+          category.includes('\r')
+        ) {
+          throw new TypeError(
+            `updateChart categories[${index}] cannot be empty or contain commas/newlines`
+          )
         }
         return category
       })
@@ -279,7 +301,9 @@ function facade(operations) {
         }
         const values = item.values.map((value, valueIndex) => {
           if (typeof value !== 'number' || !Number.isFinite(value)) {
-            throw new TypeError(`updateChart series[${index}].values[${valueIndex}] must be finite number`)
+            throw new TypeError(
+              `updateChart series[${index}].values[${valueIndex}] must be finite number`
+            )
           }
           return String(value)
         })
@@ -328,5 +352,9 @@ export async function editPresentation({ source, destination, mode = 'saveAs', e
     mode,
     operations
   }
-  await writeFile(planPath, `${JSON.stringify(plan)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  await writeFile(planPath, `${JSON.stringify(plan)}\n`, {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600
+  })
 }

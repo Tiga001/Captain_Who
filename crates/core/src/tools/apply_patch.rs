@@ -1,6 +1,6 @@
-use super::write_file_stream::FileChangeInputStreamObserver;
+use super::file_change_stream::FileChangeInputStreamObserver;
 use super::{
-    file_change_staged, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
+    file_change_staged, AgentTool, AgentToolPermissionPolicy, FileChangeToolAccess,
     ToolExecutionContext, ToolInputStreamObserver,
 };
 use crate::file_change::{
@@ -118,7 +118,7 @@ impl AgentTool for ApplyPatchTool {
     fn permission_policy(&self) -> AgentToolPermissionPolicy {
         // status/abort remain available after write authority is tightened so a dirty transaction
         // can always be inspected or safely settled. Mutating actions enforce current authority.
-        AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite)
+        AgentToolPermissionPolicy::FileChange(FileChangeToolAccess::ReadWrite)
     }
 
     fn proposed_action(

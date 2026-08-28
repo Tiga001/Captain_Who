@@ -40,7 +40,9 @@ function findHandler(channel: string): (...args: unknown[]) => Promise<unknown> 
 function automationCoreStubs() {
   return {
     onAutomationEvent: vi.fn(() => vi.fn()),
-    onAutomationResync: vi.fn(() => vi.fn())
+    onAutomationResync: vi.fn(() => vi.fn()),
+    onNotificationEvent: vi.fn(() => vi.fn()),
+    onNotificationResync: vi.fn(() => vi.fn())
   }
 }
 

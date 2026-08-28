@@ -80,7 +80,7 @@ function message(): ChatMessage {
     ],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: []
   }
   return {
@@ -287,8 +287,8 @@ describe('command output runtime projection', () => {
         status: 'completed',
         startedAt: 1,
         completedAt: 42,
-        fileDrafts: [],
-        fileWritePreviews: [],
+        fileChanges: [],
+        fileChangePreviews: [],
         messageStreamCheckpoints: {},
         readActivities: []
       }

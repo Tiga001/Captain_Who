@@ -5,15 +5,14 @@ import { stripAttachmentSummary } from '../chatAttachments'
 import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
-  ChatFileWritePreview,
+  ChatFileChangePreview,
   ChatMcpToolInvocationView,
   ChatMessage,
   ChatReadActivityKind
 } from '../chatTypes'
 import type { CollaborationTimelineActivity } from '../../agentCollaboration/collaborationTimelineModel'
-import type { ApplyPatchToolActivityGroupItem } from './toolActivities/ApplyPatchToolActivity'
 import type { ConversationHistoryActivityItem } from './toolActivities/ConversationHistoryToolActivity'
-import type { FileWriteToolActivityGroupItem } from './toolActivities/FileWriteToolActivity'
+import type { FileChangeToolActivityGroupItem } from './toolActivities/FileChangeToolActivity'
 import type { ReadToolActivityGroupItem } from './toolActivities/ReadToolActivity'
 import type { RunCommandToolActivityGroupItem } from './toolActivities/RunCommandToolActivity'
 import type { OfficeToolActivityGroupItem } from './toolActivities/OfficeToolActivity'
@@ -35,7 +34,7 @@ import {
   type SkillResourceActivityKind
 } from '../skillOfficeActivity'
 
-const FILE_WRITE_ACTIVITY_GRACE_MS = 2000
+const FILE_CHANGE_ACTIVITY_GRACE_MS = 2000
 
 const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>([
   'command_session',
@@ -105,12 +104,7 @@ export type RenderableTimelineItem =
     }
   | {
       id: string
-      type: 'apply_patch_group'
-      callIds: string[]
-    }
-  | {
-      id: string
-      type: 'write_file_group'
+      type: 'file_change_group'
       callIds: string[]
     }
   | {
@@ -345,11 +339,11 @@ export function shouldShowThinkingActivity(
   return !isBottomTimelineItemSpecificPendingStatus(run, lastItem)
 }
 
-export function hasRecentFileWriteActivity(run: ChatAgentRunView, now: number): boolean {
+export function hasRecentFileChangeActivity(run: ChatAgentRunView, now: number): boolean {
   if (isRunSettled(run)) return false
   return Boolean(
-    run.fileWritePreviews?.some(
-      (preview) => now - preview.receivedAt <= FILE_WRITE_ACTIVITY_GRACE_MS
+    run.fileChangePreviews?.some(
+      (preview) => now - preview.receivedAt <= FILE_CHANGE_ACTIVITY_GRACE_MS
     )
   )
 }
@@ -538,28 +532,19 @@ export function groupTimelineItems(
       ]
     }
 
-    const callArgs =
-      call.args && typeof call.args === 'object' && !Array.isArray(call.args)
-        ? (call.args as Record<string, unknown>)
-        : {}
-    if (
-      call.tool === 'apply_patch' &&
-      ['begin', 'append', 'edit', 'commit', 'status', 'abort'].includes(
-        String(callArgs.action ?? '')
-      )
-    ) {
+    if (call.tool === 'apply_patch') {
       let existingIndex = -1
       for (let index = items.length - 1; index >= 0; index -= 1) {
         const candidate = items[index]
         if (candidate.type === 'message') break
-        if (candidate.type === 'write_file_group') {
+        if (candidate.type === 'file_change_group') {
           existingIndex = index
           break
         }
       }
       if (existingIndex >= 0) {
         const existing = items[existingIndex]
-        if (existing.type !== 'write_file_group') return [...items, item]
+        if (existing.type !== 'file_change_group') return [...items, item]
         return items.map((candidate, index) =>
           index === existingIndex
             ? { ...existing, callIds: [...existing.callIds, item.callId] }
@@ -569,8 +554,8 @@ export function groupTimelineItems(
       return [
         ...items,
         {
-          id: `write-file-group-${item.callId}`,
-          type: 'write_file_group',
+          id: `file-change-group-${item.callId}`,
+          type: 'file_change_group',
           callIds: [item.callId]
         }
       ]
@@ -646,28 +631,6 @@ export function groupTimelineItems(
       ]
     }
 
-    if (call.tool === 'apply_patch') {
-      const previousItem = items[items.length - 1]
-      if (previousItem?.type === 'apply_patch_group') {
-        return [
-          ...items.slice(0, -1),
-          {
-            ...previousItem,
-            callIds: [...previousItem.callIds, item.callId]
-          }
-        ]
-      }
-
-      return [
-        ...items,
-        {
-          id: `apply-patch-group-${item.callId}`,
-          type: 'apply_patch_group',
-          callIds: [item.callId]
-        }
-      ]
-    }
-
     return [...items, item]
   }, initialItems)
 }
@@ -705,13 +668,15 @@ export function getOfficeGroupItems(
   })
 }
 
-export function getWriteFileDraftId(
+export function getFileChangeTransactionId(
   run: ChatAgentRunView,
   call: AgentToolCall
 ): string | undefined {
   const args =
     call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
   if (typeof args.transactionId === 'string' && args.transactionId) return args.transactionId
+  const proposal = run.fileChangeProposals.find((candidate) => candidate.id === call.id)
+  if (proposal) return proposal.transactionId
   const result = getToolResult(run, call.id)?.result
   if (!result || typeof result !== 'object') return undefined
   const resultTransactionId = (result as Record<string, unknown>).transactionId
@@ -720,53 +685,62 @@ export function getWriteFileDraftId(
     : undefined
 }
 
-export function getLatestWriteFilePreview(
+export function getLatestFileChangePreview(
   run: ChatAgentRunView,
-  draftId: string | undefined
-): ChatFileWritePreview | undefined {
-  if (!draftId) return undefined
-  return run.fileWritePreviews?.reduce<ChatFileWritePreview | undefined>((latest, preview) => {
-    if (preview.transactionId !== draftId) return latest
+  transactionId: string | undefined
+): ChatFileChangePreview | undefined {
+  if (!transactionId) return undefined
+  return run.fileChangePreviews?.reduce<ChatFileChangePreview | undefined>((latest, preview) => {
+    if (preview.transactionId !== transactionId) return latest
     return !latest || preview.receivedAt >= latest.receivedAt ? preview : latest
   }, undefined)
 }
 
-export function getWriteFileGroupItems(
+export function getFileChangeGroupItems(
   run: ChatAgentRunView,
   callIds: string[]
-): FileWriteToolActivityGroupItem[] {
-  const itemsByDraft = new Map<string, FileWriteToolActivityGroupItem>()
+): FileChangeToolActivityGroupItem[] {
+  const itemsByTransaction = new Map<string, FileChangeToolActivityGroupItem>()
 
   callIds.forEach((callId) => {
     const call = run.toolCalls.find((candidate) => candidate.id === callId)
     if (!call) return
     const result = getToolResult(run, call.id)
-    const draftId = getWriteFileDraftId(run, call)
-    const itemKey = draftId ?? `pending-${call.id}`
-    const existing = itemsByDraft.get(itemKey)
-    const draft = draftId
-      ? run.fileDrafts?.find((candidate) => candidate.transactionId === draftId)
+    const transactionId = getFileChangeTransactionId(run, call)
+    const itemKey = transactionId ?? `pending-${call.id}`
+    const existing = itemsByTransaction.get(itemKey)
+    const transaction = transactionId
+      ? run.fileChanges?.find((candidate) => candidate.transactionId === transactionId)
       : undefined
-    const preview = getLatestWriteFilePreview(run, draftId)
-    const draftIsUnsettled =
-      draft && ['drafting', 'ready', 'waiting_approval', 'applying'].includes(draft.status)
+    const preview =
+      getLatestFileChangePreview(run, transactionId) ??
+      run.fileChangePreviews?.find((candidate) => candidate.toolCallId === call.id)
+    const proposal =
+      run.fileChangeProposals.find(
+        (candidate) => candidate.id === call.id || candidate.transactionId === transactionId
+      ) ?? existing?.proposal
+    const transactionIsUnsettled =
+      transaction &&
+      ['drafting', 'ready', 'waiting_approval', 'applying'].includes(transaction.status)
     const settledStatus =
-      draftIsUnsettled && isRunSettled(run)
+      transactionIsUnsettled && isRunSettled(run)
         ? run.status === 'failed'
           ? 'failed'
           : 'cancelled'
         : getSettledToolStatus(run, result ?? existing?.result)
-    itemsByDraft.set(itemKey, {
+    itemsByTransaction.set(itemKey, {
       call,
-      draft,
-      draftId: draftId ?? call.id,
+      cancelled: settledStatus === 'cancelled',
       preview,
+      proposal,
       result: result ?? existing?.result,
-      settledStatus
+      settledStatus,
+      transaction,
+      transactionId: transactionId ?? call.id
     })
   })
 
-  return [...itemsByDraft.values()]
+  return [...itemsByTransaction.values()]
 }
 
 export function getReadGroupItems(
@@ -866,30 +840,6 @@ export function getMcpActivityGroupItems(
       (candidate) => candidate.invocationId === invocationId
     )
     return invocation ? [...items, invocation] : items
-  }, [])
-}
-
-export function getApplyPatchGroupItems(
-  run: ChatAgentRunView,
-  callIds: string[]
-): ApplyPatchToolActivityGroupItem[] {
-  return callIds.reduce<ApplyPatchToolActivityGroupItem[]>((items, callId) => {
-    const call = run.toolCalls.find((candidate) => candidate.id === callId)
-    if (!call) return items
-    const result = getToolResult(run, call.id)
-    const settledStatus = getSettledToolStatus(run, result)
-
-    return [
-      ...items,
-      {
-        call,
-        cancelled: settledStatus === 'cancelled',
-        diff: run.diffs.find((candidate) => candidate.id === call.id),
-        preview: run.fileWritePreviews?.find((preview) => preview.toolCallId === call.id),
-        result,
-        settledStatus
-      }
-    ]
   }, [])
 }
 

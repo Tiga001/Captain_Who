@@ -53,7 +53,7 @@ function commandSessionMessage(result?: AgentToolResult): ChatMessage {
       toolCalls: [commandSessionCall],
       toolResults: result ? [result] : [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [
         { id: 'command-session-timeline', type: 'tool_call', callId: commandSessionCall.id }
       ]

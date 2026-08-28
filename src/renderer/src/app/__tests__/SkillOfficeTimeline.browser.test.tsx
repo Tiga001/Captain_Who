@@ -94,7 +94,7 @@ function assistantMessage(overrides: Partial<ChatMessage['agentRun']> = {}): Cha
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [],
       ...overrides
     }

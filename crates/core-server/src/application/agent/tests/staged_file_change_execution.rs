@@ -1,4 +1,4 @@
-use super::file_write_permissions::{
+use super::file_change_permissions::{
     direct_execution_input, seed_durable_direct_file_change_owner,
 };
 use super::*;
@@ -218,7 +218,7 @@ fn manual_staged_apply_patch_commit_uses_the_common_file_change_committer() {
     let action = AgentProposedAction::FileChange {
         file_change: proposal,
     };
-    authorize_structured_file_write(&input, &action, FileWriteAuthorizationSource::ExplicitUser)
+    authorize_file_change_action(&input, &action, FileChangeAuthorizationSource::ExplicitUser)
         .unwrap();
     let AgentProposedAction::FileChange { file_change } = action else {
         unreachable!()
@@ -248,6 +248,106 @@ fn manual_staged_apply_patch_commit_uses_the_common_file_change_committer() {
             .status,
         "applied"
     );
+}
+
+#[tokio::test]
+async fn staged_audit_failure_projects_the_same_outcome_unknown_receipt_and_status() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let target = workspace.join("staged-audit-failure.txt");
+    let run_id = "run-staged-audit-failure";
+    let conversation_id = "conversation-staged-audit-failure";
+    let assistant_message_id = "assistant-staged-audit-failure";
+    let call_id = "call-staged-audit-failure";
+    let transaction_id = "transaction-staged-audit-failure";
+    let (mut proposal, call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id,
+            conversation_id,
+            call_id,
+            transaction_id,
+        },
+        ("staged-audit-failure.txt", target.to_str().unwrap()),
+        "staged effect may exist\n",
+        AgentApprovalStatus::Required,
+    );
+    let mut input = direct_execution_input(
+        &workspace,
+        run_id,
+        conversation_id,
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+            ..Default::default()
+        },
+        &call,
+    );
+    save_test_pending_provider_for_input(&storage, &mut input);
+    bind_staged_execution_to_input(&mut proposal, &input);
+    seed_durable_direct_file_change_owner(
+        &storage,
+        &mut input,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+    );
+    storage
+        .create_agent_file_change(staged_file_change_record(&proposal, "waiting_approval"))
+        .unwrap();
+    service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentProposedAction::FileChange {
+                file_change: proposal,
+            },
+            input,
+        )
+        .unwrap();
+    let storage_id = pending_action_storage_id(run_id, call_id);
+    inject_manual_action_audit_failure(&storage_id, "completed");
+    inject_manual_action_audit_failure(&storage_id, "completed");
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output = service
+        .approve_action(run_id, call_id, notifications)
+        .expect("Staged audit fallback settles as typed outcome_unknown");
+    let output_json = serde_json::to_value(&output).unwrap();
+    let receipt = &output_json["fileChangeResult"];
+    assert!(output_json.get("toolResult").is_none());
+    assert_eq!(output_json["status"], "outcome_unknown");
+    assert_eq!(receipt["status"], "outcome_unknown");
+    assert_eq!(receipt["outcome"], "outcome_unknown");
+    assert_eq!(
+        storage
+            .get_agent_file_change(transaction_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "outcome_unknown"
+    );
+    assert_eq!(
+        fs::read_to_string(target).unwrap(),
+        "staged effect may exist\n"
+    );
+
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    let tool_result = events
+        .iter()
+        .find(|event| event["params"]["type"] == "tool_result")
+        .expect("Staged settlement publishes one ToolResult notification");
+    assert_eq!(tool_result["params"]["result"]["result"], *receipt);
+    let updated = events
+        .iter()
+        .find(|event| event["params"].get("fileChange").is_some())
+        .expect("Staged settlement publishes its current transaction snapshot");
+    assert_eq!(updated["params"]["fileChange"]["status"], "outcome_unknown");
 }
 
 #[test]
@@ -718,12 +818,12 @@ fn staged_owner_and_authority_tampering_fail_before_file_side_effects() {
         ))
         .unwrap();
     authority_input.context.as_mut().unwrap().permissions.write = AgentWritePermission::All;
-    authorize_structured_file_write(
+    authorize_file_change_action(
         &authority_input,
         &AgentProposedAction::FileChange {
             file_change: authority_proposal.clone(),
         },
-        FileWriteAuthorizationSource::ExplicitUser,
+        FileChangeAuthorizationSource::ExplicitUser,
     )
     .unwrap();
     let authority_decision = approved_staged_file_change_execution(

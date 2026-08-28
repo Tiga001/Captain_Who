@@ -1,4 +1,4 @@
-use super::{AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess, ToolExecutionContext};
+use super::{AgentTool, AgentToolPermissionPolicy, FileChangeToolAccess, ToolExecutionContext};
 use crate::office::{
     compile_office_semantic_request, OfficeChartKind, OfficeChartSeries,
     OfficeConditionalFormatKind, OfficeCreateIntent, OfficeDocumentBlockIntent,
@@ -75,7 +75,7 @@ macro_rules! impl_office_tool {
             }
 
             fn permission_policy(&self) -> AgentToolPermissionPolicy {
-                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite)
+                AgentToolPermissionPolicy::FileChange(FileChangeToolAccess::ReadWrite)
             }
 
             fn proposed_action(

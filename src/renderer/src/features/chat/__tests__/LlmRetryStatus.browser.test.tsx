@@ -43,7 +43,7 @@ function retryMessage(category: 'rate_limited' | 'network'): ChatMessage {
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [],
       llmRetry: {
         category,

@@ -551,6 +551,16 @@ function validateProviderTransitionResponseIdentity(
   }
 }
 
+function assertAgentActionExecutionIdentity(
+  request: AgentActionIdRequest,
+  response: AgentActionExecutionOutput
+): AgentActionExecutionOutput {
+  if (response.actionId !== request.actionId || response.agentOutput.runId !== request.runId) {
+    throw new Error('Invalid Agent action execution identity')
+  }
+  return response
+}
+
 function rethrowValidatedSkillError<TData extends { message: string }>(
   error: unknown,
   code: number,
@@ -1778,12 +1788,14 @@ export class CoreServer {
     return this.rpc
       .request<unknown, AgentActionIdRequest>(AGENT_APPROVE_ACTION_METHOD, input)
       .then(parseAgentActionExecutionOutputForHost)
+      .then((output) => assertAgentActionExecutionIdentity(input, output))
   }
 
   rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput> {
     return this.rpc
       .request<unknown, AgentRejectActionRequest>(AGENT_REJECT_ACTION_METHOD, input)
       .then(parseAgentActionExecutionOutputForHost)
+      .then((output) => assertAgentActionExecutionIdentity(input, output))
   }
 
   cancelAction(input: AgentActionIdRequest): Promise<boolean> {

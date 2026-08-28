@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/explicit-function-return-type -- These Node tests exercise JavaScript runtime contracts. */
+
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
@@ -182,7 +184,9 @@ test('fixed presentation editor SDK fails before writing a plan for empty edits'
       await editPresentation({
         source: input('source.pptx'),
         destination: output('outputs/source-edited.pptx'),
-        edit() {}
+        edit() {
+          // Intentionally empty to verify that the SDK rejects a no-op plan.
+        }
       })
     }),
     /contains no operations/
@@ -264,12 +268,13 @@ test('fixed presentation editor SDK uses zero-based integer z-order indices', as
 
 test('fixed presentation editor SDK emits one terminal whole-slide operation', async () => {
   for (const apply of [
-    (deck) => deck.addSlide({
-      layout: 'LAYOUT_WIDE',
-      title: 'Appendix',
-      body: 'Supporting detail',
-      backgroundColor: 'F8FAFC'
-    }),
+    (deck) =>
+      deck.addSlide({
+        layout: 'LAYOUT_WIDE',
+        title: 'Appendix',
+        body: 'Supporting detail',
+        backgroundColor: 'F8FAFC'
+      }),
     (deck) => deck.removeSlide({ slideNumber: 8 }),
     (deck) => deck.moveSlide({ slideNumber: 7, newIndex: 3 })
   ]) {
@@ -298,7 +303,9 @@ test('fixed presentation editor SDK emits one terminal whole-slide operation', a
     await editPresentation({
       source: input('source.pptx'),
       destination: output('outputs/source-edited.pptx'),
-      edit(deck) { deck.moveSlide({ slideNumber: 7, newIndex: 3 }) }
+      edit(deck) {
+        deck.moveSlide({ slideNumber: 7, newIndex: 3 })
+      }
     })
   })
   assert.deepEqual(moved.operations[0].position, { type: 'index', index: 2 })

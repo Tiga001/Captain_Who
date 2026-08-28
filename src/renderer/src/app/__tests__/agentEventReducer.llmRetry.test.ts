@@ -17,7 +17,7 @@ function runningMessage(): ChatMessage {
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [],
       messageStreamCheckpoints: {}
     }
@@ -117,7 +117,7 @@ describe('LLM retry Renderer projection', () => {
       }
     })
     expect(preview.agentRun?.llmRetry).toBeUndefined()
-    expect(preview.agentRun?.fileWritePreviews).toHaveLength(1)
+    expect(preview.agentRun?.fileChangePreviews).toHaveLength(1)
   })
 
   it('binds provisional apply_patch previews to the canonical call and clears them on settlement', () => {
@@ -162,7 +162,7 @@ describe('LLM retry Renderer projection', () => {
         reason: null
       }
     })
-    expect(called.agentRun?.fileWritePreviews?.[0]?.toolCallId).toBe('call-apply-1')
+    expect(called.agentRun?.fileChangePreviews?.[0]?.toolCallId).toBe('call-apply-1')
 
     const settled = applyAgentEventToChatMessage(called, {
       type: 'tool_result',
@@ -174,7 +174,7 @@ describe('LLM retry Renderer projection', () => {
         error: 'invalid arguments'
       }
     })
-    expect(settled.agentRun?.fileWritePreviews).toEqual([])
+    expect(settled.agentRun?.fileChangePreviews).toEqual([])
   })
 
   it.each(['already_applied', 'outcome_unknown'] as const)(
@@ -205,7 +205,7 @@ describe('LLM retry Renderer projection', () => {
           updatedAt: 11
         }
       })
-      expect(next.agentRun?.fileDrafts).toContainEqual(
+      expect(next.agentRun?.fileChanges).toContainEqual(
         expect.objectContaining({ status, transactionId: `file-change-${status}` })
       )
     }

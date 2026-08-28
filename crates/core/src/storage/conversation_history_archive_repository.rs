@@ -222,6 +222,121 @@ pub fn store_archive(
         .ok_or_else(|| invalid_data("stored history archive cannot be reloaded"))
 }
 
+/// Removes an exact-history blob which was prepared for a terminal ToolResult but never became
+/// reachable from the authoritative Trace boundary.
+///
+/// This is intentionally an exact compare-and-delete operation, not general archive cleanup. It
+/// is used only after the pending-action settlement inspector has proved that the attempted
+/// terminal audit/Trace transaction is definitely absent. A different blob, a referenced blob,
+/// or a command-owned blob always fails closed.
+pub fn delete_unreferenced_exact_archive(
+    connection: &mut Connection,
+    input: &ConversationHistoryArchiveInput,
+) -> rusqlite::Result<bool> {
+    validate_input(input)?;
+    let Some(existing) = find_archive_for_trace_item(
+        connection,
+        &input.conversation_id,
+        &input.assistant_message_id,
+        input.sequence,
+    )?
+    else {
+        return Ok(false);
+    };
+    let content_bytes = input.content.as_bytes();
+    let expected_content_hash = content_hash(content_bytes);
+    if existing.call_id != input.call_id
+        || existing.tool != input.tool
+        || existing.content_type != input.content_type
+        || existing.content_hash != expected_content_hash
+        || existing.total_bytes != content_bytes.len() as u64
+        || existing.total_chars != input.content.chars().count() as u64
+        || existing.truncated_at_source != input.truncated_at_source
+        || existing.model_projection_truncated != input.model_projection_truncated
+        || existing.archive_projection_truncated != input.archive_projection_truncated
+    {
+        return Err(invalid_data(
+            "uncommitted history archive does not match the exact attempted ToolResult",
+        ));
+    }
+
+    let referenced: bool = connection.query_row(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM conversation_turn_trace_items
+             WHERE assistant_message_id = ?1
+               AND sequence = ?2
+               AND json_extract(item_json, '$.archiveRef') = ?3
+             UNION ALL
+             SELECT 1 FROM agent_command_sessions WHERE archive_ref = ?3
+             UNION ALL
+             SELECT 1 FROM agent_command_session_lifecycle_events WHERE archive_ref = ?3
+         )",
+        params![
+            &input.assistant_message_id,
+            sqlite_integer(input.sequence)?,
+            &existing.archive_ref,
+        ],
+        |row| row.get(0),
+    )?;
+    if referenced {
+        return Err(invalid_data(
+            "uncommitted history archive is already referenced by durable state",
+        ));
+    }
+
+    let transaction = connection.transaction()?;
+    let deleted = transaction.execute(
+        "DELETE FROM conversation_history_blobs
+         WHERE archive_ref = ?1
+           AND conversation_id = ?2
+           AND assistant_message_id = ?3
+           AND sequence = ?4
+           AND call_id = ?5
+           AND tool = ?6
+           AND content_type = ?7
+           AND content_hash = ?8
+           AND uncompressed_bytes = ?9
+           AND uncompressed_chars = ?10
+           AND truncated_at_source = ?11
+           AND model_projection_truncated = ?12
+           AND archive_projection_truncated = ?13
+           AND NOT EXISTS (
+               SELECT 1
+               FROM conversation_turn_trace_items
+               WHERE assistant_message_id = ?3
+                 AND sequence = ?4
+                 AND json_extract(item_json, '$.archiveRef') = ?1
+           )
+           AND NOT EXISTS (SELECT 1 FROM agent_command_sessions WHERE archive_ref = ?1)
+           AND NOT EXISTS (
+               SELECT 1 FROM agent_command_session_lifecycle_events WHERE archive_ref = ?1
+           )",
+        params![
+            &existing.archive_ref,
+            &input.conversation_id,
+            &input.assistant_message_id,
+            sqlite_integer(input.sequence)?,
+            &input.call_id,
+            &input.tool,
+            &input.content_type,
+            &expected_content_hash,
+            sqlite_integer(content_bytes.len() as u64)?,
+            sqlite_integer(input.content.chars().count() as u64)?,
+            input.truncated_at_source,
+            input.model_projection_truncated,
+            input.archive_projection_truncated,
+        ],
+    )?;
+    if deleted > 1 {
+        return Err(invalid_data(
+            "uncommitted history archive deletion affected multiple rows",
+        ));
+    }
+    transaction.commit()?;
+    Ok(deleted == 1)
+}
+
 /// Stores one already-materialized UTF-8 Tool Result without loading its complete body into the
 /// archive compressor.
 ///

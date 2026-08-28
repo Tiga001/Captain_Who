@@ -56,10 +56,12 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
             tool_call_id: None,
             tool_calls: vec![AgentContextCheckpointToolCall {
                 id: call_id.clone(),
-                name: "write_file".to_string(),
+                name: "apply_patch".to_string(),
                 args: json!({
+                    "action": "apply",
+                    "operation": "create",
                     "filePath": "src/history.rs",
-                    "mode": "create",
+                    "observationId": "fobs_provider_transition",
                     "content": "provider transition fixture"
                 }),
                 provider_identity: AgentProviderToolCallIdentity {
@@ -87,7 +89,7 @@ fn persist_completed_history(
     conversation_id: &str,
     assistant_message_id: &str,
 ) {
-    let trace = completed_trace(conversation_id, assistant_message_id);
+    let trace = completed_trace(conversation_id, assistant_message_id, 27);
     let model_context = completed_history_model_context();
     storage
         .finalize_chat_message_with_conversation_trace_model_context_and_usage(

@@ -27,7 +27,7 @@ function message(): ChatMessage {
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     mcpInvocations: [],
     timeline: []
   }

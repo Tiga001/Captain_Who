@@ -1169,6 +1169,18 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn delete_unreferenced_exact_conversation_tool_result(
+        &self,
+        input: conversation_history_archive_repository::ConversationHistoryArchiveInput,
+    ) -> Result<bool, String> {
+        let mut connection = self.state.connection()?;
+        conversation_history_archive_repository::delete_unreferenced_exact_archive(
+            &mut connection,
+            &input,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn archive_conversation_tool_result_file(
         &self,
         input: conversation_history_archive_repository::ConversationHistoryArchiveFileInput,

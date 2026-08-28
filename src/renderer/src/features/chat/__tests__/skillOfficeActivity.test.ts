@@ -110,7 +110,7 @@ function run(overrides: Partial<ChatAgentRunView> = {}): ChatAgentRunView {
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: [],
     ...overrides
   }

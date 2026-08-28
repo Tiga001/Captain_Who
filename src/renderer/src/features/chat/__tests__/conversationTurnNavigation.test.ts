@@ -48,7 +48,7 @@ function assistantMessage(
           toolCalls: [],
           toolResults: [],
           approvals: [],
-          diffs: [],
+          fileChangeProposals: [],
           timeline: []
         }
       : undefined

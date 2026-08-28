@@ -1,8 +1,6 @@
-use crate::file_change::FileChangeError;
 use crate::storage::models::AgentFileChangeRecord;
 use crate::{
-    AgentApprovalStatus, AgentFileChangeOperation, AgentFileChangeOutcome, AgentFileChangeProposal,
-    AgentFileChangeResult, AgentFileChangeResultStatus, AgentFileChangeSnapshot,
+    AgentApprovalStatus, AgentFileChangeOperation, AgentFileChangeSnapshot,
     AgentFileChangeUpdateStrategy, AgentPatchPermission, AgentPermissions, AgentProposedAction,
     AgentWritePermission, AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
 };
@@ -12,14 +10,14 @@ use similar::TextDiff;
 /// changes. Path scope and revision checks remain the responsibility of the
 /// concrete writer; this route only answers who may authorize the write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileWriteApprovalRoute {
+pub enum FileChangeApprovalRoute {
     Denied,
     RequireExplicitApproval,
     AutoApprove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileWriteAuthorizationSource {
+pub enum FileChangeAuthorizationSource {
     Automatic,
     ExplicitUser,
 }
@@ -28,33 +26,33 @@ pub enum FileWriteAuthorizationSource {
 /// filesystem scope. Full Access reaches `AutoApprove` because the trusted
 /// frontend maps that mode to write=all + patch=auto_approve; custom modes can
 /// reach the same route without gaining write=all.
-pub fn file_write_approval_route(permissions: AgentPermissions) -> FileWriteApprovalRoute {
+pub fn file_change_approval_route(permissions: AgentPermissions) -> FileChangeApprovalRoute {
     if permissions.write == AgentWritePermission::Denied {
-        FileWriteApprovalRoute::Denied
+        FileChangeApprovalRoute::Denied
     } else if permissions.patch == AgentPatchPermission::AutoApprove {
-        FileWriteApprovalRoute::AutoApprove
+        FileChangeApprovalRoute::AutoApprove
     } else {
-        FileWriteApprovalRoute::RequireExplicitApproval
+        FileChangeApprovalRoute::RequireExplicitApproval
     }
 }
 
 /// Revalidates the authorization source at the host execution boundary. This
 /// prevents an internal caller from labelling a manually-routed write as an
 /// automatically approved action and bypassing the user's chosen mode.
-pub fn file_write_authorized(
+pub fn file_change_authorized(
     permissions: AgentPermissions,
-    source: FileWriteAuthorizationSource,
+    source: FileChangeAuthorizationSource,
 ) -> bool {
-    match (file_write_approval_route(permissions), source) {
-        (FileWriteApprovalRoute::AutoApprove, FileWriteAuthorizationSource::Automatic)
+    match (file_change_approval_route(permissions), source) {
+        (FileChangeApprovalRoute::AutoApprove, FileChangeAuthorizationSource::Automatic)
         | (
-            FileWriteApprovalRoute::AutoApprove | FileWriteApprovalRoute::RequireExplicitApproval,
-            FileWriteAuthorizationSource::ExplicitUser,
+            FileChangeApprovalRoute::AutoApprove | FileChangeApprovalRoute::RequireExplicitApproval,
+            FileChangeAuthorizationSource::ExplicitUser,
         ) => true,
-        (FileWriteApprovalRoute::Denied, _)
+        (FileChangeApprovalRoute::Denied, _)
         | (
-            FileWriteApprovalRoute::RequireExplicitApproval,
-            FileWriteAuthorizationSource::Automatic,
+            FileChangeApprovalRoute::RequireExplicitApproval,
+            FileChangeAuthorizationSource::Automatic,
         ) => false,
     }
 }
@@ -62,15 +60,15 @@ pub fn file_write_authorized(
 /// Structured host actions that publish files all share the policy above.
 /// Command and Skill-script actions stay in their separate process policy,
 /// because they can have broader side effects than a validated file writer.
-pub fn proposed_action_uses_file_write_policy(action: &AgentProposedAction) -> bool {
-    file_write_action_approval_status(action).is_some()
+pub fn proposed_action_uses_file_change_policy(action: &AgentProposedAction) -> bool {
+    file_change_action_approval_status(action).is_some()
 }
 
-/// Returns the approval status carried by every structured file-write action.
+/// Returns the approval status carried by every structured file-change action.
 /// This exhaustive classifier is shared by runtime and host checks so adding a
 /// new action variant cannot silently update one policy boundary but not the
 /// other.
-pub fn file_write_action_approval_status(
+pub fn file_change_action_approval_status(
     action: &AgentProposedAction,
 ) -> Option<AgentApprovalStatus> {
     match action {
@@ -92,78 +90,45 @@ pub fn file_write_action_approval_status(
     }
 }
 
-pub fn file_write_diff(draft: &AgentFileChangeRecord) -> String {
-    TextDiff::from_lines(&draft.base_content, &draft.content)
+pub fn file_change_diff(change: &AgentFileChangeRecord) -> String {
+    TextDiff::from_lines(&change.base_content, &change.content)
         .unified_diff()
         .header(
-            &format!("a/{}", draft.file_path),
-            &format!("b/{}", draft.file_path),
+            &format!("a/{}", change.file_path),
+            &format!("b/{}", change.file_path),
         )
         .to_string()
 }
 
-pub fn file_draft_snapshot(
-    draft: &AgentFileChangeRecord,
+pub fn file_change_snapshot(
+    change: &AgentFileChangeRecord,
 ) -> Result<AgentFileChangeSnapshot, String> {
-    let (operation, update_strategy) = file_change_operation(draft)?;
-    let status = serde_json::from_value(serde_json::Value::String(draft.status.clone()))
-        .map_err(|error| format!("文件草稿 status 无效：{error}"))?;
+    let (operation, update_strategy) = file_change_operation(change)?;
+    let status = serde_json::from_value(serde_json::Value::String(change.status.clone()))
+        .map_err(|_| "文件变更事务状态无效。".to_string())?;
     let snapshot = AgentFileChangeSnapshot {
         schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
-        transaction_id: draft.id.clone(),
-        conversation_id: draft.conversation_id.clone(),
-        project_id: draft.project_id.clone(),
-        file_path: draft.file_path.clone(),
+        transaction_id: change.id.clone(),
+        conversation_id: change.conversation_id.clone(),
+        project_id: change.project_id.clone(),
+        file_path: change.file_path.clone(),
         operation,
         update_strategy,
         status,
-        base_revision: draft.base_revision.clone(),
-        additions: draft.additions,
-        deletions: draft.deletions,
-        line_count: draft.line_count,
-        byte_count: draft.byte_count,
-        mutation_count: draft.mutation_count,
-        next_mutation_index: draft.next_mutation_index,
-        stats_final: draft.stats_final,
-        summary: draft.summary.clone(),
-        created_at: draft.created_at,
-        updated_at: draft.updated_at,
+        base_revision: change.base_revision.clone(),
+        additions: change.additions,
+        deletions: change.deletions,
+        line_count: change.line_count,
+        byte_count: change.byte_count,
+        mutation_count: change.mutation_count,
+        next_mutation_index: change.next_mutation_index,
+        stats_final: change.stats_final,
+        summary: change.summary.clone(),
+        created_at: change.created_at,
+        updated_at: change.updated_at,
     };
     snapshot.validate().map_err(str::to_string)?;
     Ok(snapshot)
-}
-
-pub fn failed_file_write_result(
-    proposal: &AgentFileChangeProposal,
-    status: AgentFileChangeResultStatus,
-    error: &FileChangeError,
-) -> AgentFileChangeResult {
-    let safe_message = error.failure().message.clone();
-    let error_code = serde_json::to_value(error.code())
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .expect("FileChangeErrorCode has a stable string representation");
-    AgentFileChangeResult {
-        schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
-        status,
-        outcome: if status == AgentFileChangeResultStatus::OutcomeUnknown {
-            AgentFileChangeOutcome::OutcomeUnknown
-        } else {
-            AgentFileChangeOutcome::DefinitelyNotExecuted
-        },
-        transaction_id: proposal.transaction_id.clone(),
-        operation: proposal.operation,
-        update_strategy: proposal.update_strategy,
-        file_path: proposal.file_path.clone(),
-        additions: proposal.additions,
-        deletions: proposal.deletions,
-        line_count: proposal.line_count,
-        byte_count: proposal.byte_count,
-        revision: None,
-        error_code: Some(error_code),
-        error: Some(safe_message.clone()),
-        message: Some(safe_message),
-    }
 }
 
 fn file_change_operation(
@@ -193,7 +158,8 @@ fn file_change_operation(
 mod tests {
     use super::*;
     use crate::{
-        AgentApprovalStatus, AgentCommandPermission, AgentPatchPermission, AgentReadPermission,
+        AgentApprovalStatus, AgentCommandPermission, AgentFileChangeProposal, AgentPatchPermission,
+        AgentReadPermission,
     };
 
     fn permissions() -> AgentPermissions {
@@ -208,19 +174,19 @@ mod tests {
     }
 
     #[test]
-    fn shared_file_write_policy_routes_manual_custom_auto_and_full_access() {
+    fn shared_file_change_policy_routes_manual_custom_auto_and_full_access() {
         let manual = permissions();
         assert_eq!(
-            file_write_approval_route(manual),
-            FileWriteApprovalRoute::RequireExplicitApproval
+            file_change_approval_route(manual),
+            FileChangeApprovalRoute::RequireExplicitApproval
         );
-        assert!(!file_write_authorized(
+        assert!(!file_change_authorized(
             manual,
-            FileWriteAuthorizationSource::Automatic
+            FileChangeAuthorizationSource::Automatic
         ));
-        assert!(file_write_authorized(
+        assert!(file_change_authorized(
             manual,
-            FileWriteAuthorizationSource::ExplicitUser
+            FileChangeAuthorizationSource::ExplicitUser
         ));
 
         let custom_auto = AgentPermissions {
@@ -228,12 +194,12 @@ mod tests {
             ..manual
         };
         assert_eq!(
-            file_write_approval_route(custom_auto),
-            FileWriteApprovalRoute::AutoApprove
+            file_change_approval_route(custom_auto),
+            FileChangeApprovalRoute::AutoApprove
         );
-        assert!(file_write_authorized(
+        assert!(file_change_authorized(
             custom_auto,
-            FileWriteAuthorizationSource::Automatic
+            FileChangeAuthorizationSource::Automatic
         ));
 
         let full_access = AgentPermissions {
@@ -245,12 +211,12 @@ mod tests {
             builtin_execution: crate::AgentBuiltinExecutionPermission::AutoApprove,
         };
         assert_eq!(
-            file_write_approval_route(full_access),
-            FileWriteApprovalRoute::AutoApprove
+            file_change_approval_route(full_access),
+            FileChangeApprovalRoute::AutoApprove
         );
-        assert!(file_write_authorized(
+        assert!(file_change_authorized(
             full_access,
-            FileWriteAuthorizationSource::Automatic
+            FileChangeAuthorizationSource::Automatic
         ));
 
         let denied = AgentPermissions {
@@ -259,21 +225,21 @@ mod tests {
             ..manual
         };
         assert_eq!(
-            file_write_approval_route(denied),
-            FileWriteApprovalRoute::Denied
+            file_change_approval_route(denied),
+            FileChangeApprovalRoute::Denied
         );
-        assert!(!file_write_authorized(
+        assert!(!file_change_authorized(
             denied,
-            FileWriteAuthorizationSource::Automatic
+            FileChangeAuthorizationSource::Automatic
         ));
-        assert!(!file_write_authorized(
+        assert!(!file_change_authorized(
             denied,
-            FileWriteAuthorizationSource::ExplicitUser
+            FileChangeAuthorizationSource::ExplicitUser
         ));
     }
 
     #[test]
-    fn structured_file_write_actions_share_one_host_policy_domain() {
+    fn structured_file_change_actions_share_one_host_policy_domain() {
         let file_change = AgentProposedAction::FileChange {
             file_change: AgentFileChangeProposal {
                 schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
@@ -343,11 +309,11 @@ mod tests {
         };
 
         for action in [&file_change, &materialization, &office] {
-            assert!(proposed_action_uses_file_write_policy(action));
-            assert!(file_write_action_approval_status(action).is_some());
+            assert!(proposed_action_uses_file_change_policy(action));
+            assert!(file_change_action_approval_status(action).is_some());
         }
 
-        assert!(!proposed_action_uses_file_write_policy(
+        assert!(!proposed_action_uses_file_change_policy(
             &AgentProposedAction::ToolCall {
                 call: crate::AgentToolCall {
                     id: "read-1".to_string(),
@@ -358,7 +324,7 @@ mod tests {
                 },
             }
         ));
-        assert!(!proposed_action_uses_file_write_policy(
+        assert!(!proposed_action_uses_file_change_policy(
             &AgentProposedAction::Command {
                 command: crate::AgentCommandRequest {
                     id: "command-1".to_string(),

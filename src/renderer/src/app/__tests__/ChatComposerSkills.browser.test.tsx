@@ -7,14 +7,15 @@ import { render } from 'vitest-browser-react'
 import '../../styles/global.css'
 import '../../features/chat/components/ChatComposer.css'
 
-const { draftChangeSpy, listSkillsSpy, submitSpy } = vi.hoisted(() => ({
+const { draftChangeSpy, listSkillsSpy, submitSpy, translate } = vi.hoisted(() => ({
   draftChangeSpy: vi.fn(),
   listSkillsSpy: vi.fn(),
-  submitSpy: vi.fn()
+  submitSpy: vi.fn(),
+  translate: (key: string) => key
 }))
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => ({ t: translate })
 }))
 
 vi.mock('../../config/ModelSettingsProvider', () => ({
@@ -798,7 +799,9 @@ describe('ChatComposer Skill picker', () => {
     await expect
       .element(screen.getByText('chat.skillCatalogTruncated', { exact: true }))
       .toBeVisible()
-    await expect.element(screen.getByText('chat.skillDiagnostics', { exact: true })).toBeVisible()
+    const diagnosticsSummary = screen.getByText('chat.skillDiagnostics', { exact: true })
+    await expect.element(diagnosticsSummary).toBeVisible()
+    await diagnosticsSummary.click()
     await expect
       .element(screen.getByText('skills.diagnosticsAvailable', { exact: true }))
       .toBeVisible()

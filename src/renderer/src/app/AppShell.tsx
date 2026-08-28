@@ -1590,12 +1590,15 @@ export function AppShell() {
   const requestOpenConversationFromScheduled = useCallback(
     (conversationId: string, messageId?: string | null) => {
       if (primaryView !== 'scheduled') {
-        commitOpenConversationFromScheduled(conversationId, messageId)
+        // Ordinary sidebar navigation activates the metadata row immediately. The navigation
+        // hook then hydrates its detail in place, preserving both the loading surface and a
+        // single loaded+active lifecycle transition for Host-owned Session reconciliation.
+        selectConversation(conversationId, messageId)
         return
       }
       requestScheduledExit(() => commitOpenConversationFromScheduled(conversationId, messageId))
     },
-    [commitOpenConversationFromScheduled, primaryView, requestScheduledExit]
+    [commitOpenConversationFromScheduled, primaryView, requestScheduledExit, selectConversation]
   )
 
   useEffect(() => {

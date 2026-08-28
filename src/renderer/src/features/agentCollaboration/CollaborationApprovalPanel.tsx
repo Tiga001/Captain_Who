@@ -154,6 +154,7 @@ function ProjectedApprovalDecisionCard({
       <AgentApprovalDialog
         allowRememberForRun={false}
         key={`${approval.approvalId}:${attempt}`}
+        observerRootConversationId={approval.rootConversationId}
         onApprove={() => void decide('approve')}
         onCancel={() => void decide('cancel')}
         onReject={(_messageId, _action, message) => void decide('reject', message?.trim() || null)}

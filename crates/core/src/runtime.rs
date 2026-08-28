@@ -38,7 +38,9 @@ use crate::conversation_trace::{
     trace_attachments_from_input, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder,
 };
-use crate::file_write::{file_draft_snapshot, file_write_approval_route, FileWriteApprovalRoute};
+use crate::file_change_support::{
+    file_change_approval_route, file_change_snapshot, FileChangeApprovalRoute,
+};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, is_repairable_empty_model_action,
     LlmChatRequest, LlmMessage, LlmMessageRole, LlmStreamEvent,
@@ -1936,23 +1938,23 @@ impl AgentRuntime {
                         }
                     }
 
-                    let uses_file_write_policy = tool_registry
+                    let uses_file_change_policy = tool_registry
                         .permission_policy(&call.tool)
-                        .uses_file_write_approval();
+                        .uses_file_change_approval();
                     if !is_policy_process_tool
                         && policy_preflight_failure.is_none()
-                        && uses_file_write_policy
+                        && uses_file_change_policy
                         && definition_requires_approval
-                        && file_write_approval_route(command_permissions)
-                            == FileWriteApprovalRoute::Denied
+                        && file_change_approval_route(command_permissions)
+                            == FileChangeApprovalRoute::Denied
                     {
                         policy_preflight_failure = Some(failed_tool_call_result(
                             &call,
                             AgentError::structured(
-                                "agent.file_write_permission_denied",
+                                "agent.file_change_permission_denied",
                                 "The current permission policy does not allow file changes.",
                                 json!({
-                                    "type": "file_write_policy",
+                                    "type": "file_change_policy",
                                     "code": "writePermissionDenied",
                                     "recovery": "changePermissions",
                                 }),
@@ -1961,7 +1963,7 @@ impl AgentRuntime {
                         requires_approval = false;
                     }
                     let auto_execute_patch = policy_preflight_failure.is_none()
-                        && uses_file_write_policy
+                        && uses_file_change_policy
                         && patch_auto_approve
                         && definition_requires_approval;
                     let auto_execute_mcp_action = policy_preflight_failure.is_none()
@@ -3349,7 +3351,7 @@ fn file_change_snapshot_from_tool_result(
         .get_agent_file_change(transaction_id)
         .map_err(AgentError::new)?
         .ok_or_else(|| AgentError::new("FileChange 当前事务不存在。"))?;
-    file_draft_snapshot(&record)
+    file_change_snapshot(&record)
         .map(Some)
         .map_err(AgentError::new)
 }

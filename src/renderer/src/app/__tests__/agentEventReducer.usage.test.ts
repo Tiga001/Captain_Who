@@ -27,7 +27,7 @@ function run(): ChatAgentRunView {
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: [],
     usage: segmentUsage
   }

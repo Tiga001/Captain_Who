@@ -301,8 +301,14 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
                 tool_call_id: None,
                 tool_calls: vec![AgentContextCheckpointToolCall {
                     id: "write-forced".to_string(),
-                    name: "write_file".to_string(),
-                    args: json!({ "filePath": "created.txt", "mode": "create" }),
+                    name: "apply_patch".to_string(),
+                    args: json!({
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "created.txt",
+                        "observationId": "fobs_forced_cancellation",
+                        "content": "forced cancellation fixture"
+                    }),
                     provider_identity: AgentProviderToolCallIdentity {
                         provider_tool_index: 0,
                         provider_call_id: "write-forced".to_string(),
@@ -331,10 +337,14 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
             ConversationTurnTraceItem::ToolCall {
                 sequence: 0,
                 call_id: "write-forced".to_string(),
-                tool: "write_file".to_string(),
-                operation: json!({ "filePath": "created.txt", "mode": "create" }),
+                tool: "apply_patch".to_string(),
+                operation: json!({
+                    "action": "apply",
+                    "operation": "create",
+                    "filePath": "created.txt"
+                }),
                 provenance: AgentToolIdentity::Builtin {
-                    tool_name: "write_file".to_string(),
+                    tool_name: "apply_patch".to_string(),
                 },
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
@@ -342,7 +352,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
             ConversationTurnTraceItem::ToolResult {
                 sequence: 1,
                 call_id: "write-forced".to_string(),
-                tool: "write_file".to_string(),
+                tool: "apply_patch".to_string(),
                 status: ConversationTraceToolResultStatus::Succeeded,
                 success: true,
                 observation: json!({
@@ -461,11 +471,15 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
             items: vec![ConversationTurnTraceItem::ToolCall {
                 sequence: 0,
                 call_id: "corrupt-call".to_string(),
-                tool: "write_file".to_string(),
+                tool: "apply_patch".to_string(),
                 provenance: AgentToolIdentity::Builtin {
-                    tool_name: "write_file".to_string(),
+                    tool_name: "apply_patch".to_string(),
                 },
-                operation: json!({ "filePath": "private.txt" }),
+                operation: json!({
+                    "action": "apply",
+                    "operation": "create",
+                    "filePath": "private.txt"
+                }),
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
             }],

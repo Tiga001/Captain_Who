@@ -42,7 +42,7 @@ function run(
     toolCalls,
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     mcpInvocations,
     timeline
   }

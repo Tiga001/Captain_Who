@@ -9,7 +9,7 @@
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",
-      "sha256": "18f4bfc032e84bd91ff8e2422dd32880c3c7728e47b2fc6df82210c1eb8ee690"
+      "sha256": "c8cef8fe81985f29d4e710e6fed30a444c49590438b6ee0c8b326d998e292ee6"
     },
     "nodeLoader": {
       "path": "resources/artifact-runtime/node-loader.mjs",
@@ -17,7 +17,7 @@
     },
     "presentationSdk": {
       "path": "resources/artifact-runtime/presentation-sdk.mjs",
-      "sha256": "d29367071a76711868d8202c4f0481ed3bf86c6e53f18e37aa62e66187f0dc41"
+      "sha256": "bc8391d487275b31bf1b526ae080f43f4c3ad5f063e7c6df00cda4cf51dcf17e"
     },
     "nodePackageManifest": {
       "path": "packages/artifact-runtime-node/package.json",

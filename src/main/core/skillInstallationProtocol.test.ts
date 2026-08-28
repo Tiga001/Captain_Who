@@ -93,6 +93,31 @@ describe('Skill installation workflow protocol', () => {
     }
   })
 
+  it('accepts the current unsupported tool reference diagnostic and rejects drift', () => {
+    const response = structuredClone(golden.management.listResponse) as {
+      diagnostics: unknown[]
+    }
+    response.diagnostics = [
+      {
+        code: 'unsupportedToolReference',
+        severity: 'warning',
+        message: 'The Skill references a model tool that is not available.',
+        location: '.agents/skills/example/SKILL.md'
+      }
+    ]
+    expect(parseSkillsListManagementOutput(response).diagnostics).toEqual(response.diagnostics)
+
+    const unknownCode = structuredClone(response) as { diagnostics: Array<Record<string, unknown>> }
+    unknownCode.diagnostics[0].code = 'futureDiagnostic'
+    expect(() => parseSkillsListManagementOutput(unknownCode)).toThrow(/Skill diagnostic\.code/)
+
+    const extraField = structuredClone(response) as { diagnostics: Array<Record<string, unknown>> }
+    extraField.diagnostics[0].internalCause = 'must not cross the protocol boundary'
+    expect(() => parseSkillsListManagementOutput(extraField)).toThrow(
+      /unexpected field internalCause/
+    )
+  })
+
   it('keeps the golden aligned with backend installation identity and source semantics', () => {
     const localInstall = golden.inspectCases.find((testCase) => testCase.name === 'local install')
     const githubUpdate = golden.inspectCases.find((testCase) => testCase.name === 'GitHub update')

@@ -1099,6 +1099,84 @@ impl AgentService {
         Ok(outcome)
     }
 
+    /// Deletes only the exact, unreachable archive prepared by an unsuccessful terminal commit.
+    ///
+    /// The caller must first prove through the pending-action settlement inspector that the
+    /// attempted terminal audit and Trace are definitely absent. This method independently binds
+    /// the delete to the same call, sequence, content digest, and projection flags used by the
+    /// archive writer; any durable reference or mismatch fails closed.
+    pub(super) fn delete_uncommitted_continuation_archive(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        created_at: i64,
+    ) -> Result<(), String> {
+        let checkpoint = record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少会话轨迹检查点。".to_string())?;
+        let continuation = agent_input
+            .tool_continuation
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
+        validate_continuation_result_identity(&continuation.call, &continuation.result)?;
+        if continuation.result.exact_archive_file.is_some() {
+            return Err("uncommitted FileChange receipt unexpectedly uses a file archive".into());
+        }
+        let conversation_id = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 conversation id。".to_string())?;
+        let assistant_message_id = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        let sequence = continuation_result_sequence(checkpoint, &continuation.call);
+        let archive_result = project_persisted_continuation_for_archive(&continuation.result);
+        if archive_result.exact_archive_file.is_some() {
+            return Err(
+                "uncommitted FileChange archive projection unexpectedly uses a file".into(),
+            );
+        }
+        let model_result = project_persisted_continuation_for_model(&continuation.result);
+        let model_gate_truncates =
+            mycopilot_core::persisted_continuation_model_projection_would_truncate(
+                &agent_input.model,
+                &agent_input.api_url,
+                agent_input.api_style,
+                &continuation.result,
+            );
+        let truncated_at_source =
+            mycopilot_core::tool_result_truncated_at_source(&continuation.result);
+        let model_projection_truncated =
+            tool_result_projection_differs(&archive_result, &model_result) || model_gate_truncates;
+        let archive_projection_truncated =
+            tool_result_projection_differs(&continuation.result, &archive_result);
+        let content = serde_json::to_string(&archive_result)
+            .map_err(|error| format!("无法序列化待撤销的精确历史结果：{error}"))?;
+        self.storage
+            .delete_unreferenced_exact_conversation_tool_result(
+                mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                    conversation_id: conversation_id.to_string(),
+                    assistant_message_id: assistant_message_id.to_string(),
+                    sequence,
+                    call_id: archive_result.call_id.clone(),
+                    tool: archive_result.tool.clone(),
+                    content_type:
+                        "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+                    content,
+                    truncated_at_source,
+                    model_projection_truncated,
+                    archive_projection_truncated,
+                    created_at,
+                },
+            )?;
+        Ok(())
+    }
+
     /// Stores the exact Host result before constructing any model-visible continuation state.
     ///
     /// Approval execution happens outside the live tool registry and may be retried after a

@@ -1,5 +1,5 @@
 use super::{
-    clean_relative_path, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
+    clean_relative_path, AgentTool, AgentToolPermissionPolicy, FileChangeToolAccess,
     ToolExecutionContext,
 };
 use crate::protocol::{
@@ -58,7 +58,7 @@ impl AgentTool for SkillsMaterializeResourceTool {
     }
 
     fn permission_policy(&self) -> AgentToolPermissionPolicy {
-        AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly)
+        AgentToolPermissionPolicy::FileChange(FileChangeToolAccess::WriteOnly)
     }
 
     fn proposed_action(

@@ -123,8 +123,8 @@ function assistantMessage(id: string, runId: string, filePath: string): ChatMess
     agentRun: {
       approvals: [],
       completedAt: 2,
-      diffs: [],
-      fileDrafts: [
+      fileChangeProposals: [],
+      fileChanges: [
         {
           schemaVersion: 1,
           additions: 1,

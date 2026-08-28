@@ -14,10 +14,7 @@ user wants reusable evaluation cases or machine-readable review history.
       "prompt": "A realistic user request",
       "expected_output": "A short description of successful behavior",
       "files": [],
-      "expectations": [
-        "The requested artifact is created",
-        "The source file remains unchanged"
-      ]
+      "expectations": ["The requested artifact is created", "The source file remains unchanged"]
     }
   ]
 }
@@ -60,4 +57,3 @@ Use the field name `expectations` consistently. Do not alternate between `assert
 
 For a blind trigger review, `skill` may be `null` when no Skill was activated. `review_type` is
 `capability` or `blind_trigger`; `verdict` is `pass` or `fail`.
-

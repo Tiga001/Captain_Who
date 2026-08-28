@@ -28,16 +28,29 @@ const translations: Record<string, string> = {
   'collaboration.approval.status.interrupted': '已中断',
   'agent.approval.dialog.approve': '批准',
   'agent.approval.dialog.commandPolicyHint': '确认后执行',
+  'agent.approval.dialog.fileChangePolicyHint': '完整审阅后执行',
+  'agent.approval.dialog.fileChangeTitle': '修改文件',
   'agent.approval.dialog.reject': '拒绝',
   'agent.approval.dialog.rejectPlaceholder': '说明拒绝原因',
-  'agent.approval.dialog.toolTitle': '运行 {tool}'
+  'agent.approval.dialog.toolTitle': '运行 {tool}',
+  'agent.fileChange.togglePreview': '文件修改差异分页',
+  'files.pdf.nextPage': '下一页',
+  'files.pdf.previousPage': '上一页',
+  'files.preview.loading': '正在加载完整差异',
+  'files.preview.error': '无法加载完整差异'
 }
+
+const fileChangeRpc = vi.hoisted(() => ({ getDiff: vi.fn() }))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
     language: 'zh-CN',
     t: (key: string) => translations[key] ?? key
   })
+}))
+
+vi.mock('../../agent/agentClient', () => ({
+  getAgentFileChangeDiff: fileChangeRpc.getDiff
 }))
 
 const commandAction: AgentProposedAction = {
@@ -76,6 +89,34 @@ function approval(
   }
 }
 
+function fileChangeApproval(): CollaborationApprovalProjection {
+  return {
+    ...approval(),
+    actionId: 'file-change-action',
+    actionType: 'file_change',
+    toolName: 'apply_patch',
+    action: {
+      type: 'file_change',
+      fileChange: {
+        schemaVersion: 1,
+        id: 'file-change-action',
+        transactionId: 'file-change-transaction',
+        operation: 'update',
+        updateStrategy: 'rewrite',
+        filePath: 'src/main.ts',
+        inlineDiff: null,
+        baseRevision: 'content-sha256-v1:base',
+        summary: '更新入口文件',
+        additions: 1,
+        deletions: 1,
+        lineCount: 1,
+        byteCount: 12,
+        approvalStatus: 'required'
+      }
+    }
+  }
+}
+
 function decisionResult(
   overrides: Partial<CollaborationApprovalDecisionResult> = {}
 ): CollaborationApprovalDecisionResult {
@@ -90,6 +131,33 @@ function decisionResult(
 }
 
 describe('CollaborationApprovalPanel', () => {
+  it('routes staged child Diff reads through the exact root conversation', async () => {
+    const projected = fileChangeApproval()
+    fileChangeRpc.getDiff.mockResolvedValue({
+      transactionId: 'file-change-transaction',
+      patch: '-old\n+new\n',
+      offset: 0,
+      nextOffset: null,
+      truncated: false
+    })
+    const screen = await render(
+      <CollaborationApprovalPanel
+        approvals={[projected]}
+        mode="interactive"
+        onDecision={vi.fn(async () => decisionResult())}
+      />
+    )
+
+    await expect.element(screen.getByText(/\+new/)).toBeVisible()
+    expect(fileChangeRpc.getDiff).toHaveBeenCalledWith(
+      'file-change-transaction',
+      0,
+      50_000,
+      'conversation-root'
+    )
+    await expect.element(screen.getByRole('button', { name: '批准' })).toBeEnabled()
+  })
+
   it('routes a root decision by stable approval identity without offering remember-for-run', async () => {
     const onDecision = vi.fn(async () => decisionResult())
     const onOpenAgent = vi.fn()

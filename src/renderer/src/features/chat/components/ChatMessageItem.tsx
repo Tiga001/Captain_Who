@@ -32,9 +32,9 @@ import {
   copyTextToClipboard,
   formatElapsedDuration,
   formatMessageTime,
-  getApplyPatchGroupItems,
   getAssistantFinalContent,
   getConversationHistoryGroupItems,
+  getFileChangeGroupItems,
   getMcpActivityGroupItems,
   getOfficeGroupItems,
   getPreviousSuccessfulTodoResult,
@@ -47,11 +47,10 @@ import {
   getUsageRows,
   getUserVisibleContent,
   getWebActivityGroupItems,
-  getWriteFileGroupItems,
   groupTimelineItems,
   hasCollapsibleTimelineContent,
   hasDisplayableContent,
-  hasRecentFileWriteActivity,
+  hasRecentFileChangeActivity,
   hasTrustedAnchoredCollaborationActivity,
   isContentFullyRepresentedByTimeline,
   isRunSettled,
@@ -70,8 +69,7 @@ import { AgentToolActivity } from './toolActivities/AgentToolActivity'
 import { McpToolActivity, McpToolActivityGroup } from './toolActivities/McpToolActivity'
 import { ContextCompactionActivity } from './toolActivities/ContextCompactionActivity'
 import { ConversationHistoryToolActivity } from './toolActivities/ConversationHistoryToolActivity'
-import { FileWriteToolActivityGroup } from './toolActivities/FileWriteToolActivity'
-import { ApplyPatchToolActivityGroup } from './toolActivities/ApplyPatchToolActivity'
+import { FileChangeToolActivityGroup } from './toolActivities/FileChangeToolActivity'
 import { ReadToolActivityGroup } from './toolActivities/ReadToolActivity'
 import { RunCommandToolActivityGroup } from './toolActivities/RunCommandToolActivity'
 import { OfficeToolActivityGroup } from './toolActivities/OfficeToolActivity'
@@ -435,19 +433,14 @@ function AgentTimelineItemView({
     return <McpToolActivityGroup items={items} />
   }
 
-  if (item.type === 'apply_patch_group') {
-    const items = getApplyPatchGroupItems(run, item.callIds)
-    if (items.length === 0) return null
-    return <ApplyPatchToolActivityGroup items={items} projectId={projectId} />
-  }
-
-  if (item.type === 'write_file_group') {
-    const items = getWriteFileGroupItems(run, item.callIds)
+  if (item.type === 'file_change_group') {
+    const items = getFileChangeGroupItems(run, item.callIds)
     if (items.length === 0) return null
     return (
-      <FileWriteToolActivityGroup
+      <FileChangeToolActivityGroup
         items={items}
         observerRootConversationId={observerRootConversationId}
+        projectId={projectId}
       />
     )
   }
@@ -484,9 +477,9 @@ function AgentTimelineItemView({
     const mcpInvocation = run.mcpInvocations?.find((candidate) => candidate.callId === call.id)
     const webActivity = run.webSearchActivities?.find((candidate) => candidate.callId === call.id)
     const readActivity = run.readActivities?.find((candidate) => candidate.callId === call.id)
-    const diff =
+    const fileChangeProposal =
       call.tool === 'apply_patch'
-        ? run.diffs.find((candidate) => candidate.id === call.id)
+        ? run.fileChangeProposals.find((candidate) => candidate.id === call.id)
         : undefined
     const result = getToolResult(run, call.id)
     const previousTodoResult =
@@ -497,7 +490,7 @@ function AgentTimelineItemView({
         cancelled={settledStatus === 'cancelled'}
         call={call}
         conversationId={conversationId}
-        diff={diff}
+        fileChangeProposal={fileChangeProposal}
         mcpInvocation={mcpInvocation}
         observerRootConversationId={observerRootConversationId}
         projectId={projectId}
@@ -829,13 +822,13 @@ function AgentRunView({
     !isRunSettled(run) &&
     Boolean(run.lastResponseAt) &&
     now - (run.lastResponseAt ?? 0) <= ACTIVE_STREAMING_GRACE_MS
-  const isStreamingFileWrite = hasRecentFileWriteActivity(run, now)
+  const isStreamingFileChange = hasRecentFileChangeActivity(run, now)
   const showThinkingActivity =
     Boolean(llmRetryLabel) ||
     (!(canToggleTimeline && timelineCollapsed) &&
       !headerState.isThinking &&
       !isStreamingAssistantText &&
-      !isStreamingFileWrite &&
+      !isStreamingFileChange &&
       (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline)))
   const showTokenLimitNotice = isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
   const webSearchSources = getUniqueWebSearchSources(run)

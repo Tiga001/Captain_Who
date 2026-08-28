@@ -123,7 +123,7 @@ describe('read_image presentation activity', () => {
       toolCalls: [call],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [],
       readActivities: [
         {

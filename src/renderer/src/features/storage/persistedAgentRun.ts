@@ -5,7 +5,7 @@ import type {
   ChatMcpToolInvocationView
 } from '../chat/chatTypes'
 import {
-  isFileDraft,
+  isFileChangeSnapshot,
   isFileChangeProposal,
   isPersistableApproval,
   isSkillInstallationRequest,
@@ -66,8 +66,8 @@ const STORED_RUN_KEYS = [
   'readActivities',
   'approvals',
   'skillInstallations',
-  'diffs',
-  'fileDrafts',
+  'fileChangeProposals',
+  'fileChanges',
   'commandSessions',
   'mcpInvocations',
   'messageStreamCheckpoints',
@@ -91,8 +91,8 @@ const REQUIRED_STORED_RUN_KEYS = [
   'webSearchActivities',
   'readActivities',
   'approvals',
-  'diffs',
-  'fileDrafts',
+  'fileChangeProposals',
+  'fileChanges',
   'mcpInvocations',
   'messageStreamCheckpoints',
   'timeline'
@@ -322,8 +322,8 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     !isRecordArray(value.webSearchActivities, isWebSearchActivity) ||
     !isRecordArray(value.readActivities, isReadActivity) ||
     !isRecordArray(value.approvals, isPersistableApproval) ||
-    !isRecordArray(value.diffs, isFileChangeProposal) ||
-    !isRecordArray(value.fileDrafts, isFileDraft) ||
+    !isRecordArray(value.fileChangeProposals, isFileChangeProposal) ||
+    !isRecordArray(value.fileChanges, isFileChangeSnapshot) ||
     !Array.isArray(value.mcpInvocations) ||
     value.mcpInvocations.length > MAX_STORED_RUN_ITEMS ||
     !Array.isArray(value.timeline) ||
@@ -501,14 +501,19 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
             | 'builtin_capability_activation'
             | 'builtin_mcp_tool_approval'
             | 'browser_risk_approval'
+            | 'file_change'
         }
       > =>
         action.type !== 'mcp_tool_call' &&
         action.type !== 'builtin_capability_activation' &&
         action.type !== 'builtin_mcp_tool_approval' &&
-        action.type !== 'browser_risk_approval'
+        action.type !== 'browser_risk_approval' &&
+        action.type !== 'file_change'
     ),
-    fileDrafts: run.fileDrafts ?? [],
+    // FileChange proposals may contain inline Diff text. Pending approvals are Host-owned and
+    // rehydrated from the canonical pending-action store; ordinary chat persistence stores none.
+    fileChangeProposals: [],
+    fileChanges: run.fileChanges ?? [],
     mcpInvocations: run.mcpInvocations ?? [],
     messageStreamCheckpoints: run.messageStreamCheckpoints ?? {},
     timeline: run.timeline.filter(
@@ -516,7 +521,7 @@ export function stringifyPersistedAgentRun(run: ChatAgentRunView | undefined): s
     ),
     ...(commandSessions ? { commandSessions } : {})
   }
-  delete persistedRun.fileWritePreviews
+  delete persistedRun.fileChangePreviews
   delete persistedRun.commandOutputPreviews
   delete persistedRun.llmRetry
   if (!commandSessions) delete persistedRun.commandSessions

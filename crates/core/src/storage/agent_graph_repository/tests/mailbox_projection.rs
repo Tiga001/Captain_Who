@@ -481,7 +481,7 @@ fn root_display_uses_durable_human_turn_and_approval_state_without_a_wake() {
                      action_json, agent_input_json, created_at, updated_at
                  ) VALUES (
                      'approval-root-running', 'run-root-running', 'conversation-root',
-                     'assistant-root-running', 'tool_approval', 'write_file', 'call-root',
+                     'assistant-root-running', 'tool_approval', 'apply_patch', 'call-root',
                      'pending', NULL, '{}', '{}', 21, 21
                  )",
             [],

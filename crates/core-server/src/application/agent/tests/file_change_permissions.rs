@@ -351,6 +351,118 @@ fn assert_direct_change_applied(
     assert!(decision.tool_result.ok);
 }
 
+fn assert_exact_json_object_keys(value: &serde_json::Value, expected: &[&str]) {
+    let mut actual = value
+        .as_object()
+        .expect("expected a JSON object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = expected
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+fn assert_strict_file_change_execution_json(
+    output: &AgentActionExecutionOutput,
+    expected_status: &str,
+) -> serde_json::Value {
+    let value = serde_json::to_value(output).unwrap();
+    assert_exact_json_object_keys(
+        &value,
+        &[
+            "actionId",
+            "actionType",
+            "toolName",
+            "status",
+            "fileChangeResult",
+            "agentOutput",
+        ],
+    );
+    assert_eq!(value["status"], expected_status);
+    assert!(value.get("toolResult").is_none());
+    assert!(value.get("commandResult").is_none());
+    assert_exact_json_object_keys(
+        &value["fileChangeResult"],
+        &[
+            "schemaVersion",
+            "status",
+            "outcome",
+            "transactionId",
+            "operation",
+            "updateStrategy",
+            "filePath",
+            "additions",
+            "deletions",
+            "lineCount",
+            "byteCount",
+            "revision",
+            "errorCode",
+            "error",
+            "message",
+        ],
+    );
+    assert_exact_json_object_keys(
+        &value["agentOutput"],
+        &[
+            "content",
+            "status",
+            "runId",
+            "events",
+            "toolDefinitions",
+            "proposedActions",
+        ],
+    );
+    value["fileChangeResult"].clone()
+}
+
+fn assert_file_change_receipt_surfaces_match(
+    storage: &StorageService,
+    storage_id: &str,
+    run_id: &str,
+    notifications: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    receipt: &serde_json::Value,
+) {
+    let audit = storage
+        .get_agent_action_audit(storage_id)
+        .unwrap()
+        .expect("FileChange has a durable terminal audit");
+    let audit_receipt: serde_json::Value = serde_json::from_str(
+        audit
+            .file_change_result_json
+            .as_deref()
+            .expect("FileChange audit has a typed result"),
+    )
+    .unwrap();
+    assert_eq!(&audit_receipt, receipt);
+    let audit_tool_result: AgentToolResult = serde_json::from_str(
+        audit
+            .tool_result_json
+            .as_deref()
+            .expect("FileChange audit has its paired ToolResult"),
+    )
+    .unwrap();
+    assert_eq!(audit_tool_result.result.as_ref(), Some(receipt));
+
+    let trace_results = storage
+        .list_agent_tool_results_for_run(run_id, "apply_patch")
+        .unwrap();
+    assert_eq!(trace_results.len(), 1);
+    assert_eq!(trace_results[0].result.as_ref(), Some(receipt));
+
+    let events = std::iter::from_fn(|| notifications.try_recv().ok()).collect::<Vec<_>>();
+    let published = events
+        .iter()
+        .filter(|event| event["params"]["type"] == "tool_result")
+        .collect::<Vec<_>>();
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0]["params"]["result"]["result"], *receipt);
+}
+
 fn staged_file_change_action(approval_status: AgentApprovalStatus) -> AgentProposedAction {
     let (file_change, _) = staged_file_change_fixture(
         StagedFileChangeFixtureIdentity {
@@ -379,22 +491,119 @@ fn apply_patch_action(approval_status: AgentApprovalStatus) -> AgentProposedActi
     .0
 }
 
-fn structured_file_write_actions(approval_status: AgentApprovalStatus) -> [AgentProposedAction; 2] {
+fn structured_file_change_actions(
+    approval_status: AgentApprovalStatus,
+) -> [AgentProposedAction; 2] {
     [
         apply_patch_action(approval_status),
         staged_file_change_action(approval_status),
     ]
 }
 
-fn assert_structured_file_write_authorization(
+#[test]
+fn direct_and_staged_body_canary_stays_inside_private_file_change_authority() {
+    const BODY_CANARY: &str = "FILE_CHANGE_BODY_PRIVACY_CANARY_7f3e2a91";
+
+    let fixture = tempdir().unwrap();
+    let direct_path = fixture.path().join("direct.txt");
+    let filler = (1..=16)
+        .map(|index| format!("unchanged line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base = format!("{BODY_CANARY}\n{filler}\nstatus: before\n");
+    let target = format!("{BODY_CANARY}\n{filler}\nstatus: after\n");
+    std::fs::write(&direct_path, &base).unwrap();
+    let (direct_action, direct_call) = direct_file_change_fixture(
+        "run-private-direct",
+        "conversation-private",
+        "call-private-direct",
+        ("direct.txt", direct_path.to_str().unwrap()),
+        Some(&base),
+        Some(&target),
+        AgentApprovalStatus::Required,
+    );
+    let AgentProposedAction::FileChange {
+        file_change: direct_proposal,
+    } = &direct_action
+    else {
+        unreachable!("Direct fixture is a FileChange")
+    };
+    assert!(!direct_proposal
+        .inline_diff
+        .as_ref()
+        .unwrap()
+        .patch
+        .contains(BODY_CANARY));
+
+    let staged_path = fixture.path().join("staged.txt");
+    let (staged_proposal, staged_call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id: "run-private-staged",
+            conversation_id: "conversation-private",
+            call_id: "call-private-staged",
+            transaction_id: "file-change-private-staged",
+        },
+        ("staged.txt", staged_path.to_str().unwrap()),
+        BODY_CANARY,
+        AgentApprovalStatus::Required,
+    );
+    let staged_action = AgentProposedAction::FileChange {
+        file_change: staged_proposal.clone(),
+    };
+
+    for (boundary, event) in [
+        (
+            "direct renderer event",
+            agent_event_notification(AgentEvent::FileChangeProposed {
+                run_id: "run-private-direct".to_string(),
+                file_change: direct_proposal.clone(),
+            }),
+        ),
+        (
+            "staged renderer event",
+            agent_event_notification(AgentEvent::FileChangeProposed {
+                run_id: "run-private-staged".to_string(),
+                file_change: staged_proposal.clone(),
+            }),
+        ),
+    ] {
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(!encoded.contains(BODY_CANARY), "{boundary} leaked body");
+        assert!(!encoded.contains("\"execution\""));
+    }
+
+    // The body is retained only by authority-bearing Host state: Direct exact replay and its
+    // frozen proposal, plus the canonical Staged transaction and frozen commit proposal.
+    let direct_input = direct_execution_input(
+        fixture.path(),
+        "run-private-direct",
+        "conversation-private",
+        AgentPermissions::default(),
+        &direct_call,
+    );
+    assert!(serde_json::to_string(&direct_input)
+        .unwrap()
+        .contains(BODY_CANARY));
+    assert!(serde_json::to_string(&direct_action)
+        .unwrap()
+        .contains(BODY_CANARY));
+    assert!(serde_json::to_string(&staged_action)
+        .unwrap()
+        .contains(BODY_CANARY));
+    let canonical_staged = staged_file_change_record(&staged_proposal, "waiting_approval");
+    assert!(canonical_staged.content.contains(BODY_CANARY));
+    assert_eq!(staged_call.tool, "apply_patch");
+}
+
+fn assert_structured_file_change_authorization(
     input: &AgentChatInput,
     approval_status: AgentApprovalStatus,
-    source: FileWriteAuthorizationSource,
+    source: FileChangeAuthorizationSource,
     allowed: bool,
 ) {
-    for action in structured_file_write_actions(approval_status) {
+    for action in structured_file_change_actions(approval_status) {
         assert_eq!(
-            authorize_structured_file_write(input, &action, source).is_ok(),
+            authorize_file_change_action(input, &action, source).is_ok(),
             allowed
         );
     }
@@ -407,10 +616,10 @@ fn automatic_host_writes_require_auto_approve_and_an_approved_snapshot() {
         patch: mycopilot_core::AgentPatchPermission::RequireApproval,
         ..Default::default()
     });
-    assert_structured_file_write_authorization(
+    assert_structured_file_change_authorization(
         &manual,
         AgentApprovalStatus::Approved,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
         false,
     );
 
@@ -419,16 +628,16 @@ fn automatic_host_writes_require_auto_approve_and_an_approved_snapshot() {
         patch: mycopilot_core::AgentPatchPermission::AutoApprove,
         ..Default::default()
     });
-    assert_structured_file_write_authorization(
+    assert_structured_file_change_authorization(
         &automatic,
         AgentApprovalStatus::Approved,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
         true,
     );
-    assert_structured_file_write_authorization(
+    assert_structured_file_change_authorization(
         &automatic,
         AgentApprovalStatus::Required,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
         false,
     );
 }
@@ -440,10 +649,10 @@ fn explicit_user_approval_authorizes_manual_writes_but_never_overrides_write_den
         patch: mycopilot_core::AgentPatchPermission::RequireApproval,
         ..Default::default()
     });
-    assert_structured_file_write_authorization(
+    assert_structured_file_change_authorization(
         &manual,
         AgentApprovalStatus::Required,
-        FileWriteAuthorizationSource::ExplicitUser,
+        FileChangeAuthorizationSource::ExplicitUser,
         true,
     );
 
@@ -452,16 +661,16 @@ fn explicit_user_approval_authorizes_manual_writes_but_never_overrides_write_den
         patch: mycopilot_core::AgentPatchPermission::AutoApprove,
         ..Default::default()
     });
-    assert_structured_file_write_authorization(
+    assert_structured_file_change_authorization(
         &denied,
         AgentApprovalStatus::Approved,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
         false,
     );
-    assert_structured_file_write_authorization(
+    assert_structured_file_change_authorization(
         &denied,
         AgentApprovalStatus::Required,
-        FileWriteAuthorizationSource::ExplicitUser,
+        FileChangeAuthorizationSource::ExplicitUser,
         false,
     );
 }
@@ -473,10 +682,10 @@ fn process_actions_remain_in_their_separate_command_policy_domain() {
         command: command_request("command-1", "pwd"),
     };
 
-    assert!(authorize_structured_file_write(
+    assert!(authorize_file_change_action(
         &denied,
         &command,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
     )
     .is_ok());
 }
@@ -515,10 +724,10 @@ fn direct_create_update_delete_share_the_committer_across_auto_and_manual_approv
         &create_call,
     );
     bind_direct_execution_to_input(&mut create_action, &create_input);
-    authorize_structured_file_write(
+    authorize_file_change_action(
         &create_input,
         &create_action,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
     )
     .unwrap();
     let AgentProposedAction::FileChange {
@@ -559,10 +768,10 @@ fn direct_create_update_delete_share_the_committer_across_auto_and_manual_approv
         &update_call,
     );
     bind_direct_execution_to_input(&mut update_action, &update_input);
-    authorize_structured_file_write(
+    authorize_file_change_action(
         &update_input,
         &update_action,
-        FileWriteAuthorizationSource::ExplicitUser,
+        FileChangeAuthorizationSource::ExplicitUser,
     )
     .unwrap();
     let update_record = pending_file_change_record(
@@ -608,10 +817,10 @@ fn direct_create_update_delete_share_the_committer_across_auto_and_manual_approv
         &delete_call,
     );
     bind_direct_execution_to_input(&mut delete_action, &delete_input);
-    authorize_structured_file_write(
+    authorize_file_change_action(
         &delete_input,
         &delete_action,
-        FileWriteAuthorizationSource::Automatic,
+        FileChangeAuthorizationSource::Automatic,
     )
     .unwrap();
     let AgentProposedAction::FileChange {
@@ -662,7 +871,7 @@ fn no_workspace_absolute_direct_create_executes_with_full_write_scope() {
         &call,
     );
     bind_direct_execution_to_input(&mut action, &input);
-    authorize_structured_file_write(&input, &action, FileWriteAuthorizationSource::Automatic)
+    authorize_file_change_action(&input, &action, FileChangeAuthorizationSource::Automatic)
         .unwrap();
     let AgentProposedAction::FileChange { file_change } = &action else {
         unreachable!()
@@ -1251,6 +1460,149 @@ async fn manual_direct_post_receipt_error_adopts_exact_timeline_once() {
     );
 }
 
+#[tokio::test]
+async fn manual_file_change_approve_rpc_has_only_the_strict_typed_result() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-manual-file-change-approve-json";
+    let conversation_id = "conversation-manual-file-change-approve-json";
+    let assistant_message_id = "assistant-manual-file-change-approve-json";
+    let call_id = "call-manual-file-change-approve-json";
+    let target = workspace.join("approve-json.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        call_id,
+        "approve-json.txt",
+        "strict approve receipt\n",
+    );
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output = service
+        .approve_action(run_id, call_id, notifications)
+        .expect("manual FileChange approval succeeds");
+    let receipt = assert_strict_file_change_execution_json(&output, "applied");
+    assert_eq!(receipt["status"], "applied");
+    assert_eq!(receipt["outcome"], "applied");
+    assert_eq!(
+        fs::read_to_string(target).unwrap(),
+        "strict approve receipt\n"
+    );
+    assert_file_change_receipt_surfaces_match(
+        &storage,
+        &pending_action_storage_id(run_id, call_id),
+        run_id,
+        &mut receiver,
+        &receipt,
+    );
+}
+
+#[tokio::test]
+async fn manual_file_change_reject_rpc_has_only_the_strict_typed_result() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-manual-file-change-reject-json";
+    let conversation_id = "conversation-manual-file-change-reject-json";
+    let assistant_message_id = "assistant-manual-file-change-reject-json";
+    let call_id = "call-manual-file-change-reject-json";
+    let target = workspace.join("reject-json.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        call_id,
+        "reject-json.txt",
+        "must never be published\n",
+    );
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output = service
+        .reject_action(
+            run_id,
+            call_id,
+            Some("用户拒绝本次文件修改。".to_string()),
+            notifications,
+        )
+        .expect("manual FileChange rejection succeeds");
+    let receipt = assert_strict_file_change_execution_json(&output, "rejected");
+    assert_eq!(receipt["status"], "rejected");
+    assert_eq!(receipt["outcome"], "definitely_not_executed");
+    assert!(!target.exists());
+    assert_file_change_receipt_surfaces_match(
+        &storage,
+        &pending_action_storage_id(run_id, call_id),
+        run_id,
+        &mut receiver,
+        &receipt,
+    );
+}
+
+#[tokio::test]
+async fn manual_file_change_audit_failure_publishes_one_typed_outcome_unknown_receipt() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-manual-file-change-audit-failure-json";
+    let conversation_id = "conversation-manual-file-change-audit-failure-json";
+    let assistant_message_id = "assistant-manual-file-change-audit-failure-json";
+    let call_id = "call-manual-file-change-audit-failure-json";
+    let target = workspace.join("audit-failure-json.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        call_id,
+        "audit-failure-json.txt",
+        "effect may already exist\n",
+    );
+    let storage_id = pending_action_storage_id(run_id, call_id);
+    // Exhaust the two commits of the original `applied` receipt. The subsequent fallback commit
+    // must use the strict FileChange contract and become the only authoritative terminal fact.
+    inject_manual_action_audit_failure(&storage_id, "completed");
+    inject_manual_action_audit_failure(&storage_id, "completed");
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output = service
+        .approve_action(run_id, call_id, notifications)
+        .expect("typed outcome_unknown fallback settles durably");
+    let receipt = assert_strict_file_change_execution_json(&output, "outcome_unknown");
+    assert_eq!(receipt["status"], "outcome_unknown");
+    assert_eq!(receipt["outcome"], "outcome_unknown");
+    assert_eq!(receipt["errorCode"], "agent.apply_patch.outcome_unknown");
+    assert_eq!(
+        fs::read_to_string(target).unwrap(),
+        "effect may already exist\n"
+    );
+    assert_file_change_receipt_surfaces_match(
+        &storage,
+        &storage_id,
+        run_id,
+        &mut receiver,
+        &receipt,
+    );
+}
+
 #[test]
 fn direct_update_revision_conflict_after_approval_wait_has_no_side_effect() {
     let fixture = tempdir().unwrap();
@@ -1284,7 +1636,7 @@ fn direct_update_revision_conflict_after_approval_wait_has_no_side_effect() {
         &call,
     );
     bind_direct_execution_to_input(&mut action, &input);
-    authorize_structured_file_write(&input, &action, FileWriteAuthorizationSource::ExplicitUser)
+    authorize_file_change_action(&input, &action, FileChangeAuthorizationSource::ExplicitUser)
         .unwrap();
 
     fs::write(&target, "external change while approval was pending\n").unwrap();
@@ -1355,7 +1707,7 @@ fn direct_update_rejects_an_identical_replacement_after_approval_wait() {
         &call,
     );
     bind_direct_execution_to_input(&mut action, &input);
-    authorize_structured_file_write(&input, &action, FileWriteAuthorizationSource::ExplicitUser)
+    authorize_file_change_action(&input, &action, FileChangeAuthorizationSource::ExplicitUser)
         .unwrap();
 
     let displaced = workspace.join("displaced.txt");

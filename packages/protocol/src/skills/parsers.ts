@@ -897,10 +897,52 @@ function parseSkillSourceDescriptor(value: unknown): SkillSourceDescriptor {
 
 function parseSkillDiagnostic(value: unknown): SkillDiagnostic {
   const record = expectRecord(value, 'Skill diagnostic')
+  expectOnlyKeys(
+    record,
+    ['code', 'severity', 'message', 'skillId', 'location'] as const,
+    'Skill diagnostic'
+  )
   const skillId = optionalNonEmptyString(record.skillId, 'Skill diagnostic.skillId')
   const location = optionalNonEmptyString(record.location, 'Skill diagnostic.location')
   return {
-    code: expectNonEmptyString(record.code, 'Skill diagnostic.code') as SkillDiagnosticCode,
+    code: expectEnum(
+      record.code,
+      [
+        'invalidRoot',
+        'rootEscapesWorkspace',
+        'tooManyEntries',
+        'scanBudgetExceeded',
+        'catalogTooLarge',
+        'unreadableEntry',
+        'unsupportedPathEncoding',
+        'symlinkNotAllowed',
+        'pathChangedDuringRead',
+        'missingSkillFile',
+        'skillFileTooLarge',
+        'invalidUtf8',
+        'nulByte',
+        'missingFrontmatter',
+        'invalidFrontmatter',
+        'missingDescription',
+        'invalidName',
+        'invalidDescription',
+        'invalidDirectoryName',
+        'missingInstructions',
+        'defaultedName',
+        'duplicateName',
+        'unsupportedToolReference',
+        'invalidInstallationReceipt',
+        'packageRevisionMismatch',
+        'unexpectedPackageEntry',
+        'invalidResourcePath',
+        'resourceFileTooLarge',
+        'packageTooLarge',
+        'invalidPackageManifest',
+        'sourceUnavailable',
+        'sourceContractViolation'
+      ] as const satisfies readonly SkillDiagnosticCode[],
+      'Skill diagnostic.code'
+    ),
     severity: expectEnum(
       record.severity,
       ['warning', 'error'] as const,

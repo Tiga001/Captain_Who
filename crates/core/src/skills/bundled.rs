@@ -529,6 +529,7 @@ mod tests {
         SkillResourceListOptions, SkillResourceMaterializer, SkillResourcePath,
         SkillResourceTextReadOptions, SkillTemplateTreeMaterializationRequest, SkillsService,
     };
+    use crate::tools::ToolRegistry;
     use serde_json::Value;
     use std::fs;
     use std::path::Path;
@@ -646,6 +647,94 @@ mod tests {
             .contains("**Edit an existing `.docx`:**"));
         assert!(!package.instructions().contains("description:"));
         assert_eq!(package.revision(), descriptor.revision());
+    }
+
+    #[test]
+    fn current_authoring_skills_resolve_and_activate_without_retired_writer_guidance() {
+        let source = BundledSkillSource::new().unwrap();
+        let catalog = source.list().unwrap();
+        let service = SkillsService::new().with_bundled_source().unwrap();
+
+        let registry = ToolRegistry::defaults_with_search(None);
+        assert!(registry.definition_for("apply_patch").is_some());
+        assert!(registry.definition_for("write_file").is_none());
+        assert_eq!(
+            registry
+                .definitions()
+                .iter()
+                .filter(|definition| definition.name == "apply_patch")
+                .count(),
+            1
+        );
+
+        for local_id in [
+            SKILL_CREATOR_LOCAL_ID,
+            SKILL_INSTALLER_LOCAL_ID,
+            DOCUMENTS_LOCAL_ID,
+            SPREADSHEETS_LOCAL_ID,
+            PRESENTATIONS_LOCAL_ID,
+        ] {
+            let descriptor = catalog
+                .skills()
+                .iter()
+                .find(|skill| skill.id().local_id() == local_id)
+                .unwrap();
+            let package = source.resolve(&descriptor.selection()).unwrap();
+            assert!(
+                !package.source_text().contains("write_file"),
+                "{local_id} still instructs the model to use the retired writer"
+            );
+
+            let activated = service.activate(&[descriptor.selection()]).unwrap();
+            assert_eq!(activated.skills().len(), 1);
+            assert_eq!(activated.skills()[0].id(), descriptor.id());
+            assert_eq!(activated.skills()[0].source_text(), package.source_text());
+            assert!(!activated.skills()[0].instructions().contains("write_file"));
+
+            let reader = source.open_resource_reader(&package).unwrap();
+            for resource in package.resources().entries() {
+                let bytes = reader
+                    .as_ref()
+                    .expect("resource-bearing package must expose a reader")
+                    .read(resource)
+                    .unwrap();
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    assert!(
+                        !text.contains("write_file"),
+                        "{local_id}/{} still instructs the model to use the retired writer",
+                        resource.path()
+                    );
+                }
+            }
+
+            if matches!(
+                local_id,
+                DOCUMENTS_LOCAL_ID | SPREADSHEETS_LOCAL_ID | PRESENTATIONS_LOCAL_ID
+            ) {
+                let reader = reader.expect("Office package must expose resources");
+                let capability = package
+                    .resources()
+                    .get("office-capability.json")
+                    .expect("Office package must expose its capability manifest");
+                let capability: Value =
+                    serde_json::from_slice(&reader.read(capability).unwrap()).unwrap();
+                assert_eq!(
+                    capability["modes"]["script"]["editTools"],
+                    serde_json::json!(["apply_patch"])
+                );
+                assert!(
+                    capability["modes"]["script"]["routes"]
+                        .as_object()
+                        .is_some_and(|routes| !routes.is_empty()),
+                    "{local_id} lost its managed script route"
+                );
+                assert!(package
+                    .resources()
+                    .entries()
+                    .iter()
+                    .any(|resource| resource.path().starts_with("templates/builder.")));
+            }
+        }
     }
 
     #[test]
@@ -1030,6 +1119,9 @@ mod tests {
             "MYCOPILOT_APP_DATA_ROOT",
             "Never place the suffix inside the double quotes",
             "redirect provider diagnostics",
+            "create only from a missing observation",
+            "`apply_patch` Direct or Staged actions",
+            "never use a command, redirection, or script as an alternate writer",
         ] {
             assert!(
                 normalized_platform_workflows.contains(required),

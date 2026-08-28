@@ -13,7 +13,7 @@ import type {
 import type { ChatAgentRunView } from '../../chatTypes'
 import { isReadActivityTool } from '../../agentReadActivities'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
-import { ApplyPatchToolActivity } from './ApplyPatchToolActivity'
+import { FileChangeToolActivity } from './FileChangeToolActivity'
 import { ConversationHistoryToolActivity } from './ConversationHistoryToolActivity'
 import { GenericToolActivity } from './GenericToolActivity'
 import { GitDiffToolActivity } from './GitDiffToolActivity'
@@ -38,7 +38,7 @@ interface AgentToolActivityProps {
   readActivity?: ChatReadActivity
   webActivity?: ChatWebSearchActivity
   call: AgentToolCall
-  diff?: AgentFileChangeProposal
+  fileChangeProposal?: AgentFileChangeProposal
   mcpInvocation?: ChatMcpToolInvocationView
   observerRootConversationId?: string
   projectId?: string | null
@@ -56,7 +56,7 @@ export function AgentToolActivity({
   readActivity,
   webActivity,
   call,
-  diff,
+  fileChangeProposal,
   mcpInvocation,
   observerRootConversationId,
   projectId,
@@ -207,14 +207,36 @@ export function AgentToolActivity({
   }
 
   if (call.tool === 'apply_patch') {
+    const callArgs =
+      call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+        ? (call.args as Record<string, unknown>)
+        : {}
+    const resultValue =
+      result?.result && typeof result.result === 'object' && !Array.isArray(result.result)
+        ? (result.result as Record<string, unknown>)
+        : {}
+    const transactionId =
+      (typeof callArgs.transactionId === 'string' && callArgs.transactionId) ||
+      fileChangeProposal?.transactionId ||
+      (typeof resultValue.transactionId === 'string' ? resultValue.transactionId : undefined)
     return (
-      <ApplyPatchToolActivity
+      <FileChangeToolActivity
         cancelled={cancelled && !result}
         call={call}
-        diff={diff}
+        observerRootConversationId={observerRootConversationId}
+        preview={run.fileChangePreviews?.find(
+          (candidate) =>
+            candidate.toolCallId === call.id ||
+            (transactionId !== undefined && candidate.transactionId === transactionId)
+        )}
         projectId={projectId}
+        proposal={fileChangeProposal}
         result={result}
         settledStatus={settledStatus}
+        transaction={run.fileChanges?.find(
+          (candidate) => candidate.transactionId === transactionId
+        )}
+        transactionId={transactionId}
       />
     )
   }

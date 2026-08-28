@@ -19,4 +19,3 @@ section when the Skill is self-contained.
 ## Completion
 
 Describe observable completion evidence and any limitation that must be reported.
-

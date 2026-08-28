@@ -3,7 +3,8 @@ import {
   type AgentApprovalStatus,
   type AgentChatOutput,
   type AgentEvent,
-  type AgentProposedAction
+  type AgentProposedAction,
+  type AgentToolResult
 } from '@mycopilot/protocol'
 import type {
   ChatAgentInterruptionView,
@@ -31,9 +32,9 @@ import { getActionToolCall, getActionToolCallId } from './actionProjection'
 import {
   createRejectedToolResult,
   getApprovalsForStatus,
-  updateDiffApprovalStatus,
-  updateFileDraftApprovalStatus,
-  updateFileDraftFromToolResult,
+  updateFileChangeApprovalStatus,
+  updateFileChangeFromToolResult,
+  updateFileChangeProposalApprovalStatus,
   updateToolCallApprovalStatus
 } from './approvalState'
 import {
@@ -68,7 +69,7 @@ import {
   mergeSkillInstallationApprovals,
   removeAgentAction,
   upsertAgentAction,
-  upsertFileWritePreview
+  upsertFileChangePreview
 } from './agentEventReducerFileSkill'
 import {
   guidanceAttachments,
@@ -180,7 +181,7 @@ export function settleAgentRunToolActivities(
 
   return {
     ...runWithStatus,
-    fileWritePreviews: [],
+    fileChangePreviews: [],
     timeline: settlePendingContextCompactions(runWithStatus.timeline, settledActivityStatus),
     webSearchActivities: settlePendingWebSearchActivities(
       runWithStatus,
@@ -383,8 +384,8 @@ export function applyAgentEventToChatMessage(
         status: 'running',
         llmRetry: undefined,
         ...getRunResponseTimestamps(currentRun, receivedAt),
-        fileWritePreviews: upsertFileWritePreview(
-          currentRun.fileWritePreviews ?? [],
+        fileChangePreviews: upsertFileChangePreview(
+          currentRun.fileChangePreviews ?? [],
           agentEvent.preview,
           receivedAt
         )
@@ -397,7 +398,7 @@ export function applyAgentEventToChatMessage(
       ...message,
       agentRun: {
         ...currentRun,
-        fileWritePreviews: (currentRun.fileWritePreviews ?? []).filter(
+        fileChangePreviews: (currentRun.fileChangePreviews ?? []).filter(
           (preview) =>
             preview.streamId !== agentEvent.streamId || preview.attempt !== agentEvent.attempt
         )
@@ -530,8 +531,8 @@ export function applyAgentEventToChatMessage(
         ...runWithCleanTimeline,
         status: 'running',
         toolCalls: upsertById(currentRun.toolCalls, agentEvent.call, (call) => call.id),
-        fileWritePreviews: bindFileChangePreviewsToCall(
-          currentRun.fileWritePreviews ?? [],
+        fileChangePreviews: bindFileChangePreviewsToCall(
+          currentRun.fileChangePreviews ?? [],
           agentEvent.call
         ),
         webSearchActivities: upsertWebSearchActivityFromCall(currentRun, agentEvent.call),
@@ -571,13 +572,13 @@ export function applyAgentEventToChatMessage(
       toolResults: upsertById(currentRun.toolResults, safeResult, (result) => result.callId),
       webSearchActivities: upsertWebSearchActivityFromResult(currentRun, agentEvent.result),
       readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
-      fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),
-      fileWritePreviews:
+      fileChanges: updateFileChangeFromToolResult(currentRun.fileChanges ?? [], agentEvent.result),
+      fileChangePreviews:
         agentEvent.result.tool === 'apply_patch'
-          ? (currentRun.fileWritePreviews ?? []).filter(
+          ? (currentRun.fileChangePreviews ?? []).filter(
               (preview) => preview.toolCallId !== agentEvent.result.callId
             )
-          : (currentRun.fileWritePreviews ?? [])
+          : (currentRun.fileChangePreviews ?? [])
     }
     const managedReceipt = runningCommandReceipt(agentEvent.result)
     if (managedReceipt) {
@@ -635,12 +636,12 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'running',
-        fileDrafts: upsertById(
-          currentRun.fileDrafts ?? [],
+        fileChanges: upsertById(
+          currentRun.fileChanges ?? [],
           agentEvent.fileChange,
           (fileChange) => fileChange.transactionId
         ),
-        fileWritePreviews: (currentRun.fileWritePreviews ?? []).filter(
+        fileChangePreviews: (currentRun.fileChangePreviews ?? []).filter(
           (preview) => preview.transactionId !== agentEvent.fileChange.transactionId
         )
       }
@@ -710,9 +711,13 @@ export function applyAgentEventToChatMessage(
         toolCalls: call
           ? upsertById(currentRun.toolCalls, call, (candidate) => candidate.id)
           : currentRun.toolCalls,
-        diffs: updateDiffApprovalStatus(currentRun.diffs, agentEvent.action, 'required'),
-        fileDrafts: updateFileDraftApprovalStatus(
-          currentRun.fileDrafts ?? [],
+        fileChangeProposals: updateFileChangeProposalApprovalStatus(
+          currentRun.fileChangeProposals,
+          agentEvent.action,
+          'required'
+        ),
+        fileChanges: updateFileChangeApprovalStatus(
+          currentRun.fileChanges ?? [],
           agentEvent.action,
           'required'
         ),
@@ -727,9 +732,13 @@ export function applyAgentEventToChatMessage(
 
   if (agentEvent.type === 'file_change_proposed') {
     const call = getActionToolCall({ type: 'file_change', fileChange: agentEvent.fileChange })
-    const runWithDiff = {
+    const runWithProposal = {
       ...currentRun,
-      diffs: upsertById(currentRun.diffs, agentEvent.fileChange, (fileChange) => fileChange.id),
+      fileChangeProposals: upsertById(
+        currentRun.fileChangeProposals,
+        agentEvent.fileChange,
+        (fileChange) => fileChange.id
+      ),
       toolCalls: call
         ? upsertById(currentRun.toolCalls, call, (candidate) => candidate.id)
         : currentRun.toolCalls
@@ -739,9 +748,9 @@ export function applyAgentEventToChatMessage(
       ...message,
       status: 'pending',
       agentRun: {
-        ...runWithDiff,
+        ...runWithProposal,
         status: currentRun.status === 'waiting_for_approval' ? currentRun.status : 'running',
-        timeline: call ? appendToolCallToTimeline(runWithDiff, call.id) : currentRun.timeline
+        timeline: call ? appendToolCallToTimeline(runWithProposal, call.id) : currentRun.timeline
       }
     }
   }
@@ -1122,8 +1131,16 @@ export function applyAgentActionDecisionToChatMessage(
       : mcpCallId
         ? currentRun.toolResults.filter((result) => result.callId !== mcpCallId)
         : currentRun.toolResults,
-    diffs: updateDiffApprovalStatus(currentRun.diffs, action, approvalStatus),
-    fileDrafts: updateFileDraftApprovalStatus(currentRun.fileDrafts ?? [], action, approvalStatus),
+    fileChangeProposals: updateFileChangeProposalApprovalStatus(
+      currentRun.fileChangeProposals,
+      action,
+      approvalStatus
+    ),
+    fileChanges: updateFileChangeApprovalStatus(
+      currentRun.fileChanges ?? [],
+      action,
+      approvalStatus
+    ),
     mcpInvocations,
     timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
       (item) => item.type !== 'tool_call' || item.callId !== mcpCallId
@@ -1216,6 +1233,68 @@ export function applyAgentActionExecutionToChatMessage(
       ? originalBuiltinMcpApproval.approval.identity.callId
       : null
 
+  if (execution.actionType === 'file_change') {
+    const fileChangeResult = execution.fileChangeResult
+    if (
+      execution.toolName !== 'apply_patch' ||
+      !fileChangeResult ||
+      decidedAction?.type !== 'file_change' ||
+      decidedAction.fileChange.id !== execution.actionId ||
+      decidedAction.fileChange.transactionId !== fileChangeResult.transactionId
+    ) {
+      throw new Error('Invalid FileChange action execution identity')
+    }
+
+    const finalApprovalStatus: AgentApprovalStatus =
+      execution.status === 'rejected' ? 'rejected' : 'approved'
+    const successfulSettlement =
+      fileChangeResult.status === 'applied' ||
+      fileChangeResult.status === 'already_applied' ||
+      fileChangeResult.status === 'rejected' ||
+      fileChangeResult.status === 'aborted'
+    const toolResult: AgentToolResult = {
+      callId: execution.actionId,
+      tool: 'apply_patch',
+      ok: successfulSettlement,
+      result: fileChangeResult,
+      ...(!successfulSettlement && fileChangeResult.error !== null
+        ? { error: fileChangeResult.error }
+        : {})
+    }
+    const fileChangesWithDecision = updateFileChangeApprovalStatus(
+      currentRun.fileChanges ?? [],
+      decidedAction,
+      finalApprovalStatus
+    )
+    const nextRun = normalizeAgentRunToolActivities({
+      ...currentRun,
+      toolCalls: updateToolCallApprovalStatus(
+        currentRun.toolCalls,
+        decidedAction,
+        finalApprovalStatus
+      ),
+      toolResults: upsertById(currentRun.toolResults, toolResult, (result) => result.callId),
+      fileChanges: updateFileChangeFromToolResult(fileChangesWithDecision, toolResult),
+      fileChangeProposals: updateFileChangeProposalApprovalStatus(
+        currentRun.fileChangeProposals,
+        decidedAction,
+        finalApprovalStatus
+      ),
+      fileChangePreviews: (currentRun.fileChangePreviews ?? []).filter(
+        (preview) =>
+          preview.toolCallId !== execution.actionId &&
+          preview.transactionId !== fileChangeResult.transactionId
+      ),
+      approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      timeline: removeTransientToolTimelineItems(currentRun.timeline)
+    })
+
+    return {
+      ...messageWithAgentOutput,
+      agentRun: nextRun
+    }
+  }
+
   if (execution.actionType === 'mcp_tool_call' || mcpCallId) {
     const rejectionReason =
       execution.status === 'rejected' ? projectMcpRejectionReason(mcpRejectionMessage) : undefined
@@ -1300,8 +1379,8 @@ export function applyAgentActionExecutionToChatMessage(
       toolCalls: currentRun.toolCalls.map((call) =>
         call.id === execution.actionId ? { ...call, approvalStatus } : call
       ),
-      diffs: currentRun.diffs.map((diff) =>
-        diff.id === execution.actionId ? { ...diff, approvalStatus } : diff
+      fileChangeProposals: currentRun.fileChangeProposals.map((proposal) =>
+        proposal.id === execution.actionId ? { ...proposal, approvalStatus } : proposal
       ),
       skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
       timeline: removeTransientToolTimelineItems(currentRun.timeline)
@@ -1348,14 +1427,14 @@ export function applyAgentActionExecutionToChatMessage(
       execution.toolResult,
       (result) => result.callId
     ),
-    fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], execution.toolResult),
-    diffs: currentRun.diffs.map((diff) =>
-      diff.id === execution.actionId
+    fileChanges: updateFileChangeFromToolResult(currentRun.fileChanges ?? [], execution.toolResult),
+    fileChangeProposals: currentRun.fileChangeProposals.map((proposal) =>
+      proposal.id === execution.actionId
         ? {
-            ...diff,
+            ...proposal,
             approvalStatus: finalApprovalStatus
           }
-        : diff
+        : proposal
     ),
     approvals: removeAgentAction(currentRun.approvals, execution.actionId),
     skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),

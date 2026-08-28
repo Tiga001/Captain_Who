@@ -23,7 +23,7 @@ function run(toolCalls: AgentToolCall[]): ChatAgentRunView {
     toolCalls,
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: toolCalls.map((call) => ({
       id: `tool-${call.id}`,
       type: 'tool_call',

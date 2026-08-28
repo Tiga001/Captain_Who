@@ -36,25 +36,27 @@ export function updateToolCallApprovalStatus(
   )
 }
 
-export function updateDiffApprovalStatus(
-  diffs: ChatAgentRunView['diffs'],
+export function updateFileChangeProposalApprovalStatus(
+  fileChangeProposals: ChatAgentRunView['fileChangeProposals'],
   action: AgentProposedAction,
   approvalStatus: AgentApprovalStatus
 ) {
-  if (action.type !== 'file_change') return diffs
+  if (action.type !== 'file_change') return fileChangeProposals
   return upsertById(
-    diffs.map((diff) => (diff.id === action.fileChange.id ? { ...diff, approvalStatus } : diff)),
+    fileChangeProposals.map((proposal) =>
+      proposal.id === action.fileChange.id ? { ...proposal, approvalStatus } : proposal
+    ),
     { ...action.fileChange, approvalStatus },
-    (diff) => diff.id
+    (proposal) => proposal.id
   )
 }
 
-export function updateFileDraftApprovalStatus(
-  fileDrafts: NonNullable<ChatAgentRunView['fileDrafts']>,
+export function updateFileChangeApprovalStatus(
+  fileChanges: NonNullable<ChatAgentRunView['fileChanges']>,
   action: AgentProposedAction,
   approvalStatus: AgentApprovalStatus
 ) {
-  if (action.type !== 'file_change' || action.fileChange.inlineDiff !== null) return fileDrafts
+  if (action.type !== 'file_change' || action.fileChange.inlineDiff !== null) return fileChanges
   const fileChange = action.fileChange
   const status: AgentFileChangeStatus =
     approvalStatus === 'required'
@@ -62,12 +64,14 @@ export function updateFileDraftApprovalStatus(
       : approvalStatus === 'rejected'
         ? 'rejected'
         : 'applying'
-  const updated = fileDrafts.map((draft) =>
-    draft.transactionId === fileChange.transactionId
-      ? { ...draft, status, statsFinal: true, updatedAt: Date.now() }
-      : draft
+  const updated = fileChanges.map((transaction) =>
+    transaction.transactionId === fileChange.transactionId
+      ? { ...transaction, status, statsFinal: true, updatedAt: Date.now() }
+      : transaction
   )
-  if (updated.some((draft) => draft.transactionId === fileChange.transactionId)) return updated
+  if (updated.some((transaction) => transaction.transactionId === fileChange.transactionId)) {
+    return updated
+  }
   const now = Date.now()
   return [
     ...updated,
@@ -95,36 +99,40 @@ export function updateFileDraftApprovalStatus(
   ]
 }
 
-export function updateFileDraftFromToolResult(
-  fileDrafts: NonNullable<ChatAgentRunView['fileDrafts']>,
+export function updateFileChangeFromToolResult(
+  fileChanges: NonNullable<ChatAgentRunView['fileChanges']>,
   result: AgentToolResult
 ) {
   if (result.tool !== 'apply_patch' || !result.result || typeof result.result !== 'object') {
-    return fileDrafts
+    return fileChanges
   }
   const value = result.result as Record<string, unknown>
   const transactionId = typeof value.transactionId === 'string' ? value.transactionId : ''
-  if (!transactionId) return fileDrafts
-  return fileDrafts.map((draft) => {
-    if (draft.transactionId !== transactionId) return draft
+  if (!transactionId) return fileChanges
+  return fileChanges.map((transaction) => {
+    if (transaction.transactionId !== transactionId) return transaction
     const resultStatus = value.status
     const status: AgentFileChangeStatus =
       resultStatus === 'applied' || resultStatus === 'already_applied'
-        ? 'applied'
+        ? resultStatus
         : resultStatus === 'conflict'
           ? 'conflict'
           : resultStatus === 'rejected'
             ? 'rejected'
             : resultStatus === 'failed'
               ? 'failed'
-              : draft.status
+              : resultStatus === 'outcome_unknown'
+                ? 'outcome_unknown'
+                : resultStatus === 'aborted' || resultStatus === 'expired'
+                  ? resultStatus
+                  : transaction.status
     return {
-      ...draft,
+      ...transaction,
       status,
-      additions: typeof value.additions === 'number' ? value.additions : draft.additions,
-      deletions: typeof value.deletions === 'number' ? value.deletions : draft.deletions,
-      lineCount: typeof value.lineCount === 'number' ? value.lineCount : draft.lineCount,
-      byteCount: typeof value.byteCount === 'number' ? value.byteCount : draft.byteCount,
+      additions: typeof value.additions === 'number' ? value.additions : transaction.additions,
+      deletions: typeof value.deletions === 'number' ? value.deletions : transaction.deletions,
+      lineCount: typeof value.lineCount === 'number' ? value.lineCount : transaction.lineCount,
+      byteCount: typeof value.byteCount === 'number' ? value.byteCount : transaction.byteCount,
       statsFinal: true,
       updatedAt: Date.now()
     }

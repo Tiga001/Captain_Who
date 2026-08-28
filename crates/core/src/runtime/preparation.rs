@@ -118,7 +118,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         .map(PathBuf::from);
     let patch_auto_approve = context
         .map(|context| {
-            file_write_approval_route(context.permissions) == FileWriteApprovalRoute::AutoApprove
+            file_change_approval_route(context.permissions) == FileChangeApprovalRoute::AutoApprove
         })
         .unwrap_or(false)
         && host_actions_available;
@@ -136,7 +136,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
                 Some(AgentToolExposure::Stable)
             ) && tool_registry
                 .permission_policy(&definition.name)
-                .uses_file_write_approval()
+                .uses_file_change_approval()
         }) {
             definition.requires_approval = false;
             definition.approval_mode = AgentToolApprovalMode::Never;

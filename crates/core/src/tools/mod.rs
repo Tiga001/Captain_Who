@@ -8,6 +8,7 @@ mod context;
 mod conversation_history;
 mod document_text;
 mod file_change_staged;
+mod file_change_stream;
 mod filesystem;
 mod git_diff;
 mod image_generation;
@@ -36,7 +37,6 @@ mod tool_set;
 mod web_fetch;
 mod web_search;
 mod workspace_map;
-mod write_file_stream;
 
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::protocol::{
@@ -462,14 +462,14 @@ pub(crate) enum AgentToolExposure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentToolPermissionPolicy {
     Default,
-    FileWrite(FileWriteToolAccess),
+    FileChange(FileChangeToolAccess),
 }
 
 /// Controls whether a file-writing tool still has useful read-only calls when
 /// writes are disabled. `ReadWrite` tools stay visible, but their write calls
 /// must still fail closed in proposal preparation and host execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileWriteToolAccess {
+pub(crate) enum FileChangeToolAccess {
     WriteOnly,
     ReadWrite,
 }
@@ -508,12 +508,12 @@ fn unknown_tool_call_projection(call: &AgentToolCall) -> AgentToolCall {
 }
 
 impl AgentToolPermissionPolicy {
-    pub(crate) fn uses_file_write_approval(self) -> bool {
-        matches!(self, Self::FileWrite(_))
+    pub(crate) fn uses_file_change_approval(self) -> bool {
+        matches!(self, Self::FileChange(_))
     }
 
     pub(crate) fn is_available_when_write_denied(self) -> bool {
-        !matches!(self, Self::FileWrite(FileWriteToolAccess::WriteOnly))
+        !matches!(self, Self::FileChange(FileChangeToolAccess::WriteOnly))
     }
 }
 
@@ -1900,7 +1900,7 @@ mod tests {
             }
             assert_eq!(
                 registry.permission_policy(tool_name),
-                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite)
+                AgentToolPermissionPolicy::FileChange(FileChangeToolAccess::ReadWrite)
             );
         }
     }
@@ -1989,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_writers_declare_their_exact_shared_file_write_access() {
+    fn structured_writers_declare_their_exact_shared_file_change_access() {
         let registry = ToolRegistry::defaults_with_search(None);
 
         // FileChange transactions must remain inspectable and abortable after write authority is
@@ -1997,12 +1997,12 @@ mod tests {
         // and again at approval execution.
         assert_eq!(
             registry.permission_policy("apply_patch"),
-            AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite),
+            AgentToolPermissionPolicy::FileChange(FileChangeToolAccess::ReadWrite),
             "apply_patch must retain only its safe status/abort surface when writes are denied"
         );
         assert_eq!(
             registry.permission_policy("skills_materialize_resource"),
-            AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly),
+            AgentToolPermissionPolicy::FileChange(FileChangeToolAccess::WriteOnly),
             "materialization has no read-only settlement action and must disappear when writes are denied"
         );
         assert_eq!(

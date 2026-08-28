@@ -27,8 +27,8 @@ function conversation(id: string, runId: string, messageId: string): ChatConvers
           webSearchActivities: [],
           readActivities: [],
           approvals: [],
-          diffs: [],
-          fileDrafts: [],
+          fileChangeProposals: [],
+          fileChanges: [],
           mcpInvocations: [],
           messageStreamCheckpoints: {},
           timeline: []

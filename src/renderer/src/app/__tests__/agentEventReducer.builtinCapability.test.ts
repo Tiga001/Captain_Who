@@ -49,7 +49,7 @@ function baseMessage(): ChatMessage {
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: []
     }
   }

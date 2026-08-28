@@ -38,7 +38,7 @@ function interruptedMessage(): ChatMessage {
       toolCalls: [],
       toolResults: [],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: [],
       interruption: { reason: 'service_connection_failed' }
     }

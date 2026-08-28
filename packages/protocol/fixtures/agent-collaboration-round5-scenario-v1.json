@@ -502,7 +502,7 @@
           "status": "pending",
           "inputOrigin": null,
           "attachments": [],
-          "agentRunJson": "{\"runId\":\"run-review\",\"status\":\"running\",\"startedAt\":1720000001000,\"toolDefinitions\":[],\"toolCalls\":[],\"toolResults\":[],\"webSearchActivities\":[],\"readActivities\":[],\"approvals\":[],\"diffs\":[],\"fileDrafts\":[],\"mcpInvocations\":[],\"messageStreamCheckpoints\":{},\"timeline\":[],\"usage\":{\"inputTokens\":11,\"outputTokens\":7,\"totalTokens\":18}}",
+          "agentRunJson": "{\"runId\":\"run-review\",\"status\":\"running\",\"startedAt\":1720000001000,\"toolDefinitions\":[],\"toolCalls\":[],\"toolResults\":[],\"webSearchActivities\":[],\"readActivities\":[],\"approvals\":[],\"fileChangeProposals\":[],\"fileChanges\":[],\"mcpInvocations\":[],\"messageStreamCheckpoints\":{},\"timeline\":[],\"usage\":{\"inputTokens\":11,\"outputTokens\":7,\"totalTokens\":18}}",
           "uiStateJson": null
         }
       ]
@@ -543,7 +543,7 @@
           "status": "pending",
           "inputOrigin": null,
           "attachments": [],
-          "agentRunJson": "{\"runId\":\"run-compatibility\",\"status\":\"running\",\"startedAt\":1720000001000,\"toolDefinitions\":[],\"toolCalls\":[],\"toolResults\":[],\"webSearchActivities\":[],\"readActivities\":[],\"approvals\":[],\"diffs\":[],\"fileDrafts\":[],\"mcpInvocations\":[],\"messageStreamCheckpoints\":{},\"timeline\":[],\"usage\":{\"inputTokens\":19,\"outputTokens\":14,\"totalTokens\":33}}",
+          "agentRunJson": "{\"runId\":\"run-compatibility\",\"status\":\"running\",\"startedAt\":1720000001000,\"toolDefinitions\":[],\"toolCalls\":[],\"toolResults\":[],\"webSearchActivities\":[],\"readActivities\":[],\"approvals\":[],\"fileChangeProposals\":[],\"fileChanges\":[],\"mcpInvocations\":[],\"messageStreamCheckpoints\":{},\"timeline\":[],\"usage\":{\"inputTokens\":19,\"outputTokens\":14,\"totalTokens\":33}}",
           "uiStateJson": null
         }
       ]

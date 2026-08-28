@@ -206,7 +206,7 @@ export class ElectronSurfaceGroupCdpTransport implements ConnectOverCDPTransport
     this.entriesByOutwardSession.set(entry.outwardRootSessionId, entry)
     this.entriesByOutwardTarget.set(entry.outwardTargetId, entry)
     input.transport.onmessage = (message) => this.handleDelegateMessage(entry, message)
-    input.transport.onclose = (reason) => this.handleDelegateClosed(entry, reason)
+    input.transport.onclose = () => this.handleDelegateClosed(entry)
 
     if (this.discoverTargets) this.emitTargetCreated(entry)
     if (this.autoAttachParams) {
@@ -518,18 +518,16 @@ export class ElectronSurfaceGroupCdpTransport implements ConnectOverCDPTransport
     const id = this.nextDelegateId++
     return await new Promise<unknown>((resolve, reject) => {
       let settled = false
-      let timer: ReturnType<typeof setTimeout> | undefined
-      let pending!: ContextControlPending
       const finish = (operation: () => void): void => {
         if (settled) return
         settled = true
-        if (timer) clearTimeout(timer)
+        clearTimeout(timer)
         this.contextControls.delete(pending)
         transport.onmessage = undefined
         transport.onclose = undefined
         operation()
       }
-      pending = {
+      const pending: ContextControlPending = {
         cancel: (reason) =>
           finish(() => {
             transport.close()
@@ -539,7 +537,7 @@ export class ElectronSurfaceGroupCdpTransport implements ConnectOverCDPTransport
         transport
       }
       this.contextControls.add(pending)
-      timer = setTimeout(
+      const timer = setTimeout(
         () => pending.cancel('context_control_timeout'),
         CONTEXT_CONTROL_TIMEOUT_MS
       )
@@ -940,7 +938,7 @@ export class ElectronSurfaceGroupCdpTransport implements ConnectOverCDPTransport
     }
   }
 
-  private handleDelegateClosed(entry: SurfaceEntry, _reason?: string): void {
+  private handleDelegateClosed(entry: SurfaceEntry): void {
     if (this.entriesBySurface.get(entry.surfaceId) !== entry) return
     this.finalizeEntry(entry, true)
     this.options.handleSurfaceTransportClosed?.({

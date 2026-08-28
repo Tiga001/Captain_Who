@@ -1019,7 +1019,7 @@ mod tests {
                 "run-other",
                 "apply_patch",
             ),
-            ("conversation-1", Some("project-1"), "run-1", "write_file"),
+            ("conversation-1", Some("project-1"), "run-1", "other_tool"),
         ] {
             assert!(get_file_change_for_owner(
                 &connection,

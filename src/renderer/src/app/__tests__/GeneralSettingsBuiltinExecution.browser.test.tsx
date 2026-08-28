@@ -14,6 +14,8 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
   })
 }))
 
+vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
+
 const preferences: UiPreferencesSnapshot = {
   profileAvatarDataUrl: null,
   profileDisplayName: '',

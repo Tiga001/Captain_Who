@@ -40,7 +40,9 @@ const event = { sender: {} } as IpcMainInvokeEvent
 function automationCoreStubs() {
   return {
     onAutomationEvent: vi.fn(() => vi.fn()),
-    onAutomationResync: vi.fn(() => vi.fn())
+    onAutomationResync: vi.fn(() => vi.fn()),
+    onNotificationEvent: vi.fn(() => vi.fn()),
+    onNotificationResync: vi.fn(() => vi.fn())
   }
 }
 

@@ -136,7 +136,7 @@ function runningMessage(officeCallIds: readonly string[]): ChatMessage {
         }
       ],
       approvals: [],
-      diffs: [],
+      fileChangeProposals: [],
       timeline: toolCalls.map((call, index) => ({
         id: `timeline-${call.id}`,
         type: 'tool_call' as const,
@@ -157,7 +157,7 @@ function settledRun(hash = FIRST_HASH): ChatAgentRunView {
     toolCalls: [imageCall()],
     toolResults: [imageResult(hash)],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: [{ id: 'timeline-image-call', type: 'tool_call', callId: 'image-call' }]
   }
 }

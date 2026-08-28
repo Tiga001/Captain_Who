@@ -1,20 +1,23 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import { ApplyPatchToolActivity } from '../../features/chat/components/toolActivities/ApplyPatchToolActivity'
+import { FileChangeToolActivity } from '../../features/chat/components/toolActivities/FileChangeToolActivity'
 import '../../styles/global.css'
 import '../../features/chat/ChatConversationPage.agent.css'
 
 const translations: Record<string, string> = {
   'agent.separator': '，',
-  'agent.patch.group.processed': '已处理 {count} 个文件',
-  'agent.patch.group.failedCount': '失败 {count} 个',
-  'agent.patch.create.row.failed': '新建失败',
-  'agent.patch.failure.generic': '无法安全应用这处修改。',
-  'agent.patch.failure.conflict': '文件已发生变化，无法安全应用这处修改。',
-  'agent.patch.failure.fileExists': '文件已存在。',
-  'agent.patch.failure.staleFile': '文件状态已过期，请重新读取后再试。',
-  'agent.patch.failure.outcomeUnknown': '无法确认修改结果。请先检查文件当前状态，不要直接重试。'
+  'agent.fileChange.group.processed': '已处理 {count} 个文件',
+  'agent.fileChange.group.failedCount': '失败 {count} 个',
+  'agent.fileChange.create.row.failed': '新建失败',
+  'agent.fileChange.create.row.running': '正在新建',
+  'agent.fileChange.create.row.cancelled': '已取消新建',
+  'agent.fileChange.failure.generic': '无法安全应用这处修改。',
+  'agent.fileChange.failure.conflict': '文件已发生变化，无法安全应用这处修改。',
+  'agent.fileChange.failure.fileExists': '文件已存在。',
+  'agent.fileChange.failure.staleFile': '文件状态已过期，请重新读取后再试。',
+  'agent.fileChange.failure.outcomeUnknown':
+    '无法确认修改结果。请先检查文件当前状态，不要直接重试。'
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -25,6 +28,11 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 
 vi.mock('../../features/storage/storageClient', () => ({
   revealStoredProjectFile: vi.fn()
+}))
+
+vi.mock('../../features/agent/agentClient', () => ({
+  getAgentFileChangeDiff: vi.fn(),
+  readAgentFileChange: vi.fn()
 }))
 
 const INTERNAL_ERROR =
@@ -46,7 +54,7 @@ function applyPatchCall(): AgentToolCall {
   }
 }
 
-describe('apply_patch failure presentation', () => {
+describe('FileChange failure presentation', () => {
   it('uses the structured error code without exposing the raw error', async () => {
     const call = applyPatchCall()
     const result: AgentToolResult = {
@@ -64,7 +72,7 @@ describe('apply_patch failure presentation', () => {
       },
       error: INTERNAL_ERROR
     }
-    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+    const screen = await render(<FileChangeToolActivity call={call} result={result} />)
 
     screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
@@ -96,7 +104,7 @@ describe('apply_patch failure presentation', () => {
       },
       error: privateCause
     }
-    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+    const screen = await render(<FileChangeToolActivity call={call} result={result} />)
 
     screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
@@ -116,7 +124,7 @@ describe('apply_patch failure presentation', () => {
       result: { errorCode: 'agent.apply_patch.future_internal_failure' },
       error: 'sensitive provider or filesystem diagnostic'
     }
-    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+    const screen = await render(<FileChangeToolActivity call={call} result={result} />)
 
     screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
@@ -141,7 +149,7 @@ describe('apply_patch failure presentation', () => {
       },
       error: 'private publication diagnostic'
     }
-    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+    const screen = await render(<FileChangeToolActivity call={call} result={result} />)
 
     screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
@@ -164,7 +172,7 @@ describe('apply_patch failure presentation', () => {
       result: { code: 'file_exists' },
       error: INTERNAL_ERROR
     }
-    const screen = await render(<ApplyPatchToolActivity call={call} result={result} />)
+    const screen = await render(<FileChangeToolActivity call={call} result={result} />)
 
     screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
@@ -172,4 +180,43 @@ describe('apply_patch failure presentation', () => {
     expect(screen.container.textContent).not.toContain('文件已存在。')
     expect(screen.container.textContent).not.toContain('structured_edit_error')
   })
+
+  it.each([
+    ['cancelled', '已取消新建'],
+    ['failed', '新建失败']
+  ] as const)(
+    'shows a terminal %s Run over an unsettled transaction',
+    async (settledStatus, label) => {
+      const call = applyPatchCall()
+      const screen = await render(
+        <FileChangeToolActivity
+          call={call}
+          settledStatus={settledStatus}
+          transaction={{
+            schemaVersion: 1,
+            transactionId: 'file-change-transaction',
+            conversationId: 'conversation',
+            projectId: null,
+            operation: 'create',
+            updateStrategy: null,
+            filePath: 'existing.txt',
+            status: 'waiting_approval',
+            baseRevision: null,
+            additions: 1,
+            deletions: 0,
+            byteCount: 11,
+            lineCount: 1,
+            mutationCount: 1,
+            nextMutationIndex: 1,
+            statsFinal: true,
+            summary: null,
+            createdAt: 1,
+            updatedAt: 2
+          }}
+        />
+      )
+
+      expect(screen.container.textContent).toContain(label)
+    }
+  )
 })

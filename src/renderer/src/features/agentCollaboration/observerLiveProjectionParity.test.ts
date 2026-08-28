@@ -26,8 +26,8 @@ function assistantMessage(): ChatMessage {
       webSearchActivities: [],
       readActivities: [],
       approvals: [],
-      diffs: [],
-      fileDrafts: [],
+      fileChangeProposals: [],
+      fileChanges: [],
       mcpInvocations: [],
       messageStreamCheckpoints: {},
       timeline: []

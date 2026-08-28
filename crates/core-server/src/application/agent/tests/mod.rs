@@ -32,7 +32,8 @@ mod command_sessions;
 mod context_history;
 mod context_runtime;
 mod deletion;
-mod file_write_permissions;
+mod file_change_permissions;
+mod file_change_source_boundary;
 mod historical_compatibility_boundary;
 mod human_root_notifications;
 mod image_generation;
@@ -468,7 +469,11 @@ fn staged_file_change_record(
     }
 }
 
-fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {
+fn completed_trace(
+    conversation_id: &str,
+    assistant_message_id: &str,
+    content_bytes: u64,
+) -> ConversationTurnTrace {
     let call_id = history_call_id();
     ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
@@ -487,13 +492,15 @@ fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> Convers
             ConversationTurnTraceItem::ToolCall {
                 sequence: 1,
                 call_id: call_id.clone(),
-                tool: "write_file".to_string(),
+                tool: "apply_patch".to_string(),
                 operation: json!({
+                    "action": "apply",
+                    "operation": "create",
                     "filePath": "src/history.rs",
-                    "mode": "create"
+                    "contentBytes": content_bytes
                 }),
                 provenance: AgentToolIdentity::Builtin {
-                    tool_name: "write_file".to_string(),
+                    tool_name: "apply_patch".to_string(),
                 },
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
@@ -501,7 +508,7 @@ fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> Convers
             ConversationTurnTraceItem::ToolResult {
                 sequence: 2,
                 call_id,
-                tool: "write_file".to_string(),
+                tool: "apply_patch".to_string(),
                 status: ConversationTraceToolResultStatus::Succeeded,
                 success: true,
                 observation: json!({

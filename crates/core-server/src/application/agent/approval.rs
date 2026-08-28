@@ -121,7 +121,7 @@ pub(crate) struct ProjectedApprovalDecisionResult {
     pub(crate) accepted: bool,
 }
 
-pub(super) fn publish_inline_file_write_tool_result(
+pub(super) fn publish_inline_file_change_tool_result(
     notifications: &CoreServerNotificationSender,
     run_id: &str,
     action: &AgentProposedAction,
@@ -542,14 +542,14 @@ impl AgentService {
         offset: Option<usize>,
         max_chars: Option<usize>,
     ) -> Result<AgentFileChangeContentPage, String> {
-        let draft = self
+        let change = self
             .storage
             .get_agent_file_change(transaction_id)?
             .ok_or_else(|| format!("未找到文件修改事务：{transaction_id}"))?;
-        self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
-        let snapshot = file_draft_snapshot(&draft)?;
+        self.authorize_file_change_read(observer_root_conversation_id, &change.conversation_id)?;
+        let snapshot = file_change_snapshot(&change)?;
         let (content, offset, next_offset, truncated) =
-            paginate_chars(&draft.content, offset, max_chars);
+            paginate_chars(&change.content, offset, max_chars);
         Ok(AgentFileChangeContentPage {
             file_change: snapshot,
             content,
@@ -566,15 +566,15 @@ impl AgentService {
         offset: Option<usize>,
         max_chars: Option<usize>,
     ) -> Result<AgentFileChangeDiffPage, String> {
-        let draft = self
+        let change = self
             .storage
             .get_agent_file_change(transaction_id)?
             .ok_or_else(|| format!("未找到文件修改事务：{transaction_id}"))?;
-        self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
-        let diff = file_write_diff(&draft);
+        self.authorize_file_change_read(observer_root_conversation_id, &change.conversation_id)?;
+        let diff = file_change_diff(&change);
         let (patch, offset, next_offset, truncated) = paginate_chars(&diff, offset, max_chars);
         Ok(AgentFileChangeDiffPage {
-            transaction_id: draft.id,
+            transaction_id: change.id,
             patch,
             offset,
             next_offset,
@@ -582,18 +582,21 @@ impl AgentService {
         })
     }
 
-    fn authorize_file_draft_read(
+    fn authorize_file_change_read(
         &self,
         observer_root_conversation_id: Option<&str>,
-        draft_conversation_id: &str,
+        file_change_conversation_id: &str,
     ) -> Result<(), String> {
         match observer_root_conversation_id {
             Some(root_conversation_id) => self
-                .authorize_exact_child_observer_read(root_conversation_id, draft_conversation_id)
+                .authorize_exact_child_observer_read(
+                    root_conversation_id,
+                    file_change_conversation_id,
+                )
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
             None => self
-                .authorize_user_conversation_write(draft_conversation_id)
+                .authorize_user_conversation_write(file_change_conversation_id)
                 .map_err(|error| error.to_string()),
         }
     }
@@ -1250,10 +1253,10 @@ impl AgentService {
             if decision_status == AgentApprovalDecisionStatus::Approved
                 && provider_continuation_error.is_none()
             {
-                authorize_structured_file_write(
+                authorize_file_change_action(
                     &record.agent_input,
                     &record.snapshot.action,
-                    FileWriteAuthorizationSource::ExplicitUser,
+                    FileChangeAuthorizationSource::ExplicitUser,
                 )
                 .map_err(|error| error.to_string())?;
             }
@@ -2077,8 +2080,21 @@ impl AgentService {
                     tool_result: settled_result,
                     pending_status,
                 } => {
+                    let settled_file_change_result = file_change_result_for_audit(
+                        &record,
+                        &settled_result,
+                    )?
+                    .ok_or_else(|| {
+                        "FileChange settlement is missing its typed terminal receipt.".to_string()
+                    })?;
                     final_pending_status = pending_status;
                     tool_result = settled_result;
+                    if settled_file_change_result.status
+                        == mycopilot_core::AgentFileChangeResultStatus::OutcomeUnknown
+                    {
+                        execution_status = "outcome_unknown".to_string();
+                    }
+                    execution.file_change_result = Some(settled_file_change_result);
                     *agent_input
                 }
                 ManualFileEffectSettlement::CommittedAndAdvanced => {
@@ -2210,7 +2226,7 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if !publish_lifecycle.contains_input(&record.agent_input)
-            && publish_inline_file_write_tool_result(
+            && publish_inline_file_change_tool_result(
                 &notifications,
                 &record.snapshot.run_id,
                 &record.snapshot.action,
@@ -2230,7 +2246,7 @@ impl AgentService {
                         .storage
                         .get_agent_file_change(&file_change_result.transaction_id)
                     {
-                        if let Ok(snapshot) = file_draft_snapshot(&draft) {
+                        if let Ok(snapshot) = file_change_snapshot(&draft) {
                             let _ = notifications.send(agent_event_notification(
                                 AgentEvent::FileChangeUpdated {
                                     run_id: record.snapshot.run_id.clone(),
@@ -2267,7 +2283,7 @@ impl AgentService {
 
         let renderer_tool_result = if matches!(
             record.snapshot.action,
-            AgentProposedAction::McpToolCall { .. }
+            AgentProposedAction::FileChange { .. } | AgentProposedAction::McpToolCall { .. }
         ) {
             None
         } else {
@@ -2280,8 +2296,8 @@ impl AgentService {
             status: execution_status,
             file_change_result: execution.file_change_result,
             command_result: None,
-            // MCP has a dedicated approval/lifecycle contract. Keep the generic result response
-            // for built-ins and runtime extensions only.
+            // FileChange and MCP each have a dedicated typed approval/lifecycle contract. Keep the
+            // generic result response for built-ins and runtime extensions only.
             tool_result: renderer_tool_result,
             agent_output: AgentChatOutput {
                 content: String::new(),

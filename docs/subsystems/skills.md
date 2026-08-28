@@ -90,7 +90,7 @@ Discovery snapshot 当前默认最多占用 2,000 tokens，并根据 context win
 - `skills_read_resource`：UTF-8 文本按预算/字节游标读取；
 - `skills_materialize_resource`：将选中资源写入获准目标。
 
-URI 不暴露源绝对路径。每次读取重新校验当前 Run 激活、revision、digest、resource kind 和权限。二进制 asset 不应经文本读取伪装；需要落地时走 materialization 的 typed FileWrite proposal，批准后再验证 source digest 与目标 revision。
+URI 不暴露源绝对路径。每次读取重新校验当前 Run 激活、revision、digest、resource kind 和权限。二进制 asset 不应经文本读取伪装；需要落地时走 materialization 的 typed FileChange proposal，批准后再验证 source digest 与目标 revision。
 
 ## Skill Script
 

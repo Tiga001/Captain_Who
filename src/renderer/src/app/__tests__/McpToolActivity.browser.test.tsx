@@ -102,7 +102,7 @@ function run(): ChatAgentRunView {
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     mcpInvocations: [],
     timeline: []
   }

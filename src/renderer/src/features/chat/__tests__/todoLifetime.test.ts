@@ -23,7 +23,7 @@ function runWithTodo(runId: string): ChatAgentRunView {
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: []
   }
 }

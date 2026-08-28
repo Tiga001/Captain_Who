@@ -37,7 +37,7 @@ Artifact Runtime 只提供可复现 executable/dependency 发现和 preflight，
 - DOCX 与 XLSX/XLSM/CSV：`inspect`、`render`；
 - PPTX：`status`、`inspect`、`validate`、`render`。
 
-每次调用都要求简短、单行的 `reason`，但 reason 只用于展示和审计，不构成授权。`status` 不生成 execution request；`inspect`/`validate` 是 ReadOnly；`render` 因发布 output 而按 FileWrite 路径准备和审批。`create` 及所有 mutation 已从模型 schema 移除，并以 `office.model_operation_removed` fail closed；只有历史上已冻结、已批准且完全匹配的旧 snapshot 可通过兼容解析器恢复。新建和编辑由 bundled Skill 的 managed Python/MJS Builder/Editor 完成，而不是重新开放 Office Tool mutation。
+每次调用都要求简短、单行的 `reason`，但 reason 只用于展示和审计，不构成授权。`status` 不生成 execution request；`inspect`/`validate` 是 ReadOnly；`render` 因发布 output 而准备当前严格 `OfficeOperation` frozen snapshot，并复用统一文件修改审批策略。`create` 及所有 mutation 已从模型 schema 移除，并以 `office.model_operation_removed` fail closed；崩溃恢复只接受当次持久化的精确冻结 Office snapshot，不解析旧 Wire 或猜测 action。新建和编辑由 bundled Skill 的 managed Python/MJS Builder/Editor 完成，而不是重新开放 Office Tool mutation。
 
 内部 Office Engine 仍用 `OfficeOperation` 的 `help/create/view/get/query/validate/set/add/remove/move/swap` 安全集合表达 Rust Core-owned 编译结果和历史恢复；它不是模型可直接调用的 CLI allowlist。`install/config/watch/open/close/mcp/serve/server/raw/raw-set/add-part/batch/dump/merge` 等管理、驻留、网络或 raw OOXML 操作仍显式拒绝。
 
@@ -45,7 +45,7 @@ Artifact Runtime 只提供可复现 executable/dependency 发现和 preflight，
 
 ## 语义请求编译
 
-模型不直接生成 OfficeCLI argv。当前 Tool 只解析扁平、typed 的检查/渲染 intent：document kind、operation、`filePath`、文档块/sheet/range/slide selector、render output/viewport、timeout 与 reason；然后编译为版本化 `OfficeExecutionRequest`。历史 mutation wire 类型只用于精确冻结 snapshot 的恢复，不属于当前模型 schema。
+模型不直接生成 OfficeCLI argv。当前 Tool 只解析扁平、typed 的检查/渲染 intent：document kind、operation、`filePath`、文档块/sheet/range/slide selector、render output/viewport、timeout 与 reason；然后编译为版本化 `OfficeExecutionRequest`。内部 mutation 类型只服务于当前冻结 snapshot 的精确崩溃恢复，不属于当前模型 schema，也不是旧 Wire 兼容入口。
 
 ```text
 model semantic args
@@ -53,7 +53,7 @@ model semantic args
       -> status: direct Office Engine status
       -> semantic request
           -> resolve input/output through file authority
-          -> classify ReadOnly or FileWrite
+          -> classify ReadOnly or OfficeOperationAccess::FileWrite
           -> compile Provider-neutral semantic request
           -> ReadOnly inspect / validate: direct Office Engine execution
           -> render output: freeze OfficePreparedExecution v6
@@ -118,12 +118,12 @@ Generic Image 当前最多 8 MiB，PDF 当前最多 128 MiB。独立的 image-ge
 
 ## Artifact 生产者与消费者
 
-| 生产者                          | 产物/引用                                         | 关键边界                                                      |
-| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------- |
-| Office render                   | 已批准 final path 的图片/PDF `readPath`           | Office engine/renderer revision、coverage、FileWrite approval |
-| `run_command` / managed builder | Generic PNG/JPEG/WebP/PDF Artifact                | before/after observation、completion hook、commit unknown     |
-| Image generation                | 独立 generation image Artifact                    | paid request idempotency、下载网络策略、generation journal    |
-| Managed Playwright              | Browser Artifact；screenshot 可另发 Generic Image | HostBridge 清洗、最多 16 refs、单 ref 128 MiB、Run 生命周期   |
+| 生产者                          | 产物/引用                                         | 关键边界                                                            |
+| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------- |
+| Office render                   | 已批准 final path 的图片/PDF `readPath`           | Office engine/renderer revision、coverage、OfficeOperation approval |
+| `run_command` / managed builder | Generic PNG/JPEG/WebP/PDF Artifact                | before/after observation、completion hook、commit unknown           |
+| Image generation                | 独立 generation image Artifact                    | paid request idempotency、下载网络策略、generation journal          |
+| Managed Playwright              | Browser Artifact；screenshot 可另发 Generic Image | HostBridge 清洗、最多 16 refs、单 ref 128 MiB、Run 生命周期         |
 
 Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他显式声明相应 file-input kind 的 Tool，以及受控导出流程；Office workspace `readPath` 继续按文件权限解析。Renderer 只消费安全 DTO。模型只能传回 Tool 返回的完整 URI/readPath，不应猜 digest、改 scheme 或使用内部 `savedPath`。Browser Artifact 不等同于 Generic Managed Artifact：Renderer 通过 Main broker 预览/导出，模型只有在 screenshot 返回 `image-artifact://` readPath 时才能交给 `read_image`。
 
@@ -146,7 +146,7 @@ Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他�
 ## 不变量
 
 1. Office 模型面只接受当前 advertised inspection/render schema，绝不直接透传 raw CLI/OOXML 或重新开放 retired mutation。
-2. Office read/write access 由 operation 和 output 共同决定；render output 走 FileWrite，AutoApprove 不绕过文件校验。
+2. Office read/write access 由 operation 和 output 共同决定；render output 走严格 `OfficeOperation` frozen snapshot、统一文件修改审批策略和 Office transaction/engine 提交。内部 `OfficeOperationAccess::FileWrite` 只是当前 Office 风险分类，不是模型工具名；AutoApprove 不绕过文件校验。
 3. Artifact Runtime 的完整性不等于执行授权。
 4. Managed Artifact bytes 不可变，identity 为内容 hash，授权由 grant 单独表达。
 5. 私有绝对路径、staging path 和 credential 不进入 Model/Event/Trace/Renderer。

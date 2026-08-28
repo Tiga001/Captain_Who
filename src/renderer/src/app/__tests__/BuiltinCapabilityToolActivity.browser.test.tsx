@@ -132,7 +132,7 @@ function run(): ChatAgentRunView {
     toolCalls: [],
     toolResults: [],
     approvals: [],
-    diffs: [],
+    fileChangeProposals: [],
     timeline: []
   }
 }
@@ -676,7 +676,7 @@ describe('BuiltinCapabilityToolActivity', () => {
     reveal?.click()
     await expect.poll(() => hostMocks.revealDownload.mock.calls.length).toBeGreaterThan(0)
     expect(hostMocks.revealDownload).toHaveBeenLastCalledWith({
-      schemaVersion: 1,
+      schemaVersion: 2,
       downloadId: download.downloadId
     })
   })
