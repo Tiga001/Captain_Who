@@ -587,7 +587,7 @@ fn build_commit_proposal(
         deletions: plan.deletions,
     };
     let execution = FileChangeDirectBinding {
-        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        schema_version: crate::file_change::FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
         transaction,
         proposal,
         observation_id: stored.observation_id.clone(),
@@ -599,6 +599,13 @@ fn build_commit_proposal(
             .clone()
             .ok_or_else(|| {
                 file_change_agent_error(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
+            })?,
+        trace_args_digest: crate::file_change_support::apply_patch_trace_args_digest(&call.args)
+            .map_err(|error| {
+                file_change_agent_error(FileChangeError::with_diagnostic(
+                    FileChangeErrorCode::Failed,
+                    error,
+                ))
             })?,
         staged_transaction_id: Some(stored.id.clone()),
         conversation_id: stored.conversation_id.clone(),

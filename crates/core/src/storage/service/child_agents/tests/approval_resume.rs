@@ -50,8 +50,8 @@ fn waiting_skill_run(action_id: &str) -> String {
                 "reason": null
             }
         }],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],

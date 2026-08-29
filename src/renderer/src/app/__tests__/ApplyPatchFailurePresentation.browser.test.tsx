@@ -1,6 +1,7 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { getAgentFileChangeDiff } from '../../features/agent/agentClient'
 import { FileChangeToolActivity } from '../../features/chat/components/toolActivities/FileChangeToolActivity'
 import '../../styles/global.css'
 import '../../features/chat/ChatConversationPage.agent.css'
@@ -8,10 +9,15 @@ import '../../features/chat/ChatConversationPage.agent.css'
 const translations: Record<string, string> = {
   'agent.separator': '，',
   'agent.fileChange.group.processed': '已处理 {count} 个文件',
+  'agent.fileChange.group.applied': '已编辑 {count} 个文件',
   'agent.fileChange.group.failedCount': '失败 {count} 个',
+  'agent.fileChange.create.row.applied': '已新建',
   'agent.fileChange.create.row.failed': '新建失败',
   'agent.fileChange.create.row.running': '正在新建',
   'agent.fileChange.create.row.cancelled': '已取消新建',
+  'agent.fileChange.togglePreview': '展开文件修改',
+  'agent.fileChange.loadingPreview': '正在读取修改',
+  'files.preview.error': '无法读取修改',
   'agent.fileChange.failure.generic': '无法安全应用这处修改。',
   'agent.fileChange.failure.conflict': '文件已发生变化，无法安全应用这处修改。',
   'agent.fileChange.failure.fileExists': '文件已存在。',
@@ -57,7 +63,69 @@ function applyPatchCall(): AgentToolCall {
 }
 
 describe('FileChange failure presentation', () => {
+  it('loads a completed result-only Diff and keeps detail text at activity size', async () => {
+    const call = applyPatchCall()
+    const transactionId = 'file-change-result-only'
+    const result: AgentToolResult = {
+      callId: call.id,
+      tool: call.tool,
+      ok: true,
+      result: {
+        schemaVersion: 1,
+        status: 'applied',
+        outcome: 'applied',
+        transactionId,
+        operation: 'create',
+        updateStrategy: null,
+        filePath: 'existing.txt',
+        additions: 1,
+        deletions: 0,
+        lineCount: 1,
+        byteCount: 12,
+        revision: 'content-sha256-v1:result-only',
+        errorCode: null,
+        error: null,
+        message: null
+      }
+    }
+    vi.mocked(getAgentFileChangeDiff).mockResolvedValueOnce({
+      transactionId,
+      patch: '+replacement',
+      offset: 0,
+      nextOffset: null,
+      truncated: false
+    })
+
+    const screen = await render(
+      <FileChangeToolActivity call={call} result={result} settledStatus="completed" />
+    )
+    await screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
+
+    const activityLabel = screen.container.querySelector<HTMLElement>('.agent-activity__label')
+    const itemLine = screen.container.querySelector<HTMLElement>('.file-change-activity__item-line')
+    expect(activityLabel).not.toBeNull()
+    expect(itemLine).not.toBeNull()
+    expect(window.getComputedStyle(itemLine!).fontSize).toBe(
+      window.getComputedStyle(activityLabel!).fontSize
+    )
+    itemLine?.querySelectorAll<HTMLElement>('span').forEach((element) => {
+      expect(window.getComputedStyle(element).fontSize).toBe(
+        window.getComputedStyle(activityLabel!).fontSize
+      )
+    })
+
+    const previewToggle = screen.container.querySelector<HTMLButtonElement>(
+      '.file-change-activity__toggle'
+    )
+    expect(previewToggle).not.toBeNull()
+    await previewToggle?.click()
+
+    await expect.element(screen.getByText('+replacement', { exact: true })).toBeVisible()
+    expect(getAgentFileChangeDiff).toHaveBeenCalledWith(transactionId, 0, 50_000, undefined)
+  })
+
   it('uses the structured error code without exposing the raw error', async () => {
+    vi.mocked(getAgentFileChangeDiff).mockClear()
     const call = applyPatchCall()
     const result: AgentToolResult = {
       callId: call.id,
@@ -79,6 +147,8 @@ describe('FileChange failure presentation', () => {
     screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
     await expect.element(screen.getByText('文件已存在。', { exact: true })).toBeVisible()
+    expect(screen.container.querySelector('.file-change-activity__toggle')).toBeNull()
+    expect(getAgentFileChangeDiff).not.toHaveBeenCalled()
     expect(screen.container.textContent).not.toContain('structured_edit_error')
     expect(screen.container.textContent).not.toContain('/private/workspace/internal.txt')
   })

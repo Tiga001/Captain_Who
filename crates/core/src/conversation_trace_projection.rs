@@ -286,6 +286,10 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
         return (json!({ "request": {} }), true);
     }
     let mut output = Map::new();
+    // This marker is Host-owned: the strict model-visible apply_patch Wire rejects it. Keeping it
+    // in the durable projection makes the projection idempotent when an approval continuation
+    // appends a new ToolCall to an already-projected Trace prefix.
+    output.insert("validatedRequest".into(), Value::Bool(true));
     let mut truncated = false;
     for (key, limit) in [
         ("action", DurableTraceProjectionLimits::TITLE_CHARS),
@@ -344,14 +348,14 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
             output.insert("editsDigest".into(), json!(digest));
         }
         ("edits", additions, deletions)
-    } else if input.get("editCount").and_then(Value::as_u64).is_some() {
-        ("edits", 0, 0)
     } else if let Some(representation) = input.get("changeRepresentation").and_then(Value::as_str) {
         (
             representation,
             input.get("additions").and_then(Value::as_u64).unwrap_or(0),
             input.get("deletions").and_then(Value::as_u64).unwrap_or(0),
         )
+    } else if input.get("editCount").and_then(Value::as_u64).is_some() {
+        ("edits", 0, 0)
     } else {
         ("metadata_only", 0, 0)
     };
@@ -379,6 +383,10 @@ fn is_host_validated_apply_patch_projection(input: &Map<String, Value>) -> bool 
                     | "contentDigest"
                     | "editCount"
                     | "editsDigest"
+                    | "changeRepresentation"
+                    | "additions"
+                    | "deletions"
+                    | "summary"
             )
         })
 }
@@ -1350,6 +1358,56 @@ mod tests {
         assert!(!serde_json::to_string(&projected)
             .unwrap()
             .contains(private_content));
+    }
+
+    #[test]
+    fn apply_patch_trace_projection_is_body_free_and_idempotent() {
+        let cases = [
+            json!({
+                "request": {
+                    "action": "apply",
+                    "operation": "create",
+                    "filePath": "created.txt",
+                    "observationId": "fobs_private",
+                    "content": "DIRECT_TRACE_CANARY\nsecond line\n",
+                    "summary": "create fixture"
+                }
+            }),
+            json!({
+                "request": {
+                    "action": "apply",
+                    "operation": "update",
+                    "filePath": "updated.txt",
+                    "observationId": "fobs_private",
+                    "edits": [{
+                        "kind": "replace",
+                        "oldText": "OLD_TRACE_CANARY",
+                        "newText": "NEW_TRACE_CANARY"
+                    }]
+                }
+            }),
+            json!({
+                "request": {
+                    "action": "commit",
+                    "transactionId": "file-change-staged-v1:fixture",
+                    "expectedDraftRevision": 3,
+                    "summary": "commit fixture"
+                }
+            }),
+        ];
+
+        for raw in cases {
+            let first = project_tool_call("apply_patch", &raw);
+            let second = project_tool_call("apply_patch", &first.value);
+            assert_eq!(second.value, first.value);
+            assert_eq!(second.truncated, first.truncated);
+            assert_eq!(first.value["request"]["validatedRequest"], true);
+            let serialized = first.value.to_string();
+            assert!(!serialized.contains("fobs_private"));
+            assert!(!serialized.contains("DIRECT_TRACE_CANARY"));
+            assert!(!serialized.contains("OLD_TRACE_CANARY"));
+            assert!(!serialized.contains("NEW_TRACE_CANARY"));
+        }
     }
 
     #[test]

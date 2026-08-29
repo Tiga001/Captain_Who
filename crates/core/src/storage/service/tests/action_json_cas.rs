@@ -39,7 +39,7 @@ fn file_change_json_pair(parent: &Path, staged: bool) -> (String, String) {
         updated_at: now,
     };
     let prepared_binding = FileChangeDirectBinding {
-        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        schema_version: crate::file_change::FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
         transaction,
         proposal: FileChangeProposal {
             schema_version: FILE_CHANGE_SCHEMA_VERSION,
@@ -72,6 +72,7 @@ fn file_change_json_pair(parent: &Path, staged: bool) -> (String, String) {
         source_tool_name: "apply_patch".to_string(),
         source_call_id: "call-file-change-1".to_string(),
         source_args_digest: content_digest(b"args"),
+        trace_args_digest: content_digest(b"trace-args"),
         staged_transaction_id: staged.then(|| "transaction-1".to_string()),
         conversation_id: "conversation-1".to_string(),
         project_id: None,

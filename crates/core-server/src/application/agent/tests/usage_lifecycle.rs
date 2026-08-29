@@ -825,8 +825,8 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
                         "webSearchActivities": [],
                         "readActivities": [],
                         "approvals": [],
-                        "diffs": [],
-                        "fileDrafts": [],
+                        "fileChangeProposals": [],
+                        "fileChanges": [],
                         "mcpInvocations": [],
                         "messageStreamCheckpoints": {},
                         "timeline": [{

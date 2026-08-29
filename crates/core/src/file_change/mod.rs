@@ -30,7 +30,7 @@ pub use error::{
 pub use model::{
     FileChangeContentState, FileChangeDirectBinding, FileChangeEdit, FileChangeOperation,
     FileChangeOutcome, FileChangeProposal, FileChangeReceipt, FileChangeResult, FileChangeStatus,
-    FileChangeTransaction, FILE_CHANGE_SCHEMA_VERSION,
+    FileChangeTransaction, FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
 };
 pub(crate) use observation::FileObservationOwner;
 pub use observation::{

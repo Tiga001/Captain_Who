@@ -1043,14 +1043,15 @@ fn test_pending_resume_checkpoint_for_call(
         provider_identity: provider_identity.clone(),
     }];
     checkpoint.assistant_turn_identity = crate::test_assistant_turn_identity(&[call.id.as_str()]);
+    let (trace_operation, trace_truncated) = durable_test_tool_call_operation(call);
     checkpoint.conversation_trace_items = vec![ConversationTurnTraceItem::ToolCall {
         sequence: 0,
         call_id: call.id.clone(),
         tool: call.tool.clone(),
-        operation: call.args.clone(),
+        operation: trace_operation,
         provenance,
         approval_status: call.approval_status,
-        truncated: false,
+        truncated: trace_truncated,
     }];
     checkpoint.conversation_model_context_items = vec![ConversationModelContextItem {
         sequence: 0,
@@ -1067,7 +1068,21 @@ fn test_pending_resume_checkpoint_for_call(
         is_error: false,
     }];
     checkpoint.next_conversation_trace_sequence = 1;
+    checkpoint.conversation_trace_truncated = trace_truncated;
     checkpoint
+}
+
+fn durable_test_tool_call_operation(call: &AgentToolCall) -> (serde_json::Value, bool) {
+    if call.tool == "apply_patch" {
+        let operation = mycopilot_core::file_change_support::apply_patch_trace_operation(
+            &call.args,
+        )
+        .expect("project test apply_patch call through the production durable Trace boundary");
+        let truncated = operation != call.args;
+        (operation, truncated)
+    } else {
+        (call.args.clone(), false)
+    }
 }
 
 fn seed_durable_pending_owner(
@@ -1087,8 +1102,8 @@ fn seed_durable_pending_owner(
         "toolCalls": [],
         "toolResults": [],
         "approvals": [],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],
@@ -1150,6 +1165,7 @@ fn append_durable_pending_trace(
         provider_call_id: call.id.clone(),
         runtime_call_id: call.id.clone(),
     };
+    let (trace_operation, trace_truncated) = durable_test_tool_call_operation(call);
     let trace = ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: run_id.to_string(),
@@ -1157,15 +1173,15 @@ fn append_durable_pending_trace(
         assistant_message_id: assistant_message_id.to_string(),
         terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
         terminal_error: None,
-        truncated: false,
+        truncated: trace_truncated,
         items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             provenance,
-            operation: call.args.clone(),
+            operation: trace_operation,
             approval_status: call.approval_status,
-            truncated: false,
+            truncated: trace_truncated,
         }],
     };
     let model_context = vec![ConversationModelContextItem {
@@ -1539,8 +1555,8 @@ fn seed_durable_mcp_pending_owner(
                         "toolCalls": [],
                         "toolResults": [],
                         "approvals": [],
-                        "diffs": [],
-                        "fileDrafts": [],
+                        "fileChangeProposals": [],
+                        "fileChanges": [],
                         "webSearchActivities": [],
                         "readActivities": [],
                         "mcpInvocations": [{
@@ -8888,8 +8904,8 @@ async fn projected_child_skill_approval_atomically_resumes_wake_before_worker_ru
         }],
         "toolResults": [],
         "approvals": [serde_json::to_value(&action).unwrap()],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],

@@ -1,7 +1,9 @@
 mod agent_run_projection;
 
-pub(crate) use agent_run_projection::canonical_agent_run_lifecycle_projection;
-use agent_run_projection::current_agent_run_projection_is_safe;
+pub(crate) use agent_run_projection::{
+    canonical_agent_run_lifecycle_projection, current_agent_run_projection_is_safe,
+    current_agent_run_projection_is_safe_for_trace_rebuild,
+};
 #[cfg(test)]
 use agent_run_projection::{
     current_persisted_approval_is_safe, current_uuid_is_safe, MAX_JS_SAFE_INTEGER,

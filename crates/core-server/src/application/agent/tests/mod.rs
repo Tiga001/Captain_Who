@@ -244,7 +244,7 @@ fn direct_file_change_fixture(
         }
     };
     let execution = FileChangeDirectBinding {
-        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        schema_version: mycopilot_core::file_change::FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
         transaction,
         proposal,
         observation_id: observation_id.clone(),
@@ -263,6 +263,10 @@ fn direct_file_change_fixture(
         source_tool_name: "apply_patch".to_string(),
         source_call_id: call_id.to_string(),
         source_args_digest: proposal_digest(&args).expect("digest fixture Tool Call arguments"),
+        trace_args_digest: mycopilot_core::file_change_support::apply_patch_trace_args_digest(
+            &args,
+        )
+        .expect("digest fixture durable Trace arguments"),
         staged_transaction_id: None,
         conversation_id: conversation_id.to_string(),
         project_id: None,
@@ -366,6 +370,9 @@ fn staged_file_change_fixture(
     });
     execution.source_args_digest = mycopilot_core::file_change::proposal_digest(&args)
         .expect("digest staged fixture Tool Call arguments");
+    execution.trace_args_digest =
+        mycopilot_core::file_change_support::apply_patch_trace_args_digest(&args)
+            .expect("digest staged fixture durable Trace arguments");
     execution
         .validate()
         .expect("valid staged FileChange execution binding");

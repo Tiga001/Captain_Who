@@ -1,5 +1,5 @@
 use super::file_change_permissions::{
-    direct_execution_input, seed_durable_direct_file_change_owner,
+    bind_direct_execution_to_input, direct_execution_input, seed_durable_direct_file_change_owner,
 };
 use super::*;
 
@@ -111,6 +111,9 @@ fn staged_update_file_change_fixture(
     });
     execution.source_args_digest = mycopilot_core::file_change::proposal_digest(&args)
         .expect("digest staged update Tool Call arguments");
+    execution.trace_args_digest =
+        mycopilot_core::file_change_support::apply_patch_trace_args_digest(&args)
+            .expect("digest staged update durable Trace arguments");
     execution
         .validate()
         .expect("valid staged update FileChange execution binding");
@@ -363,6 +366,176 @@ async fn staged_approval_response_lost_retry_replays_receipt_without_recommittin
         fs::metadata(&target).unwrap().modified().unwrap(),
         metadata_after_first.modified().unwrap()
     );
+}
+
+#[tokio::test]
+async fn remaining_run_approval_from_staged_commit_authorizes_later_direct_changes() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-staged-remaining-approval";
+    let conversation_id = "conversation-staged-remaining-approval";
+    let assistant_message_id = "assistant-staged-remaining-approval";
+    let call_id = "call-staged-remaining-approval";
+    let transaction_id = "transaction-staged-remaining-approval";
+    let target = workspace.join("staged-grant.txt");
+    let (mut proposal, call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id,
+            conversation_id,
+            call_id,
+            transaction_id,
+        },
+        ("staged-grant.txt", target.to_str().unwrap()),
+        "content committed from the staged transaction\n",
+        AgentApprovalStatus::Required,
+    );
+    let expected_trace_digest = proposal.execution.trace_args_digest.clone();
+    let mut input = direct_execution_input(
+        &workspace,
+        run_id,
+        conversation_id,
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+            ..Default::default()
+        },
+        &call,
+    );
+    save_test_pending_provider_for_input(&storage, &mut input);
+    bind_staged_execution_to_input(&mut proposal, &input);
+    seed_durable_direct_file_change_owner(
+        &storage,
+        &mut input,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+    );
+    storage
+        .create_agent_file_change(staged_file_change_record(&proposal, "waiting_approval"))
+        .unwrap();
+    service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentProposedAction::FileChange {
+                file_change: proposal,
+            },
+            input,
+        )
+        .unwrap();
+
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .expect("the staged approval fixture has one durable Trace");
+    let trace_operation = trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                call_id: candidate,
+                operation,
+                ..
+            } if candidate == call_id => Some(operation),
+            _ => None,
+        })
+        .expect("the staged commit has one durable ToolCall");
+    assert_eq!(
+        trace_operation,
+        &mycopilot_core::file_change_support::apply_patch_trace_operation(&call.args).unwrap()
+    );
+    assert_eq!(trace_operation["request"]["action"], "commit");
+    assert_eq!(
+        trace_operation["request"]["changeRepresentation"],
+        "metadata_only"
+    );
+    assert_eq!(
+        mycopilot_core::file_change::proposal_digest(trace_operation).unwrap(),
+        expected_trace_digest
+    );
+
+    let approved = service
+        .approve_action_with_scope(
+            run_id,
+            call_id,
+            mycopilot_protocol_rs::AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .expect("the staged commit must settle and activate its remaining-Run grant");
+    assert_eq!(approved.status, "applied");
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "content committed from the staged transaction\n"
+    );
+    storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .expect("the safely projected staged commit receipt activates the Run grant");
+
+    for (successor_call_id, paths, base, target_content) in [
+        (
+            "call-after-staged-create",
+            (
+                "created-after-staged.txt",
+                workspace
+                    .join("created-after-staged.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None,
+            "created under the remaining-Run grant\n",
+        ),
+        (
+            "call-after-staged-update",
+            ("staged-grant.txt", target.to_string_lossy().into_owned()),
+            Some("content committed from the staged transaction\n"),
+            "updated under the remaining-Run grant\n",
+        ),
+    ] {
+        let (mut successor, successor_call) = direct_file_change_fixture(
+            run_id,
+            conversation_id,
+            successor_call_id,
+            (paths.0, paths.1.as_str()),
+            base,
+            Some(target_content),
+            AgentApprovalStatus::Required,
+        );
+        let mut successor_input = direct_execution_input(
+            &workspace,
+            run_id,
+            conversation_id,
+            AgentPermissions {
+                write: AgentWritePermission::WorkspaceOnly,
+                patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+                ..Default::default()
+            },
+            &successor_call,
+        );
+        save_test_pending_provider_for_input(&storage, &mut successor_input);
+        bind_direct_execution_to_input(&mut successor, &successor_input);
+        let AgentProposedAction::FileChange {
+            file_change: successor,
+        } = successor
+        else {
+            unreachable!("Direct fixture always produces a FileChange")
+        };
+        storage
+            .resolve_active_file_change_run_grant(
+                &successor,
+                successor_input.context.as_ref().unwrap(),
+            )
+            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("same-Run Direct successor {successor_call_id} must inherit the grant")
+            });
+    }
 }
 
 #[tokio::test]

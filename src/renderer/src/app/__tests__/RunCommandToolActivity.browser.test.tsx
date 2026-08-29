@@ -5,7 +5,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { ChatAgentRunView } from '../../features/chat/chatTypes'
 import { AgentToolActivity } from '../../features/chat/components/toolActivities/AgentToolActivity'
-import { RunCommandToolActivity } from '../../features/chat/components/toolActivities/RunCommandToolActivity'
+import {
+  RunCommandToolActivity,
+  RunCommandToolActivityGroup,
+  type RunCommandToolActivityGroupItem
+} from '../../features/chat/components/toolActivities/RunCommandToolActivity'
 import '../../styles/global.css'
 import '../../features/chat/ChatConversationPage.agent.css'
 
@@ -16,6 +20,7 @@ const { copyTextSpy } = vi.hoisted(() => ({
 const translations: Record<string, string> = {
   'agent.command.completed': '已运行命令',
   'agent.command.failed': '命令失败',
+  'agent.command.groupCompleted': '已处理 {count} 个命令',
   'agent.command.waitingApproval': '等待审批运行命令',
   'agent.command.waitingApprovalStatus': '等待审批',
   'agent.command.starting': '正在启动命令',
@@ -52,6 +57,60 @@ vi.mock('../../features/chat/components/chatMessageItemUtils', async (importOrig
 })
 
 describe('RunCommandToolActivity', () => {
+  it('keeps expanded grouped command rows at the tool activity font size', async () => {
+    const items: RunCommandToolActivityGroupItem[] = [
+      {
+        call: {
+          approvalStatus: 'approved',
+          reason: null,
+          args: { command: 'echo one', reason: '验证第一个命令' },
+          id: 'group-command-1',
+          tool: 'run_command'
+        },
+        result: {
+          callId: 'group-command-1',
+          ok: true,
+          result: { status: 'exited', exitCode: 0, stdout: '', stderr: '' },
+          tool: 'run_command'
+        }
+      },
+      {
+        call: {
+          approvalStatus: 'approved',
+          reason: null,
+          args: { command: 'echo two', reason: '验证第二个命令' },
+          id: 'group-command-2',
+          tool: 'run_command'
+        },
+        result: {
+          callId: 'group-command-2',
+          ok: true,
+          result: { status: 'exited', exitCode: 0, stdout: '', stderr: '' },
+          tool: 'run_command'
+        }
+      }
+    ]
+
+    const screen = await render(<RunCommandToolActivityGroup items={items} />)
+    const groupSummary = screen.container.querySelector<HTMLElement>(
+      '.agent-activity--run-command > summary'
+    )
+    expect(groupSummary).not.toBeNull()
+    await userEvent.click(groupSummary!)
+
+    const groupLabel = groupSummary!.querySelector<HTMLElement>('.agent-activity__label')
+    const commandLabels = screen.container.querySelectorAll<HTMLElement>(
+      '.run-command-activity__details--group > .agent-activity > summary .agent-activity__label'
+    )
+    expect(groupLabel).not.toBeNull()
+    expect(commandLabels).toHaveLength(2)
+    commandLabels.forEach((label) => {
+      expect(window.getComputedStyle(label).fontSize).toBe(
+        window.getComputedStyle(groupLabel!).fontSize
+      )
+    })
+  })
+
   it('keeps the reason in the title and the command in the expanded body', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',

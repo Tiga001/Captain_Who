@@ -7,6 +7,21 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const FILE_CHANGE_SCHEMA_VERSION: u32 = 1;
+pub const FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION: u32 = 2;
+
+fn deserialize_direct_binding_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version == FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "unsupported FileChange direct binding schema version",
+        ))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +153,7 @@ pub struct FileChangeTransaction {
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileChangeDirectBinding {
+    #[serde(deserialize_with = "deserialize_direct_binding_schema_version")]
     pub schema_version: u32,
     pub transaction: FileChangeTransaction,
     pub proposal: FileChangeProposal,
@@ -146,6 +162,10 @@ pub struct FileChangeDirectBinding {
     pub source_tool_name: String,
     pub source_call_id: String,
     pub source_args_digest: String,
+    /// Digest of the canonical body-free operation stored in the durable Conversation Trace.
+    /// This is deliberately separate from `source_args_digest`, which binds the private exact
+    /// execution arguments retained by the current Checkpoint/continuation boundary.
+    pub trace_args_digest: String,
     /// Required-nullable reference to the canonical persistent Staged transaction. Direct
     /// `action=apply` carries `null`; Staged commit carries the exact transaction id so approval
     /// settlement cannot target another draft.
@@ -183,11 +203,12 @@ impl std::fmt::Debug for FileChangeDirectBinding {
 
 impl FileChangeDirectBinding {
     pub fn validate(&self) -> FileChangeResultValue<()> {
-        if self.schema_version != FILE_CHANGE_SCHEMA_VERSION
+        if self.schema_version != FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION
             || self.observation_id.trim().is_empty()
             || self.source_tool_name != "apply_patch"
             || self.source_call_id.trim().is_empty()
             || !valid_digest(&self.source_args_digest)
+            || !valid_digest(&self.trace_args_digest)
             || self.conversation_id.trim().is_empty()
             || self
                 .project_id
@@ -275,7 +296,7 @@ impl FileChangeDirectBinding {
         ) && self.transaction.outcome == FileChangeOutcome::Applied
             && self.receipt.as_ref().is_some_and(|receipt| {
                 receipt.validate().is_ok()
-                    && receipt.schema_version == self.schema_version
+                    && receipt.schema_version == FILE_CHANGE_SCHEMA_VERSION
                     && receipt.transaction_id == self.transaction.id
                     && receipt.operation == self.transaction.operation
                     && receipt.file_path == self.transaction.file_path

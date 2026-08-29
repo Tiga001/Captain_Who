@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "projectionArguments": {
+    "runId": "run-projection-contract",
+    "runStatus": "failed",
+    "startedAt": 10,
+    "updatedAt": 30,
+    "completedAt": 30
+  },
+  "input": {
+    "runId": "run-projection-contract",
+    "status": "failed",
+    "startedAt": 10,
+    "completedAt": 20,
+    "toolDefinitions": [],
+    "toolCalls": [],
+    "toolResults": [],
+    "webSearchActivities": [],
+    "readActivities": [],
+    "approvals": [],
+    "fileChangeProposals": [
+      {
+        "schemaVersion": 1,
+        "id": "file-change-proposal-contract",
+        "transactionId": "file-change-transaction-contract",
+        "operation": "update",
+        "updateStrategy": "modify",
+        "filePath": "README.md",
+        "inlineDiff": null,
+        "baseRevision": "content-sha256-v1:base",
+        "summary": "Update the contract fixture",
+        "additions": 1,
+        "deletions": 1,
+        "lineCount": 2,
+        "byteCount": 32,
+        "approvalStatus": "approved"
+      }
+    ],
+    "fileChanges": [
+      {
+        "schemaVersion": 1,
+        "transactionId": "file-change-transaction-contract",
+        "conversationId": "conversation-projection-contract",
+        "projectId": "project-projection-contract",
+        "filePath": "README.md",
+        "operation": "update",
+        "updateStrategy": "modify",
+        "status": "applied",
+        "baseRevision": "content-sha256-v1:base",
+        "additions": 1,
+        "deletions": 1,
+        "lineCount": 2,
+        "byteCount": 32,
+        "mutationCount": 1,
+        "nextMutationIndex": 1,
+        "statsFinal": true,
+        "summary": "Update the contract fixture",
+        "createdAt": 11,
+        "updatedAt": 19
+      }
+    ],
+    "mcpInvocations": [],
+    "messageStreamCheckpoints": {
+      "stream-contract": {
+        "previousContent": "partial response"
+      }
+    },
+    "timeline": [
+      {
+        "id": "trace-message-contract",
+        "type": "message",
+        "content": "current traced narration",
+        "traceSequence": 0
+      }
+    ],
+    "interruption": {
+      "reason": "service_connection_failed"
+    },
+    "usage": {
+      "inputTokens": 13,
+      "outputTokens": 5,
+      "totalTokens": 18
+    }
+  },
+  "expectedCanonical": {
+    "runId": "run-projection-contract",
+    "status": "failed",
+    "startedAt": 10,
+    "completedAt": 30,
+    "toolDefinitions": [],
+    "toolCalls": [],
+    "toolResults": [],
+    "webSearchActivities": [],
+    "readActivities": [],
+    "approvals": [],
+    "fileChangeProposals": [
+      {
+        "schemaVersion": 1,
+        "id": "file-change-proposal-contract",
+        "transactionId": "file-change-transaction-contract",
+        "operation": "update",
+        "updateStrategy": "modify",
+        "filePath": "README.md",
+        "inlineDiff": null,
+        "baseRevision": "content-sha256-v1:base",
+        "summary": "Update the contract fixture",
+        "additions": 1,
+        "deletions": 1,
+        "lineCount": 2,
+        "byteCount": 32,
+        "approvalStatus": "approved"
+      }
+    ],
+    "fileChanges": [
+      {
+        "schemaVersion": 1,
+        "transactionId": "file-change-transaction-contract",
+        "conversationId": "conversation-projection-contract",
+        "projectId": "project-projection-contract",
+        "filePath": "README.md",
+        "operation": "update",
+        "updateStrategy": "modify",
+        "status": "applied",
+        "baseRevision": "content-sha256-v1:base",
+        "additions": 1,
+        "deletions": 1,
+        "lineCount": 2,
+        "byteCount": 32,
+        "mutationCount": 1,
+        "nextMutationIndex": 1,
+        "statsFinal": true,
+        "summary": "Update the contract fixture",
+        "createdAt": 11,
+        "updatedAt": 19
+      }
+    ],
+    "mcpInvocations": [],
+    "messageStreamCheckpoints": {
+      "stream-contract": {
+        "previousContent": "partial response"
+      }
+    },
+    "timeline": [
+      {
+        "id": "trace-message-contract",
+        "type": "message",
+        "content": "current traced narration",
+        "traceSequence": 0
+      }
+    ],
+    "interruption": {
+      "reason": "service_connection_failed"
+    },
+    "usage": {
+      "inputTokens": 13,
+      "outputTokens": 5,
+      "totalTokens": 18
+    },
+    "state": {
+      "status": "failed",
+      "activeRunId": null,
+      "lastError": null,
+      "updatedAt": 30
+    }
+  },
+  "rejectedMutations": [
+    {
+      "name": "obsolete_file_projection_fields",
+      "remove": ["fileChangeProposals", "fileChanges"],
+      "set": {
+        "diffs": [],
+        "fileDrafts": []
+      }
+    },
+    {
+      "name": "obsolete_message_stream_checkpoint",
+      "remove": [],
+      "set": {
+        "messageStreamCheckpoints": {
+          "stream-contract": {
+            "baseContentLength": 16,
+            "baseWasThinking": false
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_interruption_reason",
+      "remove": [],
+      "set": {
+        "interruption": {
+          "reason": "provider_internal_failure"
+        }
+      }
+    },
+    {
+      "name": "extra_top_level_field",
+      "remove": [],
+      "set": {
+        "privateDiagnostic": "must not survive"
+      }
+    }
+  ]
+}

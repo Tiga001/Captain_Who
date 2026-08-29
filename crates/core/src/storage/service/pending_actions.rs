@@ -550,7 +550,7 @@ fn validate_frozen_manual_file_effect_tool_call(
         AgentProposedAction::FileChange { file_change } => {
             let digest = crate::file_change::proposal_digest(operation)
                 .map_err(|_| "FileChange ToolCall arguments are invalid".to_string())?;
-            if digest != file_change.execution.source_args_digest {
+            if digest != file_change.execution.trace_args_digest {
                 return Err(format!(
                     "启动对账发现 FileChange {action_id} 的冻结 ToolCall 参数与 action 不一致。"
                 ));

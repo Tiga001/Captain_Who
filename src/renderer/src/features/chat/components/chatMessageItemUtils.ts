@@ -738,7 +738,7 @@ export function getFileChangeGroupItems(
       result: result ?? existing?.result,
       settledStatus,
       transaction,
-      transactionId: transactionId ?? call.id
+      transactionId
     })
   })
 

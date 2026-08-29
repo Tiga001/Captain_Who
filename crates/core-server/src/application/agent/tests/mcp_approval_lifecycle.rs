@@ -3098,8 +3098,8 @@ async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_
             "toolCalls": [],
             "toolResults": [],
             "approvals": [],
-            "diffs": [],
-            "fileDrafts": [],
+            "fileChangeProposals": [],
+            "fileChanges": [],
             "webSearchActivities": [],
             "readActivities": [],
             "mcpInvocations": [{

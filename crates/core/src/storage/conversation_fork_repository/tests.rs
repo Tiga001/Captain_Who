@@ -2210,7 +2210,8 @@ fn source_conversation() -> ChatConversationRecord {
                 "toolCalls": [],
                 "toolResults": [],
                 "approvals": [],
-                "diffs": [],
+                "fileChangeProposals": [],
+                "fileChanges": [],
                 "timeline": [],
                 "usage": {
                     "inputTokens": 100,

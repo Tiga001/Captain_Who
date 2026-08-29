@@ -2347,6 +2347,34 @@ fn project_guidance_timeline(
     command_sessions: &[agent_command_session_repository::AgentCommandSessionRecord],
     fallback_started_at: i64,
 ) -> Result<String, String> {
+    let (expected_run_id, fallback_status, fallback_completed_at) = trace
+        .map(|trace| {
+            let status = match trace.terminal_status {
+                crate::ConversationTurnTraceTerminalStatus::InProgress => "running",
+                crate::ConversationTurnTraceTerminalStatus::Completed => "completed",
+                crate::ConversationTurnTraceTerminalStatus::Failed => "failed",
+                crate::ConversationTurnTraceTerminalStatus::Cancelled => "cancelled",
+            };
+            (
+                trace.run_id.as_str(),
+                status,
+                (trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress)
+                    .then_some(fallback_started_at),
+            )
+        })
+        .or_else(|| {
+            guidances
+                .first()
+                .map(|guidance| (guidance.run_id.as_str(), "running", None))
+        })
+        .ok_or_else(|| "guidance projection has no current run identity".to_string())?;
+    if guidances
+        .iter()
+        .any(|guidance| guidance.run_id != expected_run_id)
+    {
+        return Err("guidance projection has inconsistent run identity".to_string());
+    }
+
     let existing_run = if let Some(raw) = existing_run_json {
         let value = serde_json::from_str::<serde_json::Value>(raw)
             .map_err(|error| format!("current AgentRun projection is invalid JSON: {error}"))?;
@@ -2354,47 +2382,31 @@ fn project_guidance_timeline(
             .as_object()
             .cloned()
             .ok_or_else(|| "current AgentRun projection must be an object".to_string())?;
-        // Some pre-runtime Renderer fixtures persisted only lifecycle fields. They are not a
-        // valid current projection and must never be merged field-by-field, but an authoritative
-        // trace can safely rebuild the complete presentation skeleton from scratch.
-        validate_current_agent_run_projection(&run)
-            .ok()
-            .map(|()| run)
+        // A malformed or incomplete presentation must never be merged field-by-field. A durable
+        // Trace may defer only Tool identity coherence because every Trace-owned Timeline item is
+        // discarded and rebuilt below; Guidance without a Trace has no such authority.
+        let is_safe = if trace.is_some() {
+            chat_repository::current_agent_run_projection_is_safe_for_trace_rebuild(
+                &run,
+                expected_run_id,
+            )
+        } else {
+            chat_repository::current_agent_run_projection_is_safe(&run, expected_run_id)
+        };
+        is_safe.then_some(run)
     } else {
         None
     };
     let mut run = if let Some(run) = existing_run {
         run
     } else {
-        let (run_id, status, completed_at) = trace
-            .map(|trace| {
-                let status = match trace.terminal_status {
-                    crate::ConversationTurnTraceTerminalStatus::InProgress => "running",
-                    crate::ConversationTurnTraceTerminalStatus::Completed => "completed",
-                    crate::ConversationTurnTraceTerminalStatus::Failed => "failed",
-                    crate::ConversationTurnTraceTerminalStatus::Cancelled => "cancelled",
-                };
-                (
-                    trace.run_id.as_str(),
-                    status,
-                    (trace.terminal_status
-                        != crate::ConversationTurnTraceTerminalStatus::InProgress)
-                        .then_some(fallback_started_at),
-                )
-            })
-            .or_else(|| {
-                guidances
-                    .first()
-                    .map(|guidance| (guidance.run_id.as_str(), "running", None))
-            })
-            .ok_or_else(|| "guidance projection has no current run identity".to_string())?;
         let canonical = chat_repository::canonical_agent_run_lifecycle_projection(
             None,
-            run_id,
-            status,
+            expected_run_id,
+            fallback_status,
             fallback_started_at,
             fallback_started_at,
-            completed_at,
+            fallback_completed_at,
         )
         .map_err(storage_error)?;
         serde_json::from_str::<serde_json::Value>(&canonical)
@@ -2771,8 +2783,8 @@ fn project_guidance_timeline(
     for field in [
         "toolDefinitions",
         "approvals",
-        "diffs",
-        "fileDrafts",
+        "fileChangeProposals",
+        "fileChanges",
         "webSearchActivities",
         "readActivities",
     ] {
@@ -2856,40 +2868,6 @@ fn project_activated_skill_from_trace_result(
         }),
         revision,
     ))
-}
-
-fn validate_current_agent_run_projection(
-    run: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    if !run.get("runId").is_some_and(serde_json::Value::is_string)
-        || !run.get("status").is_some_and(serde_json::Value::is_string)
-        || !run.get("startedAt").is_some_and(serde_json::Value::is_i64)
-    {
-        return Err("current AgentRun lifecycle identity is incomplete".to_string());
-    }
-    for field in [
-        "toolDefinitions",
-        "toolCalls",
-        "toolResults",
-        "approvals",
-        "diffs",
-        "fileDrafts",
-        "webSearchActivities",
-        "readActivities",
-        "mcpInvocations",
-        "timeline",
-    ] {
-        if !run.get(field).is_some_and(serde_json::Value::is_array) {
-            return Err(format!("current AgentRun field `{field}` must be an array"));
-        }
-    }
-    if !run
-        .get("messageStreamCheckpoints")
-        .is_some_and(serde_json::Value::is_object)
-    {
-        return Err("current AgentRun messageStreamCheckpoints must be an object".to_string());
-    }
-    Ok(())
 }
 
 fn project_durable_mcp_invocations(

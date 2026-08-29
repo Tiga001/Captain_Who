@@ -646,8 +646,9 @@ impl ToolRegistry {
     }
 
     /// Produces the canonical clone stored in the durable conversation trace.
-    /// Execution and approval always retain the original model call; this
-    /// projection carries no authorization meaning.
+    /// Execution and approval retain the original model call. A frozen action may bind a separate
+    /// digest of this body-free clone when durable settlement must prove Trace identity, but the
+    /// projection by itself never grants execution authority.
     pub(crate) fn trace_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
         self.tools
             .get(&call.tool)

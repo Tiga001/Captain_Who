@@ -22,6 +22,214 @@ fn browser_tool_identity(
     }
 }
 
+fn current_projection_with_suffix(run_id: Option<&str>, suffix: &str) -> serde_json::Value {
+    serde_json::json!({
+        "runId": run_id,
+        "status": "running",
+        "startedAt": 2,
+        "toolDefinitions": [],
+        "toolCalls": [],
+        "toolResults": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "approvals": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
+        "mcpInvocations": [],
+        "messageStreamCheckpoints": {
+            "stream-current": {
+                "previousContent": "partial response"
+            }
+        },
+        "timeline": [{
+            "id": "renderer-suffix",
+            "type": "message",
+            "content": suffix
+        }],
+        "interruption": {
+            "reason": "service_connection_failed"
+        }
+    })
+}
+
+fn empty_projection_trace(
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+) -> ConversationTurnTrace {
+    ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: Vec::new(),
+    }
+}
+
+fn save_projection_conversation(
+    service: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run: serde_json::Value,
+) {
+    let mut stored = conversation(conversation_id, None, "message-user");
+    stored.messages.push(ChatMessageRecord {
+        id: assistant_message_id.to_string(),
+        role: "assistant".to_string(),
+        content: "pending".to_string(),
+        created_at: 2,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: Some(run.to_string()),
+        ui_state_json: None,
+    });
+    service.save_conversation(stored).unwrap();
+}
+
+fn load_projected_run(service: &StorageService, conversation_id: &str) -> serde_json::Value {
+    let view = service
+        .load_conversation_view(conversation_id)
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(
+        view.conversation
+            .messages
+            .last()
+            .unwrap()
+            .agent_run_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn conversation_view_preserves_a_strict_current_projection_suffix() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-current-projection";
+    let assistant_message_id = "assistant-current-projection";
+    let run_id = "run-current-projection";
+    save_projection_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        current_projection_with_suffix(Some(run_id), "preserve current suffix"),
+    );
+    service
+        .append_in_progress_conversation_turn_trace(
+            &empty_projection_trace(conversation_id, assistant_message_id, run_id),
+            2,
+            2,
+        )
+        .unwrap();
+
+    let run = load_projected_run(&service, conversation_id);
+    assert_eq!(run["runId"], run_id);
+    assert_eq!(run["timeline"][0]["content"], "preserve current suffix");
+    assert_eq!(
+        run["messageStreamCheckpoints"]["stream-current"]["previousContent"],
+        "partial response"
+    );
+    assert_eq!(run["interruption"]["reason"], "service_connection_failed");
+    assert_eq!(run["fileChangeProposals"], serde_json::json!([]));
+    assert_eq!(run["fileChanges"], serde_json::json!([]));
+}
+
+#[test]
+fn conversation_view_rebuilds_a_projection_owned_by_another_run() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-mismatched-projection";
+    let assistant_message_id = "assistant-mismatched-projection";
+    let authoritative_run_id = "run-authoritative-projection";
+    save_projection_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        current_projection_with_suffix(Some("run-wrong-owner"), "must not survive"),
+    );
+    service
+        .append_in_progress_conversation_turn_trace(
+            &empty_projection_trace(conversation_id, assistant_message_id, authoritative_run_id),
+            2,
+            2,
+        )
+        .unwrap();
+
+    let run = load_projected_run(&service, conversation_id);
+    assert_eq!(run["runId"], authoritative_run_id);
+    assert_eq!(run["timeline"], serde_json::json!([]));
+    assert!(run.get("interruption").is_none());
+    assert_eq!(run["messageStreamCheckpoints"], serde_json::json!({}));
+}
+
+#[test]
+fn conversation_view_binds_a_current_null_run_id_to_the_durable_trace() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-null-run-projection";
+    let assistant_message_id = "assistant-null-run-projection";
+    let run_id = "run-bound-projection";
+    save_projection_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        current_projection_with_suffix(None, "preserve null-owner suffix"),
+    );
+    service
+        .append_in_progress_conversation_turn_trace(
+            &empty_projection_trace(conversation_id, assistant_message_id, run_id),
+            2,
+            2,
+        )
+        .unwrap();
+
+    let run = load_projected_run(&service, conversation_id);
+    assert_eq!(run["runId"], run_id);
+    assert_eq!(run["timeline"][0]["content"], "preserve null-owner suffix");
+}
+
+#[test]
+fn conversation_view_rejects_guidance_rows_with_conflicting_run_owners() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-conflicting-guidance";
+    let assistant_message_id = "assistant-conflicting-guidance";
+    save_projection_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        current_projection_with_suffix(Some("run-guidance-a"), "must not load"),
+    );
+    for (index, run_id) in ["run-guidance-a", "run-guidance-b"].into_iter().enumerate() {
+        service
+            .store_agent_run_guidance(AgentRunGuidanceRecord {
+                guidance_id: format!("guidance-conflict-{index}"),
+                client_message_id: format!("client-guidance-conflict-{index}"),
+                run_id: run_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                content: format!("guidance {index}"),
+                status: crate::AgentGuidanceStatus::Queued,
+                attachment_ids: Vec::new(),
+                applied_trace_sequence: None,
+                terminal_reason: None,
+                created_at: 3 + index as i64,
+                updated_at: 3 + index as i64,
+            })
+            .unwrap();
+    }
+
+    assert_eq!(
+        service.load_conversation_view(conversation_id).unwrap_err(),
+        "guidance projection has inconsistent run identity"
+    );
+}
+
 #[test]
 fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_writes() {
     let fixture = StorageFixture::new();
@@ -172,6 +380,10 @@ fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_
     assert_eq!(run["toolResults"][0]["callId"], "call-read");
     assert_eq!(run["toolResults"][0]["result"]["content"], "bounded");
     assert_eq!(run["timeline"][0]["type"], "tool_call");
+    assert_eq!(run["fileChangeProposals"], serde_json::json!([]));
+    assert_eq!(run["fileChanges"], serde_json::json!([]));
+    assert!(run.get("diffs").is_none());
+    assert!(run.get("fileDrafts").is_none());
     assert_eq!(run["activatedSkills"][0]["name"], "Spreadsheets");
     assert_eq!(run["activatedSkills"][0]["source"]["kind"], "bundled");
     assert_eq!(

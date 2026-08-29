@@ -7,6 +7,28 @@ use crate::{
 };
 use similar::TextDiff;
 
+/// Returns the one canonical, body-free operation stored for a strict apply_patch ToolCall.
+///
+/// The model-visible request is validated before projection so malformed calls cannot collapse to
+/// the same fail-closed Trace value and accidentally become approval authority. The returned value
+/// contains only bounded metadata and content/edit digests; it is safe for durable audit history.
+pub fn apply_patch_trace_operation(
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
+    if !crate::tools::apply_patch_wire_is_valid(args) {
+        return Err("invalid apply_patch ToolCall arguments");
+    }
+    let (sanitized, _) = crate::conversation_trace_projection::sanitize_runtime_value(args);
+    Ok(crate::conversation_trace_projection::project_tool_call("apply_patch", &sanitized).value)
+}
+
+/// Binds a frozen FileChange action to its canonical body-free durable Trace operation.
+pub fn apply_patch_trace_args_digest(args: &serde_json::Value) -> Result<String, &'static str> {
+    let operation = apply_patch_trace_operation(args)?;
+    crate::file_change::proposal_digest(&operation)
+        .map_err(|_| "apply_patch Trace arguments could not be digested")
+}
+
 /// The single approval route used by structured tools that publish file
 /// changes. Path scope and revision checks remain the responsibility of the
 /// concrete writer; this route only answers who may authorize the write.
@@ -432,7 +454,7 @@ mod tests {
             updated_at: 1,
         };
         FileChangeDirectBinding {
-            schema_version: FILE_CHANGE_SCHEMA_VERSION,
+            schema_version: crate::file_change::FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
             transaction,
             proposal: FileChangeProposal {
                 schema_version: FILE_CHANGE_SCHEMA_VERSION,
@@ -465,6 +487,7 @@ mod tests {
             source_tool_name: "apply_patch".to_string(),
             source_call_id: "diff-1".to_string(),
             source_args_digest: digest.clone(),
+            trace_args_digest: digest.clone(),
             staged_transaction_id: None,
             conversation_id: "conversation-1".to_string(),
             project_id: None,
@@ -488,7 +511,7 @@ mod tests {
         assert_eq!(encoded["deleteJournal"], serde_json::Value::Null);
         assert_eq!(encoded["receipt"], serde_json::Value::Null);
 
-        for missing in ["observation", "deleteJournal", "receipt"] {
+        for missing in ["observation", "traceArgsDigest", "deleteJournal", "receipt"] {
             let mut malformed = encoded.clone();
             malformed.as_object_mut().unwrap().remove(missing);
             assert!(
@@ -501,6 +524,15 @@ mod tests {
         assert!(
             serde_json::from_value::<crate::file_change::FileChangeDirectBinding>(extra).is_err()
         );
+
+        for unsupported in [1, 99] {
+            let mut malformed = serde_json::to_value(direct_binding_fixture()).unwrap();
+            malformed["schemaVersion"] = serde_json::json!(unsupported);
+            assert!(
+                serde_json::from_value::<crate::file_change::FileChangeDirectBinding>(malformed)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -517,7 +549,7 @@ mod tests {
         let commit = FileChangeCommit {
             status: FileChangeStatus::Applied,
             receipt: FileChangeReceipt {
-                schema_version: prepared.schema_version,
+                schema_version: crate::file_change::FILE_CHANGE_SCHEMA_VERSION,
                 transaction_id: prepared.transaction.id.clone(),
                 operation: prepared.transaction.operation,
                 file_path: prepared.transaction.file_path.clone(),

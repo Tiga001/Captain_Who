@@ -277,8 +277,8 @@ fn store_action(
                         "toolCalls": [],
                         "toolResults": [],
                         "approvals": [],
-                        "diffs": [],
-                        "fileDrafts": [],
+                        "fileChangeProposals": [],
+                        "fileChanges": [],
                         "webSearchActivities": [],
                         "readActivities": [],
                         "mcpInvocations": [{

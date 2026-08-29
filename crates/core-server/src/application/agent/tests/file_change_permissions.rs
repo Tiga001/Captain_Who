@@ -228,6 +228,10 @@ pub(super) fn seed_durable_direct_file_change_owner(
             items: Vec::new(),
         });
     let trace_sequence = trace.items.last().map_or(0, |item| item.sequence() + 1);
+    let trace_operation =
+        mycopilot_core::file_change_support::apply_patch_trace_operation(&call.args)
+            .expect("project fixture ToolCall through the production durable Trace boundary");
+    let trace_redacted = trace_operation != call.args;
     trace.items.push(ConversationTurnTraceItem::ToolCall {
         sequence: trace_sequence,
         call_id: call.id.clone(),
@@ -235,10 +239,11 @@ pub(super) fn seed_durable_direct_file_change_owner(
         provenance: AgentToolIdentity::Builtin {
             tool_name: "apply_patch".to_string(),
         },
-        operation: call.args.clone(),
+        operation: trace_operation,
         approval_status: call.approval_status,
-        truncated: false,
+        truncated: trace_redacted,
     });
+    trace.truncated |= trace_redacted;
     let mut model_context = storage
         .get_conversation_model_context_log(assistant_message_id)
         .unwrap()
@@ -266,6 +271,7 @@ pub(super) fn seed_durable_direct_file_change_owner(
     checkpoint.conversation_trace_items = trace.items.clone();
     checkpoint.conversation_model_context_items = model_context.clone();
     checkpoint.next_conversation_trace_sequence = trace_sequence + 1;
+    checkpoint.conversation_trace_truncated = trace.truncated;
     storage
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &trace,
@@ -863,7 +869,7 @@ fn direct_create_update_delete_share_the_committer_across_auto_and_manual_approv
 }
 
 #[tokio::test]
-async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_create_only() {
+async fn remaining_run_approval_survives_redacted_content_trace_and_drives_the_next_update() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let workspace = fixture.path().join("workspace");
@@ -906,14 +912,14 @@ async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_cr
     );
 
     let second_call_id = "call-remember-second";
-    let second_target = workspace.join("second.txt");
+    let second_target = workspace.join("first.txt");
     let (mut second_action, second_call) = direct_file_change_fixture(
         run_id,
         conversation_id,
         second_call_id,
-        ("second.txt", second_target.to_str().unwrap()),
-        None,
-        Some("second\n"),
+        ("first.txt", second_target.to_str().unwrap()),
+        Some("first\n"),
+        Some("updated\n"),
         AgentApprovalStatus::Approved,
     );
     let mut second_input = direct_execution_input(
@@ -941,7 +947,7 @@ async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_cr
             second_input.context.as_ref().unwrap(),
         )
         .unwrap()
-        .expect("same-Run create inherits the exact active grant");
+        .expect("same-Run update inherits the exact active grant");
     second_input
         .resume_checkpoint
         .as_mut()
@@ -969,7 +975,7 @@ async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_cr
         )
         .expect("the RunGrant route executes through the managed auto journal");
     assert!(second_result.ok);
-    assert_eq!(fs::read_to_string(&second_target).unwrap(), "second\n");
+    assert_eq!(fs::read_to_string(&second_target).unwrap(), "updated\n");
     let second_audit = storage
         .get_agent_action_audit(&pending_action_storage_id(run_id, second_call_id))
         .unwrap()
@@ -980,8 +986,8 @@ async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_cr
         run_id,
         conversation_id,
         "call-remember-delete",
-        ("second.txt", second_target.to_str().unwrap()),
-        Some("second\n"),
+        ("first.txt", second_target.to_str().unwrap()),
+        Some("updated\n"),
         None,
         AgentApprovalStatus::Required,
     );
@@ -1066,6 +1072,16 @@ async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_cr
             |row| row.get(0),
         )
         .unwrap();
+    let original_trace_call: String = connection
+        .query_row(
+            "SELECT item_json FROM conversation_turn_trace_items
+             WHERE assistant_message_id = 'assistant-remember-first'
+               AND item_kind = 'tool_call'
+               AND json_extract(item_json, '$.callId') = ?1",
+            [first_call_id],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     connection
         .execute(
@@ -1126,6 +1142,41 @@ async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_cr
                AND item_kind = 'tool_result'
                AND json_extract(item_json, '$.callId') = ?1",
             rusqlite::params![first_call_id, original_trace_result],
+        )
+        .unwrap();
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_some());
+
+    connection
+        .execute(
+            "UPDATE conversation_turn_trace_items
+             SET item_json = json_set(
+                 item_json,
+                 '$.operation.request.contentDigest',
+                 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+             )
+             WHERE assistant_message_id = 'assistant-remember-first'
+               AND item_kind = 'tool_call'
+               AND json_extract(item_json, '$.callId') = ?1",
+            [first_call_id],
+        )
+        .unwrap();
+    assert!(
+        storage
+            .get_active_file_change_run_grant(run_id)
+            .unwrap()
+            .is_none(),
+        "tampering the body-free Trace operation must revoke remembered authority"
+    );
+    connection
+        .execute(
+            "UPDATE conversation_turn_trace_items SET item_json = ?2
+             WHERE assistant_message_id = 'assistant-remember-first'
+               AND item_kind = 'tool_call'
+               AND json_extract(item_json, '$.callId') = ?1",
+            rusqlite::params![first_call_id, original_trace_call],
         )
         .unwrap();
     assert!(storage

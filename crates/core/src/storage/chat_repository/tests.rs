@@ -63,8 +63,8 @@ fn current_browser_agent_run() -> serde_json::Value {
         ],
         "toolResults": [],
         "approvals": [],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],
@@ -741,8 +741,8 @@ fn assert_complete_current_agent_run_lifecycle(
         "toolCalls",
         "toolResults",
         "approvals",
-        "diffs",
-        "fileDrafts",
+        "fileChangeProposals",
+        "fileChanges",
         "webSearchActivities",
         "readActivities",
         "mcpInvocations",
@@ -920,8 +920,8 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
                 "observe": null
             }
         }],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [{
             "callId": "web-call",
             "query": "current query",
@@ -1022,8 +1022,8 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
                 "observe": null
             }
         }],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [{
             "callId": "web-call",
             "query": "current query",
@@ -1041,7 +1041,7 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
         "readActivities": [],
         "mcpInvocations": [],
         "messageStreamCheckpoints": {
-            "stream-1": {"baseContentLength": 3, "baseWasThinking": false}
+            "stream-1": {"previousContent": "abc"}
         },
         "timeline": [{"id": "message-1", "type": "message", "content": "kept"}],
         "todo": {
@@ -1106,6 +1106,9 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
             "id": "workspace:example",
             "revision": "revision-1"
         }],
+        "interruption": {
+            "reason": "service_connection_failed"
+        },
         "state": {
             "status": "running",
             "activeRunId": "run-1",
@@ -1141,6 +1144,10 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
         recovered["explicitSkillSelections"][0]["revision"],
         "revision-1"
     );
+    assert_eq!(
+        recovered["interruption"]["reason"],
+        "service_connection_failed"
+    );
 
     let invalid_projections = [
         {
@@ -1159,6 +1166,16 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
         {
             let mut invalid = valid_presentation.clone();
             invalid["messageStreamCheckpoints"]["stream-1"]["privateField"] = true.into();
+            invalid
+        },
+        {
+            let mut invalid = valid_presentation.clone();
+            invalid["interruption"]["privateField"] = true.into();
+            invalid
+        },
+        {
+            let mut invalid = valid_presentation.clone();
+            invalid["interruption"]["reason"] = "provider_internal_failure".into();
             invalid
         },
         {
@@ -1217,8 +1234,8 @@ fn canonical_recovery_preserves_the_current_pre_start_projection() {
         "toolCalls": [],
         "toolResults": [],
         "approvals": [],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],
@@ -1239,6 +1256,89 @@ fn canonical_recovery_preserves_the_current_pre_start_projection() {
     assert_eq!(recovered["runId"], "run-1");
     assert_eq!(recovered["status"], "running");
     assert_eq!(recovered["timeline"][0]["content"], "kept");
+}
+
+#[test]
+fn canonical_recovery_rejects_obsolete_file_projection_field_names() {
+    let obsolete = serde_json::json!({
+        "runId": "run-1",
+        "status": "running",
+        "startedAt": 2,
+        "toolDefinitions": [],
+        "toolCalls": [],
+        "toolResults": [],
+        "approvals": [],
+        "diffs": [],
+        "fileDrafts": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "mcpInvocations": [],
+        "messageStreamCheckpoints": {},
+        "timeline": [{"id": "obsolete", "type": "message", "content": "must not survive"}]
+    });
+
+    let recovered = canonical_agent_run_lifecycle_projection(
+        Some(&obsolete.to_string()),
+        "run-1",
+        "running",
+        2,
+        3,
+        None,
+    )
+    .unwrap();
+    let recovered: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+    assert!(recovered.get("diffs").is_none());
+    assert!(recovered.get("fileDrafts").is_none());
+    assert_eq!(recovered["fileChangeProposals"], serde_json::json!([]));
+    assert_eq!(recovered["fileChanges"], serde_json::json!([]));
+    assert_eq!(recovered["timeline"], serde_json::json!([]));
+}
+
+#[test]
+fn persisted_agent_run_projection_matches_renderer_contract_fixture() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../packages/protocol/fixtures/persisted-agent-run-projection-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["schemaVersion"], 1);
+
+    let arguments = fixture["projectionArguments"].as_object().unwrap();
+    let input = fixture["input"].as_object().unwrap();
+    let run_id = arguments["runId"].as_str().unwrap();
+    assert!(current_agent_run_projection_is_safe(input, run_id));
+
+    let input_json = serde_json::to_string(input).unwrap();
+    let projected = canonical_agent_run_lifecycle_projection(
+        Some(&input_json),
+        run_id,
+        arguments["runStatus"].as_str().unwrap(),
+        arguments["startedAt"].as_i64().unwrap(),
+        arguments["updatedAt"].as_i64().unwrap(),
+        Some(arguments["completedAt"].as_i64().unwrap()),
+    )
+    .unwrap();
+    let projected: serde_json::Value = serde_json::from_str(&projected).unwrap();
+    assert_eq!(projected, fixture["expectedCanonical"]);
+    assert!(current_agent_run_projection_is_safe(
+        projected.as_object().unwrap(),
+        run_id
+    ));
+
+    for mutation in fixture["rejectedMutations"].as_array().unwrap() {
+        let mut rejected = fixture["input"].clone();
+        let rejected = rejected.as_object_mut().unwrap();
+        for key in mutation["remove"].as_array().unwrap() {
+            rejected.remove(key.as_str().unwrap());
+        }
+        for (key, value) in mutation["set"].as_object().unwrap() {
+            rejected.insert(key.clone(), value.clone());
+        }
+        assert!(
+            !current_agent_run_projection_is_safe(rejected, run_id),
+            "Rust accepted rejected shared contract case {}",
+            mutation["name"].as_str().unwrap()
+        );
+    }
 }
 
 #[test]
@@ -1354,8 +1454,8 @@ fn live_running_agent_run() -> serde_json::Value {
         "toolCalls": [],
         "toolResults": [],
         "approvals": [],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],

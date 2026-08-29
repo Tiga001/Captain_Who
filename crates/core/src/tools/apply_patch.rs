@@ -9,7 +9,7 @@ use crate::file_change::{
     FileChangeMutation, FileChangeOperation, FileChangeOutcome, FileChangePathPolicy,
     FileChangePlanRequest, FileChangePlanner, FileChangeProposal, FileChangeStatus,
     FileChangeTransaction, FileObservationIdentity, FileObservationState,
-    FILE_CHANGE_SCHEMA_VERSION,
+    FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentFileChangeOperation, AgentFileChangeProposal,
@@ -203,6 +203,13 @@ impl AgentTool for ApplyPatchTool {
             }
         }
         projection.args = json!({ "request": safe });
+        projection
+    }
+
+    fn trace_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        let mut projection = call.clone();
+        projection.args = crate::file_change_support::apply_patch_trace_operation(&call.args)
+            .unwrap_or_else(|_| json!({ "request": {} }));
         projection
     }
 
@@ -681,7 +688,7 @@ fn direct_proposal_from_args(
         None
     };
     let execution = FileChangeDirectBinding {
-        schema_version: FILE_CHANGE_SCHEMA_VERSION,
+        schema_version: FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
         transaction,
         proposal,
         observation_id,
@@ -694,6 +701,13 @@ fn direct_proposal_from_args(
                 error.to_string(),
             ))
         })?,
+        trace_args_digest: crate::file_change_support::apply_patch_trace_args_digest(&call.args)
+            .map_err(|error| {
+                file_change_agent_error(FileChangeError::with_diagnostic(
+                    FileChangeErrorCode::Failed,
+                    error,
+                ))
+            })?,
         staged_transaction_id: None,
         conversation_id: context.conversation_id()?.to_string(),
         project_id: context.project_id().map(ToString::to_string),
@@ -2091,6 +2105,57 @@ mod tests {
             .args
             .to_string()
             .contains("PRIVATE_PATH_CANARY"));
+    }
+
+    #[test]
+    fn durable_trace_projection_uses_the_authority_digest_shape_without_private_text() {
+        let call = AgentToolCall {
+            id: "trace-1".to_string(),
+            tool: "apply_patch".to_string(),
+            args: wire(json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"trace.txt",
+                "observationId":"fobs_private",
+                "content":"PRIVATE_DURABLE_TRACE_CANARY\n"
+            })),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let projected = ApplyPatchTool.trace_call_projection(&call);
+        assert_eq!(
+            crate::file_change::proposal_digest(&projected.args).unwrap(),
+            crate::file_change_support::apply_patch_trace_args_digest(&call.args).unwrap()
+        );
+        assert_eq!(projected.args["request"]["action"], "apply");
+        assert_eq!(projected.args["request"]["changeRepresentation"], "content");
+        assert!(projected.args["request"].get("contentDigest").is_some());
+        assert!(projected.args["request"].get("observationId").is_none());
+        assert!(!projected
+            .args
+            .to_string()
+            .contains("PRIVATE_DURABLE_TRACE_CANARY"));
+
+        let binary_call = AgentToolCall {
+            args: wire(json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"binary.txt",
+                "observationId":"fobs_binary",
+                "content":"data:text/plain;base64,UFJJVkFURV9CSU5BUllfQ0FOQVJZ"
+            })),
+            ..call
+        };
+        let binary_projection = ApplyPatchTool.trace_call_projection(&binary_call);
+        assert_eq!(
+            crate::file_change::proposal_digest(&binary_projection.args).unwrap(),
+            crate::file_change_support::apply_patch_trace_args_digest(&binary_call.args).unwrap()
+        );
+        assert!(!binary_projection
+            .args
+            .to_string()
+            .contains("UFJJVkFURV9CSU5BUllfQ0FOQVJZ"));
     }
 
     #[test]

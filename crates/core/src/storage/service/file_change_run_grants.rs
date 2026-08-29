@@ -332,7 +332,7 @@ mod tests {
             updated_at: 1,
         };
         let execution = FileChangeDirectBinding {
-            schema_version: FILE_CHANGE_SCHEMA_VERSION,
+            schema_version: crate::file_change::FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
             transaction,
             proposal: FileChangeProposal {
                 schema_version: FILE_CHANGE_SCHEMA_VERSION,
@@ -365,6 +365,7 @@ mod tests {
             source_tool_name: "apply_patch".to_string(),
             source_call_id: "call-1".to_string(),
             source_args_digest: crate::file_change::content_digest(b"args"),
+            trace_args_digest: crate::file_change::content_digest(b"trace-args"),
             staged_transaction_id: None,
             conversation_id: "conversation-1".to_string(),
             project_id: Some("project-1".to_string()),

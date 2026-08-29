@@ -17,13 +17,14 @@ const CURRENT_AGENT_RUN_KEYS: &[&str] = &[
     "readActivities",
     "approvals",
     "skillInstallations",
-    "diffs",
-    "fileDrafts",
+    "fileChangeProposals",
+    "fileChanges",
     "commandSessions",
     "mcpInvocations",
     "messageStreamCheckpoints",
     "timeline",
     "state",
+    "interruption",
     "error",
     "usage",
     "finishReason",
@@ -1451,9 +1452,13 @@ fn current_timeline_item_is_safe(item: &serde_json::Map<String, serde_json::Valu
     }
     match item.get("type").and_then(serde_json::Value::as_str) {
         Some("message") => {
-            exact_required_optional_keys(item, &["id", "type", "content"], &["streamId"])
-                && bounded_string(&item["content"], 4 * 1_024 * 1_024, true)
+            exact_required_optional_keys(
+                item,
+                &["id", "type", "content"],
+                &["streamId", "traceSequence"],
+            ) && bounded_string(&item["content"], 4 * 1_024 * 1_024, true)
                 && optional_bounded_string(item, "streamId", 1_024, false)
+                && optional_safe_integer(item, "traceSequence")
         }
         Some("tool_call") => {
             exact_required_optional_keys(
@@ -1467,20 +1472,26 @@ fn current_timeline_item_is_safe(item: &serde_json::Map<String, serde_json::Valu
                 })
         }
         Some("mcp_tool_call") => {
-            exact_keys(item, &["id", "type", "invocationId"])
+            exact_required_optional_keys(item, &["id", "type", "invocationId"], &["traceSequence"])
                 && bounded_string(&item["invocationId"], 1_024, false)
+                && optional_safe_integer(item, "traceSequence")
         }
         Some("context_compaction") => {
-            exact_keys(item, &["id", "type", "operationId", "status"])
-                && bounded_string(&item["operationId"], 1_024, false)
+            exact_required_optional_keys(
+                item,
+                &["id", "type", "operationId", "status"],
+                &["traceSequence"],
+            ) && bounded_string(&item["operationId"], 1_024, false)
                 && matches!(
                     item["status"].as_str(),
                     Some("running" | "applied" | "skipped" | "failed" | "cancelled")
                 )
+                && optional_safe_integer(item, "traceSequence")
         }
         Some("error") => {
-            exact_keys(item, &["id", "type", "message"])
+            exact_required_optional_keys(item, &["id", "type", "message"], &["traceSequence"])
                 && bounded_string(&item["message"], 128 * 1_024, true)
+                && optional_safe_integer(item, "traceSequence")
         }
         Some("user_guidance") => {
             exact_required_optional_keys(
@@ -1500,6 +1511,7 @@ fn current_timeline_item_is_safe(item: &serde_json::Map<String, serde_json::Valu
                     "error",
                     "recoverable",
                     "sequence",
+                    "traceSequence",
                 ],
             ) && bounded_string(&item["clientMessageId"], 1_024, false)
                 && bounded_string(&item["content"], 4 * 1_024 * 1_024, true)
@@ -1516,6 +1528,7 @@ fn current_timeline_item_is_safe(item: &serde_json::Map<String, serde_json::Valu
                     .get("recoverable")
                     .is_none_or(serde_json::Value::is_boolean)
                 && item.get("sequence").is_none_or(safe_integer)
+                && optional_safe_integer(item, "traceSequence")
         }
         _ => false,
     }
@@ -1526,12 +1539,31 @@ fn current_message_stream_checkpoints_are_safe(value: &serde_json::Value) -> boo
         checkpoints.len() <= MAX_CURRENT_RUN_ITEMS
             && checkpoints.values().all(|checkpoint| {
                 checkpoint.as_object().is_some_and(|checkpoint| {
-                    exact_keys(checkpoint, &["baseContentLength", "baseWasThinking"])
-                        && safe_integer(&checkpoint["baseContentLength"])
-                        && checkpoint["baseWasThinking"].is_boolean()
+                    exact_keys(checkpoint, &["previousContent"])
+                        && bounded_string(&checkpoint["previousContent"], 4 * 1_024 * 1_024, true)
                 })
             })
     })
+}
+
+fn current_interruption_is_safe(value: &serde_json::Value) -> bool {
+    let Some(interruption) = value.as_object() else {
+        return false;
+    };
+    exact_keys(interruption, &["reason"])
+        && matches!(
+            interruption["reason"].as_str(),
+            Some(
+                "service_connection_failed"
+                    | "service_unavailable"
+                    | "authentication_failed"
+                    | "quota_exhausted"
+                    | "context_limit_exceeded"
+                    | "request_rejected"
+                    | "response_invalid"
+                    | "request_failed"
+            )
+        )
 }
 
 fn current_mcp_invocation_is_safe(value: &serde_json::Value) -> bool {
@@ -1747,9 +1779,27 @@ fn current_mcp_invocation_is_safe(value: &serde_json::Value) -> bool {
     }
 }
 
-pub(super) fn current_agent_run_projection_is_safe(
+pub(crate) fn current_agent_run_projection_is_safe(
     run: &serde_json::Map<String, serde_json::Value>,
     expected_run_id: &str,
+) -> bool {
+    current_agent_run_projection_is_safe_with_trace_policy(run, expected_run_id, true)
+}
+
+/// Validates the complete current Renderer projection while allowing only Tool identity
+/// coherence to be deferred to an authoritative durable Trace. The caller must discard and
+/// rebuild every Trace-owned Timeline item before returning the projection.
+pub(crate) fn current_agent_run_projection_is_safe_for_trace_rebuild(
+    run: &serde_json::Map<String, serde_json::Value>,
+    expected_run_id: &str,
+) -> bool {
+    current_agent_run_projection_is_safe_with_trace_policy(run, expected_run_id, false)
+}
+
+fn current_agent_run_projection_is_safe_with_trace_policy(
+    run: &serde_json::Map<String, serde_json::Value>,
+    expected_run_id: &str,
+    require_timeline_tool_identity_coherence: bool,
 ) -> bool {
     const REQUIRED: &[&str] = &[
         "runId",
@@ -1761,8 +1811,8 @@ pub(super) fn current_agent_run_projection_is_safe(
         "webSearchActivities",
         "readActivities",
         "approvals",
-        "diffs",
-        "fileDrafts",
+        "fileChangeProposals",
+        "fileChanges",
         "mcpInvocations",
         "messageStreamCheckpoints",
         "timeline",
@@ -1806,8 +1856,11 @@ pub(super) fn current_agent_run_projection_is_safe(
         || !record_array_is_safe(&run["webSearchActivities"], current_web_activity_is_safe)
         || !record_array_is_safe(&run["readActivities"], current_read_activity_is_safe)
         || !record_array_is_safe(&run["approvals"], current_persisted_approval_is_safe)
-        || !record_array_is_safe(&run["diffs"], current_file_change_proposal_is_safe)
-        || !record_array_is_safe(&run["fileDrafts"], current_file_change_snapshot_is_safe)
+        || !record_array_is_safe(
+            &run["fileChangeProposals"],
+            current_file_change_proposal_is_safe,
+        )
+        || !record_array_is_safe(&run["fileChanges"], current_file_change_snapshot_is_safe)
         || !run["mcpInvocations"].as_array().is_some_and(|invocations| {
             invocations.len() <= MAX_CURRENT_RUN_ITEMS
                 && invocations.iter().all(current_mcp_invocation_is_safe)
@@ -1832,6 +1885,12 @@ pub(super) fn current_agent_run_projection_is_safe(
             .is_some_and(|selections| {
                 !record_array_is_safe(selections, current_skill_selection_is_safe)
             })
+    {
+        return false;
+    }
+    if run
+        .get("interruption")
+        .is_some_and(|interruption| !current_interruption_is_safe(interruption))
     {
         return false;
     }
@@ -1998,27 +2057,28 @@ pub(super) fn current_agent_run_projection_is_safe(
                     .as_str()
                     .is_some_and(|id| mcp_call_ids.contains(&id))
         })
-        || timeline.iter().any(|item| {
-            if item["type"] != "tool_call" {
-                return false;
-            }
-            let Some(identity) = item.get("identity") else {
-                return false;
-            };
-            let Some(call_id) = item["callId"].as_str() else {
-                return true;
-            };
-            let Some(tool_name) = tool_calls_by_id.get(call_id) else {
-                return true;
-            };
-            serde_json::from_value::<crate::AgentToolIdentity>(identity.clone())
-                .map_err(|_| ())
-                .and_then(|identity| {
-                    crate::conversation_trace::validate_tool_identity(tool_name, &identity)
-                        .map_err(|_| ())
-                })
-                .is_err()
-        })
+        || (require_timeline_tool_identity_coherence
+            && timeline.iter().any(|item| {
+                if item["type"] != "tool_call" {
+                    return false;
+                }
+                let Some(identity) = item.get("identity") else {
+                    return false;
+                };
+                let Some(call_id) = item["callId"].as_str() else {
+                    return true;
+                };
+                let Some(tool_name) = tool_calls_by_id.get(call_id) else {
+                    return true;
+                };
+                serde_json::from_value::<crate::AgentToolIdentity>(identity.clone())
+                    .map_err(|_| ())
+                    .and_then(|identity| {
+                        crate::conversation_trace::validate_tool_identity(tool_name, &identity)
+                            .map_err(|_| ())
+                    })
+                    .is_err()
+            }))
         || timeline_mcp_ids
             .iter()
             .any(|id| !mcp_invocation_ids.contains(id))
@@ -2060,8 +2120,8 @@ pub(crate) fn canonical_agent_run_lifecycle_projection(
         "toolCalls",
         "toolResults",
         "approvals",
-        "diffs",
-        "fileDrafts",
+        "fileChangeProposals",
+        "fileChanges",
         "webSearchActivities",
         "readActivities",
         "mcpInvocations",

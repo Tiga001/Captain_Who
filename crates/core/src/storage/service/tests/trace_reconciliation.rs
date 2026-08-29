@@ -424,8 +424,8 @@ fn reload_rebuilds_compaction_and_runtime_error_in_the_durable_trace_order() {
         "toolCalls": [],
         "toolResults": [],
         "approvals": [],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],
@@ -591,8 +591,8 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
             "result": { "path": "brief.txt" }
         }],
         "approvals": [],
-        "diffs": [],
-        "fileDrafts": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
         "webSearchActivities": [],
         "readActivities": [],
         "mcpInvocations": [],
@@ -643,6 +643,7 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
         "state": {
             "status": "completed",
             "activeRunId": null,
+            "lastError": null,
             "updatedAt": 9
         }
     });
@@ -855,8 +856,8 @@ fn reload_keeps_a_host_terminal_error_unanchored_without_inventing_a_trace_seque
                             "toolCalls": [],
                             "toolResults": [],
                             "approvals": [],
-                            "diffs": [],
-                            "fileDrafts": [],
+                            "fileChangeProposals": [],
+                            "fileChanges": [],
                             "webSearchActivities": [],
                             "readActivities": [],
                             "mcpInvocations": [],

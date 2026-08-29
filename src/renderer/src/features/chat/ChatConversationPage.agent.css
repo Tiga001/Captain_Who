@@ -637,6 +637,11 @@
 
 .run-command-activity__details--group > .agent-activity {
   margin: 0;
+  font-size: var(--mc-font-size-chat-activity);
+}
+
+.run-command-activity__details--group > .agent-activity > summary .agent-activity__label {
+  font-size: inherit;
 }
 
 .run-command-shell {
@@ -883,6 +888,11 @@
 
 .file-change-activity__item-line {
   align-items: baseline;
+  font-size: var(--mc-font-size-chat-activity);
+}
+
+.file-change-activity__item-line span {
+  font-size: inherit;
 }
 
 .file-change-activity__icon {
