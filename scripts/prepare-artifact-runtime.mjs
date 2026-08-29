@@ -1557,6 +1557,36 @@ async function installPythonDependencies(manifest, pythonExecutable) {
   )
 }
 
+export async function normalizePythonConsoleScriptShebangs(pythonExecutable) {
+  if (process.platform === 'win32') return Object.freeze([])
+
+  const binDirectory = dirname(pythonExecutable)
+  const expectedShebang = `#!${pythonExecutable}`
+  const portableLauncher =
+    `#!/bin/sh\n` +
+    `'''exec' "$(dirname -- "$(realpath -- "$0")")/${basename(pythonExecutable)}" "$0" "$@"\n` +
+    `' '''\n`
+  const normalized = []
+
+  for (const entry of await readdir(binDirectory, { withFileTypes: true })) {
+    if (!entry.isFile()) continue
+    const path = join(binDirectory, entry.name)
+    const contents = await readFile(path)
+    const firstNewline = contents.indexOf(0x0a)
+    if (firstNewline === -1) continue
+    const firstLine = contents.subarray(0, firstNewline).toString('utf8').replace(/\r$/, '')
+    if (firstLine !== expectedShebang) continue
+
+    await writeFile(
+      path,
+      Buffer.concat([Buffer.from(portableLauncher), contents.subarray(firstNewline + 1)])
+    )
+    normalized.push(entry.name)
+  }
+
+  return Object.freeze(normalized.sort())
+}
+
 async function copyRuntimeSupportFiles(manifestPath, manifest, staging, downloadDirectory) {
   await cp(manifestPath, join(staging, 'runtime-manifest.json'), {
     force: false,
@@ -2427,6 +2457,7 @@ async function buildComponentSource({ manifestPath, manifest, staging, downloadD
     downloadDirectory
   )
   await installPythonDependencies(manifest, pythonExecutable)
+  await normalizePythonConsoleScriptShebangs(pythonExecutable)
   const ripgrepExecutable = await acquireRipgrep(manifest, ripgrepAsset, staging, downloadDirectory)
   await copyRuntimeSupportFiles(manifestPath, manifest, staging, downloadDirectory)
   await probePreparedRuntimes(

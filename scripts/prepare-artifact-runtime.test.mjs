@@ -22,6 +22,7 @@ import test from 'node:test'
 import {
   createManagedNodeDependencyEvidence,
   loadArtifactRuntimeManifest,
+  normalizePythonConsoleScriptShebangs,
   prepareArtifactRuntime,
   prepareArtifactRuntimeLegalEvidence,
   prepareManagedNodeDependencies,
@@ -48,6 +49,30 @@ const presentationSdkPath = join(
   'presentation-sdk.mjs'
 )
 const pdfCliPath = join(repositoryRoot, 'crates', 'core', 'src', 'command', 'pdf_runtime_cli.py')
+
+test('pip console scripts are rewritten as relocatable launchers without build paths', async () => {
+  const binDirectory = await mkdtemp(join(tmpdir(), 'mycopilot-python-bin-'))
+  const pythonExecutable = join(binDirectory, 'python3')
+  const consoleScript = join(binDirectory, 'pdfplumber')
+  const portableScript = join(binDirectory, 'pip')
+  await writeFile(pythonExecutable, 'fixture python\n')
+  await writeFile(
+    consoleScript,
+    `#!${pythonExecutable}\nimport sys\nfrom pdfplumber.cli import main\nsys.exit(main())\n`,
+    { mode: 0o755 }
+  )
+  await writeFile(portableScript, '#!/bin/sh\necho already-portable\n', { mode: 0o755 })
+
+  const normalized = await normalizePythonConsoleScriptShebangs(pythonExecutable)
+  const rewritten = await readFile(consoleScript, 'utf8')
+
+  assert.deepEqual(normalized, ['pdfplumber'])
+  assert.match(rewritten, /^#!\/bin\/sh\n/)
+  assert.match(rewritten, /\$\(dirname -- "\$\(realpath -- "\$0"\)"\)\/python3/)
+  assert.equal(rewritten.includes(binDirectory), false)
+  assert.equal(await readFile(portableScript, 'utf8'), '#!/bin/sh\necho already-portable\n')
+  assert.equal((await stat(consoleScript)).mode & 0o111, 0o111)
+})
 
 async function rawManifest() {
   return JSON.parse(await readFile(manifestPath, 'utf8'))
