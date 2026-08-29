@@ -1,7 +1,10 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import { getAgentFileChangeDiff } from '../../features/agent/agentClient'
+import {
+  getAgentFileChangeDiff,
+  getAgentFileChangeHistoryDiff
+} from '../../features/agent/agentClient'
 import { FileChangeToolActivity } from '../../features/chat/components/toolActivities/FileChangeToolActivity'
 import '../../styles/global.css'
 import '../../features/chat/ChatConversationPage.agent.css'
@@ -17,6 +20,7 @@ const translations: Record<string, string> = {
   'agent.fileChange.create.row.cancelled': '已取消新建',
   'agent.fileChange.togglePreview': '展开文件修改',
   'agent.fileChange.loadingPreview': '正在读取修改',
+  'agent.fileChange.historyPreviewUnavailable': '无法读取已保存的修改详情。',
   'files.preview.error': '无法读取修改',
   'agent.fileChange.failure.generic': '无法安全应用这处修改。',
   'agent.fileChange.failure.conflict': '文件已发生变化，无法安全应用这处修改。',
@@ -38,7 +42,7 @@ vi.mock('../../features/storage/storageClient', () => ({
 
 vi.mock('../../features/agent/agentClient', () => ({
   getAgentFileChangeDiff: vi.fn(),
-  readAgentFileChange: vi.fn()
+  getAgentFileChangeHistoryDiff: vi.fn()
 }))
 
 const INTERNAL_ERROR =
@@ -88,8 +92,11 @@ describe('FileChange failure presentation', () => {
         message: null
       }
     }
-    vi.mocked(getAgentFileChangeDiff).mockResolvedValueOnce({
-      transactionId,
+    vi.mocked(getAgentFileChangeHistoryDiff).mockResolvedValueOnce({
+      conversationId: 'conversation-1',
+      assistantMessageId: 'assistant-message-1',
+      runId: 'run-1',
+      toolCallId: call.id,
       patch: '+replacement',
       offset: 0,
       nextOffset: null,
@@ -97,8 +104,26 @@ describe('FileChange failure presentation', () => {
     })
 
     const screen = await render(
-      <FileChangeToolActivity call={call} result={result} settledStatus="completed" />
+      <FileChangeToolActivity
+        assistantMessageId="assistant-message-1"
+        call={call}
+        conversationId="conversation-1"
+        result={result}
+        runId="run-1"
+        settledStatus="completed"
+      />
     )
+    await vi.waitFor(() => {
+      expect(getAgentFileChangeHistoryDiff).toHaveBeenCalledWith({
+        conversationId: 'conversation-1',
+        assistantMessageId: 'assistant-message-1',
+        runId: 'run-1',
+        toolCallId: call.id,
+        offset: 0,
+        maxChars: 50_000
+      })
+    })
+    expect(getAgentFileChangeDiff).not.toHaveBeenCalled()
     await screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
     const activityLabel = screen.container.querySelector<HTMLElement>('.agent-activity__label')
@@ -121,7 +146,7 @@ describe('FileChange failure presentation', () => {
     await previewToggle?.click()
 
     await expect.element(screen.getByText('+replacement', { exact: true })).toBeVisible()
-    expect(getAgentFileChangeDiff).toHaveBeenCalledWith(transactionId, 0, 50_000, undefined)
+    expect(getAgentFileChangeDiff).not.toHaveBeenCalled()
   })
 
   it('uses the structured error code without exposing the raw error', async () => {

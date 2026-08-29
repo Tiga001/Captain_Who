@@ -428,7 +428,7 @@ mod tests {
         use crate::file_change::{
             FileChangeContentState, FileChangeDirectBinding, FileChangeOperation,
             FileChangeOutcome, FileChangeProposal, FileChangeStatus, FileChangeTransaction,
-            FileObservationCheckpoint, FileObservationIdentity, FileObservationState,
+            FileObservationCheckpoint, FileObservationDirectoryIdentity, FileObservationState,
             FILE_CHANGE_SCHEMA_VERSION, FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
             FILE_OBSERVATION_TTL_MS,
         };
@@ -478,9 +478,12 @@ mod tests {
                 run_id: "run-1".to_string(),
                 canonical_target: "/tmp/report.md".to_string(),
                 state: FileObservationState::Missing,
-                parent_identity: FileObservationIdentity::from_metadata(
-                    &std::fs::metadata("/tmp").expect("test temporary directory metadata"),
-                ),
+                parent_directory_identity: FileObservationDirectoryIdentity::read(
+                    &std::env::temp_dir()
+                        .canonicalize()
+                        .expect("canonical test temporary directory"),
+                )
+                .expect("test temporary directory identity"),
                 created_at_ms: 1,
                 expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
             },

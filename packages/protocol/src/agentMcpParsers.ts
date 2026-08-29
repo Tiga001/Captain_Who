@@ -15,6 +15,7 @@ import type {
   AgentFileChangePreview,
   AgentFileChangeContentPage,
   AgentFileChangeDiffPage,
+  AgentFileChangeHistoryDiffPage,
   AgentFileChangeProposal,
   AgentFileChangeResult,
   AgentFileChangeSnapshot,
@@ -3682,6 +3683,36 @@ export function parseAgentFileChangeDiffPageForHost(value: unknown): AgentFileCh
   const pagination = parseFileChangePageCursor(item, context)
   return {
     transactionId: expectOpaqueRunId(item.transactionId, `${context}.transactionId`),
+    patch: expectBoundedString(item.patch, `${context}.patch`, MAX_RENDERER_SAFE_AGENT_EVENT_BYTES),
+    ...pagination
+  }
+}
+
+export function parseAgentFileChangeHistoryDiffPageForHost(
+  value: unknown
+): AgentFileChangeHistoryDiffPage {
+  const context = 'Agent FileChange history Diff page'
+  const item = expectRecord(value, context)
+  expectOnlyKeys(
+    item,
+    [
+      'conversationId',
+      'assistantMessageId',
+      'runId',
+      'toolCallId',
+      'patch',
+      'offset',
+      'nextOffset',
+      'truncated'
+    ] as const,
+    context
+  )
+  const pagination = parseFileChangePageCursor(item, context)
+  return {
+    conversationId: expectOpaqueRunId(item.conversationId, `${context}.conversationId`),
+    assistantMessageId: expectOpaqueRunId(item.assistantMessageId, `${context}.assistantMessageId`),
+    runId: expectOpaqueRunId(item.runId, `${context}.runId`),
+    toolCallId: expectOpaqueRunId(item.toolCallId, `${context}.toolCallId`),
     patch: expectBoundedString(item.patch, `${context}.patch`, MAX_RENDERER_SAFE_AGENT_EVENT_BYTES),
     ...pagination
   }

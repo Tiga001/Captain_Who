@@ -26,7 +26,7 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -176,6 +176,7 @@ pub(crate) struct ProviderContinuationForkMapping {
     pub(crate) target_conversation_id: String,
     pub(crate) target_assistant_message_id: String,
     pub(crate) target_run_id: String,
+    pub(crate) runtime_tool_call_id_map: Arc<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for ProviderContinuationForkMapping {
@@ -543,7 +544,11 @@ impl ProviderContinuationVault {
             {
                 return Err(ProviderContinuationStoreError::InvalidBinding);
             }
-            let loaded = self.decrypt_record(&mapping.source_ref, source, None)?;
+            let mut loaded = self.decrypt_record(&mapping.source_ref, source, None)?;
+            remap_fork_runtime_tool_call_ids(
+                &mut loaded.assistant_turn,
+                &mapping.runtime_tool_call_id_map,
+            )?;
             let protocol = loaded
                 .assistant_turn
                 .provider_protocol()
@@ -782,6 +787,27 @@ impl ProviderContinuationVault {
         }
         use_key(&key[..])
     }
+}
+
+fn remap_fork_runtime_tool_call_ids(
+    turn: &mut LlmAssistantTurn,
+    runtime_tool_call_id_map: &HashMap<String, String>,
+) -> Result<(), ProviderContinuationStoreError> {
+    let Some(bindings) = turn.runtime_tool_bindings() else {
+        if turn.provider_tool_calls().is_empty() {
+            return Ok(());
+        }
+        return Err(ProviderContinuationStoreError::InvalidTurn);
+    };
+    let mut remapped = bindings.to_vec();
+    for binding in &mut remapped {
+        binding.runtime_call.id = runtime_tool_call_id_map
+            .get(&binding.runtime_call.id)
+            .cloned()
+            .ok_or(ProviderContinuationStoreError::InvalidBinding)?;
+    }
+    turn.set_runtime_tool_bindings(remapped)
+        .map_err(|_| ProviderContinuationStoreError::InvalidTurn)
 }
 
 fn validate_binding(
@@ -1857,6 +1883,48 @@ mod tests {
             ProviderContinuationStoreError::AuthenticationFailed
         );
 
+        fixture
+            .storage
+            .replace_conversation_turn_trace(
+                &ConversationTurnTrace {
+                    schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                    run_id: RUN_ID.to_string(),
+                    conversation_id: CONVERSATION_ID.to_string(),
+                    assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+                    terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+                    terminal_error: None,
+                    truncated: false,
+                    items: vec![
+                        ConversationTurnTraceItem::ToolCall {
+                            sequence: 0,
+                            call_id: "runtime-call-1".to_string(),
+                            tool: "read_file".to_string(),
+                            provenance: crate::AgentToolIdentity::Builtin {
+                                tool_name: "read_file".to_string(),
+                            },
+                            operation: json!({"path": "src/lib.rs"}),
+                            approval_status: AgentApprovalStatus::NotRequired,
+                            truncated: false,
+                        },
+                        ConversationTurnTraceItem::ToolResult {
+                            sequence: 1,
+                            call_id: "runtime-call-1".to_string(),
+                            tool: "read_file".to_string(),
+                            status: crate::ConversationTraceToolResultStatus::Succeeded,
+                            success: true,
+                            observation: json!({"path": "src/lib.rs"}),
+                            approval_status: AgentApprovalStatus::NotRequired,
+                            error: None,
+                            truncated: false,
+                            archive: Default::default(),
+                        },
+                    ],
+                },
+                2,
+                3,
+            )
+            .unwrap();
+
         let forked = fixture
             .storage
             .fork_conversation_request_view_with_provider_continuation_vault(
@@ -1877,6 +1945,24 @@ mod tests {
         assert_eq!(forked_turns.len(), 1);
         assert_ne!(forked_turns[0].continuation_ref, continuation_ref);
         assert_eq!(forked_turns[0].conversation_id, forked.conversation.id);
+        let forked_assistant = forked.conversation.messages.last().unwrap();
+        let forked_trace = fixture
+            .storage
+            .get_conversation_turn_trace(&forked_assistant.id)
+            .unwrap()
+            .unwrap();
+        let forked_trace_call_id = match &forked_trace.items[0] {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => call_id,
+            item => panic!("expected cloned tool call, got {item:?}"),
+        };
+        let forked_runtime_call_id = &forked_turns[0]
+            .assistant_turn
+            .runtime_tool_bindings()
+            .unwrap()[0]
+            .runtime_call
+            .id;
+        assert_ne!(forked_runtime_call_id, "runtime-call-1");
+        assert_eq!(forked_runtime_call_id, forked_trace_call_id);
         let forked_record = fixture
             .storage
             .load_provider_continuation(&forked_turns[0].continuation_ref.id)
@@ -1884,6 +1970,42 @@ mod tests {
             .unwrap();
         assert_ne!(forked_record.nonce, source.nonce);
         assert_ne!(forked_record.ciphertext, source.ciphertext);
+
+        let recursive = fixture
+            .storage
+            .fork_conversation_request_view_with_provider_continuation_vault(
+                crate::storage::models::ForkConversationRequest {
+                    request_id: "provider-vault-recursive-fork-request".to_string(),
+                    source_conversation_id: forked.conversation.id.clone(),
+                    fork_point: crate::storage::models::ConversationForkPoint::AssistantReply {
+                        assistant_message_id: forked_assistant.id.clone(),
+                    },
+                },
+                &fixture.vault,
+            )
+            .unwrap();
+        let recursive_turns = fixture
+            .vault
+            .list_replayable_for_conversation(&recursive.conversation.id, &fixture.protocol)
+            .unwrap();
+        let recursive_assistant = recursive.conversation.messages.last().unwrap();
+        let recursive_trace = fixture
+            .storage
+            .get_conversation_turn_trace(&recursive_assistant.id)
+            .unwrap()
+            .unwrap();
+        let recursive_trace_call_id = match &recursive_trace.items[0] {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => call_id,
+            item => panic!("expected recursively cloned tool call, got {item:?}"),
+        };
+        let recursive_runtime_call_id = &recursive_turns[0]
+            .assistant_turn
+            .runtime_tool_bindings()
+            .unwrap()[0]
+            .runtime_call
+            .id;
+        assert_ne!(recursive_runtime_call_id, forked_runtime_call_id);
+        assert_eq!(recursive_runtime_call_id, recursive_trace_call_id);
 
         fixture
             .vault

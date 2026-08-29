@@ -81,6 +81,8 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
     clearUsageRecords: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.clearUsageRecords, input),
     readFileChange: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.readFileChange, input),
     getFileChangeDiff: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getFileChangeDiff, input),
+    getFileChangeHistoryDiff: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.getFileChangeHistoryDiff, input),
     onProviderTransition: (handler) => {
       const listener = (_event: IpcRendererEvent, payload: Parameters<typeof handler>[0]): void =>
         handler(payload)

@@ -12,6 +12,7 @@ import {
   parseAgentEventForHost,
   parseAgentFileChangeContentPageForHost,
   parseAgentFileChangeDiffPageForHost,
+  parseAgentFileChangeHistoryDiffPageForHost,
   parseAgentMcpToolApproval,
   parseAgentMcpToolInvocationEvent,
   parseAgentToolIdentityForHost,
@@ -602,6 +603,17 @@ describe('Renderer-safe FileChange paged RPC contract', () => {
     }
     expect(parseAgentFileChangeContentPageForHost(contentPage)).toEqual(contentPage)
     expect(parseAgentFileChangeDiffPageForHost(diffPage)).toEqual(diffPage)
+    const historyPage = {
+      conversationId: 'conversation-owned',
+      assistantMessageId: 'assistant-message-owned',
+      runId: 'run-owned',
+      toolCallId: 'tool-call-owned',
+      patch: '+new\n',
+      offset: 0,
+      nextOffset: null,
+      truncated: false
+    }
+    expect(parseAgentFileChangeHistoryDiffPageForHost(historyPage)).toEqual(historyPage)
   })
 
   it('rejects missing, extra and incomplete page chains', () => {
@@ -632,6 +644,19 @@ describe('Renderer-safe FileChange paged RPC contract', () => {
         internalCause: 'private'
       })
     ).toThrow(/unexpected field internalCause/)
+    expect(() =>
+      parseAgentFileChangeHistoryDiffPageForHost({
+        conversationId: 'conversation-owned',
+        assistantMessageId: 'assistant-message-owned',
+        runId: 'run-owned',
+        toolCallId: 'tool-call-owned',
+        patch: '+new\n',
+        offset: 0,
+        nextOffset: null,
+        truncated: false,
+        actionJson: { executionCredential: 'private' }
+      })
+    ).toThrow(/unexpected field actionJson/)
   })
 })
 

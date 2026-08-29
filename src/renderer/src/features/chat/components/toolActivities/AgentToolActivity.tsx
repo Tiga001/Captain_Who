@@ -34,6 +34,7 @@ import { ActivateCapabilityToolActivity } from './ActivateCapabilityToolActivity
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
+  assistantMessageId?: string
   cancelled?: boolean
   conversationId?: string
   readActivity?: ChatReadActivity
@@ -52,6 +53,7 @@ interface AgentToolActivityProps {
 }
 
 export function AgentToolActivity({
+  assistantMessageId,
   cancelled = false,
   conversationId,
   readActivity,
@@ -219,8 +221,10 @@ export function AgentToolActivity({
       (typeof resultValue.transactionId === 'string' ? resultValue.transactionId : undefined)
     return (
       <FileChangeToolActivity
+        assistantMessageId={assistantMessageId}
         cancelled={cancelled && !result}
         call={call}
+        conversationId={conversationId}
         observerRootConversationId={observerRootConversationId}
         preview={run.fileChangePreviews?.find(
           (candidate) =>
@@ -230,6 +234,7 @@ export function AgentToolActivity({
         projectId={projectId}
         proposal={fileChangeProposal}
         result={result}
+        runId={run.runId ?? undefined}
         settledStatus={settledStatus}
         transaction={run.fileChanges?.find(
           (candidate) => candidate.transactionId === transactionId

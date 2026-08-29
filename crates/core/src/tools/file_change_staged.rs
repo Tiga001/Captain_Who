@@ -1320,6 +1320,81 @@ mod tests {
     }
 
     #[test]
+    fn staged_create_observation_survives_unrelated_sibling_changes() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        save_conversation(&storage, "conversation-staged-siblings");
+        let owner_context = context(
+            &root,
+            storage,
+            "conversation-staged-siblings",
+            Some("project-staged-siblings"),
+            "run-staged-siblings",
+        );
+        let observation = observe(&owner_context, "target.md", "read-staged-sibling-target");
+
+        fs::write(root.join("sibling-before-begin.md"), "unrelated\n").unwrap();
+        let begun = begin(
+            &call_context(&owner_context, "begin-staged-sibling-target"),
+            StagedSource::new(
+                "apply_patch",
+                content_digest(b"begin-staged-sibling-target"),
+            ),
+            FileChangeOperation::Create,
+            None,
+            "target.md".to_string(),
+            observation,
+            None,
+        )
+        .expect("a sibling created after read_file must not invalidate staged begin");
+        let transaction_id = begun["transactionId"].as_str().unwrap().to_string();
+        append(
+            &call_context(&owner_context, "append-staged-sibling-target"),
+            "apply_patch",
+            transaction_id.clone(),
+            0,
+            0,
+            "target\n".to_string(),
+            content_digest(b"append-staged-sibling-target"),
+        )
+        .unwrap();
+
+        fs::write(root.join("sibling-before-commit.md"), "also unrelated\n").unwrap();
+        let commit_call = AgentToolCall {
+            id: "commit-staged-sibling-target".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({
+                "request": {
+                    "action": "commit",
+                    "transactionId": transaction_id,
+                    "expectedDraftRevision": 1
+                }
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let proposal = commit(
+            &call_context(&owner_context, "commit-staged-sibling-target"),
+            &commit_call,
+            "apply_patch",
+            transaction_id,
+            1,
+            None,
+        )
+        .expect("a sibling created while drafting must not invalidate staged commit");
+
+        assert_eq!(proposal.file_path, "target.md");
+        assert_eq!(
+            proposal.execution.target_content.as_deref(),
+            Some("target\n")
+        );
+        assert!(!root.join("target.md").exists());
+    }
+
+    #[test]
     fn aborted_and_expired_records_allow_only_complete_or_absent_final_identity() {
         let fixture = |status: &str| AgentFileChangeRecord {
             schema_version: AGENT_FILE_CHANGE_SCHEMA_VERSION,

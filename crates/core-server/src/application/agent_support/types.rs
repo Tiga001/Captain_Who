@@ -171,6 +171,19 @@ pub struct AgentFileChangeDiffPage {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileChangeHistoryDiffPage {
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub run_id: String,
+    pub tool_call_id: String,
+    pub patch: String,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConversationTurnInput {

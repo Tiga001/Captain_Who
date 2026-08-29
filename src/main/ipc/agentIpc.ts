@@ -146,6 +146,9 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.getFileChangeDiff, (_event, input) =>
     coreServer.getFileChangeDiff(input)
   )
+  ipcMain.handle(HOST_CHANNELS.agent.getFileChangeHistoryDiff, (_event, input) =>
+    coreServer.getFileChangeHistoryDiff(input)
+  )
 }
 
 /**

@@ -1,5 +1,5 @@
 use super::*;
-use mycopilot_protocol_rs::AgentApprovalScopeDto;
+use mycopilot_protocol_rs::{AgentApprovalScopeDto, AgentFileChangeHistoryDiffRequest};
 use serde::Serialize;
 use std::sync::{LazyLock, Weak};
 
@@ -604,6 +604,78 @@ impl AgentService {
         let (patch, offset, next_offset, truncated) = paginate_chars(&diff, offset, max_chars);
         Ok(AgentFileChangeDiffPage {
             transaction_id: change.id,
+            patch,
+            offset,
+            next_offset,
+            truncated,
+        })
+    }
+
+    pub fn get_file_change_history_diff(
+        &self,
+        input: &AgentFileChangeHistoryDiffRequest,
+    ) -> Result<AgentFileChangeHistoryDiffPage, String> {
+        let conversation_id = input.conversation_id.as_str();
+        let assistant_message_id = input.assistant_message_id.as_str();
+        let run_id = input.run_id.as_str();
+        let tool_call_id = input.tool_call_id.as_str();
+        let storage_id = pending_action_storage_id(run_id, tool_call_id);
+        let audit = self
+            .storage
+            .get_agent_action_audit(&storage_id)?
+            .ok_or_else(|| "未找到已完成的文件修改记录。".to_string())?;
+
+        if audit.action_id != storage_id
+            || audit.run_id != run_id
+            || audit.conversation_id.as_deref() != Some(conversation_id)
+            || audit.assistant_message_id.as_deref() != Some(assistant_message_id)
+            || audit.action_type != "file_change"
+            || audit.tool_name != "apply_patch"
+            || !matches!(
+                audit.status.as_str(),
+                "completed" | "failed" | "cancelled" | "rejected"
+            )
+            || audit.completed_at.is_none()
+        {
+            return Err("文件修改历史身份或状态无效。".to_string());
+        }
+        self.authorize_file_change_read(
+            input.observer_root_conversation_id.as_deref(),
+            conversation_id,
+        )?;
+
+        let action = serde_json::from_str::<AgentProposedAction>(&audit.action_json)
+            .map_err(|_| "文件修改历史记录无效。".to_string())?;
+        let AgentProposedAction::FileChange { file_change } = action else {
+            return Err("文件修改历史记录类型无效。".to_string());
+        };
+        if file_change.id != tool_call_id
+            || file_change.execution.source_call_id != tool_call_id
+            || file_change.execution.run_id != run_id
+            || file_change.execution.conversation_id != conversation_id
+        {
+            return Err("文件修改历史绑定身份无效。".to_string());
+        }
+
+        let patch = match (
+            file_change.inline_diff,
+            file_change.execution.staged_transaction_id.as_ref(),
+        ) {
+            (Some(inline_diff), None) => inline_diff.patch,
+            (None, Some(_)) => {
+                FileChangePlan::from_binding(&file_change.execution)
+                    .map_err(|_| "文件修改历史 Diff 无效。".to_string())?
+                    .diff
+            }
+            _ => return Err("文件修改历史模式无效。".to_string()),
+        };
+        let (patch, offset, next_offset, truncated) =
+            paginate_chars(&patch, input.offset, input.max_chars);
+        Ok(AgentFileChangeHistoryDiffPage {
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            run_id: run_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
             patch,
             offset,
             next_offset,

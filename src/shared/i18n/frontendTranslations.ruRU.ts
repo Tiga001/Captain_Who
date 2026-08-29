@@ -1395,6 +1395,7 @@ export const ruRUTranslations = {
   'agent.fileChange.unknownFile': 'файл',
   'agent.fileChange.togglePreview': 'Переключить предварительный просмотр файла',
   'agent.fileChange.loadingPreview': 'Загрузка предварительного просмотра…',
+  'agent.fileChange.historyPreviewUnavailable': 'Сохранённые сведения об изменении недоступны.',
   'agent.fileChange.loadMorePreview': 'Загрузить ещё',
   'agent.approval.dialog.toolTitle': 'Разрешите мне использовать {tool}?',
   'agent.approval.dialog.commandPolicyHint':

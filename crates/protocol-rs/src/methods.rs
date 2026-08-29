@@ -73,6 +73,7 @@ pub const AGENT_GET_USAGE_SUMMARY_METHOD: &str = "agent.getUsageSummary";
 pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
 pub const AGENT_READ_FILE_CHANGE_METHOD: &str = "agent.readFileChange";
 pub const AGENT_GET_FILE_CHANGE_DIFF_METHOD: &str = "agent.getFileChangeDiff";
+pub const AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD: &str = "agent.getFileChangeHistoryDiff";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const AGENT_COLLABORATION_GET_TREE_METHOD: &str = "agent.collaboration.getTree";
 pub const AGENT_COLLABORATION_GET_AGENT_METHOD: &str = "agent.collaboration.getAgent";

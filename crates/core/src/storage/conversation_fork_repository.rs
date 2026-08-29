@@ -2,11 +2,12 @@ use crate::context::{
     ContextCompactionSummary, ContextContinuitySnapshot, ContextHistoryRef, ContextJournalCursor,
 };
 use crate::storage::models::{
-    AgentFileChangeRecord, AgentRunGuidanceRecord, AttachmentRecord, ChatConversationRecord,
-    ChatMessageRecord, ConversationContinuationOriginRecord, ConversationForkPoint,
+    AgentActionAuditRecord, AgentFileChangeRecord, AgentRunGuidanceRecord, AttachmentRecord,
+    ChatConversationRecord, ChatMessageRecord, ConversationContinuationOriginRecord,
+    ConversationForkPoint,
 };
 use crate::storage::{
-    agent_graph_repository, attachment_repository, chat_repository,
+    agent_action_audit_repository, agent_graph_repository, attachment_repository, chat_repository,
     context_compaction_receipt_repository, context_compaction_repository,
     conversation_context_adaptation_repository, conversation_history_archive_repository,
     conversation_history_open, conversation_model_context_repository,
@@ -19,16 +20,17 @@ use crate::{
     provider_continuation_store::{
         PreparedProviderContinuationClone, ProviderContinuationForkMapping,
     },
-    root_agent_creation_request_id, root_agent_id_for_conversation, AgentGuidanceStatus,
-    AgentLifecycle, AgentNodeRecord, ContextCompactionReceipt, ContextCompactionReceiptStage,
-    ContextCompactionReceiptStatus, ConversationMessageOrigin, ConversationModelContextItem,
-    ConversationTurnTrace, EnsureRootAgentInput, ModelRequestObservation, ProviderContinuationRef,
-    WorldStateDiff, WorldStateRecord, WorldStateReducer, WorldStateSectionEnvelope,
-    WorldStateSnapshot,
+    root_agent_creation_request_id, root_agent_id_for_conversation, AgentFileChangeResult,
+    AgentGuidanceStatus, AgentLifecycle, AgentNodeRecord, AgentProposedAction, AgentToolResult,
+    ContextCompactionReceipt, ContextCompactionReceiptStage, ContextCompactionReceiptStatus,
+    ConversationMessageOrigin, ConversationModelContextItem, ConversationTurnTrace,
+    EnsureRootAgentInput, ModelRequestObservation, ProviderContinuationRef, WorldStateDiff,
+    WorldStateRecord, WorldStateReducer, WorldStateSectionEnvelope, WorldStateSnapshot,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub const CONVERSATION_FORK_ERROR_TYPE: &str = "conversation_fork";
@@ -143,6 +145,7 @@ struct ConversationHistoryForkPlan {
     attachments: Vec<ForkAttachmentCopy>,
     archives: Vec<conversation_history_archive_repository::ConversationHistoryArchiveForkCopy>,
     traces: Vec<ForkTrace>,
+    action_audits: Vec<AgentActionAuditRecord>,
     turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
     guidances: Vec<ForkGuidance>,
     file_changes: Vec<ForkFileChange>,
@@ -172,6 +175,7 @@ struct ConversationHistoryForkPlanRef<'a> {
     attachments: &'a [ForkAttachmentCopy],
     archives: &'a [conversation_history_archive_repository::ConversationHistoryArchiveForkCopy],
     traces: &'a [ForkTrace],
+    action_audits: &'a [AgentActionAuditRecord],
     turn_diffs: &'a [turn_diff_repository::AgentTurnDiffForkCopy],
     guidances: &'a [ForkGuidance],
     file_changes: &'a [ForkFileChange],
@@ -195,6 +199,7 @@ impl ConversationHistoryForkPlan {
             attachments: &self.attachments,
             archives: &self.archives,
             traces: &self.traces,
+            action_audits: &self.action_audits,
             turn_diffs: &self.turn_diffs,
             guidances: &self.guidances,
             file_changes: &self.file_changes,
@@ -221,6 +226,7 @@ pub(crate) struct ConversationForkPlan {
     pub attachments: Vec<ForkAttachmentCopy>,
     archives: Vec<conversation_history_archive_repository::ConversationHistoryArchiveForkCopy>,
     traces: Vec<ForkTrace>,
+    action_audits: Vec<AgentActionAuditRecord>,
     turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
     guidances: Vec<ForkGuidance>,
     file_changes: Vec<ForkFileChange>,
@@ -249,6 +255,7 @@ impl ConversationForkPlan {
             attachments: &self.attachments,
             archives: &self.archives,
             traces: &self.traces,
+            action_audits: &self.action_audits,
             turn_diffs: &self.turn_diffs,
             guidances: &self.guidances,
             file_changes: &self.file_changes,
@@ -1503,6 +1510,17 @@ fn build_single_conversation_fork_plan_at_point(
             &copy.target_observation_id,
         )?;
     }
+    let action_audits = remap_terminal_file_change_action_audits(
+        connection,
+        &source.id,
+        &target_conversation_id,
+        &source_message_ids,
+        &message_id_map,
+        &run_id_map,
+        &tool_call_id_map,
+        &traces,
+        &mut replacements,
+    )?;
     for fork_trace in &mut traces {
         rewrite_trace_items(&mut fork_trace.trace, &replacements)?;
         rewrite_model_context_items(&mut fork_trace.model_context_items, &replacements)?;
@@ -1556,6 +1574,7 @@ fn build_single_conversation_fork_plan_at_point(
         // compaction before this fork can send anything.
         Vec::new()
     } else {
+        let runtime_tool_call_id_map = Arc::new(tool_call_id_map.clone());
         provider_continuation_repository::list_replayable_for_conversation(connection, &source.id)
             .map_err(database_error)?
             .into_iter()
@@ -1584,6 +1603,7 @@ fn build_single_conversation_fork_plan_at_point(
                     target_conversation_id: target_conversation_id.clone(),
                     target_assistant_message_id,
                     target_run_id,
+                    runtime_tool_call_id_map: Arc::clone(&runtime_tool_call_id_map),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?
@@ -1619,6 +1639,7 @@ fn build_single_conversation_fork_plan_at_point(
         attachments,
         archives,
         traces,
+        action_audits,
         turn_diffs,
         guidances,
         file_changes,
@@ -1677,6 +1698,272 @@ fn remapped_file_change_call_digest(
     rewrite_exact_ids(&mut target_operation, replacements);
     crate::file_change::proposal_digest(&target_operation)
         .map_err(|_| ConversationForkError::Other("无法复制文件变更 Tool Call。".to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remap_terminal_file_change_action_audits(
+    connection: &Connection,
+    source_conversation_id: &str,
+    target_conversation_id: &str,
+    source_message_ids: &[String],
+    message_id_map: &HashMap<String, String>,
+    run_id_map: &HashMap<String, String>,
+    tool_call_id_map: &HashMap<String, String>,
+    traces: &[ForkTrace],
+    replacements: &mut HashMap<String, String>,
+) -> Result<Vec<AgentActionAuditRecord>, ConversationForkError> {
+    let visible_message_ids = source_message_ids.iter().collect::<HashSet<_>>();
+    let source_audits =
+        agent_action_audit_repository::list_terminal_file_change_action_audits_for_conversation(
+            connection,
+            source_conversation_id,
+        )
+        .map_err(database_error)?;
+    let mut remapped = Vec::new();
+    for audit in source_audits.into_iter().filter(|audit| {
+        audit
+            .assistant_message_id
+            .as_ref()
+            .is_some_and(|message_id| visible_message_ids.contains(message_id))
+    }) {
+        remapped.push(remap_terminal_file_change_action_audit(
+            audit,
+            source_conversation_id,
+            target_conversation_id,
+            message_id_map,
+            run_id_map,
+            tool_call_id_map,
+            traces,
+            replacements,
+        )?);
+    }
+    Ok(remapped)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remap_terminal_file_change_action_audit(
+    audit: AgentActionAuditRecord,
+    source_conversation_id: &str,
+    target_conversation_id: &str,
+    message_id_map: &HashMap<String, String>,
+    run_id_map: &HashMap<String, String>,
+    tool_call_id_map: &HashMap<String, String>,
+    traces: &[ForkTrace],
+    replacements: &mut HashMap<String, String>,
+) -> Result<AgentActionAuditRecord, ConversationForkError> {
+    if audit.conversation_id.as_deref() != Some(source_conversation_id)
+        || audit.action_type != "file_change"
+        || audit.tool_name != "apply_patch"
+        || !matches!(
+            audit.status.as_str(),
+            "completed" | "failed" | "cancelled" | "rejected"
+        )
+        || audit.completed_at.is_none()
+        || audit.command_result_json.is_some()
+    {
+        return Err(ConversationForkError::Other(
+            "文件修改审计的来源身份或终态无效。".to_string(),
+        ));
+    }
+    let source_assistant_message_id = audit
+        .assistant_message_id
+        .as_deref()
+        .ok_or_else(|| ConversationForkError::Other("文件修改审计缺少所属消息。".to_string()))?;
+    let target_assistant_message_id = mapped_id(
+        message_id_map,
+        source_assistant_message_id,
+        "文件修改审计所属消息",
+    )?;
+    let target_run_id = mapped_id(run_id_map, &audit.run_id, "文件修改审计所属运行")?;
+
+    let mut action = serde_json::from_str::<AgentProposedAction>(&audit.action_json)
+        .map_err(|_| ConversationForkError::Other("文件修改审计 action 无效。".to_string()))?;
+    let AgentProposedAction::FileChange { file_change } = &mut action else {
+        return Err(ConversationForkError::Other(
+            "文件修改审计 action 类型无效。".to_string(),
+        ));
+    };
+    let source_tool_call_id = file_change.id.clone();
+    let source_transaction_id = file_change.transaction_id.clone();
+    let source_observation_id = file_change.execution.observation_id.clone();
+    if audit.action_id != crate::canonical_pending_action_id(&audit.run_id, &source_tool_call_id)
+        || file_change.execution.source_call_id != source_tool_call_id
+        || file_change.execution.run_id != audit.run_id
+        || file_change.execution.conversation_id != source_conversation_id
+        || file_change.execution.transaction.id != source_transaction_id
+        || file_change.execution.proposal.transaction_id != source_transaction_id
+    {
+        return Err(ConversationForkError::Other(
+            "文件修改审计与冻结 action 的身份不一致。".to_string(),
+        ));
+    }
+    let target_tool_call_id = mapped_id(
+        tool_call_id_map,
+        &source_tool_call_id,
+        "文件修改审计 Tool Call",
+    )?;
+    let target_transaction_id = if let Some(target) = replacements.get(&source_transaction_id) {
+        target.clone()
+    } else {
+        let target = new_id("file-change-history");
+        insert_global_replacement(replacements, &source_transaction_id, &target)?;
+        target
+    };
+    let target_observation_id = if let Some(target) = replacements.get(&source_observation_id) {
+        target.clone()
+    } else {
+        let target = format!("fobs_{}", Uuid::new_v4().simple());
+        insert_global_replacement(replacements, &source_observation_id, &target)?;
+        target
+    };
+    let target_observation_source_tool_call_id = mapped_id(
+        tool_call_id_map,
+        &file_change.execution.observation.source_tool_call_id,
+        "文件修改审计 observation Tool Call",
+    )?;
+    let target_trace_args_digest = remapped_file_change_call_digest(
+        traces,
+        &source_tool_call_id,
+        &file_change.execution.trace_args_digest,
+        "apply_patch",
+        replacements,
+    )?;
+    let staged = file_change.execution.staged_transaction_id.is_some();
+
+    file_change.id = target_tool_call_id.clone();
+    file_change.transaction_id = target_transaction_id.clone();
+    let execution = file_change.execution.as_mut();
+    execution.transaction.id = target_transaction_id.clone();
+    execution.proposal.id = target_tool_call_id.clone();
+    execution.proposal.transaction_id = target_transaction_id.clone();
+    execution.observation_id = target_observation_id.clone();
+    execution.observation.observation_id = target_observation_id;
+    execution.observation.source_tool_call_id = target_observation_source_tool_call_id;
+    execution.observation.conversation_id = target_conversation_id.to_string();
+    execution.observation.run_id = target_run_id.clone();
+    execution.source_call_id = target_tool_call_id.clone();
+    // A forked terminal action is display-only and never replays. Keep the exact private source
+    // digest as lineage evidence; only the cloned durable Trace projection receives a new digest.
+    execution.trace_args_digest = target_trace_args_digest.clone();
+    if staged {
+        execution.staged_transaction_id = Some(target_transaction_id.clone());
+    }
+    execution.conversation_id = target_conversation_id.to_string();
+    execution.run_id = target_run_id.clone();
+    if let Some(journal) = execution.delete_journal.as_ref() {
+        execution.delete_journal = Some(
+            journal
+                .with_forked_transaction_id(&target_transaction_id)
+                .map_err(|_| {
+                    ConversationForkError::Other("无法重映射文件修改删除日志。".to_string())
+                })?,
+        );
+    }
+    if let Some(receipt) = execution.receipt.as_mut() {
+        receipt.transaction_id = target_transaction_id.clone();
+    }
+    file_change.validate().map_err(|_| {
+        ConversationForkError::Other("复制后的文件修改审计 action 无效。".to_string())
+    })?;
+    let target_action_json = serde_json::to_string(&action).map_err(|_| {
+        ConversationForkError::Other("无法序列化复制后的文件修改审计 action。".to_string())
+    })?;
+    let target_file_change_result_json = remap_file_change_result_json(
+        audit.file_change_result_json.as_deref(),
+        &source_transaction_id,
+        &target_transaction_id,
+    )?;
+    let target_tool_result_json = remap_file_change_tool_result_json(
+        audit.tool_result_json.as_deref(),
+        &source_tool_call_id,
+        &target_tool_call_id,
+        &source_transaction_id,
+        &target_transaction_id,
+    )?;
+
+    Ok(AgentActionAuditRecord {
+        action_id: crate::canonical_pending_action_id(&target_run_id, &target_tool_call_id),
+        run_id: target_run_id,
+        conversation_id: Some(target_conversation_id.to_string()),
+        assistant_message_id: Some(target_assistant_message_id),
+        action_type: audit.action_type,
+        tool_name: audit.tool_name,
+        decision: audit.decision,
+        status: audit.status,
+        action_json: target_action_json,
+        file_change_result_json: target_file_change_result_json,
+        command_result_json: None,
+        tool_result_json: target_tool_result_json,
+        error: audit.error,
+        created_at: audit.created_at,
+        decided_at: audit.decided_at,
+        completed_at: audit.completed_at,
+        effective_permissions_json: audit.effective_permissions_json,
+        path_scope: audit.path_scope,
+        command_cwd_scope: audit.command_cwd_scope,
+        blocked_reason: audit.blocked_reason,
+        decision_source: audit.decision_source,
+    })
+}
+
+fn remap_file_change_result_json(
+    raw: Option<&str>,
+    source_transaction_id: &str,
+    target_transaction_id: &str,
+) -> Result<Option<String>, ConversationForkError> {
+    raw.map(|raw| {
+        let mut result = serde_json::from_str::<AgentFileChangeResult>(raw)
+            .map_err(|_| ConversationForkError::Other("文件修改审计 result 无效。".to_string()))?;
+        if result.transaction_id != source_transaction_id {
+            return Err(ConversationForkError::Other(
+                "文件修改审计 result 的事务身份不一致。".to_string(),
+            ));
+        }
+        result.transaction_id = target_transaction_id.to_string();
+        serde_json::to_string(&result).map_err(|_| {
+            ConversationForkError::Other("无法序列化复制后的文件修改 result。".to_string())
+        })
+    })
+    .transpose()
+}
+
+fn remap_file_change_tool_result_json(
+    raw: Option<&str>,
+    source_tool_call_id: &str,
+    target_tool_call_id: &str,
+    source_transaction_id: &str,
+    target_transaction_id: &str,
+) -> Result<Option<String>, ConversationForkError> {
+    raw.map(|raw| {
+        let mut tool_result = serde_json::from_str::<AgentToolResult>(raw).map_err(|_| {
+            ConversationForkError::Other("文件修改审计 ToolResult 无效。".to_string())
+        })?;
+        if tool_result.call_id != source_tool_call_id || tool_result.tool != "apply_patch" {
+            return Err(ConversationForkError::Other(
+                "文件修改审计 ToolResult 的调用身份不一致。".to_string(),
+            ));
+        }
+        tool_result.call_id = target_tool_call_id.to_string();
+        if let Some(value) = tool_result.result.take() {
+            let mut result =
+                serde_json::from_value::<AgentFileChangeResult>(value).map_err(|_| {
+                    ConversationForkError::Other("文件修改审计 ToolResult 的结果无效。".to_string())
+                })?;
+            if result.transaction_id != source_transaction_id {
+                return Err(ConversationForkError::Other(
+                    "文件修改审计 ToolResult 的事务身份不一致。".to_string(),
+                ));
+            }
+            result.transaction_id = target_transaction_id.to_string();
+            tool_result.result = Some(serde_json::to_value(result).map_err(|_| {
+                ConversationForkError::Other("无法序列化复制后的文件修改 ToolResult。".to_string())
+            })?);
+        }
+        serde_json::to_string(&tool_result).map_err(|_| {
+            ConversationForkError::Other("无法序列化复制后的文件修改 ToolResult。".to_string())
+        })
+    })
+    .transpose()
 }
 
 fn remap_file_change_observation(
@@ -1770,6 +2057,7 @@ fn history_from_single_plan(
             attachments: plan.attachments,
             archives: plan.archives,
             traces: plan.traces,
+            action_audits: plan.action_audits,
             turn_diffs: plan.turn_diffs,
             guidances: plan.guidances,
             file_changes: plan.file_changes,
@@ -1884,6 +2172,7 @@ fn build_message_only_history_plan(
         attachments,
         archives: Vec::new(),
         traces: Vec::new(),
+        action_audits: Vec::new(),
         turn_diffs: Vec::new(),
         guidances: Vec::new(),
         file_changes: Vec::new(),
@@ -3066,6 +3355,16 @@ fn apply_history_facts(
         )
         .map_err(database_error)?;
     }
+    for audit in history.action_audits {
+        let inserted =
+            agent_action_audit_repository::insert_action_audit_record_if_absent(connection, audit)
+                .map_err(database_error)?;
+        if !inserted {
+            return Err(ConversationForkError::Other(
+                "分叉后的文件修改审计身份发生冲突。".to_string(),
+            ));
+        }
+    }
     for turn_diff in history.turn_diffs {
         turn_diff_repository::insert_fork_copy(connection, turn_diff).map_err(database_error)?;
     }
@@ -3843,6 +4142,9 @@ fn new_id(prefix: &str) -> String {
 fn database_error(error: rusqlite::Error) -> String {
     format!("本地数据库操作失败：{error}")
 }
+
+#[cfg(test)]
+mod policy;
 
 #[cfg(test)]
 mod tests;

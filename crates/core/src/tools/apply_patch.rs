@@ -1210,7 +1210,7 @@ fn freeze_observed_base_with_limit_and_hook(
     // authorized target still names that descriptor before a proposal can expose its Diff.
     parent.revalidate()?;
     let parent_metadata = parent.parent_metadata()?;
-    if !observation.parent_identity_matches(&parent_metadata) {
+    if !observation.parent_identity_matches(target.absolute_path(), &parent_metadata)? {
         return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
     }
     match (observation.state(), current) {
@@ -2241,6 +2241,94 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(stale.code(), Some("agent.apply_patch.observation_stale"));
+    }
+
+    #[test]
+    fn sibling_missing_observations_survive_other_direct_creates() {
+        let workspace = TestWorkspace::new();
+        let context = workspace.context();
+        let first_observation = observe(&context, "first.txt");
+        let second_observation = observe(&context, "second.txt");
+        let third_observation = observe(&context, "third.txt");
+
+        let first = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"first.txt",
+                "observationId":first_observation,
+                "content":"first\n"
+            }),
+        )
+        .unwrap();
+        // Freeze the second proposal before the first create is published. Its execution-time
+        // observation check models a proposal waiting for approval while an authorized sibling
+        // FileChange settles in the same Run.
+        let second = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"second.txt",
+                "observationId":second_observation,
+                "content":"second\n"
+            }),
+        )
+        .unwrap();
+
+        let commit = |proposal: &AgentFileChangeProposal, committed_at| {
+            let target = FileChangePathPolicy::new(Some(&workspace.root), false)
+                .resolve(&proposal.execution.canonical_target)
+                .unwrap();
+            proposal
+                .execution
+                .observation
+                .revalidate_current_identity(target.absolute_path())
+                .unwrap();
+            let plan = crate::file_change::FileChangePlan::from_binding(&proposal.execution)
+                .expect("rebuild the frozen Direct plan");
+            FileChangeCommitter
+                .commit_fresh(
+                    &proposal.execution.transaction.id,
+                    &target,
+                    &plan,
+                    committed_at,
+                    None,
+                )
+                .expect("commit the authorized sibling create");
+        };
+
+        commit(&first, 1);
+        commit(&second, 2);
+
+        // This proposal is intentionally built only after two sibling entries changed the parent
+        // directory. The exact target is still absent, so its earlier observation remains valid.
+        let third = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"third.txt",
+                "observationId":third_observation,
+                "content":"third\n"
+            }),
+        )
+        .unwrap();
+        commit(&third, 3);
+
+        assert_eq!(
+            fs::read_to_string(workspace.root.join("first.txt")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.root.join("second.txt")).unwrap(),
+            "second\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.root.join("third.txt")).unwrap(),
+            "third\n"
+        );
     }
 
     #[test]

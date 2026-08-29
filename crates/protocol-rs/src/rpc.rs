@@ -65,6 +65,22 @@ pub struct AgentFileChangeReadRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentFileChangeHistoryDiffRequest {
+    #[serde(deserialize_with = "deserialize_non_empty_identifier")]
+    pub conversation_id: String,
+    #[serde(deserialize_with = "deserialize_non_empty_identifier")]
+    pub assistant_message_id: String,
+    #[serde(deserialize_with = "deserialize_non_empty_identifier")]
+    pub run_id: String,
+    #[serde(deserialize_with = "deserialize_non_empty_identifier")]
+    pub tool_call_id: String,
+    pub observer_root_conversation_id: Option<String>,
+    pub offset: Option<usize>,
+    pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CorePingRequest {
     pub message: Option<String>,
 }

@@ -9,11 +9,11 @@ use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
-    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentProviderTransitionGetStatusInput,
-    AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
-    AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
-    AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,
-    PendingAgentActionSnapshot,
+    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentFileChangeHistoryDiffPage,
+    AgentProviderTransitionGetStatusInput, AgentProviderTransitionGetStatusOutput,
+    AgentProviderTransitionOperation, AgentProviderTransitionPreflightInput,
+    AgentProviderTransitionPreflightOutput, AgentProviderTransitionStartInput, AgentServiceError,
+    PendingActionStatus, PendingAgentActionSnapshot,
 };
 use crate::application::mcp::approval_payload_store::{
     McpApprovalStartupInspector, McpApprovalStartupPayloadState,
@@ -32,8 +32,9 @@ use mycopilot_core::command::{
     AgentCommandExecutionResult, CommandAuthorizationSource, CommandRunGuard, CommandRunState,
 };
 use mycopilot_core::file_change::{
-    derive_file_change_run_grant_scope, FileChangeRunGrantRecord, FileChangeRunGrantStatus,
-    APPLY_PATCH_RUN_GRANT_CONTRACT_REVISION, FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
+    derive_file_change_run_grant_scope, FileChangePlan, FileChangeRunGrantRecord,
+    FileChangeRunGrantStatus, APPLY_PATCH_RUN_GRANT_CONTRACT_REVISION,
+    FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
 };
 use mycopilot_core::file_change_support::{
     file_change_action_approval_status, file_change_approval_route, file_change_authorized,

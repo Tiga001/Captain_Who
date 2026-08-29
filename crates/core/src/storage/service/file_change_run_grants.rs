@@ -291,7 +291,7 @@ mod tests {
         file_change_workspace_identity, FileChangeContentState, FileChangeDirectBinding,
         FileChangeDirectoryIdentity, FileChangeOperation, FileChangeOutcome, FileChangeProposal,
         FileChangeRunGrantScopeKind, FileChangeStatus, FileChangeTransaction,
-        FileObservationCheckpoint, FileObservationIdentity, FileObservationState,
+        FileObservationCheckpoint, FileObservationDirectoryIdentity, FileObservationState,
         FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
         FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION, FILE_OBSERVATION_TTL_MS,
     };
@@ -356,9 +356,8 @@ mod tests {
                 run_id: "run-1".to_string(),
                 canonical_target: target_path.to_string_lossy().into_owned(),
                 state: FileObservationState::Missing,
-                parent_identity: FileObservationIdentity::from_metadata(
-                    &fs::metadata(&canonical_root).unwrap(),
-                ),
+                parent_directory_identity: FileObservationDirectoryIdentity::read(&canonical_root)
+                    .unwrap(),
                 created_at_ms: 1,
                 expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
             },

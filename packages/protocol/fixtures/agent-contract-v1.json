@@ -20,6 +20,7 @@
     "clearUsageRecords": "agent.clearUsageRecords",
     "readFileChange": "agent.readFileChange",
     "getFileChangeDiff": "agent.getFileChangeDiff",
+    "getFileChangeHistoryDiff": "agent.getFileChangeHistoryDiff",
     "eventNotification": "agent.event"
   },
   "events": {

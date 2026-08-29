@@ -1301,6 +1301,7 @@ export const zhCNTranslations = {
   'agent.fileChange.unknownFile': '文件',
   'agent.fileChange.togglePreview': '展开或收起文件预览',
   'agent.fileChange.loadingPreview': '正在加载预览…',
+  'agent.fileChange.historyPreviewUnavailable': '无法读取已保存的修改详情。',
   'agent.fileChange.loadMorePreview': '加载更多',
   'agent.approval.dialog.toolTitle': '是否允许我使用 {tool}？',
   'agent.approval.dialog.commandPolicyHint':

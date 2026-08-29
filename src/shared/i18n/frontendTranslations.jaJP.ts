@@ -1381,6 +1381,7 @@ export const jaJPTranslations = {
   'agent.fileChange.unknownFile': 'ファイル',
   'agent.fileChange.togglePreview': 'ファイルプレビューの切り替え',
   'agent.fileChange.loadingPreview': 'プレビューを読み込み中…',
+  'agent.fileChange.historyPreviewUnavailable': '保存済みの変更内容を読み込めません。',
   'agent.fileChange.loadMorePreview': 'さらに読み込む',
   'agent.approval.dialog.toolTitle': '{tool}を使用してもいいですか？',
   'agent.approval.dialog.commandPolicyHint':

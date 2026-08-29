@@ -246,6 +246,16 @@ pub(crate) fn handle_request(
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
+        AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD => {
+            let input = match parse_params::<AgentFileChangeHistoryDiffRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.get_file_change_history_diff(&input) {
+                Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
         SEARCH_SEARCH_CHATS_METHOD => {
             let input = match parse_params::<ChatSearchInput>(request.params) {
                 Ok(input) => input,

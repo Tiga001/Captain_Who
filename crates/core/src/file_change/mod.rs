@@ -34,8 +34,9 @@ pub use model::{
 };
 pub(crate) use observation::FileObservationOwner;
 pub use observation::{
-    FileObservation, FileObservationCheckpoint, FileObservationIdentity, FileObservationRegistry,
-    FileObservationState, FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION, FILE_OBSERVATION_TTL_MS,
+    FileObservation, FileObservationCheckpoint, FileObservationDirectoryIdentity,
+    FileObservationIdentity, FileObservationRegistry, FileObservationState,
+    FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION, FILE_OBSERVATION_TTL_MS,
 };
 pub use planner::{
     FileChangeBase, FileChangeMutation, FileChangePlan, FileChangePlanRequest, FileChangePlanner,

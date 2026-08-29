@@ -81,6 +81,40 @@ impl FileChangeDeleteJournal {
         Ok(())
     }
 
+    /// Rebinds a historical snapshot to a fork-local transaction identity.
+    ///
+    /// Journal and tombstone names are deterministic derivatives of the transaction id, so they
+    /// must be rebuilt together even though a completed fork never replays the filesystem effect.
+    pub fn with_forked_transaction_id(&self, transaction_id: &str) -> FileChangeResultValue<Self> {
+        let suffix = delete_journal_suffix(
+            transaction_id,
+            &self.target_path,
+            &self.base_digest,
+            &self.proposal_digest,
+        );
+        let journal_id = format!("file-change-delete-{suffix}");
+        let tombstone_path = Path::new(&self.target_path)
+            .parent()
+            .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::InvalidArguments))?
+            .join(format!(".{journal_id}.tombstone"))
+            .to_string_lossy()
+            .into_owned();
+        let remapped = Self {
+            schema_version: self.schema_version,
+            journal_id,
+            transaction_id: transaction_id.to_string(),
+            target_path: self.target_path.clone(),
+            tombstone_path,
+            base_digest: self.base_digest.clone(),
+            proposal_digest: self.proposal_digest.clone(),
+            state: self.state,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        };
+        remapped.validate()?;
+        Ok(remapped)
+    }
+
     fn tombstone(&self) -> &Path {
         Path::new(&self.tombstone_path)
     }

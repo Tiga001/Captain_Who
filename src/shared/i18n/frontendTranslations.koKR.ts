@@ -1355,6 +1355,7 @@ export const koKRTranslations = {
   'agent.fileChange.unknownFile': '파일',
   'agent.fileChange.togglePreview': '파일 미리보기 전환',
   'agent.fileChange.loadingPreview': '미리보기 로드 중…',
+  'agent.fileChange.historyPreviewUnavailable': '저장된 변경 세부 정보를 불러올 수 없습니다.',
   'agent.fileChange.loadMorePreview': '더 보기',
   'agent.approval.dialog.toolTitle': '{tool}를 사용할 수 있도록 허용하시겠습니까?',
   'agent.approval.dialog.commandPolicyHint':

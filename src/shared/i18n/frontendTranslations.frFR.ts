@@ -1410,6 +1410,7 @@ export const frFRTranslations = {
   'agent.fileChange.unknownFile': 'fichier',
   'agent.fileChange.togglePreview': "Activer/désactiver l'aperçu du fichier",
   'agent.fileChange.loadingPreview': "Chargement de l'aperçu…",
+  'agent.fileChange.historyPreviewUnavailable': 'Les détails enregistrés sont indisponibles.',
   'agent.fileChange.loadMorePreview': 'Charger plus',
   'agent.approval.dialog.toolTitle': "Permettez-moi d'utiliser {tool} ?",
   'agent.approval.dialog.commandPolicyHint':

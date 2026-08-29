@@ -3,6 +3,8 @@ import type {
   AgentEvent,
   AgentFileChangeContentPage,
   AgentFileChangeDiffPage,
+  AgentFileChangeHistoryDiffInput,
+  AgentFileChangeHistoryDiffPage,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentConversationTurnRewriteInput,
@@ -163,4 +165,10 @@ export function getAgentFileChangeDiff(
     maxChars,
     ...(observerRootConversationId ? { observerRootConversationId } : {})
   })
+}
+
+export function getAgentFileChangeHistoryDiff(
+  input: AgentFileChangeHistoryDiffInput
+): Promise<AgentFileChangeHistoryDiffPage> {
+  return hostClient.agent.getFileChangeHistoryDiff(input)
 }

@@ -1288,6 +1288,7 @@ export const zhTWTranslations = {
   'agent.fileChange.unknownFile': '文件',
   'agent.fileChange.togglePreview': '展開或收起文件預覽',
   'agent.fileChange.loadingPreview': '正在加載預覽…',
+  'agent.fileChange.historyPreviewUnavailable': '無法讀取已儲存的修改詳情。',
   'agent.fileChange.loadMorePreview': '載入更多',
   'agent.approval.dialog.toolTitle': '是否允許我使用 {tool}？',
   'agent.approval.dialog.commandPolicyHint':

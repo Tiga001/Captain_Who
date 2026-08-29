@@ -244,6 +244,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   getProviderTransitionStatus: vi.fn().mockResolvedValue({ operations: [] }),
   getAgentCommandSession: vi.fn(),
   getAgentFileChangeDiff: vi.fn(),
+  getAgentFileChangeHistoryDiff: vi.fn(),
   listAgentCommandSessions: vi.fn().mockResolvedValue({ sessions: [] }),
   listPendingAgentActions: vi.fn().mockResolvedValue([]),
   onAgentEvent: (listener: (event: AgentEvent) => void) => {

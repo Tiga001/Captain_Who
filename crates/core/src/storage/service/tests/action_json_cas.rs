@@ -6,7 +6,7 @@ fn file_change_json_pair(parent: &Path, staged: bool) -> (String, String) {
         content_digest, FileChangeCommit, FileChangeContentState, FileChangeDirectBinding,
         FileChangeOperation, FileChangeOutcome, FileChangeProposal, FileChangeReceipt,
         FileChangeStatus, FileChangeTransaction, FileObservationCheckpoint,
-        FileObservationIdentity, FileObservationState, FILE_CHANGE_SCHEMA_VERSION,
+        FileObservationDirectoryIdentity, FileObservationState, FILE_CHANGE_SCHEMA_VERSION,
         FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION, FILE_OBSERVATION_TTL_MS,
     };
 
@@ -63,9 +63,7 @@ fn file_change_json_pair(parent: &Path, staged: bool) -> (String, String) {
             run_id: "run-1".to_string(),
             canonical_target: canonical_target.clone(),
             state: FileObservationState::Missing,
-            parent_identity: FileObservationIdentity::from_metadata(
-                &std::fs::metadata(parent).unwrap(),
-            ),
+            parent_directory_identity: FileObservationDirectoryIdentity::read(parent).unwrap(),
             created_at_ms: now,
             expires_at_ms: now + FILE_OBSERVATION_TTL_MS,
         },

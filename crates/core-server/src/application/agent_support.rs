@@ -56,11 +56,11 @@ pub(super) use types::{
 pub use types::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
-    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentProviderTransitionGetStatusInput,
-    AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
-    AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
-    AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,
-    PendingAgentActionSnapshot,
+    AgentFileChangeContentPage, AgentFileChangeDiffPage, AgentFileChangeHistoryDiffPage,
+    AgentProviderTransitionGetStatusInput, AgentProviderTransitionGetStatusOutput,
+    AgentProviderTransitionOperation, AgentProviderTransitionPreflightInput,
+    AgentProviderTransitionPreflightOutput, AgentProviderTransitionStartInput, AgentServiceError,
+    PendingActionStatus, PendingAgentActionSnapshot,
 };
 pub(super) use utility::*;
 pub(super) use world_state::*;

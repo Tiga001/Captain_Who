@@ -11,7 +11,7 @@ import type {
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
-import { getAgentFileChangeDiff, readAgentFileChange } from '../../../agent/agentClient'
+import { getAgentFileChangeDiff, getAgentFileChangeHistoryDiff } from '../../../agent/agentClient'
 import { getApplyPatchRequest } from '../../../agentRun/applyPatchRequest'
 import { revealStoredProjectFile } from '../../../storage/storageClient'
 import type { ChatFileChangePreview } from '../../chatTypes'
@@ -34,16 +34,22 @@ export interface FileChangeToolActivityGroupItem {
 }
 
 interface FileChangeToolActivityGroupProps {
+  assistantMessageId?: string
+  conversationId?: string
   items: FileChangeToolActivityGroupItem[]
   observerRootConversationId?: string
   projectId?: string | null
+  runId?: string
 }
 
 interface FileChangeToolActivityProps extends Omit<
   FileChangeToolActivityGroupItem,
   'transactionId'
 > {
+  assistantMessageId?: string
+  conversationId?: string
   observerRootConversationId?: string
+  runId?: string
   transactionId?: string
 }
 
@@ -365,13 +371,19 @@ function isAbsoluteLocalPath(filePath: string): boolean {
 }
 
 function FileChangeRow({
+  assistantMessageId,
+  conversationId,
   item,
   observerRootConversationId,
-  projectId
+  projectId,
+  runId
 }: {
+  assistantMessageId?: string
+  conversationId?: string
   item: FileChangeToolActivityGroupItem
   observerRootConversationId?: string
   projectId?: string | null
+  runId?: string
 }) {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
@@ -380,26 +392,75 @@ function FileChangeRow({
   const [loading, setLoading] = useState(false)
   const [nextOffset, setNextOffset] = useState<number | null>(null)
   const view = getFileChangeItemView(item)
-  const structuredResult = getFileChangeResult(item.result)
-  const inlinePatch = item.proposal?.inlineDiff?.patch ?? null
-  const previewTransactionId = getPreviewTransactionId(item)
-  const previewSource =
-    item.proposal ||
-    structuredResult ||
-    item.transaction?.statsFinal ||
-    item.transaction?.status === 'waiting_approval'
-      ? 'diff'
-      : 'content'
+  const terminal = !isPending(view.status)
+  const inlinePatch = terminal ? null : (item.proposal?.inlineDiff?.patch ?? null)
+  const previewTransactionId = terminal ? undefined : getPreviewTransactionId(item)
+  const historyIdentityAvailable = Boolean(
+    terminal && conversationId && assistantMessageId && runId && item.call.id
+  )
   const hasLivePreview = view.status === 'running' && Boolean(item.preview)
   const displayedPreview = hasLivePreview
     ? `${persistedPreview}${item.preview?.content ?? ''}`
     : persistedPreview
-  const canPreview = Boolean(inlinePatch !== null || item.preview || previewTransactionId)
-  const safePreviewError = t('files.preview.error')
+  const canPreview =
+    historyIdentityAvailable ||
+    Boolean(inlinePatch !== null || item.preview || previewTransactionId)
+  const safePreviewError = terminal
+    ? t('agent.fileChange.historyPreviewUnavailable')
+    : t('files.preview.error')
   const canReveal = Boolean(view.filePath && (projectId || isAbsoluteLocalPath(view.filePath)))
 
   useEffect(() => {
-    if (!expanded || !canPreview) return
+    if (
+      !terminal ||
+      !conversationId ||
+      !assistantMessageId ||
+      !runId ||
+      !historyIdentityAvailable
+    ) {
+      return
+    }
+    let cancelled = false
+    setPersistedPreview('')
+    setNextOffset(null)
+    setPreviewError('')
+    setLoading(true)
+    void getAgentFileChangeHistoryDiff({
+      conversationId,
+      assistantMessageId,
+      runId,
+      toolCallId: item.call.id,
+      offset: 0,
+      maxChars: PREVIEW_PAGE_CHARS,
+      ...(observerRootConversationId ? { observerRootConversationId } : {})
+    })
+      .then((page) => {
+        if (cancelled) return
+        setPersistedPreview(page.patch)
+        setNextOffset(page.nextOffset)
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewError(safePreviewError)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    assistantMessageId,
+    conversationId,
+    historyIdentityAvailable,
+    item.call.id,
+    observerRootConversationId,
+    runId,
+    safePreviewError,
+    terminal
+  ])
+
+  useEffect(() => {
+    if (terminal || !expanded || !canPreview) return
     let cancelled = false
     setPersistedPreview('')
     setNextOffset(null)
@@ -409,39 +470,23 @@ function FileChangeRow({
       setLoading(false)
       return
     }
-    if (!previewTransactionId) {
+    if (view.status !== 'waiting' || !previewTransactionId) {
       setLoading(false)
       return
     }
     setLoading(true)
-    const request =
-      previewSource === 'diff'
-        ? getAgentFileChangeDiff(
-            previewTransactionId,
-            0,
-            PREVIEW_PAGE_CHARS,
-            observerRootConversationId
-          ).then((page) => {
-            if (page.transactionId !== previewTransactionId || page.offset !== 0) {
-              throw new Error('FileChange preview identity mismatch')
-            }
-            return { content: page.patch, nextOffset: page.nextOffset }
-          })
-        : readAgentFileChange(
-            previewTransactionId,
-            0,
-            PREVIEW_PAGE_CHARS,
-            observerRootConversationId
-          ).then((page) => {
-            if (page.fileChange.transactionId !== previewTransactionId || page.offset !== 0) {
-              throw new Error('FileChange preview identity mismatch')
-            }
-            return { content: page.content, nextOffset: page.nextOffset }
-          })
-    void request
+    void getAgentFileChangeDiff(
+      previewTransactionId,
+      0,
+      PREVIEW_PAGE_CHARS,
+      observerRootConversationId
+    )
       .then((page) => {
         if (cancelled) return
-        setPersistedPreview(page.content)
+        if (page.transactionId !== previewTransactionId || page.offset !== 0) {
+          throw new Error('FileChange preview identity mismatch')
+        }
+        setPersistedPreview(page.patch)
         setNextOffset(page.nextOffset)
       })
       .catch(() => {
@@ -459,17 +504,29 @@ function FileChangeRow({
     inlinePatch,
     observerRootConversationId,
     previewTransactionId,
-    previewSource,
-    safePreviewError
+    safePreviewError,
+    terminal,
+    view.status
   ])
 
   const loadMore = (): void => {
-    if (nextOffset === null || loading || !previewTransactionId) return
+    if (nextOffset === null || loading) return
     const requestedOffset = nextOffset
     setLoading(true)
     setPreviewError('')
-    const request =
-      previewSource === 'diff'
+    const request = terminal
+      ? conversationId && assistantMessageId && runId
+        ? getAgentFileChangeHistoryDiff({
+            conversationId,
+            assistantMessageId,
+            runId,
+            toolCallId: item.call.id,
+            offset: requestedOffset,
+            maxChars: PREVIEW_PAGE_CHARS,
+            ...(observerRootConversationId ? { observerRootConversationId } : {})
+          }).then((page) => ({ content: page.patch, nextOffset: page.nextOffset }))
+        : null
+      : previewTransactionId
         ? getAgentFileChangeDiff(
             previewTransactionId,
             requestedOffset,
@@ -481,20 +538,11 @@ function FileChangeRow({
             }
             return { content: page.patch, nextOffset: page.nextOffset }
           })
-        : readAgentFileChange(
-            previewTransactionId,
-            requestedOffset,
-            PREVIEW_PAGE_CHARS,
-            observerRootConversationId
-          ).then((page) => {
-            if (
-              page.fileChange.transactionId !== previewTransactionId ||
-              page.offset !== requestedOffset
-            ) {
-              throw new Error('FileChange preview identity mismatch')
-            }
-            return { content: page.content, nextOffset: page.nextOffset }
-          })
+        : null
+    if (!request) {
+      setLoading(false)
+      return
+    }
     void request
       .then((page) => {
         setPersistedPreview((current) => `${current}${page.content}`)
@@ -583,23 +631,32 @@ function FileChangeRow({
 }
 
 export function FileChangeToolActivity({
+  assistantMessageId,
+  conversationId,
   observerRootConversationId,
+  runId,
   transactionId,
   ...item
 }: FileChangeToolActivityProps) {
   return (
     <FileChangeToolActivityGroup
       items={[{ ...item, transactionId }]}
+      assistantMessageId={assistantMessageId}
+      conversationId={conversationId}
       observerRootConversationId={observerRootConversationId}
       projectId={item.projectId}
+      runId={runId}
     />
   )
 }
 
 export function FileChangeToolActivityGroup({
+  assistantMessageId,
+  conversationId,
   items,
   observerRootConversationId,
-  projectId
+  projectId,
+  runId
 }: FileChangeToolActivityGroupProps) {
   const { t } = useFrontendConfig()
   if (items.length === 0) return null
@@ -614,10 +671,13 @@ export function FileChangeToolActivityGroup({
       <div className="agent-activity__details file-change-activity__details">
         {items.map((item) => (
           <FileChangeRow
+            assistantMessageId={assistantMessageId}
+            conversationId={conversationId}
             item={item}
             key={item.call.id}
             observerRootConversationId={observerRootConversationId}
             projectId={projectId}
+            runId={runId}
           />
         ))}
       </div>

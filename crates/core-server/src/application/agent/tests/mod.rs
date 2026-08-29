@@ -125,8 +125,8 @@ fn direct_file_change_fixture(
         proposal_digest, FileChangeBase, FileChangeCommitter, FileChangeDirectBinding,
         FileChangeMutation, FileChangeOperation, FileChangeOutcome, FileChangePathPolicy,
         FileChangePlanRequest, FileChangePlanner, FileChangeProposal, FileChangeStatus,
-        FileChangeTransaction, FileObservationCheckpoint, FileObservationIdentity,
-        FileObservationState, FILE_CHANGE_SCHEMA_VERSION,
+        FileChangeTransaction, FileObservationCheckpoint, FileObservationDirectoryIdentity,
+        FileObservationIdentity, FileObservationState, FILE_CHANGE_SCHEMA_VERSION,
         FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION, FILE_OBSERVATION_TTL_MS,
     };
 
@@ -223,13 +223,19 @@ fn direct_file_change_fixture(
         None
     };
     let canonical_path = std::path::Path::new(canonical_target);
-    let parent_metadata = std::fs::metadata(
+    let parent_directory_identity = FileObservationDirectoryIdentity::read(
         canonical_path
             .parent()
             .expect("Direct fixture target has a parent"),
     )
-    .or_else(|_| std::fs::metadata(std::env::temp_dir()))
-    .expect("Direct fixture parent metadata");
+    .or_else(|_| {
+        FileObservationDirectoryIdentity::read(
+            &std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical Direct fixture fallback parent"),
+        )
+    })
+    .expect("Direct fixture parent directory identity");
     let observation_state = match &plan.base {
         mycopilot_core::file_change::FileChangeContentState::Missing => {
             FileObservationState::Missing
@@ -256,7 +262,7 @@ fn direct_file_change_fixture(
             run_id: run_id.to_string(),
             canonical_target: canonical_target.to_string(),
             state: observation_state,
-            parent_identity: FileObservationIdentity::from_metadata(&parent_metadata),
+            parent_directory_identity,
             created_at_ms: 1,
             expires_at_ms: 1 + FILE_OBSERVATION_TTL_MS,
         },

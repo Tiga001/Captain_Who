@@ -20,6 +20,7 @@ export const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
 export const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
 export const AGENT_READ_FILE_CHANGE_METHOD = 'agent.readFileChange'
 export const AGENT_GET_FILE_CHANGE_DIFF_METHOD = 'agent.getFileChangeDiff'
+export const AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD = 'agent.getFileChangeHistoryDiff'
 export const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 
 export type AgentMessageRole = 'system' | 'user' | 'assistant'
@@ -1266,6 +1267,29 @@ export interface AgentFileChangeDiffInput extends AgentFileChangeIdInput {
 
 export interface AgentFileChangeDiffPage {
   transactionId: string
+  patch: string
+  offset: number
+  nextOffset: number | null
+  truncated: boolean
+}
+
+/** Durable, terminal Apply Patch identity. No private audit payload crosses this contract. */
+export interface AgentFileChangeHistoryDiffInput {
+  conversationId: string
+  assistantMessageId: string
+  runId: string
+  toolCallId: string
+  /** Exact root authority for an authorized read-only child observer. */
+  observerRootConversationId?: string
+  offset?: number
+  maxChars?: number
+}
+
+export interface AgentFileChangeHistoryDiffPage {
+  conversationId: string
+  assistantMessageId: string
+  runId: string
+  toolCallId: string
   patch: string
   offset: number
   nextOffset: number | null

@@ -2908,3 +2908,191 @@ async fn cancelled_pre_runtime_continuation_revokes_active_run_grant_before_done
     assert_eq!(done[0]["params"]["status"], "cancelled");
     assert_eq!(done[0]["params"]["success"], false);
 }
+
+fn seed_file_change_history_owner(
+    storage: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+) {
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "FileChange history".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: "done".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+}
+
+fn terminal_file_change_history_audit(
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    action: &AgentProposedAction,
+) -> AgentActionAuditRecord {
+    AgentActionAuditRecord {
+        action_id: mycopilot_core::canonical_pending_action_id(run_id, call_id),
+        run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        assistant_message_id: Some(assistant_message_id.to_string()),
+        action_type: "file_change".to_string(),
+        tool_name: "apply_patch".to_string(),
+        decision: Some("approved".to_string()),
+        status: "completed".to_string(),
+        action_json: serde_json::to_string(action).unwrap(),
+        file_change_result_json: None,
+        command_result_json: None,
+        tool_result_json: None,
+        error: None,
+        created_at: 1,
+        decided_at: Some(2),
+        completed_at: Some(3),
+        effective_permissions_json: Some("{}".to_string()),
+        path_scope: None,
+        command_cwd_scope: None,
+        blocked_reason: None,
+        decision_source: Some("manual".to_string()),
+    }
+}
+
+#[test]
+fn completed_direct_file_change_history_returns_only_the_saved_inline_diff() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let target = workspace.join("history-direct.txt");
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-history-direct";
+    let conversation_id = "conversation-history-direct";
+    let assistant_message_id = "assistant-history-direct";
+    let call_id = "call-history-direct";
+    seed_file_change_history_owner(&storage, conversation_id, assistant_message_id);
+    let (action, _) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        call_id,
+        ("history-direct.txt", target.to_str().unwrap()),
+        None,
+        Some("saved direct content\n"),
+        AgentApprovalStatus::Approved,
+    );
+    let expected_patch = match &action {
+        AgentProposedAction::FileChange { file_change } => file_change
+            .inline_diff
+            .as_ref()
+            .expect("Direct proposal has an inline Diff")
+            .patch
+            .clone(),
+        _ => unreachable!(),
+    };
+    storage
+        .insert_agent_action_audit_if_absent(terminal_file_change_history_audit(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            call_id,
+            &action,
+        ))
+        .unwrap();
+
+    let page = service
+        .get_file_change_history_diff(&mycopilot_protocol_rs::AgentFileChangeHistoryDiffRequest {
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            run_id: run_id.to_string(),
+            tool_call_id: call_id.to_string(),
+            observer_root_conversation_id: None,
+            offset: Some(0),
+            max_chars: Some(50_000),
+        })
+        .unwrap();
+    assert_eq!(page.patch, expected_patch);
+    let serialized = serde_json::to_value(page).unwrap();
+    assert_exact_json_object_keys(
+        &serialized,
+        &[
+            "conversationId",
+            "assistantMessageId",
+            "runId",
+            "toolCallId",
+            "patch",
+            "offset",
+            "nextOffset",
+            "truncated",
+        ],
+    );
+    assert!(serialized.get("actionJson").is_none());
+    assert!(serialized.get("execution").is_none());
+}
+
+#[test]
+fn completed_staged_file_change_history_rebuilds_diff_from_the_saved_binding() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let target = workspace.join("history-staged.txt");
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-history-staged";
+    let conversation_id = "conversation-history-staged";
+    let assistant_message_id = "assistant-history-staged";
+    let call_id = "call-history-staged";
+    seed_file_change_history_owner(&storage, conversation_id, assistant_message_id);
+    let (proposal, _) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id,
+            conversation_id,
+            call_id,
+            transaction_id: "transaction-history-staged",
+        },
+        ("history-staged.txt", target.to_str().unwrap()),
+        "saved staged content\n",
+        AgentApprovalStatus::Approved,
+    );
+    let expected_patch =
+        mycopilot_core::file_change::FileChangePlan::from_binding(&proposal.execution)
+            .unwrap()
+            .diff;
+    let action = AgentProposedAction::FileChange {
+        file_change: proposal,
+    };
+    storage
+        .insert_agent_action_audit_if_absent(terminal_file_change_history_audit(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            call_id,
+            &action,
+        ))
+        .unwrap();
+
+    let page = service
+        .get_file_change_history_diff(&mycopilot_protocol_rs::AgentFileChangeHistoryDiffRequest {
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            run_id: run_id.to_string(),
+            tool_call_id: call_id.to_string(),
+            observer_root_conversation_id: None,
+            offset: Some(0),
+            max_chars: Some(50_000),
+        })
+        .unwrap();
+    assert_eq!(page.patch, expected_patch);
+}

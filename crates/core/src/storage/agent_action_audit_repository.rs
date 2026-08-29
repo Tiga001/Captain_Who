@@ -489,6 +489,36 @@ pub fn list_executing_file_change_action_audits(
     records
 }
 
+/// Lists terminal Apply Patch receipts owned by one conversation for exact history cloning.
+///
+/// The fork layer validates and remaps the typed payload before inserting a target receipt. This
+/// storage query deliberately returns no pending or executing claim.
+pub(crate) fn list_terminal_file_change_action_audits_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<AgentActionAuditRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT action_id, run_id, conversation_id, assistant_message_id, action_type,
+               tool_name, decision, status, action_json, file_change_result_json,
+               command_result_json, tool_result_json, error, created_at, decided_at,
+               completed_at, effective_permissions_json, path_scope, command_cwd_scope,
+               blocked_reason, decision_source
+        FROM agent_action_audit
+        WHERE conversation_id = ?1
+          AND action_type = 'file_change'
+          AND tool_name = 'apply_patch'
+          AND status IN ('completed', 'failed', 'cancelled', 'rejected')
+          AND completed_at IS NOT NULL
+        ORDER BY created_at ASC, action_id ASC
+        ",
+    )?;
+    let records = statement
+        .query_map(params![conversation_id], action_audit_record_from_row)?
+        .collect();
+    records
+}
+
 fn action_audit_record_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<AgentActionAuditRecord> {

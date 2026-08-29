@@ -1,4 +1,5 @@
 use super::error::{FileChangeError, FileChangeErrorCode, FileChangeResultValue};
+use super::run_grant::FileChangeDirectoryIdentity;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 #[cfg(not(unix))]
@@ -10,7 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub const FILE_OBSERVATION_TTL_MS: u64 = 10 * 60 * 1_000;
-pub const FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+pub const FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION: u32 = 2;
+const FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 const MAX_OBSERVATIONS_PER_RUN: usize = 1_024;
 
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +79,121 @@ impl FileObservationIdentity {
     }
 }
 
+/// Strict Observation-owned projection of a stable parent directory object identity.
+///
+/// Acquisition is shared with FileChange Run grants, but this private checkpoint DTO owns its
+/// camelCase wire independently so changing it cannot reinterpret the existing Run-grant storage
+/// shape.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum FileObservationDirectoryIdentity {
+    Unix {
+        #[serde(deserialize_with = "deserialize_observation_directory_identity_schema_version")]
+        schema_version: u32,
+        device: u64,
+        inode: u64,
+    },
+    Windows {
+        #[serde(deserialize_with = "deserialize_observation_directory_identity_schema_version")]
+        schema_version: u32,
+        volume_serial_number: u64,
+        file_id: String,
+    },
+}
+
+fn deserialize_observation_directory_identity_schema_version<'de, D>(
+    deserializer: D,
+) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version == FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "unsupported FileObservation directory identity schema version",
+        ))
+    }
+}
+
+impl FileObservationDirectoryIdentity {
+    pub fn read(path: &Path) -> Result<Self, &'static str> {
+        Self::from_file_change_identity(FileChangeDirectoryIdentity::read(path)?)
+    }
+
+    #[cfg(unix)]
+    fn from_bound_metadata(metadata: &Metadata) -> Result<Self, &'static str> {
+        Self::from_file_change_identity(FileChangeDirectoryIdentity::from_bound_metadata(metadata)?)
+    }
+
+    fn from_file_change_identity(
+        identity: FileChangeDirectoryIdentity,
+    ) -> Result<Self, &'static str> {
+        identity.validate()?;
+        Ok(match identity {
+            FileChangeDirectoryIdentity::Unix { device, inode, .. } => Self::Unix {
+                schema_version: FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION,
+                device,
+                inode,
+            },
+            FileChangeDirectoryIdentity::Windows {
+                volume_serial_number,
+                file_id,
+                ..
+            } => Self::Windows {
+                schema_version: FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION,
+                volume_serial_number,
+                file_id,
+            },
+        })
+    }
+
+    fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Unix { schema_version, .. }
+                if *schema_version == FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION =>
+            {
+                Ok(())
+            }
+            Self::Windows {
+                schema_version,
+                file_id,
+                ..
+            } if *schema_version == FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION
+                && file_id.len() == 32
+                && file_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+            {
+                Ok(())
+            }
+            _ => Err("invalid FileObservation parent directory identity"),
+        }
+    }
+}
+
+fn deserialize_observation_checkpoint_schema_version<'de, D>(
+    deserializer: D,
+) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version == FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "unsupported FileObservation checkpoint schema version",
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FileObservationState {
@@ -94,6 +211,7 @@ pub enum FileObservationState {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileObservationCheckpoint {
+    #[serde(deserialize_with = "deserialize_observation_checkpoint_schema_version")]
     pub schema_version: u32,
     pub observation_id: String,
     pub source_tool_call_id: String,
@@ -101,7 +219,7 @@ pub struct FileObservationCheckpoint {
     pub run_id: String,
     pub canonical_target: String,
     pub state: FileObservationState,
-    pub parent_identity: FileObservationIdentity,
+    pub parent_directory_identity: FileObservationDirectoryIdentity,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
 }
@@ -130,7 +248,9 @@ impl FileObservationCheckpoint {
         {
             return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
         }
-        self.parent_identity.validate()?;
+        self.parent_directory_identity.validate().map_err(|error| {
+            FileChangeError::with_diagnostic(FileChangeErrorCode::InvalidArguments, error)
+        })?;
         if let FileObservationState::Existing { revision, identity } = &self.state {
             if !valid_owned_id(revision) {
                 return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
@@ -183,7 +303,9 @@ impl FileObservationCheckpoint {
                     error.to_string(),
                 )
             })?;
-            if self.parent_identity != FileObservationIdentity::from_metadata(&parent_metadata) {
+            if self.parent_directory_identity
+                != parent_directory_identity(expected_target, &parent_metadata)?
+            {
                 return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
             }
             let current = parent.inspect_optional_leaf()?;
@@ -218,7 +340,9 @@ impl FileObservationCheckpoint {
                     error.to_string(),
                 )
             })?;
-            if self.parent_identity != FileObservationIdentity::from_metadata(&parent_metadata) {
+            if self.parent_directory_identity
+                != parent_directory_identity(expected_target, &parent_metadata)?
+            {
                 return Err(FileChangeError::new(FileChangeErrorCode::ObservationStale));
             }
             match &self.state {
@@ -273,7 +397,7 @@ pub struct FileObservation {
     run_id: String,
     canonical_target: PathBuf,
     state: FileObservationState,
-    parent_identity: FileObservationIdentity,
+    parent_directory_identity: FileObservationDirectoryIdentity,
     created_at: u64,
     expires_at: u64,
 }
@@ -303,8 +427,12 @@ impl FileObservation {
         self.expires_at
     }
 
-    pub fn parent_identity_matches(&self, metadata: &Metadata) -> bool {
-        self.parent_identity == FileObservationIdentity::from_metadata(metadata)
+    pub fn parent_identity_matches(
+        &self,
+        target: &Path,
+        metadata: &Metadata,
+    ) -> FileChangeResultValue<bool> {
+        Ok(self.parent_directory_identity == parent_directory_identity(target, metadata)?)
     }
 
     pub(crate) fn checkpoint(&self) -> FileObservationCheckpoint {
@@ -316,7 +444,7 @@ impl FileObservation {
             run_id: self.run_id.clone(),
             canonical_target: self.canonical_target.to_string_lossy().into_owned(),
             state: self.state.clone(),
-            parent_identity: self.parent_identity.clone(),
+            parent_directory_identity: self.parent_directory_identity.clone(),
             created_at_ms: self.created_at,
             expires_at_ms: self.expires_at,
         }
@@ -344,7 +472,7 @@ impl FileObservation {
             run_id: checkpoint.run_id,
             canonical_target,
             state: checkpoint.state,
-            parent_identity: checkpoint.parent_identity,
+            parent_directory_identity: checkpoint.parent_directory_identity,
             created_at: checkpoint.created_at_ms,
             expires_at: checkpoint.expires_at_ms,
         })
@@ -480,7 +608,8 @@ impl FileObservationRegistry {
         {
             return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
         }
-        let parent_identity = FileObservationIdentity::from_metadata(parent_metadata);
+        let parent_directory_identity =
+            parent_directory_identity(canonical_target, parent_metadata)?;
         let expires_at = now.saturating_add(FILE_OBSERVATION_TTL_MS);
         let mut observations = self
             .observations
@@ -503,7 +632,7 @@ impl FileObservationRegistry {
             run_id: owner.run_id.to_string(),
             canonical_target: canonical_target.to_path_buf(),
             state,
-            parent_identity,
+            parent_directory_identity,
             created_at: now,
             expires_at,
         };
@@ -606,6 +735,40 @@ impl FileObservationRegistry {
         Ok(Self {
             observations: Mutex::new(observations),
         })
+    }
+}
+
+fn parent_directory_identity(
+    canonical_target: &Path,
+    parent_metadata: &Metadata,
+) -> FileChangeResultValue<FileObservationDirectoryIdentity> {
+    let parent = canonical_target
+        .parent()
+        .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::ParentMissing))?;
+
+    #[cfg(unix)]
+    {
+        let _ = parent;
+        FileObservationDirectoryIdentity::from_bound_metadata(parent_metadata).map_err(|error| {
+            FileChangeError::with_diagnostic(FileChangeErrorCode::ObservationStale, error)
+        })
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = parent_metadata;
+        FileObservationDirectoryIdentity::read(parent).map_err(|error| {
+            FileChangeError::with_diagnostic(FileChangeErrorCode::ObservationStale, error)
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (parent, parent_metadata);
+        Err(FileChangeError::with_diagnostic(
+            FileChangeErrorCode::ObservationStale,
+            "stable parent directory identity is unsupported on this platform",
+        ))
     }
 }
 
@@ -868,35 +1031,123 @@ mod tests {
         let created_at_ms = now
             .saturating_sub(FILE_OBSERVATION_TTL_MS)
             .saturating_sub(1);
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().canonicalize().unwrap();
+        let target = directory_path.join("example.txt");
         let checkpoint = FileObservationCheckpoint {
             schema_version: FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
             observation_id: "fobs_0123456789abcdef0123456789abcdef".to_string(),
             source_tool_call_id: "read-call-1".to_string(),
             conversation_id: "conversation-1".to_string(),
             run_id: "run-1".to_string(),
-            canonical_target: "/tmp/example.txt".to_string(),
+            canonical_target: target.to_string_lossy().into_owned(),
             state: FileObservationState::Missing,
-            parent_identity: FileObservationIdentity {
-                byte_count: 0,
-                modified_ns: None,
-                device: None,
-                inode: None,
-            },
+            parent_directory_identity: parent_directory_identity(
+                &target,
+                &fs::metadata(&directory_path).unwrap(),
+            )
+            .unwrap(),
             created_at_ms,
             expires_at_ms: created_at_ms.saturating_add(FILE_OBSERVATION_TTL_MS),
         };
         checkpoint
-            .validate_frozen_binding("conversation-1", "run-1", Path::new("/tmp/example.txt"))
+            .validate_frozen_binding("conversation-1", "run-1", &target)
             .expect("a claimed transaction may outlive the observation claim TTL");
 
         let mut tampered = checkpoint;
         tampered.expires_at_ms = tampered.expires_at_ms.saturating_add(1);
         assert_eq!(
             tampered
-                .validate_frozen_binding("conversation-1", "run-1", Path::new("/tmp/example.txt"),)
+                .validate_frozen_binding("conversation-1", "run-1", &target)
                 .unwrap_err()
                 .code(),
             FileChangeErrorCode::InvalidArguments
+        );
+    }
+
+    #[test]
+    fn checkpoint_revalidation_allows_an_unrelated_sibling_create() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().canonicalize().unwrap();
+        let target = directory_path.join("target.txt");
+        let registry = FileObservationRegistry::default();
+        let observation = registry
+            .issue(
+                FileObservationOwner::new("read-call-1", "conversation-1", "run-1"),
+                &target,
+                FileObservationState::Missing,
+                &fs::metadata(&directory_path).unwrap(),
+                now_ms().saturating_sub(1),
+            )
+            .unwrap()
+            .checkpoint();
+
+        fs::write(directory_path.join("sibling.txt"), "sibling\n").unwrap();
+
+        observation
+            .revalidate_current_identity(&target)
+            .expect("a sibling entry does not replace the observed parent or target leaf");
+    }
+
+    #[test]
+    fn checkpoint_revalidation_rejects_creation_of_the_exact_missing_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let directory_path = directory.path().canonicalize().unwrap();
+        let target = directory_path.join("target.txt");
+        let registry = FileObservationRegistry::default();
+        let observation = registry
+            .issue(
+                FileObservationOwner::new("read-call-1", "conversation-1", "run-1"),
+                &target,
+                FileObservationState::Missing,
+                &fs::metadata(&directory_path).unwrap(),
+                now_ms().saturating_sub(1),
+            )
+            .unwrap()
+            .checkpoint();
+
+        fs::write(&target, "created externally\n").unwrap();
+
+        assert_eq!(
+            observation
+                .revalidate_current_identity(&target)
+                .unwrap_err()
+                .code(),
+            FileChangeErrorCode::FileExists
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "created externally\n");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn checkpoint_revalidation_rejects_a_replaced_parent_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let parent = root_path.join("parent");
+        let displaced = root_path.join("displaced");
+        fs::create_dir(&parent).unwrap();
+        let target = parent.join("target.txt");
+        let registry = FileObservationRegistry::default();
+        let observation = registry
+            .issue(
+                FileObservationOwner::new("read-call-1", "conversation-1", "run-1"),
+                &target,
+                FileObservationState::Missing,
+                &fs::metadata(&parent).unwrap(),
+                now_ms().saturating_sub(1),
+            )
+            .unwrap()
+            .checkpoint();
+
+        fs::rename(&parent, &displaced).unwrap();
+        fs::create_dir(&parent).unwrap();
+
+        assert_eq!(
+            observation
+                .revalidate_current_identity(&target)
+                .unwrap_err()
+                .code(),
+            FileChangeErrorCode::ObservationStale
         );
     }
 
@@ -970,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_json_is_strict_and_requires_nullable_identity_fields() {
+    fn checkpoint_json_is_strict_and_rejects_the_previous_parent_identity_shape() {
         let checkpoint = serde_json::json!({
             "schemaVersion": FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
             "observationId": "fobs_0123456789abcdef0123456789abcdef",
@@ -979,11 +1230,11 @@ mod tests {
             "runId": "run-1",
             "canonicalTarget": "/tmp/example.txt",
             "state": { "kind": "missing" },
-            "parentIdentity": {
-                "byteCount": 0,
-                "modifiedNs": null,
-                "device": null,
-                "inode": null
+            "parentDirectoryIdentity": {
+                "kind": "unix",
+                "schemaVersion": FILE_OBSERVATION_DIRECTORY_IDENTITY_SCHEMA_VERSION,
+                "device": 1,
+                "inode": 2
             },
             "createdAtMs": 100,
             "expiresAtMs": 100 + FILE_OBSERVATION_TTL_MS
@@ -991,11 +1242,26 @@ mod tests {
         serde_json::from_value::<FileObservationCheckpoint>(checkpoint.clone()).unwrap();
 
         let mut missing = checkpoint.clone();
-        missing["parentIdentity"]
+        missing["parentDirectoryIdentity"]
             .as_object_mut()
             .unwrap()
             .remove("inode");
         assert!(serde_json::from_value::<FileObservationCheckpoint>(missing).is_err());
+        let mut old_version = checkpoint.clone();
+        old_version["schemaVersion"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<FileObservationCheckpoint>(old_version).is_err());
+        let mut old_parent_shape = checkpoint.clone();
+        old_parent_shape
+            .as_object_mut()
+            .unwrap()
+            .remove("parentDirectoryIdentity");
+        old_parent_shape["parentIdentity"] = serde_json::json!({
+            "byteCount": 0,
+            "modifiedNs": null,
+            "device": null,
+            "inode": null
+        });
+        assert!(serde_json::from_value::<FileObservationCheckpoint>(old_parent_shape).is_err());
         let mut extra = checkpoint;
         extra["internalCause"] = serde_json::json!("must not be accepted");
         assert!(serde_json::from_value::<FileObservationCheckpoint>(extra).is_err());

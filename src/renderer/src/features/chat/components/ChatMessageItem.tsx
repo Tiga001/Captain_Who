@@ -373,12 +373,14 @@ function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) 
 }
 
 function AgentTimelineItemView({
+  assistantMessageId,
   conversationId,
   item,
   observerRootConversationId,
   projectId,
   run
 }: {
+  assistantMessageId: string
   conversationId?: string
   item: RenderableTimelineItem
   observerRootConversationId?: string
@@ -443,9 +445,12 @@ function AgentTimelineItemView({
     if (items.length === 0) return null
     return (
       <FileChangeToolActivityGroup
+        assistantMessageId={assistantMessageId}
+        conversationId={conversationId}
         items={items}
         observerRootConversationId={observerRootConversationId}
         projectId={projectId}
+        runId={run.runId ?? undefined}
       />
     )
   }
@@ -492,6 +497,7 @@ function AgentTimelineItemView({
     const settledStatus = getSettledToolStatus(run, result)
     return (
       <AgentToolActivity
+        assistantMessageId={assistantMessageId}
         cancelled={settledStatus === 'cancelled'}
         call={call}
         conversationId={conversationId}
@@ -884,6 +890,7 @@ function AgentRunView({
         // identity. Keep every semantic item directly under the run with its durable item id.
         return block.items.map((item) => (
           <AgentTimelineItemView
+            assistantMessageId={message.id}
             conversationId={conversationId}
             item={item}
             key={`timeline-item:${item.id}`}

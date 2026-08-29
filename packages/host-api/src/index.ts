@@ -42,6 +42,8 @@ import type {
   AgentFileChangeContentPage,
   AgentFileChangeDiffInput,
   AgentFileChangeDiffPage,
+  AgentFileChangeHistoryDiffInput,
+  AgentFileChangeHistoryDiffPage,
   AgentFileChangeReadInput,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
@@ -576,6 +578,9 @@ export interface AgentHostApi {
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
   readFileChange(input: AgentFileChangeReadInput): Promise<AgentFileChangeContentPage>
   getFileChangeDiff(input: AgentFileChangeDiffInput): Promise<AgentFileChangeDiffPage>
+  getFileChangeHistoryDiff(
+    input: AgentFileChangeHistoryDiffInput
+  ): Promise<AgentFileChangeHistoryDiffPage>
   onProviderTransition(handler: (event: AgentProviderTransitionNotification) => void): () => void
   onEvent(handler: (event: AgentEvent) => void): () => void
 }

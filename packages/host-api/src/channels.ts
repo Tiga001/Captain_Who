@@ -39,6 +39,7 @@ export const HOST_CHANNELS = {
     getCommandSession: 'host:agent.getCommandSession',
     getContextWindowSnapshot: 'host:agent.getContextWindowSnapshot',
     getFileChangeDiff: 'host:agent.getFileChangeDiff',
+    getFileChangeHistoryDiff: 'host:agent.getFileChangeHistoryDiff',
     getProviderTransitionStatus: 'host:agent.getProviderTransitionStatus',
     getUsageSummary: 'host:agent.getUsageSummary',
     listCommandSessions: 'host:agent.listCommandSessions',

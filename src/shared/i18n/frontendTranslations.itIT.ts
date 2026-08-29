@@ -1409,6 +1409,7 @@ export const itITTranslations = {
   'agent.fileChange.unknownFile': 'file',
   'agent.fileChange.togglePreview': "Attiva/disattiva l'anteprima del file",
   'agent.fileChange.loadingPreview': 'Caricamento anteprima...',
+  'agent.fileChange.historyPreviewUnavailable': 'I dettagli salvati non sono disponibili.',
   'agent.fileChange.loadMorePreview': 'Carica altro',
   'agent.approval.dialog.toolTitle': 'Mi permetti di usare {tool}?',
   'agent.approval.dialog.commandPolicyHint':

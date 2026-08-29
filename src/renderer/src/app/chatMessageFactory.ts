@@ -86,8 +86,8 @@ export function createForkComposerDraft(
   forkedConversation: Pick<ChatConversation, 'modelId' | 'projectId'>
 ): ChatComposerDraft {
   return createComposerDraft({
-    // The fork point owns history; the source composer independently owns the next-run model.
-    modelId: sourceDraft.modelId || forkedConversation.modelId || undefined,
+    // The fork boundary owns both the copied history and the model that can continue it.
+    modelId: forkedConversation.modelId || sourceDraft.modelId || undefined,
     permissionMode: sourceDraft.permissionMode,
     projectId: forkedConversation.projectId
   })

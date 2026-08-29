@@ -44,6 +44,8 @@ import type {
   AgentFileChangeContentPage,
   AgentFileChangeDiffInput,
   AgentFileChangeDiffPage,
+  AgentFileChangeHistoryDiffInput,
+  AgentFileChangeHistoryDiffPage,
   AgentFileChangeReadInput,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
@@ -252,6 +254,7 @@ import {
   AGENT_EVENT_NOTIFICATION_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
   AGENT_GET_FILE_CHANGE_DIFF_METHOD,
+  AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD,
   AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
   AGENT_GET_USAGE_SUMMARY_METHOD,
   AGENT_LIST_PENDING_ACTIONS_METHOD,
@@ -265,6 +268,7 @@ import {
   parseAgentActionExecutionOutputForHost,
   parseAgentFileChangeContentPageForHost,
   parseAgentFileChangeDiffPageForHost,
+  parseAgentFileChangeHistoryDiffPageForHost,
   parseAutomationAttentionAcknowledgeInput,
   parseAutomationAttentionAcknowledgeOutput,
   parseAutomationAttentionSummaryInput,
@@ -1836,6 +1840,28 @@ export class CoreServer {
         const page = parseAgentFileChangeDiffPageForHost(value)
         if (page.transactionId !== input.transactionId) {
           throw new Error('Invalid FileChange Diff page identity')
+        }
+        return page
+      })
+  }
+
+  getFileChangeHistoryDiff(
+    input: AgentFileChangeHistoryDiffInput
+  ): Promise<AgentFileChangeHistoryDiffPage> {
+    return this.rpc
+      .request<unknown, AgentFileChangeHistoryDiffInput>(
+        AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD,
+        input
+      )
+      .then((value) => {
+        const page = parseAgentFileChangeHistoryDiffPageForHost(value)
+        if (
+          page.conversationId !== input.conversationId ||
+          page.assistantMessageId !== input.assistantMessageId ||
+          page.runId !== input.runId ||
+          page.toolCallId !== input.toolCallId
+        ) {
+          throw new Error('Invalid FileChange history Diff page identity')
         }
         return page
       })

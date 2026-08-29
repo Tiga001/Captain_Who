@@ -173,6 +173,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   getProviderTransitionStatus: testState.getProviderTransitionStatus,
   getAgentCommandSession: testState.getAgentCommandSession,
   getAgentFileChangeDiff: vi.fn(),
+  getAgentFileChangeHistoryDiff: vi.fn(),
   listAgentCommandSessions: testState.listAgentCommandSessions,
   listPendingAgentActions: testState.listPendingAgentActions,
   onAgentEvent: testState.onAgentEvent,

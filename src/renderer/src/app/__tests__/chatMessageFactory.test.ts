@@ -37,22 +37,40 @@ describe('createComposerDraft', () => {
     expect(synchronized.conversation).toBe(authoritative)
   })
 
-  it('keeps the source composer model independent from the forked history model', () => {
+  it('uses the fork boundary model instead of the source composer selection', () => {
     const sourceDraft = createComposerDraft({
-      modelId: 'deepseek-draft-model',
+      modelId: 'glm-source-draft-model',
       permissionMode: 'custom',
       projectId: 'source-project'
     })
 
     const forkDraft = createForkComposerDraft(sourceDraft, {
-      modelId: 'generic-history-model',
+      modelId: 'deepseek-boundary-model',
       projectId: 'fork-project'
     })
 
     expect(forkDraft).toMatchObject({
       message: '',
-      modelId: 'deepseek-draft-model',
+      modelId: 'deepseek-boundary-model',
       permissionMode: 'custom',
+      projectId: 'fork-project'
+    })
+  })
+
+  it('falls back to the source composer model when the fork has no boundary model', () => {
+    const sourceDraft = createComposerDraft({
+      modelId: 'source-draft-model',
+      permissionMode: 'full'
+    })
+
+    const forkDraft = createForkComposerDraft(sourceDraft, {
+      modelId: null,
+      projectId: 'fork-project'
+    })
+
+    expect(forkDraft).toMatchObject({
+      modelId: 'source-draft-model',
+      permissionMode: 'full',
       projectId: 'fork-project'
     })
   })

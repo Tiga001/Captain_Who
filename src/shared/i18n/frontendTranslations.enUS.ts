@@ -1372,6 +1372,7 @@ export const enUSTranslations = {
   'agent.fileChange.unknownFile': 'file',
   'agent.fileChange.togglePreview': 'Toggle file preview',
   'agent.fileChange.loadingPreview': 'Loading preview…',
+  'agent.fileChange.historyPreviewUnavailable': 'Saved change details are unavailable.',
   'agent.fileChange.loadMorePreview': 'Load more',
   'agent.approval.dialog.toolTitle': 'Allow me to use {tool}?',
   'agent.approval.dialog.commandPolicyHint':

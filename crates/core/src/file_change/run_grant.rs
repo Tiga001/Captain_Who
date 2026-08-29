@@ -217,6 +217,22 @@ pub enum FileChangeDirectoryIdentity {
 }
 
 impl FileChangeDirectoryIdentity {
+    /// Builds the stable identity of an already-open Unix directory from that descriptor's
+    /// metadata. Observation issuance uses this path so an ancestor cannot be swapped between a
+    /// pathname lookup and identity capture.
+    #[cfg(unix)]
+    pub(crate) fn from_bound_metadata(metadata: &std::fs::Metadata) -> Result<Self, &'static str> {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.is_dir() {
+            return Err("FileChange directory identity requires a directory");
+        }
+        Ok(Self::Unix {
+            schema_version: FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
     pub fn read(path: &Path) -> Result<Self, &'static str> {
         let metadata = std::fs::symlink_metadata(path)
             .map_err(|_| "FileChange grant directory is unavailable")?;
@@ -225,12 +241,7 @@ impl FileChangeDirectoryIdentity {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            Ok(Self::Unix {
-                schema_version: FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            })
+            Self::from_bound_metadata(&metadata)
         }
         #[cfg(windows)]
         {

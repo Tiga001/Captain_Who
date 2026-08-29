@@ -512,6 +512,10 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
         ("clearUsageRecords", AGENT_CLEAR_USAGE_RECORDS_METHOD),
         ("readFileChange", AGENT_READ_FILE_CHANGE_METHOD),
         ("getFileChangeDiff", AGENT_GET_FILE_CHANGE_DIFF_METHOD),
+        (
+            "getFileChangeHistoryDiff",
+            AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD,
+        ),
         ("eventNotification", AGENT_EVENT_NOTIFICATION_METHOD),
         (
             "providerTransitionNotification",

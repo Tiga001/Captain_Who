@@ -7,9 +7,9 @@ import { EditSummaryCard } from '../components/EditSummaryCard'
 
 const mocks = vi.hoisted(() => ({
   getAgentFileChangeDiff: vi.fn(),
+  getAgentFileChangeHistoryDiff: vi.fn(),
   getTurnDiffSummaries: vi.fn(),
-  loadAttachmentImage: vi.fn(),
-  readAgentFileChange: vi.fn()
+  loadAttachmentImage: vi.fn()
 }))
 
 const translations: Record<string, string> = {
@@ -45,7 +45,7 @@ vi.mock('../../gitReview/gitReviewClient', () => ({
 
 vi.mock('../../agent/agentClient', () => ({
   getAgentFileChangeDiff: mocks.getAgentFileChangeDiff,
-  readAgentFileChange: mocks.readAgentFileChange
+  getAgentFileChangeHistoryDiff: mocks.getAgentFileChangeHistoryDiff
 }))
 
 vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
@@ -254,8 +254,11 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
 }
 
 it('reuses the chat Timeline in observer mode while exposing no child write controls', async () => {
-  mocks.getAgentFileChangeDiff.mockResolvedValue({
-    transactionId: 'draft-child',
+  mocks.getAgentFileChangeHistoryDiff.mockResolvedValue({
+    conversationId: 'child-conversation',
+    assistantMessageId: 'child-answer',
+    runId: 'child-run',
+    toolCallId: writeCall.id,
     patch: '+export const child = true',
     offset: 0,
     nextOffset: null,
@@ -312,12 +315,16 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
   await expect
     .element(screen.getByText('+export const child = true', { exact: true }))
     .toBeVisible()
-  expect(mocks.getAgentFileChangeDiff).toHaveBeenCalledWith(
-    'draft-child',
-    0,
-    50_000,
-    'root-conversation'
-  )
+  expect(mocks.getAgentFileChangeHistoryDiff).toHaveBeenCalledWith({
+    conversationId: 'child-conversation',
+    assistantMessageId: 'child-answer',
+    runId: 'child-run',
+    toolCallId: writeCall.id,
+    offset: 0,
+    maxChars: 50_000,
+    observerRootConversationId: 'root-conversation'
+  })
+  expect(mocks.getAgentFileChangeDiff).not.toHaveBeenCalled()
 })
 
 it('renders a persisted edit summary read-only without review or undo actions', async () => {
