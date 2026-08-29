@@ -598,6 +598,45 @@ mod tests {
     }
 
     #[test]
+    fn run_grant_storage_failure_projects_only_typed_safe_tool_result_fields() {
+        let call = AgentToolCall {
+            id: "run-grant-storage-failure".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({ "request": { "action": "status", "transactionId": "tx" } }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = crate::storage::service::FileChangeRunGrantServiceError::StorageUnavailable
+            .into_agent_error();
+
+        let result = failed_tool_call_result(&call, error);
+
+        assert!(!result.ok);
+        assert_eq!(
+            result.error.as_deref(),
+            Some(
+                "File approval memory is temporarily unavailable; this file change was not executed."
+            )
+        );
+        let details = result.result.expect("typed Run grant failure");
+        assert_eq!(details["type"], "file_change_policy");
+        assert_eq!(details["code"], "runGrantStorageUnavailable");
+        assert_eq!(
+            details["errorCode"],
+            "agent.file_change_run_grant_storage_unavailable"
+        );
+        assert_eq!(details["outcome"], "definitely_not_executed");
+        assert_eq!(details["recovery"], "requestApproval");
+        let public = serde_json::to_string(&(result.error, details)).unwrap();
+        for forbidden in ["SQLite", "sqlite", "rusqlite", "Database(", "stack"] {
+            assert!(
+                !public.contains(forbidden),
+                "leaked `{forbidden}`: {public}"
+            );
+        }
+    }
+
+    #[test]
     fn native_tool_calls_replace_untrusted_unicode_ids_and_disambiguate_duplicates() {
         let provider_id = format!("重复/unsafe:{}", "工具调用🔧".repeat(80));
         let calls = tool_calls_from_response(

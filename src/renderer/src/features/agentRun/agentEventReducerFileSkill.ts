@@ -7,6 +7,7 @@ import type {
 } from '@mycopilot/protocol'
 import type { ChatFileChangePreview, ChatSkillInstallationView } from '../chat/chatTypes'
 import { getAgentActionId } from './agentActionUtils'
+import { getApplyPatchRequest } from './applyPatchRequest'
 import { withActionApprovalStatus } from './actionProjection'
 import { upsertById } from './agentEventReducerShared'
 
@@ -43,13 +44,11 @@ export function bindFileChangePreviewsToCall(
   call: AgentToolCall
 ): ChatFileChangePreview[] {
   if (call.tool !== 'apply_patch') return previews
-  const args =
-    call.args && typeof call.args === 'object' && !Array.isArray(call.args)
-      ? (call.args as Record<string, unknown>)
-      : {}
-  const transactionId = typeof args.transactionId === 'string' ? args.transactionId : undefined
-  const filePath = typeof args.filePath === 'string' ? args.filePath : undefined
-  const directApply = call.tool === 'apply_patch' && args.action === 'apply'
+  const request = getApplyPatchRequest(call.args)
+  const transactionId =
+    typeof request?.transactionId === 'string' ? request.transactionId : undefined
+  const filePath = typeof request?.filePath === 'string' ? request.filePath : undefined
+  const directApply = request?.action === 'apply'
 
   const previewIndex = previews.findIndex((preview) => {
     if (preview.toolCallId !== null) return false

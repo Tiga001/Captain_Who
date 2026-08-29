@@ -40,18 +40,21 @@ beforeEach(() => {
   fileChangeRpc.getDiff.mockReset()
 })
 
-function fileChangeAction(inlineDiff: { patch: string; truncated: false } | null) {
+function fileChangeAction(
+  inlineDiff: { patch: string; truncated: false } | null,
+  operation: 'create' | 'update' | 'delete' = 'update'
+) {
   return {
     type: 'file_change',
     fileChange: {
       schemaVersion: 1,
       id: 'file-change-call',
       transactionId: 'file-change-transaction',
-      operation: 'update',
-      updateStrategy: inlineDiff === null ? 'rewrite' : null,
+      operation,
+      updateStrategy: operation === 'update' && inlineDiff === null ? 'rewrite' : null,
       filePath: 'src/main.ts',
       inlineDiff,
-      baseRevision: 'content-sha256-v1:base',
+      baseRevision: operation === 'create' ? null : 'content-sha256-v1:base',
       summary: '更新入口文件',
       additions: 2,
       deletions: 1,
@@ -78,9 +81,51 @@ describe('AgentApprovalDialog FileChange approval', () => {
     const approve = screen.getByRole('button', { name: /^1\s*批准$/ })
     await expect.element(approve).toBeEnabled()
     await approve.click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, {
-      rememberForRun: false
-    })
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
+  })
+
+  it.each(['create', 'update'] as const)(
+    'offers and forwards run-scoped approval for %s',
+    async (operation) => {
+      const action = fileChangeAction(
+        { patch: '@@ -0,0 +1 @@\n+current\n', truncated: false },
+        operation
+      )
+      const onApprove = vi.fn()
+      const screen = await render(
+        <AgentApprovalDialog
+          target={{ action, messageId: 'assistant-message' }}
+          onApprove={onApprove}
+        />
+      )
+
+      const remember = screen.container.querySelector<HTMLButtonElement>('[data-choice="remember"]')
+      expect(remember).not.toBeNull()
+      await remember!.click()
+      expect(onApprove).toHaveBeenCalledWith(
+        'assistant-message',
+        action,
+        'remainingApplyPatchInRun'
+      )
+    }
+  )
+
+  it('does not offer run-scoped approval for delete', async () => {
+    const action = fileChangeAction(
+      { patch: '@@ -1 +0,0 @@\n-current\n', truncated: false },
+      'delete'
+    )
+    const onApprove = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
+
+    expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
+    await screen.getByRole('button', { name: /^1\s*批准$/ }).click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
   })
 
   it('keeps approval disabled until every staged Diff page is loaded in order', async () => {
@@ -291,9 +336,7 @@ describe('AgentApprovalDialog Skill script approval', () => {
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
 
     await screen.getByRole('button', { name: '批准' }).click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, {
-      rememberForRun: false
-    })
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
   })
 })
 
@@ -333,11 +376,10 @@ describe('AgentApprovalDialog command approval', () => {
     expect(window.getComputedStyle(code!).maxHeight).toBe('180px')
     expect(window.getComputedStyle(code!).overflow).toBe('auto')
     expect(window.getComputedStyle(code!).whiteSpace).toBe('pre-wrap')
+    expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
 
     await screen.getByRole('button', { name: '批准' }).click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, {
-      rememberForRun: false
-    })
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
   })
 
   it('unlocks a standard approval after an unaccepted or failed submission', async () => {
@@ -381,6 +423,7 @@ describe('AgentApprovalDialog command approval', () => {
 describe('AgentApprovalDialog Office approval', () => {
   it('shows logical Office paths without exposing frozen execution details', async () => {
     const parentIdentity = { revision: 'office-path-parent-v1:test', device: 1, inode: 2 }
+    const onApprove = vi.fn()
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
@@ -450,7 +493,10 @@ describe('AgentApprovalDialog Office approval', () => {
       }
     }
     const screen = await render(
-      <AgentApprovalDialog target={{ action, messageId: 'assistant-message' }} />
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
     )
 
     const snapshot = screen.container.querySelector('.agent-approval-dialog__command')
@@ -462,5 +508,8 @@ describe('AgentApprovalDialog Office approval', () => {
     expect(snapshot?.textContent).not.toContain('readSource')
     expect(snapshot?.textContent).not.toContain('createNew')
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
+
+    await screen.getByRole('button', { name: '批准' }).click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
   })
 })

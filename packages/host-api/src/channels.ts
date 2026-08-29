@@ -10,6 +10,7 @@ export const HOST_CHANNELS = {
     getWindowState: 'host:app.getWindowState',
     openExternal: 'host:app.openExternal',
     setNativeThemeSource: 'host:app.setNativeThemeSource',
+    whenReady: 'host:app.whenReady',
     windowStateChange: 'host:app.windowStateChange'
   },
   agent: {

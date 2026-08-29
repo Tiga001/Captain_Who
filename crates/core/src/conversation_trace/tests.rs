@@ -1052,11 +1052,13 @@ fn staged_and_direct_file_change_projection_keeps_effect_metadata_without_payloa
         id: "staged-1".into(),
         tool: "apply_patch".into(),
         args: json!({
-            "action": "append",
-            "transactionId": "file-change-1",
-            "index": 0,
-            "expectedDraftRevision": 0,
-            "content": "first\nsecond\nSECRET_WRITE_BODY"
+            "request": {
+                "action": "append",
+                "transactionId": "file-change-1",
+                "index": 0,
+                "expectedDraftRevision": 0,
+                "content": "first\nsecond\nSECRET_WRITE_BODY"
+            }
         }),
         approval_status: AgentApprovalStatus::NotRequired,
         reason: None,
@@ -1065,16 +1067,18 @@ fn staged_and_direct_file_change_projection_keeps_effect_metadata_without_payloa
         id: "patch-1".into(),
         tool: "apply_patch".into(),
         args: json!({
-            "action": "apply",
-            "operation": "update",
-            "filePath": "src/lib.rs",
-            "observationId": "fobs_trace_projection",
-            "edits": [{
-                "kind": "replace",
-                "oldText": "old",
-                "newText": "new\nextra"
-            }],
-            "summary": "Update the implementation"
+            "request": {
+                "action": "apply",
+                "operation": "update",
+                "filePath": "src/lib.rs",
+                "observationId": "fobs_trace_projection",
+                "edits": [{
+                    "kind": "replace",
+                    "oldText": "old",
+                    "newText": "new\nextra"
+                }],
+                "summary": "Update the implementation"
+            }
         }),
         approval_status: AgentApprovalStatus::Approved,
         reason: None,
@@ -1150,8 +1154,8 @@ fn staged_and_direct_file_change_projection_keeps_effect_metadata_without_payloa
     else {
         panic!("expected staged call");
     };
-    assert_eq!(staged_operation["contentBytes"], 30);
-    assert_eq!(staged_operation["additions"], 3);
+    assert_eq!(staged_operation["request"]["contentBytes"], 30);
+    assert_eq!(staged_operation["request"]["additions"], 3);
     let ConversationTurnTraceItem::ToolResult {
         observation: staged_result,
         ..
@@ -1169,9 +1173,9 @@ fn staged_and_direct_file_change_projection_keeps_effect_metadata_without_payloa
     else {
         panic!("expected patch call");
     };
-    assert_eq!(patch_operation["filePath"], "src/lib.rs");
-    assert_eq!(patch_operation["additions"], 2);
-    assert_eq!(patch_operation["deletions"], 1);
+    assert_eq!(patch_operation["request"]["filePath"], "src/lib.rs");
+    assert_eq!(patch_operation["request"]["additions"], 2);
+    assert_eq!(patch_operation["request"]["deletions"], 1);
     let ConversationTurnTraceItem::ToolResult {
         observation: patch_result,
         approval_status,
@@ -1401,15 +1405,17 @@ fn approval_checkpoint_keeps_exact_direct_args_while_durable_snapshot_is_bounded
         id: "patch-approval".into(),
         tool: "apply_patch".into(),
         args: json!({
-            "action": "apply",
-            "operation": "update",
-            "filePath": "src/main.rs",
-            "observationId": "fobs_approval_checkpoint",
-            "edits": [{
-                "kind": "replace",
-                "oldText": "old",
-                "newText": "new"
-            }]
+            "request": {
+                "action": "apply",
+                "operation": "update",
+                "filePath": "src/main.rs",
+                "observationId": "fobs_approval_checkpoint",
+                "edits": [{
+                    "kind": "replace",
+                    "oldText": "old",
+                    "newText": "new"
+                }]
+            }
         }),
         approval_status: AgentApprovalStatus::Required,
         reason: None,
@@ -1425,11 +1431,17 @@ fn approval_checkpoint_keeps_exact_direct_args_while_durable_snapshot_is_bounded
         panic!("expected checkpoint call");
     };
     assert_eq!(
-        checkpoint_operation["observationId"],
+        checkpoint_operation["request"]["observationId"],
         "fobs_approval_checkpoint"
     );
-    assert_eq!(checkpoint_operation["edits"][0]["oldText"], "old");
-    assert_eq!(checkpoint_operation["edits"][0]["newText"], "new");
+    assert_eq!(
+        checkpoint_operation["request"]["edits"][0]["oldText"],
+        "old"
+    );
+    assert_eq!(
+        checkpoint_operation["request"]["edits"][0]["newText"],
+        "new"
+    );
 
     let durable = recorder
         .snapshot()
@@ -1441,12 +1453,13 @@ fn approval_checkpoint_keeps_exact_direct_args_while_durable_snapshot_is_bounded
     else {
         panic!("expected durable call");
     };
-    assert!(durable_operation.get("edits").is_none());
-    assert!(durable_operation.get("observationId").is_none());
-    assert_eq!(durable_operation["filePath"], "src/main.rs");
-    assert_eq!(durable_operation["editCount"], 1);
-    assert_eq!(durable_operation["additions"], 1);
-    assert_eq!(durable_operation["deletions"], 1);
+    let durable_request = &durable_operation["request"];
+    assert!(durable_request.get("edits").is_none());
+    assert!(durable_request.get("observationId").is_none());
+    assert_eq!(durable_request["filePath"], "src/main.rs");
+    assert_eq!(durable_request["editCount"], 1);
+    assert_eq!(durable_request["additions"], 1);
+    assert_eq!(durable_request["deletions"], 1);
 }
 
 #[test]

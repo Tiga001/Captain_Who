@@ -1422,7 +1422,7 @@ export const frFRTranslations = {
   'agent.approval.dialog.approveRemember':
     'Oui, et ne redemandez pas ce tour-ci les commandes commençant par ceci',
   'agent.approval.dialog.approveFileChangeRemember':
-    'Oui, et ne demandez plus de modifications de fichiers ce tour-ci',
+    'Oui, et ne plus demander pour les créations/mises à jour de fichiers pendant cette exécution (les suppressions restent soumises à approbation)',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': 'Non',
   'agent.approval.dialog.rejectPlaceholder': 'Non, dis-moi comment ajuster',

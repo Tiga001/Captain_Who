@@ -1,8 +1,9 @@
 use crate::storage::models::AgentFileChangeRecord;
 use crate::{
-    AgentApprovalStatus, AgentFileChangeOperation, AgentFileChangeSnapshot,
-    AgentFileChangeUpdateStrategy, AgentPatchPermission, AgentPermissions, AgentProposedAction,
-    AgentWritePermission, AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+    AgentApprovalStatus, AgentFileChangeOperation, AgentFileChangeProposal, AgentFileChangeResult,
+    AgentFileChangeResultStatus, AgentFileChangeSnapshot, AgentFileChangeUpdateStrategy,
+    AgentPatchPermission, AgentPermissions, AgentProposedAction, AgentWritePermission,
+    AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
 };
 use similar::TextDiff;
 
@@ -20,6 +21,60 @@ pub enum FileChangeApprovalRoute {
 pub enum FileChangeAuthorizationSource {
     Automatic,
     ExplicitUser,
+    RunGrant,
+}
+
+/// Proves that one typed terminal result belongs to the exact frozen FileChange proposal.
+///
+/// This invariant deliberately lives below the runtime caller: durable settlement and later
+/// run-grant receipt checks both invoke it, so replacing the result and ToolResult together cannot
+/// rebind an approval to another transaction, path, operation, or receipt.
+pub fn file_change_result_matches_frozen_proposal(
+    result: &AgentFileChangeResult,
+    proposal: &AgentFileChangeProposal,
+) -> bool {
+    if result.validate().is_err()
+        || proposal.validate().is_err()
+        || result.transaction_id != proposal.transaction_id
+        || result.operation != proposal.operation
+        || result.update_strategy != proposal.update_strategy
+        || result.file_path != proposal.file_path
+        || result.additions != proposal.additions
+        || result.deletions != proposal.deletions
+        || result.line_count != proposal.line_count
+        || result.byte_count != proposal.byte_count
+    {
+        return false;
+    }
+    let succeeded = matches!(
+        result.status,
+        AgentFileChangeResultStatus::Applied | AgentFileChangeResultStatus::AlreadyApplied
+    );
+    if !succeeded {
+        return true;
+    }
+    let Some(receipt) = proposal.execution.receipt.as_ref() else {
+        return false;
+    };
+    let status_matches = match (proposal.execution.transaction.status, result.status) {
+        // A normal terminal path reports `applied`. Startup reconciliation is allowed to
+        // strengthen the same receipt-backed effect to `already_applied` after proving that the
+        // target digest is already present. Both states remain bound to the exact durable receipt
+        // below; the reverse transition would incorrectly claim a fresh execution.
+        (
+            crate::file_change::FileChangeStatus::Applied,
+            AgentFileChangeResultStatus::Applied | AgentFileChangeResultStatus::AlreadyApplied,
+        )
+        | (
+            crate::file_change::FileChangeStatus::AlreadyApplied,
+            AgentFileChangeResultStatus::AlreadyApplied,
+        ) => true,
+        _ => false,
+    };
+    status_matches
+        && receipt.transaction_id == result.transaction_id
+        && receipt.file_path == result.file_path
+        && receipt.target.revision() == result.revision.as_deref()
 }
 
 /// Resolves the common write/approval dimensions without granting any broader
@@ -45,6 +100,10 @@ pub fn file_change_authorized(
 ) -> bool {
     match (file_change_approval_route(permissions), source) {
         (FileChangeApprovalRoute::AutoApprove, FileChangeAuthorizationSource::Automatic)
+        | (
+            FileChangeApprovalRoute::AutoApprove | FileChangeApprovalRoute::RequireExplicitApproval,
+            FileChangeAuthorizationSource::RunGrant,
+        )
         | (
             FileChangeApprovalRoute::AutoApprove | FileChangeApprovalRoute::RequireExplicitApproval,
             FileChangeAuthorizationSource::ExplicitUser,
@@ -352,9 +411,10 @@ mod tests {
             FILE_OBSERVATION_TTL_MS,
         };
 
-        let digest = format!("file-change-sha256-v1:{}", "0".repeat(64));
+        let digest = crate::file_change::content_digest(b"");
+        let diff_digest = crate::file_change::diff_digest("");
         let target = FileChangeContentState::Present {
-            revision: "revision".to_string(),
+            revision: crate::content_revision(b""),
             digest: digest.clone(),
             byte_count: 0,
         };
@@ -382,7 +442,7 @@ mod tests {
                 file_path: "report.md".to_string(),
                 base: FileChangeContentState::Missing,
                 target,
-                diff_digest: digest.clone(),
+                diff_digest,
                 proposal_digest: digest.clone(),
                 additions: 0,
                 deletions: 0,
@@ -441,5 +501,102 @@ mod tests {
         assert!(
             serde_json::from_value::<crate::file_change::FileChangeDirectBinding>(extra).is_err()
         );
+    }
+
+    #[test]
+    fn terminal_result_is_exactly_bound_to_frozen_proposal_and_receipt() {
+        use crate::file_change::{
+            FileChangeCommit, FileChangeOutcome, FileChangeReceipt, FileChangeStatus,
+        };
+        use crate::{
+            AgentFileChangeOutcome, AgentFileChangeResultStatus,
+            AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+        };
+
+        let prepared = direct_binding_fixture();
+        let commit = FileChangeCommit {
+            status: FileChangeStatus::Applied,
+            receipt: FileChangeReceipt {
+                schema_version: prepared.schema_version,
+                transaction_id: prepared.transaction.id.clone(),
+                operation: prepared.transaction.operation,
+                file_path: prepared.transaction.file_path.clone(),
+                outcome: FileChangeOutcome::Applied,
+                base: prepared.transaction.base.clone(),
+                target: prepared.transaction.target.clone(),
+                proposal_digest: prepared.transaction.proposal_digest.clone(),
+                committed_at: 2,
+            },
+            delete_journal: None,
+        };
+        let committed = prepared.with_commit(&commit).unwrap();
+        let proposal = AgentFileChangeProposal {
+            schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            id: "diff-1".to_string(),
+            transaction_id: "transaction-1".to_string(),
+            operation: AgentFileChangeOperation::Create,
+            update_strategy: None,
+            file_path: "report.md".to_string(),
+            inline_diff: Some(crate::AgentGitDiffSnapshot {
+                patch: String::new(),
+                truncated: false,
+            }),
+            base_revision: None,
+            summary: None,
+            additions: 0,
+            deletions: 0,
+            line_count: 0,
+            byte_count: 0,
+            approval_status: AgentApprovalStatus::Approved,
+            execution: Box::new(committed),
+        };
+        let result = AgentFileChangeResult {
+            schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            status: AgentFileChangeResultStatus::Applied,
+            outcome: AgentFileChangeOutcome::Applied,
+            transaction_id: proposal.transaction_id.clone(),
+            operation: proposal.operation,
+            update_strategy: proposal.update_strategy,
+            file_path: proposal.file_path.clone(),
+            additions: proposal.additions,
+            deletions: proposal.deletions,
+            line_count: proposal.line_count,
+            byte_count: proposal.byte_count,
+            revision: proposal
+                .execution
+                .transaction
+                .target
+                .revision()
+                .map(str::to_string),
+            error_code: None,
+            error: None,
+            message: None,
+        };
+        assert!(file_change_result_matches_frozen_proposal(
+            &result, &proposal
+        ));
+
+        let mut reconciled = result.clone();
+        reconciled.status = AgentFileChangeResultStatus::AlreadyApplied;
+        assert!(file_change_result_matches_frozen_proposal(
+            &reconciled,
+            &proposal
+        ));
+
+        let mut tampered = result.clone();
+        tampered.transaction_id = "other-transaction".to_string();
+        assert!(!file_change_result_matches_frozen_proposal(
+            &tampered, &proposal
+        ));
+        let mut tampered = result.clone();
+        tampered.file_path = "other.md".to_string();
+        assert!(!file_change_result_matches_frozen_proposal(
+            &tampered, &proposal
+        ));
+        let mut tampered = result.clone();
+        tampered.revision = Some("other-revision".to_string());
+        assert!(!file_change_result_matches_frozen_proposal(
+            &tampered, &proposal
+        ));
     }
 }

@@ -623,7 +623,7 @@ fn validate_frozen_office_settlement_trace_args(
 /// terminal audit, and paired trace item must all identify the same tool call and outcome. Any
 /// malformed or incomplete evidence is conservatively reported as unsettled rather than inferred
 /// from `pending.status` alone.
-fn manual_file_effect_has_authoritative_settlement(
+pub(crate) fn manual_file_effect_has_authoritative_settlement(
     connection: &rusqlite::Connection,
     pending: &AgentPendingActionRecord,
 ) -> Result<bool, String> {
@@ -678,7 +678,8 @@ fn manual_file_effect_has_authoritative_settlement(
         }
         let (call_sequence, trace_tool, operation, call_approval_status) = matching_calls[0];
         let expected_trace_approval_status = if is_mcp_action
-            || (is_file_change && audit.decision_source.as_deref() != Some("auto"))
+            || (is_file_change
+                && !matches!(audit.decision_source.as_deref(), Some("auto" | "run_grant")))
         {
             // Provider ToolCalls are immutable. MCP approval is represented by the terminal audit
             // and paired ToolResult rather than rewriting the frozen call from required.
@@ -731,6 +732,23 @@ fn manual_file_effect_has_authoritative_settlement(
             &expected_call,
             &audited_tool_result,
         );
+        if is_file_change {
+            let ConversationTurnTraceItem::ToolResult {
+                approval_status, ..
+            } = &mut expected_result_item
+            else {
+                return Err("file-effect projection did not produce a ToolResult".to_string());
+            };
+            *approval_status = match audit.decision.as_deref() {
+                Some("approved") => crate::AgentApprovalStatus::Approved,
+                Some("rejected" | "cancelled") => crate::AgentApprovalStatus::Rejected,
+                _ => {
+                    return Err(
+                        "manual file-effect terminal audit has an invalid decision".to_string()
+                    )
+                }
+            };
+        }
         if is_mcp_action || is_file_change {
             // Archive metadata belongs to the validated trace rather than the typed terminal
             // audit. Current MCP and FileChange projections may attach that private archive
@@ -1264,7 +1282,7 @@ fn validate_auto_file_change_initial_journal(
         || audit.decided_at != Some(audit.created_at)
         || audit.completed_at.is_some()
         || audit.blocked_reason.is_some()
-        || audit.decision_source.as_deref() != Some("auto")
+        || !matches!(audit.decision_source.as_deref(), Some("auto" | "run_grant"))
         || audit.effective_permissions_json.is_none()
         || file_change.schema_version != crate::file_change::FILE_CHANGE_SCHEMA_VERSION
         || file_change.approval_status != crate::AgentApprovalStatus::Approved
@@ -1669,8 +1687,17 @@ impl StorageService {
             expected_status: expected_status.to_string(),
             outcome,
         };
-        let changed =
-            terminalize_mcp_action_in_transaction(&transaction, &request, updated_at)?.is_some();
+        let terminalized =
+            terminalize_mcp_action_in_transaction(&transaction, &request, updated_at)?;
+        if let Some(record) = terminalized.as_ref() {
+            file_change_run_grant_repository::revoke_nonterminal_run_grants(
+                &transaction,
+                &record.run_id,
+                updated_at,
+            )
+            .map_err(storage_error)?;
+        }
+        let changed = terminalized.is_some();
         transaction.commit().map_err(storage_error)?;
         Ok(changed)
     }
@@ -2290,14 +2317,33 @@ impl StorageService {
     /// byte-for-byte approved journal written by
     /// [`Self::store_auto_file_change_pending_action_with_audit`]. The filesystem committer may
     /// run only after this transaction returns `true`.
+    #[allow(clippy::too_many_arguments)]
     pub fn claim_auto_file_change_pending_execution(
         &self,
         pending: &AgentPendingActionRecord,
         approved_audit: &AgentActionAuditRecord,
+        expected_run_grant_ref: Option<&crate::file_change::FileChangeRunGrantRef>,
+        expected_file_change: Option<&crate::AgentFileChangeProposal>,
+        expected_run_context: Option<&crate::AgentRunContext>,
         executing_agent_input_json: &str,
         updated_at: i64,
     ) -> Result<bool, String> {
         validate_auto_file_change_initial_journal(pending, approved_audit)?;
+        let uses_run_grant = approved_audit.decision_source.as_deref() == Some("run_grant");
+        if uses_run_grant
+            != (expected_run_grant_ref.is_some()
+                && expected_file_change.is_some()
+                && expected_run_context.is_some())
+            || (!uses_run_grant
+                && (expected_file_change.is_some() || expected_run_context.is_some()))
+        {
+            return Err("automatic FileChange grant authority is inconsistent".to_string());
+        }
+        if let Some(grant_ref) = expected_run_grant_ref {
+            grant_ref
+                .validate()
+                .map_err(|_| "automatic FileChange grant reference is invalid".to_string())?;
+        }
         if updated_at < pending.updated_at || executing_agent_input_json.trim().is_empty() {
             return Err("automatic FileChange executing journal is invalid".to_string());
         }
@@ -2336,6 +2382,32 @@ impl StorageService {
             transaction.commit().map_err(storage_error)?;
             return Ok(false);
         }
+        if let (Some(grant_ref), Some(file_change), Some(run_context)) = (
+            expected_run_grant_ref,
+            expected_file_change,
+            expected_run_context,
+        ) {
+            let grant = file_change_run_grant_repository::get_active_run_grant(
+                &transaction,
+                &pending.run_id,
+            )
+            .map_err(storage_error)?;
+            let Some(grant) = grant else {
+                transaction.commit().map_err(storage_error)?;
+                return Ok(false);
+            };
+            if !super::file_change_run_grants::file_change_run_grant_authorizes(
+                &grant,
+                Some(grant_ref),
+                file_change,
+                run_context,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                transaction.commit().map_err(storage_error)?;
+                return Ok(false);
+            }
+        }
         let pending_changed = pending_action_repository::transition_pending_action(
             &transaction,
             &pending.action_id,
@@ -2353,7 +2425,7 @@ impl StorageService {
                 WHERE action_id = ?1
                   AND status = 'approved'
                   AND decision = 'approved'
-                  AND decision_source = 'auto'
+                  AND decision_source = ?11
                   AND run_id = ?2
                   AND conversation_id IS ?3
                   AND assistant_message_id IS ?4
@@ -2383,6 +2455,7 @@ impl StorageService {
                     approved_audit.effective_permissions_json,
                     approved_audit.path_scope,
                     approved_audit.command_cwd_scope,
+                    approved_audit.decision_source,
                 ],
             )
             .map_err(storage_error)?;
@@ -3122,6 +3195,56 @@ impl StorageService {
         transaction.commit().map_err(storage_error)
     }
 
+    /// Atomically makes a cancelled approval non-actionable and revokes every nonterminal
+    /// FileChange Run grant owned by that logical Run.
+    ///
+    /// Cancellation terminates the Run rather than continuing the model. Keeping the pending
+    /// status CAS, notification settlement, and grant revocation in one immediate transaction
+    /// prevents a terminal UI result from racing still-active remembered write authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_cancelled_pending_agent_action_and_revoke_file_change_run_grants(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        agent_input_json: &str,
+        run_id: &str,
+        renderer_action_id: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let affected = pending_action_repository::transition_pending_action(
+            &transaction,
+            action_id,
+            expected_status,
+            "cancelled",
+            agent_input_json,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "待审批操作取消必须且只能更新一条记录，actionId={action_id}，实际更新 {affected} 条。"
+            ));
+        }
+        notification_repository::resolve_notification_events_by_run_and_approval_action_id_in_transaction(
+            &transaction,
+            run_id,
+            renderer_action_id,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        file_change_run_grant_repository::revoke_nonterminal_run_grants(
+            &transaction,
+            run_id,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
+    }
+
     /// Marks one exact child Wake as approval-paused only while its owning action is still
     /// pending in the same SQLite write transaction.
     ///
@@ -3511,6 +3634,12 @@ impl StorageService {
             "task_failed",
             completed_at,
         )?;
+        file_change_run_grant_repository::revoke_nonterminal_run_grants(
+            &transaction,
+            &trace.run_id,
+            completed_at,
+        )
+        .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)
     }
 
@@ -3639,6 +3768,30 @@ impl StorageService {
                 "manual file-effect pending target settlement conflict: actionId={}, expectedStatus={expected_pending_status}, targetStatus={target_status}",
                 pending.action_id
             ));
+        }
+
+        if terminal_audit.action_type == "file_change" {
+            let result_json = terminal_audit
+                .file_change_result_json
+                .as_deref()
+                .ok_or_else(|| "FileChange terminal audit lacks its typed result".to_string())?;
+            let result = serde_json::from_str::<crate::AgentFileChangeResult>(result_json)
+                .map_err(|_| "FileChange terminal audit result is invalid".to_string())?;
+            let activate = matches!(
+                result.status,
+                crate::AgentFileChangeResultStatus::Applied
+                    | crate::AgentFileChangeResultStatus::AlreadyApplied
+            );
+            let activation_result_digest =
+                activate.then(|| crate::file_change::content_digest(result_json.as_bytes()));
+            file_change_run_grant_repository::settle_pending_run_grant(
+                &transaction,
+                &pending.action_id,
+                activate,
+                activation_result_digest.as_deref(),
+                committed_at,
+            )
+            .map_err(storage_error)?;
         }
 
         let trace_changed = conversation_trace_repository::commit_trace_in_connection(
@@ -3783,8 +3936,41 @@ impl StorageService {
                 terminal_audit,
             )
         });
+        let grant_intent = file_change_run_grant_repository::get_run_grant_for_pending_action(
+            &transaction,
+            &pending.action_id,
+        )
+        .map_err(storage_error)?;
+        let expected_grant_active = terminal_audit
+            .file_change_result_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<crate::AgentFileChangeResult>(json).ok())
+            .is_some_and(|result| {
+                matches!(
+                    result.status,
+                    crate::AgentFileChangeResultStatus::Applied
+                        | crate::AgentFileChangeResultStatus::AlreadyApplied
+                )
+            });
+        let grant_is_terminal = grant_intent.as_ref().is_none_or(|grant| {
+            grant.status
+                == if expected_grant_active {
+                    crate::file_change::FileChangeRunGrantStatus::Active
+                } else {
+                    crate::file_change::FileChangeRunGrantStatus::Inactive
+                }
+        });
+        let grant_is_pending = grant_intent.as_ref().is_none_or(|grant| {
+            grant.status == crate::file_change::FileChangeRunGrantStatus::Pending
+        });
 
         if target_is_committed && audit_is_terminal {
+            if !grant_is_terminal {
+                return Ok(settlement_diverged(
+                    "fileChangeRunGrant",
+                    "the terminal receipt committed without the exact grant lifecycle",
+                ));
+            }
             if !model_context_at_or_after_boundary {
                 return Ok(settlement_diverged(
                     "conversationModelContext",
@@ -3811,6 +3997,12 @@ impl StorageService {
         }
 
         if target_is_uncommitted && audit_is_preterminal {
+            if !grant_is_pending {
+                return Ok(settlement_diverged(
+                    "fileChangeRunGrant",
+                    "the grant lifecycle advanced without the terminal receipt",
+                ));
+            }
             if !model_context_before_boundary {
                 return Ok(settlement_diverged(
                     "conversationModelContext",
@@ -4151,7 +4343,8 @@ fn validate_manual_file_effect_settlement_request(
         audit.decision.as_deref() == Some("approved")
     };
     let valid_decision_source = audit.decision_source.as_deref() == Some("manual")
-        || (is_file_change && audit.decision_source.as_deref() == Some("auto"));
+        || (is_file_change
+            && matches!(audit.decision_source.as_deref(), Some("auto" | "run_grant")));
     if !valid_decision || !valid_decision_source {
         return Err("file-effect settlement contains an invalid audit lifecycle".to_string());
     }
@@ -4190,6 +4383,17 @@ fn validate_manual_file_effect_settlement_request(
         (true, Some(result_json)) => {
             let result = serde_json::from_str::<crate::AgentFileChangeResult>(result_json)
                 .map_err(|_| "FileChange terminal result is invalid".to_string())?;
+            let AgentProposedAction::FileChange { file_change } = &action else {
+                unreachable!("is_file_change was derived from the exact action")
+            };
+            if !crate::file_change_support::file_change_result_matches_frozen_proposal(
+                &result,
+                file_change,
+            ) {
+                return Err(
+                    "FileChange terminal result differs from its frozen proposal".to_string(),
+                );
+            }
             if tool_result.result.as_ref()
                 != Some(
                     &serde_json::to_value(&result).map_err(|_| {

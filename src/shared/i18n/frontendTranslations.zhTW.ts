@@ -1298,7 +1298,8 @@ export const zhTWTranslations = {
     '批准後我會使用這個工具。如果操作超出目前權限，系統會自動攔住。',
   'agent.approval.dialog.approve': '是',
   'agent.approval.dialog.approveRemember': '是，且本輪後續以此開頭的命令不再詢問',
-  'agent.approval.dialog.approveFileChangeRemember': '是，且本輪編輯文件無需審批',
+  'agent.approval.dialog.approveFileChangeRemember':
+    '是，且本輪後續建立/更新檔案無需審批（刪除仍需審批）',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': '否',
   'agent.approval.dialog.rejectPlaceholder': '否，請告訴我如何調整',

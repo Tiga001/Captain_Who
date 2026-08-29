@@ -154,11 +154,13 @@ async fn write_approval_tool_stream(stream: &mut TcpStream, observation_id: &str
                     "function": {
                         "name": "apply_patch",
                         "arguments": serde_json::to_string(&json!({
-                            "action": "apply",
-                            "operation": "create",
-                            "filePath": "guided.txt",
-                            "observationId": observation_id,
-                            "content": "draft"
+                            "request": {
+                                "action": "apply",
+                                "operation": "create",
+                                "filePath": "guided.txt",
+                                "observationId": observation_id,
+                                "content": "draft"
+                            }
                         })).unwrap()
                     }
                 }]

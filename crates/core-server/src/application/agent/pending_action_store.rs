@@ -450,9 +450,34 @@ impl AgentService {
             &record.agent_input,
             PendingActionStatus::Executing,
         )?;
+        let expected_run_grant_ref = record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.file_change_run_grant_ref.as_ref());
+        let expected_file_change = match (&record.snapshot.action, expected_run_grant_ref) {
+            (AgentProposedAction::FileChange { file_change }, Some(_)) => Some(file_change),
+            (_, Some(_)) => {
+                return Err(
+                    "automatic FileChange grant reference is attached to another action"
+                        .to_string(),
+                )
+            }
+            (_, None) => None,
+        };
+        let expected_run_context = if expected_run_grant_ref.is_some() {
+            Some(record.agent_input.context.as_ref().ok_or_else(|| {
+                "automatic FileChange grant authority has no frozen Run context".to_string()
+            })?)
+        } else {
+            None
+        };
         let claimed = self.storage.claim_auto_file_change_pending_execution(
             &approved_pending,
             &approved_audit,
+            expected_run_grant_ref,
+            expected_file_change,
+            expected_run_context,
             &executing_agent_input_json,
             now_ms(),
         )?;
@@ -945,6 +970,40 @@ impl AgentService {
         Ok(())
     }
 
+    /// Commits the cancellation status and retires every remembered FileChange grant for the Run
+    /// in one SQLite transaction before process-local state can report a terminal cancellation.
+    pub(super) fn transition_pending_status_to_cancelled_and_revoke_run_grants(
+        &self,
+        record: &PendingActionRecord,
+    ) -> Result<(), String> {
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let pending = pending_actions
+            .get_mut(&record.storage_id)
+            .ok_or_else(|| format!("待审批操作的内存状态不存在：{}", record.storage_id))?;
+        let current = pending.snapshot.status;
+        if current == PendingActionStatus::Cancelled {
+            return Ok(());
+        }
+        ensure_pending_status_transition(current, PendingActionStatus::Cancelled)?;
+        self.storage
+            .transition_cancelled_pending_agent_action_and_revoke_file_change_run_grants(
+                &record.storage_id,
+                pending_status_label(current),
+                &persisted_pending_agent_input_json(
+                    &pending.agent_input,
+                    PendingActionStatus::Cancelled,
+                )?,
+                &record.snapshot.run_id,
+                &record.snapshot.action_id,
+                now_ms(),
+            )?;
+        pending.snapshot.status = PendingActionStatus::Cancelled;
+        Ok(())
+    }
+
     pub(super) fn persist_pending_action(
         &self,
         record: &PendingActionRecord,
@@ -1191,7 +1250,7 @@ impl AgentService {
     ) -> Result<bool, String> {
         let status = pending_status_label(target_status);
         #[cfg(test)]
-        let injected_failure = if decision_source == "auto" {
+        let injected_failure = if matches!(decision_source, "auto" | "run_grant") {
             take_auto_action_audit_failure(
                 &record.snapshot.run_id,
                 &record.snapshot.action_id,
@@ -1232,7 +1291,7 @@ impl AgentService {
                 completed_at,
             )?;
         #[cfg(test)]
-        let injected_post_commit_failure = if decision_source == "auto" {
+        let injected_post_commit_failure = if matches!(decision_source, "auto" | "run_grant") {
             take_auto_action_audit_post_commit_failure(
                 &record.snapshot.run_id,
                 &record.snapshot.action_id,
@@ -1274,10 +1333,21 @@ impl AgentService {
         ) {
             return Err("automatic FileChange settlement requires a FileChange action".into());
         }
+        let decision_source = if record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.file_change_run_grant_ref.as_ref())
+            .is_some()
+        {
+            "run_grant"
+        } else {
+            "auto"
+        };
         self.persist_manual_audited_result_trace_for_decision(
             record,
             "approved",
-            "auto",
+            decision_source,
             target_status,
             None,
             tool_result,
@@ -1626,6 +1696,17 @@ fn auto_action_audit_record(
     completed_at: Option<i64>,
 ) -> AgentActionAuditRecord {
     let provider_action_id = action_id_for_action(action);
+    let decision_source = if matches!(action, AgentProposedAction::FileChange { .. })
+        && agent_input
+            .resume_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.file_change_run_grant_ref.as_ref())
+            .is_some()
+    {
+        "run_grant"
+    } else {
+        "auto"
+    };
     AgentActionAuditRecord {
         action_id: pending_action_storage_id(run_id, &provider_action_id),
         run_id: run_id.to_string(),
@@ -1647,7 +1728,7 @@ fn auto_action_audit_record(
         path_scope: path_scope_for_action(agent_input, action),
         command_cwd_scope: command_cwd_scope_for_action(agent_input, action),
         blocked_reason: error.map(ToString::to_string),
-        decision_source: Some("auto".to_string()),
+        decision_source: Some(decision_source.to_string()),
     }
 }
 
@@ -1792,7 +1873,24 @@ fn pending_action_binding_matches_with_builtin_status(
             Ok(digest) => digest,
             Err(_) => return false,
         };
+        let run_grant_shape_valid = match (
+            builtin_status,
+            checkpoint.file_change_run_grant_ref.as_ref(),
+        ) {
+            (BuiltinMcpBindingApprovalStatus::Required, None) => true,
+            (BuiltinMcpBindingApprovalStatus::Required, Some(_)) => false,
+            (BuiltinMcpBindingApprovalStatus::Approved, None) => true,
+            (BuiltinMcpBindingApprovalStatus::Approved, Some(grant_ref)) => {
+                grant_ref.validate().is_ok()
+                    && matches!(
+                        file_change.operation,
+                        mycopilot_core::AgentFileChangeOperation::Create
+                            | mycopilot_core::AgentFileChangeOperation::Update
+                    )
+            }
+        };
         return file_change.validate().is_ok()
+            && run_grant_shape_valid
             && file_change.approval_status == expected_approval_status
             && file_change.execution.source_tool_name == "apply_patch"
             && file_change.execution.source_call_id == checkpoint_call.id
@@ -1916,6 +2014,116 @@ pub(super) fn load_persisted_pending_actions(
         pending_actions.insert(storage_id.clone(), pending_record);
     }
     Ok(pending_actions)
+}
+
+/// Retains Run-scoped FileChange authority only for an exact, currently recoverable logical Run.
+///
+/// A pending remember intent remains non-authority, but is retained when its exact explicit
+/// granting action is itself a strict recoverable approval. This lets a pre-effect crash settle
+/// that action once and activate only after an applied receipt. Other pending intents are retired.
+/// An active grant must retain its authoritative granting receipt and a distinct strict current
+/// Pending Action for the same run/conversation/project. A terminal, orphaned, malformed, forked,
+/// or new Run therefore cannot inherit it. The startup constructor propagates any storage error,
+/// so a failed revocation is retried on the next startup instead of exposing uncertain authority.
+pub(super) fn reconcile_file_change_run_grants_on_startup(
+    storage: &StorageService,
+    pending_actions: &HashMap<String, PendingActionRecord>,
+) -> Result<(), String> {
+    for grant in storage
+        .list_pending_file_change_run_grant_records()
+        .map_err(|error| error.to_string())?
+    {
+        let granting_action_is_recoverable = match pending_actions
+            .get(&grant.granting_pending_action_id)
+        {
+            Some(record) => {
+                let current_action_has_no_grant_authority = record
+                    .agent_input
+                    .resume_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| {
+                        checkpoint.pending_action_id.as_deref() == Some(record.storage_id.as_str())
+                            && checkpoint.file_change_run_grant_ref.is_none()
+                    });
+                let Some(context) = record.agent_input.context.as_ref() else {
+                    storage
+                        .retire_pending_file_change_run_grant(&grant.granting_pending_action_id)
+                        .map_err(|error| error.to_string())?;
+                    continue;
+                };
+                let current_file_change = match &record.snapshot.action {
+                    AgentProposedAction::FileChange { file_change } => {
+                        file_change.id == record.snapshot.action_id
+                            && storage
+                                .validate_pending_file_change_run_grant_binding(
+                                    &grant,
+                                    file_change,
+                                    context,
+                                )
+                                .map_err(|error| error.to_string())?
+                    }
+                    _ => false,
+                };
+                current_file_change
+                    && current_action_has_no_grant_authority
+                    && record.snapshot.run_id == grant.run_id
+                    && record.snapshot.conversation_id.as_deref()
+                        == Some(grant.conversation_id.as_str())
+                    && matches!(
+                        record.snapshot.status,
+                        PendingActionStatus::Pending | PendingActionStatus::Approved
+                    )
+            }
+            None => false,
+        };
+        if !granting_action_is_recoverable {
+            storage
+                .retire_pending_file_change_run_grant(&grant.granting_pending_action_id)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    for grant in storage
+        .list_active_file_change_run_grant_records()
+        .map_err(|error| error.to_string())?
+    {
+        let receipt_is_authoritative = storage
+            .get_active_file_change_run_grant(&grant.run_id)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|active| active.grant_id == grant.grant_id);
+        let run_is_recoverable = pending_actions.values().any(|record| {
+            if record.snapshot.run_id != grant.run_id
+                || record.snapshot.conversation_id.as_deref()
+                    != Some(grant.conversation_id.as_str())
+                || !matches!(
+                    record.snapshot.status,
+                    PendingActionStatus::Pending | PendingActionStatus::Approved
+                )
+                || record.storage_id == grant.granting_pending_action_id
+            {
+                return false;
+            }
+            let Some(context) = record.agent_input.context.as_ref() else {
+                return false;
+            };
+            let checkpoint_matches =
+                record
+                    .agent_input
+                    .resume_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| {
+                        checkpoint.pending_action_id.as_deref() == Some(record.storage_id.as_str())
+                    });
+            checkpoint_matches
+                && context.conversation_id.as_deref() == Some(grant.conversation_id.as_str())
+                && context.project_id.as_deref() == grant.project_id.as_deref()
+        });
+        if !receipt_is_authoritative || !run_is_recoverable {
+            storage
+                .revoke_active_file_change_run_grant(&grant.run_id)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn recovery_file_change_binding(
@@ -2352,8 +2560,10 @@ pub(super) fn reconcile_interrupted_file_changes(
                     && existing.file_change_result_json.is_some()
                     && existing.tool_result_json.is_some()
                     && existing.completed_at.is_some());
-            existing.decision_source.as_deref() == Some("auto")
-                && lifecycle_matches
+            matches!(
+                existing.decision_source.as_deref(),
+                Some("auto" | "run_grant")
+            ) && lifecycle_matches
                 && existing.action_json == durable.action_json
                 && existing.run_id == durable.run_id
                 && existing.conversation_id == durable.conversation_id
@@ -2415,12 +2625,17 @@ pub(super) fn reconcile_interrupted_file_changes(
                     "cancelled FileChange recovery is missing its durable model context".to_string()
                 })?
                 .items;
-            let recovered_snapshot =
+            let mut recovered_snapshot =
                 mycopilot_core::conversation_trace_snapshot_with_recovered_tool_result(
                     &trace,
                     model_context_items,
                     &execution.tool_result,
                 )?;
+            set_recovered_file_change_result_approval(
+                &mut recovered_snapshot,
+                &execution.tool_result,
+                AgentApprovalStatus::Rejected,
+            )?;
             let conversation_id = durable.conversation_id.as_deref().ok_or_else(|| {
                 "cancelled FileChange recovery is missing its conversation owner".to_string()
             })?;
@@ -2602,12 +2817,23 @@ pub(super) fn reconcile_interrupted_file_changes(
                 "Direct FileChange recovery is missing its durable model context".to_string()
             })?
             .items;
-        let recovered_snapshot =
+        let mut recovered_snapshot =
             mycopilot_core::conversation_trace_snapshot_with_recovered_tool_result(
                 &trace,
                 model_context_items,
                 &tool_result,
             )?;
+        if !is_exact_auto_journal {
+            // The provider ToolCall remains immutable `required`, while a manual approval's
+            // terminal ToolResult records the decision that authorized this recovered effect.
+            // Normal execution already has this split; startup reconciliation must reproduce it
+            // exactly instead of inheriting the unresolved ToolCall's approval marker.
+            set_recovered_file_change_result_approval(
+                &mut recovered_snapshot,
+                &tool_result,
+                AgentApprovalStatus::Approved,
+            )?;
+        }
         let conversation_id = durable.conversation_id.as_deref().ok_or_else(|| {
             "Direct FileChange recovery is missing its conversation owner".to_string()
         })?;
@@ -2621,7 +2847,10 @@ pub(super) fn reconcile_interrupted_file_changes(
             // The pending action JSON may have advanced from its prepared binding to the
             // reconciled committed binding above. The exact auto identity was frozen and checked
             // before that CAS, so do not compare the older audit JSON with the new binding again.
-            "auto"
+            existing_audit
+                .as_ref()
+                .and_then(|audit| audit.decision_source.as_deref())
+                .expect("exact automatic FileChange journal has a decision source")
         } else {
             match existing_audit.as_ref() {
                 Some(existing)
@@ -2662,6 +2891,25 @@ pub(super) fn reconcile_interrupted_file_changes(
         recovered = recovered.saturating_add(1);
     }
     Ok(recovered)
+}
+
+fn set_recovered_file_change_result_approval(
+    snapshot: &mut ConversationTraceSnapshot,
+    tool_result: &AgentToolResult,
+    approval_status: AgentApprovalStatus,
+) -> Result<(), String> {
+    match snapshot.items.last_mut() {
+        Some(ConversationTurnTraceItem::ToolResult {
+            call_id,
+            tool,
+            approval_status: recovered_status,
+            ..
+        }) if call_id == &tool_result.call_id && tool == &tool_result.tool => {
+            *recovered_status = approval_status;
+            Ok(())
+        }
+        _ => Err("FileChange recovery did not append the exact terminal ToolResult".to_string()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -13,6 +13,7 @@ export function createAppIpcBridge(ipcRenderer: AppIpcRenderer): HostApi['app'] 
       return () => ipcRenderer.removeListener(HOST_CHANNELS.app.windowStateChange, listener)
     },
     setNativeThemeSource: (themeSource) =>
-      ipcRenderer.invoke(HOST_CHANNELS.app.setNativeThemeSource, themeSource)
+      ipcRenderer.invoke(HOST_CHANNELS.app.setNativeThemeSource, themeSource),
+    whenReady: () => ipcRenderer.invoke(HOST_CHANNELS.app.whenReady)
   }
 }

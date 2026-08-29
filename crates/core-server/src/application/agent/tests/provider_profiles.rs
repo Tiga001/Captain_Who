@@ -1153,13 +1153,15 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                         tool_name: "apply_patch".to_string(),
                     };
                     *operation = json!({
-                        "action": "apply",
-                        "operation": "create",
-                        "filePath": "src/history.rs",
-                        "contentBytes": 22,
-                        "contentDigest": mycopilot_core::file_change::content_digest(
-                            b"durable source content",
-                        ),
+                        "request": {
+                            "action": "apply",
+                            "operation": "create",
+                            "filePath": "src/history.rs",
+                            "contentBytes": 22,
+                            "contentDigest": mycopilot_core::file_change::content_digest(
+                                b"durable source content",
+                            ),
+                        }
                     });
                 }
                 ConversationTurnTraceItem::ToolResult { tool, .. } => {
@@ -1189,11 +1191,13 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                     id: runtime_call_id.clone(),
                     name: "apply_patch".to_string(),
                     args: json!({
-                        "action": "apply",
-                        "operation": "create",
-                        "filePath": "src/history.rs",
-                        "observationId": "fobs_provider_profile_fixture",
-                        "content": "durable source content"
+                        "request": {
+                            "action": "apply",
+                            "operation": "create",
+                            "filePath": "src/history.rs",
+                            "observationId": "fobs_provider_profile_fixture",
+                            "content": "durable source content"
+                        }
                     }),
                     provider_identity: AgentProviderToolCallIdentity {
                         provider_tool_index: 0,
@@ -2485,10 +2489,12 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
                     "function": {
                         "name": "apply_patch",
                         "arguments": serde_json::to_string(&json!({
-                            "action": "begin",
-                            "operation": "create",
-                            "filePath": "must-not-create.md",
-                            "observationId": "fobs_provider_vault_unavailable"
+                            "request": {
+                                "action": "begin",
+                                "operation": "create",
+                                "filePath": "must-not-create.md",
+                                "observationId": "fobs_provider_vault_unavailable"
+                            }
                         })).unwrap()
                     }
                 }]

@@ -1393,7 +1393,7 @@ export const jaJPTranslations = {
   'agent.approval.dialog.approveRemember':
     'はい。このターンではこれで始まるコマンドを再度要求しないでください。',
   'agent.approval.dialog.approveFileChangeRemember':
-    'はい、このターンではファイル編集を再度要求しないでください',
+    'はい。この実行中、以後のファイル作成・更新は承認を省略します（削除は引き続き承認が必要です）',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': 'いいえ',
   'agent.approval.dialog.rejectPlaceholder': 'いいえ、調整方法を教えてください',

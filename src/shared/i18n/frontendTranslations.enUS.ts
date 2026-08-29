@@ -1384,7 +1384,7 @@ export const enUSTranslations = {
   'agent.approval.dialog.approveRemember':
     'Yes, and do not ask again this turn for commands starting with this',
   'agent.approval.dialog.approveFileChangeRemember':
-    'Yes, and do not ask again for file edits this turn',
+    'Yes, and skip approval for later file creates/updates this run (deletes still require approval)',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': 'No',
   'agent.approval.dialog.rejectPlaceholder': 'No, tell me how to adjust',

@@ -12,6 +12,7 @@ import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
 import { getAgentFileChangeDiff, readAgentFileChange } from '../../../agent/agentClient'
+import { getApplyPatchRequest } from '../../../agentRun/applyPatchRequest'
 import { revealStoredProjectFile } from '../../../storage/storageClient'
 import type { ChatFileChangePreview } from '../../chatTypes'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
@@ -110,7 +111,7 @@ function getOperation(value: unknown): AgentFileChangeOperation | undefined {
 }
 
 function getCallArgs(call: AgentToolCall): Record<string, unknown> {
-  return isRecord(call.args) ? call.args : {}
+  return getApplyPatchRequest(call.args) ?? {}
 }
 
 function getFileChangeResult(

@@ -11,6 +11,8 @@ import type { AppLanguage, LanguageDirection } from '../../config/languageRegist
 export interface BootstrapStartupCopy {
   readonly ambient: string
   readonly direction: LanguageDirection
+  readonly failedDescription: string
+  readonly failedTitle: string
   readonly language: AppLanguage
   readonly loading: string
 }
@@ -37,9 +39,25 @@ export function getBootstrapStartupCopy(rawStoredConfig: string | null): Bootstr
   return {
     ambient: getTranslation(language, 'startup.ambient.deepThinking'),
     direction: getLanguageDefinition(language).direction,
+    failedDescription: getTranslation(language, 'startup.failedDescription'),
+    failedTitle: getTranslation(language, 'startup.failedTitle'),
     language,
     loading: getTranslation(language, 'startup.loading')
   }
+}
+
+export function applyBootstrapStartupFailure(
+  documentRoot: Document,
+  rawStoredConfig: string | null
+): void {
+  const copy = getBootstrapStartupCopy(rawStoredConfig)
+  const statusLabel = documentRoot.querySelector<HTMLElement>('[data-bootstrap-startup-label]')
+  const ambientText = documentRoot.querySelector<HTMLElement>('[data-bootstrap-startup-ambient]')
+  if (ambientText) {
+    ambientText.dataset.phase = 'holding'
+    ambientText.textContent = copy.failedTitle
+  }
+  if (statusLabel) statusLabel.textContent = copy.failedDescription
 }
 
 export function applyBootstrapStartupLocalization(

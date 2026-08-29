@@ -58,11 +58,13 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
                 id: call_id.clone(),
                 name: "apply_patch".to_string(),
                 args: json!({
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "src/history.rs",
-                    "observationId": "fobs_provider_transition",
-                    "content": "provider transition fixture"
+                    "request": {
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "src/history.rs",
+                        "observationId": "fobs_provider_transition",
+                        "content": "provider transition fixture"
+                    }
                 }),
                 provider_identity: AgentProviderToolCallIdentity {
                     provider_tool_index: 0,

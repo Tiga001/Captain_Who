@@ -188,6 +188,30 @@ describe('CollaborationApprovalPanel', () => {
     })
   })
 
+  it('never offers run-scoped approval for a child FileChange', async () => {
+    const projected = fileChangeApproval()
+    fileChangeRpc.getDiff.mockResolvedValue({
+      transactionId: 'file-change-transaction',
+      patch: '-old\n+new\n',
+      offset: 0,
+      nextOffset: null,
+      truncated: false
+    })
+    const onDecision = vi.fn(async () => decisionResult())
+    const screen = await render(
+      <CollaborationApprovalPanel
+        approvals={[projected]}
+        mode="interactive"
+        onDecision={onDecision}
+      />
+    )
+
+    await expect.element(screen.getByText(/\+new/)).toBeVisible()
+    expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
+    await screen.getByRole('button', { name: '批准' }).click()
+    expect(onDecision).toHaveBeenCalledWith('approval-stable', 'approve', null)
+  })
+
   it('routes root rejection guidance to the original child approval', async () => {
     const onDecision = vi.fn(async () => decisionResult({ status: 'rejected' }))
     const screen = await render(

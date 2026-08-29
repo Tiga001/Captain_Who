@@ -33,7 +33,7 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read an authorized regular UTF-8 text file. Immediately before every apply_patch Direct create, update, or delete, call read_file on that exact target path—even when you expect it to be absent; do not substitute a parent-directory listing, workspace_map, search result, or earlier read. A not-found result for that exact path establishes the missing state required by create. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
+            description: "Read an authorized regular UTF-8 text file. Immediately before every apply_patch Direct apply or Staged begin, call read_file on that exact target path—even when you expect it to be absent; do not substitute a parent-directory listing, workspace_map, search result, or earlier read. Copy the returned fileChangeTarget.filePath and observationId into apply_patch.request. A not-found result establishes the missing state required by create but is not itself an executable create call because the model must still supply content or begin a Staged transaction. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -71,6 +71,12 @@ impl AgentTool for ReadFileTool {
             return projected;
         };
         value.remove("observationId");
+        if let Some(target) = value
+            .get_mut("fileChangeTarget")
+            .and_then(Value::as_object_mut)
+        {
+            target.remove("observationId");
+        }
         if let Some(args) = value
             .get_mut("continueWith")
             .and_then(Value::as_object_mut)
@@ -231,6 +237,7 @@ fn read_file_model_projection(source: Option<&Value>) -> Option<Value> {
             "continueWith",
             "exists",
             "observationId",
+            "fileChangeTarget",
             "message",
         ],
     );
@@ -384,6 +391,11 @@ fn build_read_file_page(
         "path": display_path,
         "exists": true,
         "observationId": observation_id,
+        "fileChangeTarget": {
+            "filePath": display_path,
+            "observationId": observation_id,
+            "state": "existing"
+        },
         "revision": inspection.revision,
         "startLine": inspection.start.line,
         "startColumn": inspection.start.column,
@@ -463,16 +475,12 @@ fn missing_file_observation_with_hook(
         "path": input_path,
         "exists": false,
         "observationId": observation.id(),
+        "fileChangeTarget": {
+            "filePath": input_path,
+            "observationId": observation.id(),
+            "state": "missing"
+        },
         "message": "文件不存在。",
-        "continueWith": {
-            "tool": "apply_patch",
-            "args": {
-                "action": "apply",
-                "operation": "create",
-                "filePath": input_path,
-                "observationId": observation.id()
-            }
-        }
     })))
 }
 
@@ -1128,13 +1136,13 @@ mod tests {
         assert!(definition.description.contains("regular UTF-8 text file"));
         assert!(definition
             .description
-            .contains("Immediately before every apply_patch Direct create, update, or delete"));
+            .contains("Immediately before every apply_patch Direct apply or Staged begin"));
         assert!(definition
             .description
             .contains("call read_file on that exact target path"));
         assert!(definition
             .description
-            .contains("A not-found result for that exact path establishes the missing state"));
+            .contains("A not-found result establishes the missing state required by create"));
         assert!(definition
             .description
             .contains("Without a workspace, relative paths are invalid"));
@@ -1229,9 +1237,13 @@ mod tests {
             .as_str()
             .is_some_and(|id| id.starts_with("fobs_")));
         assert_eq!(
-            missing["continueWith"]["args"]["observationId"],
+            missing["fileChangeTarget"]["observationId"],
             missing["observationId"]
         );
+        assert_eq!(missing["fileChangeTarget"]["filePath"], "missing.txt");
+        assert_eq!(missing["fileChangeTarget"]["state"], "missing");
+        assert!(missing.get("continueWith").is_none());
+        assert_eq!(existing["fileChangeTarget"]["state"], "existing");
         assert_ne!(existing["observationId"], missing["observationId"]);
     }
 

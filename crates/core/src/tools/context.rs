@@ -73,6 +73,7 @@ impl Drop for ModelImageDeliveryReservation {
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     workspace_root: Option<PathBuf>,
+    workspace_context: Option<crate::AgentWorkspaceContext>,
     attachment_library: Option<AgentAttachmentLibraryContext>,
     cancellation_token: AgentCancellationToken,
     model_capabilities: ModelCapabilities,
@@ -223,6 +224,7 @@ impl ToolExecutionContext {
             .and_then(|context| context.workspace.as_ref())
             .and_then(|workspace| workspace.root_path.as_ref())
             .map(PathBuf::from);
+        let workspace_context = context.and_then(|context| context.workspace.clone());
         let attachment_library = context.and_then(|context| context.attachment_library.clone());
         let permissions = context
             .map(|context| context.permissions)
@@ -232,6 +234,7 @@ impl ToolExecutionContext {
 
         Self {
             workspace_root,
+            workspace_context,
             attachment_library,
             cancellation_token: AgentCancellationToken::new(),
             model_capabilities: ModelCapabilities::default(),
@@ -527,6 +530,41 @@ impl ToolExecutionContext {
         self.run_id
             .as_deref()
             .ok_or_else(|| AgentError::new("当前运行缺少 runId，不能创建文件草稿。"))
+    }
+
+    pub(crate) fn resolve_active_file_change_run_grant(
+        &self,
+        action: &crate::AgentProposedAction,
+    ) -> AgentResult<Option<crate::file_change::FileChangeRunGrantRef>> {
+        let crate::AgentProposedAction::FileChange { file_change } = action else {
+            return Ok(None);
+        };
+        if !matches!(
+            file_change.operation,
+            crate::AgentFileChangeOperation::Create | crate::AgentFileChangeOperation::Update
+        ) {
+            return Ok(None);
+        }
+        let Some(storage) = self.storage.as_deref() else {
+            return Ok(None);
+        };
+        let run_id = self.run_id()?;
+        if file_change.execution.run_id != run_id {
+            return Err(AgentError::new(
+                "FileChange Run grant proposal owner is invalid.",
+            ));
+        }
+        let context = crate::AgentRunContext {
+            conversation_id: self.conversation_id.clone(),
+            project_id: self.project_id.clone(),
+            workspace: self.workspace_context.clone(),
+            attachment_library: None,
+            permissions: self.permissions,
+            collaboration_identity: None,
+        };
+        storage
+            .resolve_active_file_change_run_grant(file_change, &context)
+            .map_err(crate::storage::service::FileChangeRunGrantServiceError::into_agent_error)
     }
 
     pub(crate) fn tool_call_id(&self) -> AgentResult<&str> {

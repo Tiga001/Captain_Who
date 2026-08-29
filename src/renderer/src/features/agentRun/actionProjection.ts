@@ -22,16 +22,23 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
 
   if (action.type === 'file_change') {
     const fileChange = action.fileChange
+    const request =
+      fileChange.inlineDiff === null
+        ? {
+            action: 'commit',
+            transactionId: fileChange.transactionId,
+            summary: fileChange.summary
+          }
+        : {
+            action: 'apply',
+            operation: fileChange.operation,
+            filePath: fileChange.filePath,
+            summary: fileChange.summary
+          }
     return {
       id: fileChange.id,
       tool: 'apply_patch',
-      args: {
-        action: fileChange.inlineDiff === null ? 'commit' : 'apply',
-        transactionId: fileChange.transactionId,
-        operation: fileChange.operation,
-        filePath: fileChange.filePath,
-        summary: fileChange.summary
-      },
+      args: { request },
       approvalStatus: fileChange.approvalStatus,
       reason: fileChange.summary
     }

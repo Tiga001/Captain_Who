@@ -282,7 +282,8 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 11 totalizes unconsumed `read_file` observations referenced by queued `apply_patch`
+/// Version 12 carries the exact private reference for a Host-owned Run-scoped FileChange grant.
+/// Version 11 totalized unconsumed `read_file` observations referenced by queued `apply_patch`
 /// calls. Version 10 froze built-in execution approval authority alongside every other permission
 /// dimension. Version 9 froze model-visible Agent collaboration selector capabilities and removed the
 /// retired Provider-specific Skill-activation sibling deferral bit. Tools exposed in the request
@@ -291,7 +292,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 11;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -352,6 +353,11 @@ pub struct AgentRunCheckpoint {
     /// projection authority always come from the frozen typed Tool provenance, never this field.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub pending_action_id: Option<String>,
+    /// Exact private authority reference used only when a FileChange was routed by an already
+    /// active Run grant. The granting action itself remains an explicit-user action and stores
+    /// `None` here.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub file_change_run_grant_ref: Option<crate::file_change::FileChangeRunGrantRef>,
     pub pending_tool_call_id: String,
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
     /// Bounded, replay-safe projection of the active run's uncompressed model timeline.

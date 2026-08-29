@@ -1094,6 +1094,14 @@ export interface AgentActionIdRequest {
   actionId: string
 }
 
+export type AgentApprovalScope = 'singleAction' | 'remainingApplyPatchInRun'
+
+export interface AgentApproveActionRequest {
+  runId: string
+  actionId: string
+  approvalScope: AgentApprovalScope
+}
+
 export interface AgentRejectActionRequest {
   runId: string
   actionId: string

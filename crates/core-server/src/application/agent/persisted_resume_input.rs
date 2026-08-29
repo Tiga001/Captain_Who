@@ -190,6 +190,13 @@ impl PersistedAgentResumeInput {
         if resume_checkpoint.version != mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION {
             return Err("pending Agent checkpoint has an unsupported schema version".to_string());
         }
+        if resume_checkpoint
+            .file_change_run_grant_ref
+            .as_ref()
+            .is_some_and(|grant| grant.validate().is_err())
+        {
+            return Err("pending Agent checkpoint has an invalid FileChange Run grant".to_string());
+        }
         if resume_checkpoint.context_items.is_empty() {
             return Err("pending Agent checkpoint is missing its exact context".to_string());
         }
@@ -304,6 +311,14 @@ impl PersistedAgentResumeInput {
             || self.resume_checkpoint.context_items.is_empty()
             || self.resume_checkpoint.provider_profile_config != self.provider_profile_config
             || self.resume_checkpoint.provider_protocol_key != self.provider_protocol_key
+        {
+            return Err(PersistedAgentResumeInputError::InvalidShape);
+        }
+        if self
+            .resume_checkpoint
+            .file_change_run_grant_ref
+            .as_ref()
+            .is_some_and(|grant| grant.validate().is_err())
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
@@ -474,6 +489,7 @@ mod tests {
             "runWorldState": crate::test_run_world_state(),
             "pendingActionId": null,
             "pendingToolCallId": "call-persisted-resume",
+            "fileChangeRunGrantRef": null,
             "conversationTraceItems": [],
             "conversationModelContextItems": [],
             "nextConversationTraceSequence": 0,

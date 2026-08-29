@@ -1,5 +1,6 @@
 import type { AgentToolCall, AgentToolResult, AgentUsage } from '@mycopilot/protocol'
 import type { Translate } from '../../../config/translationFormat'
+import { getApplyPatchRequest } from '../../agentRun/applyPatchRequest'
 import { getReadActivityKindForTool, isReadActivityTool } from '../agentReadActivities'
 import { stripAttachmentSummary } from '../chatAttachments'
 import type {
@@ -672,9 +673,10 @@ export function getFileChangeTransactionId(
   run: ChatAgentRunView,
   call: AgentToolCall
 ): string | undefined {
-  const args =
-    call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
-  if (typeof args.transactionId === 'string' && args.transactionId) return args.transactionId
+  const request = getApplyPatchRequest(call.args)
+  if (typeof request?.transactionId === 'string' && request.transactionId) {
+    return request.transactionId
+  }
   const proposal = run.fileChangeProposals.find((candidate) => candidate.id === call.id)
   if (proposal) return proposal.transactionId
   const result = getToolResult(run, call.id)?.result

@@ -599,11 +599,11 @@ fn mcp_approval_barrier_drops_only_external_calls_and_persists_a_safe_reprepare_
     let pending = LlmToolCall {
         id: canonical_test_call_id(0, "provider-pending"),
         name: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-provider-pending",
             "expectedDraftRevision": 1
-        }),
+        })),
     };
     let mut batch = ToolCallBatch::from_model_response(
         "checkpoint-validation-run",

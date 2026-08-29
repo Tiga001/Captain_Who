@@ -235,6 +235,9 @@ fn automatic_file_change_claims_pending_and_audit_before_commit() {
         .claim_auto_file_change_pending_execution(
             &approved_pending,
             &approved_audit,
+            None,
+            None,
+            None,
             r#"{"checkpoint":"current"}"#,
             30,
         )

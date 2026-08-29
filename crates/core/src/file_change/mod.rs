@@ -11,6 +11,7 @@ mod model;
 mod observation;
 mod planner;
 mod policy;
+mod run_grant;
 mod staged;
 
 pub(crate) use bound_io::BoundParent;
@@ -20,6 +21,7 @@ pub use committer::{
     FileChangeCommit, FileChangeCommitter, FileChangeDeleteJournal, FileChangeDeleteJournalState,
     FileChangeReconciliation,
 };
+pub(crate) use digest::valid_digest;
 pub use digest::{content_digest, diff_digest, proposal_digest};
 pub use error::{
     FileChangeError, FileChangeErrorCategory, FileChangeErrorCode, FileChangeFailure,
@@ -39,8 +41,10 @@ pub use planner::{
     FileChangeBase, FileChangeMutation, FileChangePlan, FileChangePlanRequest, FileChangePlanner,
 };
 pub use policy::{FileChangePathPolicy, ResolvedFileChangeTarget};
+pub use run_grant::*;
 pub use staged::{
-    FileChangeMutationReceipt, FileChangeStagedAction, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION,
+    allowed_staged_actions, is_unsettled_staged_status, FileChangeMutationReceipt,
+    FileChangeStagedAction, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION,
 };
 
 #[cfg(test)]

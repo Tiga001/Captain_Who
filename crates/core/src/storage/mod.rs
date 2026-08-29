@@ -28,6 +28,7 @@ pub mod conversation_turn_rewrite_repository;
 pub mod database_instance_lock;
 mod database_snapshot;
 pub mod file_change_repository;
+pub mod file_change_run_grant_repository;
 pub mod guidance_repository;
 pub mod image_generation_execution_repository;
 pub mod image_generation_repository;

@@ -43,11 +43,13 @@ function applyPatchCall(): AgentToolCall {
     id: 'patch-create-existing',
     tool: 'apply_patch',
     args: {
-      action: 'apply',
-      operation: 'create',
-      filePath: 'existing.txt',
-      observationId: 'fobs_missing_target',
-      content: 'replacement'
+      request: {
+        action: 'apply',
+        operation: 'create',
+        filePath: 'existing.txt',
+        observationId: 'fobs_missing_target',
+        content: 'replacement'
+      }
     },
     approvalStatus: 'not_required',
     reason: null

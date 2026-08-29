@@ -168,14 +168,19 @@ pub(crate) fn handle_agent_approve_action(
     id: JsonRpcId,
     params: Option<Value>,
 ) -> Value {
-    let input = match parse_params::<AgentActionIdRequest>(params) {
+    let input = match parse_params::<AgentApproveActionRequest>(params) {
         Ok(input) => input,
         Err(message) => return response_error(Some(id), -32602, message),
     };
 
-    match agent_service.approve_action(&input.run_id, &input.action_id, notification_tx) {
+    match agent_service.approve_action_with_scope(
+        &input.run_id,
+        &input.action_id,
+        input.approval_scope,
+        notification_tx,
+    ) {
         Ok(output) => response_success(id, output),
-        Err(message) => response_error(Some(id), -32000, message),
+        Err(error) => agent_service_error_response(id, error),
     }
 }
 

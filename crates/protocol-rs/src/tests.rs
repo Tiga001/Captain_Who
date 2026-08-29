@@ -1597,12 +1597,89 @@ fn action_decision_requests_require_run_scoped_identity() {
         .is_err()
     );
     assert!(
+        serde_json::from_value::<AgentActionIdRequest>(serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+            "approvalScope": "singleAction"
+        }))
+        .is_err()
+    );
+    assert!(
         serde_json::from_value::<AgentRejectActionRequest>(serde_json::json!({
             "actionId": "call-1",
             "message": "no"
         }))
         .is_err()
     );
+}
+
+#[test]
+fn approve_action_request_requires_a_strict_current_scope() {
+    for (wire_scope, expected) in [
+        ("singleAction", AgentApprovalScopeDto::SingleAction),
+        (
+            "remainingApplyPatchInRun",
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+        ),
+    ] {
+        let request: AgentApproveActionRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+            "approvalScope": wire_scope,
+        }))
+        .unwrap();
+        assert_eq!(request.run_id, "run-1");
+        assert_eq!(request.action_id, "call-1");
+        assert_eq!(request.approval_scope, expected);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({
+                "runId": "run-1",
+                "actionId": "call-1",
+                "approvalScope": wire_scope,
+            })
+        );
+    }
+
+    for invalid in [
+        serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+        }),
+        serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+            "approvalScope": null,
+        }),
+        serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+            "approvalScope": "remaining_file_changes",
+        }),
+        serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+            "approval_scope": "singleAction",
+        }),
+        serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1",
+            "approvalScope": "singleAction",
+            "rememberForRun": true,
+        }),
+        serde_json::json!({
+            "runId": "",
+            "actionId": "call-1",
+            "approvalScope": "singleAction",
+        }),
+        serde_json::json!({
+            "runId": "run-1",
+            "actionId": " call-1 ",
+            "approvalScope": "singleAction",
+        }),
+    ] {
+        assert!(serde_json::from_value::<AgentApproveActionRequest>(invalid).is_err());
+    }
 }
 
 #[test]

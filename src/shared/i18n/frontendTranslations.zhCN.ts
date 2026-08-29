@@ -1311,7 +1311,8 @@ export const zhCNTranslations = {
     '批准后我会使用这个工具。如果操作超出当前权限，系统会自动拦住。',
   'agent.approval.dialog.approve': '是',
   'agent.approval.dialog.approveRemember': '是，且本轮后续以此开头的命令不再询问',
-  'agent.approval.dialog.approveFileChangeRemember': '是，且本轮编辑文件无需审批',
+  'agent.approval.dialog.approveFileChangeRemember':
+    '是，且本轮后续创建/更新文件无需审批（删除仍需审批）',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': '否',
   'agent.approval.dialog.rejectPlaceholder': '否，请告诉我如何调整',

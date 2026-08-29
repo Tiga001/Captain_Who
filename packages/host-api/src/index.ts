@@ -1,6 +1,7 @@
 import type {
   AgentActionExecutionOutput,
   AgentActionIdRequest,
+  AgentApproveActionRequest,
   AgentCancelRunRequest,
   AgentCancelRunResponse,
   AgentCommandSessionGetInput,
@@ -568,7 +569,7 @@ export interface AgentHostApi {
   steerRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput>
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>
-  approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput>
+  approveAction(input: AgentApproveActionRequest): Promise<AgentActionExecutionOutput>
   rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput>
   cancelAction(input: AgentActionIdRequest): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
@@ -595,6 +596,7 @@ export interface HostApi {
     openExternal(url: string): Promise<void>
     onWindowStateChange(handler: (state: AppWindowState) => void): () => void
     setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
+    whenReady(): Promise<void>
   }
   agent: AgentHostApi
   attachments: AttachmentsHostApi

@@ -11,7 +11,12 @@ import {
   Star,
   WifiOff
 } from 'lucide-react'
-import type { AgentProposedAction, AgentUsage, GitTurnDiffSummary } from '@mycopilot/protocol'
+import type {
+  AgentApprovalScope,
+  AgentProposedAction,
+  AgentUsage,
+  GitTurnDiffSummary
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { formatTranslation } from '../../../config/translationFormat'
@@ -123,7 +128,7 @@ interface ChatMessageItemProps {
   onApprove?: (
     messageId: string,
     action: AgentProposedAction,
-    options?: { rememberForRun?: boolean }
+    approvalScope: AgentApprovalScope
   ) => ApprovalSubmissionResult
   onCancel?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>

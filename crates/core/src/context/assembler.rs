@@ -742,11 +742,13 @@ mod tests {
             id: call_id.clone(),
             tool: "apply_patch".to_string(),
             args: json!({
-                "action": "apply",
-                "operation": "create",
-                "filePath": "src/new.rs",
-                "observationId": "fobs-history-missing",
-                "content": "pub fn new() {}\n"
+                "request": {
+                    "action": "apply",
+                    "operation": "create",
+                    "filePath": "src/new.rs",
+                    "observationId": "fobs-history-missing",
+                    "content": "pub fn new() {}\n"
+                }
             }),
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
@@ -1315,7 +1317,7 @@ mod tests {
         assert_eq!(messages[3].role(), LlmMessageRole::Assistant);
         let file_change_call = messages[3].tool_calls().next().unwrap();
         assert_eq!(file_change_call.name, "apply_patch");
-        assert_eq!(file_change_call.args["filePath"], "src/new.rs");
+        assert_eq!(file_change_call.args["request"]["filePath"], "src/new.rs");
         assert_eq!(messages[4].role(), LlmMessageRole::Tool);
         assert_eq!(
             messages[4].tool_call_id(),

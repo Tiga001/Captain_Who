@@ -119,6 +119,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel".to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
@@ -276,6 +277,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-forced".to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
@@ -303,11 +305,13 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
                     id: "write-forced".to_string(),
                     name: "apply_patch".to_string(),
                     args: json!({
-                        "action": "apply",
-                        "operation": "create",
-                        "filePath": "created.txt",
-                        "observationId": "fobs_forced_cancellation",
-                        "content": "forced cancellation fixture"
+                        "request": {
+                            "action": "apply",
+                            "operation": "create",
+                            "filePath": "created.txt",
+                            "observationId": "fobs_forced_cancellation",
+                            "content": "forced cancellation fixture"
+                        }
                     }),
                     provider_identity: AgentProviderToolCallIdentity {
                         provider_tool_index: 0,
@@ -339,9 +343,11 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
                 call_id: "write-forced".to_string(),
                 tool: "apply_patch".to_string(),
                 operation: json!({
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "created.txt"
+                    "request": {
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "created.txt"
+                    }
                 }),
                 provenance: AgentToolIdentity::Builtin {
                     tool_name: "apply_patch".to_string(),
@@ -476,9 +482,11 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
                     tool_name: "apply_patch".to_string(),
                 },
                 operation: json!({
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "private.txt"
+                    "request": {
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "private.txt"
+                    }
                 }),
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
@@ -639,6 +647,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-before-spawn".to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
@@ -791,6 +800,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
@@ -995,6 +1005,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-command-cancel".to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),

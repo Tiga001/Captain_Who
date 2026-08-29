@@ -1,15 +1,16 @@
 use super::apply_patch::{
-    file_change_agent_error, freeze_staged_observed_base, sanitize_summary, state_revision,
-    validate_observation_operation,
+    file_change_agent_error, file_change_agent_error_for_path,
+    file_change_agent_error_for_transaction, freeze_staged_observed_base, sanitize_summary,
+    state_revision, validate_observation_operation,
 };
 use super::ToolExecutionContext;
 use crate::file_change::{
-    content_digest, proposal_digest, FileChangeBase, FileChangeDirectBinding, FileChangeEdit,
-    FileChangeError, FileChangeErrorCode, FileChangeMutation, FileChangeMutationReceipt,
-    FileChangeOperation, FileChangeOutcome, FileChangePathPolicy, FileChangePlanRequest,
-    FileChangePlanner, FileChangeProposal, FileChangeStagedAction, FileChangeStatus,
-    FileChangeTransaction, FileObservationCheckpoint, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION,
-    FILE_CHANGE_SCHEMA_VERSION,
+    allowed_staged_actions, content_digest, is_unsettled_staged_status, proposal_digest,
+    FileChangeBase, FileChangeDirectBinding, FileChangeEdit, FileChangeError, FileChangeErrorCode,
+    FileChangeMutation, FileChangeMutationReceipt, FileChangeOperation, FileChangeOutcome,
+    FileChangePathPolicy, FileChangePlanRequest, FileChangePlanner, FileChangeProposal,
+    FileChangeStagedAction, FileChangeStatus, FileChangeTransaction, FileObservationCheckpoint,
+    FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentFileChangeProposal, AgentFileChangeUpdateStrategy,
@@ -127,11 +128,11 @@ fn begin_with_hook(
             context.run_id()?,
             target.absolute_path(),
         )
-        .map_err(file_change_agent_error)?;
+        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
     validate_observation_operation(operation, observation.state())
-        .map_err(file_change_agent_error)?;
+        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
     let frozen = freeze_staged_observed_base(context, &target, &observation, MAX_STAGED_FILE_BYTES)
-        .map_err(file_change_agent_error)?;
+        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
     if frozen
         .content
         .as_deref()
@@ -204,7 +205,7 @@ fn begin_with_hook(
             context.run_id()?,
             target.absolute_path(),
         )
-        .map_err(file_change_agent_error)?;
+        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
     if let Err(error) = context
         .storage()?
         .create_agent_file_change(transaction.clone())
@@ -267,11 +268,13 @@ pub(super) fn append(
         )));
     }
     let payload_digest = proposal_digest(&json!({
-        "action": "append",
-        "transactionId": transaction_id,
-        "index": index,
-        "expectedDraftRevision": expected_draft_revision,
-        "content": content,
+        "request": {
+            "action": "append",
+            "transactionId": transaction_id,
+            "index": index,
+            "expectedDraftRevision": expected_draft_revision,
+            "content": content,
+        }
     }))
     .map_err(internal_file_error)?;
     let mut transaction = load_owned(context, &transaction_id, source_tool_name)?;
@@ -317,11 +320,13 @@ pub(super) fn edit(
         )));
     }
     let payload_digest = proposal_digest(&json!({
-        "action": "edit",
-        "transactionId": transaction_id,
-        "index": index,
-        "expectedDraftRevision": expected_draft_revision,
-        "edits": edits,
+        "request": {
+            "action": "edit",
+            "transactionId": transaction_id,
+            "index": index,
+            "expectedDraftRevision": expected_draft_revision,
+            "edits": edits,
+        }
     }))
     .map_err(internal_file_error)?;
     let mut transaction = load_owned(context, &transaction_id, source_tool_name)?;
@@ -393,9 +398,10 @@ pub(super) fn abort(
         )
         .map_err(storage_error)?;
     if !transitioned {
-        return Err(file_change_agent_error(FileChangeError::new(
-            FileChangeErrorCode::DraftRevisionConflict,
-        )));
+        return Err(file_change_agent_error_for_transaction(
+            FileChangeError::new(FileChangeErrorCode::DraftRevisionConflict),
+            &transaction.id,
+        ));
     }
     Ok(transaction_result(&transaction))
 }
@@ -442,9 +448,10 @@ fn commit_with_hook(
     }
     ensure_mutable(&mut stored, context)?;
     if stored.draft_revision != expected_draft_revision {
-        return Err(file_change_agent_error(FileChangeError::new(
-            FileChangeErrorCode::DraftRevisionConflict,
-        )));
+        return Err(file_change_agent_error_for_transaction(
+            FileChangeError::new(FileChangeErrorCode::DraftRevisionConflict),
+            &transaction_id,
+        ));
     }
     stored.summary = sanitize_summary(summary);
     stored.final_action_id = Some(call.id.clone());
@@ -481,9 +488,10 @@ fn commit_with_hook(
         )? {
             return Ok(replayed);
         }
-        return Err(file_change_agent_error(FileChangeError::new(
-            FileChangeErrorCode::DraftRevisionConflict,
-        )));
+        return Err(file_change_agent_error_for_transaction(
+            FileChangeError::new(FileChangeErrorCode::DraftRevisionConflict),
+            &transaction_id,
+        ));
     }
     after_durable_transition(&stored.id, &proposal)?;
     Ok(proposal)
@@ -717,9 +725,12 @@ fn save_mutation(
         AgentFileChangeProgressSaveOutcome::ReplayMismatch => Err(file_change_agent_error(
             FileChangeError::new(FileChangeErrorCode::ReplayMismatch),
         )),
-        AgentFileChangeProgressSaveOutcome::Conflict => Err(file_change_agent_error(
-            FileChangeError::new(FileChangeErrorCode::DraftRevisionConflict),
-        )),
+        AgentFileChangeProgressSaveOutcome::Conflict => {
+            Err(file_change_agent_error_for_transaction(
+                FileChangeError::new(FileChangeErrorCode::DraftRevisionConflict),
+                &transaction.id,
+            ))
+        }
     }
 }
 
@@ -877,14 +888,16 @@ fn validate_mutation_cursor(
     expected_draft_revision: u64,
 ) -> AgentResult<()> {
     if index != transaction.next_mutation_index {
-        return Err(file_change_agent_error(FileChangeError::new(
-            FileChangeErrorCode::MutationOutOfOrder,
-        )));
+        return Err(file_change_agent_error_for_transaction(
+            FileChangeError::new(FileChangeErrorCode::MutationOutOfOrder),
+            &transaction.id,
+        ));
     }
     if expected_draft_revision != transaction.draft_revision {
-        return Err(file_change_agent_error(FileChangeError::new(
-            FileChangeErrorCode::DraftRevisionConflict,
-        )));
+        return Err(file_change_agent_error_for_transaction(
+            FileChangeError::new(FileChangeErrorCode::DraftRevisionConflict),
+            &transaction.id,
+        ));
     }
     Ok(())
 }
@@ -1005,8 +1018,8 @@ fn transaction_result(transaction: &AgentFileChangeRecord) -> Value {
         "totalChars": total_chars,
         "tailStart": tail_start,
         "tailTruncated": tail_start > 0,
-        "allowedNextActions": allowed_actions(&transaction.status),
-        "requiresCommitBeforeResponse": is_unsettled(&transaction.status),
+        "allowedNextActions": allowed_staged_actions(&transaction.status),
+        "requiresCommitBeforeResponse": is_unsettled_staged_status(&transaction.status),
     })
 }
 
@@ -1040,30 +1053,7 @@ fn redact_result_tail(value: &mut Value) {
 }
 
 fn mutable_actions() -> Vec<FileChangeStagedAction> {
-    vec![
-        FileChangeStagedAction::Append,
-        FileChangeStagedAction::Edit,
-        FileChangeStagedAction::Commit,
-        FileChangeStagedAction::Status,
-        FileChangeStagedAction::Abort,
-    ]
-}
-
-fn allowed_actions(status: &str) -> Vec<FileChangeStagedAction> {
-    match status {
-        "drafting" | "ready" => mutable_actions(),
-        _ => vec![FileChangeStagedAction::Status],
-    }
-}
-
-fn is_unsettled(status: &str) -> bool {
-    matches!(
-        status,
-        "drafting" | "ready" | "waiting_approval" | "applying"
-    ) || !matches!(
-        status,
-        "applied" | "already_applied" | "rejected" | "conflict" | "failed" | "aborted" | "expired"
-    )
+    allowed_staged_actions("drafting")
 }
 
 fn resolve_target(
@@ -1287,7 +1277,7 @@ mod tests {
             "expired",
         ] {
             assert_eq!(
-                allowed_actions(status),
+                allowed_staged_actions(status),
                 vec![FileChangeStagedAction::Status]
             );
         }
@@ -1295,8 +1285,8 @@ mod tests {
 
     #[test]
     fn outcome_unknown_remains_fenced_and_already_applied_is_terminal() {
-        assert!(is_unsettled("outcome_unknown"));
-        assert!(!is_unsettled("already_applied"));
+        assert!(is_unsettled_staged_status("outcome_unknown"));
+        assert!(!is_unsettled_staged_status("already_applied"));
     }
 
     #[test]
@@ -1536,10 +1526,12 @@ mod tests {
             id: "commit-staged".to_string(),
             tool: "apply_patch".to_string(),
             args: json!({
-                "action":"commit",
-                "transactionId":transaction_id,
-                "expectedDraftRevision":2,
-                "summary":"Create report"
+                "request": {
+                    "action":"commit",
+                    "transactionId":transaction_id,
+                    "expectedDraftRevision":2,
+                    "summary":"Create report"
+                }
             }),
             approval_status: AgentApprovalStatus::Required,
             reason: None,

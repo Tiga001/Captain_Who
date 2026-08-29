@@ -527,7 +527,13 @@ describe('MCP lifecycle Renderer projection', () => {
       call: {
         id: 'file-change-call',
         tool: 'apply_patch',
-        args: { action: 'commit', transactionId: 'file-change-1', expectedDraftRevision: 1 },
+        args: {
+          request: {
+            action: 'commit',
+            transactionId: 'file-change-1',
+            expectedDraftRevision: 1
+          }
+        },
         approvalStatus: 'required',
         reason: null
       }

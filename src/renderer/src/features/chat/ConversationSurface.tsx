@@ -11,6 +11,7 @@ import {
 import type { ReactNode } from 'react'
 import { Split, X } from 'lucide-react'
 import type {
+  AgentApprovalScope,
   AgentContextWindowSnapshot,
   AgentProposedAction,
   AgentProviderTransitionOperation,
@@ -51,10 +52,6 @@ import { projectCollaborationTimelineActivities } from '../agentCollaboration/co
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
 
-interface AgentApprovalOptions {
-  rememberForRun?: boolean
-}
-
 interface ConversationSurfaceCommonProps {
   conversation: ChatConversation
   initialScrollTop?: number | null
@@ -80,7 +77,7 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   onApproveAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
-    options?: AgentApprovalOptions
+    approvalScope: AgentApprovalScope
   ) => ApprovalSubmissionResult
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onComposerDraftChange: (draft: ChatComposerDraft) => void
@@ -191,7 +188,7 @@ interface ChatMessageListProps {
   onApproveAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
-    options?: AgentApprovalOptions
+    approvalScope: AgentApprovalScope
   ) => ApprovalSubmissionResult
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void | Promise<void>

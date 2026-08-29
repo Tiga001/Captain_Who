@@ -15,6 +15,41 @@ pub enum FileChangeStagedAction {
     Abort,
 }
 
+impl FileChangeStagedAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Edit => "edit",
+            Self::Commit => "commit",
+            Self::Status => "status",
+            Self::Abort => "abort",
+        }
+    }
+}
+
+pub fn allowed_staged_actions(status: &str) -> Vec<FileChangeStagedAction> {
+    match status {
+        "drafting" | "ready" => vec![
+            FileChangeStagedAction::Append,
+            FileChangeStagedAction::Edit,
+            FileChangeStagedAction::Commit,
+            FileChangeStagedAction::Status,
+            FileChangeStagedAction::Abort,
+        ],
+        _ => vec![FileChangeStagedAction::Status],
+    }
+}
+
+pub fn is_unsettled_staged_status(status: &str) -> bool {
+    matches!(
+        status,
+        "drafting" | "ready" | "waiting_approval" | "applying"
+    ) || !matches!(
+        status,
+        "applied" | "already_applied" | "rejected" | "conflict" | "failed" | "aborted" | "expired"
+    )
+}
+
 /// Durable, content-free receipt for one accepted Staged mutation.
 ///
 /// The operation row separately binds the exact payload digest. Keeping text out of this receipt
@@ -46,14 +81,7 @@ impl FileChangeMutationReceipt {
             || self.draft_revision != self.next_index
             || self.byte_count > MAX_STAGED_FILE_BYTES
             || allowed.len() != self.allowed_next_actions.len()
-            || allowed
-                != HashSet::from([
-                    FileChangeStagedAction::Append,
-                    FileChangeStagedAction::Edit,
-                    FileChangeStagedAction::Commit,
-                    FileChangeStagedAction::Status,
-                    FileChangeStagedAction::Abort,
-                ])
+            || allowed != allowed_staged_actions("drafting").into_iter().collect()
             || !self.requires_commit_before_response
         {
             return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));

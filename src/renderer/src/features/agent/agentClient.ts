@@ -1,4 +1,5 @@
 import type {
+  AgentApprovalScope,
   AgentEvent,
   AgentFileChangeContentPage,
   AgentFileChangeDiffPage,
@@ -93,9 +94,10 @@ export async function listPendingAgentActions(): Promise<PendingAgentActionSnaps
 
 export async function approveAgentAction(
   runId: string,
-  actionId: string
+  actionId: string,
+  approvalScope: AgentApprovalScope
 ): Promise<AgentActionExecutionOutput> {
-  return hostClient.agent.approveAction({ runId, actionId })
+  return hostClient.agent.approveAction({ runId, actionId, approvalScope })
 }
 
 export async function rejectAgentAction(

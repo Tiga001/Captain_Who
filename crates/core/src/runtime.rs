@@ -412,6 +412,24 @@ impl AgentRuntime {
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
+        // RunGrant authority must be retired even when approval resume fails during checkpoint,
+        // capability, ToolSet, collaboration, or world-state preflight. Construct the guard as
+        // soon as the Host-owned run/storage identity exists; later initialization must not leave
+        // an active grant outside a terminal guard.
+        let transaction_storage = storage.clone();
+        let mut file_transaction_guard = FileTransactionRunGuard::new(
+            transaction_storage.clone(),
+            run_id.clone(),
+            input
+                .context
+                .as_ref()
+                .and_then(|context| context.conversation_id.clone()),
+            input
+                .context
+                .as_ref()
+                .and_then(|context| context.project_id.clone()),
+            cancellation_token.clone(),
+        );
         let restore_trace_conversation_id = input
             .context
             .as_ref()
@@ -609,18 +627,8 @@ impl AgentRuntime {
             tool_definitions: tool_registry.renderer_event_definitions(&tool_definitions),
         });
         let mut emitted_tool_set_revision = effective_tool_set.revision().to_string();
-        let transaction_storage = storage.clone();
         let context_window_configured = input.context_window_tokens.is_some();
         let context_window_indicator_enabled = input.context_window_indicator_enabled;
-        let mut file_transaction_guard = FileTransactionRunGuard::new(
-            transaction_storage.clone(),
-            run_id.clone(),
-            trace_conversation_id.clone(),
-            run_context
-                .as_ref()
-                .and_then(|context| context.project_id.clone()),
-            cancellation_token.clone(),
-        );
         let file_observations = restored_checkpoint
             .as_ref()
             .map(|checkpoint| Arc::clone(&checkpoint.file_observations))
@@ -1804,6 +1812,7 @@ impl AgentRuntime {
                     let is_policy_process_tool =
                         call.tool == "run_command" || call.tool == "skills_run_script";
                     let mut prepared_policy_action = None;
+                    let mut file_change_run_grant_ref = None;
                     let mut policy_preflight_failure = None;
                     let mut terminate_after_repeat_guard_result = false;
                     let mut auto_execute_policy_action = false;
@@ -1962,9 +1971,38 @@ impl AgentRuntime {
                         ));
                         requires_approval = false;
                     }
+                    if policy_preflight_failure.is_none()
+                        && call.tool == "apply_patch"
+                        && uses_file_change_policy
+                        && definition_requires_approval
+                        && !patch_auto_approve
+                    {
+                        match tool_registry
+                            .proposed_action_async(&tool_context, &call)
+                            .await
+                        {
+                            Ok(action) => {
+                                match tool_context.resolve_active_file_change_run_grant(&action) {
+                                    Ok(grant) => file_change_run_grant_ref = grant,
+                                    Err(error) => {
+                                        let _ = tool_registry.invalidate_proposed_action(&action);
+                                        policy_preflight_failure =
+                                            Some(failed_tool_call_result(&call, error));
+                                    }
+                                }
+                                if policy_preflight_failure.is_none() {
+                                    prepared_policy_action = Some(action);
+                                }
+                            }
+                            Err(error) => {
+                                policy_preflight_failure =
+                                    Some(failed_tool_call_result(&call, error));
+                            }
+                        }
+                    }
                     let auto_execute_patch = policy_preflight_failure.is_none()
                         && uses_file_change_policy
-                        && patch_auto_approve
+                        && (patch_auto_approve || file_change_run_grant_ref.is_some())
                         && definition_requires_approval;
                     let auto_execute_mcp_action = policy_preflight_failure.is_none()
                         && tool_registry.auto_executes_prepared_action(&call.tool);
@@ -2159,7 +2197,11 @@ impl AgentRuntime {
                     }
 
                     if requires_approval {
-                        let action_result = if is_policy_process_tool {
+                        let action_result = if prepared_policy_action.is_some() {
+                            Ok(prepared_policy_action
+                                .take()
+                                .expect("prepared Host action remains available"))
+                        } else if is_policy_process_tool {
                             prepared_policy_action.take().ok_or_else(|| {
                                 AgentError::new(format!(
                                     "{} lost its validated action snapshot before approval.",
@@ -2649,7 +2691,11 @@ impl AgentRuntime {
                     let result_result = if let Some(result) = policy_preflight_failure {
                         Ok(result)
                     } else if auto_execute_host_action {
-                        let action_result = if is_policy_process_tool {
+                        let action_result = if prepared_policy_action.is_some() {
+                            Ok(prepared_policy_action
+                                .take()
+                                .expect("prepared Host action remains available"))
+                        } else if is_policy_process_tool {
                             prepared_policy_action.take().ok_or_else(|| {
                                 AgentError::new(format!(
                                     "{} lost its validated action snapshot before automatic execution.",
@@ -2748,6 +2794,8 @@ impl AgentRuntime {
                                                 .map(|mut checkpoint| {
                                                     checkpoint.pending_action_id =
                                                         Some(pending_action_id);
+                                                    checkpoint.file_change_run_grant_ref =
+                                                        file_change_run_grant_ref.clone();
                                                     checkpoint
                                                 })
                                             },
@@ -3278,7 +3326,7 @@ impl AgentRuntime {
                     "文件事务尚未结算，不能结束当前运行或输出最终回复。",
                 ));
             }
-            file_transaction_guard.complete();
+            file_transaction_guard.complete()?;
             let content = final_content;
             if !llm_request.stream {
                 event_stream.emit(AgentEvent::MessageDelta {
@@ -3331,10 +3379,7 @@ fn file_change_snapshot_from_tool_result(
     if call.tool != "apply_patch" || !result.ok {
         return Ok(None);
     }
-    let staged_action = call
-        .args
-        .get("action")
-        .and_then(Value::as_str)
+    let staged_action = crate::tools::apply_patch_action(&call.args)
         .is_some_and(|action| matches!(action, "begin" | "append" | "edit" | "status" | "abort"));
     if !staged_action {
         return Ok(None);

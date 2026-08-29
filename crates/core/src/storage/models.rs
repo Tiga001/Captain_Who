@@ -1170,6 +1170,8 @@ pub struct AgentFileChangeOperationRecord {
     pub created_at: i64,
 }
 
+pub use crate::file_change::FileChangeRunGrantRecord;
+
 #[cfg(test)]
 mod security_tests {
     use super::*;

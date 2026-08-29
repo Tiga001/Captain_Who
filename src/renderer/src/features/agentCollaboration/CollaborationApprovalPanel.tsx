@@ -152,7 +152,7 @@ function ProjectedApprovalDecisionCard({
   return (
     <div className="collaboration-approval__decision">
       <AgentApprovalDialog
-        allowRememberForRun={false}
+        allowRunScopedApproval={false}
         key={`${approval.approvalId}:${attempt}`}
         observerRootConversationId={approval.rootConversationId}
         onApprove={() => void decide('approve')}

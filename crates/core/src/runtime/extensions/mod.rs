@@ -822,6 +822,7 @@ mod tests {
                 )
                 .unwrap(),
                 pending_action_id: None,
+                file_change_run_grant_ref: None,
                 pending_tool_call_id: "call-1".to_string(),
                 conversation_trace_items: Vec::new(),
                 conversation_model_context_items: Vec::new(),

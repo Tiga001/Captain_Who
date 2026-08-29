@@ -1302,11 +1302,11 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
             .unwrap();
         let fragments = [
             format!(
-                "{{\"action\":\"append\",\"transactionId\":\"{transaction_id}\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"line 1\\n"
+                "{{\"request\":{{\"action\":\"append\",\"transactionId\":\"{transaction_id}\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"line 1\\n"
             ),
             "line 2\\n".to_string(),
             "line 3\\n".to_string(),
-            "line 4\\n\"}".to_string(),
+            "line 4\\n\"}}".to_string(),
         ];
         let tool_name_fragments = ["apply_", "patch", "", ""];
         for (fragment, tool_name) in fragments.into_iter().zip(tool_name_fragments) {
@@ -1371,10 +1371,12 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
             source_tool_name: "apply_patch".to_string(),
             source_tool_call_id: "call-begin".to_string(),
             source_tool_arguments_digest: crate::file_change::proposal_digest(&json!({
-                "action": "begin",
-                "operation": "create",
-                "filePath": "preview.md",
-                "observationId": "fobs-preview",
+                "request": {
+                    "action": "begin",
+                    "operation": "create",
+                    "filePath": "preview.md",
+                    "observationId": "fobs-preview",
+                }
             }))
             .unwrap(),
             permission_revision: "permission-v1".to_string(),
@@ -1425,8 +1427,10 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
                         tool_completion(
                             "call-abort",
                             json!({
-                                "action": "abort",
-                                "transactionId": "file-change-preview"
+                                "request": {
+                                    "action": "abort",
+                                    "transactionId": "file-change-preview"
+                                }
                             }),
                         ),
                     )
@@ -1555,7 +1559,7 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
         .iter()
         .find_map(|event| match event {
             AgentEvent::ToolCall { call, .. }
-                if call.tool == "apply_patch" && call.args["action"] == "append" =>
+                if call.tool == "apply_patch" && call.args["request"]["action"] == "append" =>
             {
                 Some(call)
             }
@@ -1563,9 +1567,9 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
         })
         .expect("apply_patch append event");
     assert_runtime_owned_tool_call_id(&append_event.id);
-    assert!(append_event.args.get("content").is_none());
-    assert_eq!(append_event.args["contentBytes"], 28);
-    assert!(append_event.args.get("contentDigest").is_some());
+    assert!(append_event.args["request"].get("content").is_none());
+    assert_eq!(append_event.args["request"]["contentBytes"], 28);
+    assert!(append_event.args["request"].get("contentDigest").is_some());
     let append_call_id = append_event.id.clone();
 
     let append_trace = output
@@ -1581,8 +1585,8 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
             _ => None,
         })
         .expect("apply_patch append trace item");
-    assert!(append_trace.get("content").is_none());
-    assert_eq!(append_trace["contentBytes"], 28);
+    assert!(append_trace["request"].get("content").is_none());
+    assert_eq!(append_trace["request"]["contentBytes"], 28);
     assert_eq!(
         storage
             .list_agent_file_changes_for_run("run-preview")

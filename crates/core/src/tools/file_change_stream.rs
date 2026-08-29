@@ -75,7 +75,7 @@ impl FileChangeInputStreamObserver {
     pub(crate) fn apply_patch(context: ToolExecutionContext) -> Self {
         Self {
             context,
-            parser: TopLevelJsonStringStream::default(),
+            parser: TopLevelJsonStringStream::nested_object("request"),
             action: String::new(),
             action_complete: false,
             transaction_id: String::new(),
@@ -321,10 +321,12 @@ mod tests {
                 source_tool_call_id: "call-begin".to_string(),
                 source_tool_arguments_digest: crate::file_change::proposal_digest(
                     &serde_json::json!({
-                        "action": "begin",
-                        "operation": "create",
-                        "filePath": "src/main.rs",
-                        "observationId": "fobs-preview-fixture"
+                        "request": {
+                            "action": "begin",
+                            "operation": "create",
+                            "filePath": "src/main.rs",
+                            "observationId": "fobs-preview-fixture"
+                        }
                     }),
                 )
                 .unwrap(),
@@ -386,7 +388,7 @@ mod tests {
                 stream_id: "stream-1",
                 attempt: 1,
                 tool_call_index: 0,
-                input_delta: r#"{"action":"append","transactionId":"draft-1","index":0,"expectedDraftRevision":0,"content":"fn main() {\n"#,
+                input_delta: r#"{"request":{"action":"append","transactionId":"draft-1","index":0,"expectedDraftRevision":0,"content":"fn main() {\n"#,
                 received_bytes: 80,
             })
             .unwrap()
@@ -402,7 +404,7 @@ mod tests {
                 stream_id: "stream-1",
                 attempt: 1,
                 tool_call_index: 0,
-                input_delta: "    println!(\\\"你好\\\");\\n}\\n\"}",
+                input_delta: "    println!(\\\"你好\\\");\\n}\\n\"}}",
                 received_bytes: 120,
             })
             .unwrap();
@@ -459,7 +461,7 @@ mod tests {
                 stream_id: "stream-apply",
                 attempt: 1,
                 tool_call_index: 2,
-                input_delta: r#"{"action":"append","transactionId":"transaction-apply-1","index":0,"expectedDraftRevision":0,"content":"你好\n"}"#,
+                input_delta: r#"{"request":{"action":"append","transactionId":"transaction-apply-1","index":0,"expectedDraftRevision":0,"content":"你好\n"}}"#,
                 received_bytes: 128,
             })
             .unwrap()
@@ -497,7 +499,7 @@ mod tests {
                 stream_id: "stream-direct",
                 attempt: 1,
                 tool_call_index: 3,
-                input_delta: r#"{"action":"apply","operation":"create","filePath":"src/direct.rs","observationId":"fobs_private","content":"fn main() {}\n"}"#,
+                input_delta: r#"{"request":{"action":"apply","operation":"create","filePath":"src/direct.rs","observationId":"fobs_private","content":"fn main() {}\n"}}"#,
                 received_bytes: 160,
             })
             .unwrap()

@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn deserialize_non_empty_identifier<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() || value.trim() != value {
+        return Err(serde::de::Error::custom(
+            "identifier must be a non-empty trimmed string",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -86,10 +99,27 @@ pub struct AgentCancelRunResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentActionIdRequest {
     pub run_id: String,
     pub action_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentApprovalScopeDto {
+    SingleAction,
+    RemainingApplyPatchInRun,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentApproveActionRequest {
+    #[serde(deserialize_with = "deserialize_non_empty_identifier")]
+    pub run_id: String,
+    #[serde(deserialize_with = "deserialize_non_empty_identifier")]
+    pub action_id: String,
+    pub approval_scope: AgentApprovalScopeDto,
 }
 
 #[derive(Debug, Deserialize)]

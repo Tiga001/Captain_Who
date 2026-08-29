@@ -164,7 +164,7 @@ fn direct_file_change_fixture(
         .expect("content revision has a digest suffix")
         .1;
     let observation_id = format!("fobs_{}", &observation_hex[..32]);
-    let mut args = json!({
+    let mut request = json!({
         "action": "apply",
         "operation": match operation {
             FileChangeOperation::Create => "create",
@@ -175,8 +175,9 @@ fn direct_file_change_fixture(
         "observationId": observation_id,
     });
     if let Some(content) = target_content {
-        args["content"] = Value::String(content.to_string());
+        request["content"] = Value::String(content.to_string());
     }
+    let args = json!({ "request": request });
 
     let transaction_id = format!("file-change-direct-v1:{call_id}");
     let transaction = FileChangeTransaction {
@@ -357,9 +358,11 @@ fn staged_file_change_fixture(
     execution.staged_transaction_id = Some(transaction_id.to_string());
     execution.staged_transaction_revision = Some(1);
     let args = json!({
-        "action": "commit",
-        "transactionId": transaction_id,
-        "expectedDraftRevision": 1,
+        "request": {
+            "action": "commit",
+            "transactionId": transaction_id,
+            "expectedDraftRevision": 1,
+        }
     });
     execution.source_args_digest = mycopilot_core::file_change::proposal_digest(&args)
         .expect("digest staged fixture Tool Call arguments");
@@ -431,10 +434,12 @@ fn staged_file_change_record(
         source_tool_name: execution.source_tool_name.clone(),
         source_tool_call_id: format!("begin-{}", proposal.transaction_id),
         source_tool_arguments_digest: mycopilot_core::file_change::proposal_digest(&json!({
-            "action": "begin",
-            "operation": operation,
-            "filePath": proposal.file_path,
-            "observationId": execution.observation_id,
+            "request": {
+                "action": "begin",
+                "operation": operation,
+                "filePath": proposal.file_path,
+                "observationId": execution.observation_id,
+            }
         }))
         .unwrap(),
         permission_revision: execution.permission_revision.clone(),
@@ -494,10 +499,12 @@ fn completed_trace(
                 call_id: call_id.clone(),
                 tool: "apply_patch".to_string(),
                 operation: json!({
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "src/history.rs",
-                    "contentBytes": content_bytes
+                    "request": {
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "src/history.rs",
+                        "contentBytes": content_bytes
+                    }
                 }),
                 provenance: AgentToolIdentity::Builtin {
                     tool_name: "apply_patch".to_string(),

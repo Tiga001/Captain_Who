@@ -903,6 +903,79 @@ CREATE TABLE agent_file_change_chunks (
             PRIMARY KEY (transaction_id, mutation_index),
             FOREIGN KEY (transaction_id) REFERENCES agent_file_changes(id) ON DELETE CASCADE
         );
+CREATE TABLE agent_file_change_run_grants (
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            grant_id TEXT PRIMARY KEY CHECK (
+                length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            revision INTEGER NOT NULL CHECK (revision >= 0),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'inactive', 'revoked')),
+            run_id TEXT NOT NULL CHECK (length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+            conversation_id TEXT NOT NULL,
+            project_id TEXT,
+            scope_kind TEXT NOT NULL CHECK (scope_kind IN ('workspace', 'external_parent')),
+            workspace_identity TEXT,
+            canonical_scope_path TEXT NOT NULL CHECK (
+                length(CAST(canonical_scope_path AS BLOB)) BETWEEN 1 AND 32768
+            ),
+            scope_directory_identity_json TEXT NOT NULL CHECK (
+                json_valid(scope_directory_identity_json)
+                AND length(CAST(scope_directory_identity_json AS BLOB)) BETWEEN 2 AND 1024
+            ),
+            granting_pending_action_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(granting_pending_action_id AS BLOB)) BETWEEN 1 AND 2304
+            ),
+            base_write_permission TEXT NOT NULL CHECK (
+                base_write_permission IN ('workspace_only', 'all')
+            ),
+            granting_permission_revision TEXT NOT NULL CHECK (
+                length(CAST(granting_permission_revision AS BLOB)) BETWEEN 1 AND 256
+            ),
+            granting_tool_set_revision TEXT NOT NULL CHECK (
+                length(CAST(granting_tool_set_revision AS BLOB)) BETWEEN 1 AND 256
+            ),
+            granting_provider_wire_revision TEXT NOT NULL CHECK (
+                length(CAST(granting_provider_wire_revision AS BLOB)) BETWEEN 1 AND 256
+            ),
+            apply_patch_contract_revision TEXT NOT NULL CHECK (
+                apply_patch_contract_revision = 'apply-patch-file-change-v1'
+            ),
+            activation_result_digest TEXT CHECK (
+                activation_result_digest IS NULL
+                OR (
+                    length(activation_result_digest) = 86
+                    AND substr(activation_result_digest, 1, 22) = 'file-change-sha256-v1:'
+                    AND substr(activation_result_digest, 23) NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            created_at INTEGER NOT NULL,
+            activated_at INTEGER,
+            inactive_at INTEGER,
+            revoked_at INTEGER,
+            CHECK (
+                (scope_kind = 'workspace' AND workspace_identity IS NOT NULL
+                    AND length(CAST(workspace_identity AS BLOB)) BETWEEN 1 AND 256)
+                OR (scope_kind = 'external_parent' AND workspace_identity IS NULL)
+            ),
+            CHECK (
+                (status = 'pending' AND revision = 0 AND activation_result_digest IS NULL
+                    AND activated_at IS NULL
+                    AND inactive_at IS NULL AND revoked_at IS NULL)
+                OR (status = 'active' AND revision > 0 AND activation_result_digest IS NOT NULL
+                    AND activated_at IS NOT NULL
+                    AND inactive_at IS NULL AND revoked_at IS NULL)
+                OR (status = 'inactive' AND revision > 0 AND activation_result_digest IS NULL
+                    AND activated_at IS NULL
+                    AND inactive_at IS NOT NULL AND revoked_at IS NULL)
+                OR (status = 'revoked' AND revision > 0 AND revoked_at IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (granting_pending_action_id)
+                REFERENCES agent_pending_actions(action_id) ON DELETE CASCADE
+        );
+CREATE UNIQUE INDEX agent_file_change_run_grants_one_active_per_run
+            ON agent_file_change_run_grants(run_id)
+            WHERE status = 'active';
 CREATE TABLE agent_file_change_operations (
             transaction_id TEXT NOT NULL,
             mutation_index INTEGER NOT NULL CHECK (mutation_index >= 0),

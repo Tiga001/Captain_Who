@@ -7,6 +7,8 @@ mod command_session;
 mod context;
 mod conversation_history;
 mod document_text;
+#[cfg(test)]
+mod file_change_round6_acceptance;
 mod file_change_staged;
 mod file_change_stream;
 mod filesystem;
@@ -45,6 +47,7 @@ use crate::protocol::{
 };
 use agent_collaboration::{AgentCollaborationTool, AgentCollaborationToolKind};
 use apply_patch::ApplyPatchTool;
+pub(crate) use apply_patch::{apply_patch_action, apply_patch_request, apply_patch_wire_is_valid};
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use automation_report::AutomationReportTool;
 pub use automation_report::{AutomationReportKind, AutomationReportSink};

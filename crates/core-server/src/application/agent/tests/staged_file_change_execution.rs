@@ -103,9 +103,11 @@ fn staged_update_file_change_fixture(
     execution.staged_transaction_id = Some(transaction_id.to_string());
     execution.staged_transaction_revision = Some(1);
     let args = json!({
-        "action": "commit",
-        "transactionId": transaction_id,
-        "expectedDraftRevision": 1,
+        "request": {
+            "action": "commit",
+            "transactionId": transaction_id,
+            "expectedDraftRevision": 1,
+        }
     });
     execution.source_args_digest = mycopilot_core::file_change::proposal_digest(&args)
         .expect("digest staged update Tool Call arguments");
@@ -247,6 +249,119 @@ fn manual_staged_apply_patch_commit_uses_the_common_file_change_committer() {
             .unwrap()
             .status,
         "applied"
+    );
+}
+
+#[tokio::test]
+async fn staged_approval_response_lost_retry_replays_receipt_without_recommitting_the_draft() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let target = workspace.join("staged-retry.txt");
+    let run_id = "run-staged-response-lost";
+    let conversation_id = "conversation-staged-response-lost";
+    let assistant_message_id = "assistant-staged-response-lost";
+    let call_id = "call-staged-response-lost";
+    let transaction_id = "transaction-staged-response-lost";
+    let (mut proposal, call) = staged_file_change_fixture(
+        StagedFileChangeFixtureIdentity {
+            run_id,
+            conversation_id,
+            call_id,
+            transaction_id,
+        },
+        ("staged-retry.txt", target.to_str().unwrap()),
+        "staged exactly once\n",
+        AgentApprovalStatus::Required,
+    );
+    let mut input = direct_execution_input(
+        &workspace,
+        run_id,
+        conversation_id,
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+            ..Default::default()
+        },
+        &call,
+    );
+    save_test_pending_provider_for_input(&storage, &mut input);
+    bind_staged_execution_to_input(&mut proposal, &input);
+    seed_durable_direct_file_change_owner(
+        &storage,
+        &mut input,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+    );
+    storage
+        .create_agent_file_change(staged_file_change_record(&proposal, "waiting_approval"))
+        .unwrap();
+    service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentProposedAction::FileChange {
+                file_change: proposal,
+            },
+            input,
+        )
+        .unwrap();
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let first = service
+        .approve_action_with_scope(
+            run_id,
+            call_id,
+            mycopilot_protocol_rs::AgentApprovalScopeDto::SingleAction,
+            notifications.clone(),
+        )
+        .unwrap();
+    let transaction_after_first = storage
+        .get_agent_file_change(transaction_id)
+        .unwrap()
+        .unwrap();
+    let metadata_after_first = fs::metadata(&target).unwrap();
+    let retry = service
+        .approve_action_with_scope(
+            run_id,
+            call_id,
+            mycopilot_protocol_rs::AgentApprovalScopeDto::SingleAction,
+            notifications,
+        )
+        .expect("the staged response-lost retry replays its terminal receipt");
+    let transaction_after_retry = storage
+        .get_agent_file_change(transaction_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first.status, "applied");
+    assert_eq!(retry.status, "applied");
+    assert_eq!(
+        serde_json::to_value(&first.file_change_result).unwrap(),
+        serde_json::to_value(&retry.file_change_result).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "staged exactly once\n"
+    );
+    assert_eq!(transaction_after_retry.status, "applied");
+    assert_eq!(
+        transaction_after_retry.draft_revision,
+        transaction_after_first.draft_revision
+    );
+    assert_eq!(
+        transaction_after_retry.next_mutation_index,
+        transaction_after_first.next_mutation_index
+    );
+    assert_eq!(
+        fs::metadata(&target).unwrap().modified().unwrap(),
+        metadata_after_first.modified().unwrap()
     );
 }
 

@@ -154,11 +154,13 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
                                         "patch-approval",
                                         "apply_patch",
                                         json!({
-                                            "action": "apply",
-                                            "operation": "create",
-                                            "filePath": "report.txt",
-                                            "observationId": observation_id,
-                                            "content": "draft report"
+                                            "request": {
+                                                "action": "apply",
+                                                "operation": "create",
+                                                "filePath": "report.txt",
+                                                "observationId": observation_id,
+                                                "content": "draft report"
+                                            }
                                         })
                                     ),
                                     native_tool_call(
@@ -610,11 +612,13 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
                                 "materialize-after-read",
                                 "apply_patch",
                                 json!({
-                                    "action": "apply",
-                                    "operation": "create",
-                                    "filePath": "report.txt",
-                                    "observationId": observation_id,
-                                    "content": "report"
+                                    "request": {
+                                        "action": "apply",
+                                        "operation": "create",
+                                        "filePath": "report.txt",
+                                        "observationId": observation_id,
+                                        "content": "report"
+                                    }
                                 })
                             )]
                         },

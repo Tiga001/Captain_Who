@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
-import type { AgentMcpToolInvocationState, AgentProposedAction } from '@mycopilot/protocol'
+import type {
+  AgentApprovalScope,
+  AgentMcpToolInvocationState,
+  AgentProposedAction
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
@@ -36,14 +40,14 @@ interface AgentApprovalDialogTarget {
 }
 
 interface AgentApprovalDialogProps {
-  allowRememberForRun?: boolean
+  allowRunScopedApproval?: boolean
   observerRootConversationId?: string
   target: AgentApprovalDialogTarget
   mcpInvocationState?: AgentMcpToolInvocationState
   onApprove?: (
     messageId: string,
     action: AgentProposedAction,
-    options?: { rememberForRun?: boolean }
+    approvalScope: AgentApprovalScope
   ) => ApprovalSubmissionResult
   onCancel?: (messageId: string, action: AgentProposedAction) => ApprovalSubmissionResult
   onReject?: (
@@ -136,18 +140,16 @@ function getApprovalPolicyHint(action: StandardAgentProposedAction, t: Translate
   return t('agent.approval.dialog.toolPolicyHint')
 }
 
-function getRememberCommandPrefix(action: StandardAgentProposedAction) {
-  if (action.type !== 'command') return ''
-  return action.command.command.trim()
-}
-
-function canRememberForRun(action: StandardAgentProposedAction) {
-  return action.type === 'command' || action.type === 'file_change'
+function canApproveRemainingApplyPatchInRun(action: StandardAgentProposedAction) {
+  return (
+    action.type === 'file_change' &&
+    (action.fileChange.operation === 'create' || action.fileChange.operation === 'update')
+  )
 }
 
 interface StandardAgentApprovalDialogProps {
   action: StandardAgentProposedAction
-  allowRememberForRun: boolean
+  allowRunScopedApproval: boolean
   messageId: string
   observerRootConversationId?: string
   onApprove?: AgentApprovalDialogProps['onApprove']
@@ -156,7 +158,7 @@ interface StandardAgentApprovalDialogProps {
 
 function StandardAgentApprovalDialog({
   action,
-  allowRememberForRun,
+  allowRunScopedApproval,
   messageId,
   observerRootConversationId,
   onApprove,
@@ -190,8 +192,7 @@ function StandardAgentApprovalDialog({
     action.type === 'office_operation' ||
     (action.type === 'command' && /[\r\n]/u.test(code))
   const policyHint = getApprovalPolicyHint(action, t)
-  const rememberPrefix = getRememberCommandPrefix(action)
-  const showRememberChoice = allowRememberForRun && canRememberForRun(action)
+  const showRememberChoice = allowRunScopedApproval && canApproveRemainingApplyPatchInRun(action)
   const fileChangeTransactionId =
     action.type === 'file_change' ? action.fileChange.transactionId : null
   const inlineFileChangeDiff =
@@ -310,10 +311,10 @@ function StandardAgentApprovalDialog({
     (fileChangeDiffCurrent && !fileChangeDiff.loading && !fileChangeDiff.error)
   const fileChangeDiffPage = fileChangeDiff.pages[fileChangeDiff.pageIndex] ?? ''
 
-  const approve = (rememberForRun = false) => {
+  const approve = (approvalScope: AgentApprovalScope) => {
     if (isSubmitting || !fileChangeDiffReady) return
     setIsSubmitting(true)
-    resetApprovalSubmissionOnFailure(onApprove?.(messageId, action, { rememberForRun }), () =>
+    resetApprovalSubmissionOnFailure(onApprove?.(messageId, action, approvalScope), () =>
       setIsSubmitting(false)
     )
   }
@@ -383,7 +384,7 @@ function StandardAgentApprovalDialog({
         ) : undefined
       }
       isSubmitting={isSubmitting}
-      onApprove={() => approve(false)}
+      onApprove={() => approve('singleAction')}
       onReject={reject}
       onRejectMessageChange={setRejectMessage}
       policyHint={policyHint}
@@ -395,20 +396,11 @@ function StandardAgentApprovalDialog({
           ? {
               content: (
                 <span className="agent-approval-dialog__choice-text">
-                  {action.type === 'file_change'
-                    ? t('agent.approval.dialog.approveFileChangeRemember')
-                    : t('agent.approval.dialog.approveRemember')}
-                  {rememberPrefix ? (
-                    <small>
-                      {formatTranslation(t, 'agent.approval.dialog.rememberPrefix', {
-                        prefix: rememberPrefix
-                      })}
-                    </small>
-                  ) : null}
+                  {t('agent.approval.dialog.approveFileChangeRemember')}
                 </span>
               ),
               disabled: !fileChangeDiffReady,
-              onSelect: () => approve(true)
+              onSelect: () => approve('remainingApplyPatchInRun')
             }
           : undefined
       }
@@ -418,7 +410,7 @@ function StandardAgentApprovalDialog({
 }
 
 export function AgentApprovalDialog({
-  allowRememberForRun = true,
+  allowRunScopedApproval = true,
   observerRootConversationId,
   target,
   mcpInvocationState,
@@ -426,13 +418,18 @@ export function AgentApprovalDialog({
   onCancel,
   onReject
 }: AgentApprovalDialogProps) {
+  const onApproveSingleAction = onApprove
+    ? (messageId: string, action: AgentProposedAction) =>
+        onApprove(messageId, action, 'singleAction')
+    : undefined
+
   if (target.action.type === 'mcp_tool_call') {
     return (
       <McpToolApprovalCard
         action={target.action}
         invocationState={mcpInvocationState}
         messageId={target.messageId}
-        onApprove={onApprove}
+        onApprove={onApproveSingleAction}
         onCancel={onCancel}
         onReject={onReject}
       />
@@ -444,7 +441,7 @@ export function AgentApprovalDialog({
       <BuiltinCapabilityActivationApprovalCard
         action={target.action}
         messageId={target.messageId}
-        onApprove={onApprove}
+        onApprove={onApproveSingleAction}
         onCancel={onCancel}
         onReject={onReject}
       />
@@ -456,7 +453,7 @@ export function AgentApprovalDialog({
       <BrowserRiskApprovalCard
         action={target.action}
         messageId={target.messageId}
-        onApprove={onApprove}
+        onApprove={onApproveSingleAction}
         onCancel={onCancel}
         onReject={onReject}
       />
@@ -468,7 +465,7 @@ export function AgentApprovalDialog({
       <BuiltinMcpToolApprovalCard
         action={target.action}
         messageId={target.messageId}
-        onApprove={onApprove}
+        onApprove={onApproveSingleAction}
         onCancel={onCancel}
         onReject={onReject}
       />
@@ -480,7 +477,7 @@ export function AgentApprovalDialog({
       <SkillInstallationApprovalCard
         action={target.action}
         messageId={target.messageId}
-        onApprove={onApprove}
+        onApprove={onApproveSingleAction}
         onReject={onReject}
       />
     )
@@ -489,7 +486,7 @@ export function AgentApprovalDialog({
   return (
     <StandardAgentApprovalDialog
       action={target.action}
-      allowRememberForRun={allowRememberForRun}
+      allowRunScopedApproval={allowRunScopedApproval}
       messageId={target.messageId}
       observerRootConversationId={observerRootConversationId}
       onApprove={onApprove}

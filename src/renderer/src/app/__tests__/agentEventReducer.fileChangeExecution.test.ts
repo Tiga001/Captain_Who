@@ -66,9 +66,11 @@ function waitingMessage(): ChatMessage {
           id: action.fileChange.id,
           tool: 'apply_patch',
           args: {
-            action: 'commit',
-            transactionId: action.fileChange.transactionId,
-            expectedDraftRevision: 1
+            request: {
+              action: 'commit',
+              transactionId: action.fileChange.transactionId,
+              expectedDraftRevision: 1
+            }
           },
           approvalStatus: 'required',
           reason: action.fileChange.summary

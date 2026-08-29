@@ -91,7 +91,7 @@ describe('BuiltinCapabilityActivationApprovalCard', () => {
     approve.click()
     approve.click()
     expect(onApprove).toHaveBeenCalledOnce()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
     screen.unmount()
   })
 
@@ -163,7 +163,7 @@ describe('BuiltinCapabilityActivationApprovalCard', () => {
     await expect.element(approve).toBeEnabled()
     expect(screen.container.textContent).not.toContain('activation request has expired')
     await approve.click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
     screen.unmount()
   })
 

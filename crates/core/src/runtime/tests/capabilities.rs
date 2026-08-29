@@ -522,11 +522,13 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
                 id: "denied-stable-write".to_string(),
                 tool: "apply_patch".to_string(),
                 args: json!({
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "denied.txt",
-                    "observationId": "fobs_not_reached_because_write_is_denied",
-                    "content": "must not be written"
+                    "request": {
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "denied.txt",
+                        "observationId": "fobs_not_reached_because_write_is_denied",
+                        "content": "must not be written"
+                    }
                 }),
                 approval_status: AgentApprovalStatus::NotRequired,
                 reason: None,

@@ -447,45 +447,31 @@ fn generic_provider_payloads_expose_only_the_current_file_change_tool() {
         crate::protocol::AgentToolApprovalMode::Dynamic
     );
     assert!(apply_patch.description.contains("read_file"));
-    assert_eq!(apply_patch.input_schema["required"], json!(["action"]));
-    assert_eq!(
-        apply_patch.input_schema["properties"]["action"]["enum"],
-        json!(["apply", "begin", "append", "edit", "commit", "status", "abort"])
-    );
-    assert_eq!(
-        apply_patch.input_schema["properties"]["operation"]["enum"],
-        json!(["create", "update", "delete"])
-    );
+    assert_eq!(apply_patch.input_schema["required"], json!(["request"]));
     assert_eq!(apply_patch.input_schema["additionalProperties"], false);
+    let request_branches = apply_patch.input_schema["properties"]["request"]["oneOf"]
+        .as_array()
+        .unwrap();
+    assert_eq!(request_branches.len(), 11);
     assert_eq!(
-        apply_patch.input_schema["properties"]["edits"]["items"]["additionalProperties"],
-        false
+        request_branches[2]["properties"]["edits"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
     );
     let apply_properties = apply_patch.input_schema["properties"].as_object().unwrap();
-    assert!(apply_properties.contains_key("observationId"));
+    assert_eq!(apply_properties.len(), 1);
+    assert!(apply_properties.contains_key("request"));
     assert!(!apply_properties.contains_key("patch"));
     assert!(!apply_properties.contains_key("expectedRevision"));
     assert_eq!(
-        apply_patch.input_schema["properties"]["content"]["maxLength"],
-        1024 * 1024
+        request_branches[0]["properties"]["content"]["maxLength"],
+        32 * 1024
     );
-    for field in [
-        "transactionId",
-        "index",
-        "expectedDraftRevision",
-        "strategy",
-    ] {
-        assert!(apply_properties.contains_key(field));
-    }
     assert_eq!(
-        apply_patch.input_schema["properties"]["edits"]["items"]["properties"]["kind"]["enum"],
-        json!([
-            "replace",
-            "insert_before",
-            "insert_after",
-            "append",
-            "prepend"
-        ])
+        request_branches[6]["properties"]["content"]["maxLength"],
+        1024 * 1024
     );
     let request = |api_style, tools: Vec<AgentToolDefinition>| LlmChatRequest {
         api_url: "https://example.test".to_string(),
@@ -531,16 +517,18 @@ fn generic_provider_payloads_expose_only_the_current_file_change_tool() {
 #[test]
 fn generic_provider_payloads_preserve_strict_direct_apply_call_and_result_order() {
     let args = json!({
-        "action": "apply",
-        "operation": "update",
-        "filePath": "README.md",
-        "observationId": "fobs_current_read",
-        "edits": [{
-            "kind": "replace",
-            "oldText": "old heading",
-            "newText": "new heading"
-        }],
-        "summary": "Update the heading"
+        "request": {
+            "action": "apply",
+            "operation": "update",
+            "filePath": "README.md",
+            "observationId": "fobs_current_read",
+            "edits": [{
+                "kind": "replace",
+                "oldText": "old heading",
+                "newText": "new heading"
+            }],
+            "summary": "Update the heading"
+        }
     });
 
     for api_style in [
@@ -611,31 +599,37 @@ fn generic_provider_payloads_preserve_staged_apply_patch_history_and_exact_argum
         (
             "call-staged-begin",
             json!({
-                "action": "begin",
-                "operation": "create",
-                "filePath": "report.md",
-                "observationId": "fobs_missing_report"
+                "request": {
+                    "action": "begin",
+                    "operation": "create",
+                    "filePath": "report.md",
+                    "observationId": "fobs_missing_report"
+                }
             }),
             r#"{"transactionId":"file-change-staged-v1:report","draftRevision":0,"nextIndex":0}"#,
         ),
         (
             "call-staged-append",
             json!({
-                "action": "append",
-                "transactionId": "file-change-staged-v1:report",
-                "index": 0,
-                "expectedDraftRevision": 0,
-                "content": "# Report\n"
+                "request": {
+                    "action": "append",
+                    "transactionId": "file-change-staged-v1:report",
+                    "index": 0,
+                    "expectedDraftRevision": 0,
+                    "content": "# Report\n"
+                }
             }),
             r#"{"transactionId":"file-change-staged-v1:report","draftRevision":1,"nextIndex":1}"#,
         ),
         (
             "call-staged-commit",
             json!({
-                "action": "commit",
-                "transactionId": "file-change-staged-v1:report",
-                "expectedDraftRevision": 1,
-                "summary": "Create report"
+                "request": {
+                    "action": "commit",
+                    "transactionId": "file-change-staged-v1:report",
+                    "expectedDraftRevision": 1,
+                    "summary": "Create report"
+                }
             }),
             r#"{"status":"applied","filePath":"report.md"}"#,
         ),

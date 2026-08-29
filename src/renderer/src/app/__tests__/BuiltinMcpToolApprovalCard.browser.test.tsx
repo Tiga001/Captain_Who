@@ -218,7 +218,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
       .querySelector('.agent-approval-dialog')
       ?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }))
     expect(onApprove).toHaveBeenCalledOnce()
-    expect(onApprove).toHaveBeenCalledWith('assistant-sensitive', proposed)
+    expect(onApprove).toHaveBeenCalledWith('assistant-sensitive', proposed, 'singleAction')
     expect(onRejectAfterApprove).not.toHaveBeenCalled()
     expect(onCancelAfterApprove).not.toHaveBeenCalled()
     await screen.unmount()
@@ -285,7 +285,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
       'sensitive browser operation request has expired'
     )
     await approve.click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-sensitive', expired)
+    expect(onApprove).toHaveBeenCalledWith('assistant-sensitive', expired, 'singleAction')
     await expiredScreen.unmount()
   })
 

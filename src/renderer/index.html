@@ -73,7 +73,13 @@
         letter-spacing: 0;
         text-overflow: ellipsis;
         white-space: nowrap;
+        opacity: 1;
+        transition: opacity 180ms ease;
         user-select: none;
+      }
+
+      .app-bootstrap-screen__ambient[data-phase='fading'] {
+        opacity: 0;
       }
 
       .app-bootstrap-screen__sr-only {
@@ -129,6 +135,10 @@
         .app-bootstrap-screen__icon {
           animation: none;
         }
+
+        .app-bootstrap-screen__ambient {
+          transition: none;
+        }
       }
     </style>
   </head>
@@ -140,13 +150,10 @@
         <div class="app-bootstrap-screen__drag-region" aria-hidden="true"></div>
         <div class="app-bootstrap-screen__content">
           <picture>
-            <source
-              media="(prefers-color-scheme: dark)"
-              srcset="../../resources/brand-mark-dark.png"
-            />
+            <source data-bootstrap-startup-icon-dark media="(prefers-color-scheme: dark)" />
             <img
               class="app-bootstrap-screen__icon"
-              src="../../resources/brand-mark-light.png"
+              data-bootstrap-startup-icon
               alt=""
               aria-hidden="true"
               draggable="false"

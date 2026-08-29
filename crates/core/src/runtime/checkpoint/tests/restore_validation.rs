@@ -2,6 +2,75 @@ use super::*;
 use crate::file_change::FileObservationOwner;
 
 #[test]
+fn run_grant_checkpoint_requires_exact_canonical_action_and_strict_apply_patch_call() {
+    let run_id = "checkpoint-validation-run";
+    let (mut checkpoint, mut continuation) = restorable_checkpoint_fixture();
+    let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let args = apply_patch_args(json!({
+        "action": "apply",
+        "operation": "create",
+        "filePath": "report.txt",
+        "observationId": format!("fobs_{}", "1".repeat(32)),
+        "content": "current\n"
+    }));
+    for item in &mut checkpoint.context_items {
+        for call in &mut item.tool_calls {
+            if call.id == pending_call_id {
+                call.args = args.clone();
+            }
+        }
+    }
+    for item in &mut checkpoint.conversation_trace_items {
+        if let ConversationTurnTraceItem::ToolCall {
+            call_id,
+            tool,
+            provenance,
+            operation,
+            approval_status,
+            ..
+        } = item
+        {
+            if call_id == &pending_call_id {
+                *tool = "apply_patch".to_string();
+                *provenance = AgentToolIdentity::Builtin {
+                    tool_name: "apply_patch".to_string(),
+                };
+                *operation = args.clone();
+                *approval_status = AgentApprovalStatus::Approved;
+            }
+        }
+    }
+    checkpoint.pending_action_id =
+        Some(crate::canonical_pending_action_id(run_id, &pending_call_id));
+    checkpoint.file_change_run_grant_ref = Some(crate::file_change::FileChangeRunGrantRef {
+        schema_version: crate::file_change::FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
+        grant_id: "grant-checkpoint".to_string(),
+        revision: 1,
+        apply_patch_contract_revision: crate::file_change::APPLY_PATCH_RUN_GRANT_CONTRACT_REVISION
+            .to_string(),
+    });
+    continuation.call.args = args;
+    assert!(restore_run_checkpoint(checkpoint.clone(), run_id, &continuation).is_ok());
+
+    let mut wrong_action = checkpoint.clone();
+    wrong_action.pending_action_id = Some(crate::canonical_pending_action_id(
+        run_id,
+        "another-call-in-the-same-run",
+    ));
+    assert!(restore_run_checkpoint(wrong_action, run_id, &continuation).is_err());
+
+    let mut wrong_trace_tool = checkpoint;
+    for item in &mut wrong_trace_tool.conversation_trace_items {
+        if let ConversationTurnTraceItem::ToolCall { call_id, tool, .. } = item {
+            if call_id == &pending_call_id {
+                *tool = "read_file".to_string();
+            }
+        }
+    }
+    assert!(restore_run_checkpoint(wrong_trace_tool, run_id, &continuation).is_err());
+}
+
+#[test]
 fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observation() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("example.txt");
@@ -99,13 +168,13 @@ fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observa
         call: AgentContextCheckpointToolCall {
             id: queued_call_id.clone(),
             name: "apply_patch".to_string(),
-            args: json!({
+            args: apply_patch_args(json!({
                 "action": "apply",
                 "operation": "update",
                 "filePath": "example.txt",
                 "observationId": observation.id(),
                 "content": "after\n"
-            }),
+            })),
             provider_identity: AgentProviderToolCallIdentity {
                 provider_tool_index: 8,
                 provider_call_id: "provider-queued-apply-patch".to_string(),
@@ -243,13 +312,13 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
         call: AgentContextCheckpointToolCall {
             id: queued_call_id.clone(),
             name: "apply_patch".to_string(),
-            args: json!({
+            args: apply_patch_args(json!({
                 "action": "apply",
                 "operation": "update",
                 "filePath": "example.txt",
                 "observationId": observation.id(),
                 "content": "after\n"
-            }),
+            })),
             provider_identity: AgentProviderToolCallIdentity {
                 provider_tool_index: 8,
                 provider_call_id: "provider-queued-apply-patch".to_string(),
@@ -329,7 +398,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
     let other_target = workspace.join("other.txt");
     std::fs::write(&other_target, "other\n").unwrap();
     let mut coordinated_path_tamper = queued.clone();
-    coordinated_path_tamper[0].call.args["filePath"] = json!("other.txt");
+    coordinated_path_tamper[0].call.args["request"]["filePath"] = json!("other.txt");
     coordinated_path_tamper[0]
         .file_observation
         .as_mut()
@@ -600,24 +669,24 @@ fn one_model_response_claims_semantically_identical_file_changes_once() {
             LlmToolCall {
                 id: canonical_test_call_id(0, "claim-first"),
                 name: "apply_patch".to_string(),
-                args: json!({
+                args: apply_patch_args(json!({
                     "action": "apply",
                     "operation": "create",
                     "filePath": "report.txt",
                     "observationId": "fobs_00000000000000000000000000000000",
                     "content": "same",
-                }),
+                })),
             },
             LlmToolCall {
                 id: canonical_test_call_id(1, "claim-duplicate"),
                 name: "apply_patch".to_string(),
-                args: json!({
+                args: apply_patch_args(json!({
                     "observationId": "fobs_00000000000000000000000000000000",
                     "content": "same",
                     "filePath": "report.txt",
                     "operation": "create",
                     "action": "apply"
-                }),
+                })),
             },
         ],
         false,
@@ -643,11 +712,11 @@ fn approval_restore_reconstructs_all_seen_calls_from_the_same_model_response() {
     let pending = LlmToolCall {
         id: canonical_test_call_id(1, "restore-pending"),
         name: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-restore-pending",
             "expectedDraftRevision": 1
-        }),
+        })),
     };
     let duplicate_first = LlmToolCall {
         id: canonical_test_call_id(2, "restore-duplicate"),
@@ -825,11 +894,11 @@ fn approval_checkpoint_uses_provider_index_when_provider_call_ids_repeat() {
         LlmToolCall {
             id: "provider-reused-id".to_string(),
             name: "apply_patch".to_string(),
-            args: json!({
+            args: apply_patch_args(json!({
                 "action": "commit",
                 "transactionId": "transaction-provider-reused",
                 "expectedDraftRevision": 1
-            }),
+            })),
         },
         LlmToolCall {
             id: "provider-reused-id".to_string(),
@@ -841,11 +910,11 @@ fn approval_checkpoint_uses_provider_index_when_provider_call_ids_repeat() {
         LlmToolCall {
             id: canonical_test_call_id(0, "provider-reused-id"),
             name: "apply_patch".to_string(),
-            args: json!({
+            args: apply_patch_args(json!({
                 "action": "commit",
                 "transactionId": "transaction-provider-reused",
                 "expectedDraftRevision": 1
-            }),
+            })),
         },
         LlmToolCall {
             id: canonical_test_call_id(1, "provider-reused-id"),
@@ -925,11 +994,11 @@ fn checkpoint_creation_rejects_invalid_pending_queued_context_and_trace_ids() {
     let pending = LlmToolCall {
         id: invalid_id.clone(),
         name: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-invalid-pending",
             "expectedDraftRevision": 1
-        }),
+        })),
     };
     let (mut batch, assistant_item) =
         test_batch_and_context_item("create-invalid-pending", "", vec![pending.clone()], false);
@@ -960,11 +1029,11 @@ fn checkpoint_creation_rejects_invalid_pending_queued_context_and_trace_ids() {
     let valid_pending = LlmToolCall {
         id: canonical_test_call_id(0, "create-valid-pending"),
         name: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-valid-pending",
             "expectedDraftRevision": 1
-        }),
+        })),
     };
     let (mut invalid_queue, valid_pending_item) = test_batch_and_context_item(
         "create-invalid-queue",

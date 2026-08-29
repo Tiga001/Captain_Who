@@ -2530,7 +2530,7 @@ impl AgentService {
         self.finish_pre_runtime_action_continuation_failure(
             record,
             notifications,
-            &steer_input,
+            Some(&steer_input),
             &cancellation_token,
             target_status,
             FAILURE_CODE,
@@ -3641,14 +3641,14 @@ impl AgentService {
         let run_id = &record.snapshot.run_id;
 
         if self.is_agent_input_scope_deleting(&record.agent_input) {
-            self.discard_usage_context(run_id);
-            if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
-                self.release_conversation_turn_if_current(conversation_id, run_id);
-            }
-            self.release_turn_concurrency_permit(run_id);
-            self.discard_trace_snapshot(run_id);
-            self.discard_exact_running_context_window_snapshot(run_id);
-            self.unregister_cancellation_if_current(run_id, cancellation_token);
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                record,
+                notifications,
+                None,
+                cancellation_token,
+                None,
+                None,
+            );
             return;
         }
 
@@ -3767,20 +3767,45 @@ impl AgentService {
             self.unregister_cancellation_if_current(run_id, cancellation_token);
             return;
         }
-        if let Err(error) = persisted {
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id.clone()),
-                trace_sequence: None,
-                message: PERSISTENCE_ERROR.to_string(),
-                recoverable: false,
-                code: Some("cancelled_run_persistence_failed".to_string()),
-                details: None,
-            }));
-            eprintln!("failed to persist cancelled action continuation: {error}");
+        if persisted.is_err() {
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                record,
+                notifications,
+                None,
+                cancellation_token,
+                Some("cancelled_run_persistence_failed"),
+                Some(PERSISTENCE_ERROR.to_string()),
+            );
             return;
         }
         if let Err(error) = pending_transition {
             emit_pending_transition_error(notifications, run_id, final_pending_status, &error);
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                record,
+                notifications,
+                None,
+                cancellation_token,
+                None,
+                None,
+            );
+            return;
+        }
+        if self
+            .storage
+            .revoke_nonterminal_file_change_run_grants(run_id)
+            .is_err()
+        {
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                record,
+                notifications,
+                None,
+                cancellation_token,
+                Some("file_change_run_grant_revocation_failed"),
+                Some(
+                    "已取消的审批续跑无法确认本轮文件修改授权已安全撤销；将在启动恢复时重新对账。"
+                        .to_string(),
+                ),
+            );
             return;
         }
 
@@ -3813,7 +3838,7 @@ impl AgentService {
         &self,
         record: &PendingActionRecord,
         notifications: &CoreServerNotificationSender,
-        steer_input: &AgentSteerInputQueue,
+        steer_input: Option<&AgentSteerInputQueue>,
         cancellation_token: &AgentCancellationToken,
         expected_target_status: PendingActionStatus,
         failure_code: &str,
@@ -3824,35 +3849,27 @@ impl AgentService {
             record.snapshot.conversation_id.as_deref(),
             record.snapshot.assistant_message_id.as_deref(),
         ) else {
-            self.discard_usage_context(run_id);
-            let _ = self.unregister_active_run_control(
-                run_id,
-                steer_input,
-                AgentSteerRunRejectionCode::RunNotSteerable,
-                "The agent run has finished and no longer accepts guidance.",
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                record,
                 notifications,
+                steer_input,
+                cancellation_token,
+                Some("conversation_turn_identity_missing"),
+                Some("审批续跑缺少 Conversation Turn 持久化身份。".to_string()),
             );
-            self.unregister_cancellation_if_current(run_id, cancellation_token);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id.clone()),
-                trace_sequence: None,
-                message: "审批续跑缺少 Conversation Turn 持久化身份。".to_string(),
-                recoverable: true,
-                code: Some("conversation_turn_identity_missing".to_string()),
-                details: None,
-            }));
             return;
         };
 
-        let steering_close_error = self
-            .unregister_active_run_control(
+        let steering_close_error = steer_input.and_then(|steer_input| {
+            self.unregister_active_run_control(
                 run_id,
                 steer_input,
                 AgentSteerRunRejectionCode::RunNotSteerable,
                 "The agent run has finished and no longer accepts guidance.",
                 notifications,
             )
-            .err();
+            .err()
+        });
         self.unregister_cancellation_if_current(run_id, cancellation_token);
         let terminal_message = match steering_close_error {
             Some(error) => {
@@ -3903,15 +3920,15 @@ impl AgentService {
             });
         let terminal = match terminal_projection {
             Ok(terminal) => terminal,
-            Err(error) => {
-                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id.clone()),
-                    trace_sequence: None,
-                    message: format!("无法构造审批续跑的失败终态：{error}"),
-                    recoverable: true,
-                    code: Some("conversation_trace_persistence_failed".to_string()),
-                    details: None,
-                }));
+            Err(_) => {
+                self.preserve_claimed_action_after_pre_runtime_refusal(
+                    record,
+                    notifications,
+                    None,
+                    cancellation_token,
+                    Some("conversation_trace_persistence_failed"),
+                    Some("审批续跑无法安全持久化失败终态；已停止执行并保留恢复记录。".to_string()),
+                );
                 return;
             }
         };
@@ -3962,7 +3979,7 @@ impl AgentService {
                 Ok(())
             })
         };
-        if let Err(error) = persisted {
+        if persisted.is_err() {
             let mut usage_contexts = self
                 .usage_contexts
                 .lock()
@@ -3976,16 +3993,14 @@ impl AgentService {
                 }
             }
             drop(usage_contexts);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id.clone()),
-                trace_sequence: None,
-                message: format!(
-                    "无法原子持久化 pending、assistant、轨迹与 Usage 的失败终态：{error}"
-                ),
-                recoverable: true,
-                code: Some("conversation_trace_persistence_failed".to_string()),
-                details: None,
-            }));
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                record,
+                notifications,
+                None,
+                cancellation_token,
+                Some("conversation_trace_persistence_failed"),
+                Some("审批续跑无法安全持久化失败终态；已停止执行并保留恢复记录。".to_string()),
+            );
             return;
         }
         self.finish_persisted_run_usage(run_id, AgentRunStatus::Failed);
@@ -4022,6 +4037,71 @@ impl AgentService {
         }));
     }
 
+    /// Stops an approval continuation before Runtime without inventing a terminal outcome.
+    ///
+    /// Some refusal paths cannot safely own or mutate the durable Turn (for example, a deletion
+    /// fence or a foreign process-local Turn owner). The Pending Action therefore remains exact
+    /// and recoverable, but remembered FileChange authority is durably revoked before this worker
+    /// releases any process-owned resources or reports the refusal.
+    #[allow(clippy::too_many_arguments)]
+    fn preserve_claimed_action_after_pre_runtime_refusal(
+        &self,
+        record: &PendingActionRecord,
+        notifications: &CoreServerNotificationSender,
+        steer_input: Option<&AgentSteerInputQueue>,
+        cancellation_token: &AgentCancellationToken,
+        failure_code: Option<&str>,
+        failure_message: Option<String>,
+    ) {
+        let run_id = &record.snapshot.run_id;
+        let revocation_error = self
+            .storage
+            .revoke_nonterminal_file_change_run_grants(run_id)
+            .err();
+
+        if let Some(steer_input) = steer_input {
+            let _ = self.unregister_active_run_control(
+                run_id,
+                steer_input,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                "The agent run did not enter Runtime and no longer accepts guidance.",
+                notifications,
+            );
+        }
+        self.unregister_cancellation_if_current(run_id, cancellation_token);
+        if revocation_error.is_some() {
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id.clone()),
+                trace_sequence: None,
+                message: "审批续跑无法确认本轮文件修改授权已安全撤销；已停止执行，并将在启动恢复时重新对账。"
+                    .to_string(),
+                recoverable: true,
+                code: Some("file_change_run_grant_revocation_failed".to_string()),
+                details: None,
+            }));
+            return;
+        }
+
+        self.release_turn_concurrency_permit(run_id);
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.release_conversation_turn_if_current(conversation_id, run_id);
+        }
+        self.discard_usage_context(run_id);
+        self.discard_trace_snapshot(run_id);
+        self.discard_exact_running_context_window_snapshot(run_id);
+
+        if let (Some(code), Some(message)) = (failure_code, failure_message) {
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id.clone()),
+                trace_sequence: None,
+                message,
+                recoverable: true,
+                code: Some(code.to_string()),
+                details: None,
+            }));
+        }
+    }
+
     pub(in crate::application::agent) async fn run_action_continuation(
         &self,
         record: PendingActionRecord,
@@ -4042,16 +4122,15 @@ impl AgentService {
             .as_ref()
             .and_then(|context| context.collaboration_identity.clone());
         if frozen_identity != resumed_identity.as_ref() {
-            self.discard_usage_context(&run_id);
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                trace_sequence: None,
-                message: "审批续跑的 Collaboration identity 与冻结 checkpoint 不一致。".to_string(),
-                recoverable: true,
-                code: Some("collaboration_identity_mismatch".to_string()),
-                details: None,
-            }));
+            self.finish_pre_runtime_action_continuation_failure(
+                &record,
+                &notifications,
+                None,
+                &cancellation_token,
+                final_pending_status,
+                "collaboration_identity_mismatch",
+                "审批续跑的 Collaboration identity 与冻结 checkpoint 不一致。".to_string(),
+            );
             return;
         }
         let active_child_wake = if let Some(identity) = resumed_identity.as_ref() {
@@ -4059,19 +4138,15 @@ impl AgentService {
                 .resolve_trusted_active_wake_by_identity(identity)
             {
                 Ok(bundle) => Some(bundle),
-                Err(error) => {
-                    self.discard_usage_context(&run_id);
-                    self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                        run_id: Some(run_id),
-                        trace_sequence: None,
-                        message: format!(
-                            "子 Agent 审批续跑的 Host 协作身份已失效，已拒绝执行：{error}"
-                        ),
-                        recoverable: true,
-                        code: Some("collaboration_identity_revalidation_failed".to_string()),
-                        details: None,
-                    }));
+                Err(_) => {
+                    self.preserve_claimed_action_after_pre_runtime_refusal(
+                        &record,
+                        &notifications,
+                        None,
+                        &cancellation_token,
+                        Some("collaboration_identity_revalidation_failed"),
+                        Some("子 Agent 审批续跑的 Host 协作身份已失效，已拒绝执行。".to_string()),
+                    );
                     return;
                 }
             }
@@ -4089,15 +4164,27 @@ impl AgentService {
             return;
         }
         if self.is_agent_input_scope_deleting(&record.agent_input) {
-            self.discard_usage_context(&run_id);
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                &record,
+                &notifications,
+                None,
+                &cancellation_token,
+                None,
+                None,
+            );
             return;
         }
         self.register_cancellation(&run_id, cancellation_token.clone());
         if self.is_agent_input_scope_deleting(&record.agent_input) {
             cancellation_token.cancel();
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-            self.discard_usage_context(&run_id);
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                &record,
+                &notifications,
+                None,
+                &cancellation_token,
+                None,
+                None,
+            );
             return;
         }
         let (turn_conversation_id, turn_assistant_message_id) = match (
@@ -4109,47 +4196,45 @@ impl AgentService {
                 assistant_message_id.to_string(),
             ),
             _ => {
-                self.discard_usage_context(&run_id);
-                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id),
-                    trace_sequence: None,
-                    message: "审批续跑缺少 Conversation Turn 持久化身份。".to_string(),
-                    recoverable: true,
-                    code: Some("conversation_turn_identity_missing".to_string()),
-                    details: None,
-                }));
+                self.preserve_claimed_action_after_pre_runtime_refusal(
+                    &record,
+                    &notifications,
+                    None,
+                    &cancellation_token,
+                    Some("conversation_turn_identity_missing"),
+                    Some("审批续跑缺少 Conversation Turn 持久化身份。".to_string()),
+                );
                 return;
             }
         };
-        if let Err(error) = self.ensure_conversation_turn_owner(
-            &turn_conversation_id,
-            &run_id,
-            &turn_assistant_message_id,
-        ) {
-            self.discard_usage_context(&run_id);
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                trace_sequence: None,
-                message: format!("审批续跑无法取得 Conversation Turn：{error}"),
-                recoverable: true,
-                code: Some("conversation_turn_ownership_conflict".to_string()),
-                details: None,
-            }));
+        if self
+            .ensure_conversation_turn_owner(
+                &turn_conversation_id,
+                &run_id,
+                &turn_assistant_message_id,
+            )
+            .is_err()
+        {
+            self.preserve_claimed_action_after_pre_runtime_refusal(
+                &record,
+                &notifications,
+                None,
+                &cancellation_token,
+                Some("conversation_turn_ownership_conflict"),
+                Some("审批续跑无法安全取得当前会话执行权；已停止执行并保留恢复记录。".to_string()),
+            );
             return;
         }
-        if let Err(error) = self.ensure_turn_concurrency_permit(&run_id) {
-            self.discard_usage_context(&run_id);
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                trace_sequence: None,
-                message: format!("审批续跑暂时无法取得进程级 Agent Turn 并发许可：{error}"),
-                recoverable: true,
-                code: Some("agent_turn_concurrency_limit".to_string()),
-                details: None,
-            }));
+        if self.ensure_turn_concurrency_permit(&run_id).is_err() {
+            self.finish_pre_runtime_action_continuation_failure(
+                &record,
+                &notifications,
+                None,
+                &cancellation_token,
+                final_pending_status,
+                "agent_turn_concurrency_limit",
+                "审批续跑当前无法取得执行许可；已安全停止。".to_string(),
+            );
             return;
         }
         let steer_input = self.register_active_run_control(
@@ -4171,7 +4256,7 @@ impl AgentService {
                 self.finish_pre_runtime_action_continuation_failure(
                     &record,
                     &notifications,
-                    &steer_input,
+                    Some(&steer_input),
                     &cancellation_token,
                     final_pending_status,
                     "skill_resource_snapshot_unavailable",
@@ -4187,7 +4272,7 @@ impl AgentService {
                 self.finish_pre_runtime_action_continuation_failure(
                     &record,
                     &notifications,
-                    &steer_input,
+                    Some(&steer_input),
                     &cancellation_token,
                     final_pending_status,
                     "automation_report_capability_unavailable",
@@ -4208,7 +4293,7 @@ impl AgentService {
                 self.finish_pre_runtime_action_continuation_failure(
                     &record,
                     &notifications,
-                    &steer_input,
+                    Some(&steer_input),
                     &cancellation_token,
                     final_pending_status,
                     "context_window_tool_projection_unavailable",
@@ -4220,20 +4305,24 @@ impl AgentService {
         let context_window_tool_projection =
             RunContextToolProjection::new(initial_context_window_tool_projection);
         if let Some(active) = active_child_wake.as_ref() {
-            if let Err(error) = self.storage.transition_agent_wake(
-                &active.spawn.initial_wake.wake_id,
-                active.spawn.initial_wake.status,
-                mycopilot_core::AgentWakeStatus::Running,
-                Some(&active.claim_token),
-            ) {
+            if self
+                .storage
+                .transition_agent_wake(
+                    &active.spawn.initial_wake.wake_id,
+                    active.spawn.initial_wake.status,
+                    mycopilot_core::AgentWakeStatus::Running,
+                    Some(&active.claim_token),
+                )
+                .is_err()
+            {
                 self.finish_pre_runtime_action_continuation_failure(
                     &record,
                     &notifications,
-                    &steer_input,
+                    Some(&steer_input),
                     &cancellation_token,
                     final_pending_status,
                     "collaboration_wake_resume_transition_failed",
-                    format!("子 Agent Wake 无法持久进入续跑状态：{error}"),
+                    "子 Agent 审批续跑无法安全取得当前唤醒执行权。".to_string(),
                 );
                 return;
             }

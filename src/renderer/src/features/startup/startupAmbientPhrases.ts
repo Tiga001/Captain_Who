@@ -3,6 +3,9 @@
 import type { AppLanguage, TranslationKey } from '../../config/frontendTranslations'
 
 export const STARTUP_BOOTSTRAP_PHRASE_KEY = 'startup.ambient.deepThinking' as const
+export const STARTUP_PHRASE_HOLD_MS = 1100
+export const STARTUP_PHRASE_FADE_MS = 180
+export const STARTUP_REDUCED_MOTION_HOLD_MS = 2400
 
 const STARTUP_WORK_PHRASE_KEYS = [
   'startup.ambient.deepThinking',

@@ -1,11 +1,22 @@
 import './styles/global.css'
 
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import App from './App'
+import { hostClient } from './host/hostClient'
+import {
+  completeBootstrapStartup,
+  failBootstrapStartup
+} from './features/startup/bootstrapStartupEntry'
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>
-)
+void hostClient.app
+  .whenReady()
+  .then(async () => {
+    const [{ createElement, StrictMode }, { createRoot }, { default: App }] = await Promise.all([
+      import('react'),
+      import('react-dom/client'),
+      import('./App')
+    ])
+    completeBootstrapStartup()
+    createRoot(document.getElementById('root')!).render(
+      createElement(StrictMode, null, createElement(App))
+    )
+  })
+  .catch(() => failBootstrapStartup())

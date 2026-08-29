@@ -1367,7 +1367,7 @@ export const koKRTranslations = {
   'agent.approval.dialog.approveRemember':
     '예, 이번 차례에는 이것으로 시작하는 명령을 다시 묻지 마세요.',
   'agent.approval.dialog.approveFileChangeRemember':
-    '예, 이번 차례에는 파일 편집을 다시 요청하지 않습니다.',
+    '예, 이번 실행의 이후 파일 생성/업데이트는 승인 없이 진행합니다(삭제는 계속 승인 필요).',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': '아니요',
   'agent.approval.dialog.rejectPlaceholder': '아니요, 조정 방법을 알려주세요.',

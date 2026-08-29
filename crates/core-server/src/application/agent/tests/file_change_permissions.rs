@@ -1,5 +1,6 @@
 use super::*;
 use mycopilot_core::{AgentFileChangeOperation, AgentFileChangeResultStatus};
+use mycopilot_protocol_rs::AgentApprovalScopeDto;
 use std::path::Path;
 
 fn test_input(permissions: AgentPermissions) -> AgentChatInput {
@@ -123,6 +124,7 @@ fn direct_execution_input_with_workspace(
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_action_id: Some(pending_action_storage_id(run_id, &call.id)),
+        file_change_run_grant_ref: None,
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: Vec::new(),
         conversation_model_context_items: Vec::new(),
@@ -174,57 +176,77 @@ pub(super) fn seed_durable_direct_file_change_owner(
     call: &AgentToolCall,
 ) {
     let created_at = 1;
-    storage
-        .save_conversation(ChatConversationRecord {
+    let mut conversation = storage
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap_or(ChatConversationRecord {
             id: conversation_id.to_string(),
             project_id: None,
             model_id: Some("test-model".to_string()),
             title: "Direct FileChange crash boundary".to_string(),
-            messages: vec![ChatMessageRecord {
-                id: assistant_message_id.to_string(),
-                role: "assistant".to_string(),
-                content: String::new(),
-                created_at,
-                status: Some("pending".to_string()),
-                attachments: Vec::new(),
-                agent_run_json: None,
-                ui_state_json: None,
-            }],
+            messages: Vec::new(),
             created_at,
             updated_at: created_at,
             pinned_at: None,
             archived_at: None,
             unread_at: None,
-        })
-        .unwrap();
+        });
+    if !conversation
+        .messages
+        .iter()
+        .any(|message| message.id == assistant_message_id)
+    {
+        conversation.messages.push(ChatMessageRecord {
+            id: assistant_message_id.to_string(),
+            role: "assistant".to_string(),
+            content: String::new(),
+            created_at,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+    }
+    storage.save_conversation(conversation).unwrap();
 
     let provider_identity = AgentProviderToolCallIdentity {
         provider_tool_index: 0,
         provider_call_id: call.id.clone(),
         runtime_call_id: call.id.clone(),
     };
-    let trace = mycopilot_core::ConversationTurnTrace {
-        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
-        run_id: run_id.to_string(),
-        conversation_id: conversation_id.to_string(),
-        assistant_message_id: assistant_message_id.to_string(),
-        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
-        terminal_error: None,
-        truncated: false,
-        items: vec![ConversationTurnTraceItem::ToolCall {
-            sequence: 0,
-            call_id: call.id.clone(),
-            tool: call.tool.clone(),
-            provenance: AgentToolIdentity::Builtin {
-                tool_name: "apply_patch".to_string(),
-            },
-            operation: call.args.clone(),
-            approval_status: call.approval_status,
+    let mut trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap_or(mycopilot_core::ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
             truncated: false,
-        }],
-    };
-    let model_context = vec![ConversationModelContextItem {
-        sequence: 0,
+            items: Vec::new(),
+        });
+    let trace_sequence = trace.items.last().map_or(0, |item| item.sequence() + 1);
+    trace.items.push(ConversationTurnTraceItem::ToolCall {
+        sequence: trace_sequence,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        provenance: AgentToolIdentity::Builtin {
+            tool_name: "apply_patch".to_string(),
+        },
+        operation: call.args.clone(),
+        approval_status: call.approval_status,
+        truncated: false,
+    });
+    let mut model_context = storage
+        .get_conversation_model_context_log(assistant_message_id)
+        .unwrap()
+        .map(|log| log.items)
+        .unwrap_or_default();
+    let context_sequence = model_context.last().map_or(0, |item| item.sequence + 1);
+    model_context.push(ConversationModelContextItem {
+        sequence: context_sequence,
         ordinal: 0,
         role: "assistant".to_string(),
         content: String::new(),
@@ -236,14 +258,14 @@ pub(super) fn seed_durable_direct_file_change_owner(
             provider_identity,
         }],
         is_error: false,
-    }];
+    });
     let checkpoint = input
         .resume_checkpoint
         .as_mut()
         .expect("Direct crash fixture has a frozen checkpoint");
     checkpoint.conversation_trace_items = trace.items.clone();
     checkpoint.conversation_model_context_items = model_context.clone();
-    checkpoint.next_conversation_trace_sequence = 1;
+    checkpoint.next_conversation_trace_sequence = trace_sequence + 1;
     storage
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &trace,
@@ -838,6 +860,791 @@ fn direct_create_update_delete_share_the_committer_across_auto_and_manual_approv
     assert_direct_change_applied(&delete_decision, AgentFileChangeOperation::Delete);
     assert!(!target.exists());
     assert!(fs::read_dir(&workspace).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn remaining_run_approval_activates_exact_authority_and_drives_the_next_create_only() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-remember-file-change";
+    let conversation_id = "conversation-remember-file-change";
+    let first_call_id = "call-remember-first";
+
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        "assistant-remember-first",
+        first_call_id,
+        "first.txt",
+        "first\n",
+    );
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let first = service
+        .approve_action_with_scope(
+            run_id,
+            first_call_id,
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            notifications,
+        )
+        .expect("the explicitly approved create must settle");
+    assert_eq!(first.status, "applied");
+    let active = storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .expect("the applied granting receipt immediately authorizes the same live Run");
+    assert_eq!(
+        active.granting_pending_action_id,
+        pending_action_storage_id(run_id, first_call_id)
+    );
+
+    let second_call_id = "call-remember-second";
+    let second_target = workspace.join("second.txt");
+    let (mut second_action, second_call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        second_call_id,
+        ("second.txt", second_target.to_str().unwrap()),
+        None,
+        Some("second\n"),
+        AgentApprovalStatus::Approved,
+    );
+    let mut second_input = direct_execution_input(
+        &workspace,
+        run_id,
+        conversation_id,
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+            ..Default::default()
+        },
+        &second_call,
+    );
+    save_test_pending_provider_for_input(&storage, &mut second_input);
+    bind_direct_execution_to_input(&mut second_action, &second_input);
+    let AgentProposedAction::FileChange {
+        file_change: second_file_change,
+    } = &second_action
+    else {
+        unreachable!()
+    };
+    let grant_ref = storage
+        .resolve_active_file_change_run_grant(
+            second_file_change,
+            second_input.context.as_ref().unwrap(),
+        )
+        .unwrap()
+        .expect("same-Run create inherits the exact active grant");
+    second_input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .file_change_run_grant_ref = Some(grant_ref);
+    seed_durable_direct_file_change_owner(
+        &storage,
+        &mut second_input,
+        conversation_id,
+        "assistant-remember-first",
+        run_id,
+        &second_call,
+    );
+    let second_result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                second_input,
+                run_id.to_string(),
+                Some(conversation_id.to_string()),
+                Some("assistant-remember-first".to_string()),
+                None,
+            ),
+            second_action,
+            AgentCancellationToken::new(),
+        )
+        .expect("the RunGrant route executes through the managed auto journal");
+    assert!(second_result.ok);
+    assert_eq!(fs::read_to_string(&second_target).unwrap(), "second\n");
+    let second_audit = storage
+        .get_agent_action_audit(&pending_action_storage_id(run_id, second_call_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_audit.decision_source.as_deref(), Some("run_grant"));
+
+    let (mut delete_action, delete_call) = direct_file_change_fixture(
+        run_id,
+        conversation_id,
+        "call-remember-delete",
+        ("second.txt", second_target.to_str().unwrap()),
+        Some("second\n"),
+        None,
+        AgentApprovalStatus::Required,
+    );
+    let delete_input = direct_execution_input(
+        &workspace,
+        run_id,
+        conversation_id,
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+            ..Default::default()
+        },
+        &delete_call,
+    );
+    bind_direct_execution_to_input(&mut delete_action, &delete_input);
+    let AgentProposedAction::FileChange {
+        file_change: delete,
+    } = &delete_action
+    else {
+        unreachable!()
+    };
+    assert!(storage
+        .resolve_active_file_change_run_grant(delete, delete_input.context.as_ref().unwrap())
+        .unwrap()
+        .is_none());
+
+    let (mut new_run_action, new_run_call) = direct_file_change_fixture(
+        "run-remember-new",
+        conversation_id,
+        "call-remember-new-run",
+        (
+            "new-run.txt",
+            workspace.join("new-run.txt").to_str().unwrap(),
+        ),
+        None,
+        Some("new run\n"),
+        AgentApprovalStatus::Required,
+    );
+    let new_run_input = direct_execution_input(
+        &workspace,
+        "run-remember-new",
+        conversation_id,
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+            ..Default::default()
+        },
+        &new_run_call,
+    );
+    bind_direct_execution_to_input(&mut new_run_action, &new_run_input);
+    let AgentProposedAction::FileChange {
+        file_change: new_run_file_change,
+    } = &new_run_action
+    else {
+        unreachable!()
+    };
+    assert!(storage
+        .resolve_active_file_change_run_grant(
+            new_run_file_change,
+            new_run_input.context.as_ref().unwrap(),
+        )
+        .unwrap()
+        .is_none());
+
+    let granting_action_id = pending_action_storage_id(run_id, first_call_id);
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let (original_result_json, original_tool_result_json): (String, String) = connection
+        .query_row(
+            "SELECT file_change_result_json, tool_result_json
+             FROM agent_action_audit WHERE action_id = ?1",
+            [&granting_action_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let original_trace_result: String = connection
+        .query_row(
+            "SELECT item_json FROM conversation_turn_trace_items
+             WHERE assistant_message_id = 'assistant-remember-first'
+               AND item_kind = 'tool_result'
+               AND json_extract(item_json, '$.callId') = ?1",
+            [first_call_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    connection
+        .execute(
+            "UPDATE agent_action_audit
+             SET file_change_result_json = json_set(file_change_result_json, '$.filePath', 'tampered.txt')
+             WHERE action_id = ?1",
+            [&granting_action_id],
+        )
+        .unwrap();
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    connection
+        .execute(
+            "UPDATE agent_action_audit SET file_change_result_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, &original_result_json],
+        )
+        .unwrap();
+
+    connection
+        .execute(
+            "UPDATE agent_action_audit
+             SET tool_result_json = json_set(tool_result_json, '$.result.filePath', 'tampered.txt')
+             WHERE action_id = ?1",
+            [&granting_action_id],
+        )
+        .unwrap();
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    connection
+        .execute(
+            "UPDATE agent_action_audit SET tool_result_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, &original_tool_result_json],
+        )
+        .unwrap();
+
+    connection
+        .execute(
+            "UPDATE conversation_turn_trace_items
+             SET item_json = json_set(item_json, '$.observation.filePath', 'tampered.txt')
+             WHERE assistant_message_id = 'assistant-remember-first'
+               AND item_kind = 'tool_result'
+               AND json_extract(item_json, '$.callId') = ?1",
+            [first_call_id],
+        )
+        .unwrap();
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    connection
+        .execute(
+            "UPDATE conversation_turn_trace_items SET item_json = ?2
+             WHERE assistant_message_id = 'assistant-remember-first'
+               AND item_kind = 'tool_result'
+               AND json_extract(item_json, '$.callId') = ?1",
+            rusqlite::params![first_call_id, original_trace_result],
+        )
+        .unwrap();
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_some());
+
+    let original_agent_input_json: String = connection
+        .query_row(
+            "SELECT agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
+            [&granting_action_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut tampered_checkpoint_refs =
+        serde_json::from_str::<serde_json::Value>(&original_agent_input_json).unwrap();
+    tampered_checkpoint_refs["resumeCheckpoint"]["pendingActionId"] =
+        json!(pending_action_storage_id(run_id, "forged-granting-call"));
+    connection
+        .execute(
+            "UPDATE agent_pending_actions SET agent_input_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, tampered_checkpoint_refs.to_string()],
+        )
+        .unwrap();
+    assert!(
+        storage
+            .get_active_file_change_run_grant(run_id)
+            .unwrap()
+            .is_none(),
+        "the granting checkpoint must reference the exact canonical Pending Action"
+    );
+    tampered_checkpoint_refs["resumeCheckpoint"]["pendingActionId"] = json!(&granting_action_id);
+    tampered_checkpoint_refs["resumeCheckpoint"]["fileChangeRunGrantRef"] =
+        serde_json::to_value(active.reference().unwrap()).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_pending_actions SET agent_input_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, tampered_checkpoint_refs.to_string()],
+        )
+        .unwrap();
+    assert!(
+        storage
+            .get_active_file_change_run_grant(run_id)
+            .unwrap()
+            .is_none(),
+        "the granting checkpoint cannot bootstrap itself from remembered authority"
+    );
+    connection
+        .execute(
+            "UPDATE agent_pending_actions SET agent_input_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, &original_agent_input_json],
+        )
+        .unwrap();
+
+    let forged_workspace = fixture.path().join("forged-workspace");
+    fs::create_dir(&forged_workspace).unwrap();
+    let forged_workspace = fs::canonicalize(forged_workspace).unwrap();
+    let mut tampered_agent_input =
+        serde_json::from_str::<serde_json::Value>(&original_agent_input_json).unwrap();
+    tampered_agent_input["context"]["workspace"]["rootPath"] =
+        json!(forged_workspace.to_string_lossy());
+    tampered_agent_input["resumeCheckpoint"]["runContext"]["workspace"]["rootPath"] =
+        json!(forged_workspace.to_string_lossy());
+    connection
+        .execute(
+            "UPDATE agent_pending_actions SET agent_input_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, tampered_agent_input.to_string()],
+        )
+        .unwrap();
+    assert!(
+        storage
+            .get_active_file_change_run_grant(run_id)
+            .unwrap()
+            .is_none(),
+        "the active grant must be re-derived from the persisted granting Run context"
+    );
+    connection
+        .execute(
+            "UPDATE agent_pending_actions SET agent_input_json = ?2 WHERE action_id = ?1",
+            rusqlite::params![&granting_action_id, &original_agent_input_json],
+        )
+        .unwrap();
+
+    let forged_scope_identity =
+        mycopilot_core::file_change::FileChangeDirectoryIdentity::read(&forged_workspace).unwrap();
+    let forged_scope_identity_json = serde_json::to_string(&forged_scope_identity).unwrap();
+    let forged_workspace_identity =
+        mycopilot_core::file_change::file_change_workspace_identity(None, None, &forged_workspace)
+            .unwrap();
+    connection
+        .execute(
+            "UPDATE agent_file_change_run_grants
+             SET workspace_identity = ?2,
+                 canonical_scope_path = ?3,
+                 scope_directory_identity_json = ?4,
+                 base_write_permission = 'all'
+             WHERE grant_id = ?1",
+            rusqlite::params![
+                &active.grant_id,
+                forged_workspace_identity,
+                forged_workspace.to_string_lossy(),
+                forged_scope_identity_json,
+            ],
+        )
+        .unwrap();
+    assert!(
+        storage
+            .get_active_file_change_run_grant(run_id)
+            .unwrap()
+            .is_none(),
+        "a self-consistent but forged scope row must not survive granting-action re-derivation"
+    );
+    connection
+        .execute(
+            "UPDATE agent_file_change_run_grants
+             SET workspace_identity = ?2,
+                 canonical_scope_path = ?3,
+                 scope_directory_identity_json = ?4,
+                 base_write_permission = 'workspace_only'
+             WHERE grant_id = ?1",
+            rusqlite::params![
+                &active.grant_id,
+                active.workspace_identity.as_deref(),
+                &active.canonical_scope_path,
+                serde_json::to_string(&active.scope_directory_identity).unwrap(),
+            ],
+        )
+        .unwrap();
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn single_action_response_lost_retry_replays_the_exact_receipt_without_a_second_effect() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-single-action-response-lost";
+    let conversation_id = "conversation-single-action-response-lost";
+    let action_id = "call-single-action-response-lost";
+    let target = workspace.join("single.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        "assistant-single-action-response-lost",
+        action_id,
+        "single.txt",
+        "written exactly once\n",
+    );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let first = service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::SingleAction,
+            notifications.clone(),
+        )
+        .unwrap();
+    let first_receipt = assert_strict_file_change_execution_json(&first, "applied");
+    let metadata_after_first = fs::metadata(&target).unwrap();
+    let retry = service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::SingleAction,
+            notifications,
+        )
+        .expect("a response-lost retry must replay the durable terminal receipt");
+    let retry_receipt = assert_strict_file_change_execution_json(&retry, "applied");
+
+    assert_eq!(retry_receipt, first_receipt);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "written exactly once\n"
+    );
+    let metadata_after_retry = fs::metadata(&target).unwrap();
+    assert_eq!(metadata_after_retry.len(), metadata_after_first.len());
+    assert_eq!(
+        metadata_after_retry.modified().unwrap(),
+        metadata_after_first.modified().unwrap()
+    );
+    assert!(storage
+        .get_file_change_run_grant_for_pending_action(&pending_action_storage_id(run_id, action_id))
+        .unwrap()
+        .is_none());
+    assert!(service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("approval scope"));
+    assert!(service
+        .approve_action_with_scope(
+            "run-single-action-response-lost-forged",
+            action_id,
+            AgentApprovalScopeDto::SingleAction,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .is_err());
+    assert!(service
+        .approve_action_with_scope(
+            run_id,
+            "call-single-action-response-lost-forged",
+            AgentApprovalScopeDto::SingleAction,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .is_err());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "written exactly once\n"
+    );
+    let tool_results = std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter(|event| event["params"]["type"] == "tool_result")
+        .count();
+    assert_eq!(
+        tool_results, 1,
+        "the replay must not publish a second ToolResult"
+    );
+}
+
+#[tokio::test]
+async fn run_grant_storage_failure_returns_only_typed_safe_approval_rpc_data() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-grant-storage-safe-rpc";
+    let conversation_id = "conversation-grant-storage-safe-rpc";
+    let action_id = "call-grant-storage-safe-rpc";
+    let target = workspace.join("never-created.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        "assistant-grant-storage-safe-rpc",
+        action_id,
+        "never-created.txt",
+        "must remain unexecuted\n",
+    );
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute_batch("DROP TABLE agent_file_change_run_grants")
+        .unwrap();
+
+    let error = service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.message(),
+        "File approval memory is temporarily unavailable; this file change was not executed."
+    );
+    let data = error.data().expect("typed approval recovery data");
+    assert_eq!(data["type"], "fileChangeDecision");
+    assert_eq!(data["code"], "runGrantStorageUnavailable");
+    assert_eq!(data["outcome"], "definitelyNotExecuted");
+    assert_eq!(data["recovery"], "retryApproval");
+    assert!(!target.exists());
+    let public = format!("{}\n{}", error.message(), data);
+    for forbidden in [
+        "SQLite",
+        "sqlite",
+        "no such table",
+        "agent_file_change_run_grants",
+        "rusqlite",
+        "Database(",
+        "stack",
+    ] {
+        assert!(
+            !public.contains(forbidden),
+            "leaked `{forbidden}`: {public}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remaining_scope_response_lost_retry_preserves_the_exact_grant_and_receipt() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-remaining-response-lost";
+    let conversation_id = "conversation-remaining-response-lost";
+    let action_id = "call-remaining-response-lost";
+    let target = workspace.join("remaining.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        "assistant-remaining-response-lost",
+        action_id,
+        "remaining.txt",
+        "remembered exactly once\n",
+    );
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let first = service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            notifications.clone(),
+        )
+        .unwrap();
+    let grant_after_first = storage
+        .get_file_change_run_grant_for_pending_action(&pending_action_storage_id(run_id, action_id))
+        .unwrap()
+        .expect("the remembered approval has one durable grant");
+    let retry = service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            notifications,
+        )
+        .expect("the same remembered scope must be idempotent");
+    let grant_after_retry = storage
+        .get_file_change_run_grant_for_pending_action(&pending_action_storage_id(run_id, action_id))
+        .unwrap()
+        .expect("retry must retain the original grant");
+
+    assert_eq!(
+        serde_json::to_value(&retry.file_change_result).unwrap(),
+        serde_json::to_value(&first.file_change_result).unwrap()
+    );
+    assert_eq!(grant_after_retry.grant_id, grant_after_first.grant_id);
+    assert_eq!(grant_after_retry.revision, grant_after_first.revision);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "remembered exactly once\n"
+    );
+    assert!(service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::SingleAction,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("approval scope"));
+    assert_eq!(
+        storage
+            .get_file_change_run_grant_for_pending_action(&pending_action_storage_id(
+                run_id, action_id,
+            ))
+            .unwrap()
+            .unwrap()
+            .grant_id,
+        grant_after_first.grant_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_identical_remaining_approvals_execute_once_and_replay_once() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-concurrent-remaining-retry";
+    let conversation_id = "conversation-concurrent-remaining-retry";
+    let action_id = "call-concurrent-remaining-retry";
+    let target = workspace.join("concurrent.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        "assistant-concurrent-remaining-retry",
+        action_id,
+        "concurrent.txt",
+        "one effect\n",
+    );
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    crate::application::agent::approval::install_approval_decision_barrier_hook(
+        action_id,
+        AgentApprovalDecisionStatus::Approved,
+        {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Arc::new(move || {
+                entered.wait();
+                release.wait();
+            })
+        },
+    );
+    let first = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            service.approve_action_with_scope(
+                run_id,
+                action_id,
+                AgentApprovalScopeDto::RemainingApplyPatchInRun,
+                tokio::sync::mpsc::unbounded_channel().0,
+            )
+        })
+    };
+    entered.wait();
+    let second = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            service.approve_action_with_scope(
+                run_id,
+                action_id,
+                AgentApprovalScopeDto::RemainingApplyPatchInRun,
+                tokio::sync::mpsc::unbounded_channel().0,
+            )
+        })
+    };
+    release.wait();
+    let first = first.await.unwrap().unwrap();
+    let second = second.await.unwrap().unwrap();
+
+    assert_eq!(first.status, "applied");
+    assert_eq!(second.status, "applied");
+    assert_eq!(
+        serde_json::to_value(&first.file_change_result).unwrap(),
+        serde_json::to_value(&second.file_change_result).unwrap()
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "one effect\n");
+    assert_eq!(
+        storage
+            .list_agent_tool_results_for_run(run_id, "apply_patch")
+            .unwrap()
+            .len(),
+        1
+    );
+    let grant = storage
+        .get_file_change_run_grant_for_pending_action(&pending_action_storage_id(run_id, action_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.status, FileChangeRunGrantStatus::Active);
+}
+
+#[tokio::test]
+async fn restart_retry_of_a_durable_in_flight_approval_is_outcome_unknown_and_never_reexecutes() {
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "run-in-flight-approval-retry";
+    let conversation_id = "conversation-in-flight-approval-retry";
+    let action_id = "call-in-flight-approval-retry";
+    let target = workspace.join("in-flight.txt");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        "assistant-in-flight-approval-retry",
+        action_id,
+        "in-flight.txt",
+        "must not be replayed\n",
+    );
+    let pending = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&pending_action_storage_id(run_id, action_id))
+        .unwrap()
+        .clone();
+    service
+        .transition_pending_status(&pending, PendingActionStatus::Executing)
+        .unwrap();
+
+    let output = service
+        .approve_action_with_scope(
+            run_id,
+            action_id,
+            AgentApprovalScopeDto::SingleAction,
+            tokio::sync::mpsc::unbounded_channel().0,
+        )
+        .expect("an exact in-flight retry returns a typed uncertainty receipt");
+    let receipt = assert_strict_file_change_execution_json(&output, "outcome_unknown");
+    assert_eq!(receipt["status"], "outcome_unknown");
+    assert_eq!(receipt["outcome"], "outcome_unknown");
+    assert_eq!(receipt["errorCode"], "agent.apply_patch.approval_in_flight");
+    assert!(receipt["error"].as_str().unwrap().contains("未再次执行"));
+    assert!(!target.exists());
+    assert!(storage
+        .get_file_change_run_grant_for_pending_action(
+            &pending_action_storage_id(run_id, action_id,)
+        )
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -1735,4 +2542,318 @@ fn direct_update_rejects_an_identical_replacement_after_approval_wait() {
         fs::read_to_string(&target).unwrap(),
         "same bytes, different file identity\n"
     );
+}
+
+fn active_run_grant_continuation_fixture(
+    fixture: &tempfile::TempDir,
+    run_id: &str,
+    conversation_id: &str,
+) -> (
+    Arc<StorageService>,
+    AgentService,
+    PendingActionRecord,
+    AgentChatInput,
+) {
+    let database_path = fixture.path().join("storage.sqlite");
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace = fs::canonicalize(workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let call_id = format!("call-{run_id}");
+    store_manual_direct_create(
+        &service,
+        &storage,
+        &workspace,
+        run_id,
+        conversation_id,
+        &format!("assistant-{run_id}"),
+        &call_id,
+        "created.txt",
+        "created\n",
+    );
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let result = service
+        .approve_action_with_scope(
+            run_id,
+            &call_id,
+            AgentApprovalScopeDto::RemainingApplyPatchInRun,
+            notifications,
+        )
+        .expect("the explicit FileChange must commit before the continuation is scheduled");
+    assert_eq!(result.status, "applied");
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_some());
+    let storage_id = pending_action_storage_id(run_id, &call_id);
+    let record = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    let resumed_input = record.agent_input.clone();
+    (storage, service, record, resumed_input)
+}
+
+fn mismatched_collaboration_identity(
+    conversation_id: &str,
+) -> mycopilot_core::AgentCollaborationIdentity {
+    mycopilot_core::AgentCollaborationIdentity {
+        agent_id: "agent-untrusted-resume".to_string(),
+        root_agent_id: "agent-root".to_string(),
+        root_conversation_id: conversation_id.to_string(),
+        parent_agent_id: "agent-root".to_string(),
+        parent_task_name: "Root".to_string(),
+        parent_task_path: "root".to_string(),
+        conversation_id: conversation_id.to_string(),
+        task_name: "untrusted".to_string(),
+        task_path: "root/untrusted".to_string(),
+        source_agent_id: "agent-root".to_string(),
+        source_kind: mycopilot_core::AgentMailboxKind::Task,
+        source_task_name: "Root".to_string(),
+        source_task_path: "root".to_string(),
+        source_agent_message_id: "mailbox-untrusted".to_string(),
+        entrusted_task: "Untrusted resumed identity fixture".to_string(),
+        template_instructions: None,
+    }
+}
+
+#[tokio::test]
+async fn identity_mismatch_terminalizes_claimed_continuation_and_revokes_active_run_grant() {
+    let fixture = tempdir().unwrap();
+    let run_id = "run-grant-identity-mismatch";
+    let conversation_id = "conversation-grant-identity-mismatch";
+    let (storage, service, record, mut resumed_input) =
+        active_run_grant_continuation_fixture(&fixture, run_id, conversation_id);
+    resumed_input
+        .context
+        .as_mut()
+        .unwrap()
+        .collaboration_identity = Some(mismatched_collaboration_identity(conversation_id));
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    service
+        .run_action_continuation(
+            record.clone(),
+            resumed_input,
+            notifications,
+            PendingActionStatus::Completed,
+            None,
+        )
+        .await;
+
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .list_active_file_change_run_grant_records()
+        .unwrap()
+        .is_empty());
+    let pending = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "failed");
+    assert_eq!(pending.target_status.as_deref(), Some("failed"));
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace(record.snapshot.assistant_message_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| {
+        event["params"]["type"] == "error"
+            && event["params"]["code"] == "collaboration_identity_mismatch"
+            && event["params"]["recoverable"] == false
+    }));
+    assert!(events.iter().any(|event| {
+        event["params"]["type"] == "done"
+            && event["params"]["status"] == "failed"
+            && event["params"]["success"] == false
+    }));
+}
+
+#[tokio::test]
+async fn foreign_turn_owner_revokes_active_run_grant_but_preserves_exact_recovery_state() {
+    let fixture = tempdir().unwrap();
+    let run_id = "run-grant-foreign-owner";
+    let conversation_id = "conversation-grant-foreign-owner";
+    let (storage, service, record, resumed_input) =
+        active_run_grant_continuation_fixture(&fixture, run_id, conversation_id);
+    service
+        .active_conversation_turns
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            conversation_id.to_string(),
+            ActiveConversationTurn {
+                run_id: "foreign-run".to_string(),
+                assistant_message_id: "foreign-assistant".to_string(),
+            },
+        );
+    let pending_before = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    service
+        .run_action_continuation(
+            record.clone(),
+            resumed_input,
+            notifications,
+            PendingActionStatus::Completed,
+            None,
+        )
+        .await;
+
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .list_active_file_change_run_grant_records()
+        .unwrap()
+        .is_empty());
+    let pending_after = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_after.status, pending_before.status);
+    assert_eq!(pending_after.target_status, pending_before.target_status);
+    assert_eq!(pending_after.action_json, pending_before.action_json);
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace(record.snapshot.assistant_message_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::InProgress
+    );
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| {
+        event["params"]["type"] == "error"
+            && event["params"]["code"] == "conversation_turn_ownership_conflict"
+            && event["params"]["recoverable"] == true
+    }));
+    assert!(!events.iter().any(|event| {
+        event["params"]["type"] == "done" || event["params"]["type"] == "tool_result"
+    }));
+}
+
+#[tokio::test]
+async fn pre_runtime_restore_failure_atomically_terminalizes_and_revokes_active_run_grant() {
+    let fixture = tempdir().unwrap();
+    let run_id = "run-grant-pre-runtime-failure";
+    let conversation_id = "conversation-grant-pre-runtime-failure";
+    let (storage, service, record, mut resumed_input) =
+        active_run_grant_continuation_fixture(&fixture, run_id, conversation_id);
+    resumed_input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .extension_snapshots
+        .push(mycopilot_core::AgentExtensionSnapshot {
+            extension_id: "skills".to_string(),
+            version: u32::MAX,
+            state: json!({}),
+        });
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    service
+        .run_action_continuation(
+            record.clone(),
+            resumed_input,
+            notifications,
+            PendingActionStatus::Completed,
+            None,
+        )
+        .await;
+
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .list_active_file_change_run_grant_records()
+        .unwrap()
+        .is_empty());
+    let pending = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "failed");
+    assert_eq!(pending.target_status.as_deref(), Some("failed"));
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace(record.snapshot.assistant_message_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| {
+        event["params"]["type"] == "error"
+            && event["params"]["code"] == "skill_resource_snapshot_unavailable"
+            && event["params"]["recoverable"] == false
+    }));
+}
+
+#[tokio::test]
+async fn cancelled_pre_runtime_continuation_revokes_active_run_grant_before_done() {
+    let fixture = tempdir().unwrap();
+    let run_id = "run-grant-pre-runtime-cancelled";
+    let conversation_id = "conversation-grant-pre-runtime-cancelled";
+    let (storage, service, record, resumed_input) =
+        active_run_grant_continuation_fixture(&fixture, run_id, conversation_id);
+    let cancellation = AgentCancellationToken::new();
+    cancellation.cancel();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    service
+        .run_action_continuation(
+            record.clone(),
+            resumed_input,
+            notifications,
+            PendingActionStatus::Completed,
+            Some(cancellation),
+        )
+        .await;
+
+    assert!(storage
+        .get_active_file_change_run_grant(run_id)
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .list_active_file_change_run_grant_records()
+        .unwrap()
+        .is_empty());
+    let pending = storage
+        .get_pending_agent_action(&record.storage_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "completed");
+    assert_eq!(pending.target_status.as_deref(), Some("completed"));
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace(record.snapshot.assistant_message_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    let done = events
+        .iter()
+        .filter(|event| event["params"]["type"] == "done")
+        .collect::<Vec<_>>();
+    assert_eq!(done.len(), 1, "events: {events:#?}");
+    assert_eq!(done[0]["params"]["status"], "cancelled");
+    assert_eq!(done[0]["params"]["success"], false);
 }

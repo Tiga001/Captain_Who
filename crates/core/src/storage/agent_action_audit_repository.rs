@@ -188,7 +188,8 @@ pub(crate) fn commit_pending_file_change_action_json_if_present(
           AND (
                 (status = 'pending' AND decision IS NULL AND decision_source = 'manual_pending')
              OR (status IN ('approved', 'cancellation_requested') AND decision_source = 'manual')
-             OR (status = 'executing' AND decision = 'approved' AND decision_source = 'auto')
+             OR (status = 'executing' AND decision = 'approved'
+                    AND decision_source IN ('auto', 'run_grant'))
           )
         ",
         params![
@@ -228,7 +229,7 @@ pub(crate) fn commit_pending_file_change_action_json_if_present(
         ),
         ("pending", Some("manual_pending"))
             | ("approved" | "cancellation_requested", Some("manual"))
-            | ("executing", Some("auto"))
+            | ("executing", Some("auto" | "run_grant"))
     );
     if !is_file_change_preterminal {
         return Ok(ManualActionAuditJsonCommitOutcome::NotPreterminal {
@@ -364,7 +365,7 @@ pub fn settle_manual_terminal_action_audit(
             "pending" | "approved" | "cancellation_requested",
             Some("manual") | Some("manual_pending"),
         ) => true,
-        ("executing", Some("auto")) => {
+        ("executing", Some("auto" | "run_grant")) => {
             existing.action_type == "file_change" && existing.tool_name == "apply_patch"
         }
         _ => false,
@@ -405,10 +406,10 @@ pub fn settle_manual_terminal_action_audit(
                 )
                 OR (
                     status = 'executing'
-                    AND decision_source = 'auto'
+                    AND decision_source IN ('auto', 'run_grant')
                     AND action_type = 'file_change'
                     AND tool_name = 'apply_patch'
-                    AND ?11 = 'auto'
+                    AND ?11 = decision_source
                 )
           )
         ",

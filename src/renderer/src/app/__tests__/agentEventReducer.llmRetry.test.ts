@@ -152,11 +152,13 @@ describe('LLM retry Renderer projection', () => {
         id: 'call-apply-1',
         tool: 'apply_patch',
         args: {
-          action: 'apply',
-          operation: 'create',
-          filePath: 'src/large.ts',
-          contentBytes: 18,
-          contentDigest: 'file-change-sha256-v1:redacted'
+          request: {
+            action: 'apply',
+            operation: 'create',
+            filePath: 'src/large.ts',
+            contentBytes: 18,
+            contentDigest: 'file-change-sha256-v1:redacted'
+          }
         },
         approvalStatus: 'required',
         reason: null
@@ -175,6 +177,50 @@ describe('LLM retry Renderer projection', () => {
       }
     })
     expect(settled.agentRun?.fileChangePreviews).toEqual([])
+  })
+
+  it('does not reinterpret retired flat apply_patch arguments as the current request', () => {
+    const preview = applyAgentEventToChatMessage(runningMessage(), {
+      type: 'file_change_preview_updated',
+      runId: 'run-retry',
+      preview: {
+        schemaVersion: 1,
+        previewId: 'stream-flat:1:0',
+        streamId: 'stream-flat',
+        attempt: 1,
+        toolCallIndex: 0,
+        toolCallId: null,
+        transactionId: 'stream-flat:1:0',
+        filePath: 'src/legacy-flat.ts',
+        additions: 1,
+        deletions: 0,
+        lineCount: 1,
+        byteCount: 10,
+        generatedBytes: 10,
+        contentOffsetBytes: 0,
+        contentDelta: 'legacy flat',
+        updatedAt: 10
+      }
+    })
+    const called = applyAgentEventToChatMessage(preview, {
+      type: 'tool_call',
+      runId: 'run-retry',
+      traceSequence: 1,
+      identity: { type: 'builtin', toolName: 'apply_patch' },
+      call: {
+        id: 'call-flat-retired',
+        tool: 'apply_patch',
+        args: {
+          action: 'apply',
+          operation: 'create',
+          filePath: 'src/legacy-flat.ts'
+        },
+        approvalStatus: 'required',
+        reason: null
+      }
+    })
+
+    expect(called.agentRun?.fileChangePreviews?.[0]?.toolCallId).toBeNull()
   })
 
   it.each(['already_applied', 'outcome_unknown'] as const)(

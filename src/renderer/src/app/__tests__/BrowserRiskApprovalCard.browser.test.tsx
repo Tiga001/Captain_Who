@@ -137,7 +137,7 @@ describe('BrowserRiskApprovalCard', () => {
     approve.click()
     approve.click()
     expect(onApprove).toHaveBeenCalledOnce()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', proposed)
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', proposed, 'singleAction')
     await screen.unmount()
 
     const onReject = vi.fn()
@@ -192,7 +192,7 @@ describe('BrowserRiskApprovalCard', () => {
     await expect.element(approve).toBeEnabled()
     expect(expiredScreen.container.textContent).not.toContain('browser access request has expired')
     await approve.click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', expired)
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', expired, 'singleAction')
     await expiredScreen.unmount()
   })
 })

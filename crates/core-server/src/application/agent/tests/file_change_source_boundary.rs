@@ -63,6 +63,13 @@ const UNSUPPORTED_TOOL_DIAGNOSTIC_ALLOWANCE: CurrentSemanticAllowance =
         reason: "Untrusted Skills diagnose the exact retired identifier without registering or rewriting it.",
     };
 
+const FLAT_WIRE_REJECTION_ALLOWANCE: CurrentSemanticAllowance = CurrentSemanticAllowance {
+    file: "crates/core/src/tools/apply_patch.rs",
+    line_marker: "args: json!({\"action\":\"apply\",\"content\":\"PRIVATE_FLAT_CANARY\"})",
+    expected_occurrences: 1,
+    reason: "One test-only malformed call proves the retired flat Wire is rejected and redacted before any public projection.",
+};
+
 /// These are current risk classifications, not a model-visible Tool, Wire compatibility alias, or
 /// FileChange persistence shape. Every allowance names one file and one exact line marker so a new
 /// occurrence cannot hide behind a directory-level exception.
@@ -302,6 +309,73 @@ fn retired_model_writer_wire_events_and_storage_cannot_reenter_production() {
 }
 
 #[test]
+fn current_apply_patch_calls_cannot_reintroduce_flat_wire() {
+    let root = workspace_root();
+    let mut rust_files = Vec::new();
+    for relative_root in ["crates/core/src", "crates/core-server/src"] {
+        collect_files_with_extensions(&root.join(relative_root), &["rs"], &mut rust_files);
+    }
+    let flat_call_prefix = [
+        "tool:",
+        "\"apply_patch\"",
+        ".to_string(),args:json!({",
+        "\"action\"",
+    ]
+    .concat();
+    let flat_action_read = ["call.args[", "\"action\"", "]"].concat();
+    let flat_action_get = ["call.args.get(", "\"action\"", ")"].concat();
+    let flat_provider_arguments = ["\\\"arguments\\\":\\\"{", "\\\\\\\"action"].concat();
+    let mut violations = Vec::new();
+    let mut allowed = 0_usize;
+    for path in rust_files {
+        let relative = normalized_relative(&root, &path);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+        let compact = source
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .collect::<String>();
+        let flat_calls = compact.matches(&flat_call_prefix).count();
+        if flat_calls > 0 {
+            if relative == FLAT_WIRE_REJECTION_ALLOWANCE.file
+                && source
+                    .matches(FLAT_WIRE_REJECTION_ALLOWANCE.line_marker)
+                    .count()
+                    == FLAT_WIRE_REJECTION_ALLOWANCE.expected_occurrences
+                && flat_calls == FLAT_WIRE_REJECTION_ALLOWANCE.expected_occurrences
+            {
+                allowed += flat_calls;
+            } else {
+                violations.push(format!(
+                    "{relative} contains {flat_calls} positive or unallowlisted flat apply_patch call(s)"
+                ));
+            }
+        }
+        for forbidden in [
+            &flat_action_read,
+            &flat_action_get,
+            &flat_provider_arguments,
+        ] {
+            if compact.contains(forbidden) {
+                violations.push(format!(
+                    "{relative} reads or emits the retired flat apply_patch Wire marker `{forbidden}`"
+                ));
+            }
+        }
+    }
+    assert!(!FLAT_WIRE_REJECTION_ALLOWANCE.reason.trim().is_empty());
+    assert_eq!(
+        allowed, FLAT_WIRE_REJECTION_ALLOWANCE.expected_occurrences,
+        "the exact malformed-flat rejection fixture must remain singular"
+    );
+    assert!(
+        violations.is_empty(),
+        "flat apply_patch Wire escaped its exact rejection-only allowlist:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn current_file_write_risk_names_are_confined_to_the_exact_allowlist() {
     let root = workspace_root();
     let mut violations = Vec::new();
@@ -370,9 +444,9 @@ fn model_guidance_and_bundled_authoring_packages_name_only_apply_patch() {
         &std::fs::read_to_string(&prompt_path).expect("prompt source must be readable"),
     );
     assert!(!prompt.contains("write_file"));
-    assert!(prompt.contains("apply_patch Direct"));
-    assert!(prompt.contains("apply_patch 的 Staged 模式"));
-    assert!(prompt.contains("先对准确路径 read_file"));
+    assert!(prompt.contains("Direct 使用 request.action=apply"));
+    assert!(prompt.contains("同一 apply_patch Staged 模式"));
+    assert!(prompt.contains("必须先对准确目标路径使用 read_file"));
 
     let mut guidance_files = Vec::new();
     collect_files_with_extensions(

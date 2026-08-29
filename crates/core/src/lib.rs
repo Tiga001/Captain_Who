@@ -230,6 +230,17 @@ pub fn canonical_pending_action_id(run_id: &str, source_call_id: &str) -> String
     format!("v2:{}:{run_id}:{source_call_id}", run_id.len())
 }
 
+/// Validates the current length-framed Pending Action identity against its exact Run owner.
+pub fn is_canonical_pending_action_id_for_run(action_id: &str, run_id: &str) -> bool {
+    let prefix = format!("v2:{}:{run_id}:", run_id.len());
+    action_id
+        .strip_prefix(&prefix)
+        .filter(|source_call_id| !source_call_id.is_empty())
+        .is_some_and(|source_call_id| {
+            canonical_pending_action_id(run_id, source_call_id) == action_id
+        })
+}
+
 pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAssistantTurnCheckpointIdentity,

@@ -681,6 +681,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-dynamic-installed-skill".to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
@@ -1291,6 +1292,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-model-override".to_string(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         context_items: vec![mycopilot_core::AgentContextCheckpointItem {
             role: "assistant".to_string(),
             content: String::new(),

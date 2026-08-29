@@ -82,6 +82,28 @@ function mcpAction(): Extract<AgentProposedAction, { type: 'mcp_tool_call' }> {
   }
 }
 
+function fileChangeAction(): Extract<AgentProposedAction, { type: 'file_change' }> {
+  return {
+    type: 'file_change',
+    fileChange: {
+      schemaVersion: 1,
+      id: 'file-change-console-safety',
+      transactionId: 'file-change-transaction-console-safety',
+      operation: 'create',
+      updateStrategy: null,
+      filePath: 'safe.txt',
+      inlineDiff: { patch: '@@ -0,0 +1 @@\n+safe\n', truncated: false },
+      baseRevision: null,
+      summary: 'Create a safe fixture.',
+      additions: 1,
+      deletions: 0,
+      lineCount: 1,
+      byteCount: 5,
+      approvalStatus: 'required'
+    }
+  }
+}
+
 function Harness({ action }: { action: AgentProposedAction }) {
   const conversationsRef = useRef<ChatConversation[]>([
     {
@@ -120,7 +142,9 @@ function Harness({ action }: { action: AgentProposedAction }) {
 
   return (
     <button
-      onClick={() => handleApproveAgentAction('assistant-mcp-console-safety', action)}
+      onClick={() =>
+        handleApproveAgentAction('assistant-mcp-console-safety', action, 'singleAction')
+      }
       type="button"
     >
       approve MCP
@@ -135,7 +159,7 @@ afterEach(() => {
   service.reject.mockReset()
 })
 
-describe('MCP pending-action logging safety', () => {
+describe('protected pending-action logging safety', () => {
   it('does not log Host Error objects, causes, stacks, or messages', async () => {
     const error = new Error(ERROR_CANARY, { cause: { rawArguments: ERROR_CANARY } })
     service.approve.mockRejectedValue(error)
@@ -144,6 +168,11 @@ describe('MCP pending-action logging safety', () => {
 
     await screen.getByRole('button', { name: 'approve MCP' }).click()
     await expect.poll(() => service.approve.mock.calls.length).toBe(1)
+    expect(service.approve).toHaveBeenCalledWith(
+      'run-mcp-console-safety',
+      '11111111-1111-4111-8111-111111111111',
+      'singleAction'
+    )
     await expect.poll(() => consoleError.mock.calls.length).toBe(1)
 
     expect(consoleError).toHaveBeenCalledWith('Failed to approve protected Agent action')
@@ -151,6 +180,34 @@ describe('MCP pending-action logging safety', () => {
       .flat()
       .map((value) => (value instanceof Error ? `${value.message}\n${value.stack}` : String(value)))
       .join('\n')
+    expect(logged).not.toContain(ERROR_CANARY)
+  })
+
+  it('does not log FileChange decision Error objects, causes, stacks, or storage messages', async () => {
+    const error = new Error(`SQLite no such table: ${ERROR_CANARY}`, {
+      cause: { rustVariant: `Database(${ERROR_CANARY})` }
+    })
+    service.approve.mockRejectedValue(error)
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const action = fileChangeAction()
+    const screen = await render(<Harness action={action} />)
+
+    await screen.getByRole('button', { name: 'approve MCP' }).click()
+    await expect.poll(() => service.approve.mock.calls.length).toBe(1)
+    expect(service.approve).toHaveBeenCalledWith(
+      'run-mcp-console-safety',
+      'file-change-console-safety',
+      'singleAction'
+    )
+    await expect.poll(() => consoleError.mock.calls.length).toBe(1)
+
+    expect(consoleError).toHaveBeenCalledWith('Failed to approve protected Agent action')
+    const logged = consoleError.mock.calls
+      .flat()
+      .map((value) => (value instanceof Error ? `${value.message}\n${value.stack}` : String(value)))
+      .join('\n')
+    expect(logged).not.toContain('SQLite')
+    expect(logged).not.toContain('Database(')
     expect(logged).not.toContain(ERROR_CANARY)
   })
 })

@@ -8,12 +8,11 @@ import {
   pickNextStartupPhraseIndex,
   pickStartupPhraseGroupIndex,
   STARTUP_AMBIENT_PHRASE_GROUPS,
-  STARTUP_BOOTSTRAP_PHRASE_KEY
+  STARTUP_BOOTSTRAP_PHRASE_KEY,
+  STARTUP_PHRASE_FADE_MS,
+  STARTUP_PHRASE_HOLD_MS,
+  STARTUP_REDUCED_MOTION_HOLD_MS
 } from './startupAmbientPhrases'
-
-const PHRASE_HOLD_MS = 1100
-const PHRASE_FADE_MS = 180
-const REDUCED_MOTION_HOLD_MS = 2400
 
 type AmbientTextPhase = 'typing' | 'holding' | 'fading'
 
@@ -70,7 +69,7 @@ export function StartupAmbientText() {
             ? pickFirstStartupPhraseIndex(phraseGroup, STARTUP_BOOTSTRAP_PHRASE_KEY)
             : pickNextStartupPhraseIndex(current, phraseGroup.length)
         )
-      }, REDUCED_MOTION_HOLD_MS)
+      }, STARTUP_REDUCED_MOTION_HOLD_MS)
       return () => window.clearTimeout(timeoutId)
     }
 
@@ -88,7 +87,7 @@ export function StartupAmbientText() {
     }
 
     if (phase === 'holding') {
-      const timeoutId = window.setTimeout(() => setPhase('fading'), PHRASE_HOLD_MS)
+      const timeoutId = window.setTimeout(() => setPhase('fading'), STARTUP_PHRASE_HOLD_MS)
       return () => window.clearTimeout(timeoutId)
     }
 
@@ -100,7 +99,7 @@ export function StartupAmbientText() {
       )
       setVisibleCharacterCount(0)
       setPhase('typing')
-    }, PHRASE_FADE_MS)
+    }, STARTUP_PHRASE_FADE_MS)
     return () => window.clearTimeout(timeoutId)
   }, [
     characterIntervalMs,

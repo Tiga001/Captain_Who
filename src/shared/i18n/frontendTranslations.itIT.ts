@@ -1421,7 +1421,7 @@ export const itITTranslations = {
   'agent.approval.dialog.approveRemember':
     'Sì, e non chiedere di nuovo in questo turno i comandi che iniziano con questo',
   'agent.approval.dialog.approveFileChangeRemember':
-    'Sì, e non chiedere più modifiche ai file in questo turno',
+    'Sì, e non chiedere più per creazioni/aggiornamenti di file in questa esecuzione (le eliminazioni richiedono ancora approvazione)',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': 'No',
   'agent.approval.dialog.rejectPlaceholder': 'No, dimmi come regolarmi',

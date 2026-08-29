@@ -24,8 +24,8 @@ use crate::storage::{
     conversation_context_adaptation_repository, conversation_fork_repository,
     conversation_history_archive_repository, conversation_history_repository,
     conversation_model_context_repository, conversation_trace_repository,
-    conversation_turn_rewrite_repository, file_change_repository, guidance_repository,
-    image_generation_repository, mcp_approval_envelope_repository,
+    conversation_turn_rewrite_repository, file_change_repository, file_change_run_grant_repository,
+    guidance_repository, image_generation_repository, mcp_approval_envelope_repository,
     model_request_observation_repository, notification_repository, now_ms,
     pending_action_repository, preferences_repository, project_repository,
     provider_continuation_repository, provider_transition_repository, skill_enablement_repository,
@@ -57,6 +57,7 @@ mod child_agents;
 mod command_sessions;
 mod compaction;
 mod conversations;
+mod file_change_run_grants;
 mod file_changes;
 mod guidance;
 mod image_generation;
@@ -76,6 +77,7 @@ mod world_state;
 
 use attachments::*;
 pub use command_sessions::AgentCommandSessionLifecycleAppendOutcome;
+pub use file_change_run_grants::FileChangeRunGrantServiceError;
 pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutcome};
 pub use image_generation::{ResolvedGeneratedArtifactInput, ResolvedGeneratedArtifactKind};
 pub use lifecycle::*;
@@ -83,6 +85,7 @@ pub use managed_artifacts::{
     AuthorizedManagedArtifactContent, ManagedArtifactAuthority, PublishedManagedArtifact,
     MAX_MANAGED_DOCUMENT_ARTIFACT_BYTES,
 };
+pub(crate) use pending_actions::manual_file_effect_has_authoritative_settlement;
 pub use pending_actions::{
     AgentPendingActionJsonCommitOutcome, AgentPendingActionResultCommitOutcome,
     AgentPendingActionSettlementInspection, AgentWakeApprovalWaitOutcome,

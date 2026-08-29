@@ -5,11 +5,11 @@ fn checkpoint_round_trip_preserves_skill_activation_siblings_behind_approval() {
     let pending = LlmToolCall {
         id: canonical_test_call_id(0, "round-trip-pending"),
         name: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-round-trip",
             "expectedDraftRevision": 1
-        }),
+        })),
     };
     let activation_call_id = canonical_test_call_id(1, "round-trip-activate");
     let queued_call_id = canonical_test_call_id(2, "round-trip-queued");
@@ -69,11 +69,11 @@ fn checkpoint_round_trip_preserves_skill_activation_siblings_behind_approval() {
         call: AgentToolCall {
             id: pending.id.clone(),
             tool: "apply_patch".to_string(),
-            args: json!({
+            args: apply_patch_args(json!({
                 "action": "commit",
                 "transactionId": "transaction-round-trip",
                 "expectedDraftRevision": 1
-            }),
+            })),
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
         },
@@ -180,11 +180,11 @@ fn approval_resume_preserves_compacted_context_without_restoring_raw_history() {
     let pending = LlmToolCall {
         id: canonical_test_call_id(0, "compaction-pending"),
         name: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-compacted",
             "expectedDraftRevision": 1
-        }),
+        })),
     };
     let (mut tool_batch, assistant_item) = test_batch_and_context_item(
         "run-compacted",
@@ -326,11 +326,11 @@ fn approval_resume_preserves_the_complete_committed_trace() {
     let pending_call = AgentToolCall {
         id: canonical_test_call_id(1, "pending-trace"),
         tool: "apply_patch".to_string(),
-        args: json!({
+        args: apply_patch_args(json!({
             "action": "commit",
             "transactionId": "transaction-pending-trace",
             "expectedDraftRevision": 1
-        }),
+        })),
         approval_status: AgentApprovalStatus::Required,
         reason: None,
     };

@@ -277,9 +277,14 @@ fn is_read_tool(tool: &str) -> bool {
 }
 
 fn project_apply_patch_call(value: &Value) -> (Value, bool) {
-    let Some(input) = value.as_object() else {
-        return project_generic_value(value);
+    let Some(input) = crate::tools::apply_patch_request(value) else {
+        return (json!({ "request": {} }), true);
     };
+    if !crate::tools::apply_patch_wire_is_valid(value)
+        && !is_host_validated_apply_patch_projection(input)
+    {
+        return (json!({ "request": {} }), true);
+    }
     let mut output = Map::new();
     let mut truncated = false;
     for (key, limit) in [
@@ -354,7 +359,28 @@ fn project_apply_patch_call(value: &Value) -> (Value, bool) {
     output.insert("additions".into(), json!(additions));
     output.insert("deletions".into(), json!(deletions));
     truncated |= representation != "metadata_only";
-    (Value::Object(output), truncated)
+    (json!({ "request": Value::Object(output) }), truncated)
+}
+
+fn is_host_validated_apply_patch_projection(input: &Map<String, Value>) -> bool {
+    input.get("validatedRequest").and_then(Value::as_bool) == Some(true)
+        && input.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "validatedRequest"
+                    | "action"
+                    | "operation"
+                    | "filePath"
+                    | "strategy"
+                    | "transactionId"
+                    | "index"
+                    | "expectedDraftRevision"
+                    | "contentBytes"
+                    | "contentDigest"
+                    | "editCount"
+                    | "editsDigest"
+            )
+        })
 }
 
 fn project_read_call(value: &Value) -> (Value, bool) {
@@ -1278,50 +1304,76 @@ mod tests {
     #[test]
     fn apply_patch_call_projection_keeps_only_current_direct_metadata() {
         let (projected, _) = project_apply_patch_call(&json!({
-            "action": "apply",
-            "operation": "update",
-            "filePath": "src/lib.rs",
-            "editCount": 2,
-            "patch": "legacy raw patch must not be interpreted",
-            "expectedRevision": "legacy hidden revision",
-            "observationId": "fobs_private"
+            "request": {
+                "validatedRequest": true,
+                "action": "apply",
+                "operation": "update",
+                "filePath": "src/lib.rs",
+                "editCount": 2
+            }
         }));
 
-        assert_eq!(projected["action"], "apply");
-        assert_eq!(projected["operation"], "update");
-        assert_eq!(projected["filePath"], "src/lib.rs");
-        assert_eq!(projected["changeRepresentation"], "edits");
-        assert_eq!(projected["editCount"], 2);
-        assert!(projected.get("patch").is_none());
-        assert!(projected.get("expectedRevision").is_none());
-        assert!(projected.get("observationId").is_none());
+        let request = &projected["request"];
+        assert_eq!(request["action"], "apply");
+        assert_eq!(request["operation"], "update");
+        assert_eq!(request["filePath"], "src/lib.rs");
+        assert_eq!(request["changeRepresentation"], "edits");
+        assert_eq!(request["editCount"], 2);
+        assert!(request.get("observationId").is_none());
     }
 
     #[test]
     fn apply_patch_staged_call_projection_omits_body_and_keeps_bounded_identity() {
         let private_content = "私密正文\nsecond line\n";
         let (projected, truncated) = project_apply_patch_call(&json!({
-            "action": "append",
-            "transactionId": "file-change-1",
-            "index": 4,
-            "expectedDraftRevision": "draft-revision-4",
-            "content": private_content,
+            "request": {
+                "action": "append",
+                "transactionId": "file-change-1",
+                "index": 4,
+                "expectedDraftRevision": 4,
+                "content": private_content,
+            }
         }));
 
         assert!(truncated);
-        assert_eq!(projected["action"], "append");
-        assert_eq!(projected["transactionId"], "file-change-1");
-        assert_eq!(projected["index"], 4);
-        assert_eq!(projected["expectedDraftRevision"], "draft-revision-4");
-        assert_eq!(projected["contentBytes"], private_content.len());
+        let request = &projected["request"];
+        assert_eq!(request["action"], "append");
+        assert_eq!(request["transactionId"], "file-change-1");
+        assert_eq!(request["index"], 4);
+        assert_eq!(request["expectedDraftRevision"], 4);
+        assert_eq!(request["contentBytes"], private_content.len());
         assert_eq!(
-            projected["contentDigest"],
+            request["contentDigest"],
             crate::file_change::content_digest(private_content.as_bytes())
         );
-        assert!(projected.get("content").is_none());
+        assert!(request.get("content").is_none());
         assert!(!serde_json::to_string(&projected)
             .unwrap()
             .contains(private_content));
+    }
+
+    #[test]
+    fn malformed_apply_patch_calls_cannot_leak_bodies_into_durable_trace() {
+        for malformed in [
+            json!({
+                "action": "apply",
+                "content": "PRIVATE_FLAT_TRACE_CANARY"
+            }),
+            json!({
+                "request": {
+                    "action": "apply",
+                    "operation": "delete",
+                    "filePath": "PRIVATE_PATH_TRACE_CANARY",
+                    "body": "PRIVATE_NESTED_TRACE_CANARY"
+                }
+            }),
+        ] {
+            let projected = project_tool_call("apply_patch", &malformed);
+            let serialized = projected.value.to_string();
+            assert!(!serialized.contains("PRIVATE_FLAT_TRACE_CANARY"));
+            assert!(!serialized.contains("PRIVATE_NESTED_TRACE_CANARY"));
+            assert!(!serialized.contains("PRIVATE_PATH_TRACE_CANARY"));
+        }
     }
 
     #[test]

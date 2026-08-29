@@ -12,6 +12,7 @@ import type {
 } from '../../chatTypes'
 import type { ChatAgentRunView } from '../../chatTypes'
 import { isReadActivityTool } from '../../agentReadActivities'
+import { getApplyPatchRequest } from '../../../agentRun/applyPatchRequest'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
 import { FileChangeToolActivity } from './FileChangeToolActivity'
 import { ConversationHistoryToolActivity } from './ConversationHistoryToolActivity'
@@ -207,16 +208,13 @@ export function AgentToolActivity({
   }
 
   if (call.tool === 'apply_patch') {
-    const callArgs =
-      call.args && typeof call.args === 'object' && !Array.isArray(call.args)
-        ? (call.args as Record<string, unknown>)
-        : {}
+    const request = getApplyPatchRequest(call.args)
     const resultValue =
       result?.result && typeof result.result === 'object' && !Array.isArray(result.result)
         ? (result.result as Record<string, unknown>)
         : {}
     const transactionId =
-      (typeof callArgs.transactionId === 'string' && callArgs.transactionId) ||
+      (typeof request?.transactionId === 'string' && request.transactionId) ||
       fileChangeProposal?.transactionId ||
       (typeof resultValue.transactionId === 'string' ? resultValue.transactionId : undefined)
     return (

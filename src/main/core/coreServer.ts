@@ -3,6 +3,7 @@ import type { ImageGenerationArtifactContent } from '@mycopilot/host-api'
 import type {
   AgentActionExecutionOutput,
   AgentActionIdRequest,
+  AgentApproveActionRequest,
   AgentCancelRunRequest,
   AgentCancelRunResponse,
   AgentCommandSessionGetInput,
@@ -1784,9 +1785,9 @@ export class CoreServer {
       .then(parsePendingAgentActionSnapshotsForHost)
   }
 
-  approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput> {
+  approveAction(input: AgentApproveActionRequest): Promise<AgentActionExecutionOutput> {
     return this.rpc
-      .request<unknown, AgentActionIdRequest>(AGENT_APPROVE_ACTION_METHOD, input)
+      .request<unknown, AgentApproveActionRequest>(AGENT_APPROVE_ACTION_METHOD, input)
       .then(parseAgentActionExecutionOutputForHost)
       .then((output) => assertAgentActionExecutionIdentity(input, output))
   }

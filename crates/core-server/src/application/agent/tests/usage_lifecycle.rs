@@ -1084,6 +1084,7 @@ fn pending_approval_persists_full_run_checkpoint() {
             "run-checkpoint",
             "call-checkpoint",
         )),
+        file_change_run_grant_ref: None,
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
                 role: "system".to_string(),

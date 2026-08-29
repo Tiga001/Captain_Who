@@ -21,7 +21,7 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
                                 "type": "function",
                                 "function": {
                                     "name": "apply_patch",
-                                    "arguments": "{\"action\":\"begin\",\"operation\":\"create\",\"filePath\":\"report.md\",\"observationId\":\"fobs_missing_report\"}"
+                                    "arguments": "{\"request\":{\"action\":\"begin\",\"operation\":\"create\",\"filePath\":\"report.md\",\"observationId\":\"fobs_missing_report\"}}"
                                 }
                             }]
                         },
@@ -47,7 +47,7 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
                                 "type": "function",
                                 "function": {
                                     "name": "apply_patch",
-                                    "arguments": "{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:report\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"# Report\\n\"}"
+                                    "arguments": "{\"request\":{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:report\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"# Report\\n\"}}"
                                 }
                             }]
                         },
@@ -234,20 +234,20 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
         registry.definition_for("apply_patch").unwrap().input_schema
     );
     let direct_schema = &requests[0]["tools"][1]["function"]["parameters"];
-    assert_eq!(direct_schema["required"], json!(["action"]));
+    assert_eq!(direct_schema["required"], json!(["request"]));
     assert_eq!(direct_schema["additionalProperties"], false);
     assert_eq!(
-        direct_schema["properties"]["action"]["enum"],
-        json!(["apply", "begin", "append", "edit", "commit", "status", "abort"])
+        direct_schema["properties"]["request"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        11
     );
     assert_eq!(
-        direct_schema["properties"]["strategy"]["enum"],
+        direct_schema["properties"]["request"]["oneOf"][5]["properties"]["strategy"]["enum"],
         json!(["modify", "rewrite"])
     );
-    assert!(direct_schema["properties"].get("transactionId").is_some());
-    assert!(direct_schema["properties"]
-        .get("expectedDraftRevision")
-        .is_some());
+    assert_eq!(direct_schema["properties"].as_object().unwrap().len(), 1);
     assert!(direct_schema["properties"].get("patch").is_none());
     assert!(direct_schema["properties"]
         .get("expectedRevision")

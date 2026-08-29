@@ -85,7 +85,9 @@ const commandCall: AgentToolCall = {
 const writeCall: AgentToolCall = {
   id: 'write-call',
   tool: 'apply_patch',
-  args: { action: 'commit', transactionId: 'draft-child', expectedDraftRevision: 1 },
+  args: {
+    request: { action: 'commit', transactionId: 'draft-child', expectedDraftRevision: 1 }
+  },
   approvalStatus: 'approved',
   reason: null
 }

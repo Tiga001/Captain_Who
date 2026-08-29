@@ -588,6 +588,7 @@ pub(super) fn create_run_checkpoint_with_file_observations(
         provider_continuation_refs,
         run_world_state: run_world_state.clone(),
         pending_action_id: None,
+        file_change_run_grant_ref: None,
         pending_tool_call_id: pending_tool_call_id.to_string(),
         conversation_trace_items,
         conversation_model_context_items,
@@ -701,9 +702,7 @@ fn queued_apply_patch_observation_request<'a>(
     if call.name != "apply_patch" {
         return Ok(None);
     }
-    let object = call
-        .args
-        .as_object()
+    let object = crate::tools::apply_patch_request(&call.args)
         .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 参数不是严格对象。"))?;
     if object.get("action").and_then(serde_json::Value::as_str) != Some("apply") {
         return Err(AgentError::new(
@@ -1044,6 +1043,64 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         })
     {
         return Err(AgentError::new("无法恢复运行检查点：待审批动作标识无效。"));
+    }
+    if let Some(grant_ref) = checkpoint.file_change_run_grant_ref.as_ref() {
+        grant_ref
+            .validate()
+            .map_err(|_| AgentError::new("无法恢复运行检查点：FileChange Run grant ref 无效。"))?;
+        let canonical_pending = checkpoint.pending_action_id.as_deref()
+            == Some(
+                crate::canonical_pending_action_id(run_id, &checkpoint.pending_tool_call_id)
+                    .as_str(),
+            );
+        let matching_trace_calls = checkpoint
+            .conversation_trace_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall { call_id, .. }
+                        if call_id == &checkpoint.pending_tool_call_id
+                )
+            })
+            .collect::<Vec<_>>();
+        let exact_apply_patch_call = matching_trace_calls.len() == 1
+            && matches!(
+                matching_trace_calls[0],
+                ConversationTurnTraceItem::ToolCall {
+                    tool,
+                    provenance: AgentToolIdentity::Builtin { tool_name },
+                    approval_status: AgentApprovalStatus::Approved,
+                    ..
+                } if tool == "apply_patch" && tool_name == "apply_patch"
+            );
+        let exact_supported_request = checkpoint
+            .context_items
+            .iter()
+            .flat_map(|item| item.tool_calls.iter())
+            .filter(|call| call.id == checkpoint.pending_tool_call_id && call.name == "apply_patch")
+            .collect::<Vec<_>>();
+        let exact_supported_request = exact_supported_request.len() == 1
+            && crate::tools::apply_patch_wire_is_valid(&exact_supported_request[0].args)
+            && exact_supported_request[0]
+                .args
+                .get("request")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|request| {
+                    match request.get("action").and_then(serde_json::Value::as_str) {
+                        Some("apply") => matches!(
+                            request.get("operation").and_then(serde_json::Value::as_str),
+                            Some("create" | "update")
+                        ),
+                        Some("commit") => true,
+                        _ => false,
+                    }
+                });
+        if !canonical_pending || !exact_apply_patch_call || !exact_supported_request {
+            return Err(AgentError::new(
+                "无法恢复运行检查点：FileChange Run grant ref 与冻结调用不一致。",
+            ));
+        }
     }
     validate_tool_set_checkpoint_shape(&checkpoint.tool_set)?;
     validate_collaboration_run_snapshot(

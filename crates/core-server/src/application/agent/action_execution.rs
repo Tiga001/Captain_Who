@@ -4,7 +4,10 @@ mod execution_context;
 mod file_change_authorization;
 
 pub(super) use execution_context::AutoApprovedActionContext;
-pub(super) use file_change_authorization::authorize_file_change_action;
+pub(super) use file_change_authorization::{
+    authorize_file_change_action, file_change_authorization_source,
+    validate_file_change_run_grant_at_effect_boundary,
+};
 
 mod runners;
 mod support;
@@ -665,11 +668,11 @@ impl AgentService {
             }
             _ => {}
         }
-        if let Err(error) = authorize_file_change_action(
-            &agent_input,
-            &action,
-            FileChangeAuthorizationSource::Automatic,
-        ) {
+        let file_change_authorization_source =
+            file_change_authorization_source(&agent_input, &action)?;
+        if let Err(error) =
+            authorize_file_change_action(&agent_input, &action, file_change_authorization_source)
+        {
             // A Host policy rejection is the result of this tool call, not a failure of the
             // agent transport. Office calls must stay paired with their original callId/tool so
             // the model loop and trace remain structurally valid.
@@ -745,6 +748,11 @@ impl AgentService {
                             }),
                         )
                     })?;
+                validate_file_change_run_grant_at_effect_boundary(
+                    &self.storage,
+                    &agent_input,
+                    &pending.snapshot.action,
+                )?;
                 if !self
                     .claim_auto_file_change_dispatch(&mut pending)
                     .map_err(|_| direct_file_change_recovery_pending(&action_id))?

@@ -13,14 +13,10 @@ fn read_file_observation_authority_is_model_only_and_never_enters_renderer_event
             "exists": false,
             "observationId": "fobs_0123456789abcdef0123456789abcdef",
             "message": "文件不存在。",
-            "continueWith": {
-                "tool": "apply_patch",
-                "args": {
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "missing.txt",
-                    "observationId": "fobs_0123456789abcdef0123456789abcdef"
-                }
+            "fileChangeTarget": {
+                "filePath": "missing.txt",
+                "observationId": "fobs_0123456789abcdef0123456789abcdef",
+                "state": "missing"
             }
         })),
         error: None,
@@ -32,14 +28,14 @@ fn read_file_observation_authority_is_model_only_and_never_enters_renderer_event
         "fobs_0123456789abcdef0123456789abcdef"
     );
     assert_eq!(
-        model.result.as_ref().unwrap()["continueWith"]["args"]["observationId"],
+        model.result.as_ref().unwrap()["fileChangeTarget"]["observationId"],
         "fobs_0123456789abcdef0123456789abcdef"
     );
 
     let event = redact_tool_result_for_event(&registry.event_projection(&raw));
     let event_result = event.result.as_ref().unwrap();
     assert!(event_result.get("observationId").is_none());
-    assert!(event_result["continueWith"]["args"]
+    assert!(event_result["fileChangeTarget"]
         .get("observationId")
         .is_none());
     assert_eq!(event_result["path"], "missing.txt");

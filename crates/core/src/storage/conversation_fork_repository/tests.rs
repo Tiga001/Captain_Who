@@ -61,6 +61,10 @@ fn staged_tool_exchange(
     ]
 }
 
+fn apply_patch_args(request: Value) -> Value {
+    json!({ "request": request })
+}
+
 fn staged_mutation_receipt(transaction_id: &str, index: u64) -> String {
     serde_json::to_string(&crate::file_change::FileChangeMutationReceipt {
         schema_version: 1,
@@ -615,19 +619,19 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
                 1,
                 "call-file-begin",
                 "apply_patch",
-                json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))}),
+                apply_patch_args(json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))})),
             ));
             items.extend(staged_tool_exchange(
                 3,
                 "call-file-append",
                 "apply_patch",
-                json!({"action":"append","transactionId":"file-change-source","index":0,"expectedDraftRevision":0,"content":"after\n"}),
+                apply_patch_args(json!({"action":"append","transactionId":"file-change-source","index":0,"expectedDraftRevision":0,"content":"after\n"})),
             ));
             items.extend(staged_tool_exchange(
                 5,
                 "call-file-commit",
                 "apply_patch",
-                json!({"action":"commit","transactionId":"file-change-source","expectedDraftRevision":1}),
+                apply_patch_args(json!({"action":"commit","transactionId":"file-change-source","expectedDraftRevision":1})),
             ));
         }
         let trace = ConversationTurnTrace {
@@ -648,8 +652,12 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
         )
         .unwrap();
     }
-    let begin_args = json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))});
-    let append_args = json!({"action":"append","transactionId":"file-change-source","index":0,"expectedDraftRevision":0,"content":"after\n"});
+    let begin_args = apply_patch_args(
+        json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"notes.md","observationId":format!("fobs_{}", "1".repeat(32))}),
+    );
+    let append_args = apply_patch_args(
+        json!({"action":"append","transactionId":"file-change-source","index":0,"expectedDraftRevision":0,"content":"after\n"}),
+    );
     let base_revision = crate::content_revision(b"before\n");
     let (observation_id, observation_json) = file_change_observation(
         &source.id,
@@ -827,7 +835,7 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
     assert_eq!(
         call_args
             .get(target_operation.source_tool_call_id.as_str())
-            .unwrap()["transactionId"],
+            .unwrap()["request"]["transactionId"],
         target_change.id
     );
     assert!(file_change_repository::get_file_change_for_owner(
@@ -983,26 +991,26 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         serde_json::from_str(&observation_json).unwrap();
 
     let read_args = json!({ "path": "notes.md" });
-    let begin_args = json!({
+    let begin_args = apply_patch_args(json!({
         "action": "begin",
         "operation": "update",
         "filePath": "notes.md",
         "observationId": observation_id,
         "strategy": "rewrite",
-    });
-    let append_args = json!({
+    }));
+    let append_args = apply_patch_args(json!({
         "action": "append",
         "transactionId": SOURCE_TRANSACTION_ID,
         "index": 0,
         "expectedDraftRevision": 0,
         "content": "after\n",
-    });
-    let commit_args = json!({
+    }));
+    let commit_args = apply_patch_args(json!({
         "action": "commit",
         "transactionId": SOURCE_TRANSACTION_ID,
         "expectedDraftRevision": 1,
         "summary": "replace notes",
-    });
+    }));
 
     for (index, message) in source
         .messages
@@ -1239,15 +1247,15 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         .unwrap();
     let target_begin = calls
         .iter()
-        .find(|(_, _, operation)| operation["action"] == "begin")
+        .find(|(_, _, operation)| operation["request"]["action"] == "begin")
         .unwrap();
     let target_append = calls
         .iter()
-        .find(|(_, _, operation)| operation["action"] == "append")
+        .find(|(_, _, operation)| operation["request"]["action"] == "append")
         .unwrap();
     let target_commit = calls
         .iter()
-        .find(|(_, _, operation)| operation["action"] == "commit")
+        .find(|(_, _, operation)| operation["request"]["action"] == "commit")
         .unwrap();
     assert_eq!(
         target_read.0.as_str(),
@@ -1255,14 +1263,17 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
     );
     assert_eq!(target_begin.0.as_str(), target_change.source_tool_call_id);
     assert_eq!(
-        target_begin.2["observationId"],
+        target_begin.2["request"]["observationId"],
         target_change.observation_id
     );
     assert_eq!(
         target_append.0.as_str(),
         target_operation.source_tool_call_id
     );
-    assert_eq!(target_append.2["transactionId"], target_transaction_id);
+    assert_eq!(
+        target_append.2["request"]["transactionId"],
+        target_transaction_id
+    );
     assert_eq!(
         crate::file_change::proposal_digest(target_append.2).unwrap(),
         target_operation.source_tool_arguments_digest
@@ -1271,7 +1282,10 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
         target_commit.0.as_str(),
         target_change.final_action_id.as_deref().unwrap()
     );
-    assert_eq!(target_commit.2["transactionId"], target_transaction_id);
+    assert_eq!(
+        target_commit.2["request"]["transactionId"],
+        target_transaction_id
+    );
     let target_read_result = target_trace
         .items
         .iter()
@@ -1692,8 +1706,12 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
     let source = source_conversation();
     chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
     let transaction_id = "file-change-plan-snapshot";
-    let begin_args = json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"snapshot.md","observationId":format!("fobs_{}", "1".repeat(32))});
-    let append_args = json!({"action":"append","transactionId":transaction_id,"index":0,"expectedDraftRevision":0,"content":"planned"});
+    let begin_args = apply_patch_args(
+        json!({"action":"begin","operation":"update","strategy":"rewrite","filePath":"snapshot.md","observationId":format!("fobs_{}", "1".repeat(32))}),
+    );
+    let append_args = apply_patch_args(
+        json!({"action":"append","transactionId":transaction_id,"index":0,"expectedDraftRevision":0,"content":"planned"}),
+    );
     let mut trace_items =
         staged_tool_exchange(0, "call-plan-begin", "apply_patch", begin_args.clone());
     trace_items.extend(staged_tool_exchange(
@@ -1706,7 +1724,9 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
         4,
         "call-plan-commit",
         "apply_patch",
-        json!({"action":"commit","transactionId":transaction_id,"expectedDraftRevision":1}),
+        apply_patch_args(
+            json!({"action":"commit","transactionId":transaction_id,"expectedDraftRevision":1}),
+        ),
     ));
     conversation_trace_repository::replace_trace(
         &mut connection,
@@ -1822,7 +1842,9 @@ fn fork_commit_uses_the_file_change_history_frozen_in_the_plan() {
     change.next_mutation_index = 2;
     change.mutation_count = 2;
     change.updated_at = 50;
-    let second_args = json!({"action":"append","transactionId":transaction_id,"index":1,"expectedDraftRevision":1,"content":"later"});
+    let second_args = apply_patch_args(
+        json!({"action":"append","transactionId":transaction_id,"index":1,"expectedDraftRevision":1,"content":"later"}),
+    );
     let second_operation = crate::storage::models::AgentFileChangeOperationRecord {
         transaction_id: transaction_id.to_string(),
         mutation_index: 1,

@@ -19,11 +19,41 @@ describe('pickNextStartupPhraseIndex', () => {
     expect(rendererShell).toContain('class="app-bootstrap-screen__ambient"')
     expect(rendererShell).toContain('data-bootstrap-startup-ambient')
     expect(rendererShell).toContain('data-bootstrap-startup-label')
+    expect(rendererShell).toContain('data-bootstrap-startup-icon')
+    expect(rendererShell).not.toContain('../../resources/brand-mark-light.png')
+    expect(rendererShell).not.toContain('../../resources/brand-mark-dark.png')
     expect(rendererShell).toContain('/src/features/startup/bootstrapStartupEntry.ts')
+    expect(rendererShell.indexOf('/src/features/startup/bootstrapStartupEntry.ts')).toBeLessThan(
+      rendererShell.indexOf('/src/main.tsx')
+    )
     expect(rendererShell).not.toContain('>正在深度思考<')
     expect(rendererShell).not.toContain('aria-label="Starting MyCopilot"')
     expect(rendererShell).toContain('background: rgba(244, 244, 242, 0.58)')
+    expect(rendererShell).toContain("[data-phase='fading']")
     expect(rendererShell).toContain('@media (prefers-reduced-transparency: reduce)')
+  })
+
+  it('keeps the full application behind the Host readiness gate', () => {
+    const rendererEntry = readFileSync(resolve('src/renderer/src/main.tsx'), 'utf8')
+    expect(rendererEntry).toContain('void hostClient.app')
+    expect(rendererEntry).toContain('.whenReady()')
+    expect(rendererEntry).toContain("import('./App')")
+    expect(rendererEntry).not.toContain("import App from './App'")
+    expect(rendererEntry).toContain('.catch(() => failBootstrapStartup())')
+    expect(rendererEntry.indexOf('.whenReady()')).toBeLessThan(
+      rendererEntry.indexOf("import('./App')")
+    )
+  })
+
+  it('resolves the existing brand artwork through the Renderer asset pipeline', () => {
+    const bootstrapEntry = readFileSync(
+      resolve('src/renderer/src/features/startup/bootstrapStartupEntry.ts'),
+      'utf8'
+    )
+    expect(bootstrapEntry).toContain("resources/brand-mark-light.png'")
+    expect(bootstrapEntry).toContain("resources/brand-mark-dark.png'")
+    expect(bootstrapEntry).toContain('brandImage.src = lightBrandMark')
+    expect(bootstrapEntry).toContain('darkBrandSource.srcset = darkBrandMark')
   })
 
   it('returns the only phrase when the catalog has fewer than two entries', () => {

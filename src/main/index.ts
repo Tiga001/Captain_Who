@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeTheme,
   session,
@@ -42,6 +43,7 @@ import {
 } from './mcp/ManagedPlaywrightBridgeHost'
 import { ManagedPlaywrightSensitiveTargetBindingBroker } from './mcp/ManagedPlaywrightSensitiveTargetBindingBroker'
 import { NotificationLocaleStore } from './notifications/notificationLocaleStore'
+import { registerStartupReadiness, type StartupReadinessController } from './startupReadiness'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -59,6 +61,9 @@ let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: HostIpcRegistration | null = null
 let mainWindow: BrowserWindow | null = null
+let startupReadiness: StartupReadinessController | null = null
+let hostInitializationReady = false
+let startupInitializationFailed = false
 let browserSurfaceManager: BrowserSurfaceManager | null = null
 let browserNetworkGuard: BrowserNetworkGuard | null = null
 let browserArtifactBroker: BrowserArtifactBroker | null = null
@@ -141,8 +146,15 @@ function isTrustedRendererEvent(event: IpcMainInvokeEvent): boolean {
   )
 }
 
+function configureMainWindowWebviews(window: BrowserWindow): void {
+  if (!browserSurfaceManager) return
+  configureManagedWebviewHost(window.webContents, {
+    targetRegistry: browserSurfaceManager,
+    ...(browserNetworkGuard ? { networkGuard: browserNetworkGuard } : {})
+  })
+}
+
 function createWindow(): void {
-  if (!browserSurfaceManager) throw new Error('Browser surface manager is not initialized')
   const rendererEntryUrl = getRendererEntryUrl()
   const window = new BrowserWindow({
     title: 'MyCopilot',
@@ -171,10 +183,7 @@ function createWindow(): void {
   const rendererWebContents = window.webContents
   const rendererWebContentsId = rendererWebContents.id
   trustedRendererEntries.set(rendererWebContentsId, rendererEntryUrl)
-  configureManagedWebviewHost(rendererWebContents, {
-    targetRegistry: browserSurfaceManager,
-    ...(browserNetworkGuard ? { networkGuard: browserNetworkGuard } : {})
-  })
+  configureMainWindowWebviews(window)
   installNativeImageContextMenu(window)
   const handleWindowStateChange = (): void => sendAppWindowState(window)
 
@@ -182,6 +191,11 @@ function createWindow(): void {
     trustedRendererEntries.delete(rendererWebContentsId)
   })
   window.on('close', (event) => {
+    if (startupInitializationFailed && !isQuittingAfterServiceShutdown) {
+      event.preventDefault()
+      app.quit()
+      return
+    }
     if (mainWindowLifecycle.requestClose(window, isQuittingAfterServiceShutdown)) {
       event.preventDefault()
     }
@@ -197,7 +211,7 @@ function createWindow(): void {
     // A cold-start backlog must not race the window that the user just opened. Native delivery
     // begins only after the first app window is visible; the final focus check still runs directly
     // before every OS notification.
-    disposeHostIpc?.beginNotificationDelivery()
+    if (hostInitializationReady) disposeHostIpc?.beginNotificationDelivery()
   })
 
   rendererWebContents.on('did-finish-load', handleWindowStateChange)
@@ -211,11 +225,12 @@ function createWindow(): void {
   window.on('restore', handleWindowStateChange)
 
   rendererWebContents.setWindowOpenHandler((details) => {
-    void getBrowserLinkRouter()
-      .openAppUrl(details.url)
-      .catch((error: unknown) => {
+    const linkRouter = browserLinkRouter
+    if (linkRouter) {
+      void linkRouter.openAppUrl(details.url).catch((error: unknown) => {
         console.error('Failed to open app URL', error)
       })
+    }
     return { action: 'deny' }
   })
 
@@ -223,11 +238,12 @@ function createWindow(): void {
     if (isAllowedRendererUrl(url, rendererEntryUrl)) return
 
     event.preventDefault()
-    void getBrowserLinkRouter()
-      .openAppUrl(url)
-      .catch((error: unknown) => {
+    const linkRouter = browserLinkRouter
+    if (linkRouter) {
+      void linkRouter.openAppUrl(url).catch((error: unknown) => {
         console.error('Blocked main-window navigation', error)
       })
+    }
   })
 
   void window.loadURL(rendererEntryUrl).catch(() => {
@@ -245,12 +261,19 @@ function activateMainWindow(): void {
   }
 
   sendAppWindowState(window)
+  if (hostInitializationReady) disposeHostIpc?.beginNotificationDelivery()
 }
 
 async function initializeApplication(): Promise<void> {
   app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
   disposeAdaptiveAppIcon = installAdaptiveAppIcon()
+  app.on('browser-window-created', (_, window) => {
+    optimizer.watchWindowShortcuts(window)
+  })
+  startupReadiness = registerStartupReadiness(ipcMain, isTrustedRendererEvent)
+  createWindow()
+  app.on('activate', activateMainWindow)
   coreServer.start()
   const managedBrowserSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
   const faviconResourceCache = new FaviconResourceCache({
@@ -323,6 +346,7 @@ async function initializeApplication(): Promise<void> {
       return browserFileBroker?.releaseSurface(input) ?? Promise.resolve()
     }
   })
+  if (mainWindow && !mainWindow.isDestroyed()) configureMainWindowWebviews(mainWindow)
   browserLinkRouter = new BrowserLinkRouter({
     coreServer,
     initialPreferences: browserPreferences,
@@ -385,10 +409,6 @@ async function initializeApplication(): Promise<void> {
     })
   })
 
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
-  })
-
   disposeHostIpc = registerHostIpc(
     coreServer,
     terminalBridge,
@@ -406,10 +426,9 @@ async function initializeApplication(): Promise<void> {
       session: managedBrowserSession
     }
   )
-
-  createWindow()
-
-  app.on('activate', activateMainWindow)
+  if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
+  hostInitializationReady = true
+  startupReadiness.markReady()
 }
 
 void app
@@ -417,7 +436,9 @@ void app
   .then(initializeApplication)
   .catch((error: unknown) => {
     console.error('Failed to initialize application', error)
-    app.exit(1)
+    startupInitializationFailed = true
+    startupReadiness?.markFailed()
+    if (!mainWindow || mainWindow.isDestroyed()) app.exit(1)
   })
 
 app.on('window-all-closed', () => {
@@ -466,6 +487,8 @@ app.on('before-quit', (event) => {
 })
 
 app.on('will-quit', () => {
+  startupReadiness?.dispose()
+  startupReadiness = null
   disposeHostIpc?.()
   disposeHostIpc = null
   disposeAdaptiveAppIcon?.()
@@ -486,11 +509,6 @@ app.on('will-quit', () => {
 export function getBrowserSurfaceManager(): BrowserSurfaceManager {
   if (!browserSurfaceManager) throw new Error('Browser surface manager is not initialized')
   return browserSurfaceManager
-}
-
-function getBrowserLinkRouter(): BrowserLinkRouter {
-  if (!browserLinkRouter) throw new Error('Browser link router is not initialized')
-  return browserLinkRouter
 }
 
 function getRendererEntryUrl(): string {

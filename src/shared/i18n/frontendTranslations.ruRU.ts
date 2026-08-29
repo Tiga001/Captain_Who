@@ -1407,7 +1407,7 @@ export const ruRUTranslations = {
   'agent.approval.dialog.approveRemember':
     'Да, и не спрашивайте повторно в этом ходу команды, начинающиеся с этого',
   'agent.approval.dialog.approveFileChangeRemember':
-    'Да, и больше не запрашивайте редактирование файлов на этом ходу.',
+    'Да, и не спрашивать снова при последующем создании/обновлении файлов в этом запуске (удаление всё ещё требует одобрения).',
   'agent.approval.dialog.rememberPrefix': '{prefix}',
   'agent.approval.dialog.reject': 'Нет',
   'agent.approval.dialog.rejectPlaceholder': 'Нет, скажи мне, как настроить',

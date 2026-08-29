@@ -12,7 +12,8 @@ import { CoreServer } from './coreServer'
 
 const request = {
   runId: 'run-owned',
-  actionId: 'file-change-action-current'
+  actionId: 'file-change-action-current',
+  approvalScope: 'singleAction' as const
 }
 
 function fileChangeExecution(overrides: Record<string, unknown> = {}): Record<string, unknown> {

@@ -288,10 +288,10 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
     }
     if has_tool(tool_definitions, "apply_patch") {
-        rules.push("- apply_patch Direct 适合对单个可 diff 文件做一次性短小 create、update 或 delete。每次 Direct 调用前，即使预期目标不存在，也必须先对准确目标路径使用 read_file 确认当前状态和内容；父目录列表、搜索结果或更早的读取不能替代。create 是 no-clobber，只有 read_file 对该准确路径明确报告目标不存在或无法找到后才能使用 create；目标已存在时，修改必须使用 update，删除则使用 delete。".to_string());
-        rules.push("- 每次 Direct 调用都提交 action=apply、准确 filePath，并原样复制刚才 read_file 返回的 observationId。create 还要提供短小完整 content；update 必须在 content 与 structured edits（replace、insert_before、insert_after、append、prepend）中恰好选择一个，并确认唯一锚点和 oldText；delete 不得提供 content 或 edits。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。审批 Diff 由 Host 从冻结目标内容生成，不要提交 raw unified diff。".to_string());
-        rules.push("- 较长的完整生成或需要多步组装时，使用同一 apply_patch 的 Staged 模式：先对准确路径 read_file，再 action=begin；create 从空草稿开始，update 显式选择 strategy=modify 或 rewrite。之后每次只使用 Host 返回的 transactionId、nextIndex 和 draftRevision 调用 action=append 或 action=edit，最后 action=commit；放弃时 action=abort。不得猜测 id、index 或 revision，不得重复生成已持久化的 chunk。".to_string());
-        rules.push("- action=begin/append/edit 成功后，FileChange transaction 处于未结算状态。在所有未结算 transaction 都获得 commit/abort 结果前，只能继续调用 apply_patch append/edit/commit/abort，禁止输出任何面向用户的进度或完成文字。进入 waiting_approval/applying 后不得再修改草稿；终态后的后续修改必须重新 action=begin。".to_string());
+        rules.push("- apply_patch 的参数根节点只能有 request。Direct 适合对单个可 diff 文件做一次性短小 create、update 或 delete。每次 request.action=apply 或 begin 前，即使预期目标不存在，也必须先对准确目标路径使用 read_file；父目录列表、搜索结果或更早的读取不能替代。原样复制返回的 fileChangeTarget.filePath 和 observationId。create 是 no-clobber；missing observation 才能 create，existing observation 才能 update/delete。Direct 结构示例：{\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"observationId\":\"fobs_example\",\"content\":\"hello\\n\"}}。示例只说明结构；fobs_example、示例 transactionId 和游标绝不能照抄，必须换成当前 Host 刚返回的精确值。".to_string());
+        rules.push("- Direct 使用 request.action=apply。create 提供不超过 32 KiB 的完整 content；update 在不超过 32 KiB 的完整 content 与 structured edits（replace、insert_before、insert_after、append、prepend）中恰好选择一个，Direct edits 的最终目标不得超过 240,000 UTF-8 bytes；delete 不得提供 content 或 edits。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home。审批 Diff 由 Host 生成，不要提交 raw unified diff。".to_string());
+        rules.push("- 较长的完整生成或多步组装使用同一 apply_patch Staged 模式：先 read_file，再提交 request.action=begin；create 从空草稿开始，update 显式选择 strategy=modify 或 rewrite。之后把 Host 返回的 transactionId、nextIndex 和 draftRevision 原样放入 request；append 的单个非空 content chunk 不超过 1 MiB，完整 transaction 不超过 4 MiB。Staged 续写结构示例：{\"request\":{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:example\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"next chunk\"}}。用 append/edit 组装，commit 结算，status 查询权威游标，abort 放弃；不得猜测或重复已持久化 chunk。".to_string());
+        rules.push("- begin/append/edit 成功后 transaction 未结算，禁止输出面向用户的进度或完成文字。drafting/ready 时只能调用同一 transaction 的 append/edit/commit/status/abort；waiting_approval、applying 或 outcome_unknown 时只能调用 status，不能再修改或 abort。终态后的后续修改必须重新 read_file 并 begin。".to_string());
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
@@ -335,7 +335,7 @@ fn tool_progress_communication_section() -> String {
     - 工具返回后，如果接下来还要继续调用工具，先简短说明你从结果里确认了什么、下一步要补哪块信息。不要把每个细小工具调用都单独汇报；可以按阶段合并说明。\n\
     - 不展示隐藏推理链，不写冗长心理活动。只说可验证的工作意图、观察到的事实、下一步动作。\n\
     - 如果发现目标已经满足，尤其是 todo 全部 completed、文件已创建、测试已通过或用户要求的产物已生成，应停止继续调用工具，直接给用户总结结果。\n\
-    - apply_patch FileChange transaction 处于 drafting、ready、waiting_approval 或 applying 时是唯一例外：此时不得输出进展文字，只能继续 apply_patch append/edit/commit/abort；审批或终止结果返回后再说明进展。\n\
+    - apply_patch FileChange transaction 未结算时是唯一例外：不得输出进展文字。drafting/ready 只能继续同一 transaction 的 append/edit/commit/status/abort；waiting_approval、applying 或 outcome_unknown 只能调用 status；权威终态返回后再说明进展。\n\
     - 工具进展文字要自然、短小、具体，避免“我正在努力处理”一类空泛句子。"
         .to_string()
 }
@@ -716,30 +716,34 @@ mod tests {
         ];
         let prompt = build_system_prompt(None, &tools);
 
-        assert!(prompt.contains("每次 Direct 调用前"));
-        assert!(prompt.contains("apply_patch Direct 适合"));
+        assert!(prompt.contains("每次 request.action=apply 或 begin 前"));
+        assert!(prompt.contains("参数根节点只能有 request"));
+        assert!(prompt.contains("Direct 适合"));
         assert!(prompt.contains("一次性短小 create、update 或 delete"));
         assert!(prompt.contains("即使预期目标不存在"));
-        assert!(prompt.contains("先对准确目标路径使用 read_file"));
+        assert!(prompt.contains("必须先对准确目标路径使用 read_file"));
         assert!(prompt.contains("父目录列表、搜索结果或更早的读取不能替代"));
         assert!(prompt.contains("create 是 no-clobber"));
-        assert!(prompt.contains("明确报告目标不存在或无法找到后才能使用 create"));
+        assert!(prompt.contains("missing observation 才能 create"));
         assert!(!prompt.contains("read_file 明确返回 not_found"));
-        assert!(prompt.contains("目标已存在时，修改必须使用 update"));
-        assert!(prompt.contains("每次 Direct 调用都提交 action=apply"));
-        assert!(prompt.contains("原样复制刚才 read_file 返回的 observationId"));
-        assert!(prompt.contains("create 还要提供短小完整 content"));
-        assert!(prompt.contains("content 与 structured edits"));
+        assert!(prompt.contains("existing observation 才能 update/delete"));
+        assert!(prompt.contains("Direct 使用 request.action=apply"));
+        assert!(prompt.contains("fileChangeTarget.filePath 和 observationId"));
+        assert!(prompt.contains("不超过 32 KiB 的完整 content"));
+        assert!(prompt.contains("structured edits"));
         assert!(prompt.contains("恰好选择一个"));
         assert!(prompt.contains("delete 不得提供 content 或 edits"));
-        assert!(prompt.contains("使用同一 apply_patch 的 Staged 模式"));
-        assert!(prompt.contains("action=begin"));
+        assert!(prompt.contains("使用同一 apply_patch Staged 模式"));
+        assert!(prompt.contains("request.action=begin"));
         assert!(prompt.contains("transactionId、nextIndex 和 draftRevision"));
-        assert!(prompt.contains("只能继续调用 apply_patch append/edit/commit/abort"));
+        assert!(prompt.contains("append/edit/commit/status/abort"));
+        assert!(prompt.contains("waiting_approval、applying 或 outcome_unknown 时只能调用 status"));
         assert!(!prompt.contains("write_file"));
-        assert!(prompt.contains("审批 Diff 由 Host 从冻结目标内容生成"));
+        assert!(prompt.contains("审批 Diff 由 Host 生成"));
         assert!(prompt.contains("不要提交 raw unified diff"));
-        assert!(prompt.contains("确认唯一锚点和 oldText"));
+        assert!(prompt.contains("示例只说明结构"));
+        assert!(prompt.contains("示例 transactionId 和游标绝不能照抄"));
+        assert!(prompt.contains("replace、insert_before、insert_after、append、prepend"));
         assert!(!prompt.contains("read_file 返回的 revision"));
         assert!(!prompt.contains("expectedRevision"));
         assert!(!prompt.contains("baseRevision"));

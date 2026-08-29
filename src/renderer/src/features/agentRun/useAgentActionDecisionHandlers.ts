@@ -1,5 +1,5 @@
 import { useCallback, type RefObject } from 'react'
-import type { AgentProposedAction } from '@mycopilot/protocol'
+import type { AgentApprovalScope, AgentProposedAction } from '@mycopilot/protocol'
 import type { ChatConversation, ChatMessage } from '../chat/chatTypes'
 import { approveAgentAction, cancelAgentAction, rejectAgentAction } from '../agent/agentClient'
 import { getAgentActionId } from './agentActionUtils'
@@ -40,7 +40,7 @@ export function useAgentActionDecisionHandlers({
   updateAssistantMessage
 }: UseAgentActionDecisionHandlersOptions) {
   const handleApproveAgentAction = useCallback(
-    (messageId: string, action: AgentProposedAction) => {
+    (messageId: string, action: AgentProposedAction, approvalScope: AgentApprovalScope) => {
       if (!activeConversationId) return false
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
@@ -48,7 +48,8 @@ export function useAgentActionDecisionHandlers({
 
       return applyAuthoritativePendingActionDecision({
         runId,
-        invoke: (authoritativeRunId) => approveAgentAction(authoritativeRunId, actionId),
+        invoke: (authoritativeRunId) =>
+          approveAgentAction(authoritativeRunId, actionId, approvalScope),
         apply: (execution) => {
           updateAssistantMessage(
             conversationId,
@@ -145,6 +146,7 @@ function logAgentActionDecisionError(
   error: unknown
 ): void {
   if (
+    action.type === 'file_change' ||
     action.type === 'mcp_tool_call' ||
     action.type === 'builtin_capability_activation' ||
     action.type === 'builtin_mcp_tool_approval' ||

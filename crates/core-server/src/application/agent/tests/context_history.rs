@@ -659,11 +659,13 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
                 id: runtime_call_id.clone(),
                 name: "apply_patch".to_string(),
                 args: json!({
-                    "action": "apply",
-                    "operation": "create",
-                    "filePath": "src/history.rs",
-                    "observationId": "fobs_exact_history",
-                    "content": "EXACT_WRITE_CONTENT"
+                    "request": {
+                        "action": "apply",
+                        "operation": "create",
+                        "filePath": "src/history.rs",
+                        "observationId": "fobs_exact_history",
+                        "content": "EXACT_WRITE_CONTENT"
+                    }
                 }),
                 provider_identity: mycopilot_core::AgentProviderToolCallIdentity {
                     provider_tool_index: 0,

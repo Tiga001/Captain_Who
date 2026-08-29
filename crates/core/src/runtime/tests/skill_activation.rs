@@ -539,11 +539,13 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                                     "function": {
                                         "name": "apply_patch",
                                         "arguments": serde_json::to_string(&json!({
-                                            "action": "apply",
-                                            "operation": "create",
-                                            "filePath": "approved.txt",
-                                            "observationId": observation_id,
-                                            "content": "approved"
+                                            "request": {
+                                                "action": "apply",
+                                                "operation": "create",
+                                                "filePath": "approved.txt",
+                                                "observationId": observation_id,
+                                                "content": "approved"
+                                            }
                                         })).unwrap()
                                     }
                                 },

@@ -4,6 +4,7 @@ import {
   HOST_CHANNELS,
   type HostInvocationResult
 } from '@mycopilot/host-api'
+import { parseAgentApproveActionRequest } from '@mycopilot/protocol'
 import type { CoreServer } from '../core/coreServer'
 import type { TrustedIpcMain } from './trustedIpc'
 
@@ -125,7 +126,7 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.cancelRun, (_event, input) => coreServer.cancelRun(input))
   ipcMain.handle(HOST_CHANNELS.agent.listPendingActions, () => coreServer.listPendingActions())
   ipcMain.handle(HOST_CHANNELS.agent.approveAction, (_event, input) =>
-    coreServer.approveAction(input)
+    coreServer.approveAction(parseAgentApproveActionRequest(input))
   )
   ipcMain.handle(HOST_CHANNELS.agent.rejectAction, (_event, input) =>
     coreServer.rejectAction(input)

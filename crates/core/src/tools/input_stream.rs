@@ -29,6 +29,9 @@ enum EscapeState {
 
 pub(crate) struct TopLevelJsonStringStream {
     depth: usize,
+    nested_root_field: Option<String>,
+    target_active: bool,
+    target_depth: usize,
     state: TopLevelState,
     current_key: Option<String>,
     in_string: bool,
@@ -42,6 +45,9 @@ impl Default for TopLevelJsonStringStream {
     fn default() -> Self {
         Self {
             depth: 0,
+            nested_root_field: None,
+            target_active: true,
+            target_depth: 1,
             state: TopLevelState::BeforeObject,
             current_key: None,
             in_string: false,
@@ -54,6 +60,15 @@ impl Default for TopLevelJsonStringStream {
 }
 
 impl TopLevelJsonStringStream {
+    pub(crate) fn nested_object(root_field: &str) -> Self {
+        Self {
+            nested_root_field: Some(root_field.to_string()),
+            target_active: false,
+            target_depth: 2,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn push(&mut self, input: &str) -> Vec<JsonStringFieldEvent> {
         let mut events = Vec::new();
         for ch in input.chars() {
@@ -72,13 +87,18 @@ impl TopLevelJsonStringStream {
                 self.in_string = true;
                 self.escape = EscapeState::None;
                 self.pending_high_surrogate = None;
-                self.string_role = if self.depth == 1 {
+                let parsing_depth = if self.target_active {
+                    self.target_depth
+                } else {
+                    1
+                };
+                self.string_role = if self.depth == parsing_depth {
                     match self.state {
                         TopLevelState::ExpectKey => {
                             self.key_buffer.clear();
                             StringRole::Key
                         }
-                        TopLevelState::ExpectValue => {
+                        TopLevelState::ExpectValue if self.target_active => {
                             StringRole::Value(self.current_key.clone().unwrap_or_default())
                         }
                         _ => StringRole::Ignored,
@@ -88,41 +108,75 @@ impl TopLevelJsonStringStream {
                 };
             }
             '{' => {
+                let entering_nested_target = !self.target_active
+                    && self.depth == 1
+                    && self.state == TopLevelState::ExpectValue
+                    && self.current_key.as_deref() == self.nested_root_field.as_deref();
                 self.depth = self.depth.saturating_add(1);
                 if self.depth == 1 {
                     self.state = TopLevelState::ExpectKey;
-                } else if self.depth == 2 && self.state == TopLevelState::ExpectValue {
+                } else if entering_nested_target {
+                    self.target_active = true;
+                    self.state = TopLevelState::ExpectKey;
+                    self.current_key = None;
+                } else if self.target_active
+                    && self.depth == self.target_depth.saturating_add(1)
+                    && self.state == TopLevelState::ExpectValue
+                {
                     self.state = TopLevelState::AfterValue;
                 }
             }
             '[' => {
                 self.depth = self.depth.saturating_add(1);
-                if self.depth == 2 && self.state == TopLevelState::ExpectValue {
+                if self.target_active
+                    && self.depth == self.target_depth.saturating_add(1)
+                    && self.state == TopLevelState::ExpectValue
+                {
                     self.state = TopLevelState::AfterValue;
                 }
             }
             '}' | ']' => {
+                if self.target_active
+                    && self.nested_root_field.is_some()
+                    && self.depth == self.target_depth
+                    && ch == '}'
+                {
+                    self.target_active = false;
+                }
                 self.depth = self.depth.saturating_sub(1);
                 if self.depth == 0 {
                     self.state = TopLevelState::BeforeObject;
                     self.current_key = None;
+                } else if !self.target_active && self.depth == 1 {
+                    self.state = TopLevelState::AfterValue;
+                    self.current_key = None;
                 }
             }
-            ':' if self.depth == 1 && self.state == TopLevelState::ExpectColon => {
+            ':' if self.depth == self.parsing_depth()
+                && self.state == TopLevelState::ExpectColon =>
+            {
                 self.state = TopLevelState::ExpectValue;
             }
-            ',' if self.depth == 1 => {
+            ',' if self.depth == self.parsing_depth() => {
                 self.state = TopLevelState::ExpectKey;
                 self.current_key = None;
             }
             value
-                if self.depth == 1
+                if self.depth == self.parsing_depth()
                     && self.state == TopLevelState::ExpectValue
                     && !value.is_whitespace() =>
             {
                 self.state = TopLevelState::AfterValue;
             }
             _ => {}
+        }
+    }
+
+    fn parsing_depth(&self) -> usize {
+        if self.target_active {
+            self.target_depth
+        } else {
+            1
         }
     }
 
@@ -296,5 +350,32 @@ mod tests {
         assert_eq!(values.len(), 1);
         assert_eq!(values["content"], "\"quoted\"\\path");
         assert_eq!(completed, vec!["content"]);
+    }
+
+    #[test]
+    fn nested_object_mode_streams_only_request_level_strings() {
+        let mut parser = TopLevelJsonStringStream::nested_object("request");
+        let mut values = BTreeMap::<String, String>::new();
+        let mut completed = Vec::new();
+        for chunk in [
+            r#"{"request":{"action":"app"#,
+            r#"end","transactionId":"txn-1","edits":[{"text":"PRIVATE_NESTED"}],"content":"中\u6587"#,
+            r#"🚀"},"body":"PRIVATE_ROOT"}"#,
+        ] {
+            for event in parser.push(chunk) {
+                match event {
+                    JsonStringFieldEvent::Delta { field, value } => {
+                        values.entry(field).or_default().push_str(&value);
+                    }
+                    JsonStringFieldEvent::Completed { field } => completed.push(field),
+                }
+            }
+        }
+
+        assert_eq!(values["action"], "append");
+        assert_eq!(values["transactionId"], "txn-1");
+        assert_eq!(values["content"], "中文🚀");
+        assert!(!values.values().any(|value| value.contains("PRIVATE")));
+        assert_eq!(completed, vec!["action", "transactionId", "content"]);
     }
 }

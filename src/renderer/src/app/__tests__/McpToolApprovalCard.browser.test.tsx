@@ -177,7 +177,7 @@ describe('McpToolApprovalCard', () => {
     approveButton.click()
     approveButton.click()
     expect(onApprove).toHaveBeenCalledTimes(1)
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
     screen.unmount()
   })
 
@@ -238,7 +238,7 @@ describe('McpToolApprovalCard', () => {
     expect(approveButton.disabled).toBe(false)
     expect(screen.container.textContent).not.toContain('Expired')
     approveButton.click()
-    expect(onApprove).toHaveBeenCalledWith('assistant-message', action)
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
     screen.unmount()
   })
 

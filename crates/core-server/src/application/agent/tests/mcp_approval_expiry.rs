@@ -185,6 +185,7 @@ fn resume_checkpoint(
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
         "pendingToolCallId": pending_tool_call_id,
+        "fileChangeRunGrantRef": null,
         "conversationTraceItems": [],
         "conversationModelContextItems": [],
         "nextConversationTraceSequence": 0,

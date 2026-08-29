@@ -136,3 +136,55 @@ describe('Main Agent IPC collaboration routing', () => {
     expect(coreServer.rewriteConversationTurn).toHaveBeenCalledWith(input)
   })
 })
+
+describe('Main Agent IPC approval-scope boundary', () => {
+  function approvalHandler(coreServer: { approveAction: ReturnType<typeof vi.fn> }) {
+    getAllWindows.mockReturnValue([])
+    const server = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      onCollaborationEvent: vi.fn(),
+      onCollaborationObserverEvent: vi.fn(),
+      onCollaborationResync: vi.fn(),
+      ...coreServer
+    }
+    const ipcMain = { handle: vi.fn(), on: vi.fn() }
+    registerAgentIpc(ipcMain as never, server as never)
+    const registration = ipcMain.handle.mock.calls.find(
+      ([channel]) => channel === HOST_CHANNELS.agent.approveAction
+    )
+    return registration?.[1] as ((event: unknown, input: unknown) => Promise<unknown>) | undefined
+  }
+
+  it.each(['singleAction', 'remainingApplyPatchInRun'] as const)(
+    'forwards the strict %s scope unchanged',
+    async (approvalScope) => {
+      const approveAction = vi.fn().mockResolvedValue({ accepted: true })
+      const handler = approvalHandler({ approveAction })
+      const input = { runId: 'run-current', actionId: 'action-current', approvalScope }
+
+      await expect(handler?.({}, input)).resolves.toEqual({ accepted: true })
+      expect(approveAction).toHaveBeenCalledWith(input)
+    }
+  )
+
+  it.each([
+    { runId: 'run-current', actionId: 'action-current' },
+    { runId: '', actionId: 'action-current', approvalScope: 'singleAction' },
+    { runId: ' run-current', actionId: 'action-current', approvalScope: 'singleAction' },
+    { runId: 'run-current', actionId: 'action-current ', approvalScope: 'singleAction' },
+    { runId: 'run-current', actionId: 'action-current', approval_scope: 'singleAction' },
+    {
+      runId: 'run-current',
+      actionId: 'action-current',
+      approvalScope: 'singleAction',
+      rememberForRun: true
+    }
+  ])('rejects an invalid approval request before Core dispatch: %#', (input) => {
+    const approveAction = vi.fn()
+    const handler = approvalHandler({ approveAction })
+
+    expect(() => handler?.({}, input)).toThrow(/Invalid Agent approve action/)
+    expect(approveAction).not.toHaveBeenCalled()
+  })
+})

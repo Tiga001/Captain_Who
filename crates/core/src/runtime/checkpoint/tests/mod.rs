@@ -64,6 +64,10 @@ fn canonical_test_call_id(tool_index: usize, provider_call_id: &str) -> String {
     model_response_tool_call_id("checkpoint-validation-run", 0, tool_index, provider_call_id)
 }
 
+fn apply_patch_args(request: serde_json::Value) -> serde_json::Value {
+    json!({ "request": request })
+}
+
 fn test_batch_and_context_item(
     run_id: &str,
     assistant_content: &str,

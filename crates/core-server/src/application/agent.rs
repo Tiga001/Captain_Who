@@ -31,6 +31,10 @@ use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, Artifact
 use mycopilot_core::command::{
     AgentCommandExecutionResult, CommandAuthorizationSource, CommandRunGuard, CommandRunState,
 };
+use mycopilot_core::file_change::{
+    derive_file_change_run_grant_scope, FileChangeRunGrantRecord, FileChangeRunGrantStatus,
+    APPLY_PATCH_RUN_GRANT_CONTRACT_REVISION, FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
+};
 use mycopilot_core::file_change_support::{
     file_change_action_approval_status, file_change_approval_route, file_change_authorized,
     file_change_diff, file_change_snapshot, proposed_action_uses_file_change_policy,
@@ -704,6 +708,7 @@ impl AgentService {
                 })?;
         }
         let pending_actions = load_persisted_pending_actions(&storage)?;
+        reconcile_file_change_run_grants_on_startup(&storage, &pending_actions)?;
         let usage_contexts = usage::restore_pending_usage_contexts(&storage, &pending_actions)?;
         let office_engine = resolve_default_office_engine();
         let artifact_runtime = resolve_default_artifact_runtime();

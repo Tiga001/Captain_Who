@@ -319,6 +319,15 @@ impl StorageService {
             )
             .map_err(storage_error)?;
         }
+        // A terminal Run must never remain usable as remembered FileChange authority. Keep the
+        // revocation in the same visibility transaction as the terminal Assistant/Trace so a
+        // crash cannot publish Completed/Failed/Cancelled while leaving a grant active.
+        file_change_run_grant_repository::revoke_nonterminal_run_grants(
+            &transaction,
+            &trace.run_id,
+            completed_at,
+        )
+        .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)
     }
 
