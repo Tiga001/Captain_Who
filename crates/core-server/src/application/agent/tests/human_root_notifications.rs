@@ -92,6 +92,7 @@ fn completed_human_root_turn_atomically_publishes_one_safe_notification() {
             "conversation-notification",
             "assistant-notification",
             &mut output,
+            None,
         )
         .unwrap();
     // A restart/recovery replay derives the same dedupe identity and cannot create a second event.
@@ -159,6 +160,7 @@ fn failed_human_root_turn_uses_prompt_identity_and_never_the_error() {
             "conversation-notification-failed",
             "assistant-notification-failed",
             &mut output,
+            None,
         )
         .unwrap();
 
@@ -205,6 +207,7 @@ fn emoji_heavy_prompt_persists_notification_without_rolling_back_terminal_turn()
             "conversation-notification-emoji",
             "assistant-notification-emoji",
             &mut output,
+            None,
         )
         .unwrap();
 

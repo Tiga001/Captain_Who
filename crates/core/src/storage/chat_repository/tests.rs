@@ -692,6 +692,7 @@ fn normal_terminal_update_refreshes_conversation_but_startup_repair_does_not() {
         Some("sent"),
         "completed",
         50,
+        None,
     )
     .unwrap();
     let updated_at: i64 = connection
@@ -1359,6 +1360,7 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
         Some("sent"),
         "cancelled",
         20,
+        None,
     )
     .unwrap();
 
@@ -1384,6 +1386,37 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
         serde_json::from_str(loaded.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
     assert_eq!(run["status"], "cancelled");
     assert_eq!(run["completedAt"], 20);
+    assert_eq!(
+        run["collaborationTimelineActivities"],
+        serde_json::json!([])
+    );
+
+    let mut renderer_terminal = run;
+    renderer_terminal
+        .as_object_mut()
+        .unwrap()
+        .remove("collaborationTimelineActivities");
+    update_message_state(
+        &connection,
+        "conversation-1",
+        &ChatMessageStateRecord {
+            id: "assistant-1".to_string(),
+            content: String::new(),
+            status: Some("sent".to_string()),
+            agent_run_json: Some(renderer_terminal.to_string()),
+            ui_state_json: None,
+        },
+    )
+    .unwrap();
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(loaded.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        run["collaborationTimelineActivities"],
+        serde_json::json!([])
+    );
 }
 
 #[test]

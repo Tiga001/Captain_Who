@@ -1485,6 +1485,7 @@ impl AgentService {
                 completed_at,
                 completed_at,
                 usage_record.as_ref(),
+                None,
             )?;
             self.finish_persisted_run_usage(&record.snapshot.run_id, AgentRunStatus::Cancelled);
             self.invalidate_conversation_context_state(conversation_id);

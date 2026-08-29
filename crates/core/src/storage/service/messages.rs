@@ -178,6 +178,7 @@ impl StorageService {
             trace_created_at,
             completed_at,
             usage,
+            None,
         )
     }
 
@@ -198,6 +199,7 @@ impl StorageService {
         trace_created_at: i64,
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
+        collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         self.finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
             conversation_id,
@@ -211,6 +213,7 @@ impl StorageService {
             completed_at,
             usage,
             None,
+            collaboration_cutoff,
         )
     }
 
@@ -233,6 +236,7 @@ impl StorageService {
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
         notification: &notification_repository::NewNotificationEventRecord,
+        collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         self.finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
             conversation_id,
@@ -246,6 +250,7 @@ impl StorageService {
             completed_at,
             usage,
             Some(notification),
+            collaboration_cutoff,
         )
     }
 
@@ -263,6 +268,7 @@ impl StorageService {
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
         notification: Option<&notification_repository::NewNotificationEventRecord>,
+        collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
@@ -283,6 +289,7 @@ impl StorageService {
             message_status,
             run_status,
             completed_at,
+            collaboration_cutoff,
         )
         .map_err(storage_error)?;
         conversation_trace_repository::commit_trace_in_connection(
@@ -462,6 +469,7 @@ impl StorageService {
             message_status,
             run_status,
             completed_at,
+            None,
         )
         .map_err(storage_error)
     }

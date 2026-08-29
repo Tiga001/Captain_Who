@@ -105,6 +105,7 @@ fn persist_completed_history(
             2,
             3,
             None,
+            None,
         )
         .unwrap();
 }

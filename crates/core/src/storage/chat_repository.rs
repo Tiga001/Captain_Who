@@ -13,7 +13,8 @@ use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
 use crate::storage::{
-    context_compaction_repository, now_ms, provider_continuation_repository, world_state_repository,
+    agent_collaboration_event_repository, context_compaction_repository, now_ms,
+    provider_continuation_repository, world_state_repository,
 };
 use crate::{AgentMcpToolApproval, AgentMcpToolInvocationEvent};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -1002,6 +1003,7 @@ pub fn update_message_status_and_content(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_message_run_terminal_state(
     connection: &Connection,
     conversation_id: &str,
@@ -1010,6 +1012,7 @@ pub fn update_message_run_terminal_state(
     message_status: Option<&str>,
     run_status: &str,
     completed_at: i64,
+    collaboration_cutoff: Option<u64>,
 ) -> rusqlite::Result<()> {
     let Some((existing_agent_run_json, started_at)) = connection
         .query_row(
@@ -1029,6 +1032,20 @@ pub fn update_message_run_terminal_state(
         completed_at,
         Some(completed_at),
     )?;
+    let mut next_agent_run = serde_json::from_str::<serde_json::Value>(&next_agent_run_json)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let next_agent_run = next_agent_run
+        .as_object_mut()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    next_agent_run.insert(
+        "collaborationTimelineActivities".to_string(),
+        terminal_collaboration_timeline_activities(connection, message_id, collaboration_cutoff)?,
+    );
+    if !current_agent_run_projection_is_safe(next_agent_run, run_id) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let next_agent_run_json =
+        serde_json::to_string(next_agent_run).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
     connection.execute(
         "
@@ -1048,6 +1065,38 @@ pub fn update_message_run_terminal_state(
         params![completed_at, conversation_id],
     )?;
     Ok(())
+}
+
+fn terminal_collaboration_timeline_activities(
+    connection: &Connection,
+    message_id: &str,
+    collaboration_cutoff: Option<u64>,
+) -> rusqlite::Result<serde_json::Value> {
+    let events = agent_collaboration_event_repository::list_message_activities(
+        connection,
+        message_id,
+        collaboration_cutoff,
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let activities = events
+        .into_iter()
+        .filter_map(|event| {
+            let activity = event.activity?;
+            Some(serde_json::json!({
+                "activityId": event.event_id,
+                "agentId": activity.agent_id,
+                "occurredAt": event.created_at,
+                "rootAnchorMessageId": activity.root_anchor_message_id?,
+                "rootTraceBoundarySequence": activity.root_trace_boundary_sequence?,
+                "runId": event.run_id,
+                "semantic": activity.semantic.as_str(),
+                "sequence": event.root_sequence,
+                "taskNameSnapshot": activity.task_name_snapshot,
+                "turnId": event.turn_id,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::Value::Array(activities))
 }
 
 /// Repairs an assistant lifecycle after process restart using the backend-owned trace identity.
@@ -1310,6 +1359,7 @@ pub fn update_message_state(
         &message.id,
         existing_run_json.as_deref(),
     )?;
+    let has_durable_terminal = durable_terminal.is_some();
     let authoritative_usage =
         get_authoritative_message_usage(connection, conversation_id, &message.id)?;
 
@@ -1360,6 +1410,12 @@ pub fn update_message_state(
                 authoritative_usage.as_ref(),
             ),
         )
+    };
+
+    let agent_run_json = if has_durable_terminal {
+        overlay_authoritative_collaboration_activities(agent_run_json, existing_run_json.as_deref())
+    } else {
+        agent_run_json
     };
 
     connection.execute(
@@ -1756,6 +1812,30 @@ fn overlay_authoritative_usage(
     );
     run.insert("usage".to_string(), projected.into());
 
+    serde_json::to_string(&value).ok().or(Some(raw))
+}
+
+fn overlay_authoritative_collaboration_activities(
+    agent_run_json: Option<String>,
+    durable_agent_run_json: Option<&str>,
+) -> Option<String> {
+    let raw = agent_run_json?;
+    let Some(durable_raw) = durable_agent_run_json else {
+        return Some(raw);
+    };
+    let Ok(durable) = serde_json::from_str::<serde_json::Value>(durable_raw) else {
+        return Some(raw);
+    };
+    let Some(activities) = durable.get("collaborationTimelineActivities").cloned() else {
+        return Some(raw);
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Some(raw);
+    };
+    let Some(run) = value.as_object_mut() else {
+        return Some(raw);
+    };
+    run.insert("collaborationTimelineActivities".to_string(), activities);
     serde_json::to_string(&value).ok().or(Some(raw))
 }
 

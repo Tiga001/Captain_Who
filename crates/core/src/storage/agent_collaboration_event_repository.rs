@@ -57,6 +57,55 @@ pub fn list_global_events(
     )
 }
 
+/// Returns the bounded, renderer-safe activity facts owned by one root Assistant message.
+///
+/// This is an internal terminal-snapshot query, not a public event-log page. It deliberately
+/// selects only events carrying the exact durable message/trace anchor that the chat Timeline can
+/// render. Operational events without an activity projection never leave storage through this
+/// path.
+pub(crate) fn list_message_activities(
+    connection: &Connection,
+    assistant_message_id: &str,
+    through_root_sequence: Option<u64>,
+) -> Result<Vec<AgentCollaborationEventRecord>, AgentCollaborationEventError> {
+    validate_id(assistant_message_id)?;
+    const MAX_TERMINAL_MESSAGE_ACTIVITIES: i64 = 2_048;
+
+    match through_root_sequence {
+        Some(through_root_sequence) => {
+            let through = i64::try_from(through_root_sequence)
+                .map_err(|_| AgentCollaborationEventError::InvalidInput)?;
+            query_events(
+                connection,
+                &format!(
+                    "{EVENT_SELECT}
+                     WHERE activity_root_anchor_message_id = ?1
+                       AND activity_root_trace_boundary_sequence IS NOT NULL
+                       AND root_sequence <= ?2
+                     ORDER BY root_sequence
+                     LIMIT ?3"
+                ),
+                params![
+                    assistant_message_id,
+                    through,
+                    MAX_TERMINAL_MESSAGE_ACTIVITIES
+                ],
+            )
+        }
+        None => query_events(
+            connection,
+            &format!(
+                "{EVENT_SELECT}
+                 WHERE activity_root_anchor_message_id = ?1
+                   AND activity_root_trace_boundary_sequence IS NOT NULL
+                 ORDER BY root_sequence
+                 LIMIT ?2"
+            ),
+            params![assistant_message_id, MAX_TERMINAL_MESSAGE_ACTIVITIES],
+        ),
+    }
+}
+
 pub fn latest_root_sequence(
     connection: &Connection,
     root_agent_id: &str,
@@ -707,6 +756,111 @@ mod tests {
                 .as_ref()
                 .and_then(|activity| activity.root_trace_boundary_sequence),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn terminal_message_snapshot_stops_at_the_final_response_stream_cutoff() {
+        let mut connection = tree();
+        let running_run = serde_json::json!({
+            "runId": "run-root",
+            "status": "running",
+            "startedAt": 10,
+            "toolDefinitions": [],
+            "toolCalls": [],
+            "toolResults": [],
+            "webSearchActivities": [],
+            "readActivities": [],
+            "approvals": [],
+            "fileChangeProposals": [],
+            "fileChanges": [],
+            "mcpInvocations": [],
+            "messageStreamCheckpoints": {},
+            "timeline": []
+        });
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, agent_run_json,
+                     created_at, position
+                 ) VALUES (
+                     'root-assistant', 'conversation-root', 'assistant', '', 'pending', ?1, 10, 0
+                 )",
+                [running_run.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversation_turn_traces (
+                     assistant_message_id, conversation_id, run_id, schema_version,
+                     terminal_status, terminal_error, truncated, created_at, updated_at,
+                     completed_at
+                 ) VALUES (
+                     'root-assistant', 'conversation-root', 'run-root', 1,
+                     'in_progress', NULL, 0, 10, 10, NULL
+                 )",
+                [],
+            )
+            .unwrap();
+
+        insert_activity_event(
+            &mut connection,
+            "activity-before-final",
+            "agent-child",
+            "conversation-child",
+            "agent-child",
+            "review",
+            Some("root-assistant"),
+            Some(0),
+        )
+        .unwrap();
+        let cutoff = latest_root_sequence(&connection, "agent-root").unwrap();
+        insert_activity_event(
+            &mut connection,
+            "activity-after-final-started",
+            "agent-child",
+            "conversation-child",
+            "agent-child",
+            "review",
+            Some("root-assistant"),
+            Some(0),
+        )
+        .unwrap();
+
+        crate::storage::chat_repository::update_message_run_terminal_state(
+            &connection,
+            "conversation-root",
+            "root-assistant",
+            "run-root",
+            Some("sent"),
+            "completed",
+            20,
+            Some(cutoff),
+        )
+        .unwrap();
+
+        let raw = connection
+            .query_row(
+                "SELECT agent_run_json FROM messages WHERE id = 'root-assistant'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let run: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            run["collaborationTimelineActivities"],
+            serde_json::json!([{
+                "activityId": "activity-before-final",
+                "agentId": "agent-child",
+                "occurredAt": 20,
+                "rootAnchorMessageId": "root-assistant",
+                "rootTraceBoundarySequence": 0,
+                "runId": null,
+                "semantic": "started",
+                "sequence": cutoff,
+                "taskNameSnapshot": "review",
+                "turnId": null
+            }])
         );
     }
 

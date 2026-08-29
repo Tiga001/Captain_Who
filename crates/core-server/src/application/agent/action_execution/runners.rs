@@ -4331,6 +4331,7 @@ impl AgentService {
         let RuntimeTurnSegmentOutcome {
             result,
             terminal_event_gate,
+            final_response_collaboration_cutoff,
         } = self
             .run_prepared_turn_segment(
                 PreparedRuntimeTurnSegment {
@@ -4400,6 +4401,7 @@ impl AgentService {
                                     conversation_id,
                                     assistant_message_id,
                                     &mut agent_output,
+                                    final_response_collaboration_cutoff,
                                 ),
                             _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
                         }

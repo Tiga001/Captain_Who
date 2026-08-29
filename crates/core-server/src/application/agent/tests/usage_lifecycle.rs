@@ -337,6 +337,7 @@ async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
                 CONVERSATION_ID,
                 ASSISTANT_MESSAGE_ID,
                 &mut output,
+                None,
             )
         },
         || {
@@ -887,6 +888,7 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
             "conversation-cumulative",
             "assistant-cumulative",
             &mut waiting,
+            None,
         )
         .unwrap();
 
@@ -928,6 +930,7 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
             "conversation-cumulative",
             "assistant-cumulative",
             &mut completed,
+            None,
         )
         .unwrap();
 

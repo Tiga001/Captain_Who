@@ -34,6 +34,7 @@ impl AgentService {
         trace_created_at: i64,
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
+        collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         let notification = self.human_root_terminal_notification(
             run_id,
@@ -56,6 +57,7 @@ impl AgentService {
                     completed_at,
                     usage,
                     notification,
+                    collaboration_cutoff,
                 )
         } else {
             self.storage
@@ -70,6 +72,7 @@ impl AgentService {
                     trace_created_at,
                     completed_at,
                     usage,
+                    collaboration_cutoff,
                 )
         }
     }

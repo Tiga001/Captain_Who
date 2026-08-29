@@ -905,6 +905,7 @@ fn seed_current_terminal_assistant_trace(
             1,
             40,
             None,
+            None,
         )
         .unwrap();
 }

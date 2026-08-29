@@ -70,6 +70,7 @@ const STORED_RUN_KEYS = [
   'fileChanges',
   'commandSessions',
   'mcpInvocations',
+  'collaborationTimelineActivities',
   'messageStreamCheckpoints',
   'timeline',
   'state',
@@ -298,6 +299,36 @@ function isSkillInstallation(value: unknown): boolean {
   )
 }
 
+function isCollaborationTimelineActivity(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, [
+      'activityId',
+      'agentId',
+      'occurredAt',
+      'rootAnchorMessageId',
+      'rootTraceBoundarySequence',
+      'runId',
+      'semantic',
+      'sequence',
+      'taskNameSnapshot',
+      'turnId'
+    ]) &&
+    isBoundedString(value.activityId, 2048) &&
+    isBoundedString(value.agentId, 256) &&
+    isSafeInteger(value.occurredAt) &&
+    isBoundedString(value.rootAnchorMessageId, 2048) &&
+    isSafeInteger(value.rootTraceBoundarySequence) &&
+    (value.runId === null || isBoundedString(value.runId, 2048)) &&
+    ['started', 'updated', 'waiting_approval', 'completed', 'failed', 'interrupted'].includes(
+      value.semantic as string
+    ) &&
+    isSafeInteger(value.sequence) &&
+    isBoundedString(value.taskNameSnapshot, 256) &&
+    (value.turnId === null || isBoundedString(value.turnId, 2048))
+  )
+}
+
 /**
  * Parses the current Renderer-owned durable Agent-run projection. This is deliberately not the
  * JSON-RPC MCP event parser: the wire event has required nullable fields and diagnostics, while
@@ -326,6 +357,8 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     !isRecordArray(value.fileChanges, isFileChangeSnapshot) ||
     !Array.isArray(value.mcpInvocations) ||
     value.mcpInvocations.length > MAX_STORED_RUN_ITEMS ||
+    (hasOwn(value, 'collaborationTimelineActivities') &&
+      !isRecordArray(value.collaborationTimelineActivities, isCollaborationTimelineActivity)) ||
     !Array.isArray(value.timeline) ||
     value.timeline.length > MAX_STORED_RUN_ITEMS ||
     !isRecord(value.messageStreamCheckpoints) ||

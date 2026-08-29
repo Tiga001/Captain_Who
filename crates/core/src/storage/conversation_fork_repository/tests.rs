@@ -159,6 +159,8 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
     let replacements = HashMap::from([
         ("run-old".to_string(), "run-new".to_string()),
         ("message-old".to_string(), "message-new".to_string()),
+        ("agent-old".to_string(), "agent-new".to_string()),
+        ("turn-old".to_string(), "turn-new".to_string()),
     ]);
     let cloned = clone_agent_run_json(
         &json!({
@@ -166,7 +168,19 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
             "assistantMessageId": "message-old",
             "usage": { "inputTokens": 10, "totalTokens": 12 },
             "messageStreamCheckpoints": { "1": "partial" },
-            "state": { "activeRunId": "run-old", "status": "completed" }
+            "state": { "activeRunId": "run-old", "status": "completed" },
+            "collaborationTimelineActivities": [{
+                "activityId": "event-stable",
+                "agentId": "agent-old",
+                "occurredAt": 10,
+                "rootAnchorMessageId": "message-old",
+                "rootTraceBoundarySequence": 2,
+                "runId": "run-old",
+                "semantic": "updated",
+                "sequence": 3,
+                "taskNameSnapshot": "Reviewer",
+                "turnId": "turn-old"
+            }]
         })
         .to_string(),
         &replacements,
@@ -179,6 +193,32 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
     assert_eq!(value["usage"]["billableRequestCount"], 0);
     assert_eq!(value["state"]["activeRunId"], Value::Null);
     assert_eq!(value["messageStreamCheckpoints"], json!({}));
+    let activity = &value["collaborationTimelineActivities"][0];
+    assert_eq!(activity["activityId"], "event-stable");
+    assert_eq!(activity["agentId"], "agent-new");
+    assert_eq!(activity["rootAnchorMessageId"], "message-new");
+    assert_eq!(activity["runId"], "run-new");
+    assert_eq!(activity["turnId"], "turn-new");
+
+    let recursive = clone_agent_run_json(
+        &cloned,
+        &HashMap::from([
+            ("run-new".to_string(), "run-recursive".to_string()),
+            ("message-new".to_string(), "message-recursive".to_string()),
+            ("agent-new".to_string(), "agent-recursive".to_string()),
+            ("turn-new".to_string(), "turn-recursive".to_string()),
+        ]),
+    )
+    .unwrap();
+    let recursive: Value = serde_json::from_str(&recursive).unwrap();
+    let recursive_activity = &recursive["collaborationTimelineActivities"][0];
+    assert_eq!(recursive_activity["agentId"], "agent-recursive");
+    assert_eq!(
+        recursive_activity["rootAnchorMessageId"],
+        "message-recursive"
+    );
+    assert_eq!(recursive_activity["runId"], "run-recursive");
+    assert_eq!(recursive_activity["turnId"], "turn-recursive");
 }
 
 #[test]

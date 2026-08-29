@@ -21,6 +21,7 @@ const CURRENT_AGENT_RUN_KEYS: &[&str] = &[
     "fileChanges",
     "commandSessions",
     "mcpInvocations",
+    "collaborationTimelineActivities",
     "messageStreamCheckpoints",
     "timeline",
     "state",
@@ -1779,6 +1780,40 @@ fn current_mcp_invocation_is_safe(value: &serde_json::Value) -> bool {
     }
 }
 
+fn current_collaboration_timeline_activity_is_safe(
+    activity: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    exact_keys(
+        activity,
+        &[
+            "activityId",
+            "agentId",
+            "occurredAt",
+            "rootAnchorMessageId",
+            "rootTraceBoundarySequence",
+            "runId",
+            "semantic",
+            "sequence",
+            "taskNameSnapshot",
+            "turnId",
+        ],
+    ) && bounded_string(&activity["activityId"], 2_048, false)
+        && bounded_string(&activity["agentId"], 256, false)
+        && safe_integer(&activity["occurredAt"])
+        && bounded_string(&activity["rootAnchorMessageId"], 2_048, false)
+        && safe_integer(&activity["rootTraceBoundarySequence"])
+        && nullable_bounded_string(&activity["runId"], 2_048, false)
+        && matches!(
+            activity["semantic"].as_str(),
+            Some(
+                "started" | "updated" | "waiting_approval" | "completed" | "failed" | "interrupted"
+            )
+        )
+        && safe_integer(&activity["sequence"])
+        && bounded_string(&activity["taskNameSnapshot"], 256, false)
+        && nullable_bounded_string(&activity["turnId"], 2_048, false)
+}
+
 pub(crate) fn current_agent_run_projection_is_safe(
     run: &serde_json::Map<String, serde_json::Value>,
     expected_run_id: &str,
@@ -1877,6 +1912,11 @@ fn current_agent_run_projection_is_safe_with_trace_policy(
         || run.get("skillInstallations").is_some_and(|installations| {
             !record_array_is_safe(installations, current_skill_installation_is_safe)
         })
+        || run
+            .get("collaborationTimelineActivities")
+            .is_some_and(|activities| {
+                !record_array_is_safe(activities, current_collaboration_timeline_activity_is_safe)
+            })
         || run
             .get("activatedSkills")
             .is_some_and(|skills| !record_array_is_safe(skills, current_activated_skill_is_safe))

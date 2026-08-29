@@ -201,6 +201,10 @@ pub(super) struct PreparedRuntimeTurnSegment {
 pub(super) struct RuntimeTurnSegmentOutcome {
     pub(super) result: AgentResult<AgentChatOutput>,
     pub(super) terminal_event_gate: Arc<AgentTerminalEventGate>,
+    /// Root-local collaboration event sequence captured when the committed final response stream
+    /// started. Activity committed after this boundary remains visible in Agent Center but does
+    /// not become part of the frozen parent response Timeline.
+    pub(super) final_response_collaboration_cutoff: Option<u64>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -634,6 +638,7 @@ impl AgentService {
                 created_at,
                 completed_at,
                 None,
+                None,
             ) {
                 Ok(()) => {
                     settled = true;
@@ -655,6 +660,7 @@ impl AgentService {
                 None,
                 created_at,
                 completed_at,
+                None,
                 None,
             )?;
         }
@@ -820,6 +826,7 @@ impl AgentService {
             let RuntimeTurnSegmentOutcome {
                 result,
                 terminal_event_gate,
+                final_response_collaboration_cutoff,
             } = service
                 .run_prepared_turn_segment(segment, notifications.clone())
                 .await;
@@ -870,6 +877,7 @@ impl AgentService {
                                 &worker_conversation_id,
                                 &worker_assistant_message_id,
                                 &mut agent_output,
+                                final_response_collaboration_cutoff,
                             )
                         },
                         || restore_run_usage_state(&service, &worker_run_id, &previous_usage_state),
@@ -1433,6 +1441,11 @@ impl AgentService {
         let emitter_terminal_event_gate = terminal_event_gate.clone();
         let pending_store_failure = Arc::new(Mutex::new(None::<String>));
         let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
+        let collaboration_stream_cutoffs = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
+        let emitter_collaboration_stream_cutoffs = Arc::clone(&collaboration_stream_cutoffs);
+        let final_response_collaboration_cutoff = Arc::new(Mutex::new(None::<u64>));
+        let emitter_final_response_collaboration_cutoff =
+            Arc::clone(&final_response_collaboration_cutoff);
         let emitter: AgentEventEmitter = Arc::new(move |event| {
             if let AgentEvent::ApprovalRequired {
                 run_id,
@@ -1513,6 +1526,49 @@ impl AgentService {
                 .is_some()
             {
                 return;
+            }
+            match &event {
+                AgentEvent::MessageStreamStarted { stream_id, .. } => {
+                    let root_sequence = emitter_service
+                        .storage
+                        .get_agent_node_by_conversation(&emitter_conversation_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|node| {
+                            emitter_service
+                                .storage
+                                .latest_agent_collaboration_event_sequence(&node.root_agent_id)
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    emitter_collaboration_stream_cutoffs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(stream_id.clone(), root_sequence);
+                }
+                AgentEvent::MessageStreamReset { stream_id, .. } => {
+                    emitter_collaboration_stream_cutoffs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove(stream_id);
+                }
+                AgentEvent::MessageStreamCommitted {
+                    stream_id,
+                    trace_sequence,
+                    ..
+                } => {
+                    let cutoff = emitter_collaboration_stream_cutoffs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove(stream_id)
+                        .unwrap_or(0);
+                    if trace_sequence.is_none() {
+                        *emitter_final_response_collaboration_cutoff
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = Some(cutoff);
+                    }
+                }
+                _ => {}
             }
             let event = emitter_service.project_cumulative_usage_onto_event(event);
             if let Some(event) = emitter_terminal_event_gate.route(event) {
@@ -1624,9 +1680,13 @@ impl AgentService {
             match collaboration_harness.attach_to_host_services(host_services, &conversation_id) {
                 Ok(services) => services,
                 Err(error) => {
+                    let final_response_collaboration_cutoff = *final_response_collaboration_cutoff
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner());
                     return RuntimeTurnSegmentOutcome {
                         result: Err(error),
                         terminal_event_gate,
+                        final_response_collaboration_cutoff,
                     };
                 }
             };
@@ -1681,9 +1741,13 @@ impl AgentService {
             }
         };
 
+        let final_response_collaboration_cutoff = *final_response_collaboration_cutoff
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         RuntimeTurnSegmentOutcome {
             result,
             terminal_event_gate,
+            final_response_collaboration_cutoff,
         }
     }
 }

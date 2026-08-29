@@ -554,6 +554,7 @@ function AgentRunView({
 }) {
   const { t } = useFrontendConfig()
   const run = message.agentRun
+  const runIsSettled = !run || isRunSettled(run)
   const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
   const finalAnswerContent = getAssistantFinalContent(message)
   const finalAnswerTimelineItemIndex = useMemo(() => {
@@ -571,9 +572,14 @@ function AgentRunView({
         : timeline,
     [finalAnswerTimelineItemIndex, timeline]
   )
+  const effectiveCollaborationActivities = useMemo(
+    () =>
+      runIsSettled ? (run?.collaborationTimelineActivities ?? []) : collaborationTimelineActivities,
+    [collaborationTimelineActivities, run?.collaborationTimelineActivities, runIsSettled]
+  )
   const normalizedCollaborationActivities = useMemo(
-    () => normalizeCollaborationTimelineActivities(collaborationTimelineActivities),
-    [collaborationTimelineActivities]
+    () => normalizeCollaborationTimelineActivities(effectiveCollaborationActivities),
+    [effectiveCollaborationActivities]
   )
   const [liveActivityAnchors, setLiveActivityAnchors] = useState<{
     runId: string | null
@@ -584,6 +590,7 @@ function AgentRunView({
   // tail present when an activity first arrives, so later narration or Tools cannot push it to the
   // end of the current run. useLayoutEffect applies the placement before paint.
   useLayoutEffect(() => {
+    if (runIsSettled) return
     const nextRunId = run?.runId ?? null
     setLiveActivityAnchors((current) => {
       const currentAnchors = current.runId === nextRunId ? current.byActivityId : {}
@@ -597,7 +604,7 @@ function AgentRunView({
       if (current.runId === nextRunId && nextAnchors === currentAnchors) return current
       return { runId: nextRunId, byActivityId: nextAnchors }
     })
-  }, [normalizedCollaborationActivities, run?.runId, timeline])
+  }, [normalizedCollaborationActivities, run?.runId, runIsSettled, timeline])
 
   const displayTimelineBlocks = useMemo(() => {
     type TimelineBlock =
@@ -632,10 +639,12 @@ function AgentRunView({
           const sequence = timelineSequence(item)
           return sequence !== undefined && sequence >= boundary
         })
-        const hasLiveAnchor = Object.prototype.hasOwnProperty.call(
-          liveActivityAnchors.byActivityId,
-          activity.activityId
-        )
+        const hasLiveAnchor =
+          !runIsSettled &&
+          Object.prototype.hasOwnProperty.call(
+            liveActivityAnchors.byActivityId,
+            activity.activityId
+          )
         const durableLowerBound = lastCommittedBeforeBoundary + 1
         const liveAnchor = hasLiveAnchor
           ? liveActivityAnchors.byActivityId[activity.activityId]
@@ -719,6 +728,7 @@ function AgentRunView({
     liveActivityAnchors.byActivityId,
     normalizedCollaborationActivities,
     run,
+    runIsSettled,
     timeline
   ])
   const finalAnswerRepresentedByTimeline = useMemo(
@@ -730,7 +740,6 @@ function AgentRunView({
     [displayTimelineBlocks]
   )
   const runId = run?.runId
-  const runIsSettled = !run || isRunSettled(run)
   const waitingForCommandCompletion = Boolean(run && isWaitingForCommandCompletion(run))
   const hasTimeline = displayTimeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')

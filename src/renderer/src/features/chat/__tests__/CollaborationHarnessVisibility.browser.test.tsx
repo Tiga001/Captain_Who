@@ -137,9 +137,12 @@ describe('collaboration Harness timeline projection', () => {
 
   it('folds trusted anchored activity for a settled root run without exposing raw Harness calls', async () => {
     const settled = settledMessage(harnessTools.map(call))
+    const started = activity('assistant-message', 1)
+    if (!settled.agentRun) throw new Error('missing root run fixture')
+    settled.agentRun.collaborationTimelineActivities = [started]
     const onUiStateChange = vi.fn()
     const props = {
-      collaborationTimelineActivities: [activity('assistant-message', 1)],
+      collaborationTimelineActivities: [started],
       message: settled,
       mode: 'interactive' as const,
       onOpenCollaborationAgent: vi.fn(),
@@ -209,6 +212,13 @@ describe('collaboration Harness timeline projection', () => {
     if (!candidate.agentRun) throw new Error('missing root run fixture')
     candidate.agentRun.status = variant.status
     if (variant.status === 'running') candidate.agentRun.completedAt = undefined
+    else {
+      candidate.agentRun.collaborationTimelineActivities = variant.activities.filter(
+        (candidateActivity) =>
+          candidateActivity.rootAnchorMessageId === 'assistant-message' &&
+          candidateActivity.rootTraceBoundarySequence !== null
+      )
+    }
 
     const screen = await render(
       <ChatMessageItem

@@ -981,6 +981,7 @@ impl AgentService {
                 context.started_at,
                 completed_at,
                 usage_record.as_ref(),
+                None,
             );
             if persisted.is_ok() {
                 self.finish_persisted_run_usage(&context.run_id, AgentRunStatus::Cancelled);
@@ -1061,12 +1062,14 @@ impl AgentService {
         conversation_id: &str,
         assistant_message_id: &str,
         output: &mut AgentChatOutput,
+        collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         self.persist_final_assistant_output_inner(
             conversation_id,
             assistant_message_id,
             output,
             None,
+            collaboration_cutoff,
         )
     }
 
@@ -1082,6 +1085,7 @@ impl AgentService {
             assistant_message_id,
             output,
             Some(model_context_items),
+            None,
         )
     }
 
@@ -1091,6 +1095,7 @@ impl AgentService {
         assistant_message_id: &str,
         output: &mut AgentChatOutput,
         model_context_items: Option<&[ConversationModelContextItem]>,
+        collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         let completed_at = now_ms();
         if matches!(
@@ -1151,6 +1156,7 @@ impl AgentService {
                 completed_at,
                 completed_at,
                 usage_record.as_ref(),
+                collaboration_cutoff,
             )?;
             replace_output_usage(output, cumulative_usage);
             self.finish_persisted_run_usage(&output.run_id, output.status);
@@ -1290,6 +1296,7 @@ impl AgentService {
             completed_at,
             completed_at,
             usage_record.as_ref(),
+            None,
         )?;
         let cumulative_usage = run_id
             .as_deref()

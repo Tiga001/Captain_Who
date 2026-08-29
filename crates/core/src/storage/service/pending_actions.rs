@@ -1010,6 +1010,7 @@ fn terminalize_mcp_action_in_transaction(
         Some(request.outcome.message_status()),
         run_status,
         updated_at,
+        None,
     )
     .map_err(storage_error)?;
     if let Some(approval) = approval.as_ref() {
@@ -2004,6 +2005,7 @@ impl StorageService {
             Some("error"),
             "failed",
             updated_at,
+            None,
         )
         .map_err(storage_error)?;
         conversation_trace_repository::commit_trace_in_connection(
@@ -3091,6 +3093,7 @@ impl StorageService {
                     Some("error"),
                     "failed",
                     updated_at,
+                    None,
                 )
                 .map_err(storage_error)?;
             }
@@ -3596,6 +3599,7 @@ impl StorageService {
             Some("error"),
             "failed",
             completed_at,
+            None,
         )
         .map_err(storage_error)?;
         conversation_trace_repository::commit_trace_in_connection(

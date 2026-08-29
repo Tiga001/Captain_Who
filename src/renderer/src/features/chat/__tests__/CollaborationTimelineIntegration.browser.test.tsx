@@ -166,15 +166,30 @@ function activity(
   }
 }
 
+function freezeTerminalActivities(
+  target: ChatConversation,
+  activities: readonly CollaborationTimelineActivity[]
+): ChatConversation {
+  const run = target.messages.find((message) => message.id === 'root-assistant-1')?.agentRun
+  if (!run) throw new Error('missing root run fixture')
+  run.collaborationTimelineActivities = activities.filter(
+    (candidate) =>
+      candidate.rootAnchorMessageId === 'root-assistant-1' &&
+      candidate.rootTraceBoundarySequence !== null
+  )
+  return target
+}
+
 it('merges only trusted anchored activity into the message timeline', async () => {
   const onOpenAgent = vi.fn()
+  const anchored = activity('event-anchored', 'started', 2, 2_100, 'root-assistant-1')
   const screen = await render(
     <ChatMessageList
       collaborationTimelineActivities={[
         activity('event-unanchored', 'updated', 2, 3_000, null),
-        activity('event-anchored', 'started', 2, 2_100, 'root-assistant-1')
+        anchored
       ]}
-      conversation={expandedConversation()}
+      conversation={freezeTerminalActivities(expandedConversation(), [anchored])}
       editableLastUserMessageId={null}
       editSelectedModelAvailable
       editSelectedModelSupportsImage
@@ -211,10 +226,11 @@ it('does not append or rewrite inline state when post-terminal activity arrives 
     2_100,
     'root-assistant-1'
   )
+  const settled = freezeTerminalActivities(expandedConversation(), [startedBeforeTerminal])
   const screen = await render(
     <ChatMessageList
       collaborationTimelineActivities={[startedBeforeTerminal]}
-      conversation={expandedConversation()}
+      conversation={settled}
       editableLastUserMessageId={null}
       editSelectedModelAvailable
       editSelectedModelSupportsImage
@@ -232,7 +248,7 @@ it('does not append or rewrite inline state when post-terminal activity arrives 
         startedBeforeTerminal,
         activity('completed-after-terminal', 'completed', 2, 4_500, null)
       ]}
-      conversation={expandedConversation()}
+      conversation={settled}
       editableLastUserMessageId={null}
       editSelectedModelAvailable
       editSelectedModelSupportsImage
@@ -246,12 +262,11 @@ it('does not append or rewrite inline state when post-terminal activity arrives 
 })
 
 it('keeps root collaboration activity out of the child observer capability mode', async () => {
+  const rootActivity = activity('event-root-only', 'started', 1, 2_500, 'root-assistant-1')
   const screen = await render(
     <ChatMessageList
-      collaborationTimelineActivities={[
-        activity('event-root-only', 'started', 1, 2_500, 'root-assistant-1')
-      ]}
-      conversation={conversation()}
+      collaborationTimelineActivities={[rootActivity]}
+      conversation={freezeTerminalActivities(conversation(), [rootActivity])}
       editableLastUserMessageId={null}
       editSelectedModelAvailable={false}
       editSelectedModelSupportsImage={false}
@@ -385,21 +400,27 @@ it('keeps an unnumbered presentation item visible before the activity from its a
   )
 })
 
-it('renders a causally pre-terminal anchored event even when its notification arrives late', async () => {
-  const settled = structuredClone(expandedConversation())
-  const run = settled.messages[1]?.agentRun
-  if (!run) throw new Error('missing root run fixture')
-  run.timeline.push({
-    id: 'trace-message-final-answer',
-    type: 'message',
-    content: 'I finished the root response.',
-    traceSequence: 3
-  })
+it('keeps the frozen pre-final activity in place and ignores a late live terminal event', async () => {
+  const updatedBeforeFinal = activity(
+    'event-before-terminal-delivered-late',
+    'updated',
+    3,
+    4_100,
+    'root-assistant-1'
+  )
+  const active = structuredClone(expandedConversation())
+  const activeMessage = active.messages[1]
+  const activeRun = activeMessage?.agentRun
+  if (!activeMessage || !activeRun) throw new Error('missing root run fixture')
+  activeMessage.content = ''
+  activeMessage.status = 'pending'
+  activeRun.status = 'running'
+  activeRun.completedAt = undefined
 
   const screen = await render(
     <ChatMessageList
-      collaborationTimelineActivities={[]}
-      conversation={settled}
+      collaborationTimelineActivities={[updatedBeforeFinal]}
+      conversation={active}
       editableLastUserMessageId={null}
       editSelectedModelAvailable
       editSelectedModelSupportsImage
@@ -408,11 +429,27 @@ it('renders a causally pre-terminal anchored event even when its notification ar
     />
   )
 
-  expect(screen.container.querySelector('[data-semantic="updated"]')).toBeNull()
+  const initialUpdated = screen.container.querySelector<HTMLElement>('[data-semantic="updated"]')
+  expect(initialUpdated).not.toBeNull()
+  const settled = structuredClone(active)
+  const settledMessage = settled.messages[1]
+  const settledRun = settledMessage?.agentRun
+  if (!settledMessage || !settledRun) throw new Error('missing settled root run fixture')
+  settledMessage.content = 'I finished the root response.'
+  settledMessage.status = 'sent'
+  settledRun.status = 'completed'
+  settledRun.completedAt = 4_300
+  settledRun.collaborationTimelineActivities = [updatedBeforeFinal]
+  settledRun.timeline.push({
+    id: 'trace-message-final-answer',
+    type: 'message',
+    content: 'I finished the root response.'
+  })
   await screen.rerender(
     <ChatMessageList
       collaborationTimelineActivities={[
-        activity('event-before-terminal-delivered-late', 'updated', 4, 4_100, 'root-assistant-1')
+        updatedBeforeFinal,
+        activity('event-after-final', 'completed', 4, 4_200, 'root-assistant-1')
       ]}
       conversation={settled}
       editableLastUserMessageId={null}
@@ -426,9 +463,10 @@ it('renders a causally pre-terminal anchored event even when its notification ar
   const finalAnswer = screen.getByText('I finished the root response.').element()
   const updated = screen.container.querySelector<HTMLElement>('[data-semantic="updated"]')
   expect(updated).not.toBeNull()
-  expect(finalAnswer.compareDocumentPosition(updated!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+  expect(updated!.compareDocumentPosition(finalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
     Node.DOCUMENT_POSITION_FOLLOWING
   )
+  expect(screen.container.querySelector('[data-semantic="completed"]')).toBeNull()
   expect(screen.getByText('I finished the root response.').elements()).toHaveLength(1)
 })
 
@@ -486,6 +524,7 @@ it('folds anchored activity with the execution timeline and omits unanchored act
     activity('event-between-read-tools', 'started', 1, 2_100, 'root-assistant-1'),
     activity('event-unanchored-followup', 'updated', 2, 4_500, null)
   ]
+  run.collaborationTimelineActivities = [activities[0]!]
   const screen = await render(
     <ChatMessageList
       collaborationTimelineActivities={activities}
@@ -598,6 +637,7 @@ it('coalesces consecutive same-status Harness activity across hidden trace bound
     rootTraceBoundarySequence: index + 2,
     taskNameSnapshot: `Worker ${index + 1}`
   }))
+  run.collaborationTimelineActivities = activities
 
   const screen = await render(
     <ChatMessageList
@@ -653,6 +693,7 @@ it('keeps different statuses compact but never merges across visible narration',
     activity('event-update-before-text', 'updated', 2, 2_200, 'root-assistant-1'),
     activity('event-start-after-text', 'started', 5, 2_300, 'root-assistant-1')
   ]
+  run.collaborationTimelineActivities = activities
 
   const screen = await render(
     <ChatMessageList
@@ -696,12 +737,11 @@ it('renders inline activity inside the real interactive ConversationSurface desi
     height: 560,
     width: 720
   } as CSSProperties
+  const surfaceActivity = activity('event-surface', 'started', 1, 2_100, 'root-assistant-1')
   const screen = await render(
     <div style={theme}>
       <ConversationSurface
-        collaborationTimelineActivities={[
-          activity('event-surface', 'started', 1, 2_100, 'root-assistant-1')
-        ]}
+        collaborationTimelineActivities={[surfaceActivity]}
         composerDraft={{
           attachments: [],
           message: '',
@@ -712,7 +752,7 @@ it('renders inline activity inside the real interactive ConversationSurface desi
           skills: [],
           updatedAt: 5_000
         }}
-        conversation={expandedConversation()}
+        conversation={freezeTerminalActivities(expandedConversation(), [surfaceActivity])}
         editSelectedModelAvailable
         editSelectedModelSupportsImage
         mode="interactive"

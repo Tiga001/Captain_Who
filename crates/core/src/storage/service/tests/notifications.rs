@@ -115,6 +115,7 @@ fn invalid_notification_rolls_back_the_terminal_message_and_trace() {
             3,
             None,
             &invalid,
+            None,
         )
         .is_err());
 

@@ -675,6 +675,38 @@ function currentStoredRun(overrides: Record<string, unknown> = {}) {
   }
 }
 
+it('persists and restores the Host-frozen collaboration Timeline snapshot', () => {
+  const collaborationTimelineActivities = [
+    {
+      activityId: 'event-reviewer-updated',
+      agentId: 'agent-reviewer',
+      occurredAt: 8,
+      rootAnchorMessageId: 'assistant-current',
+      rootTraceBoundarySequence: 3,
+      runId: 'run-reviewer',
+      semantic: 'updated' as const,
+      sequence: 4,
+      taskNameSnapshot: 'Reviewer',
+      turnId: 'turn-reviewer'
+    }
+  ]
+  const encoded = stringifyPersistedAgentRun(
+    currentStoredRun({ collaborationTimelineActivities }) as ChatAgentRunView
+  )
+  const restored = parsePersistedAgentRun(JSON.parse(encoded ?? ''))
+
+  expect(restored?.collaborationTimelineActivities).toEqual(collaborationTimelineActivities)
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        collaborationTimelineActivities: [
+          { ...collaborationTimelineActivities[0], privatePayload: 'must-not-survive' }
+        ]
+      })
+    )
+  ).toBeUndefined()
+})
+
 it('keeps FileChange source and Diff text out of ordinary Renderer persistence', () => {
   const canary = 'FILE_CHANGE_PRIVATE_CANARY_4f80d20e'
   const proposal = {

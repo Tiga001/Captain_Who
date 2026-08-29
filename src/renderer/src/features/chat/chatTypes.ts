@@ -27,6 +27,7 @@ import type {
   ActivatedSkillSummary,
   SkillSelection
 } from '@mycopilot/protocol'
+import type { CollaborationTimelineActivity } from '../agentCollaboration/collaborationTimelineModel'
 
 export type ChatSkillInstallationStatus =
   | 'waiting_for_approval'
@@ -236,6 +237,8 @@ export interface ChatAgentRunView {
   commandSessions?: Record<string, ChatCommandSessionView>
   /** Safe lifecycle-only MCP views. Never store MCP arguments or result bodies here. */
   mcpInvocations?: ChatMcpToolInvocationView[]
+  /** Host-frozen collaboration rows owned by this terminal Assistant response. */
+  collaborationTimelineActivities?: CollaborationTimelineActivity[]
   /** Previous committed answer projection, retained only while the next model stream is provisional. */
   messageStreamCheckpoints?: Record<string, { previousContent: string }>
   /** Ephemeral retry status. Cleared by the next model output or a terminal boundary. */
