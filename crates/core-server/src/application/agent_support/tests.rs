@@ -51,6 +51,7 @@ fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
         run_world_state: crate::test_run_world_state(),
         pending_action_id: Some(action_id),
         file_change_run_grant_ref: None,
+        pending_file_observation: None,
         pending_tool_call_id: call_id,
         conversation_trace_items: Vec::new(),
         conversation_model_context_items: Vec::new(),
@@ -439,6 +440,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         run_id: "run-backend-bound".to_string(),
         pending_action_id: None,
         file_change_run_grant_ref: None,
+        pending_file_observation: None,
         context_items: vec![AgentContextCheckpointItem {
             role: "assistant".to_string(),
             content: String::new(),

@@ -2057,6 +2057,7 @@ fn attach_current_manual_file_effect_checkpoint(
         run_world_state: serde_json::from_value(test_checkpoint_run_world_state()).unwrap(),
         pending_action_id: None,
         file_change_run_grant_ref: None,
+        pending_file_observation: None,
         pending_tool_call_id: call_id.clone(),
         conversation_trace_items: trace.items.clone(),
         conversation_model_context_items: current_model_context_for_trace(trace),

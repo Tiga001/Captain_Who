@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, Pencil } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type {
   AgentFileChangeOperation,
   AgentFileChangeProposal,
@@ -17,6 +17,7 @@ import { getApplyPatchRequest } from '../../../agentRun/applyPatchRequest'
 import { revealStoredProjectFile } from '../../../storage/storageClient'
 import type { ChatFileChangePreview } from '../../chatTypes'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
+import { FileChangeDiffCard } from './FileChangeDiffCard'
 import { getSafeFileChangeFailureMessage } from './fileChangeFailurePresentation'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -504,7 +505,7 @@ function FileChangeRow({
     view.status
   ])
 
-  const loadMore = (): void => {
+  const loadMore = useCallback((): void => {
     if (nextOffset === null || loading) return
     const requestedOffset = nextOffset
     setLoading(true)
@@ -545,7 +546,18 @@ function FileChangeRow({
       })
       .catch(() => setPreviewError(safePreviewError))
       .finally(() => setLoading(false))
-  }
+  }, [
+    assistantMessageId,
+    conversationId,
+    item.call.id,
+    loading,
+    nextOffset,
+    observerRootConversationId,
+    previewTransactionId,
+    runId,
+    safePreviewError,
+    terminal
+  ])
 
   const failureNote =
     view.status === 'failed' || view.status === 'conflict' || view.status === 'outcome_unknown'
@@ -604,22 +616,18 @@ function FileChangeRow({
       ) : null}
       {failureNote ? <p className="file-change-activity__error-note">{failureNote}</p> : null}
       {expanded ? (
-        <div className="file-change-activity__preview">
-          {loading && !persistedPreview ? (
-            <span>{t('agent.fileChange.loadingPreview')}</span>
-          ) : null}
-          {previewError ? (
-            <span className="file-change-activity__error">{previewError}</span>
-          ) : null}
-          {!previewError && displayedPreview ? <pre>{displayedPreview}</pre> : null}
-          {nextOffset !== null && !previewError ? (
-            <button disabled={loading} onClick={loadMore} type="button">
-              {loading
-                ? t('agent.fileChange.loadingPreview')
-                : t('agent.fileChange.loadMorePreview')}
-            </button>
-          ) : null}
-        </div>
+        <FileChangeDiffCard
+          additions={view.additions}
+          complete={!hasLivePreview && nextOffset === null && !loading}
+          deletions={view.deletions}
+          error={previewError}
+          filePath={view.filePath || t('agent.fileChange.unknownFile')}
+          hasMore={nextOffset !== null}
+          loading={loading}
+          onLoadMore={loadMore}
+          patch={displayedPreview}
+          toolCallId={item.call.id}
+        />
       ) : null}
     </div>
   )

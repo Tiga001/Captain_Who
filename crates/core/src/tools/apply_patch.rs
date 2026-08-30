@@ -42,7 +42,7 @@ impl AgentTool for ApplyPatchTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Create, update, or delete one UTF-8 text file through one strict FileChange protocol. Put exactly one operation in the required request object; use only the fields listed by its matching schema branch. Before the first request.action=apply or begin for a target, call read_file and copy fileChangeTarget.filePath and observationId. Every successful apply or commit normally returns a new fileChangeTarget bound to the verified post-write state; use that newer observation for the next change to the same target without rereading solely for another token. If it is absent or observationRefreshRequired=true, follow continueWith and read the target again. Direct shape example: {\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"observationId\":\"fobs_example\",\"content\":\"hello\\n\"}}. Examples show shape only: never copy fobs_example, example transaction IDs, or example cursors; replace them with the exact values returned by this Host. Direct apply accepts at most 32 KiB of complete content; use begin/append/edit/commit for larger content, with append chunks up to 1 MiB and a 4 MiB transaction total. After begin, copy the Host-returned transactionId, nextIndex, and draftRevision exactly. Staged shape example: {\"request\":{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:example\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"next chunk\"}}. create is always no-clobber; Staged delete is unsupported. Settle every unfinished transaction with commit or abort before user-visible narration. Without a workspace, filePath must be an authorized absolute path or @home, @desktop, @documents, or @downloads. Never use run_command, redirection, or scripts to bypass file-change approval."
+            description: "Create, update, or delete one UTF-8 text file through one strict FileChange protocol. Put exactly one operation in the required request object; use only the fields listed by its matching schema branch. create never accepts observationId: the Host proves that the exact target is missing and creates it with atomic no-clobber; a successful create returns the first fileChangeTarget for follow-up changes. Before update or delete, call read_file and copy its exact fileChangeTarget.filePath and observationId. Within the current run, every successful update/delete or staged update commit refreshes that same observationId to the verified post-write state, so reuse the same ID only after the model has received the successful Tool Result. If it is absent or observationRefreshRequired=true, follow continueWith and read the target again. Direct create example: {\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"content\":\"hello\\n\"}}. Direct apply accepts at most 32 KiB of complete content; use begin/append/edit/commit for larger content, with append chunks up to 1 MiB and a 4 MiB transaction total. begin/create also omits observationId. After begin, copy the Host-returned transactionId, nextIndex, and draftRevision exactly. Staged mutation example: {\"request\":{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:example\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"next chunk\"}}. Examples show shape only: never copy example transaction IDs or cursors; replace them with exact Host values. create is always no-clobber; Staged delete is unsupported. Settle every unfinished transaction with commit or abort before user-visible narration. Without a workspace, filePath must be an authorized absolute path or @home, @desktop, @documents, or @downloads. Never use run_command, redirection, or scripts to bypass file-change approval."
                 .to_string(),
             input_schema: patch_input_schema(),
             safety: AgentToolSafety::RequiresApproval,
@@ -256,8 +256,9 @@ pub(crate) fn without_successor_observation_projection(
 ///
 /// The Host owns the commit and its durable receipt, while the live Runtime owns the run-scoped
 /// Observation registry. The Runtime therefore reopens the exact target after settlement,
-/// verifies the committed Revision (or verified absence for delete), and only then issues a new
-/// opaque Observation. The authoritative result is never changed, so Renderer, audit, and
+/// verifies the committed Revision (or verified absence for delete), and only then issues the
+/// first opaque Observation for create or renews the consumed id for update/delete. The
+/// authoritative result is never changed, so Renderer, audit, and
 /// ordinary durable result projections cannot accidentally treat this convenience capability as
 /// commit proof. The same model-only envelope is retained in the private run checkpoint so a
 /// queued follow-up call can prove where its token came from.
@@ -277,6 +278,7 @@ pub(crate) fn attach_successor_observation_to_model_result(
         authoritative_result,
         model_result,
         None,
+        None,
     )
 }
 
@@ -293,6 +295,24 @@ pub(crate) fn attach_successor_observation_to_model_result_with_proposal(
         authoritative_result,
         model_result,
         Some(proposal),
+        None,
+    )
+}
+
+pub(crate) fn attach_successor_observation_to_model_result_with_predecessor(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    authoritative_result: &AgentToolResult,
+    model_result: &mut AgentToolResult,
+    predecessor_observation_id: &str,
+) -> bool {
+    attach_successor_observation_to_model_result_inner(
+        context,
+        call,
+        authoritative_result,
+        model_result,
+        None,
+        Some(predecessor_observation_id),
     )
 }
 
@@ -302,11 +322,15 @@ fn attach_successor_observation_to_model_result_inner(
     authoritative_result: &AgentToolResult,
     model_result: &mut AgentToolResult,
     proposal: Option<&AgentFileChangeProposal>,
+    predecessor_observation_id: Option<&str>,
 ) -> bool {
     let Some(terminal) = successful_file_change_result(call, authoritative_result, proposal) else {
         return false;
     };
-    let observation = issue_successor_observation(context, call, &terminal);
+    let predecessor_observation_id = predecessor_observation_id
+        .or_else(|| successor_predecessor_observation_id(call, &terminal, proposal));
+    let observation =
+        issue_successor_observation(context, call, &terminal, predecessor_observation_id);
     let Some(output) = model_result.result.as_mut().and_then(Value::as_object_mut) else {
         return false;
     };
@@ -442,10 +466,28 @@ fn operation_label_from_protocol(operation: AgentFileChangeOperation) -> &'stati
     }
 }
 
+fn successor_predecessor_observation_id<'a>(
+    call: &'a AgentToolCall,
+    terminal: &AgentFileChangeResult,
+    proposal: Option<&'a AgentFileChangeProposal>,
+) -> Option<&'a str> {
+    if terminal.operation == AgentFileChangeOperation::Create {
+        return None;
+    }
+    match apply_patch_action(&call.args) {
+        Some("apply") => apply_patch_request(&call.args)?
+            .get("observationId")?
+            .as_str(),
+        Some("commit") => proposal.map(|proposal| proposal.execution.observation_id.as_str()),
+        _ => None,
+    }
+}
+
 fn issue_successor_observation(
     context: &ToolExecutionContext,
     call: &AgentToolCall,
     terminal: &AgentFileChangeResult,
+    predecessor_observation_id: Option<&str>,
 ) -> AgentResult<(String, &'static str)> {
     let target = FileChangePathPolicy::new(
         context.workspace_root_optional()?.as_deref(),
@@ -485,17 +527,36 @@ fn issue_successor_observation(
                 )));
             }
             let parent_metadata = parent.parent_metadata().map_err(file_change_agent_error)?;
-            let observation = bound_context
-                .file_observations()
-                .issue_existing(
-                    conversation_id,
-                    run_id,
-                    target.absolute_path(),
-                    expected_revision,
-                    &current.metadata,
-                    &parent_metadata,
-                )
-                .map_err(file_change_agent_error)?;
+            let observation = match terminal.operation {
+                AgentFileChangeOperation::Create => {
+                    bound_context.file_observations().issue_existing(
+                        conversation_id,
+                        run_id,
+                        target.absolute_path(),
+                        expected_revision,
+                        &current.metadata,
+                        &parent_metadata,
+                    )
+                }
+                AgentFileChangeOperation::Update => {
+                    let predecessor_observation_id =
+                        predecessor_observation_id.ok_or_else(|| {
+                            file_change_agent_error(FileChangeError::new(
+                                FileChangeErrorCode::ObservationRequired,
+                            ))
+                        })?;
+                    bound_context.file_observations().reissue_existing(
+                        predecessor_observation_id,
+                        (conversation_id, run_id),
+                        target.absolute_path(),
+                        expected_revision,
+                        &current.metadata,
+                        &parent_metadata,
+                    )
+                }
+                AgentFileChangeOperation::Delete => unreachable!("delete has no target bytes"),
+            }
+            .map_err(file_change_agent_error)?;
             (observation, "existing")
         }
         AgentFileChangeOperation::Delete => {
@@ -509,9 +570,15 @@ fn issue_successor_observation(
                 )));
             }
             let parent_metadata = parent.parent_metadata().map_err(file_change_agent_error)?;
+            let predecessor_observation_id = predecessor_observation_id.ok_or_else(|| {
+                file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::ObservationRequired,
+                ))
+            })?;
             let observation = bound_context
                 .file_observations()
-                .issue_missing(
+                .reissue_missing(
+                    predecessor_observation_id,
                     conversation_id,
                     run_id,
                     target.absolute_path(),
@@ -568,7 +635,6 @@ fn patch_input_schema() -> Value {
                             "action": { "type": "string", "enum": ["apply"] },
                             "operation": { "type": "string", "enum": ["create"] },
                             "filePath": file_path.clone(),
-                            "observationId": observation_id.clone(),
                             "content": {
                                 "type": "string",
                                 "maxLength": MAX_INLINE_CONTENT_BYTES,
@@ -576,7 +642,7 @@ fn patch_input_schema() -> Value {
                             },
                             "summary": summary.clone()
                         },
-                        "required": ["action", "operation", "filePath", "observationId", "content"],
+                        "required": ["action", "operation", "filePath", "content"],
                         "additionalProperties": false
                     },
                     {
@@ -627,9 +693,8 @@ fn patch_input_schema() -> Value {
                             "action": { "type": "string", "enum": ["begin"] },
                             "operation": { "type": "string", "enum": ["create"] },
                             "filePath": file_path.clone(),
-                            "observationId": observation_id.clone()
                         },
-                        "required": ["action", "operation", "filePath", "observationId"],
+                        "required": ["action", "operation", "filePath"],
                         "additionalProperties": false
                     },
                     {
@@ -793,7 +858,7 @@ enum ApplyPatchArgs {
     Apply {
         operation: FileChangeOperation,
         file_path: String,
-        observation_id: String,
+        observation_id: Option<String>,
         content: Option<String>,
         edits: Option<Vec<StructuredTextEdit>>,
         summary: Option<String>,
@@ -801,7 +866,7 @@ enum ApplyPatchArgs {
     Begin {
         operation: FileChangeOperation,
         file_path: String,
-        observation_id: String,
+        observation_id: Option<String>,
         strategy: Option<file_change_staged::StagedUpdateStrategy>,
     },
     Append {
@@ -909,25 +974,67 @@ fn direct_proposal_from_args(
     )
     .resolve(&file_path)
     .map_err(file_change_agent_error)?;
-    let observation = context
-        .file_observations()
-        .validate(
-            &observation_id,
-            context.conversation_id()?,
-            context.run_id()?,
-            target.absolute_path(),
-        )
-        .map_err(|error| {
-            file_change_agent_error_for_direct(error, &file_path, &observation_id, staged_recovery)
-        })?;
+    let public_observation_id = observation_id.as_deref();
+    let observation = match operation {
+        FileChangeOperation::Create => {
+            if public_observation_id.is_some() {
+                return Err(file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::IllegalFieldCombination,
+                )));
+            }
+            capture_missing_base_observation(context, &target).map_err(|error| {
+                file_change_agent_error_for_direct(error, &file_path, None, staged_recovery)
+            })?
+        }
+        FileChangeOperation::Update | FileChangeOperation::Delete => {
+            let observation_id = public_observation_id.ok_or_else(|| {
+                file_change_agent_error_with_continuation(
+                    FileChangeError::new(FileChangeErrorCode::ObservationRequired),
+                    Some(read_file_continuation(&file_path)),
+                    None,
+                )
+            })?;
+            context
+                .file_observations()
+                .validate(
+                    observation_id,
+                    context.conversation_id()?,
+                    context.run_id()?,
+                    target.absolute_path(),
+                )
+                .map_err(|error| {
+                    file_change_agent_error_for_direct(
+                        error,
+                        &file_path,
+                        Some(observation_id),
+                        staged_recovery,
+                    )
+                })?
+        }
+    };
     validate_observation_operation(operation, observation.state()).map_err(|error| {
-        file_change_agent_error_for_direct(error, &file_path, &observation_id, staged_recovery)
+        file_change_agent_error_for_direct(
+            error,
+            &file_path,
+            public_observation_id,
+            staged_recovery,
+        )
     })?;
     let frozen_base = freeze_observed_base(context, &target, &observation).map_err(|error| {
-        file_change_agent_error_for_direct(error, &file_path, &observation_id, staged_recovery)
+        file_change_agent_error_for_direct(
+            error,
+            &file_path,
+            public_observation_id,
+            staged_recovery,
+        )
     })?;
     let mutation = mutation_from_args(operation, content, edits).map_err(|error| {
-        file_change_agent_error_for_direct(error, &file_path, &observation_id, staged_recovery)
+        file_change_agent_error_for_direct(
+            error,
+            &file_path,
+            public_observation_id,
+            staged_recovery,
+        )
     })?;
     let plan = FileChangePlanner
         .plan(FileChangePlanRequest {
@@ -937,7 +1044,12 @@ fn direct_proposal_from_args(
             mutation,
         })
         .map_err(|error| {
-            file_change_agent_error_for_direct(error, &file_path, &observation_id, staged_recovery)
+            file_change_agent_error_for_direct(
+                error,
+                &file_path,
+                public_observation_id,
+                staged_recovery,
+            )
         })?;
     if plan
         .target_content
@@ -947,7 +1059,7 @@ fn direct_proposal_from_args(
         return Err(file_change_agent_error_for_direct(
             FileChangeError::new(FileChangeErrorCode::ContentTooLarge),
             &file_path,
-            &observation_id,
+            public_observation_id,
             staged_recovery,
         ));
     }
@@ -993,7 +1105,7 @@ fn direct_proposal_from_args(
         schema_version: FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
         transaction,
         proposal,
-        observation_id,
+        observation_id: observation.id().to_string(),
         observation: observation.checkpoint(),
         source_tool_name: "apply_patch".to_string(),
         source_call_id: call.id.clone(),
@@ -1025,15 +1137,17 @@ fn direct_proposal_from_args(
         provider_wire_revision: context.file_change_provider_wire_revision().to_string(),
     };
     execution.validate().map_err(file_change_agent_error)?;
-    context
-        .file_observations()
-        .claim(
-            &execution.observation_id,
-            context.conversation_id()?,
-            context.run_id()?,
-            target.absolute_path(),
-        )
-        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
+    if let Some(observation_id) = public_observation_id {
+        context
+            .file_observations()
+            .claim(
+                observation_id,
+                context.conversation_id()?,
+                context.run_id()?,
+                target.absolute_path(),
+            )
+            .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
+    }
     let target_content = plan.target_content.as_deref().unwrap_or_default();
     Ok(AgentFileChangeProposal {
         schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
@@ -1155,13 +1269,7 @@ fn validate_request_wire_shape(object: &Map<String, Value>) -> Result<(), FileCh
             let operation = object.get("operation").and_then(Value::as_str);
             match operation {
                 Some("create") => exact(
-                    &[
-                        "action",
-                        "operation",
-                        "filePath",
-                        "observationId",
-                        "content",
-                    ],
+                    &["action", "operation", "filePath", "content"],
                     &["summary"],
                 ),
                 Some("update") => {
@@ -1178,7 +1286,7 @@ fn validate_request_wire_shape(object: &Map<String, Value>) -> Result<(), FileCh
             }
         }
         "begin" => match object.get("operation").and_then(Value::as_str) {
-            Some("create") => exact(&["action", "operation", "filePath", "observationId"], &[]),
+            Some("create") => exact(&["action", "operation", "filePath"], &[]),
             Some("update") => {
                 exact(
                     &[
@@ -1440,6 +1548,31 @@ pub(super) fn validate_observation_operation(
     }
 }
 
+pub(super) fn capture_missing_base_observation(
+    context: &ToolExecutionContext,
+    target: &crate::file_change::ResolvedFileChangeTarget,
+) -> Result<crate::file_change::FileObservation, FileChangeError> {
+    context.check_cancelled().map_err(|error| {
+        FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
+    })?;
+    let parent = BoundParent::open(target)?;
+    if parent.read_optional(target.absolute_path())?.is_some() {
+        return Err(FileChangeError::new(FileChangeErrorCode::FileExists));
+    }
+    parent.revalidate()?;
+    let parent_metadata = parent.parent_metadata()?;
+    context.file_observations().capture_missing(
+        context.conversation_id().map_err(|error| {
+            FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
+        })?,
+        context.run_id().map_err(|error| {
+            FileChangeError::with_diagnostic(FileChangeErrorCode::Failed, error.to_string())
+        })?,
+        target.absolute_path(),
+        &parent_metadata,
+    )
+}
+
 #[derive(Debug)]
 pub(super) struct FrozenBase {
     pub(super) content: Option<String>,
@@ -1593,16 +1726,20 @@ fn wire_safe_continuation(code: FileChangeErrorCode, value: &Value) -> Option<Va
     let action = request.get("action").and_then(Value::as_str)?;
     if matches!(action, "apply" | "begin") {
         let file_path = bounded_nonempty_string(request, "filePath", 4_096)?;
+        let operation = request.get("operation").and_then(Value::as_str);
         let observation_is_invalid = request
             .get("observationId")
             .and_then(Value::as_str)
             .is_none_or(str::is_empty);
-        if observation_is_invalid {
+        if observation_is_invalid && operation != Some("create") {
             return Some(read_file_continuation(file_path));
         }
         if code == FileChangeErrorCode::ContentTooLarge && action == "apply" {
-            let observation_id = bounded_nonempty_string(request, "observationId", 256)?;
-            let staged_recovery = match request.get("operation").and_then(Value::as_str) {
+            let observation_id = request
+                .get("observationId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.chars().count() <= 256);
+            let staged_recovery = match operation {
                 Some("create") if request.contains_key("content") => {
                     Some(DirectStagedRecovery::Create)
                 }
@@ -1657,7 +1794,7 @@ fn request_has_invalid_cursor(action: &str, request: &Map<String, Value>) -> boo
 fn file_change_agent_error_for_direct(
     error: FileChangeError,
     file_path: &str,
-    observation_id: &str,
+    observation_id: Option<&str>,
     staged_recovery: Option<DirectStagedRecovery>,
 ) -> AgentError {
     let continuation = if error.code() == FileChangeErrorCode::ContentTooLarge {
@@ -1717,7 +1854,7 @@ fn read_file_continuation(file_path: &str) -> Value {
 
 fn direct_staged_continuation(
     file_path: &str,
-    observation_id: &str,
+    observation_id: Option<&str>,
     recovery: DirectStagedRecovery,
 ) -> Value {
     let mut request = Map::from_iter([
@@ -1730,14 +1867,19 @@ fn direct_staged_continuation(
             }),
         ),
         ("filePath".to_string(), json!(file_path)),
-        ("observationId".to_string(), json!(observation_id)),
     ]);
     match recovery {
         DirectStagedRecovery::Create => {}
         DirectStagedRecovery::Modify => {
+            let observation_id =
+                observation_id.expect("update staged recovery always has a validated observation");
+            request.insert("observationId".to_string(), json!(observation_id));
             request.insert("strategy".to_string(), json!("modify"));
         }
         DirectStagedRecovery::Rewrite => {
+            let observation_id =
+                observation_id.expect("update staged recovery always has a validated observation");
+            request.insert("observationId".to_string(), json!(observation_id));
             request.insert("strategy".to_string(), json!("rewrite"));
         }
     }
@@ -1787,15 +1929,12 @@ fn wire_expected_shape(value: &Value) -> Value {
         action, operation,
     ) {
         (Some("apply"), Some("create")) => (
-            vec![
-                "action",
-                "operation",
-                "filePath",
-                "observationId",
-                "content",
-            ],
+            vec!["action", "operation", "filePath", "content"],
             vec!["summary"],
-            vec!["content is complete UTF-8 text and at most 32 KiB"],
+            vec![
+                "content is complete UTF-8 text and at most 32 KiB",
+                "do not include observationId; create is atomic no-clobber",
+            ],
         ),
         (Some("apply"), Some("update")) if request.contains_key("edits") => (
             vec!["action", "operation", "filePath", "observationId", "edits"],
@@ -1819,9 +1958,9 @@ fn wire_expected_shape(value: &Value) -> Value {
             vec!["do not include content or edits"],
         ),
         (Some("begin"), Some("create")) => (
-            vec!["action", "operation", "filePath", "observationId"],
+            vec!["action", "operation", "filePath"],
             vec![],
-            vec!["do not include strategy, content, edits, or summary"],
+            vec!["do not include observationId, strategy, content, edits, or summary"],
         ),
         (Some("begin"), Some("update")) => (
             vec![
@@ -1997,9 +2136,9 @@ mod tests {
         let definition = ApplyPatchTool.definition();
         let schema = definition.input_schema;
         assert!(definition.description.contains("Examples show shape only"));
-        assert!(definition
-            .description
-            .contains("replace them with the exact values returned by this Host"));
+        assert!(definition.description.contains(
+            "reuse the same ID only after the model has received the successful Tool Result"
+        ));
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["required"], json!(["request"]));
@@ -2023,9 +2162,7 @@ mod tests {
     #[test]
     fn staged_wire_enforces_every_exact_action_matrix() {
         let valid = [
-            wire(
-                json!({"action":"begin","operation":"create","filePath":"a.txt","observationId":"fobs_x"}),
-            ),
+            wire(json!({"action":"begin","operation":"create","filePath":"a.txt"})),
             wire(
                 json!({"action":"begin","operation":"update","filePath":"a.txt","observationId":"fobs_x","strategy":"modify"}),
             ),
@@ -2056,6 +2193,9 @@ mod tests {
                 json!({"action":"begin","operation":"create","filePath":"a.txt","observationId":"fobs_x","strategy":"rewrite"}),
             ),
             wire(
+                json!({"action":"begin","operation":"create","filePath":"a.txt","observationId":"fobs_x"}),
+            ),
+            wire(
                 json!({"action":"begin","operation":"update","filePath":"a.txt","observationId":"fobs_x"}),
             ),
             wire(
@@ -2082,6 +2222,9 @@ mod tests {
         let invalid = [
             json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":"fobs_example"}),
             json!({"operation":"delete","filePath":"a.txt","observationId":"fobs_example"}),
+            wire(
+                json!({"action":"apply","operation":"create","filePath":"a.txt","observationId":"fobs_example","content":"x"}),
+            ),
             wire(
                 json!({"action":"apply","operation":"delete","filePath":"a.txt","observationId":null}),
             ),
@@ -2184,7 +2327,7 @@ mod tests {
 
         let missing_observation = wire(json!({
             "action":"apply",
-            "operation":"create",
+            "operation":"update",
             "filePath":"missing.txt",
             "content":"hello\n"
         }));
@@ -2220,12 +2363,10 @@ mod tests {
         validate_wire_shape(&continuation["args"]).unwrap();
         parse_args(continuation["args"].clone()).unwrap();
 
-        let observation_id = observe(&context, "large.txt");
         let oversized = wire(json!({
             "action":"apply",
             "operation":"create",
             "filePath":"large.txt",
-            "observationId":observation_id,
             "content":"DIRECT_PRIVATE_CANARY".repeat(MAX_INLINE_CONTENT_BYTES)
         }));
         let error =
@@ -2247,7 +2388,6 @@ mod tests {
             "action":"begin",
             "operation":"create",
             "filePath":"new.txt",
-            "observationId":"fobs_example",
             "strategy":"rewrite"
         }));
         let invalid = [
@@ -2316,7 +2456,6 @@ mod tests {
             "action":"begin",
             "operation":"create",
             "filePath":"long-staged.md",
-            "observationId":"fobs_example",
             "strategy":"rewrite"
         }));
         let expected = wire_expected_shape(&create_with_strategy);
@@ -2418,7 +2557,6 @@ mod tests {
                 "action":"apply",
                 "operation":"create",
                 "filePath":"trace.txt",
-                "observationId":"fobs_private",
                 "content":"PRIVATE_DURABLE_TRACE_CANARY\n"
             })),
             approval_status: AgentApprovalStatus::Required,
@@ -2444,7 +2582,6 @@ mod tests {
                 "action":"apply",
                 "operation":"create",
                 "filePath":"binary.txt",
-                "observationId":"fobs_binary",
                 "content":"data:text/plain;base64,UFJJVkFURV9CSU5BUllfQ0FOQVJZ"
             })),
             ..call
@@ -2466,10 +2603,9 @@ mod tests {
         workspace.write("existing.txt", "alpha\nbeta\n");
         let context = workspace.context();
 
-        let missing = observe(&context, "created.txt");
         let create = proposal(
             &context,
-            json!({"action":"apply","operation":"create","filePath":"created.txt","observationId":missing,"content":"created\n"}),
+            json!({"action":"apply","operation":"create","filePath":"created.txt","content":"created\n"}),
         )
         .unwrap();
         assert_eq!(create.operation, AgentFileChangeOperation::Create);
@@ -2546,26 +2682,21 @@ mod tests {
     }
 
     #[test]
-    fn sibling_missing_observations_survive_other_direct_creates() {
+    fn sibling_direct_creates_freeze_independent_missing_preconditions() {
         let workspace = TestWorkspace::new();
         let context = workspace.context();
-        let first_observation = observe(&context, "first.txt");
-        let second_observation = observe(&context, "second.txt");
-        let third_observation = observe(&context, "third.txt");
-
         let first = proposal(
             &context,
             json!({
                 "action":"apply",
                 "operation":"create",
                 "filePath":"first.txt",
-                "observationId":first_observation,
                 "content":"first\n"
             }),
         )
         .unwrap();
         // Freeze the second proposal before the first create is published. Its execution-time
-        // observation check models a proposal waiting for approval while an authorized sibling
+        // missing-target check models a proposal waiting for approval while an authorized sibling
         // FileChange settles in the same Run.
         let second = proposal(
             &context,
@@ -2573,7 +2704,6 @@ mod tests {
                 "action":"apply",
                 "operation":"create",
                 "filePath":"second.txt",
-                "observationId":second_observation,
                 "content":"second\n"
             }),
         )
@@ -2605,14 +2735,13 @@ mod tests {
         commit(&second, 2);
 
         // This proposal is intentionally built only after two sibling entries changed the parent
-        // directory. The exact target is still absent, so its earlier observation remains valid.
+        // directory. The exact target is still absent, so a fresh proposal remains valid.
         let third = proposal(
             &context,
             json!({
                 "action":"apply",
                 "operation":"create",
                 "filePath":"third.txt",
-                "observationId":third_observation,
                 "content":"third\n"
             }),
         )
@@ -2685,10 +2814,9 @@ mod tests {
         let workspace = TestWorkspace::new();
         workspace.write("exists.txt", "keep\n");
         let context = workspace.context();
-        let observation = observe(&context, "exists.txt");
         let error = proposal(
             &context,
-            json!({"action":"apply","operation":"create","filePath":"exists.txt","observationId":observation,"content":"replace\n"}),
+            json!({"action":"apply","operation":"create","filePath":"exists.txt","content":"replace\n"}),
         )
         .unwrap_err();
         assert_eq!(error.code(), Some("agent.apply_patch.file_exists"));
@@ -2700,10 +2828,9 @@ mod tests {
         let workspace = TestWorkspace::new();
         let context = workspace.context_without_workspace();
         let absolute = workspace.root.canonicalize().unwrap().join("absolute.txt");
-        let observation = observe(&context, absolute.to_str().unwrap());
         assert!(proposal(
             &context,
-            json!({"action":"apply","operation":"create","filePath":absolute,"observationId":observation,"content":"ok\n"})
+            json!({"action":"apply","operation":"create","filePath":absolute,"content":"ok\n"})
         )
         .is_ok());
 
@@ -2712,14 +2839,12 @@ mod tests {
             std::process::id(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let alias_observation = observe(&context, &alias);
         let alias_direct = proposal(
             &context,
             json!({
                 "action":"apply",
                 "operation":"create",
                 "filePath":alias,
-                "observationId":alias_observation,
                 "content":"not published by proposal construction\n"
             }),
         )
@@ -2729,7 +2854,7 @@ mod tests {
 
         let relative = proposal(
             &context,
-            json!({"action":"apply","operation":"create","filePath":"relative.txt","observationId":"fobs_missing","content":"no\n"}),
+            json!({"action":"apply","operation":"create","filePath":"relative.txt","content":"no\n"}),
         )
         .unwrap_err();
         assert_eq!(
@@ -2835,41 +2960,48 @@ mod tests {
     }
 
     #[test]
-    fn successful_apply_issues_a_new_observation_for_a_direct_follow_up_without_reading() {
+    fn successful_apply_renews_the_read_observation_for_direct_follow_up_without_reading() {
         let workspace = TestWorkspace::new();
-        workspace.write("target.txt", "second version\n");
+        workspace.write("target.txt", "first version\n");
         workspace.write("sibling.txt", "before\n");
         let context = workspace.context();
+        let predecessor = observe(&context, "target.txt");
         let call = apply_call(
             "apply-successor-update",
             json!({
                 "action":"apply",
                 "operation":"update",
                 "filePath":"target.txt",
-                "observationId":"fobs_consumed_input",
+                "observationId":predecessor,
                 "content":"second version\n"
             }),
         );
-        let authoritative = successful_result(
+        let frozen_proposal =
+            direct_proposal_from_call(&context.clone().with_tool_call_id(call.id.clone()), &call)
+                .unwrap();
+        workspace.write("target.txt", "second version\n");
+        let mut authoritative = successful_result(
             &call,
             AgentFileChangeOperation::Update,
             "target.txt",
             Some(content_revision(b"second version\n")),
         );
+        authoritative.result.as_mut().unwrap()["transactionId"] =
+            json!(frozen_proposal.transaction_id.clone());
         let mut model = authoritative.clone();
 
-        assert!(attach_successor_observation_to_model_result(
+        assert!(attach_successor_observation_to_model_result_with_proposal(
             &context,
             &call,
             &authoritative,
             &mut model,
+            &frozen_proposal,
         ));
         let successor = model.result.as_ref().unwrap()["observationId"]
             .as_str()
             .unwrap()
             .to_string();
-        assert!(successor.starts_with("fobs_"));
-        assert_ne!(successor, "fobs_consumed_input");
+        assert_eq!(successor, predecessor);
         assert_eq!(
             model.result.as_ref().unwrap()["fileChangeTarget"],
             json!({
@@ -2880,11 +3012,12 @@ mod tests {
         );
 
         let mut replayed_model = authoritative.clone();
-        assert!(attach_successor_observation_to_model_result(
+        assert!(attach_successor_observation_to_model_result_with_proposal(
             &context,
             &call,
             &authoritative,
             &mut replayed_model,
+            &frozen_proposal,
         ));
         assert_eq!(
             replayed_model.result.as_ref().unwrap()["observationId"],
@@ -2895,11 +3028,12 @@ mod tests {
         let mut reconciled = authoritative.clone();
         reconciled.result.as_mut().unwrap()["status"] = json!("already_applied");
         let mut reconciled_model = reconciled.clone();
-        assert!(attach_successor_observation_to_model_result(
+        assert!(attach_successor_observation_to_model_result_with_proposal(
             &context,
             &call,
             &reconciled,
             &mut reconciled_model,
+            &frozen_proposal,
         ));
         assert_eq!(
             reconciled_model.result.as_ref().unwrap()["observationId"],
@@ -2947,7 +3081,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        assert_ne!(second_successor, successor);
+        assert_eq!(second_successor, successor);
 
         let third = proposal(
             &context,
@@ -2967,32 +3101,42 @@ mod tests {
     }
 
     #[test]
-    fn successful_delete_issues_a_missing_observation_for_create_without_reading() {
+    fn successful_delete_renews_the_same_observation_but_create_needs_no_id() {
         let workspace = TestWorkspace::new();
+        workspace.write("deleted.txt", "delete me\n");
         let context = workspace.context();
+        let predecessor = observe(&context, "deleted.txt");
         let call = apply_call(
             "apply-successor-delete",
             json!({
                 "action":"apply",
                 "operation":"delete",
                 "filePath":"deleted.txt",
-                "observationId":"fobs_consumed_input"
+                "observationId":predecessor
             }),
         );
-        let authoritative =
+        let frozen_proposal =
+            direct_proposal_from_call(&context.clone().with_tool_call_id(call.id.clone()), &call)
+                .unwrap();
+        fs::remove_file(workspace.root.join("deleted.txt")).unwrap();
+        let mut authoritative =
             successful_result(&call, AgentFileChangeOperation::Delete, "deleted.txt", None);
+        authoritative.result.as_mut().unwrap()["transactionId"] =
+            json!(frozen_proposal.transaction_id.clone());
         let mut model = authoritative.clone();
 
-        assert!(attach_successor_observation_to_model_result(
+        assert!(attach_successor_observation_to_model_result_with_proposal(
             &context,
             &call,
             &authoritative,
             &mut model,
+            &frozen_proposal,
         ));
         let successor = model.result.as_ref().unwrap()["observationId"]
             .as_str()
             .unwrap()
             .to_string();
+        assert_eq!(successor, predecessor);
         assert_eq!(
             model.result.as_ref().unwrap()["fileChangeTarget"]["state"],
             "missing"
@@ -3003,7 +3147,6 @@ mod tests {
                 "action":"apply",
                 "operation":"create",
                 "filePath":"deleted.txt",
-                "observationId":successor,
                 "content":"recreated\n"
             }),
         )
@@ -3141,7 +3284,6 @@ mod tests {
                 "action":"apply",
                 "operation":"create",
                 "filePath":"private.txt",
-                "observationId":"fobs_consumed_input",
                 "content":"current\n"
             }),
         );

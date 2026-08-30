@@ -746,7 +746,6 @@ mod tests {
                     "action": "apply",
                     "operation": "create",
                     "filePath": "src/new.rs",
-                    "observationId": "fobs-history-missing",
                     "content": "pub fn new() {}\n"
                 }
             }),

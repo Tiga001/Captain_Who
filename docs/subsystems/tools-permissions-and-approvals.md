@@ -89,7 +89,7 @@ Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更�
 
 解析过程执行规范化、父目录与 symlink/reparse 检查、conversation grant 校验、文件 identity/revision 校验，并为命令/Office 创建私有只读输入 mount。当前一次文件输入最多 16 项，单项 64 MiB、合计 128 MiB；视觉输入单项上限为 8 MiB。URI 是稳定引用，不是裸本地路径，不能被字符串替换绕过授权。
 
-文件修改只通过 `apply_patch`：Direct 模式用于一次性 create/update/delete，Staged 模式使用同一 FileChange transaction/store 分块组装，当前单事务目标上限 4 MiB。初次变更绑定准确 `read_file` observation；每次成功 apply/commit 后，Runtime 重新验证写后目标并向模型签发同一强度的新 observation，供同一 Run 的后续变更直接使用。签发失败只要求重新读取，不会把已经提交的结果误报为失败。两种模式始终绑定目标 scope、无 symlink 父链、基础 revision、frozen target/diff digest 和原子发布检查；create 始终 no-clobber，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过 proposal、Pending、Checkpoint、dispatch claim 或执行前复核。
+文件修改只通过 `apply_patch`：Direct 模式用于一次性 create/update/delete，Staged 模式使用同一 FileChange transaction/store 分块组装，当前单事务目标上限 4 MiB。create/begin-create 不接收公开 observation；Host 私下冻结 missing/parent 状态并以 no-clobber 提交，成功后才签发第一个公开 ID。update/delete 与 begin-update 绑定准确 `read_file` observation；成功 apply 或 Staged update commit 后，Runtime 重新验证写后目标并把同一个 ID 续约到新状态，供同一 Run 的后续模型响应使用。同一 Provider Tool Call 批次重复使用该 ID 会在副作用前拒绝。签发或续约失败只要求重新读取，不会把已经提交的结果误报为失败。两种模式始终绑定目标 scope、无 symlink 父链、基础 revision、frozen target/diff digest 和原子发布检查；create 始终 no-clobber，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过 proposal、Pending、Checkpoint、dispatch claim 或执行前复核。
 
 ## 审批状态机
 

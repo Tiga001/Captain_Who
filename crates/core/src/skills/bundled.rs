@@ -1119,7 +1119,8 @@ mod tests {
             "MYCOPILOT_APP_DATA_ROOT",
             "Never place the suffix inside the double quotes",
             "redirect provider diagnostics",
-            "create only from a missing observation",
+            "create and begin/create omit `observationId`",
+            "renews the same ID after the Tool Result is received",
             "`apply_patch` Direct or Staged actions",
             "never use a command, redirection, or script as an alternate writer",
         ] {

@@ -186,6 +186,7 @@ fn resume_checkpoint(
         "pendingActionId": action_id,
         "pendingToolCallId": pending_tool_call_id,
         "fileChangeRunGrantRef": null,
+        "pendingFileObservation": null,
         "conversationTraceItems": [],
         "conversationModelContextItems": [],
         "nextConversationTraceSequence": 0,

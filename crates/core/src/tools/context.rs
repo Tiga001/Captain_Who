@@ -162,6 +162,94 @@ impl FileObservationRegistryView<'_> {
         )
     }
 
+    /// Freezes a Missing binding for a create proposal without registering model authority.
+    ///
+    /// The source call id comes only from the authenticated dispatch context. The returned
+    /// observation is suitable for a private transaction checkpoint, but `validate` and `claim`
+    /// can never resolve it as model authority. Successful create issues a separate first public
+    /// Observation after the write is authoritatively verified.
+    pub(super) fn capture_missing(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let source_tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        self.context.file_observations.capture_missing(
+            crate::file_change::FileObservationOwner::new(
+                source_tool_call_id,
+                conversation_id,
+                run_id,
+            ),
+            canonical_target,
+            parent_metadata,
+        )
+    }
+
+    /// Activates a verified existing successor while preserving its consumed predecessor id.
+    pub(super) fn reissue_existing(
+        &self,
+        predecessor_observation_id: &str,
+        owner: (&str, &str),
+        canonical_target: &Path,
+        revision: &str,
+        metadata: &Metadata,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        let (conversation_id, run_id) = owner;
+        self.validate_owner(conversation_id, run_id)?;
+        let source_tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        self.context.file_observations.reissue_existing(
+            predecessor_observation_id,
+            crate::file_change::FileObservationOwner::new(
+                source_tool_call_id,
+                conversation_id,
+                run_id,
+            ),
+            canonical_target,
+            revision,
+            metadata,
+            parent_metadata,
+        )
+    }
+
+    /// Activates a verified missing successor while preserving its consumed predecessor id.
+    pub(super) fn reissue_missing(
+        &self,
+        predecessor_observation_id: &str,
+        conversation_id: &str,
+        run_id: &str,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+    ) -> Result<crate::file_change::FileObservation, crate::file_change::FileChangeError> {
+        self.validate_owner(conversation_id, run_id)?;
+        let source_tool_call_id = self.context.tool_call_id.as_deref().ok_or_else(|| {
+            crate::file_change::FileChangeError::new(
+                crate::file_change::FileChangeErrorCode::InvalidArguments,
+            )
+        })?;
+        self.context.file_observations.reissue_missing(
+            predecessor_observation_id,
+            crate::file_change::FileObservationOwner::new(
+                source_tool_call_id,
+                conversation_id,
+                run_id,
+            ),
+            canonical_target,
+            parent_metadata,
+        )
+    }
+
     pub(super) fn validate(
         &self,
         observation_id: &str,
@@ -932,6 +1020,74 @@ fn attachment_id_from_path(input_path: &str) -> AgentResult<String> {
         .ok_or_else(|| AgentError::new("附件路径缺少附件 id。"))?;
 
     Ok(attachment_id.to_string())
+}
+
+#[cfg(test)]
+mod file_observation_registry_view_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn private_missing_capture_never_becomes_the_public_create_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("created.txt");
+        let parent_metadata = fs::metadata(directory.path()).unwrap();
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: Some("conversation-1".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+            collaboration_identity: None,
+        }))
+        .with_runtime_services("run-1".to_string(), None)
+        .with_tool_call_id("create-call-1".to_string());
+
+        let captured = context
+            .file_observations()
+            .capture_missing("conversation-1", "run-1", &target, &parent_metadata)
+            .unwrap();
+        assert_eq!(captured.source_tool_call_id(), "create-call-1");
+        assert!(captured.state().is_missing());
+        assert_eq!(
+            context
+                .file_observations()
+                .validate(captured.id(), "conversation-1", "run-1", &target)
+                .unwrap_err()
+                .code(),
+            crate::file_change::FileChangeErrorCode::ObservationRequired
+        );
+        assert_eq!(
+            context
+                .file_observations()
+                .capture_missing("conversation-2", "run-1", &target, &parent_metadata)
+                .unwrap_err()
+                .code(),
+            crate::file_change::FileChangeErrorCode::ObservationOwnerMismatch
+        );
+
+        fs::write(&target, "created\n").unwrap();
+        let successor_context = context
+            .clone()
+            .with_tool_call_id("apply-call-1".to_string());
+        let successor = successor_context
+            .file_observations()
+            .issue_existing(
+                "conversation-1",
+                "run-1",
+                &target,
+                "revision-1",
+                &fs::metadata(&target).unwrap(),
+                &parent_metadata,
+            )
+            .unwrap();
+        assert_ne!(successor.id(), captured.id());
+        assert_eq!(successor.source_tool_call_id(), "apply-call-1");
+        assert!(successor_context
+            .file_observations()
+            .validate(successor.id(), "conversation-1", "run-1", &target)
+            .is_ok());
+    }
 }
 
 #[cfg(test)]

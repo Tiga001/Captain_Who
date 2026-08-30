@@ -1195,7 +1195,6 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                             "action": "apply",
                             "operation": "create",
                             "filePath": "src/history.rs",
-                            "observationId": "fobs_provider_profile_fixture",
                             "content": "durable source content"
                         }
                     }),
@@ -2492,8 +2491,7 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
                             "request": {
                                 "action": "begin",
                                 "operation": "create",
-                                "filePath": "must-not-create.md",
-                                "observationId": "fobs_provider_vault_unavailable"
+                                "filePath": "must-not-create.md"
                             }
                         })).unwrap()
                     }

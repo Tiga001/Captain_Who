@@ -10,7 +10,6 @@ fn run_grant_checkpoint_requires_exact_canonical_action_and_strict_apply_patch_c
         "action": "apply",
         "operation": "create",
         "filePath": "report.txt",
-        "observationId": format!("fobs_{}", "1".repeat(32)),
         "content": "current\n"
     }));
     for item in &mut checkpoint.context_items {
@@ -85,7 +84,6 @@ fn approval_restore_issues_a_verified_successor_observation_before_resuming_the_
         "action":"apply",
         "operation":"create",
         "filePath":"report.txt",
-        "observationId":format!("fobs_{}", "1".repeat(32)),
         "content":"after\n"
     }));
     for item in &mut checkpoint.context_items {
@@ -176,6 +174,192 @@ fn approval_restore_issues_a_verified_successor_observation_before_resuming_the_
     assert!(restored
         .file_observations
         .validate(observation_id, conversation_id, run_id, &target)
+        .is_ok());
+}
+
+#[test]
+fn direct_update_approval_restore_renews_the_exact_pending_observation_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().canonicalize().unwrap();
+    let target = workspace.join("report.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    let run_id = "checkpoint-validation-run";
+    let conversation_id = "checkpoint-update-successor-restore";
+    let read_call_id = canonical_test_call_id(7, "provider-read-before-update");
+    let registry = FileObservationRegistry::default();
+    let observation = registry
+        .issue_existing(
+            FileObservationOwner::new(&read_call_id, conversation_id, run_id),
+            &target,
+            &crate::content_revision(b"before\n"),
+            &std::fs::metadata(&target).unwrap(),
+            &std::fs::metadata(&workspace).unwrap(),
+        )
+        .unwrap();
+    let predecessor_id = observation.id().to_string();
+
+    let (mut checkpoint, mut continuation) = restorable_checkpoint_fixture();
+    let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let args = apply_patch_args(json!({
+        "action":"apply",
+        "operation":"update",
+        "filePath":"report.txt",
+        "observationId":predecessor_id,
+        "content":"after\n"
+    }));
+    checkpoint.context_items.splice(
+        0..0,
+        [
+            AgentContextCheckpointItem {
+                role: "assistant".to_string(),
+                content: String::new(),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: read_call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "report.txt" }),
+                    provider_identity: AgentProviderToolCallIdentity {
+                        provider_tool_index: 7,
+                        provider_call_id: "provider-read-before-update".to_string(),
+                        runtime_call_id: read_call_id.clone(),
+                    },
+                }],
+                is_error: false,
+                sources: vec!["model_response".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: Some(crate::AgentContextCheckpointGroup {
+                    id: "read-before-update".to_string(),
+                    kind: "tool_exchange".to_string(),
+                }),
+                origin: None,
+            },
+            AgentContextCheckpointItem {
+                role: "tool".to_string(),
+                content: json!({
+                    "path": "report.txt",
+                    "exists": true,
+                    "revision": crate::content_revision(b"before\n"),
+                    "observationId": predecessor_id,
+                    "content": "before\n"
+                })
+                .to_string(),
+                images: Vec::new(),
+                tool_call_id: Some(read_call_id),
+                tool_calls: Vec::new(),
+                is_error: false,
+                sources: vec!["tool_result".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: Some(crate::AgentContextCheckpointGroup {
+                    id: "read-before-update".to_string(),
+                    kind: "tool_exchange".to_string(),
+                }),
+                origin: None,
+            },
+        ],
+    );
+    for item in &mut checkpoint.context_items {
+        for call in &mut item.tool_calls {
+            if call.id == pending_call_id {
+                call.args = args.clone();
+            }
+        }
+    }
+    for item in &mut checkpoint.conversation_trace_items {
+        if let ConversationTurnTraceItem::ToolCall {
+            call_id,
+            tool,
+            provenance,
+            operation,
+            approval_status,
+            ..
+        } = item
+        {
+            if call_id == &pending_call_id {
+                *tool = "apply_patch".to_string();
+                *provenance = AgentToolIdentity::Builtin {
+                    tool_name: "apply_patch".to_string(),
+                };
+                *operation = args.clone();
+                *approval_status = AgentApprovalStatus::Approved;
+            }
+        }
+    }
+    checkpoint.pending_action_id =
+        Some(crate::canonical_pending_action_id(run_id, &pending_call_id));
+    checkpoint.file_change_run_grant_ref = Some(crate::file_change::FileChangeRunGrantRef {
+        schema_version: crate::file_change::FILE_CHANGE_RUN_GRANT_SCHEMA_VERSION,
+        grant_id: "grant-update-successor-restore".to_string(),
+        revision: 1,
+        apply_patch_contract_revision: crate::file_change::APPLY_PATCH_RUN_GRANT_CONTRACT_REVISION
+            .to_string(),
+    });
+    checkpoint.pending_file_observation = Some(observation.checkpoint());
+    checkpoint.run_context = Some(AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: Some(crate::protocol::AgentWorkspaceContext {
+            project_id: None,
+            display_name: None,
+            root_path: Some(workspace.display().to_string()),
+        }),
+        attachment_library: None,
+        permissions: crate::protocol::AgentPermissions {
+            read: crate::protocol::AgentReadPermission::WorkspaceOnly,
+            write: crate::protocol::AgentWritePermission::WorkspaceOnly,
+            ..crate::protocol::AgentPermissions::default()
+        },
+    });
+    assert!(serde_json::to_value(&checkpoint).unwrap()["pendingFileObservation"].is_object());
+
+    std::fs::write(&target, "after\n").unwrap();
+    continuation.call.args = args;
+    let revision = crate::content_revision(b"after\n");
+    let terminal = crate::protocol::AgentFileChangeResult {
+        schema_version: crate::protocol::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+        status: crate::protocol::AgentFileChangeResultStatus::Applied,
+        outcome: crate::protocol::AgentFileChangeOutcome::Applied,
+        transaction_id: "file-change-direct-v1:update-successor-restore".to_string(),
+        operation: crate::protocol::AgentFileChangeOperation::Update,
+        update_strategy: None,
+        file_path: "report.txt".to_string(),
+        additions: 1,
+        deletions: 1,
+        line_count: 1,
+        byte_count: 6,
+        revision: Some(revision),
+        error_code: None,
+        error: None,
+        message: Some("文件变更已应用。".to_string()),
+    };
+    terminal.validate().unwrap();
+    continuation.result = crate::protocol::AgentToolResult {
+        exact_archive_file: None,
+        call_id: pending_call_id,
+        tool: "apply_patch".to_string(),
+        ok: true,
+        result: Some(serde_json::to_value(terminal).unwrap()),
+        error: None,
+    };
+
+    let restored = restore_run_checkpoint(checkpoint, run_id, &continuation).unwrap();
+    let model_result: serde_json::Value =
+        serde_json::from_str(restored.context.to_messages().last().unwrap().content()).unwrap();
+    assert_eq!(model_result["observationId"], predecessor_id);
+    assert_eq!(
+        model_result["fileChangeTarget"],
+        json!({
+            "filePath": "report.txt",
+            "observationId": predecessor_id,
+            "state": "existing"
+        })
+    );
+    assert!(restored
+        .file_observations
+        .validate(&predecessor_id, conversation_id, run_id, &target)
         .is_ok());
 }
 
@@ -303,6 +487,7 @@ fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observa
         run_id,
         Some(&run_context),
         &context_items,
+        None,
     )
     .unwrap();
     let frozen = queued[0]
@@ -313,7 +498,7 @@ fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observa
     assert_eq!(frozen.source_tool_call_id, source_call_id);
 
     let restored =
-        restore_queued_file_observations(&queued, run_id, Some(&run_context), &context_items)
+        restore_queued_file_observations(&queued, run_id, Some(&run_context), &context_items, None)
             .unwrap();
     assert!(restored
         .validate(observation.id(), conversation_id, run_id, target.as_path(),)
@@ -471,12 +656,17 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_successful_apply_patch_su
         run_id,
         Some(&run_context),
         &context_items,
+        None,
     )
     .unwrap();
-    assert!(
-        restore_queued_file_observations(&queued, run_id, Some(&run_context), &context_items,)
-            .is_ok()
-    );
+    assert!(restore_queued_file_observations(
+        &queued,
+        run_id,
+        Some(&run_context),
+        &context_items,
+        None,
+    )
+    .is_ok());
 
     for mutate in [
         |value: &mut serde_json::Value| value["fileChangeTarget"]["state"] = json!("missing"),
@@ -487,10 +677,14 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_successful_apply_patch_su
         let mut value: serde_json::Value = serde_json::from_str(&tampered[1].content).unwrap();
         mutate(&mut value);
         tampered[1].content = value.to_string();
-        assert!(
-            restore_queued_file_observations(&queued, run_id, Some(&run_context), &tampered,)
-                .is_err()
-        );
+        assert!(restore_queued_file_observations(
+            &queued,
+            run_id,
+            Some(&run_context),
+            &tampered,
+            None,
+        )
+        .is_err());
     }
 }
 
@@ -691,18 +885,27 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_staged_commit_successor_s
         run_id,
         Some(&run_context),
         &context_items,
+        None,
     )
     .unwrap();
-    assert!(
-        restore_queued_file_observations(&queued, run_id, Some(&run_context), &context_items)
-            .is_ok()
-    );
+    assert!(restore_queued_file_observations(
+        &queued,
+        run_id,
+        Some(&run_context),
+        &context_items,
+        None
+    )
+    .is_ok());
 
     let assert_rejected = |tampered: &[AgentContextCheckpointItem]| {
-        assert!(
-            restore_queued_file_observations(&queued, run_id, Some(&run_context), tampered)
-                .is_err()
-        );
+        assert!(restore_queued_file_observations(
+            &queued,
+            run_id,
+            Some(&run_context),
+            tampered,
+            None,
+        )
+        .is_err());
     };
 
     let mut wrong_begin_path = context_items.clone();
@@ -867,22 +1070,31 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
         run_id,
         Some(&run_context),
         &context_items,
+        None,
     )
     .unwrap();
 
     let mut missing = queued.clone();
     missing[0].file_observation = None;
-    assert!(
-        restore_queued_file_observations(&missing, run_id, Some(&run_context), &context_items,)
-            .is_err()
-    );
+    assert!(restore_queued_file_observations(
+        &missing,
+        run_id,
+        Some(&run_context),
+        &context_items,
+        None,
+    )
+    .is_err());
 
     let mut extra = queued.clone();
     extra[0].call.name = "read_file".to_string();
-    assert!(
-        restore_queued_file_observations(&extra, run_id, Some(&run_context), &context_items,)
-            .is_err()
-    );
+    assert!(restore_queued_file_observations(
+        &extra,
+        run_id,
+        Some(&run_context),
+        &context_items,
+        None,
+    )
+    .is_err());
 
     let duplicate = vec![queued[0].clone(), queued[0].clone()];
     assert!(restore_queued_file_observations(
@@ -890,6 +1102,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
         run_id,
         Some(&run_context),
         &context_items,
+        None,
     )
     .is_err());
 
@@ -921,6 +1134,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
             run_id,
             Some(&run_context),
             &context_items,
+            None,
         )
         .is_err());
     }
@@ -939,6 +1153,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
         run_id,
         Some(&run_context),
         &context_items,
+        None,
     )
     .is_err());
 
@@ -949,6 +1164,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
         run_id,
         Some(&run_context),
         &mismatched_source_path,
+        None,
     )
     .is_err());
 
@@ -978,6 +1194,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
             run_id,
             Some(&run_context),
             &tampered_context,
+            None,
         )
         .is_err());
     }
@@ -1203,7 +1420,6 @@ fn one_model_response_claims_semantically_identical_file_changes_once() {
                     "action": "apply",
                     "operation": "create",
                     "filePath": "report.txt",
-                    "observationId": "fobs_00000000000000000000000000000000",
                     "content": "same",
                 })),
             },
@@ -1211,7 +1427,6 @@ fn one_model_response_claims_semantically_identical_file_changes_once() {
                 id: canonical_test_call_id(1, "claim-duplicate"),
                 name: "apply_patch".to_string(),
                 args: apply_patch_args(json!({
-                    "observationId": "fobs_00000000000000000000000000000000",
                     "content": "same",
                     "filePath": "report.txt",
                     "operation": "create",
@@ -1230,6 +1445,50 @@ fn one_model_response_claims_semantically_identical_file_changes_once() {
         batch.claim(&duplicate.call),
         ToolCallBatchClaim::Duplicate { .. }
     ));
+}
+
+#[test]
+fn one_model_response_cannot_reuse_one_observation_before_the_first_result() {
+    let observation_id = "fobs_00000000000000000000000000000000";
+    let mut batch = ToolCallBatch::from_model_response(
+        "observation-claim-run",
+        0,
+        String::new(),
+        vec![
+            LlmToolCall {
+                id: canonical_test_call_id(0, "observation-first"),
+                name: "apply_patch".to_string(),
+                args: apply_patch_args(json!({
+                    "action": "apply",
+                    "operation": "update",
+                    "filePath": "report.txt",
+                    "observationId": observation_id,
+                    "content": "first update"
+                })),
+            },
+            LlmToolCall {
+                id: canonical_test_call_id(1, "observation-second"),
+                name: "apply_patch".to_string(),
+                args: apply_patch_args(json!({
+                    "action": "apply",
+                    "operation": "update",
+                    "filePath": "report.txt",
+                    "observationId": observation_id,
+                    "content": "different update"
+                })),
+            },
+        ],
+        false,
+        |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
+    );
+    let first = batch.pop_front().unwrap();
+    let second = batch.pop_front().unwrap();
+
+    assert_eq!(batch.claim(&first.call), ToolCallBatchClaim::Execute);
+    assert_eq!(
+        batch.claim(&second.call),
+        ToolCallBatchClaim::FileObservationReused
+    );
 }
 
 #[test]

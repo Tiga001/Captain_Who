@@ -1368,7 +1368,6 @@ mod tests {
                     "action": "apply",
                     "operation": "create",
                     "filePath": "created.txt",
-                    "observationId": "fobs_private",
                     "content": "DIRECT_TRACE_CANARY\nsecond line\n",
                     "summary": "create fixture"
                 }

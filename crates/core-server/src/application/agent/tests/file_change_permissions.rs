@@ -125,6 +125,7 @@ fn direct_execution_input_with_workspace(
         run_world_state: crate::test_run_world_state(),
         pending_action_id: Some(pending_action_storage_id(run_id, &call.id)),
         file_change_run_grant_ref: None,
+        pending_file_observation: None,
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: Vec::new(),
         conversation_model_context_items: Vec::new(),

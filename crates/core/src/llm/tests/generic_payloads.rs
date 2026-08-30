@@ -602,8 +602,7 @@ fn generic_provider_payloads_preserve_staged_apply_patch_history_and_exact_argum
                 "request": {
                     "action": "begin",
                     "operation": "create",
-                    "filePath": "report.md",
-                    "observationId": "fobs_missing_report"
+                    "filePath": "report.md"
                 }
             }),
             r#"{"transactionId":"file-change-staged-v1:report","draftRevision":0,"nextIndex":0}"#,

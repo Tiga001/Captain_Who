@@ -275,7 +275,12 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
     assistantMessageId: 'child-answer',
     runId: 'child-run',
     toolCallId: writeCall.id,
-    patch: '+export const child = true',
+    patch: [
+      '--- /dev/null',
+      '+++ b/src/child.ts',
+      '@@ -0,0 +1,1 @@',
+      '+export const child = true'
+    ].join('\n'),
     offset: 0,
     nextOffset: null,
     truncated: false
@@ -328,9 +333,7 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
     .querySelector<HTMLButtonElement>('.agent-activity--file-change > summary')
     ?.click()
   await screen.container.querySelector<HTMLButtonElement>('.file-change-activity__toggle')?.click()
-  await expect
-    .element(screen.getByText('+export const child = true', { exact: true }))
-    .toBeVisible()
+  await expect.element(screen.getByText('export const child = true', { exact: true })).toBeVisible()
   expect(mocks.getAgentFileChangeHistoryDiff).toHaveBeenCalledWith({
     conversationId: 'child-conversation',
     assistantMessageId: 'child-answer',

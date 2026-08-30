@@ -520,6 +520,68 @@ impl FileObservationRegistry {
         )
     }
 
+    /// Captures a Host-authenticated Missing binding without registering model authority.
+    ///
+    /// This is the create counterpart to an observation supplied by `read_file`: proposal and
+    /// staged-begin code can freeze the exact parent/leaf state in a private checkpoint without
+    /// first handing the model a token for a file that does not exist. Because the returned value
+    /// is deliberately absent from `observations`, it cannot be validated or claimed as live
+    /// authority. Its private id remains execution-only; a verified successful create issues the
+    /// first model-visible Observation separately.
+    pub(crate) fn capture_missing(
+        &self,
+        owner: FileObservationOwner<'_>,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+    ) -> FileChangeResultValue<FileObservation> {
+        self.capture_missing_at(owner, canonical_target, parent_metadata, now_ms())
+    }
+
+    /// Reissues a consumed predecessor id for a verified post-write existing file.
+    ///
+    /// The predecessor must have been atomically removed by `claim`. An occupied id, or another
+    /// live observation issued by the same source call, fails closed. Repeating the exact same
+    /// issuance is idempotent and returns the already registered successor.
+    pub(crate) fn reissue_existing(
+        &self,
+        predecessor_observation_id: &str,
+        owner: FileObservationOwner<'_>,
+        canonical_target: &Path,
+        revision: &str,
+        metadata: &Metadata,
+        parent_metadata: &Metadata,
+    ) -> FileChangeResultValue<FileObservation> {
+        self.reissue(
+            predecessor_observation_id,
+            owner,
+            canonical_target,
+            FileObservationState::Existing {
+                revision: revision.to_string(),
+                identity: FileObservationIdentity::from_metadata(metadata),
+            },
+            parent_metadata,
+            now_ms(),
+        )
+    }
+
+    /// Reissues a consumed predecessor id for a verified post-write missing file.
+    pub(crate) fn reissue_missing(
+        &self,
+        predecessor_observation_id: &str,
+        owner: FileObservationOwner<'_>,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+    ) -> FileChangeResultValue<FileObservation> {
+        self.reissue(
+            predecessor_observation_id,
+            owner,
+            canonical_target,
+            FileObservationState::Missing,
+            parent_metadata,
+            now_ms(),
+        )
+    }
+
     pub fn validate(
         &self,
         observation_id: &str,
@@ -649,6 +711,109 @@ impl FileObservationRegistry {
             parent_directory_identity,
             created_at: now,
             expires_at,
+        };
+        observations.insert(observation.id.clone(), observation.clone());
+        Ok(observation)
+    }
+
+    fn capture_missing_at(
+        &self,
+        owner: FileObservationOwner<'_>,
+        canonical_target: &Path,
+        parent_metadata: &Metadata,
+        now: u64,
+    ) -> FileChangeResultValue<FileObservation> {
+        if !valid_owned_id(owner.source_tool_call_id)
+            || !valid_owned_id(owner.conversation_id)
+            || !valid_owned_id(owner.run_id)
+            || !canonical_target.is_absolute()
+        {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+        Ok(FileObservation {
+            id: format!("fobs_{}", Uuid::new_v4().simple()),
+            source_tool_call_id: owner.source_tool_call_id.to_string(),
+            conversation_id: owner.conversation_id.to_string(),
+            run_id: owner.run_id.to_string(),
+            canonical_target: canonical_target.to_path_buf(),
+            state: FileObservationState::Missing,
+            parent_directory_identity: parent_directory_identity(
+                canonical_target,
+                parent_metadata,
+            )?,
+            created_at: now,
+            expires_at: now.saturating_add(FILE_OBSERVATION_TTL_MS),
+        })
+    }
+
+    fn reissue(
+        &self,
+        predecessor_observation_id: &str,
+        owner: FileObservationOwner<'_>,
+        canonical_target: &Path,
+        state: FileObservationState,
+        parent_metadata: &Metadata,
+        now: u64,
+    ) -> FileChangeResultValue<FileObservation> {
+        if !valid_observation_id(predecessor_observation_id)
+            || !valid_owned_id(owner.source_tool_call_id)
+            || !valid_owned_id(owner.conversation_id)
+            || !valid_owned_id(owner.run_id)
+            || !canonical_target.is_absolute()
+        {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+        if let FileObservationState::Existing { revision, identity } = &state {
+            if !valid_owned_id(revision) {
+                return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+            }
+            identity.validate()?;
+        }
+        let parent_directory_identity =
+            parent_directory_identity(canonical_target, parent_metadata)?;
+        let mut observations = self
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        observations.retain(|_, observation| observation.expires_at > now);
+
+        if let Some(existing) = observations.get(predecessor_observation_id) {
+            if existing.source_tool_call_id == owner.source_tool_call_id
+                && existing.conversation_id == owner.conversation_id
+                && existing.run_id == owner.run_id
+                && existing.canonical_target == canonical_target
+                && existing.state == state
+                && existing.parent_directory_identity == parent_directory_identity
+            {
+                return Ok(existing.clone());
+            }
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+        if observations
+            .values()
+            .any(|observation| observation.source_tool_call_id == owner.source_tool_call_id)
+        {
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
+        if observations.len() >= MAX_OBSERVATIONS_PER_RUN {
+            let oldest = observations
+                .values()
+                .min_by_key(|observation| observation.created_at)
+                .map(|observation| observation.id.clone());
+            if let Some(oldest) = oldest {
+                observations.remove(&oldest);
+            }
+        }
+        let observation = FileObservation {
+            id: predecessor_observation_id.to_string(),
+            source_tool_call_id: owner.source_tool_call_id.to_string(),
+            conversation_id: owner.conversation_id.to_string(),
+            run_id: owner.run_id.to_string(),
+            canonical_target: canonical_target.to_path_buf(),
+            state,
+            parent_directory_identity,
+            created_at: now,
+            expires_at: now.saturating_add(FILE_OBSERVATION_TTL_MS),
         };
         observations.insert(observation.id.clone(), observation.clone());
         Ok(observation)
@@ -995,6 +1160,225 @@ mod tests {
                 .unwrap_err()
                 .code(),
             FileChangeErrorCode::ObservationRequired
+        );
+    }
+
+    #[test]
+    fn captured_missing_binding_is_checkpointable_but_not_registered_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("new.txt");
+        let parent = fs::metadata(directory.path()).unwrap();
+        let registry = FileObservationRegistry::default();
+
+        let captured = registry
+            .capture_missing_at(
+                FileObservationOwner::new("create-call-1", "conversation-1", "run-1"),
+                &path,
+                &parent,
+                100,
+            )
+            .unwrap();
+
+        assert!(valid_observation_id(captured.id()));
+        assert_eq!(captured.source_tool_call_id(), "create-call-1");
+        assert!(captured.state().is_missing());
+        assert_eq!(captured.created_at(), 100);
+        assert_eq!(captured.expires_at(), 100 + FILE_OBSERVATION_TTL_MS);
+        captured
+            .checkpoint()
+            .validate_frozen_binding("conversation-1", "run-1", &path)
+            .unwrap();
+        assert_eq!(
+            registry
+                .validate_at(captured.id(), "conversation-1", "run-1", &path, 101)
+                .unwrap_err()
+                .code(),
+            FileChangeErrorCode::ObservationRequired
+        );
+        assert_eq!(
+            registry
+                .claim_at(
+                    captured.id(),
+                    "conversation-1",
+                    "run-1",
+                    &path,
+                    "consumer-call-1",
+                    101,
+                )
+                .unwrap_err()
+                .code(),
+            FileChangeErrorCode::ObservationRequired
+        );
+        assert!(registry
+            .observations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty());
+    }
+
+    #[test]
+    fn reissue_preserves_predecessor_id_and_refreshes_owner_state_and_ttl() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("example.txt");
+        fs::write(&path, "first\n").unwrap();
+        let parent = fs::metadata(directory.path()).unwrap();
+        let registry = FileObservationRegistry::default();
+        let predecessor = registry
+            .issue(
+                FileObservationOwner::new("read-call-1", "conversation-1", "run-1"),
+                &path,
+                FileObservationState::Existing {
+                    revision: "revision-1".to_string(),
+                    identity: FileObservationIdentity::from_metadata(&fs::metadata(&path).unwrap()),
+                },
+                &parent,
+                100,
+            )
+            .unwrap();
+        registry
+            .claim_at(
+                predecessor.id(),
+                "conversation-1",
+                "run-1",
+                &path,
+                "apply-call-1",
+                101,
+            )
+            .unwrap();
+
+        fs::write(&path, "second version\n").unwrap();
+        let existing_state = FileObservationState::Existing {
+            revision: "revision-2".to_string(),
+            identity: FileObservationIdentity::from_metadata(&fs::metadata(&path).unwrap()),
+        };
+        let successor = registry
+            .reissue(
+                predecessor.id(),
+                FileObservationOwner::new("apply-call-1", "conversation-1", "run-1"),
+                &path,
+                existing_state.clone(),
+                &parent,
+                200,
+            )
+            .unwrap();
+
+        assert_eq!(successor.id(), predecessor.id());
+        assert_eq!(successor.source_tool_call_id(), "apply-call-1");
+        assert_eq!(successor.state(), &existing_state);
+        assert_eq!(successor.created_at(), 200);
+        assert_eq!(successor.expires_at(), 200 + FILE_OBSERVATION_TTL_MS);
+        let exact_replay = registry
+            .reissue(
+                predecessor.id(),
+                FileObservationOwner::new("apply-call-1", "conversation-1", "run-1"),
+                &path,
+                existing_state,
+                &parent,
+                201,
+            )
+            .unwrap();
+        assert_eq!(exact_replay, successor);
+
+        registry
+            .claim_at(
+                successor.id(),
+                "conversation-1",
+                "run-1",
+                &path,
+                "apply-call-2",
+                202,
+            )
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        let deleted = registry
+            .reissue(
+                successor.id(),
+                FileObservationOwner::new("apply-call-2", "conversation-1", "run-1"),
+                &path,
+                FileObservationState::Missing,
+                &parent,
+                300,
+            )
+            .unwrap();
+        assert_eq!(deleted.id(), predecessor.id());
+        assert_eq!(deleted.source_tool_call_id(), "apply-call-2");
+        assert!(deleted.state().is_missing());
+        assert_eq!(deleted.created_at(), 300);
+        assert_eq!(deleted.expires_at(), 300 + FILE_OBSERVATION_TTL_MS);
+    }
+
+    #[test]
+    fn reissue_fails_closed_for_an_occupied_predecessor_or_source_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("example.txt");
+        let other_path = directory.path().join("other.txt");
+        fs::write(&path, "first\n").unwrap();
+        fs::write(&other_path, "other\n").unwrap();
+        let parent = fs::metadata(directory.path()).unwrap();
+        let registry = FileObservationRegistry::default();
+        let state = FileObservationState::Existing {
+            revision: "revision-1".to_string(),
+            identity: FileObservationIdentity::from_metadata(&fs::metadata(&path).unwrap()),
+        };
+        let predecessor = registry
+            .issue(
+                FileObservationOwner::new("read-call-1", "conversation-1", "run-1"),
+                &path,
+                state.clone(),
+                &parent,
+                100,
+            )
+            .unwrap();
+
+        let occupied = registry
+            .reissue(
+                predecessor.id(),
+                FileObservationOwner::new("apply-call-1", "conversation-1", "run-1"),
+                &path,
+                state.clone(),
+                &parent,
+                101,
+            )
+            .unwrap_err();
+        assert_eq!(occupied.code(), FileChangeErrorCode::InvalidArguments);
+
+        registry
+            .claim_at(
+                predecessor.id(),
+                "conversation-1",
+                "run-1",
+                &path,
+                "proposal-call-1",
+                102,
+            )
+            .unwrap();
+        registry
+            .issue(
+                FileObservationOwner::new("apply-call-1", "conversation-1", "run-1"),
+                &other_path,
+                FileObservationState::Existing {
+                    revision: "revision-other".to_string(),
+                    identity: FileObservationIdentity::from_metadata(
+                        &fs::metadata(&other_path).unwrap(),
+                    ),
+                },
+                &parent,
+                103,
+            )
+            .unwrap();
+        let source_conflict = registry
+            .reissue(
+                predecessor.id(),
+                FileObservationOwner::new("apply-call-1", "conversation-1", "run-1"),
+                &path,
+                state,
+                &parent,
+                104,
+            )
+            .unwrap_err();
+        assert_eq!(
+            source_conflict.code(),
+            FileChangeErrorCode::InvalidArguments
         );
     }
 

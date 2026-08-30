@@ -1015,7 +1015,8 @@ fn test_mcp_resume_checkpoint(
         "conversationModelContextItems": [],
         "nextConversationTraceSequence": 0,
         "conversationTraceTruncated": false,
-        "fileChangeRunGrantRef": null
+        "fileChangeRunGrantRef": null,
+        "pendingFileObservation": null
     }))
     .unwrap()
 }
@@ -8134,6 +8135,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         run_id: "run-skill-redaction".to_string(),
         pending_action_id: None,
         file_change_run_grant_ref: None,
+        pending_file_observation: None,
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
                 role: "user".to_string(),
@@ -10272,6 +10274,7 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
         run_id: "run-invalid-checkpoint".to_string(),
         pending_action_id: None,
         file_change_run_grant_ref: None,
+        pending_file_observation: None,
         context_items: vec![mycopilot_core::AgentContextCheckpointItem {
             role: "assistant".to_string(),
             content: String::new(),

@@ -113,7 +113,7 @@ fn isolated_file_change_acceptance_matrix() {
     let mut checks = Vec::new();
 
     direct_create_and_no_clobber(&registry, &direct_context, &workspace, &direct_canary);
-    checks.push("direct create uses a missing observation; create-existing is zero-effect".into());
+    checks.push("direct create needs no public observation; create-existing is zero-effect".into());
 
     direct_update_matrix(&registry, &direct_context, &workspace);
     checks.push(
@@ -391,13 +391,12 @@ fn direct_create_and_no_clobber(
     workspace: &Path,
     direct_canary: &str,
 ) {
-    let observation = observe(registry, context, "quick_sort.py");
     let content = format!(
         "# {direct_canary}\ndef quick_sort(values):\n    if len(values) < 2:\n        return values[:]\n    pivot = values[len(values) // 2]\n    return quick_sort([v for v in values if v < pivot]) + [v for v in values if v == pivot] + quick_sort([v for v in values if v > pivot])\n"
     );
     let args = json!({
         "action":"apply", "operation":"create", "filePath":"quick_sort.py",
-        "observationId":observation, "content":content
+        "content":content
     });
     let call = AgentToolCall {
         id: format!("apply-{}", Uuid::new_v4()),
@@ -416,13 +415,12 @@ fn direct_create_and_no_clobber(
     );
 
     let before = evidence(&workspace.join("existing.txt"));
-    let observation = observe(registry, context, "existing.txt");
     let error = build_direct_proposal(
         registry,
         context,
         json!({
             "action":"apply", "operation":"create", "filePath":"existing.txt",
-            "observationId":observation, "content":"must not overwrite\n"
+            "content":"must not overwrite\n"
         }),
     )
     .unwrap_err();
@@ -599,13 +597,12 @@ fn direct_match_delete_reject_and_conflict_matrix(
         "external update wins\n"
     );
 
-    let observation = observe(registry, context, "raced-create.txt");
     let (_, raced_create) = build_direct_proposal(
         registry,
         context,
         json!({
             "action":"apply", "operation":"create", "filePath":"raced-create.txt",
-            "observationId":observation, "content":"approved create\n"
+            "content":"approved create\n"
         }),
     )
     .unwrap();
@@ -783,14 +780,13 @@ fn staged_matrix(
         AgentReadPermission::WorkspaceOnly,
         AgentWritePermission::WorkspaceOnly,
     );
-    let observation = observe(registry, &context, "large.md");
     let begun = begin(
         &call_context(&context, "begin-large"),
         StagedSource::new("apply_patch", content_digest(b"begin-large")),
         FileChangeOperation::Create,
         None,
         "large.md".to_string(),
-        observation,
+        None,
         None,
     )
     .unwrap();
@@ -987,14 +983,13 @@ fn staged_matrix(
         false,
     );
 
-    let abort_observation = observe(registry, &recovered, "abort.md");
     let aborted = begin(
         &call_context(&recovered, "begin-abort"),
         StagedSource::new("apply_patch", content_digest(b"begin-abort")),
         FileChangeOperation::Create,
         None,
         "abort.md".to_string(),
-        abort_observation,
+        None,
         None,
     )
     .unwrap();
@@ -1036,7 +1031,7 @@ fn staged_matrix(
 
 #[allow(clippy::too_many_arguments)]
 fn staged_size_boundary(
-    registry: &ToolRegistry,
+    _registry: &ToolRegistry,
     workspace: &Path,
     storage: Arc<StorageService>,
     conversation: &str,
@@ -1055,7 +1050,6 @@ fn staged_size_boundary(
         AgentReadPermission::WorkspaceOnly,
         AgentWritePermission::WorkspaceOnly,
     );
-    let observation = observe(registry, &context, path);
     let begin_call = format!("begin-{path}");
     let begun = begin(
         &call_context(&context, &begin_call),
@@ -1063,7 +1057,7 @@ fn staged_size_boundary(
         FileChangeOperation::Create,
         None,
         path.to_string(),
-        observation,
+        None,
         None,
     )
     .unwrap();

@@ -1,36 +1,5 @@
 use super::*;
 
-fn missing_file_observation_id(request: &Value, expected_path: &str) -> String {
-    fn find(value: &Value, expected_path: &str) -> Option<String> {
-        match value {
-            Value::Object(object) => {
-                if object.get("path").and_then(Value::as_str) == Some(expected_path)
-                    && object.get("exists").and_then(Value::as_bool) == Some(false)
-                {
-                    return object
-                        .get("observationId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
-                object.values().find_map(|value| find(value, expected_path))
-            }
-            Value::Array(values) => values.iter().find_map(|value| find(value, expected_path)),
-            Value::String(text) if text.starts_with('{') || text.starts_with('[') => {
-                serde_json::from_str::<Value>(text)
-                    .ok()
-                    .and_then(|value| find(&value, expected_path))
-            }
-            _ => None,
-        }
-    }
-
-    find(request, expected_path).unwrap_or_else(|| {
-        panic!(
-            "Provider request must contain the missing read_file observation for {expected_path}"
-        )
-    })
-}
-
 #[tokio::test]
 async fn model_activation_preserves_exposed_siblings_and_discloses_new_tools_next_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -511,7 +480,6 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                     }]
                 }),
                 1 => {
-                    let observation_id = missing_file_observation_id(&request, "approved.txt");
                     json!({
                     "choices": [{
                         "message": {
@@ -543,7 +511,6 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
                                                 "action": "apply",
                                                 "operation": "create",
                                                 "filePath": "approved.txt",
-                                                "observationId": observation_id,
                                                 "content": "approved"
                                             }
                                         })).unwrap()

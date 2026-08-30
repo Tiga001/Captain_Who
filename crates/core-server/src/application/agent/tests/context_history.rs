@@ -663,7 +663,6 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
                         "action": "apply",
                         "operation": "create",
                         "filePath": "src/history.rs",
-                        "observationId": "fobs_exact_history",
                         "content": "EXACT_WRITE_CONTENT"
                     }
                 }),

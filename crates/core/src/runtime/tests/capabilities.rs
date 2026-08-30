@@ -526,7 +526,6 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
                         "action": "apply",
                         "operation": "create",
                         "filePath": "denied.txt",
-                        "observationId": "fobs_not_reached_because_write_is_denied",
                         "content": "must not be written"
                     }
                 }),

@@ -62,7 +62,6 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
                         "action": "apply",
                         "operation": "create",
                         "filePath": "src/history.rs",
-                        "observationId": "fobs_provider_transition",
                         "content": "provider transition fixture"
                     }
                 }),

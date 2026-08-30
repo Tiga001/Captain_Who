@@ -38,6 +38,7 @@ use crate::conversation_trace::{
     trace_attachments_from_input, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder,
 };
+use crate::file_change::FileObservationCheckpoint;
 use crate::file_change_support::{
     file_change_approval_route, file_change_snapshot, FileChangeApprovalRoute,
 };
@@ -54,9 +55,9 @@ use crate::protocol::{
     AgentApprovalStatus, AgentAutomationExecutionContext, AgentBuiltinExecutionPermission,
     AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowSnapshot,
-    AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences,
-    AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus,
-    AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
+    AgentError, AgentEvent, AgentExtensionSnapshot, AgentFileChangeOperation, AgentPermissions,
+    AgentPromptPreferences, AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext,
+    AgentRunStatus, AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
     AgentSkillScriptSourceKind, AgentSkillScriptTrust, AgentSteerInput, AgentToolApprovalMode,
     AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
@@ -111,6 +112,19 @@ const MAX_MAX_TOKENS: u32 = 128_000;
 const DEFAULT_TEMPERATURE: f32 = 0.6;
 const MAX_TOOL_ITERATIONS: usize = 10_000;
 const MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST: usize = 3;
+
+fn pending_file_change_observation(
+    action: &AgentProposedAction,
+) -> Option<&FileObservationCheckpoint> {
+    let AgentProposedAction::FileChange { file_change } = action else {
+        return None;
+    };
+    matches!(
+        file_change.operation,
+        AgentFileChangeOperation::Update | AgentFileChangeOperation::Delete
+    )
+    .then_some(&file_change.execution.observation)
+}
 
 fn merge_provider_usage(
     total: &mut Option<crate::protocol::AgentUsage>,
@@ -1820,6 +1834,7 @@ impl AgentRuntime {
                     let duplicate_in_batch = matches!(
                         batch_claim,
                         ToolCallBatchClaim::Duplicate { .. }
+                            | ToolCallBatchClaim::FileObservationReused
                     );
                     let tool_identity = tool_registry.identity(&call.tool).cloned().unwrap_or_else(
                         || AgentToolIdentity::Unregistered {
@@ -1830,7 +1845,7 @@ impl AgentRuntime {
 
                     if let ToolCallBatchClaim::Duplicate {
                         semantic_fingerprint,
-                    } = batch_claim
+                    } = &batch_claim
                     {
                         let message = format!(
                             "Tool `{}` repeated the same semantic operation in one model response. \
@@ -1849,6 +1864,27 @@ impl AgentRuntime {
                                 "recovery": "useEarlierCallResult",
                                 "tool": call.tool,
                                 "semanticFingerprint": semantic_fingerprint,
+                                "executed": false,
+                                "message": message,
+                            })),
+                            error: Some(message),
+                        });
+                        requires_approval = false;
+                        call.approval_status = AgentApprovalStatus::NotRequired;
+                    }
+
+                    if matches!(batch_claim, ToolCallBatchClaim::FileObservationReused) {
+                        let message = "同一模型响应中的较早文件修改已经使用了这个 observationId；当前调用未执行。请等待较早调用返回后，再使用其结果中续约后的同一 ID。".to_string();
+                        policy_preflight_failure = Some(AgentToolResult {
+                            exact_archive_file: None,
+                            call_id: call.id.clone(),
+                            tool: call.tool.clone(),
+                            ok: false,
+                            result: Some(json!({
+                                "type": "runtime_guard",
+                                "code": "fileObservationReusedInBatch",
+                                "errorCode": "agent.file_observation_reused_in_batch",
+                                "recovery": "waitForEarlierCallResult",
                                 "executed": false,
                                 "message": message,
                             })),
@@ -2525,6 +2561,7 @@ impl AgentRuntime {
                                     provider_protocol_key: &llm_request.provider_protocol_key,
                                 },
                                 tool_context.file_observation_registry(),
+                                pending_file_change_observation(&action),
                             )
                         };
                         let mut checkpoint = match checkpoint_result {
@@ -2797,6 +2834,7 @@ impl AgentRuntime {
                                                             &llm_request.provider_protocol_key,
                                                     },
                                                     tool_context.file_observation_registry(),
+                                                    pending_file_change_observation(&action),
                                                 )
                                                 .map(|mut checkpoint| {
                                                     checkpoint.pending_action_id =

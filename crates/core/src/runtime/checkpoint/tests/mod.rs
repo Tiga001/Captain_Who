@@ -199,7 +199,16 @@ fn restorable_checkpoint_fixture_for_pending_tool(
     let pending = LlmToolCall {
         id: canonical_test_call_id(0, "provider-pending"),
         name: pending_tool_name.to_string(),
-        args: json!({ "path": "report.txt" }),
+        args: if pending_tool_name == "apply_patch" {
+            apply_patch_args(json!({
+                "action": "apply",
+                "operation": "create",
+                "filePath": "report.txt",
+                "content": "report\n"
+            }))
+        } else {
+            json!({ "path": "report.txt" })
+        },
     };
     let queued = LlmToolCall {
         id: canonical_test_call_id(1, "provider-queued"),

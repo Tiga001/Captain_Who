@@ -1375,7 +1375,6 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
                     "action": "begin",
                     "operation": "create",
                     "filePath": "preview.md",
-                    "observationId": "fobs-preview",
                 }
             }))
             .unwrap(),

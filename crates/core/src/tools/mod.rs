@@ -50,6 +50,7 @@ use apply_patch::ApplyPatchTool;
 pub(crate) use apply_patch::{
     apply_patch_action, apply_patch_request, apply_patch_wire_is_valid,
     attach_successor_observation_to_model_result,
+    attach_successor_observation_to_model_result_with_predecessor,
     attach_successor_observation_to_model_result_with_proposal,
     copy_successor_observation_projection,
 };

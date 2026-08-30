@@ -21,7 +21,7 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
                                 "type": "function",
                                 "function": {
                                     "name": "apply_patch",
-                                    "arguments": "{\"request\":{\"action\":\"begin\",\"operation\":\"create\",\"filePath\":\"report.md\",\"observationId\":\"fobs_missing_report\"}}"
+                                    "arguments": "{\"request\":{\"action\":\"begin\",\"operation\":\"create\",\"filePath\":\"report.md\"}}"
                                 }
                             }]
                         },

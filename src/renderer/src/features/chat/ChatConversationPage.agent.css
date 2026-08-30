@@ -997,39 +997,139 @@ button.file-change-activity__path:focus-visible {
   background: var(--mc-color-surface-muted);
 }
 
-.file-change-activity__preview {
-  max-height: 280px;
-  overflow: auto;
+.file-change-diff-card {
+  --git-review-line-number-width: 42px;
+  --git-review-diff-row-height: 19px;
+
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mc-color-git-review-text-primary);
+  background: var(--mc-color-git-review-card-surface);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-md);
-  background: var(--mc-color-surface-muted);
 }
 
-.file-change-activity__preview > span {
+.file-change-diff-card__header {
+  display: grid;
+  min-width: 0;
+  min-height: 36px;
+  grid-template-columns: minmax(0, 1fr) auto 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 7px 0 11px;
+  color: var(--mc-color-git-review-text-secondary);
+  background: var(--mc-color-git-review-header-surface);
+  border-bottom: 1px solid var(--mc-color-git-review-border-subtle);
+  font-size: var(--mc-font-size-chat-activity);
+}
+
+.file-change-diff-card__path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mc-color-git-review-text-primary);
+  font-weight: var(--mc-font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-change-diff-card__stats {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--mc-font-weight-medium);
+  white-space: nowrap;
+}
+
+.file-change-diff-card__additions {
+  color: var(--mc-color-git-review-addition-text);
+}
+
+.file-change-diff-card__deletions {
+  color: var(--mc-color-git-review-deletion-text);
+}
+
+.file-change-diff-card__copy {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  color: var(--mc-color-icon-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-sm);
+  cursor: pointer;
+}
+
+.file-change-diff-card__copy:hover:not(:disabled),
+.file-change-diff-card__copy:focus-visible,
+.file-change-diff-card__copy.is-copied {
+  color: var(--mc-color-icon-default);
+  background: var(--mc-color-state-hover);
+}
+
+.file-change-diff-card__copy:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.file-change-diff-card__copy svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+}
+
+.file-change-diff-card__body {
+  max-height: 320px;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--mc-color-git-review-border-default) transparent;
+}
+
+.file-change-diff-card__renderer.git-review {
   display: block;
-  padding: 10px 12px;
-  font-size: var(--mc-font-size-chat-metadata);
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  color: var(--mc-color-git-review-text-primary);
+  background: var(--mc-color-git-review-card-surface);
 }
 
-.file-change-activity__preview pre {
-  min-width: max-content;
-  padding: 10px 12px;
-  margin: 0;
-  font-family: var(--mc-mono-font-family);
+.file-change-diff-card__message {
+  display: grid;
+  min-height: 72px;
+  padding: 12px;
+  place-items: center;
+  color: var(--mc-color-git-review-text-muted);
   font-size: var(--mc-font-size-chat-metadata);
-  line-height: var(--mc-line-height-relaxed);
-  white-space: pre;
+  text-align: center;
 }
 
-.file-change-activity__preview > button {
+.file-change-diff-card__message--error {
+  color: var(--mc-color-text-danger);
+}
+
+.file-change-diff-card__load-more {
+  width: 100%;
+  min-height: 32px;
   padding: 6px 12px;
   color: var(--mc-color-text-accent);
   background: transparent;
   border: 0;
+  border-top: 1px solid var(--mc-color-git-review-border-subtle);
   cursor: pointer;
 }
 
-.file-change-activity__preview > button:disabled {
+.file-change-diff-card__load-more:hover:not(:disabled),
+.file-change-diff-card__load-more:focus-visible {
+  background: var(--mc-color-state-hover);
+}
+
+.file-change-diff-card__load-more:disabled {
   color: var(--mc-color-text-muted);
   cursor: default;
 }

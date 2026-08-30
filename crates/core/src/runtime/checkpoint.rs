@@ -96,12 +96,39 @@ pub(super) struct ToolCallBatch {
     /// provider response. Approval restore reconstructs it from the checkpoint's durable tool
     /// exchange groups, so pausing cannot make a queued duplicate executable again.
     seen_semantic_fingerprints: BTreeSet<String>,
+    /// Observation ids already consumed by an earlier call in this exact Provider batch.
+    /// A later sibling cannot use a renewal it could not yet have observed.
+    seen_file_observation_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ToolCallBatchClaim {
     Execute,
     Duplicate { semantic_fingerprint: String },
+    FileObservationReused,
+}
+
+fn claimed_file_observation_id(call: &LlmToolCall) -> Option<&str> {
+    claimed_file_observation_id_from_args(&call.name, &call.args)
+}
+
+fn claimed_file_observation_id_from_args<'a>(
+    name: &str,
+    args: &'a serde_json::Value,
+) -> Option<&'a str> {
+    if name != "apply_patch" || !crate::tools::apply_patch_wire_is_valid(args) {
+        return None;
+    }
+    let request = crate::tools::apply_patch_request(args)?;
+    matches!(
+        request.get("action").and_then(serde_json::Value::as_str),
+        Some("apply") | Some("begin")
+    )
+    .then_some(())?;
+    request
+        .get("observationId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 impl ToolCallBatch {
@@ -224,21 +251,28 @@ impl ToolCallBatch {
             deferred_external_tool_call_count: 0,
             suppressed_narration,
             seen_semantic_fingerprints: BTreeSet::new(),
+            seen_file_observation_ids: BTreeSet::new(),
         })
     }
 
     pub(super) fn claim(&mut self, call: &LlmToolCall) -> ToolCallBatchClaim {
         let semantic_fingerprint = semantic_tool_call_fingerprint(&call.name, &call.args);
-        if self
+        if !self
             .seen_semantic_fingerprints
             .insert(semantic_fingerprint.clone())
         {
-            ToolCallBatchClaim::Execute
-        } else {
-            ToolCallBatchClaim::Duplicate {
+            return ToolCallBatchClaim::Duplicate {
                 semantic_fingerprint,
-            }
+            };
         }
+        if claimed_file_observation_id(call).is_some_and(|observation_id| {
+            !self
+                .seen_file_observation_ids
+                .insert(observation_id.to_string())
+        }) {
+            return ToolCallBatchClaim::FileObservationReused;
+        }
+        ToolCallBatchClaim::Execute
     }
 
     pub(super) fn pop_front(&mut self) -> Option<QueuedToolCall> {
@@ -479,13 +513,19 @@ pub(super) fn create_run_checkpoint(
     run_id: &str,
     state: RunCheckpointState<'_>,
 ) -> AgentResult<AgentRunCheckpoint> {
-    create_run_checkpoint_with_file_observations(run_id, state, &FileObservationRegistry::default())
+    create_run_checkpoint_with_file_observations(
+        run_id,
+        state,
+        &FileObservationRegistry::default(),
+        None,
+    )
 }
 
 pub(super) fn create_run_checkpoint_with_file_observations(
     run_id: &str,
     state: RunCheckpointState<'_>,
     file_observations: &FileObservationRegistry,
+    pending_file_observation: Option<&FileObservationCheckpoint>,
 ) -> AgentResult<AgentRunCheckpoint> {
     let RunCheckpointState {
         context,
@@ -543,6 +583,19 @@ pub(super) fn create_run_checkpoint_with_file_observations(
     let mut context_items = context.checkpoint_items()?;
     project_mcp_result_context_for_checkpoint(&mut context_items);
     validate_context_checkpoint_tool_call_ids(&context_items)?;
+    let pending_tool_call = context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .find(|call| call.id == pending_tool_call_id)
+        .ok_or_else(|| AgentError::new("无法创建运行检查点：缺少待审批 Tool Call。"))?;
+    validate_pending_file_observation(
+        pending_tool_call,
+        pending_file_observation,
+        run_id,
+        run_context,
+        &context_items,
+        "创建",
+    )?;
     validate_checkpoint_world_state(run_world_state, model_capabilities)?;
     validate_collaboration_run_snapshot(
         tool_set
@@ -569,6 +622,7 @@ pub(super) fn create_run_checkpoint_with_file_observations(
         run_id,
         run_context,
         &context_items,
+        pending_file_observation,
     )?;
     Ok(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
@@ -590,6 +644,7 @@ pub(super) fn create_run_checkpoint_with_file_observations(
         run_world_state: run_world_state.clone(),
         pending_action_id: None,
         file_change_run_grant_ref: None,
+        pending_file_observation: pending_file_observation.cloned(),
         pending_tool_call_id: pending_tool_call_id.to_string(),
         conversation_trace_items,
         conversation_model_context_items,
@@ -604,6 +659,7 @@ fn attach_queued_file_observations(
     run_id: &str,
     run_context: Option<&AgentRunContext>,
     context_items: &[AgentContextCheckpointItem],
+    pending_file_observation: Option<&FileObservationCheckpoint>,
 ) -> AgentResult<()> {
     let mut observation_ids = BTreeSet::new();
     let mut source_call_ids = BTreeSet::new();
@@ -615,9 +671,15 @@ fn attach_queued_file_observations(
             continue;
         };
         if !observation_ids.insert(observation_id.to_string()) {
-            return Err(AgentError::new(
-                "无法创建运行检查点：多个 queued apply_patch 重复引用同一文件观察。",
-            ));
+            // The Runtime batch guard will reject this later call before execution. Keeping a
+            // second authority copy would instead let approval restore bypass that guard.
+            queued.file_observation = None;
+            continue;
+        }
+        if pending_file_observation.is_some_and(|pending| pending.observation_id == observation_id)
+        {
+            queued.file_observation = None;
+            continue;
         }
         let checkpoint = registry
             .checkpoint_exact(observation_id, conversation_id, run_id, &canonical_target)
@@ -640,9 +702,12 @@ fn restore_queued_file_observations(
     run_id: &str,
     run_context: Option<&AgentRunContext>,
     context_items: &[AgentContextCheckpointItem],
+    pending_file_observation: Option<&FileObservationCheckpoint>,
 ) -> AgentResult<Arc<FileObservationRegistry>> {
     let mut checkpoints = Vec::new();
-    let mut observation_ids = BTreeSet::new();
+    let mut observation_ids = pending_file_observation
+        .map(|checkpoint| BTreeSet::from([checkpoint.observation_id.clone()]))
+        .unwrap_or_default();
     let mut source_call_ids = BTreeSet::new();
     let mut expected_conversation_id = None;
     for queued in queued_calls {
@@ -656,6 +721,7 @@ fn restore_queued_file_observations(
                     "无法恢复运行检查点：非 apply_patch 调用包含额外的文件观察。",
                 ));
             }
+            (Some((observation_id, _, _)), None) if observation_ids.contains(observation_id) => {}
             (Some(_), None) => {
                 return Err(AgentError::new(
                     "无法恢复运行检查点：queued apply_patch 缺少文件观察。",
@@ -703,12 +769,26 @@ fn queued_apply_patch_observation_request<'a>(
     if call.name != "apply_patch" {
         return Ok(None);
     }
+    if !crate::tools::apply_patch_wire_is_valid(&call.args) {
+        return Err(AgentError::new(
+            "运行检查点中的 queued apply_patch 参数不符合当前严格协议。",
+        ));
+    }
     let object = crate::tools::apply_patch_request(&call.args)
         .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 参数不是严格对象。"))?;
-    if object.get("action").and_then(serde_json::Value::as_str) != Some("apply") {
-        return Err(AgentError::new(
-            "运行检查点中的 queued apply_patch 缺少当前 action。",
-        ));
+    let action = object
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 缺少当前 action。"))?;
+    if !matches!(action, "apply" | "begin") {
+        return Ok(None);
+    }
+    let operation = object
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AgentError::new("运行检查点中的 queued apply_patch 缺少 operation。"))?;
+    if operation == "create" {
+        return Ok(None);
     }
     let observation_id = object
         .get("observationId")
@@ -746,6 +826,72 @@ fn queued_apply_patch_observation_request<'a>(
         target.absolute_path().to_path_buf(),
         conversation_id,
     )))
+}
+
+fn validate_pending_file_observation(
+    pending_call: &AgentContextCheckpointToolCall,
+    checkpoint: Option<&FileObservationCheckpoint>,
+    run_id: &str,
+    run_context: Option<&AgentRunContext>,
+    context_items: &[AgentContextCheckpointItem],
+    operation: &str,
+) -> AgentResult<()> {
+    let requested = queued_apply_patch_observation_request(pending_call, run_context)?;
+    let is_staged_commit = pending_call.name == "apply_patch"
+        && crate::tools::apply_patch_request(&pending_call.args)
+            .and_then(|request| request.get("action"))
+            .and_then(serde_json::Value::as_str)
+            == Some("commit");
+
+    match (requested, checkpoint) {
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(AgentError::new(format!(
+            "无法{operation}运行检查点：待审批 FileChange 缺少冻结的文件观察。"
+        ))),
+        (None, Some(_)) if !is_staged_commit => Err(AgentError::new(format!(
+            "无法{operation}运行检查点：当前待审批调用包含不允许的文件观察。"
+        ))),
+        (requested, Some(checkpoint)) => {
+            let run_context = run_context.ok_or_else(|| {
+                AgentError::new(format!(
+                    "无法{operation}运行检查点：待审批 FileChange 缺少运行上下文。"
+                ))
+            })?;
+            let conversation_id = run_context
+                .conversation_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    AgentError::new(format!(
+                        "无法{operation}运行检查点：待审批 FileChange 缺少会话上下文。"
+                    ))
+                })?;
+            if !matches!(checkpoint.state, FileObservationState::Existing { .. }) {
+                return Err(AgentError::new(format!(
+                    "无法{operation}运行检查点：待审批 update/delete 的文件观察状态无效。"
+                )));
+            }
+            let target = requested
+                .as_ref()
+                .map(|(_, target, _)| target.as_path())
+                .unwrap_or_else(|| Path::new(&checkpoint.canonical_target));
+            checkpoint
+                .validate_frozen_binding(conversation_id, run_id, target)
+                .map_err(|_| {
+                    AgentError::new(format!(
+                        "无法{operation}运行检查点：待审批 FileChange 的文件观察无效。"
+                    ))
+                })?;
+            if requested
+                .is_some_and(|(observation_id, _, _)| observation_id != checkpoint.observation_id)
+            {
+                return Err(AgentError::new(format!(
+                    "无法{operation}运行检查点：待审批 FileChange 的 observationId 不一致。"
+                )));
+            }
+            validate_observation_source(context_items, checkpoint, Some(run_context), operation)
+        }
+    }
 }
 
 fn validate_observation_source(
@@ -1440,11 +1586,30 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     validate_context_checkpoint_tool_call_ids(&checkpoint.context_items)?;
     validate_queued_checkpoint_tool_call_ids(&checkpoint.queued_tool_calls)?;
     validate_conversation_trace_tool_call_ids(&checkpoint.conversation_trace_items)?;
+    let pending_checkpoint_call = checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .find(|call| call.id == checkpoint.pending_tool_call_id)
+        .ok_or_else(|| AgentError::new("无法恢复运行检查点：缺少待审批 Tool Call。"))?;
+    validate_pending_file_observation(
+        pending_checkpoint_call,
+        checkpoint.pending_file_observation.as_ref(),
+        run_id,
+        checkpoint.run_context.as_ref(),
+        &checkpoint.context_items,
+        "恢复",
+    )?;
+    let pending_file_observation_id = checkpoint
+        .pending_file_observation
+        .as_ref()
+        .map(|observation| observation.observation_id.clone());
     let file_observations = restore_queued_file_observations(
         &checkpoint.queued_tool_calls,
         run_id,
         checkpoint.run_context.as_ref(),
         &checkpoint.context_items,
+        checkpoint.pending_file_observation.as_ref(),
     )?;
     if checkpoint.pending_tool_call_id != continuation.call.id {
         return Err(AgentError::new(format!(
@@ -1488,6 +1653,13 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
         restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
+    let mut restored_batch_file_observation_ids = restore_batch_file_observation_ids(
+        &checkpoint.context_items,
+        &checkpoint.pending_tool_call_id,
+    )?;
+    if let Some(observation_id) = pending_file_observation_id.as_ref() {
+        restored_batch_file_observation_ids.insert(observation_id.clone());
+    }
     let mut conversation_trace = ConversationTraceRecorder::from_checkpoint_with_model_context(
         checkpoint.conversation_trace_items,
         checkpoint.conversation_model_context_items,
@@ -1516,6 +1688,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         deferred_external_tool_call_count: checkpoint.deferred_external_tool_call_count,
         suppressed_narration: checkpoint.suppressed_narration,
         seen_semantic_fingerprints: restored_batch_fingerprints,
+        seen_file_observation_ids: restored_batch_file_observation_ids,
     };
     validate_assistant_turn_identity(
         restored_batch.assistant_turn_identity()?,
@@ -1541,12 +1714,22 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
             ToolExecutionContext::from_run_context(checkpoint.run_context.as_ref())
                 .with_runtime_services(run_id.to_string(), None)
                 .with_file_observation_registry(Arc::clone(&file_observations));
-        crate::tools::attach_successor_observation_to_model_result(
-            &observation_context,
-            &continuation.call,
-            &continuation.result,
-            &mut continuation_model_result,
-        );
+        if let Some(predecessor_observation_id) = pending_file_observation_id.as_deref() {
+            crate::tools::attach_successor_observation_to_model_result_with_predecessor(
+                &observation_context,
+                &continuation.call,
+                &continuation.result,
+                &mut continuation_model_result,
+                predecessor_observation_id,
+            );
+        } else {
+            crate::tools::attach_successor_observation_to_model_result(
+                &observation_context,
+                &continuation.call,
+                &continuation.result,
+                &mut continuation_model_result,
+            );
+        }
     }
     let continuation_call = LlmToolCall {
         id: continuation.call.id.clone(),
@@ -2055,6 +2238,33 @@ fn restore_batch_fingerprints(
         fingerprints.insert(semantic_tool_call_fingerprint(&call.name, &call.args));
         if call.id == pending_tool_call_id {
             return Ok(fingerprints);
+        }
+    }
+    Err(AgentError::new(
+        "运行检查点的完整 Assistant Turn 缺少待审批 Tool Call。",
+    ))
+}
+
+fn restore_batch_file_observation_ids(
+    context_items: &[AgentContextCheckpointItem],
+    pending_tool_call_id: &str,
+) -> AgentResult<BTreeSet<String>> {
+    let pending_item = context_items
+        .iter()
+        .find(|item| {
+            item.tool_calls
+                .iter()
+                .any(|call| call.id == pending_tool_call_id)
+        })
+        .ok_or_else(|| AgentError::new("运行检查点缺少冻结的待审批工具调用。"))?;
+    let mut observation_ids = BTreeSet::new();
+    for call in &pending_item.tool_calls {
+        if let Some(observation_id) = claimed_file_observation_id_from_args(&call.name, &call.args)
+        {
+            observation_ids.insert(observation_id.to_string());
+        }
+        if call.id == pending_tool_call_id {
+            return Ok(observation_ids);
         }
     }
     Err(AgentError::new(

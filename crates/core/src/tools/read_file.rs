@@ -33,7 +33,7 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read an authorized regular UTF-8 text file and issue a run-owned FileChange Observation. Call read_file on the exact target before the first apply_patch Direct apply or Staged begin, whenever current contents are unknown, or whenever the latest successful apply_patch result did not return a reusable fileChangeTarget. A successful apply_patch apply/commit normally returns a new fileChangeTarget for its verified post-write state; copy that newer filePath and observationId into the next change to the same target instead of rereading solely for another token. Do not substitute a parent-directory listing, workspace_map, or search result. A not-found result establishes the missing state required by create but is not itself an executable create call because the model must still supply content or begin a Staged transaction. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
+            description: "Read an authorized regular UTF-8 text file and issue a run-owned FileChange Observation. Call read_file on the exact target before the first apply_patch update/delete or Staged begin/update, whenever current contents are unknown, or whenever the latest successful apply_patch result did not return a reusable fileChangeTarget. Create is the exception: apply_patch create and begin/create omit observationId and do not require a preceding read because the Host privately proves the exact target is missing and commits with atomic no-clobber. A successful create returns the first fileChangeTarget. A successful update/delete or Staged update commit renews the same observationId to its verified post-write state; copy that filePath and ID into the next model response instead of rereading solely for another token. Do not reuse one ID in multiple writes from the same Provider Tool Call batch. Do not substitute a parent-directory listing, workspace_map, or search result. A not-found result reports the current missing state, but its observationId must not be supplied to create. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -1136,16 +1136,19 @@ mod tests {
         assert!(definition.description.contains("regular UTF-8 text file"));
         assert!(definition
             .description
-            .contains("before the first apply_patch Direct apply or Staged begin"));
+            .contains("before the first apply_patch update/delete or Staged begin/update"));
         assert!(definition
             .description
             .contains("successful apply_patch result did not return a reusable fileChangeTarget"));
         assert!(definition
             .description
-            .contains("instead of rereading solely for another token"));
+            .contains("renews the same observationId"));
         assert!(definition
             .description
-            .contains("A not-found result establishes the missing state required by create"));
+            .contains("apply_patch create and begin/create omit observationId"));
+        assert!(definition
+            .description
+            .contains("observationId must not be supplied to create"));
         assert!(definition
             .description
             .contains("Without a workspace, relative paths are invalid"));

@@ -12,13 +12,14 @@ The discoverable location is:
 ```
 
 Use a normal workspace command to create the directory before writing files. Quote the validated
-literal path and do not combine directory creation with unrelated commands. Then call `read_file`
-on each exact target to obtain its initial observation and use `apply_patch`: create only from a
-missing observation, update only from an existing observation, and use Staged actions for long
-resources. A successful apply or commit returns a new post-write `fileChangeTarget`; reuse it for
-the next change to that same target instead of rereading solely for another ID. If the successor is
-absent, refresh is required, or current external content is unknown, call `read_file` again. Create
-is no-clobber; never use a command, redirection, or script as an alternate writer.
+literal path and do not combine directory creation with unrelated commands. Then use
+`apply_patch`: create and begin/create omit `observationId` and do not need a preceding
+`read_file`; update/delete and begin/update require the exact observation returned by `read_file`
+or the latest successful FileChange. Use Staged actions for long resources. A successful create
+returns the first post-write `fileChangeTarget`; a successful update/delete or Staged update commit
+renews the same ID after the Tool Result is received. Reuse it only in a later model response. If
+the target is absent, refresh is required, or current external content is unknown, call `read_file`
+again. Create is no-clobber; never use a command, redirection, or script as an alternate writer.
 
 Workspace Skill directories and files must be regular, non-symlink paths. `SKILL.md` must use the
 exact filename, UTF-8 text, YAML frontmatter, and non-empty Markdown instructions.

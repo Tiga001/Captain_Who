@@ -282,7 +282,10 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 12 carries the exact private reference for a Host-owned Run-scoped FileChange grant.
+/// Version 13 carries the consumed predecessor observation for the exact pending FileChange so a
+/// successful approval continuation can renew the same run-scoped id without weakening replay
+/// protection. Version 12 carried the exact private reference for a Host-owned Run-scoped
+/// FileChange grant.
 /// Version 11 totalized unconsumed `read_file` observations referenced by queued `apply_patch`
 /// calls. Version 10 froze built-in execution approval authority alongside every other permission
 /// dimension. Version 9 froze model-visible Agent collaboration selector capabilities and removed the
@@ -292,7 +295,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 12;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 13;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -358,6 +361,10 @@ pub struct AgentRunCheckpoint {
     /// `None` here.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub file_change_run_grant_ref: Option<crate::file_change::FileChangeRunGrantRef>,
+    /// Consumed read/apply observation bound to the exact pending update/delete FileChange.
+    /// Create carries `null`; queued unconsumed observations remain attached to their calls.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub pending_file_observation: Option<crate::file_change::FileObservationCheckpoint>,
     pub pending_tool_call_id: String,
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
     /// Bounded, replay-safe projection of the active run's uncompressed model timeline.

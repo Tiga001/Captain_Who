@@ -71,7 +71,7 @@ pub(super) fn begin(
     operation: FileChangeOperation,
     strategy: Option<StagedUpdateStrategy>,
     file_path: String,
-    observation_id: String,
+    observation_id: Option<String>,
     initial_summary: Option<String>,
 ) -> AgentResult<Value> {
     begin_with_hook(
@@ -93,7 +93,7 @@ fn begin_with_hook(
     operation: FileChangeOperation,
     strategy: Option<StagedUpdateStrategy>,
     file_path: String,
-    observation_id: String,
+    observation_id: Option<String>,
     initial_summary: Option<String>,
     after_durable_create: impl FnOnce(&str) -> AgentResult<()>,
 ) -> AgentResult<Value> {
@@ -120,15 +120,36 @@ fn begin_with_hook(
         return Ok(existing);
     }
     let target = resolve_target(context, &file_path)?;
-    let observation = context
-        .file_observations()
-        .validate(
-            &observation_id,
-            context.conversation_id()?,
-            context.run_id()?,
-            target.absolute_path(),
-        )
-        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
+    let public_observation_id = observation_id.as_deref();
+    let observation = match operation {
+        FileChangeOperation::Create => {
+            if public_observation_id.is_some() {
+                return Err(file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::IllegalFieldCombination,
+                )));
+            }
+            super::apply_patch::capture_missing_base_observation(context, &target)
+                .map_err(|error| file_change_agent_error_for_path(error, &file_path))?
+        }
+        FileChangeOperation::Update => {
+            let observation_id = public_observation_id.ok_or_else(|| {
+                file_change_agent_error_for_path(
+                    FileChangeError::new(FileChangeErrorCode::ObservationRequired),
+                    &file_path,
+                )
+            })?;
+            context
+                .file_observations()
+                .validate(
+                    observation_id,
+                    context.conversation_id()?,
+                    context.run_id()?,
+                    target.absolute_path(),
+                )
+                .map_err(|error| file_change_agent_error_for_path(error, &file_path))?
+        }
+        FileChangeOperation::Delete => unreachable!("validated staged begin rejects delete"),
+    };
     validate_observation_operation(operation, observation.state())
         .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
     let frozen = freeze_staged_observed_base(context, &target, &observation, MAX_STAGED_FILE_BYTES)
@@ -167,7 +188,7 @@ fn begin_with_hook(
         permission_revision: context.file_change_permission_revision().to_string(),
         tool_set_revision: context.file_change_tool_set_revision().to_string(),
         provider_wire_revision: context.file_change_provider_wire_revision().to_string(),
-        observation_id: observation_id.clone(),
+        observation_id: observation.id().to_string(),
         observation_json: serde_json::to_string(&checkpoint).map_err(internal_error)?,
         file_path: target.display_path().to_string(),
         operation: operation_label(operation).to_string(),
@@ -197,15 +218,17 @@ fn begin_with_hook(
     validate_record(&transaction)?;
     // Claim only after the complete persistent transaction is known to be semantically valid.
     // A subsequent SQLite failure may require a reread, but can never create a blind writer.
-    context
-        .file_observations()
-        .claim(
-            &observation_id,
-            context.conversation_id()?,
-            context.run_id()?,
-            target.absolute_path(),
-        )
-        .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
+    if let Some(observation_id) = public_observation_id {
+        context
+            .file_observations()
+            .claim(
+                observation_id,
+                context.conversation_id()?,
+                context.run_id()?,
+                target.absolute_path(),
+            )
+            .map_err(|error| file_change_agent_error_for_path(error, &file_path))?;
+    }
     if let Err(error) = context
         .storage()?
         .create_agent_file_change(transaction.clone())
@@ -1334,8 +1357,6 @@ mod tests {
             Some("project-staged-siblings"),
             "run-staged-siblings",
         );
-        let observation = observe(&owner_context, "target.md", "read-staged-sibling-target");
-
         fs::write(root.join("sibling-before-begin.md"), "unrelated\n").unwrap();
         let begun = begin(
             &call_context(&owner_context, "begin-staged-sibling-target"),
@@ -1346,10 +1367,10 @@ mod tests {
             FileChangeOperation::Create,
             None,
             "target.md".to_string(),
-            observation,
+            None,
             None,
         )
-        .expect("a sibling created after read_file must not invalidate staged begin");
+        .expect("a sibling create must not invalidate an independent staged create");
         let transaction_id = begun["transactionId"].as_str().unwrap().to_string();
         append(
             &call_context(&owner_context, "append-staged-sibling-target"),
@@ -1481,7 +1502,6 @@ mod tests {
             Some("project-staged"),
             "run-staged",
         );
-        let observation = observe(&owner_context, "report.md", "read-staged-create");
         let begin_args_digest = content_digest(b"begin-args");
         let begun = begin(
             &call_context(&owner_context, "begin-staged"),
@@ -1489,7 +1509,7 @@ mod tests {
             FileChangeOperation::Create,
             None,
             "report.md".to_string(),
-            observation.clone(),
+            None,
             None,
         )
         .unwrap();
@@ -1503,7 +1523,7 @@ mod tests {
             FileChangeOperation::Create,
             None,
             "report.md".to_string(),
-            observation.clone(),
+            None,
             None,
         )
         .unwrap();
@@ -1514,7 +1534,7 @@ mod tests {
             FileChangeOperation::Create,
             None,
             "different.md".to_string(),
-            observation,
+            None,
             None,
         )
         .unwrap_err();
@@ -1738,7 +1758,7 @@ mod tests {
         let database = fixture.path().join("storage.sqlite");
         fs::create_dir_all(&root).unwrap();
 
-        let (transaction_id, observation_id) = {
+        let transaction_id = {
             let storage = Arc::new(StorageService::open(&database).unwrap());
             save_conversation(&storage, "conversation-restart");
             let context = context(
@@ -1748,14 +1768,13 @@ mod tests {
                 Some("project-restart"),
                 "run-restart",
             );
-            let observation = observe(&context, "restart.md", "read-restart-create");
             let injected = begin_with_hook(
                 &call_context(&context, "begin-restart"),
                 StagedSource::new("apply_patch", content_digest(b"begin-restart")),
                 FileChangeOperation::Create,
                 None,
                 "restart.md".to_string(),
-                observation.clone(),
+                None,
                 None,
                 |durable_transaction_id| {
                     assert!(durable_transaction_id.starts_with("file-change-staged-v1:"));
@@ -1777,7 +1796,7 @@ mod tests {
                 )
                 .unwrap()
                 .expect("begin transaction was durable before the injected failure");
-            (begun.id, observation)
+            begun.id
         };
 
         let storage = Arc::new(StorageService::open(&database).unwrap());
@@ -1794,7 +1813,7 @@ mod tests {
             FileChangeOperation::Create,
             None,
             "restart.md".to_string(),
-            observation_id,
+            None,
             None,
         )
         .unwrap();
@@ -1852,14 +1871,13 @@ mod tests {
             None,
             "run-owner",
         );
-        let observation = observe(&owner, "large.txt", "read-large");
         let begun = begin(
             &call_context(&owner, "begin-large"),
             StagedSource::new("apply_patch", content_digest(b"begin-large")),
             FileChangeOperation::Create,
             None,
             "large.txt".into(),
-            observation,
+            None,
             None,
         )
         .unwrap();
@@ -1956,7 +1974,7 @@ mod tests {
             FileChangeOperation::Update,
             Some(StagedUpdateStrategy::Modify),
             "existing.txt".into(),
-            modify_observation,
+            Some(modify_observation),
             None,
         )
         .unwrap();
@@ -2001,7 +2019,7 @@ mod tests {
             FileChangeOperation::Update,
             Some(StagedUpdateStrategy::Rewrite),
             "existing.txt".into(),
-            rewrite_observation,
+            Some(rewrite_observation),
             None,
         )
         .unwrap();

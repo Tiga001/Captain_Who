@@ -117,8 +117,7 @@ fn successor_observation_is_live_and_checkpoint_only_while_durable_prefix_stays_
             "request": {
                 "action": "apply",
                 "operation": "create",
-                "filePath": "projection.txt",
-                "observationId": "fobs_consumed"
+                "filePath": "projection.txt"
             }
         }),
         approval_status: AgentApprovalStatus::Approved,

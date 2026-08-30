@@ -172,8 +172,10 @@ fn direct_file_change_fixture(
             FileChangeOperation::Delete => "delete",
         },
         "filePath": file_path,
-        "observationId": observation_id,
     });
+    if operation != FileChangeOperation::Create {
+        request["observationId"] = Value::String(observation_id.clone());
+    }
     if let Some(content) = target_content {
         request["content"] = Value::String(content.to_string());
     }
@@ -257,7 +259,11 @@ fn direct_file_change_fixture(
         observation: FileObservationCheckpoint {
             schema_version: FILE_OBSERVATION_CHECKPOINT_SCHEMA_VERSION,
             observation_id: observation_id.clone(),
-            source_tool_call_id: format!("read-{call_id}"),
+            source_tool_call_id: if operation == FileChangeOperation::Create {
+                call_id.to_string()
+            } else {
+                format!("read-{call_id}")
+            },
             conversation_id: conversation_id.to_string(),
             run_id: run_id.to_string(),
             canonical_target: canonical_target.to_string(),
@@ -446,15 +452,22 @@ fn staged_file_change_record(
         run_id: execution.run_id.clone(),
         source_tool_name: execution.source_tool_name.clone(),
         source_tool_call_id: format!("begin-{}", proposal.transaction_id),
-        source_tool_arguments_digest: mycopilot_core::file_change::proposal_digest(&json!({
-            "request": {
+        source_tool_arguments_digest: {
+            let mut request = json!({
                 "action": "begin",
                 "operation": operation,
                 "filePath": proposal.file_path,
-                "observationId": execution.observation_id,
+            });
+            if operation == "update" {
+                request["observationId"] = Value::String(execution.observation_id.clone());
+                request["strategy"] = Value::String(
+                    strategy
+                        .clone()
+                        .expect("Staged update fixture has an explicit strategy"),
+                );
             }
-        }))
-        .unwrap(),
+            mycopilot_core::file_change::proposal_digest(&json!({ "request": request })).unwrap()
+        },
         permission_revision: execution.permission_revision.clone(),
         tool_set_revision: execution.tool_set_revision.clone(),
         provider_wire_revision: execution.provider_wire_revision.clone(),

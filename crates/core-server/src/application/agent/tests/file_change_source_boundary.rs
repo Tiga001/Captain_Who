@@ -446,6 +446,8 @@ fn model_guidance_and_bundled_authoring_packages_name_only_apply_patch() {
     assert!(!prompt.contains("write_file"));
     assert!(prompt.contains("Direct 使用 request.action=apply"));
     assert!(prompt.contains("同一 apply_patch Staged 模式"));
+    assert!(prompt.contains("create 不得提供 observationId，也不必先 read_file"));
+    assert!(prompt.contains("把输入的同一个 observationId 续约到写后状态"));
     assert!(prompt.contains("必须先对准确目标路径使用 read_file"));
 
     let mut guidance_files = Vec::new();

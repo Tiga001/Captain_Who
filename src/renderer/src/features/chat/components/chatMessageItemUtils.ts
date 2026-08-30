@@ -168,23 +168,7 @@ export function getUsageRows(usage: AgentUsage | undefined, language: string, t:
   ].filter((row): row is { label: string; value: string } => row.value !== null)
 }
 
-export async function copyTextToClipboard(content: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(content)
-    return
-  }
-
-  const textarea = document.createElement('textarea')
-  textarea.value = content
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.top = '-1000px'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  document.body.removeChild(textarea)
-}
+export { copyTextToClipboard } from './clipboard'
 
 export function getToolResult(run: ChatAgentRunView, callId: string): AgentToolResult | undefined {
   return run.toolResults.find((result) => result.callId === callId)

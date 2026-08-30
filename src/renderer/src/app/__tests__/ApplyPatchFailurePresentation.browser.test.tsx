@@ -20,8 +20,14 @@ const translations: Record<string, string> = {
   'agent.fileChange.create.row.cancelled': '已取消新建',
   'agent.fileChange.togglePreview': '展开文件修改',
   'agent.fileChange.loadingPreview': '正在读取修改',
+  'agent.fileChange.loadMorePreview': '加载更多',
   'agent.fileChange.historyPreviewUnavailable': '无法读取已保存的修改详情。',
+  'chat.copy': '复制',
+  'chat.copied': '已复制',
   'files.preview.error': '无法读取修改',
+  'gitReview.diff.invalid': '这个文件的差异格式无效，无法安全显示。',
+  'gitReview.diff.noHunks': '这个文件没有可显示的文本差异。',
+  'gitReview.diff.tooLarge': '这个文件的差异过大，无法安全显示。',
   'agent.fileChange.failure.generic': '无法安全应用这处修改。',
   'agent.fileChange.failure.conflict': '文件已发生变化，无法安全应用这处修改。',
   'agent.fileChange.failure.fileExists': '文件已存在。',
@@ -47,6 +53,12 @@ vi.mock('../../features/agent/agentClient', () => ({
 
 const INTERNAL_ERROR =
   'apply_patch structured_edit_error code=file_exists: /private/workspace/internal.txt'
+const CREATED_FILE_PATCH = [
+  '--- /dev/null',
+  '+++ b/existing.txt',
+  '@@ -0,0 +1,1 @@',
+  '+replacement'
+].join('\n')
 
 function applyPatchCall(): AgentToolCall {
   return {
@@ -105,7 +117,7 @@ describe('FileChange failure presentation', () => {
       assistantMessageId: 'assistant-message-1',
       runId: 'run-1',
       toolCallId: call.id,
-      patch: '+replacement',
+      patch: CREATED_FILE_PATCH,
       offset: 0,
       nextOffset: null,
       truncated: false
@@ -155,7 +167,20 @@ describe('FileChange failure presentation', () => {
       })
     })
 
-    await expect.element(screen.getByText('+replacement', { exact: true })).toBeVisible()
+    await expect.element(screen.getByText('replacement', { exact: true })).toBeVisible()
+    const card = screen.container.querySelector<HTMLElement>('.file-change-diff-card')
+    const header = screen.container.querySelector<HTMLElement>('.file-change-diff-card__header')
+    const body = screen.container.querySelector<HTMLElement>('.file-change-diff-card__body')
+    expect(card).not.toBeNull()
+    expect(header?.parentElement).toBe(card)
+    expect(body?.parentElement).toBe(card)
+    expect(header?.contains(body)).toBe(false)
+    expect(body?.style.maxHeight || window.getComputedStyle(body!).maxHeight).toBe('320px')
+    expect(
+      screen.container.querySelector('.git-review__single-diff')?.getAttribute('data-side')
+    ).toBe('new')
+    expect(screen.container.querySelectorAll('.git-review__split-pane')).toHaveLength(0)
+    expect(screen.container.querySelector('.file-change-diff-card__copy')).not.toBeNull()
     expect(getAgentFileChangeDiff).not.toHaveBeenCalled()
   })
 

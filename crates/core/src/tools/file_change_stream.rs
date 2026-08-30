@@ -324,8 +324,7 @@ mod tests {
                         "request": {
                             "action": "begin",
                             "operation": "create",
-                            "filePath": "src/main.rs",
-                            "observationId": "fobs-preview-fixture"
+                            "filePath": "src/main.rs"
                         }
                     }),
                 )
@@ -499,7 +498,7 @@ mod tests {
                 stream_id: "stream-direct",
                 attempt: 1,
                 tool_call_index: 3,
-                input_delta: r#"{"request":{"action":"apply","operation":"create","filePath":"src/direct.rs","observationId":"fobs_private","content":"fn main() {}\n"}}"#,
+                input_delta: r#"{"request":{"action":"apply","operation":"create","filePath":"src/direct.rs","content":"fn main() {}\n"}}"#,
                 received_bytes: 160,
             })
             .unwrap()

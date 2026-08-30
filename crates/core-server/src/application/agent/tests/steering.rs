@@ -66,37 +66,6 @@ async fn write_text_stream(stream: &mut TcpStream, content: &str) {
         .unwrap();
 }
 
-fn missing_file_observation_id(request: &Value, expected_path: &str) -> String {
-    fn find(value: &Value, expected_path: &str) -> Option<String> {
-        match value {
-            Value::Object(object) => {
-                if object.get("path").and_then(Value::as_str) == Some(expected_path)
-                    && object.get("exists").and_then(Value::as_bool) == Some(false)
-                {
-                    return object
-                        .get("observationId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
-                object.values().find_map(|value| find(value, expected_path))
-            }
-            Value::Array(values) => values.iter().find_map(|value| find(value, expected_path)),
-            Value::String(text) if text.starts_with('{') || text.starts_with('[') => {
-                serde_json::from_str::<Value>(text)
-                    .ok()
-                    .and_then(|value| find(&value, expected_path))
-            }
-            _ => None,
-        }
-    }
-
-    find(request, expected_path).unwrap_or_else(|| {
-        panic!(
-            "Provider request must contain the missing read_file observation for {expected_path}"
-        )
-    })
-}
-
 async fn write_target_observation_tool_stream(stream: &mut TcpStream) {
     stream
         .write_all(
@@ -135,7 +104,7 @@ async fn write_target_observation_tool_stream(stream: &mut TcpStream) {
         .unwrap();
 }
 
-async fn write_approval_tool_stream(stream: &mut TcpStream, observation_id: &str) {
+async fn write_approval_tool_stream(stream: &mut TcpStream) {
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -158,7 +127,6 @@ async fn write_approval_tool_stream(stream: &mut TcpStream, observation_id: &str
                                 "action": "apply",
                                 "operation": "create",
                                 "filePath": "guided.txt",
-                                "observationId": observation_id,
                                 "content": "draft"
                             }
                         })).unwrap()
@@ -1336,11 +1304,10 @@ async fn waiting_for_approval_closes_steering_before_the_approval_event_is_publi
         drop(observation_stream);
 
         let (mut approval_stream, _) = listener.accept().await.unwrap();
-        let approval_request = read_json_request(&mut approval_stream).await;
-        let observation_id = missing_file_observation_id(&approval_request, "guided.txt");
+        let _ = read_json_request(&mut approval_stream).await;
         request_seen_tx.send(()).unwrap();
         release_response_rx.await.unwrap();
-        write_approval_tool_stream(&mut approval_stream, &observation_id).await;
+        write_approval_tool_stream(&mut approval_stream).await;
     });
 
     let fixture = tempdir().unwrap();
@@ -1458,9 +1425,8 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
         drop(observation_stream);
 
         let (mut approval_stream, _) = listener.accept().await.unwrap();
-        let approval_request = read_json_request(&mut approval_stream).await;
-        let observation_id = missing_file_observation_id(&approval_request, "guided.txt");
-        write_approval_tool_stream(&mut approval_stream, &observation_id).await;
+        let _ = read_json_request(&mut approval_stream).await;
+        write_approval_tool_stream(&mut approval_stream).await;
         drop(approval_stream);
         approval_response_tx.send(()).unwrap();
 

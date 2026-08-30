@@ -490,6 +490,7 @@ mod tests {
             "pendingActionId": null,
             "pendingToolCallId": "call-persisted-resume",
             "fileChangeRunGrantRef": null,
+            "pendingFileObservation": null,
             "conversationTraceItems": [],
             "conversationModelContextItems": [],
             "nextConversationTraceSequence": 0,
