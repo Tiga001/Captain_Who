@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-30
 ---
 
 # 受管运行时组件
@@ -20,7 +20,7 @@ last_verified: 2026-08-23
 | Office renderer Playwright | `1.61.1`                                 | Office renderer manifest           | 同上                                     |
 | Word/PDF renderer bundle   | `2026.08.1`                              | `.cache/word-pdf-renderer/current` | `Resources/components/word-pdf-renderer` |
 | LibreOffice                | `26.2.4.2`                               | Word/PDF renderer receipt          | 同上                                     |
-| Artifact Runtime bundle    | `2026.08.4`                              | `.cache/artifact-runtime/current`  | `Resources/components/artifact-runtime`  |
+| Artifact Runtime bundle    | `2026.08.5`                              | `.cache/artifact-runtime/current`  | `Resources/components/artifact-runtime`  |
 | Artifact managed Node      | `22.23.1`                                | Artifact Runtime receipt           | 同上                                     |
 | Artifact managed Python    | `3.12.13+20260610`                       | Artifact Runtime receipt           | 同上                                     |
 | Artifact ripgrep           | `15.1.0`                                 | Artifact Runtime receipt           | 同上                                     |
@@ -102,7 +102,7 @@ Office presentation 操作的受管 CLI。manifest schema v1，最大单下载 6
 为文档、表格、演示和 PDF 的受管命令提供封闭依赖：
 
 - Node `22.23.1`；根依赖 `docx@9.6.1`、`exceljs@4.4.0`、`pptxgenjs@4.0.1`；
-- Python `3.12.13+20260610`；包括 openpyxl、pdfplumber、pypdf、pypdfium2、python-docx、python-pptx、reportlab、xlsxwriter 的精确版本；
+- Python `3.12.13+20260610`；根依赖为 `numpy@2.5.2`、`openpyxl@3.1.5`、`pandas@3.0.5`、`pdfplumber@0.11.9`、`pypdf@6.15.0`、`pypdfium2@5.12.1`、`python-docx@1.2.0`、`python-pptx@1.0.2`、`reportlab@4.4.9`、`xlsxwriter@3.2.9`；pandas 闭包另固定 `python-dateutil@2.9.0.post0`、`six@1.17.0`，Windows 固定 `tzdata@2026.3`；
 - PDF runtime CLI v1、ripgrep `15.1.0`；
 - Node bootstrap/loader、Presentation SDK、pnpm lock、patch、requirements 和 package evidence 的 SHA-256 都是 build inputs。
 

@@ -176,7 +176,7 @@ test('pinned ripgrep ZIP extraction reads only exact bounded members and rejects
 test('manifest pins runtime assets, PDF tools, and dependency versions for every desktop target', async () => {
   const manifest = await loadArtifactRuntimeManifest(manifestPath)
   assert.equal(manifest.schemaVersion, 4)
-  assert.equal(manifest.bundleVersion, '2026.08.4')
+  assert.equal(manifest.bundleVersion, '2026.08.5')
   assert.equal(manifest.node.version, '22.23.1')
   assert.equal(manifest.python.version, '3.12.13')
   assert.deepEqual(
@@ -190,7 +190,9 @@ test('manifest pins runtime assets, PDF tools, and dependency versions for every
   assert.deepEqual(
     manifest.python.dependencies.map(({ name, version }) => [name, version]),
     [
+      ['numpy', '2.5.2'],
       ['openpyxl', '3.1.5'],
+      ['pandas', '3.0.5'],
       ['pdfplumber', '0.11.9'],
       ['pypdf', '6.15.0'],
       ['pypdfium2', '5.12.1'],
@@ -246,17 +248,49 @@ test('managed Python requirements freeze the reviewed dependency closure and bin
     'pycparser==3.0',
     'pypdf==6.15.0',
     'pypdfium2==5.12.1',
+    'python-dateutil==2.9.0.post0',
     'python-docx==1.2.0',
     'python-pptx==1.0.2',
     'reportlab==4.4.9',
+    'six==1.17.0',
+    'tzdata==2026.3',
     'typing-extensions==4.16.0',
     'xlsxwriter==3.2.9'
   ]
+  const pinnedWheelRecords = records.filter(
+    (record) => record.startsWith('numpy @ ') || record.startsWith('pandas @ ')
+  )
+  const ordinaryRecords = records.filter((record) => !pinnedWheelRecords.includes(record))
   assert.deepEqual(
-    records.map((record) => record.slice(0, record.indexOf(' '))).sort(),
+    ordinaryRecords.map((record) => record.slice(0, record.indexOf(' '))).sort(),
     expectedPins.sort()
   )
   assert.ok(records.every((record) => / --hash=sha256:[a-f0-9]{64}(?: |$)/.test(record)))
+  assert.equal(pinnedWheelRecords.filter((record) => record.startsWith('numpy @ ')).length, 6)
+  assert.equal(pinnedWheelRecords.filter((record) => record.startsWith('pandas @ ')).length, 6)
+  assert.ok(
+    pinnedWheelRecords.every(
+      (record) =>
+        record.includes(' @ https://files.pythonhosted.org/packages/') &&
+        record.includes('-cp312-cp312-') &&
+        (record.includes('numpy-2.5.2-') || record.includes('pandas-3.0.5-')) &&
+        record.match(/--hash=/g)?.length === 1
+    )
+  )
+  assert.equal(
+    pinnedWheelRecords.some((record) => record.includes('macosx_14_0')),
+    false
+  )
+  for (const marker of [
+    'sys_platform == "darwin" and platform_machine == "arm64"',
+    'sys_platform == "darwin" and platform_machine == "x86_64"',
+    'sys_platform == "linux" and platform_machine == "aarch64"',
+    'sys_platform == "linux" and platform_machine == "x86_64"',
+    'sys_platform == "win32" and platform_machine == "ARM64"',
+    'sys_platform == "win32" and platform_machine == "AMD64"'
+  ]) {
+    assert.equal(pinnedWheelRecords.filter((record) => record.includes(marker)).length, 2)
+  }
   assert.equal(
     records.find((record) => record.startsWith('pypdfium2==')).match(/--hash=/g).length,
     6
@@ -526,6 +560,8 @@ async function offlineComponentSource() {
     const identity = join(directory, ...dependency.identityFile.split('/'))
     await mkdir(dirname(identity), { recursive: true })
     const reviewedLicenseMetadata = {
+      numpy: 'BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0',
+      pandas: 'BSD 3-Clause License',
       pdfplumber: null,
       pypdfium2: 'BSD-3-Clause, Apache-2.0, dependency licenses',
       reportlab:
@@ -653,7 +689,9 @@ test(
         .map(({ name }) => name)
         .sort(),
       [
+        'numpy',
         'openpyxl',
+        'pandas',
         'pdfplumber',
         'pypdf',
         'pypdfium2',

@@ -41,6 +41,19 @@ console.log('created', process.argv[2])
     )
     .expect("write Node smoke script");
     fs::write(
+        workspace.path().join("build-sheet.py"),
+        r#"import sys
+import numpy as np
+import pandas as pd
+
+frame = pd.DataFrame({"value": np.arange(4, dtype=np.int64)})
+assert int(frame["value"].sum()) == 6
+frame.to_excel(sys.argv[1], index=False, engine="openpyxl")
+print("created", sys.argv[1])
+"#,
+    )
+    .expect("write Python spreadsheet smoke script");
+    fs::write(
         workspace.path().join("build-document.py"),
         r#"import sys
 from docx import Document
@@ -96,6 +109,32 @@ process.exitCode = 7
         AgentCommandRuntimeKind::Node,
     );
     assert_successful_observed_creation(&node, "smoke.xlsx");
+
+    let python_spreadsheet = execute(
+        workspace.path(),
+        &provider,
+        "python build-sheet.py smoke-python.xlsx",
+        "smoke-python.xlsx",
+        AgentCommandRuntimeProfile::Spreadsheets,
+        AgentCommandRuntimeKind::Python,
+    );
+    assert_successful_observed_creation(&python_spreadsheet, "smoke-python.xlsx");
+    assert_eq!(
+        python_spreadsheet
+            .runtime
+            .as_ref()
+            .unwrap()
+            .resolved_packages
+            .iter()
+            .map(|package| (package.name.as_str(), package.version.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("numpy", "2.5.2"),
+            ("openpyxl", "3.1.5"),
+            ("pandas", "3.0.5"),
+            ("xlsxwriter", "3.2.9")
+        ]
+    );
 
     let python = execute(
         workspace.path(),

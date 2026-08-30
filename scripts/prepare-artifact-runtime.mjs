@@ -398,8 +398,8 @@ export function validateArtifactRuntimeManifest(value) {
   if (manifest.providerId !== 'mycopilot.artifact-runtime') {
     throw new Error('manifest.providerId must be mycopilot.artifact-runtime')
   }
-  if (manifest.bundleVersion !== '2026.08.4') {
-    throw new Error('artifact runtime bundle must remain pinned to 2026.08.4')
+  if (manifest.bundleVersion !== '2026.08.5') {
+    throw new Error('artifact runtime bundle must remain pinned to 2026.08.5')
   }
   const buildInputs = validateBuildInputs(manifest.buildInputs)
 
@@ -516,7 +516,9 @@ export function validateArtifactRuntimeManifest(value) {
       dependencies: validateDependencies(
         python.dependencies,
         [
+          ['numpy', '2.5.2'],
           ['openpyxl', '3.1.5'],
+          ['pandas', '3.0.5'],
           ['pdfplumber', '0.11.9'],
           ['pypdf', '6.15.0'],
           ['pypdfium2', '5.12.1'],

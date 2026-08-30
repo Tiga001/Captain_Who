@@ -85,7 +85,9 @@ run one direct command:
 ```
 
 Omit `runtimeProfile` and `observe`. The exact materialization receipt binds the pinned Python
-3.12.13 runtime with `openpyxl` 3.1.5. Use `openpyxl` for all workbook creation and editing.
+3.12.13 runtime with `openpyxl` 3.1.5, `xlsxwriter` 3.2.9, `numpy` 2.5.2, and `pandas` 3.0.5.
+`openpyxl` remains the workbook authoring and Host validation engine; the available library set
+does not change the managed Builder/Editor route.
 
 ## Use the fixed Editor
 

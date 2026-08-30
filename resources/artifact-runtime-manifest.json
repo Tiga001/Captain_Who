@@ -1,11 +1,11 @@
 {
   "schemaVersion": 4,
   "providerId": "mycopilot.artifact-runtime",
-  "bundleVersion": "2026.08.4",
+  "bundleVersion": "2026.08.5",
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "3e85899e3cd9d044d1f021e13532b8f3b48fdd8f29735a231f377b737e0211cf"
+      "sha256": "e38355654afc7235910fcda236838d65fd4ef5df34bf0c1d024e8d85a1e50d17"
     },
     "frozenMachOSigning": {
       "path": "scripts/frozen-macho-signing.mjs",
@@ -41,7 +41,7 @@
     },
     "pythonRequirements": {
       "path": "resources/artifact-runtime-python-requirements.txt",
-      "sha256": "00f07736ba51e7c20d7f6aab446107d1f8013cdafef738c1c140fafd022bce8b"
+      "sha256": "37a8ecc17adc545e48dc3244a3b7a49677d31d6245d5cba990ed07fafa63313e"
     },
     "pdfRuntimeCli": {
       "path": "crates/core/src/command/pdf_runtime_cli.py",
@@ -135,9 +135,19 @@
     "requirements": "resources/artifact-runtime-python-requirements.txt",
     "dependencies": [
       {
+        "name": "numpy",
+        "version": "2.5.2",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/numpy-2.5.2.dist-info/METADATA"
+      },
+      {
         "name": "openpyxl",
         "version": "3.1.5",
         "identityFile": "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA"
+      },
+      {
+        "name": "pandas",
+        "version": "3.0.5",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/pandas-3.0.5.dist-info/METADATA"
       },
       {
         "name": "pdfplumber",

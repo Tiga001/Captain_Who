@@ -1,5 +1,5 @@
 {
-  "contractVersion": 11,
+  "contractVersion": 12,
   "engine": "officecli",
   "tool": "office_spreadsheet",
   "extensions": [".xlsx"],
@@ -110,7 +110,12 @@
           "command": "python",
           "extension": ".py",
           "runtimeVersion": "3.12.13",
-          "dependencies": [{ "name": "openpyxl", "version": "3.1.5" }]
+          "dependencies": [
+            { "name": "numpy", "version": "2.5.2" },
+            { "name": "openpyxl", "version": "3.1.5" },
+            { "name": "pandas", "version": "3.0.5" },
+            { "name": "xlsxwriter", "version": "3.2.9" }
+          ]
         }
       ],
       "resolution": {

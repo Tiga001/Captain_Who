@@ -24,7 +24,7 @@ const MAX_COMPONENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SHA256_HEX_LENGTH: usize = 64;
 
-pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.4";
+pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.5";
 pub const ARTIFACT_RUNTIME_NODE_VERSION: &str = "22.23.1";
 pub const ARTIFACT_RUNTIME_PYTHON_VERSION: &str = "3.12.13";
 pub const ARTIFACT_RUNTIME_RIPGREP_VERSION: &str = "15.1.0";
@@ -35,7 +35,9 @@ const EXPECTED_NODE_DEPENDENCIES: &[(&str, &str)] = &[
     ("pptxgenjs", "4.0.1"),
 ];
 const EXPECTED_PYTHON_DEPENDENCIES: &[(&str, &str)] = &[
+    ("numpy", "2.5.2"),
     ("openpyxl", "3.1.5"),
+    ("pandas", "3.0.5"),
     ("pdfplumber", "0.11.9"),
     ("pypdf", "6.15.0"),
     ("pypdfium2", "5.12.1"),
@@ -1444,8 +1446,16 @@ mod tests {
                     b"fixture unlicense\n".as_slice(),
                 ),
                 (
+                    "dependencies/python/lib/python3.12/site-packages/numpy-2.5.2.dist-info/METADATA",
+                    b"Name: numpy\nVersion: 2.5.2\n".as_slice(),
+                ),
+                (
                     "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA",
                     b"Name: openpyxl\nVersion: 3.1.5\n".as_slice(),
+                ),
+                (
+                    "dependencies/python/lib/python3.12/site-packages/pandas-3.0.5.dist-info/METADATA",
+                    b"Name: pandas\nVersion: 3.0.5\n".as_slice(),
                 ),
                 (
                     "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA",
@@ -1572,9 +1582,19 @@ mod tests {
                     bootstrap: None,
                     dependencies: vec![
                         DependencyReceipt {
+                            name: "numpy".to_string(),
+                            version: "2.5.2".to_string(),
+                            identity_file: "dependencies/python/lib/python3.12/site-packages/numpy-2.5.2.dist-info/METADATA".to_string(),
+                        },
+                        DependencyReceipt {
                             name: "openpyxl".to_string(),
                             version: "3.1.5".to_string(),
                             identity_file: "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA".to_string(),
+                        },
+                        DependencyReceipt {
+                            name: "pandas".to_string(),
+                            version: "3.0.5".to_string(),
+                            identity_file: "dependencies/python/lib/python3.12/site-packages/pandas-3.0.5.dist-info/METADATA".to_string(),
                         },
                         DependencyReceipt {
                             name: "pdfplumber".to_string(),
@@ -1614,7 +1634,9 @@ mod tests {
                     ],
                     identity_files: vec![
                         "dependencies/python/bin/python3".to_string(),
+                        "dependencies/python/lib/python3.12/site-packages/numpy-2.5.2.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA".to_string(),
+                        "dependencies/python/lib/python3.12/site-packages/pandas-3.0.5.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA".to_string(),
@@ -1701,7 +1723,12 @@ mod tests {
                 .iter()
                 .map(|package| (package.name.as_str(), package.version.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("openpyxl", "3.1.5")]
+            vec![
+                ("numpy", "2.5.2"),
+                ("openpyxl", "3.1.5"),
+                ("pandas", "3.0.5"),
+                ("xlsxwriter", "3.2.9")
+            ]
         );
     }
 
@@ -1888,7 +1915,7 @@ mod tests {
             .preflight(
                 ArtifactRuntimeKind::Python,
                 &[
-                    ArtifactRuntimeRequirement::any("pandas").unwrap(),
+                    ArtifactRuntimeRequirement::any("scipy").unwrap(),
                     ArtifactRuntimeRequirement::exact("openpyxl", "0.0.1").unwrap(),
                 ],
             )

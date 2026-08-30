@@ -983,14 +983,20 @@ artifact-runtime (bundled document artifact runtime)
     (MIT OR GPL-3.0-or-later); the MIT option applies to this distribution.
     Full per-package notices are distributed with the component.
 
-  Python packages (18 packages, legal/python-packages/)
-    Licensed under MIT, BSD-2-Clause/3-Clause, Apache-2.0, and PSF-2.0:
+  Python packages (22 packages; Windows bundles 23 with tzdata,
+  legal/python-packages/)
+    Licensed under MIT, BSD-2-Clause/3-Clause, Apache-2.0, PSF-2.0, 0BSD,
+    Zlib, CC0-1.0, and other permissive terms recorded with each wheel:
     cffi (MIT), charset-normalizer (MIT), cryptography (Apache-2.0 OR
-    BSD-3-Clause), et_xmlfile (MIT), lxml (BSD-3-Clause), openpyxl (MIT),
-    pdfminer.six (MIT), pdfplumber (MIT), pillow (MIT-CMU), pip (MIT),
-    pycparser (BSD-3-Clause), pypdf (BSD-3-Clause), pypdfium2
-    (BSD-3-Clause/Apache-2.0), python-docx (MIT), python-pptx (MIT),
-    reportlab (BSD), typing_extensions (PSF-2.0), xlsxwriter (BSD-2-Clause).
+    BSD-3-Clause), et_xmlfile (MIT), lxml (BSD-3-Clause), numpy
+    (BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0), openpyxl (MIT),
+    pandas (BSD-3-Clause plus bundled third-party notices), pdfminer.six
+    (MIT), pdfplumber (MIT), pillow (MIT-CMU), pip (MIT), pycparser
+    (BSD-3-Clause), pypdf (BSD-3-Clause), pypdfium2
+    (BSD-3-Clause/Apache-2.0), python-dateutil (BSD-3-Clause OR Apache-2.0),
+    python-docx (MIT), python-pptx (MIT), reportlab (BSD), six (MIT),
+    typing_extensions (PSF-2.0), xlsxwriter (BSD-2-Clause), and Windows-only
+    tzdata (Apache-2.0).
     Full per-package licenses are distributed with the component.
 
 The MIT License and the Apache License, Version 2.0 are reproduced earlier

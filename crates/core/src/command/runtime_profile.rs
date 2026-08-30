@@ -241,7 +241,7 @@ fn profile_package_names(
         }
         (AgentCommandRuntimeProfile::Spreadsheets, AgentCommandRuntimeKind::Node) => &["exceljs"],
         (AgentCommandRuntimeProfile::Spreadsheets, AgentCommandRuntimeKind::Python) => {
-            &["openpyxl"]
+            &["numpy", "openpyxl", "pandas", "xlsxwriter"]
         }
         (AgentCommandRuntimeProfile::Presentations, AgentCommandRuntimeKind::Node) => {
             &["pptxgenjs"]
@@ -378,7 +378,7 @@ mod tests {
             (
                 AgentCommandRuntimeProfile::Spreadsheets,
                 AgentCommandRuntimeKind::Python,
-                vec!["openpyxl"],
+                vec!["numpy", "openpyxl", "pandas", "xlsxwriter"],
             ),
             (
                 AgentCommandRuntimeProfile::Presentations,

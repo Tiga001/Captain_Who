@@ -1238,9 +1238,9 @@ mod tests {
                 "spreadsheets",
                 "templates/builder.py",
                 "python",
-                "openpyxl",
-                "3.1.5",
-                11,
+                "numpy",
+                "2.5.2",
+                12,
             ),
         ] {
             let descriptor = catalog
@@ -1542,7 +1542,7 @@ mod tests {
                 if local_id == DOCUMENTS_LOCAL_ID {
                     14
                 } else {
-                    11
+                    12
                 }
             );
 
@@ -2165,7 +2165,7 @@ mod tests {
         assert!(!editor.contains("tempfile"));
         assert!(!editor.contains("os.replace"));
 
-        assert_eq!(capability["contractVersion"], 11);
+        assert_eq!(capability["contractVersion"], 12);
         assert_eq!(
             capability["modes"]["native"]["operations"],
             serde_json::json!(["inspect", "render"])
@@ -2222,15 +2222,13 @@ mod tests {
             false
         );
         assert_eq!(
-            script["entrypoints"][0]["dependencies"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            script["entrypoints"][0]["dependencies"][0]["name"],
-            "openpyxl"
+            script["entrypoints"][0]["dependencies"],
+            serde_json::json!([
+                { "name": "numpy", "version": "2.5.2" },
+                { "name": "openpyxl", "version": "3.1.5" },
+                { "name": "pandas", "version": "3.0.5" },
+                { "name": "xlsxwriter", "version": "3.2.9" }
+            ])
         );
 
         let service = SkillsService::new().with_bundled_source().unwrap();

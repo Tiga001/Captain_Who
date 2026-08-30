@@ -1,9 +1,10 @@
 # Editing an existing workbook
 
 Use the fixed Python Editor for every existing `.xlsx` write. The Editor executes
-normal Python with the pinned `openpyxl` runtime; it is not an AST, JSON, or operation
-DSL. The model may use helper functions, loops, conditions, comprehensions, and pinned
-library imports inside `edit_workbook`.
+normal Python in the pinned managed spreadsheet runtime; `openpyxl` remains the workbook
+authoring and round-trip engine. This is not an AST, JSON, or operation DSL. The model may
+use helper functions, loops, conditions, comprehensions, and pinned library imports inside
+`edit_workbook`.
 
 ## Workflow
 

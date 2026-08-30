@@ -201,7 +201,12 @@ fn backend_binds_managed_builder_profile_and_observation_from_office_output() {
             script: "scripts/build.py",
             profile: AgentCommandRuntimeProfile::Spreadsheets,
             kind: AgentCommandRuntimeKind::Python,
-            packages: &[("openpyxl", "3.1.5")],
+            packages: &[
+                ("numpy", "2.5.2"),
+                ("openpyxl", "3.1.5"),
+                ("pandas", "3.0.5"),
+                ("xlsxwriter", "3.2.9"),
+            ],
         },
         Case {
             command: "node scripts/build.mjs --output 'outputs/product intro.pptx'",
@@ -303,7 +308,12 @@ fn exact_bundled_builders_reject_source_and_python_editors_require_exactly_one_s
         test_binding(
             AgentCommandRuntimeProfile::Spreadsheets,
             AgentCommandRuntimeKind::Python,
-            &[("openpyxl", "3.1.5")],
+            &[
+                ("numpy", "2.5.2"),
+                ("openpyxl", "3.1.5"),
+                ("pandas", "3.0.5"),
+                ("xlsxwriter", "3.2.9"),
+            ],
         ),
     )
     .with_runtime_services(builder_run_id.to_string(), Some(storage.clone()));
@@ -366,7 +376,12 @@ fn exact_bundled_builders_reject_source_and_python_editors_require_exactly_one_s
                 AgentCommandRuntimeKind::Python,
                 match profile {
                     AgentCommandRuntimeProfile::Documents => &[("python-docx", "1.2.0")],
-                    AgentCommandRuntimeProfile::Spreadsheets => &[("openpyxl", "3.1.5")],
+                    AgentCommandRuntimeProfile::Spreadsheets => &[
+                        ("numpy", "2.5.2"),
+                        ("openpyxl", "3.1.5"),
+                        ("pandas", "3.0.5"),
+                        ("xlsxwriter", "3.2.9"),
+                    ],
                     _ => unreachable!(),
                 },
             ),

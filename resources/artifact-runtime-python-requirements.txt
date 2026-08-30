@@ -3,6 +3,41 @@
 # Every package, including transitive dependencies, is pinned and hash-checked.
 # Preparation uses --only-binary=:all: and never resolves an sdist. The native
 # wheel hashes below cover CPython 3.12 on darwin/linux/win32, arm64 and x64.
+# NumPy and pandas use target-specific direct wheel references so a newer host
+# cannot select a different deployment-tag wheel for the same pinned release.
+
+numpy @ https://files.pythonhosted.org/packages/60/2e/b5aee50a1f74ac815cf8331812cb8251e29024025de462e0c047641c614c/numpy-2.5.2-cp312-cp312-macosx_11_0_arm64.whl ; sys_platform == "darwin" and platform_machine == "arm64" \
+    --hash=sha256:4bbd96c833ecc8cc069ce518078fc8c60cb9cbfb0fea5b7a803ad65035596d03
+numpy @ https://files.pythonhosted.org/packages/69/72/dccb0aaf40972777283303919f613964227266d0c13adebb79ac124f1c3e/numpy-2.5.2-cp312-cp312-macosx_10_13_x86_64.whl ; sys_platform == "darwin" and platform_machine == "x86_64" \
+    --hash=sha256:14e373cfc6387177e8409dac3c7159be8eb05cd77096cd7c950268b86f62831c
+numpy @ https://files.pythonhosted.org/packages/e5/21/4947e0e9d6c9fc2e2ff15b8949049ee44f63adb9cacc729ab8793f97e712/numpy-2.5.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl ; sys_platform == "linux" and platform_machine == "aarch64" \
+    --hash=sha256:8ee9c4eeb8454b3660a8b53493563c3e121c2fc94fbd72b848ef814ed7b676a9
+numpy @ https://files.pythonhosted.org/packages/3a/5f/62d28cf019460c7f1394105b4d49d9911a9c444cb77ab0bd95a204c5a6de/numpy-2.5.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl ; sys_platform == "linux" and platform_machine == "x86_64" \
+    --hash=sha256:3cdec01fa790a186d430433fdd4d4ffb70eed6f0eeb4bf05c8dbe2dce0a9bcb8
+numpy @ https://files.pythonhosted.org/packages/14/52/032b97e00461ab0809bbe4c588b035620e5a14b8cdee47ecddefc7b17d33/numpy-2.5.2-cp312-cp312-win_arm64.whl ; sys_platform == "win32" and platform_machine == "ARM64" \
+    --hash=sha256:27650bb0e7140fa3d37b9923b4803645e0b125d190f326eecfd3f4dad8e8ade1
+numpy @ https://files.pythonhosted.org/packages/7f/b9/87fea2769fe1c47c1b5b01d8310772c9d1a85d485de7cf386ef7a3332b02/numpy-2.5.2-cp312-cp312-win_amd64.whl ; sys_platform == "win32" and platform_machine == "AMD64" \
+    --hash=sha256:28ac63476ec7651484215ee7fa15a1f78b57c14621f01e392afe17b9a1390ce4
+
+pandas @ https://files.pythonhosted.org/packages/68/56/fbe81c09195924d8b7b8d4461a20458fe80a6a5ed6b24f0314da684277e1/pandas-3.0.5-cp312-cp312-macosx_11_0_arm64.whl ; sys_platform == "darwin" and platform_machine == "arm64" \
+    --hash=sha256:c2e26bb46934b8a2ca0c3de1d3d606fc5f6746584791b2db264d58cf370e08dc
+pandas @ https://files.pythonhosted.org/packages/1c/54/1dc810ea558d1320b597aa140a514f2fdf1d2ea09c38cf556f13ea712ec9/pandas-3.0.5-cp312-cp312-macosx_10_13_x86_64.whl ; sys_platform == "darwin" and platform_machine == "x86_64" \
+    --hash=sha256:fa290c16964d4963fbfbc358928239cf3bd755b20e988ce944877def2f44471d
+pandas @ https://files.pythonhosted.org/packages/e0/51/fac252f4a913ed5eabf3c11b880a9e8d5a6c10f0b2129d0462212d238b4d/pandas-3.0.5-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl ; sys_platform == "linux" and platform_machine == "aarch64" \
+    --hash=sha256:73fa87b08a7ef706f8aafda39ddaccf2a99047bea62d8c88a0361bcafb2237bc
+pandas @ https://files.pythonhosted.org/packages/12/98/e976540c1addf70442be7842a18cf70884a964abbf69442504f4d2939989/pandas-3.0.5-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl ; sys_platform == "linux" and platform_machine == "x86_64" \
+    --hash=sha256:d373ce03ffd84010ed9839fa73672a9c8256990532e158440c0085db7d914b34
+pandas @ https://files.pythonhosted.org/packages/52/51/dea1e89d6a6796b9c43f85a09b484ee03edb8a4c4842e73e200a8c11301c/pandas-3.0.5-cp312-cp312-win_arm64.whl ; sys_platform == "win32" and platform_machine == "ARM64" \
+    --hash=sha256:25ff585b972a18ef1fe9ffa3ac6544d9950508aa76832e5147640b6022821e49
+pandas @ https://files.pythonhosted.org/packages/70/b5/d2d3e9ae73362ba4229651b0ee1455cf78073a1ce585f6ff693782ce263e/pandas-3.0.5-cp312-cp312-win_amd64.whl ; sys_platform == "win32" and platform_machine == "AMD64" \
+    --hash=sha256:80a611068e8a3ac23f7398c6c14eb46dc974e5cc9997f653e2dcfd1da74edd41
+
+python-dateutil==2.9.0.post0 \
+    --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
+six==1.17.0 \
+    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
+tzdata==2026.3 ; sys_platform == "win32" \
+    --hash=sha256:dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931
 
 openpyxl==3.1.5 \
     --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2

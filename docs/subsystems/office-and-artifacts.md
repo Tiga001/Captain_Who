@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-30
 ---
 
 # Office 自动化与受管 Artifact
@@ -80,7 +80,7 @@ OfficeCLI discovery 支持应用 packaged component、显式配置和受限开�
 
 Runtime bundle 由 component receipt 描述，discovery 校验：bundle/build-input revision、每个文件 size/SHA-256、总文件数/总字节、依赖版本、license/辅助脚本以及最终 runtime fingerprint。
 
-截至核验日 bundle 为 `2026.08.4`，包含 Node `22.23.1`、Python `3.12.13`、ripgrep `15.1.0` 和固定 Node/Python 依赖。准确版本必须以 `artifact_runtime/discovery.rs` 和构建 receipt 为准，不能从本文复制到打包脚本。
+截至核验日 bundle 为 `2026.08.5`，包含 Node `22.23.1`、Python `3.12.13`、ripgrep `15.1.0` 和固定 Node/Python 依赖。受管 spreadsheet Python profile 正式提供 `openpyxl@3.1.5`、`xlsxwriter@3.2.9`、`numpy@2.5.2` 和 `pandas@3.0.5`；Excel authoring 与发布前验证仍由 `openpyxl` 承担。准确版本必须以 `artifact_runtime/discovery.rs` 和构建 receipt 为准，不能从本文复制到打包脚本。
 
 Bundle/Runtime status 的 availability 只有 `available` 或 `unavailable`；版本不兼容、完整性错误和不支持平台通过结构化 `errorCode`/`recovery` 表达，不存在第三个 `incompatible` availability。调用方通过 `ArtifactRuntimeRequirement` 请求能力，再获得受验证 invocation；不得把 `$PATH` 上同名程序默认为受管 runtime，也不得让模型选择任意 executable。
 

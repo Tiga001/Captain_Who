@@ -418,9 +418,19 @@ printf '%s' '{}' > "$MYCOPILOT_PRESENTATION_EDIT_PLAN"
     ];
     for (name, version, path) in [
         (
+            "numpy",
+            "2.5.2",
+            "dependencies/python/lib/python3.12/site-packages/numpy-2.5.2.dist-info/METADATA",
+        ),
+        (
             "openpyxl",
             "3.1.5",
             "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA",
+        ),
+        (
+            "pandas",
+            "3.0.5",
+            "dependencies/python/lib/python3.12/site-packages/pandas-3.0.5.dist-info/METADATA",
         ),
         (
             "pdfplumber",
@@ -502,9 +512,19 @@ printf '%s' '{}' > "$MYCOPILOT_PRESENTATION_EDIT_PLAN"
     ];
     let python_dependencies = vec![
         test_dependency(
+            "numpy",
+            "2.5.2",
+            "dependencies/python/lib/python3.12/site-packages/numpy-2.5.2.dist-info/METADATA",
+        ),
+        test_dependency(
             "openpyxl",
             "3.1.5",
             "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA",
+        ),
+        test_dependency(
+            "pandas",
+            "3.0.5",
+            "dependencies/python/lib/python3.12/site-packages/pandas-3.0.5.dist-info/METADATA",
         ),
         test_dependency(
             "pdfplumber",

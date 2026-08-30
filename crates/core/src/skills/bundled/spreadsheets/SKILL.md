@@ -8,7 +8,7 @@ description: Create, edit, inspect, calculate, and render Microsoft Excel-compat
 Route by intent:
 
 - **Read and verify:** use the flat semantic `office_spreadsheet` tool only for `inspect` and `render`.
-- **Create:** use one saved Managed Builder from `templates/builder.py` with normal Python and the pinned `openpyxl` runtime.
+- **Create:** use one saved Managed Builder from `templates/builder.py` with normal Python and the pinned managed spreadsheet runtime.
 - **Edit an existing `.xlsx`:** inspect first, then use one saved Workbook Editor from
   `templates/editor.py`. It executes normal Python against the frozen source snapshot and publishes
   a distinct Host-gated save-as output.
@@ -21,7 +21,7 @@ Before materializing, choose one dedicated workspace-relative script directory. 
 
 Use `skills_list_resources` to locate `templates/builder.py` for creation or `templates/editor.py` for an existing workbook. Materialize the chosen exact revision once into a new path in that prepared directory. Patch and rerun that same file; do not accumulate replacement scripts.
 
-Both files are genuine Python. The Editor's `edit_workbook` region may contain functions, loops, conditions, comprehensions, and imports from the pinned runtime. Never convert it into an AST, JSON, or artificial operation DSL. Keep the fixed CLI, input resolver, publication code, and edit markers unchanged.
+Both files are genuine Python. The managed Python 3.12.13 spreadsheet runtime provides `openpyxl` 3.1.5, `xlsxwriter` 3.2.9, `numpy` 2.5.2, and `pandas` 3.0.5. `openpyxl` remains the workbook authoring and Host validation engine; the additional libraries do not change the Builder/Editor workflow. The Editor's `edit_workbook` region may contain functions, loops, conditions, comprehensions, and imports from the pinned runtime. Never convert it into an AST, JSON, or artificial operation DSL. Keep the fixed CLI, input resolver, publication code, and edit markers unchanged.
 
 Rely on the Host's automatic syntax preflight after every materialization or patch. Do not issue a model-authored syntax-check command; never request system Python, `python -m`, `python -c`, inline code, heredocs, package installation, or a command combined with `&&`, `|`, or `;`.
 
