@@ -75,9 +75,9 @@ impl ResourceLocator {
         if is_system_alias(value) {
             return Ok(Self::SystemAlias(value.to_string()));
         }
-        if has_unrecognized_uri_scheme(value) {
+        if has_unrecognized_scheme_prefix(value) || has_unrecognized_at_namespace(value) {
             return Err(ResourceLocatorError::new(
-                "资源位置使用了不受支持的 URI scheme。",
+                "资源位置使用了不受支持的虚拟资源前缀。",
             ));
         }
         Ok(Self::Filesystem(value.to_string()))
@@ -132,10 +132,7 @@ fn is_system_alias(value: &str) -> bool {
         })
 }
 
-fn has_unrecognized_uri_scheme(value: &str) -> bool {
-    if !value.contains("://") {
-        return false;
-    }
+fn has_unrecognized_scheme_prefix(value: &str) -> bool {
     // A Windows drive path is a filesystem path, not a URI.
     if cfg!(windows)
         && value.len() >= 3
@@ -145,12 +142,28 @@ fn has_unrecognized_uri_scheme(value: &str) -> bool {
     {
         return false;
     }
-    !Path::new(value).is_absolute()
+    if Path::new(value).is_absolute() {
+        return false;
+    }
+    let Some(separator) = value.find(':') else {
+        return false;
+    };
+    let scheme = &value[..separator];
+    let mut bytes = scheme.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-'))
+}
+
+fn has_unrecognized_at_namespace(value: &str) -> bool {
+    value.starts_with('@')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn classifies_supported_logical_resources() {
@@ -160,6 +173,10 @@ mod tests {
         ));
         assert!(matches!(
             ResourceLocator::parse(&format!("artifact://sha256/{}", "a".repeat(64))).unwrap(),
+            ResourceLocator::GeneratedArtifact(_)
+        ));
+        assert!(matches!(
+            ResourceLocator::parse(&format!("image-artifact://sha256/{}", "b".repeat(64))).unwrap(),
             ResourceLocator::GeneratedArtifact(_)
         ));
         assert!(matches!(
@@ -183,13 +200,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_uri_schemes_and_noncanonical_download_ids() {
+    fn every_declared_virtual_prefix_routes_through_the_logical_resource_boundary() {
+        for value in [
+            "@attachments/a/file.txt".to_string(),
+            format!("artifact://sha256/{}", "a".repeat(64)),
+            format!("image-artifact://sha256/{}", "b".repeat(64)),
+            "skill://package/a/revision/file.txt".to_string(),
+            "browser-download:123e4567-e89b-42d3-a456-426614174000".to_string(),
+            "browser-artifact:123e4567-e89b-42d3-a456-426614174000".to_string(),
+        ] {
+            assert!(
+                ResourceLocator::parse(&value).unwrap().is_virtual(),
+                "{value}"
+            );
+        }
+        for value in ["@downloads/archive.zip", "notes/archive.zip"] {
+            assert!(
+                !ResourceLocator::parse(value).unwrap().is_virtual(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_virtual_prefixes_and_noncanonical_download_ids() {
         assert!(ResourceLocator::parse("unknown://resource").is_err());
+        assert!(ResourceLocator::parse("future-resource:opaque-id").is_err());
+        assert!(ResourceLocator::parse("browser-file:opaque-id").is_err());
+        assert!(ResourceLocator::parse("@future/resource").is_err());
         assert!(ResourceLocator::parse("browser-download:not-an-id").is_err());
         assert!(
             ResourceLocator::parse("browser-download:123E4567-E89B-42D3-A456-426614174000")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn explicit_filesystem_syntax_disambiguates_prefix_like_file_names() {
+        assert!(matches!(
+            ResourceLocator::parse("./future-resource:literal.txt").unwrap(),
+            ResourceLocator::Filesystem(_)
+        ));
+        assert!(matches!(
+            ResourceLocator::parse("./@future/literal.txt").unwrap(),
+            ResourceLocator::Filesystem(_)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_paths_are_not_treated_as_virtual_schemes() {
+        assert!(matches!(
+            ResourceLocator::parse(r"C:\\files\\notes.txt").unwrap(),
+            ResourceLocator::Filesystem(_)
+        ));
     }
 
     #[test]
@@ -202,5 +266,65 @@ mod tests {
             ResourceLocator::parse("notes/archive.zip").unwrap(),
             ResourceLocator::Filesystem(_)
         ));
+    }
+
+    #[test]
+    fn production_locator_consumers_remain_on_the_single_classifier_boundary() {
+        struct CurrentConsumer {
+            file: &'static str,
+            expected_calls: usize,
+            reason: &'static str,
+        }
+
+        let allowed = [
+            CurrentConsumer {
+                file: "file_input.rs",
+                expected_calls: 1,
+                reason: "builds the typed private file-input authority reference",
+            },
+            CurrentConsumer {
+                file: "tools/context.rs",
+                expected_calls: 3,
+                reason: "routes context-search logical resources without granting authority",
+            },
+        ];
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut rust_sources = Vec::new();
+        collect_rust_sources(&source_root, &mut rust_sources);
+        let mut actual = BTreeMap::new();
+        for path in rust_sources {
+            if path.ends_with("resource_locator.rs") {
+                continue;
+            }
+            let source = fs::read_to_string(&path).unwrap();
+            let count = source.matches("ResourceLocator::parse(").count();
+            if count > 0 {
+                let relative = path
+                    .strip_prefix(&source_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                actual.insert(relative, count);
+            }
+        }
+        let expected = allowed
+            .iter()
+            .map(|consumer| {
+                assert!(!consumer.reason.is_empty());
+                (consumer.file.to_string(), consumer.expected_calls)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual, expected);
+    }
+
+    fn collect_rust_sources(directory: &Path, output: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_rust_sources(&path, output);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                output.push(path);
+            }
+        }
     }
 }

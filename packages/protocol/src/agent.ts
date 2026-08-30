@@ -639,6 +639,7 @@ export interface AgentAttachmentLibraryContext {
   conversationId?: string
   projectId?: string | null
   conversationAttachments: AgentAttachmentReference[]
+  /** Other conversations authorized by the current project or the same Agent task tree. */
   projectAttachments: AgentAttachmentReference[]
 }
 

@@ -5,6 +5,7 @@ pub mod agent_delivery_repository;
 pub mod agent_graph_repository;
 pub mod agent_prompt_preferences_repository;
 pub mod agent_template_repository;
+pub(crate) mod agent_tree_resource_scope;
 pub mod attachment_repository;
 pub mod automation_repository;
 pub mod browser_data_repository;

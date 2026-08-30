@@ -2070,7 +2070,7 @@ export const frFRTranslations = {
   'agent.read.fallbackFile': 'fichier',
   'tool.applyPatch': 'appliquer les modifications',
   'tool.attachmentsList': 'lister les pièces jointes du chat',
-  'tool.attachmentsListProject': 'lister les pièces jointes du projet',
+  'tool.attachmentsListProject': 'lister les pièces jointes partagées',
   'tool.conversationHistory': 'rappeler une conversation',
   'tool.gitDiff': 'lire la différence Git',
   'tool.readFile': 'lire le fichier',

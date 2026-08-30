@@ -2023,7 +2023,7 @@ export const jaJPTranslations = {
   'agent.read.fallbackFile': 'ファイル',
   'tool.applyPatch': '変更を適用する',
   'tool.attachmentsList': 'チャットの添付ファイルをリストする',
-  'tool.attachmentsListProject': 'プロジェクトの添付ファイルをリストする',
+  'tool.attachmentsListProject': '共有添付ファイルを一覧表示',
   'tool.conversationHistory': '会話を思い出す',
   'tool.gitDiff': 'Git の差分を読む',
   'tool.readFile': 'ファイルを読み取る',

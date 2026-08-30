@@ -304,16 +304,18 @@ pub(crate) async fn handle_image_generation_artifact_request_with_observer_autho
         content.bytes
     } else {
         let ArtifactReadTarget::Image(candidate) = &target else {
-            // Generic documents are always conversation grants. A guessed content-addressed URI
-            // must never fall through to the legacy generated-image journal.
+            // Generic documents are always exact-conversation or same-Agent-tree grants. A
+            // guessed content-addressed URI must never fall through to the generated-image
+            // journal.
             return image_generation_artifact_error_response(
                 id,
                 ImageGenerationArtifactErrorCodeDto::NotFound,
             );
         };
         // The image store is shared by legacy generation and generic managed-command Artifacts.
-        // Require the legacy publication journal before consulting raw objects so an ungranted
-        // generic sha256 URI cannot cross a conversation boundary merely by being guessed.
+        // Require the independent publication journal before consulting raw objects so an
+        // ungranted generic sha256 URI cannot cross an authorization boundary merely by being
+        // guessed.
         let storage_for_lookup = Arc::clone(&storage);
         let artifact_id = candidate.artifact_id.clone();
         let legacy = match tokio::task::spawn_blocking(move || {
@@ -1121,7 +1123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_command_image_read_requires_the_exact_conversation_grant() {
+    async fn managed_command_image_read_accepts_same_tree_grants_but_keeps_observer_authority() {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("storage.sqlite");
         let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -1186,21 +1188,16 @@ mod tests {
                 },
             )
             .unwrap();
-        for (conversation_id, run_id, call_id) in [
-            ("conversation-unbound", "run-unbound", "call-unbound"),
-            (child_conversation_id.as_str(), "run-child", "call-child"),
-        ] {
-            storage
-                .publish_managed_artifact_file(
-                    &source,
-                    mycopilot_core::storage::service::ManagedArtifactAuthority {
-                        conversation_id,
-                        run_id,
-                        call_id,
-                    },
-                )
-                .unwrap();
-        }
+        storage
+            .publish_managed_artifact_file(
+                &source,
+                mycopilot_core::storage::service::ManagedArtifactAuthority {
+                    conversation_id: "conversation-unbound",
+                    run_id: "run-unbound",
+                    call_id: "call-unbound",
+                },
+            )
+            .unwrap();
         let artifact = json!({
             "artifactId": format!("sha256:{}", published.sha256),
             "uri": published.read_path(),

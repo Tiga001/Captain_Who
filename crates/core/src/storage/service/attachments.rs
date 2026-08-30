@@ -640,19 +640,22 @@ impl StorageService {
             .into_iter()
             .map(agent_attachment_reference)
             .collect::<Vec<_>>();
-        let project_attachments = if let Some(project_id) = project_id {
-            attachment_repository::list_project_attachments_for_library_excluding_conversation(
+        let agent_tree_scope = crate::storage::agent_tree_resource_scope::for_conversation(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        let project_attachments =
+            attachment_repository::list_shared_attachments_for_library_excluding_conversation(
                 &connection,
                 project_id,
+                agent_tree_scope.as_ref(),
                 conversation_id,
             )
             .map_err(storage_error)?
             .into_iter()
             .map(agent_attachment_reference)
-            .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+            .collect::<Vec<_>>();
 
         Ok(AgentAttachmentLibraryContext {
             root_path: Some(self.attachment_root.to_string_lossy().to_string()),

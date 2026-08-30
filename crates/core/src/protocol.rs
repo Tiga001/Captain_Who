@@ -1014,6 +1014,8 @@ pub struct AgentAttachmentLibraryContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     pub conversation_attachments: Vec<AgentAttachmentReference>,
+    /// Other-conversation attachments authorized by the current project or the same trusted
+    /// Agent task tree. This private Host context never accepts root identity from the model.
     pub project_attachments: Vec<AgentAttachmentReference>,
 }
 

@@ -54,6 +54,98 @@ fn input_attachments_are_persisted_and_rehydrated() {
 }
 
 #[test]
+fn projectless_agent_tree_shares_attachments_without_leaking_to_other_conversations() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    for conversation_id in [
+        "conversation-root",
+        "conversation-child",
+        "conversation-sibling",
+        "conversation-other",
+    ] {
+        let mut record = conversation(conversation_id, None, "unused-message");
+        record.messages.clear();
+        service.save_conversation(record).unwrap();
+    }
+    bind_agent_root(&service, "agent-root", "conversation-root");
+    bind_agent_child(
+        &service,
+        "agent-child",
+        "conversation-child",
+        "agent-root",
+        "conversation-root",
+        "child",
+    );
+    bind_agent_child(
+        &service,
+        "agent-sibling",
+        "conversation-sibling",
+        "agent-root",
+        "conversation-root",
+        "sibling",
+    );
+
+    service
+        .save_input_attachments(
+            "conversation-root",
+            "message-root",
+            None,
+            &[input_attachment(
+                "attachment-root",
+                AgentInputAttachmentKind::File,
+                "root.txt",
+                Some("text/plain"),
+                b"root",
+            )],
+            10,
+        )
+        .unwrap();
+    service
+        .save_input_attachments(
+            "conversation-child",
+            "message-child",
+            None,
+            &[input_attachment(
+                "attachment-child",
+                AgentInputAttachmentKind::File,
+                "child.txt",
+                Some("text/plain"),
+                b"child",
+            )],
+            11,
+        )
+        .unwrap();
+
+    let child_library = service
+        .build_attachment_library_context("conversation-child", None)
+        .unwrap();
+    assert_eq!(child_library.project_attachments.len(), 1);
+    assert_eq!(child_library.project_attachments[0].id, "attachment-root");
+
+    let sibling_library = service
+        .build_attachment_library_context("conversation-sibling", None)
+        .unwrap();
+    assert_eq!(sibling_library.project_attachments.len(), 2);
+    assert_eq!(
+        sibling_library.project_attachments[0].id,
+        "attachment-child"
+    );
+    assert_eq!(sibling_library.project_attachments[1].id, "attachment-root");
+
+    let root_library = service
+        .build_attachment_library_context("conversation-root", None)
+        .unwrap();
+    assert_eq!(root_library.project_attachments.len(), 1);
+    assert_eq!(root_library.project_attachments[0].id, "attachment-child");
+
+    assert!(service
+        .build_attachment_library_context("conversation-other", None)
+        .unwrap()
+        .project_attachments
+        .is_empty());
+}
+
+#[test]
 fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

@@ -213,7 +213,7 @@ fn attachment_policy_section() -> String {
     "## 附件规则\n\
     - 视觉能力只以最新 World State 的 `model.selection.capabilities.imageInput` 为准：为 true 时可理解当前请求直接提供的图片；读取路径或历史附件中的图片仍须使用本次实际可用的读图工具。为 false 或缺失时不要尝试读图；如本轮提供 Agent 协作目录，可按目录中权威的 imageInput 能力把可访问图片的视觉任务委派给支持图像输入的子 Agent，不得按模型名称猜测；没有合格 selector 时再请用户切换到支持图片输入的模型。\n\
     - 附件库是否可用及当前数量由可信后端 World State 的 `attachments.library_summary` 提供。@attachments 是后端虚拟路径，不是 workspace 路径；不要臆造真实本地路径。\n\
-    - 当前聊天附件使用 attachments_list，同项目其他聊天附件使用 attachments_list_project。获取 readPath 后，只使用当前模型请求实际提供的匹配读取工具。\n\
+    - 当前聊天附件使用 attachments_list；同项目其他聊天或同一 Agent 任务树的父子任务附件使用 attachments_list_project。获取 readPath 后，只使用当前模型请求实际提供的匹配读取工具。\n\
     - 图片和普通文本使用对应读取工具；PDF 必须先激活 `bundled:application:pdf`，再把准确 readPath 绑定到 run_command.inputs，并将命令返回的图片 readPath 原样交给 read_image；Word、电子表格或演示文稿附件必须先激活对应 Skill，再使用激活后实际提供的读取能力。"
         .to_string()
 }
@@ -258,7 +258,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push(rule);
     }
     if has_tool(tool_definitions, "attachments_list") {
-        rules.push("- 需要当前聊天的历史附件时先用 attachments_list；需要同项目其他聊天的附件时用 attachments_list_project。取得 readPath 后再调用对应 read_* 工具。".to_string());
+        rules.push("- 需要当前聊天的历史附件时先用 attachments_list；需要同项目其他聊天或同一 Agent 任务树的父子任务附件时用 attachments_list_project。取得 readPath 后再调用对应 read_* 工具。".to_string());
     }
     if has_any_tool(
         tool_definitions,

@@ -154,7 +154,7 @@ impl AgentFileInputExecutionContext {
     ///
     /// This value is assembled by the Host, never accepted from model input. Legacy
     /// image-generation Artifacts remain readable through their existing journal; generic
-    /// managed-command Artifacts require a matching conversation grant.
+    /// managed-command Artifacts require an exact-conversation or same-Agent-tree grant.
     pub fn with_conversation_id(mut self, conversation_id: Option<&str>) -> Self {
         self.conversation_id = conversation_id.map(ToString::to_string);
         self
@@ -1795,6 +1795,29 @@ mod tests {
             patch: AgentPatchPermission::RequireApproval,
             ..AgentPermissions::default()
         }
+    }
+
+    #[test]
+    fn undeclared_virtual_locator_never_enters_the_file_input_tree() {
+        let context = AgentFileInputExecutionContext::default();
+        for model_path in [
+            "future-resource:opaque-id",
+            "future-resource://opaque-id",
+            "@future/resource",
+            "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+        ] {
+            let error = agent_file_input_ref_from_model_path(&context, model_path).unwrap_err();
+            assert_eq!(error.code(), ERROR_INVALID_REQUEST, "{model_path}");
+        }
+        assert!(matches!(
+            agent_file_input_ref_from_model_path(&context, "./future-resource:literal.txt")
+                .unwrap(),
+            AgentFileInputRef::Workspace { .. }
+        ));
+        assert!(matches!(
+            agent_file_input_ref_from_model_path(&context, "./@future/literal.txt").unwrap(),
+            AgentFileInputRef::Workspace { .. }
+        ));
     }
 
     fn attachment_context(

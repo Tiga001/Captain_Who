@@ -1965,7 +1965,7 @@ export const koKRTranslations = {
   'agent.read.fallbackFile': '파일',
   'tool.applyPatch': '변경 사항 적용',
   'tool.attachmentsList': '채팅 첨부 파일 나열',
-  'tool.attachmentsListProject': '프로젝트 첨부 파일 나열',
+  'tool.attachmentsListProject': '공유 첨부 파일 나열',
   'tool.conversationHistory': '대화를 회상하다',
   'tool.gitDiff': 'Git diff 읽기',
   'tool.readFile': '파일 읽기',

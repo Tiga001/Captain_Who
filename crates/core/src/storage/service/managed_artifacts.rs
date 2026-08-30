@@ -33,8 +33,9 @@ pub struct PublishedManagedArtifact {
     pub absolute_path: PathBuf,
 }
 
-/// Verified bytes and immutable presentation metadata for one conversation-authorized generic
-/// Artifact. Physical storage paths intentionally never cross this service boundary.
+/// Verified bytes and immutable presentation metadata for one generic Artifact authorized by an
+/// exact conversation or its trusted Agent task tree. Physical storage paths intentionally never
+/// cross this service boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedManagedArtifactContent {
     pub kind: ManagedArtifactKind,
@@ -207,7 +208,8 @@ impl StorageService {
     }
 
     /// Reads a generic Artifact only when the current conversation owns an explicit publication
-    /// grant. Legacy image-generation Artifacts use their existing store and are not handled here.
+    /// grant or belongs to that grant owner's Agent task tree. Independent image-generation
+    /// Artifacts use their existing store and are not handled here.
     pub fn read_authorized_managed_artifact(
         &self,
         artifact_id: &str,

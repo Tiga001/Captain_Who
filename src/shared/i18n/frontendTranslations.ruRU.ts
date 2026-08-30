@@ -2022,7 +2022,7 @@ export const ruRUTranslations = {
   'agent.read.fallbackFile': 'файл',
   'tool.applyPatch': 'применить изменения',
   'tool.attachmentsList': 'список вложений чата',
-  'tool.attachmentsListProject': 'список вложений проекта',
+  'tool.attachmentsListProject': 'список общих вложений',
   'tool.conversationHistory': 'вспомнить разговор',
   'tool.gitDiff': 'прочитать разницу в Git',
   'tool.readFile': 'прочитать файл',

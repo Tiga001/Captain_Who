@@ -1869,7 +1869,7 @@ export const zhCNTranslations = {
   'agent.read.fallbackFile': '文件',
   'tool.applyPatch': '应用修改',
   'tool.attachmentsList': '列出对话附件',
-  'tool.attachmentsListProject': '列出项目附件',
+  'tool.attachmentsListProject': '列出共享附件',
   'tool.conversationHistory': '回忆对话',
   'tool.gitDiff': '读取 Git diff',
   'tool.readFile': '读取文件',

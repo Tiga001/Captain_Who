@@ -1856,7 +1856,7 @@ export const zhTWTranslations = {
   'agent.read.fallbackFile': '文件',
   'tool.applyPatch': '應用修改',
   'tool.attachmentsList': '列出對話附件',
-  'tool.attachmentsListProject': '列出項目附件',
+  'tool.attachmentsListProject': '列出共享附件',
   'tool.conversationHistory': '回憶對話',
   'tool.gitDiff': '讀取 Git diff',
   'tool.readFile': '讀取文件',

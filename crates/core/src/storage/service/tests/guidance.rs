@@ -180,6 +180,22 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
             "assistant-guidance-attachment",
         ))
         .unwrap();
+    let mut child = conversation("conversation-guidance-child", None, "unused-message");
+    child.messages.clear();
+    service.save_conversation(child).unwrap();
+    bind_agent_root(
+        &service,
+        "agent-guidance-root",
+        "conversation-guidance-attachment",
+    );
+    bind_agent_child(
+        &service,
+        "agent-guidance-child",
+        "conversation-guidance-child",
+        "agent-guidance-root",
+        "conversation-guidance-attachment",
+        "child",
+    );
     let attachment = AgentInputAttachment {
         id: "attachment-guidance-owned".to_string(),
         kind: AgentInputAttachmentKind::File,
@@ -221,6 +237,11 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
         .build_attachment_library_context("conversation-guidance-attachment", None)
         .unwrap()
         .conversation_attachments
+        .is_empty());
+    assert!(service
+        .build_attachment_library_context("conversation-guidance-child", None)
+        .unwrap()
+        .project_attachments
         .is_empty());
     let admitted = service
         .build_attachment_library_context_for_active_run(
@@ -272,6 +293,14 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
             .conversation_attachments
             .len(),
         1
+    );
+    let child_library = service
+        .build_attachment_library_context("conversation-guidance-child", None)
+        .unwrap();
+    assert_eq!(child_library.project_attachments.len(), 1);
+    assert_eq!(
+        child_library.project_attachments[0].id,
+        "attachment-guidance-owned"
     );
 }
 

@@ -55,6 +55,52 @@ impl Drop for StorageFixture {
     }
 }
 
+fn bind_agent_root(service: &StorageService, agent_id: &str, conversation_id: &str) {
+    service
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: agent_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            creation_request_id: format!("create-{agent_id}"),
+            task_name: agent_id.to_string(),
+        })
+        .unwrap();
+}
+
+fn bind_agent_child(
+    service: &StorageService,
+    agent_id: &str,
+    conversation_id: &str,
+    root_agent_id: &str,
+    root_conversation_id: &str,
+    task_name: &str,
+) {
+    let connection = service.state.connection().unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_nodes (
+                agent_id, schema_version, root_agent_id, root_conversation_id,
+                parent_agent_id, conversation_id, project_id, creation_request_id,
+                task_name, task_path,
+                model_config_id_snapshot, model_display_name_snapshot,
+                model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                lifecycle, revision, created_at, updated_at
+             ) VALUES (?1, 1, ?3, ?4, ?3, ?2, NULL, ?1, ?5, '/root/' || ?5,
+                       'model-1', 'Model 1', 0, 32000,
+                       'settings-1', 'connection-1', 'provider-protocol-v1', 'explicit',
+                       'active', 1, 2, 2)",
+            rusqlite::params![
+                agent_id,
+                conversation_id,
+                root_agent_id,
+                root_conversation_id,
+                task_name
+            ],
+        )
+        .unwrap();
+}
+
 fn conversation(id: &str, project_id: Option<&str>, message_id: &str) -> ChatConversationRecord {
     ChatConversationRecord {
         id: id.to_string(),

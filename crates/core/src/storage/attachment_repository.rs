@@ -1,4 +1,4 @@
-use crate::storage::models::AttachmentRecord;
+use crate::storage::{agent_tree_resource_scope::AgentTreeResourceScope, models::AttachmentRecord};
 use rusqlite::{params, Connection};
 
 pub fn save_attachment(
@@ -212,9 +212,10 @@ pub fn list_conversation_attachments_for_library(
     attachments
 }
 
-pub fn list_project_attachments_for_library_excluding_conversation(
+pub(crate) fn list_shared_attachments_for_library_excluding_conversation(
     connection: &Connection,
-    project_id: &str,
+    project_id: Option<&str>,
+    agent_tree_scope: Option<&AgentTreeResourceScope>,
     excluded_conversation_id: &str,
 ) -> rusqlite::Result<Vec<AttachmentRecord>> {
     let mut statement = connection.prepare(
@@ -231,8 +232,20 @@ pub fn list_project_attachments_for_library_excluding_conversation(
             attachment.storage_rel_path,
             attachment.created_at
         FROM attachments AS attachment
-        WHERE attachment.project_id = ?1
-          AND attachment.conversation_id != ?2
+        WHERE attachment.conversation_id != ?1
+          AND (
+            (?2 IS NOT NULL AND attachment.project_id = ?2)
+            OR (
+              ?3 IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                FROM agent_nodes AS owner
+                WHERE owner.conversation_id = attachment.conversation_id
+                  AND owner.root_agent_id = ?3
+                  AND owner.root_conversation_id = ?4
+              )
+            )
+          )
           AND NOT EXISTS (
             SELECT 1
             FROM conversation_turn_rewrites AS rewrite
@@ -262,7 +275,12 @@ pub fn list_project_attachments_for_library_excluding_conversation(
     )?;
     let attachments = statement
         .query_map(
-            params![project_id, excluded_conversation_id],
+            params![
+                excluded_conversation_id,
+                project_id,
+                agent_tree_scope.map(|scope| scope.root_agent_id.as_str()),
+                agent_tree_scope.map(|scope| scope.root_conversation_id.as_str()),
+            ],
             attachment_from_row,
         )?
         .collect();

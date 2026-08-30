@@ -2085,7 +2085,7 @@ export const itITTranslations = {
   'agent.read.fallbackFile': 'file',
   'tool.applyPatch': 'applicare le modifiche',
   'tool.attachmentsList': 'elenca gli allegati della chat',
-  'tool.attachmentsListProject': 'elencare gli allegati del progetto',
+  'tool.attachmentsListProject': 'elencare gli allegati condivisi',
   'tool.conversationHistory': 'ricordare la conversazione',
   'tool.gitDiff': 'leggi Git diff',
   'tool.readFile': 'leggere il file',

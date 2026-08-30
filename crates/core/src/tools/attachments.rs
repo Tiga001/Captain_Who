@@ -67,7 +67,7 @@ impl AgentTool for AttachmentsListProjectTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list_project".to_string(),
-            description: "List files and images attached to other conversations in the current project, excluding the current conversation. Use this to discover historical project attachments from other chats. Returns exact @attachments read paths: pass images or text to read_image/read_file; for PDF activate bundled:application:pdf and bind the path through run_command.inputs; for Office files activate the matching Skill and use its available reader.".to_string(),
+            description: "List files and images attached to other conversations that are authorized by the current project or the same Agent task tree, excluding the current conversation. Use this to discover shared historical or parent/child Agent attachments. Returns exact @attachments read paths: pass images or text to read_image/read_file; for PDF activate bundled:application:pdf and bind the path through run_command.inputs; for Office files activate the matching Skill and use its available reader.".to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -79,7 +79,7 @@ impl AgentTool for AttachmentsListProjectTool {
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
         list_attachments(
             "project_other_conversations",
-            "Attachments from other conversations in the same project; current chat attachments are intentionally excluded.",
+            "Attachments from other authorized conversations in the same project or Agent task tree; current chat attachments are intentionally excluded.",
             context,
             context.project_attachments(),
             args,
@@ -476,6 +476,51 @@ mod tests {
         )
         .unwrap();
         assert_page(&second, 3, 1, 2, &["attachment-12"]);
+    }
+
+    #[test]
+    fn projectless_agent_tree_attachment_page_keeps_the_host_authorized_scope() {
+        let mut shared = attachment(
+            20,
+            AgentInputAttachmentKind::File,
+            "conversation-agent-parent",
+        );
+        shared.project_id = None;
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: Some("conversation-agent-child".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: Some(AgentAttachmentLibraryContext {
+                root_path: Some("/attachment-library".to_string()),
+                conversation_id: Some("conversation-agent-child".to_string()),
+                project_id: None,
+                conversation_attachments: Vec::new(),
+                project_attachments: vec![shared],
+            }),
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::Denied,
+                command: AgentCommandPermission::RequireApproval,
+                command_safety: AgentCommandSafetyPolicy::Guarded,
+                patch: AgentPatchPermission::RequireApproval,
+                builtin_execution: Default::default(),
+            },
+        }))
+        .with_tool_call_id("attachments-agent-tree-test-call".to_string())
+        .with_text_output_budget(crate::context::ContextTextBudget::heuristic(
+            crate::context::MODEL_TOOL_RESULT_MAX_TOKENS,
+        ));
+
+        let page = list_attachments(
+            "project_other_conversations",
+            "shared",
+            &context,
+            context.project_attachments(),
+            json!({}),
+        )
+        .unwrap();
+        assert_page(&page, 1, 1, 0, &["attachment-20"]);
     }
 
     #[test]

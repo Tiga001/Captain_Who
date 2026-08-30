@@ -98,8 +98,9 @@ impl StorageService {
         browser_download_repository::clear(&connection).map_err(storage_error)
     }
 
-    /// Returns a record only when the current conversation owns the Agent download, shares its
-    /// project, or the caller explicitly permits one user-created manual download capability.
+    /// Returns a record only when the current conversation owns the Agent download, belongs to
+    /// the same Agent task tree, shares its project, or the caller explicitly permits one
+    /// user-created manual download capability.
     pub fn authorize_browser_download_input(
         &self,
         download_id: &str,
@@ -121,6 +122,17 @@ impl StorageService {
                 };
                 if record.conversation_id.as_deref() == Some(conversation_id) {
                     return Ok(Some(record));
+                }
+                if let Some(owner_conversation_id) = record.conversation_id.as_deref() {
+                    if crate::storage::agent_tree_resource_scope::conversations_share_tree(
+                        &connection,
+                        owner_conversation_id,
+                        conversation_id,
+                    )
+                    .map_err(storage_error)?
+                    {
+                        return Ok(Some(record));
+                    }
                 }
                 let current_project = browser_download_repository::conversation_project_id(
                     &connection,
@@ -254,7 +266,7 @@ mod tests {
         ChatConversationRecord {
             id: id.to_string(),
             project_id: project_id.map(ToString::to_string),
-            model_id: None,
+            model_id: Some("model-1".to_string()),
             title: id.to_string(),
             messages: Vec::new(),
             created_at: 1,
@@ -433,5 +445,108 @@ mod tests {
         assert_eq!(service.clear_browser_download_history().unwrap(), 2);
         assert!(service.load_browser_download(agent_id).unwrap().is_none());
         assert_eq!(fs::read(&manual_path).unwrap(), manual_bytes);
+    }
+
+    #[test]
+    fn projectless_agent_download_is_shared_only_inside_its_agent_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        for conversation_id in [
+            "conversation-root",
+            "conversation-child",
+            "conversation-sibling",
+            "conversation-other-root",
+            "conversation-ordinary",
+        ] {
+            service
+                .save_conversation(conversation(conversation_id, None))
+                .unwrap();
+        }
+        service
+            .ensure_root_agent(&crate::EnsureRootAgentInput {
+                agent_id: "agent-root".to_string(),
+                conversation_id: "conversation-root".to_string(),
+                creation_request_id: "create-root".to_string(),
+                task_name: "root".to_string(),
+            })
+            .unwrap();
+        service
+            .ensure_root_agent(&crate::EnsureRootAgentInput {
+                agent_id: "agent-other-root".to_string(),
+                conversation_id: "conversation-other-root".to_string(),
+                creation_request_id: "create-other-root".to_string(),
+                task_name: "other-root".to_string(),
+            })
+            .unwrap();
+        {
+            let connection = service.state.connection().unwrap();
+            for (agent_id, conversation_id, task_name) in [
+                ("agent-child", "conversation-child", "child"),
+                ("agent-sibling", "conversation-sibling", "sibling"),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO agent_nodes (
+                            agent_id, schema_version, root_agent_id, root_conversation_id,
+                            parent_agent_id, conversation_id, project_id, creation_request_id,
+                            task_name, task_path,
+                            model_config_id_snapshot, model_display_name_snapshot,
+                            model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                            model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                            provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                            lifecycle, revision, created_at, updated_at
+                         ) VALUES (?1, 1, 'agent-root', 'conversation-root', 'agent-root', ?2,
+                                   NULL, ?1, ?3, '/root/' || ?3,
+                                   'model-1', 'Model 1', 0, 32000,
+                                   'settings-1', 'connection-1', 'provider-protocol-v1', 'explicit',
+                                   'active', 1, 2, 2)",
+                        rusqlite::params![agent_id, conversation_id, task_name],
+                    )
+                    .unwrap();
+            }
+        }
+
+        let bytes = b"tree download";
+        let path = root.path().join("tree.txt");
+        fs::write(&path, bytes).unwrap();
+        let download_id = "browser-download:123e4567-e89b-42d3-a456-426614174003";
+        service
+            .register_browser_download(BrowserDownloadRegistration {
+                schema_version: BROWSER_DOWNLOAD_SCHEMA_VERSION,
+                download_id: download_id.to_string(),
+                source: BrowserDownloadSource::Agent,
+                display_name: "tree.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: bytes.len() as u64,
+                sha256: digest(bytes),
+                absolute_path: path.to_string_lossy().into_owned(),
+                source_origin: Some("https://example.test/tree".to_string()),
+                conversation_id: Some("conversation-child".to_string()),
+                run_id: Some("run-child".to_string()),
+                call_id: Some("call-child".to_string()),
+                created_at: 2,
+            })
+            .unwrap();
+
+        for conversation_id in [
+            "conversation-child",
+            "conversation-root",
+            "conversation-sibling",
+        ] {
+            assert!(service
+                .authorize_browser_download_input(download_id, Some(conversation_id), false)
+                .unwrap()
+                .is_some());
+        }
+        for conversation_id in ["conversation-other-root", "conversation-ordinary"] {
+            assert!(service
+                .authorize_browser_download_input(download_id, Some(conversation_id), false)
+                .unwrap()
+                .is_none());
+        }
+        assert!(service
+            .authorize_browser_download_input(download_id, None, false)
+            .unwrap()
+            .is_none());
     }
 }

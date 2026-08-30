@@ -114,7 +114,7 @@ pub fn find_authorized(
     artifact_id: &str,
     conversation_id: &str,
 ) -> rusqlite::Result<Option<ManagedArtifactRecord>> {
-    let authorized = connection.query_row(
+    let directly_authorized = connection.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM managed_artifact_grants
             WHERE artifact_id = ?1 AND conversation_id = ?2
@@ -122,10 +122,36 @@ pub fn find_authorized(
         params![artifact_id, conversation_id],
         |row| row.get::<_, bool>(0),
     )?;
-    if authorized {
-        query(connection, artifact_id)
-    } else {
+    if directly_authorized {
+        return query(connection, artifact_id);
+    }
+
+    let Some(scope) =
+        crate::storage::agent_tree_resource_scope::for_conversation(connection, conversation_id)?
+    else {
+        return Ok(None);
+    };
+    let tree_authorized = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM managed_artifact_grants AS grant_record
+            INNER JOIN agent_nodes AS owner
+                ON owner.conversation_id = grant_record.conversation_id
+            WHERE grant_record.artifact_id = ?1
+              AND owner.root_agent_id = ?2
+              AND owner.root_conversation_id = ?3
+         )",
+        params![
+            artifact_id,
+            &scope.root_agent_id,
+            &scope.root_conversation_id
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !tree_authorized {
         Ok(None)
+    } else {
+        query(connection, artifact_id)
     }
 }
 
@@ -219,6 +245,69 @@ mod tests {
         }
     }
 
+    fn insert_conversation(connection: &Connection, conversation_id: &str) {
+        connection
+            .execute(
+                "INSERT INTO conversations (id, model_id, title, created_at, updated_at)
+                 VALUES (?1, 'model-1', ?1, 1, 1)",
+                [conversation_id],
+            )
+            .unwrap();
+    }
+
+    fn insert_root(
+        connection: &Connection,
+        agent_id: &str,
+        conversation_id: &str,
+        request_id: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO agent_nodes (
+                    agent_id, schema_version, root_agent_id, root_conversation_id,
+                    parent_agent_id, conversation_id, project_id, creation_request_id,
+                    task_name, task_path, lifecycle, revision, created_at, updated_at
+                 ) VALUES (?1, 1, ?1, ?2, NULL, ?2, NULL, ?3, ?1, '/root',
+                           'active', 1, 1, 1)",
+                params![agent_id, conversation_id, request_id],
+            )
+            .unwrap();
+    }
+
+    fn insert_child(
+        connection: &Connection,
+        agent_id: &str,
+        conversation_id: &str,
+        root_agent_id: &str,
+        root_conversation_id: &str,
+        task_name: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO agent_nodes (
+                    agent_id, schema_version, root_agent_id, root_conversation_id,
+                    parent_agent_id, conversation_id, project_id, creation_request_id,
+                    task_name, task_path,
+                    model_config_id_snapshot, model_display_name_snapshot,
+                    model_supports_image_snapshot, model_context_window_tokens_snapshot,
+                    model_settings_revision_snapshot, provider_connection_revision_snapshot,
+                    provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                    lifecycle, revision, created_at, updated_at
+                 ) VALUES (?1, 1, ?3, ?4, ?3, ?2, NULL, ?1, ?5, '/root/' || ?5,
+                           'model-1', 'Model 1', 0, 32000,
+                           'settings-1', 'connection-1', 'provider-protocol-v1', 'explicit',
+                           'active', 1, 2, 2)",
+                params![
+                    agent_id,
+                    conversation_id,
+                    root_agent_id,
+                    root_conversation_id,
+                    task_name
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn registration_is_idempotent_but_rejects_conflicting_identity() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -255,6 +344,105 @@ mod tests {
             find_authorized(&connection, &record.artifact_id, "conversation-2")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn authorization_expands_bidirectionally_only_inside_one_agent_tree() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        for conversation_id in [
+            "conversation-root",
+            "conversation-child",
+            "conversation-sibling",
+            "conversation-other-root",
+            "conversation-ordinary",
+        ] {
+            insert_conversation(&connection, conversation_id);
+        }
+        insert_root(
+            &connection,
+            "agent-root",
+            "conversation-root",
+            "request-root",
+        );
+        insert_child(
+            &connection,
+            "agent-child",
+            "conversation-child",
+            "agent-root",
+            "conversation-root",
+            "child",
+        );
+        insert_child(
+            &connection,
+            "agent-sibling",
+            "conversation-sibling",
+            "agent-root",
+            "conversation-root",
+            "sibling",
+        );
+        insert_root(
+            &connection,
+            "agent-other-root",
+            "conversation-other-root",
+            "request-other-root",
+        );
+
+        let artifact = record();
+        register(&mut connection, &artifact).unwrap();
+        grant(
+            &mut connection,
+            &ManagedArtifactGrant {
+                artifact_id: artifact.artifact_id.clone(),
+                conversation_id: "conversation-root".to_string(),
+                run_id: "run-root".to_string(),
+                call_id: "call-root".to_string(),
+                created_at: 2,
+            },
+        )
+        .unwrap();
+
+        for conversation_id in [
+            "conversation-root",
+            "conversation-child",
+            "conversation-sibling",
+        ] {
+            assert!(
+                find_authorized(&connection, &artifact.artifact_id, conversation_id)
+                    .unwrap()
+                    .is_some(),
+                "same-tree consumer {conversation_id} should be authorized"
+            );
+        }
+        for conversation_id in ["conversation-other-root", "conversation-ordinary"] {
+            assert!(
+                find_authorized(&connection, &artifact.artifact_id, conversation_id)
+                    .unwrap()
+                    .is_none(),
+                "unrelated consumer {conversation_id} must remain isolated"
+            );
+        }
+
+        connection
+            .execute("DELETE FROM managed_artifact_grants", [])
+            .unwrap();
+        grant(
+            &mut connection,
+            &ManagedArtifactGrant {
+                artifact_id: artifact.artifact_id.clone(),
+                conversation_id: "conversation-child".to_string(),
+                run_id: "run-child".to_string(),
+                call_id: "call-child".to_string(),
+                created_at: 3,
+            },
+        )
+        .unwrap();
+        assert!(
+            find_authorized(&connection, &artifact.artifact_id, "conversation-root")
+                .unwrap()
+                .is_some(),
+            "a child publication must also be readable by its trusted root"
         );
     }
 }

@@ -1977,7 +1977,7 @@ export const enUSTranslations = {
   'agent.read.fallbackFile': 'file',
   'tool.applyPatch': 'apply changes',
   'tool.attachmentsList': 'list chat attachments',
-  'tool.attachmentsListProject': 'list project attachments',
+  'tool.attachmentsListProject': 'list shared attachments',
   'tool.conversationHistory': 'recall conversation',
   'tool.gitDiff': 'read Git diff',
   'tool.readFile': 'read file',
