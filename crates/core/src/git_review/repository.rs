@@ -4,8 +4,22 @@ use super::*;
 pub(super) struct RepositoryContext {
     pub(super) root: PathBuf,
     pub(super) git_dir: PathBuf,
+    pub(super) project_prefix: String,
     pub(super) pathspec: String,
     pub(super) repository_id: String,
+}
+
+impl RepositoryContext {
+    pub(super) fn project_relative_path(&self, repository_path: &str) -> Option<String> {
+        let path = Path::new(repository_path);
+        let relative = if self.project_prefix.is_empty() {
+            path
+        } else {
+            path.strip_prefix(Path::new(&self.project_prefix)).ok()?
+        };
+        let relative = path_to_git_string(relative)?;
+        (!relative.is_empty()).then_some(relative)
+    }
 }
 
 #[derive(Debug)]
@@ -105,6 +119,7 @@ pub(super) fn resolve_repository(
     Ok(RepositoryContext {
         root,
         git_dir,
+        project_prefix: relative_path,
         pathspec,
         repository_id: content_revision(identity.as_bytes()),
     })

@@ -332,7 +332,7 @@ impl GitReviewService {
         let mut snapshot_files = HashMap::with_capacity(files.len());
         let public_files = files
             .into_iter()
-            .map(|file| {
+            .map(|file| -> Result<GitReviewFile, String> {
                 let id_material = format!(
                     "{}\0{}\0{}",
                     scope.as_str(),
@@ -354,15 +354,22 @@ impl GitReviewService {
                             .map(|path| file_stamp(&repository.root.join(path))),
                     },
                 );
-                GitReviewFile {
+                let path = repository.project_relative_path(&file.path).ok_or_else(|| {
+                    "Git returned a file outside the selected project.".to_string()
+                })?;
+                let previous_path = file
+                    .previous_path
+                    .as_deref()
+                    .and_then(|path| repository.project_relative_path(path));
+                Ok(GitReviewFile {
                     id,
                     stats: file_stats.get(&file.path).cloned(),
-                    path: file.path,
-                    previous_path: file.previous_path,
+                    path,
+                    previous_path,
                     status: file.status,
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         self.snapshots
             .lock()

@@ -18,7 +18,10 @@ const translations: Record<string, string> = {
   'files.pdf.nextPage': '下一页',
   'files.pdf.previousPage': '上一页',
   'files.preview.loading': '正在加载完整差异',
-  'files.preview.error': '无法加载完整差异'
+  'files.preview.error': '无法加载完整差异',
+  'gitReview.diff.invalid': '差异格式无效',
+  'gitReview.diff.noHunks': '没有可显示的差异',
+  'gitReview.diff.tooLarge': '差异过大'
 }
 
 const fileChangeRpc = vi.hoisted(() => ({ getDiff: vi.fn() }))
@@ -76,12 +79,40 @@ describe('AgentApprovalDialog FileChange approval', () => {
       />
     )
 
-    await expect.element(screen.getByText(/-old/)).toBeVisible()
+    await expect.element(screen.getByText('old')).toBeVisible()
+    await expect.element(screen.getByText('new')).toBeVisible()
     expect(fileChangeRpc.getDiff).not.toHaveBeenCalled()
+    expect(screen.container.querySelectorAll('.git-review__split-pane')).toHaveLength(2)
+    expect(screen.container.querySelector('.agent-approval-dialog__file-change-diff')).toBeNull()
+    const diff = screen.container.querySelector<HTMLElement>(
+      '.agent-approval-dialog__file-change-renderer'
+    )
+    expect(diff).not.toBeNull()
+    expect(window.getComputedStyle(diff!).height).toBe('95px')
+    expect(window.getComputedStyle(diff!).overflowY).toBe('auto')
     const approve = screen.getByRole('button', { name: /^1\s*批准$/ })
     await expect.element(approve).toBeEnabled()
     await approve.click()
     expect(onApprove).toHaveBeenCalledWith('assistant-message', action, 'singleAction')
+  })
+
+  it('limits the root Diff viewport to five rows and scrolls overflowing content', async () => {
+    const lines = Array.from({ length: 8 }, (_, index) => ` line ${index + 1}`)
+    const action = fileChangeAction({
+      patch: `@@ -1,8 +1,8 @@\n${lines.join('\n')}`,
+      truncated: false
+    })
+    const screen = await render(
+      <AgentApprovalDialog target={{ action, messageId: 'assistant-message' }} />
+    )
+
+    const diff = screen.container.querySelector<HTMLElement>(
+      '.agent-approval-dialog__file-change-renderer'
+    )
+    expect(diff).not.toBeNull()
+    await vi.waitFor(() => expect(diff!.scrollHeight).toBeGreaterThan(diff!.clientHeight))
+    expect(window.getComputedStyle(diff!).height).toBe('95px')
+    expect(window.getComputedStyle(diff!).overflowY).toBe('auto')
   })
 
   it.each(['create', 'update'] as const)(
@@ -130,6 +161,9 @@ describe('AgentApprovalDialog FileChange approval', () => {
 
   it('keeps approval disabled until every staged Diff page is loaded in order', async () => {
     const action = fileChangeAction(null)
+    const patch = '@@ -1 +1 @@\n-old\n+new\n'
+    const firstPatch = patch.slice(0, 15)
+    const secondPatch = patch.slice(15)
     let resolveFirst!: (page: {
       transactionId: string
       patch: string
@@ -146,8 +180,8 @@ describe('AgentApprovalDialog FileChange approval', () => {
       )
       .mockResolvedValueOnce({
         transactionId: action.fileChange.transactionId,
-        patch: '+second\n',
-        offset: 7,
+        patch: secondPatch,
+        offset: firstPatch.length,
         nextOffset: null,
         truncated: false
       })
@@ -168,15 +202,14 @@ describe('AgentApprovalDialog FileChange approval', () => {
     await vi.waitFor(() => expect(fileChangeRpc.getDiff).toHaveBeenCalledTimes(1))
     resolveFirst({
       transactionId: action.fileChange.transactionId,
-      patch: '+first\n',
+      patch: firstPatch,
       offset: 0,
-      nextOffset: 7,
+      nextOffset: firstPatch.length,
       truncated: true
     })
 
-    await expect.element(screen.getByText(/\+first/)).toBeVisible()
-    expect(screen.getByText(/\+second/).query()).toBeNull()
-    await expect.element(screen.getByText('1 / 2')).toBeVisible()
+    await expect.element(screen.getByText('old')).toBeVisible()
+    await expect.element(screen.getByText('new')).toBeVisible()
     await expect.element(approve).toBeEnabled()
     expect(fileChangeRpc.getDiff).toHaveBeenNthCalledWith(
       1,
@@ -188,15 +221,13 @@ describe('AgentApprovalDialog FileChange approval', () => {
     expect(fileChangeRpc.getDiff).toHaveBeenNthCalledWith(
       2,
       action.fileChange.transactionId,
-      7,
+      firstPatch.length,
       50_000,
       undefined
     )
-
-    await screen.getByRole('button', { name: '下一页' }).click()
-    await expect.element(screen.getByText(/\+second/)).toBeVisible()
-    expect(screen.getByText(/\+first/).query()).toBeNull()
-    await expect.element(screen.getByText('2 / 2')).toBeVisible()
+    expect(
+      screen.container.querySelector('.agent-approval-dialog__file-change-pagination')
+    ).toBeNull()
   })
 
   it('loads a child staged Diff through its exact observer root conversation', async () => {
@@ -216,6 +247,12 @@ describe('AgentApprovalDialog FileChange approval', () => {
     )
 
     await expect.element(screen.getByText(/reviewed by root/)).toBeVisible()
+    expect(
+      screen.container.querySelector('.agent-approval-dialog__file-change-diff pre')
+    ).not.toBeNull()
+    expect(
+      screen.container.querySelector('.agent-approval-dialog__file-change-renderer')
+    ).toBeNull()
     expect(fileChangeRpc.getDiff).toHaveBeenCalledWith(
       action.fileChange.transactionId,
       0,

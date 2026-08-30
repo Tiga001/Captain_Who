@@ -68,6 +68,22 @@
   overflow: auto;
 }
 
+.agent-approval-dialog__file-change-renderer.git-review {
+  --git-review-line-number-width: 42px;
+  --git-review-diff-row-height: 19px;
+
+  display: block;
+  width: 100%;
+  height: calc(5 * var(--git-review-diff-row-height));
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--mc-color-git-review-text-primary);
+  background: var(--mc-color-git-review-card-surface);
+  scrollbar-color: var(--mc-color-git-review-border-default) transparent;
+}
+
 .agent-approval-dialog__file-change-pagination {
   display: flex;
   align-items: center;

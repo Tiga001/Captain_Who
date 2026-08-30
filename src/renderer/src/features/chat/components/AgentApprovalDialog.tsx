@@ -1,11 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type {
   AgentApprovalScope,
+  AgentFileChangeProposal,
   AgentMcpToolInvocationState,
-  AgentProposedAction
+  AgentProposedAction,
+  GitReviewFile,
+  GitReviewFileStatus
 } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
+import { GitPatchRenderer } from '../../gitReview/GitReviewDiffRenderer'
+import { assessGitDiffRenderBudget } from '../../gitReview/diff/gitDiffRenderBudget'
+import '../../gitReview/GitReviewPanel.css'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
 import { BrowserRiskApprovalCard } from './BrowserRiskApprovalCard'
 import { BuiltinCapabilityActivationApprovalCard } from './BuiltinCapabilityActivationApprovalCard'
@@ -154,6 +160,48 @@ interface StandardAgentApprovalDialogProps {
   observerRootConversationId?: string
   onApprove?: AgentApprovalDialogProps['onApprove']
   onReject?: AgentApprovalDialogProps['onReject']
+}
+
+function getFileChangeReviewStatus(fileChange: AgentFileChangeProposal): GitReviewFileStatus {
+  if (fileChange.additions > 0 && fileChange.deletions === 0) return 'added'
+  if (fileChange.deletions > 0 && fileChange.additions === 0) return 'deleted'
+  return 'modified'
+}
+
+function FileChangeApprovalDiff({
+  fileChange,
+  patch
+}: {
+  fileChange: AgentFileChangeProposal
+  patch: string
+}) {
+  const { t } = useFrontendConfig()
+  const file: GitReviewFile = {
+    id: fileChange.transactionId,
+    path: fileChange.filePath,
+    stats: {
+      additions: fileChange.additions,
+      deletions: fileChange.deletions
+    },
+    status: getFileChangeReviewStatus(fileChange)
+  }
+
+  return (
+    <div className="agent-approval-dialog__file-change-renderer git-review">
+      <GitPatchRenderer
+        emptyState={t('gitReview.diff.noHunks')}
+        file={file}
+        invalidState={t('gitReview.diff.invalid')}
+        patch={patch}
+        snapshotId={fileChange.transactionId}
+        syntaxHighlightingEnabled
+        t={t}
+        tooLargeState={t('gitReview.diff.tooLarge')}
+        viewMode="split"
+        wrapLines={false}
+      />
+    </div>
+  )
 }
 
 function StandardAgentApprovalDialog({
@@ -310,6 +358,16 @@ function StandardAgentApprovalDialog({
     action.type !== 'file_change' ||
     (fileChangeDiffCurrent && !fileChangeDiff.loading && !fileChangeDiff.error)
   const fileChangeDiffPage = fileChangeDiff.pages[fileChangeDiff.pageIndex] ?? ''
+  const useRichFileChangeDiff =
+    action.type === 'file_change' && observerRootConversationId === undefined
+  const completeFileChangePatch = useMemo(
+    () => (useRichFileChangeDiff ? fileChangeDiff.pages.join('') : ''),
+    [fileChangeDiff.pages, useRichFileChangeDiff]
+  )
+  const richFileChangeDiffWithinBudget = useMemo(
+    () => useRichFileChangeDiff && assessGitDiffRenderBudget(completeFileChangePatch).ok,
+    [completeFileChangePatch, useRichFileChangeDiff]
+  )
 
   const approve = (approvalScope: AgentApprovalScope) => {
     if (isSubmitting || !fileChangeDiffReady) return
@@ -340,6 +398,11 @@ function StandardAgentApprovalDialog({
             <p>{t('files.preview.loading')}</p>
           ) : fileChangeDiff.error ? (
             <p role="alert">{fileChangeDiff.error}</p>
+          ) : useRichFileChangeDiff && richFileChangeDiffWithinBudget ? (
+            <FileChangeApprovalDiff
+              fileChange={action.fileChange}
+              patch={completeFileChangePatch}
+            />
           ) : (
             <div className="agent-approval-dialog__file-change-diff">
               <pre>{fileChangeDiffPage}</pre>

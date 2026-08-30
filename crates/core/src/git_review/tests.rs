@@ -630,12 +630,18 @@ fn project_subdirectory_limits_the_review_scope() {
     fs::write(repo.path().join("out-of-scope.txt"), "outside\n").unwrap();
     git(repo.path(), &["add", "."]);
 
-    let summary = GitReviewService::new()
+    let service = GitReviewService::new();
+    let summary = service
         .review_summary(&repo.path().join("selected"), GitReviewScope::Staged)
         .unwrap();
 
     assert_eq!(summary.files.len(), 1);
-    assert_eq!(summary.files[0].path, "selected/in-scope.txt");
+    assert_eq!(summary.files[0].path, "in-scope.txt");
+    let diff = service
+        .review_file_diff(&summary.snapshot_id, &summary.files[0].id)
+        .unwrap();
+    assert_eq!(diff.status, GitReviewFileDiffStatus::Ready);
+    assert!(diff.patch.unwrap().contains("+inside"));
 }
 
 #[test]

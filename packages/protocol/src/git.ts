@@ -24,7 +24,9 @@ export interface GitReviewSummaryInput {
 
 export interface GitReviewFile {
   id: string
+  /** Slash-separated path relative to the selected project root. */
   path: string
+  /** Previous path relative to the selected project root, when it remains inside that project. */
   previousPath?: string
   status: GitReviewFileStatus
   stats?: GitReviewFileStats
