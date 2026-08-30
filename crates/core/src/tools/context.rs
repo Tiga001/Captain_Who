@@ -101,9 +101,10 @@ pub struct ToolExecutionContext {
 
 /// A registry view bound to the Host-authenticated identity of the current dispatch.
 ///
-/// `read_file` deliberately does not accept a source call id from model arguments. Issuance
+/// Model-facing tools deliberately do not accept a source call id from model arguments. Issuance
 /// through this view obtains it from `ToolExecutionContext::with_tool_call_id`, while validation
-/// remains bound to the frozen conversation/run owner supplied by the same context.
+/// remains bound to the frozen conversation/run owner supplied by the same context. Both
+/// `read_file` and an authoritative successful `apply_patch` may issue an observation.
 pub(super) struct FileObservationRegistryView<'a> {
     context: &'a ToolExecutionContext,
 }
@@ -124,7 +125,7 @@ impl FileObservationRegistryView<'_> {
                 crate::file_change::FileChangeErrorCode::InvalidArguments,
             )
         })?;
-        self.context.file_observations.issue_existing_from_read(
+        self.context.file_observations.issue_existing(
             crate::file_change::FileObservationOwner::new(
                 source_tool_call_id,
                 conversation_id,
@@ -150,7 +151,7 @@ impl FileObservationRegistryView<'_> {
                 crate::file_change::FileChangeErrorCode::InvalidArguments,
             )
         })?;
-        self.context.file_observations.issue_missing_from_read(
+        self.context.file_observations.issue_missing(
             crate::file_change::FileObservationOwner::new(
                 source_tool_call_id,
                 conversation_id,
@@ -177,9 +178,9 @@ impl FileObservationRegistryView<'_> {
         )
     }
 
-    /// Claims a read observation only after the caller has formed and validated its Direct
-    /// proposal. This method is intentionally separate from `validate` so malformed edits do not
-    /// burn an otherwise-current observation.
+    /// Claims an observation only after the caller has formed and validated its Direct proposal.
+    /// This method is intentionally separate from `validate` so malformed edits do not burn an
+    /// otherwise-current read or successful-FileChange successor observation.
     pub(super) fn claim(
         &self,
         observation_id: &str,

@@ -319,6 +319,34 @@ vi.mock('../../features/chat/NewConversationPage', () => ({
 
 const { AppShell } = await import('../AppShell')
 
+const frozenRootCollaborationActivities = parseCollaborationEventsPage(
+  scenarioFixture.settledEventPage
+).events.flatMap((event) => {
+  const activity = event.activity
+  if (
+    !activity ||
+    activity.rootAnchorMessageId !== 'assistant-conversation-root' ||
+    activity.rootTraceBoundarySequence === null
+  ) {
+    return []
+  }
+
+  return [
+    {
+      activityId: event.eventId,
+      agentId: activity.agentId,
+      occurredAt: event.occurredAt,
+      rootAnchorMessageId: activity.rootAnchorMessageId,
+      rootTraceBoundarySequence: activity.rootTraceBoundarySequence,
+      runId: event.runId,
+      semantic: activity.semantic,
+      sequence: event.sequence,
+      taskNameSnapshot: activity.taskNameSnapshot,
+      turnId: event.turnId
+    }
+  ]
+})
+
 function rootConversation(conversationId: string, loaded = true): ChatConversation {
   return {
     id: conversationId,
@@ -351,6 +379,8 @@ function rootConversation(conversationId: string, loaded = true): ChatConversati
               toolResults: [],
               approvals: [],
               fileChangeProposals: [],
+              collaborationTimelineActivities:
+                conversationId === 'conversation-root' ? frozenRootCollaborationActivities : [],
               timeline: [
                 {
                   id: `trace-${conversationId}-delegation`,

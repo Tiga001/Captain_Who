@@ -187,16 +187,32 @@ impl<'target> BoundParent<'target> {
     }
 
     pub fn read_optional(&self, path: &Path) -> FileChangeResultValue<Option<BoundCurrentFile>> {
+        self.read_optional_with_limit(path, None)
+    }
+
+    pub(crate) fn read_optional_bounded(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> FileChangeResultValue<Option<BoundCurrentFile>> {
+        self.read_optional_with_limit(path, Some(max_bytes))
+    }
+
+    fn read_optional_with_limit(
+        &self,
+        path: &Path,
+        max_bytes: Option<u64>,
+    ) -> FileChangeResultValue<Option<BoundCurrentFile>> {
         #[cfg(unix)]
         {
             let name = unix::leaf_name(self.target.parent(), path)?;
-            unix::read_optional(&self.directory, &name)
+            unix::read_optional(&self.directory, &name, max_bytes)
         }
 
         #[cfg(not(unix))]
         {
             self.revalidate()?;
-            fallback::read_optional(self.target.parent(), path)
+            fallback::read_optional(self.target.parent(), path, max_bytes)
         }
     }
 
@@ -266,7 +282,7 @@ impl<'target> BoundParent<'target> {
     ) -> FileChangeResultValue<BoundCurrentFile> {
         #[cfg(unix)]
         {
-            unix::read_optional(&self.directory, &exchanged.staged.name)?
+            unix::read_optional(&self.directory, &exchanged.staged.name, None)?
                 .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::OutcomeUnknown))
         }
 
@@ -630,6 +646,7 @@ mod unix {
     pub fn read_optional(
         directory: &File,
         name: &CStr,
+        max_bytes: Option<u64>,
     ) -> FileChangeResultValue<Option<BoundCurrentFile>> {
         // O_NONBLOCK ensures a raced FIFO or device cannot block before its type is checked.
         // SAFETY: the directory descriptor and name remain live for the call.
@@ -651,8 +668,24 @@ mod unix {
         let mut file = unsafe { File::from_raw_fd(descriptor) };
         let before = file.metadata().map_err(read_error)?;
         validate_open_metadata(&before)?;
+        if max_bytes.is_some_and(|limit| before.len() > limit) {
+            return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
+        }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(read_error)?;
+        match max_bytes {
+            Some(limit) => {
+                Read::by_ref(&mut file)
+                    .take(limit.saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .map_err(read_error)?;
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+                    return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
+                }
+            }
+            None => {
+                file.read_to_end(&mut bytes).map_err(read_error)?;
+            }
+        }
         let after = file.metadata().map_err(read_error)?;
         // A second hard link may be introduced while this descriptor is being read. Validate the
         // post-read link count as well as the initially opened descriptor before freezing bytes.
@@ -1048,6 +1081,7 @@ mod fallback {
     pub fn read_optional(
         parent: &Path,
         path: &Path,
+        max_bytes: Option<u64>,
     ) -> FileChangeResultValue<Option<BoundCurrentFile>> {
         if path.parent() != Some(parent) {
             return Err(FileChangeError::new(
@@ -1074,8 +1108,24 @@ mod fallback {
         if !before.is_file() {
             return Err(FileChangeError::new(FileChangeErrorCode::NotRegularFile));
         }
+        if max_bytes.is_some_and(|limit| before.len() > limit) {
+            return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
+        }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
+        match max_bytes {
+            Some(limit) => {
+                Read::by_ref(&mut file)
+                    .take(limit.saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .map_err(io_error)?;
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+                    return Err(FileChangeError::new(FileChangeErrorCode::ContentTooLarge));
+                }
+            }
+            None => {
+                file.read_to_end(&mut bytes).map_err(io_error)?;
+            }
+        }
         let after = file.metadata().map_err(io_error)?;
         if before.len() != after.len()
             || before.modified().ok() != after.modified().ok()
@@ -1185,5 +1235,36 @@ mod tests {
             .expect_err("leaf symlink must fail");
         assert_eq!(error.code(), FileChangeErrorCode::SymlinkForbidden);
         assert_eq!(fs::read_to_string(outside).unwrap(), "outside\n");
+    }
+
+    #[test]
+    fn bounded_read_rejects_oversized_content_and_can_verify_absence_without_reading() {
+        let root = TempDir::new().expect("tempdir");
+        let target = FileChangePathPolicy::new(Some(root.path()), false)
+            .resolve("target.txt")
+            .expect("resolve target");
+        let target_path = target.absolute_path().to_path_buf();
+        let bound = BoundParent::open(&target).expect("bind parent");
+
+        assert!(bound
+            .read_optional_bounded(&target_path, 0)
+            .expect("missing leaf can be verified with a zero-byte budget")
+            .is_none());
+
+        fs::write(&target_path, "too large\n").expect("target");
+        assert_eq!(
+            bound
+                .read_optional_bounded(&target_path, 4)
+                .expect_err("oversized content must fail before it is returned")
+                .code(),
+            FileChangeErrorCode::ContentTooLarge
+        );
+        assert_eq!(
+            bound
+                .read_optional_bounded(&target_path, 0)
+                .expect_err("an existing leaf cannot be mistaken for absence")
+                .code(),
+            FileChangeErrorCode::ContentTooLarge
+        );
     }
 }

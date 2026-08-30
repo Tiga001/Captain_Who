@@ -2272,6 +2272,7 @@ impl AgentRuntime {
                                             raw_result: &result,
                                             archive_result: &archive_result,
                                             model_result: &llm_result,
+                                            model_result_for_archive_comparison: &llm_result,
                                             model_tool_result_gate: &model_tool_result_gate,
                                         })?
                                     } else {
@@ -2688,6 +2689,7 @@ impl AgentRuntime {
 
                     let mut tool_result_persistence =
                         crate::tools::AgentToolResultPersistence::RuntimeCommits;
+                    let mut settled_file_change_proposal = None;
                     let result_result = if let Some(result) = policy_preflight_failure {
                         Ok(result)
                     } else if auto_execute_host_action {
@@ -2710,6 +2712,9 @@ impl AgentRuntime {
                         match action_result {
                             Ok(action) => {
                                 let action = approve_proposed_action(action);
+                                if let AgentProposedAction::FileChange { file_change } = &action {
+                                    settled_file_change_proposal = Some(file_change.clone());
+                                }
                                 conversation_trace
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
@@ -2974,7 +2979,36 @@ impl AgentRuntime {
                         .unwrap_or_else(|error| error.into_inner())
                         .pending_tool_result_sequence(&call.id);
                     let archive_result = tool_registry.archive_projection(&result);
-                    let llm_result = tool_registry.model_projection(&result);
+                    let mut llm_result = tool_registry.model_projection(&result);
+                    let trace_result = tool_registry.trace_projection(&result);
+                    let mut checkpoint_result = tool_registry.checkpoint_projection(&result);
+                    if call.tool == "apply_patch" {
+                        if let Some(proposal) = settled_file_change_proposal.as_ref() {
+                            crate::tools::attach_successor_observation_to_model_result_with_proposal(
+                                &tool_context,
+                                &call,
+                                &result,
+                                &mut llm_result,
+                                proposal,
+                            );
+                        } else {
+                            crate::tools::attach_successor_observation_to_model_result(
+                                &tool_context,
+                                &call,
+                                &result,
+                                &mut llm_result,
+                            );
+                        }
+                        crate::tools::copy_successor_observation_projection(
+                            &llm_result,
+                            &mut checkpoint_result,
+                        );
+                    }
+                    let model_result_for_archive_comparison = if call.tool == "apply_patch" {
+                        crate::tools::without_successor_observation_projection(&llm_result)
+                    } else {
+                        llm_result.clone()
+                    };
                     let archive_metadata = if tool_registry.archives_result(&call.tool) {
                         archive_tool_result(ToolResultArchiveRequest {
                             storage: exact_history_storage.as_ref(),
@@ -2984,13 +3018,13 @@ impl AgentRuntime {
                             raw_result: &result,
                             archive_result: &archive_result,
                             model_result: &llm_result,
+                            model_result_for_archive_comparison:
+                                &model_result_for_archive_comparison,
                             model_tool_result_gate: &model_tool_result_gate,
                         })?
                     } else {
                         ConversationHistoryArchiveTraceMetadata::default()
                     };
-                    let trace_result = tool_registry.trace_projection(&result);
-                    let checkpoint_result = tool_registry.checkpoint_projection(&result);
                     let (model_observation, checkpoint_observation) =
                         match finalize_tool_observations(
                             &model_tool_result_gate,
@@ -4266,6 +4300,7 @@ struct ToolResultArchiveRequest<'a> {
     raw_result: &'a AgentToolResult,
     archive_result: &'a AgentToolResult,
     model_result: &'a AgentToolResult,
+    model_result_for_archive_comparison: &'a AgentToolResult,
     model_tool_result_gate: &'a ModelToolResultGate,
 }
 
@@ -4289,7 +4324,7 @@ fn archive_tool_result(
         truncated_at_source,
         model_projection_truncated: projection_differs(
             request.archive_result,
-            request.model_result,
+            request.model_result_for_archive_comparison,
         ) || gate_truncates
             || exact_preview_truncated,
         archive_projection_truncated: projection_differs(

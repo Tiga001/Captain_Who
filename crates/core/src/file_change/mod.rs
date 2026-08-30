@@ -45,7 +45,7 @@ pub use policy::{FileChangePathPolicy, ResolvedFileChangeTarget};
 pub use run_grant::*;
 pub use staged::{
     allowed_staged_actions, is_unsettled_staged_status, FileChangeMutationReceipt,
-    FileChangeStagedAction, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION,
+    FileChangeStagedAction, FILE_CHANGE_MUTATION_RECEIPT_SCHEMA_VERSION, MAX_STAGED_FILE_BYTES,
 };
 
 #[cfg(test)]

@@ -13,9 +13,12 @@ The discoverable location is:
 
 Use a normal workspace command to create the directory before writing files. Quote the validated
 literal path and do not combine directory creation with unrelated commands. Then call `read_file`
-on each exact target to obtain its current observation and use `apply_patch`: create only from a
+on each exact target to obtain its initial observation and use `apply_patch`: create only from a
 missing observation, update only from an existing observation, and use Staged actions for long
-resources. Create is no-clobber; never use a command, redirection, or script as an alternate writer.
+resources. A successful apply or commit returns a new post-write `fileChangeTarget`; reuse it for
+the next change to that same target instead of rereading solely for another ID. If the successor is
+absent, refresh is required, or current external content is unknown, call `read_file` again. Create
+is no-clobber; never use a command, redirection, or script as an alternate writer.
 
 Workspace Skill directories and files must be regular, non-symlink paths. `SKILL.md` must use the
 exact filename, UTF-8 text, YAML frontmatter, and non-empty Markdown instructions.
@@ -44,8 +47,9 @@ happen in the parent; behavioral review happens in a fresh child Run.
    The destination itself must be absent, while its parent `skill-creator-tmp-01` must already
    exist.
 
-5. Adapt the starter into `.agents/skills/<skill-directory>/` with exact-path `read_file` followed
-   by `apply_patch` Direct or Staged actions.
+5. Adapt the starter into `.agents/skills/<skill-directory>/` with an initial exact-path
+   `read_file`, then `apply_patch` Direct or Staged actions and their returned successor
+   observations for consecutive changes to the same target.
 6. Delete only the recorded temporary files, then remove the now-empty task directory.
 
 Do not materialize directly into `.agents`: the Host rejects reserved destination components. Do

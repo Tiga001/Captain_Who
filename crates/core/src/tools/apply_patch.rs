@@ -13,9 +13,9 @@ use crate::file_change::{
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentFileChangeOperation, AgentFileChangeProposal,
-    AgentGitDiffSnapshot, AgentProposedAction, AgentResult, AgentToolCall, AgentToolDefinition,
-    AgentToolResult, AgentToolSafety, AgentWritePermission,
-    AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+    AgentFileChangeResult, AgentFileChangeResultStatus, AgentGitDiffSnapshot, AgentProposedAction,
+    AgentResult, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentWritePermission, AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
 };
 use crate::revision::content_revision;
 use serde::Deserialize;
@@ -42,7 +42,7 @@ impl AgentTool for ApplyPatchTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),
-            description: "Create, update, or delete one UTF-8 text file through one strict FileChange protocol. Put exactly one operation in the required request object; use only the fields listed by its matching schema branch. Before request.action=apply or begin, call read_file on the exact target path and copy fileChangeTarget.filePath and observationId. Direct shape example: {\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"observationId\":\"fobs_example\",\"content\":\"hello\\n\"}}. Examples show shape only: never copy fobs_example, example transaction IDs, or example cursors; replace them with the exact values returned by this Host. Direct apply accepts at most 32 KiB of complete content; use begin/append/edit/commit for larger content, with append chunks up to 1 MiB and a 4 MiB transaction total. After begin, copy the Host-returned transactionId, nextIndex, and draftRevision exactly. Staged shape example: {\"request\":{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:example\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"next chunk\"}}. create is always no-clobber; Staged delete is unsupported. Settle every unfinished transaction with commit or abort before user-visible narration. Without a workspace, filePath must be an authorized absolute path or @home, @desktop, @documents, or @downloads. Never use run_command, redirection, or scripts to bypass file-change approval."
+            description: "Create, update, or delete one UTF-8 text file through one strict FileChange protocol. Put exactly one operation in the required request object; use only the fields listed by its matching schema branch. Before the first request.action=apply or begin for a target, call read_file and copy fileChangeTarget.filePath and observationId. Every successful apply or commit normally returns a new fileChangeTarget bound to the verified post-write state; use that newer observation for the next change to the same target without rereading solely for another token. If it is absent or observationRefreshRequired=true, follow continueWith and read the target again. Direct shape example: {\"request\":{\"action\":\"apply\",\"operation\":\"create\",\"filePath\":\"notes.txt\",\"observationId\":\"fobs_example\",\"content\":\"hello\\n\"}}. Examples show shape only: never copy fobs_example, example transaction IDs, or example cursors; replace them with the exact values returned by this Host. Direct apply accepts at most 32 KiB of complete content; use begin/append/edit/commit for larger content, with append chunks up to 1 MiB and a 4 MiB transaction total. After begin, copy the Host-returned transactionId, nextIndex, and draftRevision exactly. Staged shape example: {\"request\":{\"action\":\"append\",\"transactionId\":\"file-change-staged-v1:example\",\"index\":0,\"expectedDraftRevision\":0,\"content\":\"next chunk\"}}. create is always no-clobber; Staged delete is unsupported. Settle every unfinished transaction with commit or abort before user-visible narration. Without a workspace, filePath must be an authorized absolute path or @home, @desktop, @documents, or @downloads. Never use run_command, redirection, or scripts to bypass file-change approval."
                 .to_string(),
             input_schema: patch_input_schema(),
             safety: AgentToolSafety::RequiresApproval,
@@ -214,24 +214,326 @@ impl AgentTool for ApplyPatchTool {
     }
 
     fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        file_change_staged::public_result_projection(result)
+        non_model_file_change_result_projection(result)
     }
 
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         file_change_staged::public_result_projection(result)
     }
+
+    fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        without_successor_observation_projection(result)
+    }
+
+    fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        without_successor_observation_projection(result)
+    }
+}
+
+fn non_model_file_change_result_projection(result: &AgentToolResult) -> AgentToolResult {
+    without_successor_observation_projection(&file_change_staged::public_result_projection(result))
+}
+
+pub(crate) fn without_successor_observation_projection(
+    result: &AgentToolResult,
+) -> AgentToolResult {
+    let mut projected = result.clone();
+    if let Some(output) = projected.result.as_mut().and_then(Value::as_object_mut) {
+        for key in [
+            "observationId",
+            "fileChangeTarget",
+            "observationRefreshRequired",
+            "continueWith",
+        ] {
+            output.remove(key);
+        }
+    }
+    projected
+}
+
+/// Adds a model-only Observation for the state authoritatively produced by a successful
+/// `apply_patch` call.
+///
+/// The Host owns the commit and its durable receipt, while the live Runtime owns the run-scoped
+/// Observation registry. The Runtime therefore reopens the exact target after settlement,
+/// verifies the committed Revision (or verified absence for delete), and only then issues a new
+/// opaque Observation. The authoritative result is never changed, so Renderer, audit, and
+/// ordinary durable result projections cannot accidentally treat this convenience capability as
+/// commit proof. The same model-only envelope is retained in the private run checkpoint so a
+/// queued follow-up call can prove where its token came from.
+///
+/// If an external actor races the post-commit verification, the file mutation remains successful
+/// but no Observation is issued. The model receives an explicit `read_file` continuation instead
+/// of a guessed or stale token.
+pub(crate) fn attach_successor_observation_to_model_result(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    authoritative_result: &AgentToolResult,
+    model_result: &mut AgentToolResult,
+) -> bool {
+    attach_successor_observation_to_model_result_inner(
+        context,
+        call,
+        authoritative_result,
+        model_result,
+        None,
+    )
+}
+
+pub(crate) fn attach_successor_observation_to_model_result_with_proposal(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    authoritative_result: &AgentToolResult,
+    model_result: &mut AgentToolResult,
+    proposal: &AgentFileChangeProposal,
+) -> bool {
+    attach_successor_observation_to_model_result_inner(
+        context,
+        call,
+        authoritative_result,
+        model_result,
+        Some(proposal),
+    )
+}
+
+fn attach_successor_observation_to_model_result_inner(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    authoritative_result: &AgentToolResult,
+    model_result: &mut AgentToolResult,
+    proposal: Option<&AgentFileChangeProposal>,
+) -> bool {
+    let Some(terminal) = successful_file_change_result(call, authoritative_result, proposal) else {
+        return false;
+    };
+    let observation = issue_successor_observation(context, call, &terminal);
+    let Some(output) = model_result.result.as_mut().and_then(Value::as_object_mut) else {
+        return false;
+    };
+    match observation {
+        Ok((observation_id, state)) => {
+            output.insert(
+                "observationId".to_string(),
+                Value::String(observation_id.clone()),
+            );
+            output.insert(
+                "fileChangeTarget".to_string(),
+                json!({
+                    "filePath": terminal.file_path,
+                    "observationId": observation_id,
+                    "state": state,
+                }),
+            );
+            true
+        }
+        Err(_) => {
+            output.insert("observationRefreshRequired".to_string(), Value::Bool(true));
+            output.insert(
+                "continueWith".to_string(),
+                json!({
+                    "tool": "read_file",
+                    "args": { "path": terminal.file_path },
+                }),
+            );
+            false
+        }
+    }
+}
+
+pub(crate) fn copy_successor_observation_projection(
+    source: &AgentToolResult,
+    target: &mut AgentToolResult,
+) {
+    let (Some(source), Some(target)) = (
+        source.result.as_ref().and_then(Value::as_object),
+        target.result.as_mut().and_then(Value::as_object_mut),
+    ) else {
+        return;
+    };
+    for key in [
+        "observationId",
+        "fileChangeTarget",
+        "observationRefreshRequired",
+        "continueWith",
+    ] {
+        if let Some(value) = source.get(key) {
+            target.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn successful_file_change_result(
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+    proposal: Option<&AgentFileChangeProposal>,
+) -> Option<AgentFileChangeResult> {
+    if call.tool != "apply_patch"
+        || result.tool != "apply_patch"
+        || result.call_id != call.id
+        || !result.ok
+        || !matches!(apply_patch_action(&call.args), Some("apply" | "commit"))
+    {
+        return None;
+    }
+    let terminal = serde_json::from_value::<AgentFileChangeResult>(result.result.clone()?).ok()?;
+    if !matches!(
+        terminal.status,
+        AgentFileChangeResultStatus::Applied | AgentFileChangeResultStatus::AlreadyApplied
+    ) || !terminal_matches_call(call, &terminal)
+        || proposal.is_some_and(|proposal| !terminal_matches_proposal(call, &terminal, proposal))
+    {
+        return None;
+    }
+    Some(terminal)
+}
+
+fn terminal_matches_call(call: &AgentToolCall, terminal: &AgentFileChangeResult) -> bool {
+    let Some(request) = apply_patch_request(&call.args) else {
+        return false;
+    };
+    match request.get("action").and_then(Value::as_str) {
+        Some("apply") => {
+            request.get("filePath").and_then(Value::as_str) == Some(terminal.file_path.as_str())
+                && request.get("operation").and_then(Value::as_str)
+                    == Some(operation_label_from_protocol(terminal.operation))
+                && terminal.update_strategy.is_none()
+        }
+        Some("commit") => {
+            request.get("transactionId").and_then(Value::as_str)
+                == Some(terminal.transaction_id.as_str())
+        }
+        _ => false,
+    }
+}
+
+fn terminal_matches_proposal(
+    call: &AgentToolCall,
+    terminal: &AgentFileChangeResult,
+    proposal: &AgentFileChangeProposal,
+) -> bool {
+    let binding = proposal.execution.as_ref();
+    let expected_revision = binding.transaction.target.revision();
+    proposal.validate().is_ok()
+        && binding.source_tool_name == "apply_patch"
+        && binding.source_call_id == call.id
+        && crate::file_change::proposal_digest(&call.args)
+            .is_ok_and(|digest| digest == binding.source_args_digest)
+        && binding.transaction.id == terminal.transaction_id
+        && patch_operation(binding.transaction.operation) == terminal.operation
+        && proposal.operation == terminal.operation
+        && proposal.file_path == terminal.file_path
+        && proposal.transaction_id == terminal.transaction_id
+        && proposal.update_strategy == terminal.update_strategy
+        && expected_revision == terminal.revision.as_deref()
+        && match apply_patch_action(&call.args) {
+            Some("apply") => binding.staged_transaction_id.is_none(),
+            Some("commit") => {
+                binding.staged_transaction_id.as_deref() == Some(terminal.transaction_id.as_str())
+            }
+            _ => false,
+        }
+}
+
+fn operation_label_from_protocol(operation: AgentFileChangeOperation) -> &'static str {
+    match operation {
+        AgentFileChangeOperation::Create => "create",
+        AgentFileChangeOperation::Update => "update",
+        AgentFileChangeOperation::Delete => "delete",
+    }
+}
+
+fn issue_successor_observation(
+    context: &ToolExecutionContext,
+    call: &AgentToolCall,
+    terminal: &AgentFileChangeResult,
+) -> AgentResult<(String, &'static str)> {
+    let target = FileChangePathPolicy::new(
+        context.workspace_root_optional()?.as_deref(),
+        context.permissions().write == AgentWritePermission::All,
+    )
+    .resolve(&terminal.file_path)
+    .map_err(file_change_agent_error)?;
+    let parent = BoundParent::open(&target).map_err(file_change_agent_error)?;
+    let bound_context = context.clone().with_tool_call_id(call.id.clone());
+    let conversation_id = bound_context.conversation_id()?;
+    let run_id = bound_context.run_id()?;
+    let observation = match terminal.operation {
+        AgentFileChangeOperation::Create | AgentFileChangeOperation::Update => {
+            let current = parent
+                .read_optional_bounded(
+                    target.absolute_path(),
+                    crate::file_change::MAX_STAGED_FILE_BYTES,
+                )
+                .map_err(file_change_agent_error)?
+                .ok_or_else(|| {
+                    file_change_agent_error(FileChangeError::new(FileChangeErrorCode::FileMissing))
+                })?;
+            if std::str::from_utf8(&current.bytes).is_err() || current.bytes.contains(&0) {
+                return Err(file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::UnsupportedFileType,
+                )));
+            }
+            let expected_revision = terminal.revision.as_deref().ok_or_else(|| {
+                file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::IllegalFieldCombination,
+                ))
+            })?;
+            let actual_revision = content_revision(&current.bytes);
+            if actual_revision != expected_revision {
+                return Err(file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::RevisionConflict,
+                )));
+            }
+            let parent_metadata = parent.parent_metadata().map_err(file_change_agent_error)?;
+            let observation = bound_context
+                .file_observations()
+                .issue_existing(
+                    conversation_id,
+                    run_id,
+                    target.absolute_path(),
+                    expected_revision,
+                    &current.metadata,
+                    &parent_metadata,
+                )
+                .map_err(file_change_agent_error)?;
+            (observation, "existing")
+        }
+        AgentFileChangeOperation::Delete => {
+            if parent
+                .read_optional_bounded(target.absolute_path(), 0)
+                .map_err(file_change_agent_error)?
+                .is_some()
+            {
+                return Err(file_change_agent_error(FileChangeError::new(
+                    FileChangeErrorCode::FileExists,
+                )));
+            }
+            let parent_metadata = parent.parent_metadata().map_err(file_change_agent_error)?;
+            let observation = bound_context
+                .file_observations()
+                .issue_missing(
+                    conversation_id,
+                    run_id,
+                    target.absolute_path(),
+                    &parent_metadata,
+                )
+                .map_err(file_change_agent_error)?;
+            (observation, "missing")
+        }
+    };
+    Ok((observation.0.id().to_string(), observation.1))
 }
 
 fn patch_input_schema() -> Value {
     let file_path = json!({
         "type": "string",
         "minLength": 1,
-        "description": "Copy the exact fileChangeTarget.filePath returned by the immediately preceding read_file call. It may be workspace-relative, an authorized absolute local path, or a supported system alias."
+        "description": "Copy the exact fileChangeTarget.filePath returned by read_file or by the latest successful apply_patch apply/commit for this target. It may be workspace-relative, an authorized absolute local path, or a supported system alias."
     });
     let observation_id = json!({
         "type": "string",
         "minLength": 1,
-        "description": "Copy the opaque observationId returned by that exact read_file call."
+        "description": "Copy the opaque observationId returned by the exact read_file or latest successful apply_patch apply/commit for this target."
     });
     let transaction_id = json!({
         "type": "string",
@@ -2530,6 +2832,414 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code(), FileChangeErrorCode::HardLinkForbidden);
         assert_eq!(fs::read_to_string(outside).unwrap(), "outside secret\n");
+    }
+
+    #[test]
+    fn successful_apply_issues_a_new_observation_for_a_direct_follow_up_without_reading() {
+        let workspace = TestWorkspace::new();
+        workspace.write("target.txt", "second version\n");
+        workspace.write("sibling.txt", "before\n");
+        let context = workspace.context();
+        let call = apply_call(
+            "apply-successor-update",
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"target.txt",
+                "observationId":"fobs_consumed_input",
+                "content":"second version\n"
+            }),
+        );
+        let authoritative = successful_result(
+            &call,
+            AgentFileChangeOperation::Update,
+            "target.txt",
+            Some(content_revision(b"second version\n")),
+        );
+        let mut model = authoritative.clone();
+
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &call,
+            &authoritative,
+            &mut model,
+        ));
+        let successor = model.result.as_ref().unwrap()["observationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(successor.starts_with("fobs_"));
+        assert_ne!(successor, "fobs_consumed_input");
+        assert_eq!(
+            model.result.as_ref().unwrap()["fileChangeTarget"],
+            json!({
+                "filePath":"target.txt",
+                "observationId":successor,
+                "state":"existing"
+            })
+        );
+
+        let mut replayed_model = authoritative.clone();
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &call,
+            &authoritative,
+            &mut replayed_model,
+        ));
+        assert_eq!(
+            replayed_model.result.as_ref().unwrap()["observationId"],
+            successor,
+            "replaying the same settled Tool Call must return the same successor authority"
+        );
+
+        let mut reconciled = authoritative.clone();
+        reconciled.result.as_mut().unwrap()["status"] = json!("already_applied");
+        let mut reconciled_model = reconciled.clone();
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &call,
+            &reconciled,
+            &mut reconciled_model,
+        ));
+        assert_eq!(
+            reconciled_model.result.as_ref().unwrap()["observationId"],
+            successor,
+            "commit-unknown reconciliation must retain the same verified successor"
+        );
+
+        // A sibling change is unrelated to the successor's exact target binding.
+        workspace.write("sibling.txt", "after\n");
+        let follow_up_call = apply_call(
+            "apply-successor-follow-up",
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"target.txt",
+                "observationId":successor,
+                "edits":[{"kind":"append","text":"third line\n"}]
+            }),
+        );
+        let follow_up = direct_proposal_from_call(
+            &context.clone().with_tool_call_id(follow_up_call.id.clone()),
+            &follow_up_call,
+        )
+        .unwrap();
+        assert_eq!(
+            follow_up.execution.transaction.base.revision(),
+            Some(content_revision(b"second version\n").as_str())
+        );
+
+        workspace.write("target.txt", "second version\nthird line\n");
+        let follow_up_result = successful_result(
+            &follow_up_call,
+            AgentFileChangeOperation::Update,
+            "target.txt",
+            Some(content_revision(b"second version\nthird line\n")),
+        );
+        let mut follow_up_model = follow_up_result.clone();
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &follow_up_call,
+            &follow_up_result,
+            &mut follow_up_model,
+        ));
+        let second_successor = follow_up_model.result.as_ref().unwrap()["observationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(second_successor, successor);
+
+        let third = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"target.txt",
+                "observationId":second_successor,
+                "edits":[{"kind":"append","text":"fourth line\n"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            third.execution.transaction.base.revision(),
+            Some(content_revision(b"second version\nthird line\n").as_str())
+        );
+    }
+
+    #[test]
+    fn successful_delete_issues_a_missing_observation_for_create_without_reading() {
+        let workspace = TestWorkspace::new();
+        let context = workspace.context();
+        let call = apply_call(
+            "apply-successor-delete",
+            json!({
+                "action":"apply",
+                "operation":"delete",
+                "filePath":"deleted.txt",
+                "observationId":"fobs_consumed_input"
+            }),
+        );
+        let authoritative =
+            successful_result(&call, AgentFileChangeOperation::Delete, "deleted.txt", None);
+        let mut model = authoritative.clone();
+
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &call,
+            &authoritative,
+            &mut model,
+        ));
+        let successor = model.result.as_ref().unwrap()["observationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            model.result.as_ref().unwrap()["fileChangeTarget"]["state"],
+            "missing"
+        );
+        let follow_up = proposal(
+            &context,
+            json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"deleted.txt",
+                "observationId":successor,
+                "content":"recreated\n"
+            }),
+        )
+        .unwrap();
+        assert_eq!(follow_up.operation, AgentFileChangeOperation::Create);
+    }
+
+    #[test]
+    fn successor_requires_the_exact_call_and_frozen_file_change_binding() {
+        let workspace = TestWorkspace::new();
+        workspace.write("target.txt", "before\n");
+        workspace.write("other.txt", "other\n");
+        let context = workspace.context();
+        let observation_id = observe(&context, "target.txt");
+        let call = apply_call(
+            "apply-successor-bound",
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"target.txt",
+                "observationId":observation_id,
+                "content":"after\n"
+            }),
+        );
+        let proposal =
+            direct_proposal_from_call(&context.clone().with_tool_call_id(call.id.clone()), &call)
+                .unwrap();
+        workspace.write("target.txt", "after\n");
+        let mut authoritative = successful_result(
+            &call,
+            AgentFileChangeOperation::Update,
+            "target.txt",
+            Some(content_revision(b"after\n")),
+        );
+        authoritative.result.as_mut().unwrap()["transactionId"] =
+            json!(proposal.transaction_id.clone());
+        let mut model = authoritative.clone();
+        assert!(attach_successor_observation_to_model_result_with_proposal(
+            &context,
+            &call,
+            &authoritative,
+            &mut model,
+            &proposal,
+        ));
+
+        for mutate in [
+            |value: &mut Value| value["filePath"] = json!("other.txt"),
+            |value: &mut Value| value["transactionId"] = json!("file-change-direct-v1:tampered"),
+        ] {
+            let mut mismatched = authoritative.clone();
+            mutate(mismatched.result.as_mut().unwrap());
+            let mut mismatched_model = mismatched.clone();
+            assert!(!attach_successor_observation_to_model_result_with_proposal(
+                &context,
+                &call,
+                &mismatched,
+                &mut mismatched_model,
+                &proposal,
+            ));
+            assert!(mismatched_model
+                .result
+                .as_ref()
+                .unwrap()
+                .get("observationId")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn staged_commit_successor_is_reusable_but_a_post_commit_race_requires_reading() {
+        let workspace = TestWorkspace::new();
+        workspace.write("staged.txt", "committed draft\n");
+        let context = workspace.context();
+        let call = apply_call(
+            "apply-successor-commit",
+            json!({
+                "action":"commit",
+                "transactionId":"file-change-staged-v1:successor",
+                "expectedDraftRevision":2
+            }),
+        );
+        let authoritative = successful_result(
+            &call,
+            AgentFileChangeOperation::Create,
+            "staged.txt",
+            Some(content_revision(b"committed draft\n")),
+        );
+        let mut model = authoritative.clone();
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &call,
+            &authoritative,
+            &mut model,
+        ));
+
+        let raced_call = apply_call(
+            "apply-successor-raced",
+            json!({
+                "action":"apply",
+                "operation":"update",
+                "filePath":"staged.txt",
+                "observationId":"fobs_consumed_input",
+                "content":"expected target\n"
+            }),
+        );
+        let raced_result = successful_result(
+            &raced_call,
+            AgentFileChangeOperation::Update,
+            "staged.txt",
+            Some(content_revision(b"expected target\n")),
+        );
+        let mut raced_model = raced_result.clone();
+        assert!(!attach_successor_observation_to_model_result(
+            &context,
+            &raced_call,
+            &raced_result,
+            &mut raced_model,
+        ));
+        let output = raced_model.result.as_ref().unwrap();
+        assert!(output.get("observationId").is_none());
+        assert_eq!(output["observationRefreshRequired"], true);
+        assert_eq!(output["continueWith"]["tool"], "read_file");
+        assert_eq!(output["continueWith"]["args"]["path"], "staged.txt");
+    }
+
+    #[test]
+    fn successor_observation_is_model_and_private_checkpoint_only() {
+        let workspace = TestWorkspace::new();
+        workspace.write("private.txt", "current\n");
+        let context = workspace.context();
+        let registry = ToolRegistry::defaults_with_search(None);
+        let call = apply_call(
+            "apply-successor-private",
+            json!({
+                "action":"apply",
+                "operation":"create",
+                "filePath":"private.txt",
+                "observationId":"fobs_consumed_input",
+                "content":"current\n"
+            }),
+        );
+        let authoritative = successful_result(
+            &call,
+            AgentFileChangeOperation::Create,
+            "private.txt",
+            Some(content_revision(b"current\n")),
+        );
+        let mut model = registry.model_projection(&authoritative);
+        assert!(attach_successor_observation_to_model_result(
+            &context,
+            &call,
+            &authoritative,
+            &mut model,
+        ));
+        let mut checkpoint = registry.checkpoint_projection(&authoritative);
+        copy_successor_observation_projection(&model, &mut checkpoint);
+        assert!(model
+            .result
+            .as_ref()
+            .unwrap()
+            .get("observationId")
+            .is_some());
+        assert!(checkpoint
+            .result
+            .as_ref()
+            .unwrap()
+            .get("observationId")
+            .is_some());
+        for projected in [
+            registry.event_projection(&model),
+            registry.trace_projection(&model),
+            registry.archive_projection(&model),
+        ] {
+            let output = projected.result.as_ref().unwrap();
+            assert!(output.get("observationId").is_none());
+            assert!(output.get("fileChangeTarget").is_none());
+        }
+    }
+
+    fn apply_call(id: &str, request: Value) -> AgentToolCall {
+        AgentToolCall {
+            id: id.to_string(),
+            tool: "apply_patch".to_string(),
+            args: wire(request),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        }
+    }
+
+    fn successful_result(
+        call: &AgentToolCall,
+        operation: AgentFileChangeOperation,
+        file_path: &str,
+        revision: Option<String>,
+    ) -> AgentToolResult {
+        let result = AgentFileChangeResult {
+            schema_version: AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            status: AgentFileChangeResultStatus::Applied,
+            outcome: crate::protocol::AgentFileChangeOutcome::Applied,
+            transaction_id: if apply_patch_action(&call.args) == Some("commit") {
+                call.args["request"]["transactionId"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            } else {
+                format!("file-change-direct-v1:{}", call.id)
+            },
+            operation,
+            update_strategy: None,
+            file_path: file_path.to_string(),
+            additions: 1,
+            deletions: u64::from(operation == AgentFileChangeOperation::Update),
+            line_count: if operation == AgentFileChangeOperation::Delete {
+                0
+            } else {
+                1
+            },
+            byte_count: if operation == AgentFileChangeOperation::Delete {
+                0
+            } else {
+                1
+            },
+            revision,
+            error_code: None,
+            error: None,
+            message: Some("文件变更已应用。".to_string()),
+        };
+        result.validate().unwrap();
+        AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(serde_json::to_value(result).unwrap()),
+            error: None,
+        }
     }
 
     fn observe(context: &ToolExecutionContext, path: &str) -> String {

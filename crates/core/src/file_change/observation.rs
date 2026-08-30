@@ -204,7 +204,7 @@ pub enum FileObservationState {
     },
 }
 
-/// Strict, provider-neutral durable projection of one unconsumed read observation.
+/// Strict, provider-neutral durable projection of one unconsumed file observation.
 ///
 /// This is checkpoint state rather than model wire. Every nullable identity field is still
 /// required on the wire so a platform difference cannot be confused with an old shape.
@@ -268,8 +268,8 @@ impl FileObservationCheckpoint {
         Ok(())
     }
 
-    /// Rechecks the exact parent and leaf identity frozen by `read_file` immediately before a
-    /// definitely-not-yet-executed transaction enters the committer.
+    /// Rechecks the exact parent and leaf identity frozen by the Observation source immediately
+    /// before a definitely-not-yet-executed transaction enters the committer.
     pub fn revalidate_current_identity(
         &self,
         expected_target: &Path,
@@ -485,7 +485,7 @@ pub struct FileObservationRegistry {
 }
 
 impl FileObservationRegistry {
-    pub(crate) fn issue_existing_from_read(
+    pub(crate) fn issue_existing(
         &self,
         owner: FileObservationOwner<'_>,
         canonical_target: &Path,
@@ -505,7 +505,7 @@ impl FileObservationRegistry {
         )
     }
 
-    pub(crate) fn issue_missing_from_read(
+    pub(crate) fn issue_missing(
         &self,
         owner: FileObservationOwner<'_>,
         canonical_target: &Path,
@@ -539,8 +539,8 @@ impl FileObservationRegistry {
     /// Atomically claims an observation after a Direct proposal has been fully validated.
     ///
     /// Callers must not claim before proposal construction succeeds: malformed edits are allowed
-    /// to be corrected while the same fresh read remains valid. A successful claim makes replay
-    /// with the same observation fail closed.
+    /// to be corrected while the same current observation remains valid. A successful claim makes
+    /// replay with the same observation fail closed.
     pub(crate) fn claim(
         &self,
         observation_id: &str,
@@ -616,6 +616,20 @@ impl FileObservationRegistry {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         observations.retain(|_, observation| observation.expires_at > now);
+        if let Some(existing) = observations
+            .values()
+            .find(|observation| observation.source_tool_call_id == owner.source_tool_call_id)
+        {
+            if existing.conversation_id == owner.conversation_id
+                && existing.run_id == owner.run_id
+                && existing.canonical_target == canonical_target
+                && existing.state == state
+                && existing.parent_directory_identity == parent_directory_identity
+            {
+                return Ok(existing.clone());
+            }
+            return Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments));
+        }
         if observations.len() >= MAX_OBSERVATIONS_PER_RUN {
             let oldest = observations
                 .values()
@@ -827,7 +841,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn every_read_gets_a_fresh_owner_path_and_time_bound_observation() {
+    fn every_source_call_gets_a_fresh_owner_path_and_time_bound_observation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("example.txt");
         fs::write(&path, "hello\n").unwrap();
@@ -901,6 +915,46 @@ mod tests {
                 .code(),
             FileChangeErrorCode::ObservationExpired
         );
+    }
+
+    #[test]
+    fn repeated_issuance_for_the_same_source_is_idempotent_and_cannot_change_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_path = directory.path().join("first.txt");
+        let second_path = directory.path().join("second.txt");
+        fs::write(&first_path, "hello\n").unwrap();
+        fs::write(&second_path, "other\n").unwrap();
+        let first_metadata = fs::metadata(&first_path).unwrap();
+        let second_metadata = fs::metadata(&second_path).unwrap();
+        let parent = fs::metadata(directory.path()).unwrap();
+        let registry = FileObservationRegistry::default();
+        let owner = FileObservationOwner::new("apply-call-1", "conversation-1", "run-1");
+        let state = FileObservationState::Existing {
+            revision: "revision-1".to_string(),
+            identity: FileObservationIdentity::from_metadata(&first_metadata),
+        };
+
+        let first = registry
+            .issue(owner, &first_path, state.clone(), &parent, 100)
+            .unwrap();
+        let replay = registry
+            .issue(owner, &first_path, state, &parent, 101)
+            .unwrap();
+        assert_eq!(replay, first);
+
+        let changed_target = registry
+            .issue(
+                owner,
+                &second_path,
+                FileObservationState::Existing {
+                    revision: "revision-2".to_string(),
+                    identity: FileObservationIdentity::from_metadata(&second_metadata),
+                },
+                &parent,
+                102,
+            )
+            .unwrap_err();
+        assert_eq!(changed_target.code(), FileChangeErrorCode::InvalidArguments);
     }
 
     #[test]

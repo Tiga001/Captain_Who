@@ -43,6 +43,72 @@ fn read_file_observation_authority_is_model_only_and_never_enters_renderer_event
 }
 
 #[test]
+fn successor_observation_does_not_masquerade_as_an_archive_truncation() {
+    let raw = AgentToolResult {
+        exact_archive_file: None,
+        call_id: "call-file-change-successor".to_string(),
+        tool: "apply_patch".to_string(),
+        ok: true,
+        result: Some(json!({
+            "schemaVersion": crate::protocol::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            "status": "applied",
+            "outcome": "applied",
+            "transactionId": "file-change-direct-v1:archive-comparison",
+            "operation": "create",
+            "updateStrategy": null,
+            "filePath": "example.txt",
+            "additions": 1,
+            "deletions": 0,
+            "lineCount": 1,
+            "byteCount": 6,
+            "revision": crate::content_revision(b"hello\n"),
+            "errorCode": null,
+            "error": null,
+            "message": "文件变更已应用。"
+        })),
+        error: None,
+    };
+    let mut model_result = raw.clone();
+    let output = model_result
+        .result
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    let observation_id = format!("fobs_{}", "1".repeat(32));
+    output.insert("observationId".to_string(), json!(observation_id.clone()));
+    output.insert(
+        "fileChangeTarget".to_string(),
+        json!({
+            "filePath":"example.txt",
+            "observationId":observation_id,
+            "state":"existing"
+        }),
+    );
+    let comparison = crate::tools::without_successor_observation_projection(&model_result);
+    let gate = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    let metadata = super::archive_tool_result(super::ToolResultArchiveRequest {
+        storage: None,
+        conversation_id: None,
+        assistant_message_id: None,
+        sequence: None,
+        raw_result: &raw,
+        archive_result: &raw,
+        model_result: &model_result,
+        model_result_for_archive_comparison: &comparison,
+        model_tool_result_gate: &gate,
+    })
+    .unwrap();
+
+    assert!(!metadata.model_projection_truncated);
+}
+
+#[test]
 fn safe_boundary_delivery_uses_one_byte_exact_authenticated_envelope() {
     let delivery = AgentSamplingBoundaryDelivery {
         receipt_id: "receipt-safe".into(),
@@ -642,6 +708,7 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
         raw_result: &raw,
         archive_result: &raw,
         model_result: &model_result,
+        model_result_for_archive_comparison: &model_result,
         model_tool_result_gate: &gate,
     })
     .expect("archive tool result");
@@ -820,6 +887,7 @@ fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
         raw_result: &raw,
         archive_result: &archive_result,
         model_result: &model_result,
+        model_result_for_archive_comparison: &model_result,
         model_tool_result_gate: &gate,
     })
     .expect("archive tool result");
@@ -1018,6 +1086,7 @@ fn command_session_archive_route_is_reused_without_preview_rearchive() {
         raw_result: &raw,
         archive_result: &archive_result,
         model_result: &model_result,
+        model_result_for_archive_comparison: &model_result,
         model_tool_result_gate: &gate,
     })
     .expect("archive tool result");

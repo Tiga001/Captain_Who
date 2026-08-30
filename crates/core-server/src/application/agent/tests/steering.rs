@@ -1538,6 +1538,10 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
     .unwrap();
     let pending = service.list_pending_actions();
     assert_eq!(pending.len(), 1);
+    let approved_tool_call_id = pending[0]
+        .tool_call_id
+        .clone()
+        .expect("FileChange approval retains the exact Tool Call id");
     let approval = service
         .approve_action(&turn.run_id, &pending[0].action_id, notifications.clone())
         .unwrap();
@@ -1577,9 +1581,10 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
 
     assert!(saw_queued);
     assert!(saw_applied);
-    assert!(serde_json::to_string(&guided_request)
-        .unwrap()
-        .contains("Please use the newer constraint."));
+    let guided_request_json = serde_json::to_string(&guided_request).unwrap();
+    assert!(guided_request_json.contains("Please use the newer constraint."));
+    assert!(guided_request_json.contains("fileChangeTarget"));
+    assert!(guided_request_json.contains("observationId"));
     let journal = storage
         .load_agent_run_guidance(&queued.guidance_id)
         .unwrap()
@@ -1602,4 +1607,22 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
             .count(),
         1
     );
+    let committed_model_context = storage
+        .get_conversation_model_context_log(&turn.assistant_message_id)
+        .unwrap()
+        .expect("approved FileChange retains its committed model-context prefix");
+    let committed_tool_result = committed_model_context
+        .items
+        .iter()
+        .find(|item| item.tool_call_id.as_deref() == Some(approved_tool_call_id.as_str()))
+        .expect("approved FileChange ToolResult is present in the committed prefix");
+    assert!(!committed_tool_result.content.contains("fileChangeTarget"));
+    assert!(!committed_tool_result.content.contains("observationId"));
+    let committed_trace = storage
+        .get_conversation_turn_trace(&turn.assistant_message_id)
+        .unwrap()
+        .expect("approved FileChange retains its committed Trace");
+    let committed_trace_json = serde_json::to_string(&committed_trace).unwrap();
+    assert!(!committed_trace_json.contains("fileChangeTarget"));
+    assert!(!committed_trace_json.contains("observationId"));
 }

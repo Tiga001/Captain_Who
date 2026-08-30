@@ -33,7 +33,7 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read an authorized regular UTF-8 text file. Immediately before every apply_patch Direct apply or Staged begin, call read_file on that exact target path—even when you expect it to be absent; do not substitute a parent-directory listing, workspace_map, search result, or earlier read. Copy the returned fileChangeTarget.filePath and observationId into apply_patch.request. A not-found result establishes the missing state required by create but is not itself an executable create call because the model must still supply content or begin a Staged transaction. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
+            description: "Read an authorized regular UTF-8 text file and issue a run-owned FileChange Observation. Call read_file on the exact target before the first apply_patch Direct apply or Staged begin, whenever current contents are unknown, or whenever the latest successful apply_patch result did not return a reusable fileChangeTarget. A successful apply_patch apply/commit normally returns a new fileChangeTarget for its verified post-write state; copy that newer filePath and observationId into the next change to the same target instead of rereading solely for another token. Do not substitute a parent-directory listing, workspace_map, or search result. A not-found result establishes the missing state required by create but is not itself an executable create call because the model must still supply content or begin a Staged transaction. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. With a workspace, paths may be workspace-relative. Without a workspace, relative paths are invalid: use an authorized absolute path or @home/@desktop/@documents/@downloads. Exact authorized @attachments and published-resource references retain their current meaning. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -1136,10 +1136,13 @@ mod tests {
         assert!(definition.description.contains("regular UTF-8 text file"));
         assert!(definition
             .description
-            .contains("Immediately before every apply_patch Direct apply or Staged begin"));
+            .contains("before the first apply_patch Direct apply or Staged begin"));
         assert!(definition
             .description
-            .contains("call read_file on that exact target path"));
+            .contains("successful apply_patch result did not return a reusable fileChangeTarget"));
+        assert!(definition
+            .description
+            .contains("instead of rereading solely for another token"));
         assert!(definition
             .description
             .contains("A not-found result establishes the missing state required by create"));
@@ -1224,8 +1227,16 @@ mod tests {
         let fixture = TestWorkspace::new();
         fixture.write_file("present.txt", "present\n");
         let context = fixture.context();
-        let existing = execute(&context, json!({ "path": "present.txt" }));
-        let missing = execute(&context, json!({ "path": "missing.txt" }));
+        let existing = execute_with_call_id(
+            &context,
+            "call-read-present-file",
+            json!({ "path": "present.txt" }),
+        );
+        let missing = execute_with_call_id(
+            &context,
+            "call-read-missing-file",
+            json!({ "path": "missing.txt" }),
+        );
 
         assert_eq!(existing["exists"], true);
         assert!(existing["observationId"]
@@ -1750,9 +1761,13 @@ mod tests {
     }
 
     fn execute(context: &ToolExecutionContext, args: Value) -> Value {
+        execute_with_call_id(context, "call-read-file", args)
+    }
+
+    fn execute_with_call_id(context: &ToolExecutionContext, call_id: &str, args: Value) -> Value {
         let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
-            id: "call-read-file".to_string(),
+            id: call_id.to_string(),
             tool: "read_file".to_string(),
             args,
             approval_status: AgentApprovalStatus::NotRequired,
