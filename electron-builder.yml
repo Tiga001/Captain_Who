@@ -80,6 +80,9 @@ mac:
   # until CI has an Apple notary credential contract; it must never be confused with signing.
   notarize: false
 dmg:
+  # Sign the distributable container itself before its block map is generated. The application
+  # inside already carries the complete hardened Developer ID signature chain.
+  sign: true
   artifactName: ${name}-${version}.${ext}
 linux:
   extraResources:
