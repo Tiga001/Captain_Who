@@ -45,7 +45,7 @@
     },
     "pdfRuntimeCli": {
       "path": "crates/core/src/command/pdf_runtime_cli.py",
-      "sha256": "a96a7be711aff3435487009976fe4f9dc93697f18f5d396576679e089a101bd7"
+      "sha256": "8dc14bb751b33e1f4bf650f9f69b1ab9ae35226e8757fe7f473805dad51fc54c"
     }
   },
   "node": {

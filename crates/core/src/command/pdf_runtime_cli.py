@@ -126,6 +126,19 @@ def _parse_int(args: list[str], index: int, option: str) -> tuple[int, int]:
         raise ValueError(f"{option} requires an integer") from error
 
 
+def _sanitize_extracted_text(text: str) -> str:
+    """Keep extracted PDF text searchable by text-oriented pipeline consumers.
+
+    Some valid PDF character maps are surfaced by pypdf as U+0000. Passing that code point
+    through UTF-8 produces a literal NUL byte, which makes ripgrep classify the otherwise textual
+    stream as binary and suppress its matching lines. Remove only NUL here at the Host-owned text
+    producer; all other Unicode, whitespace, page separators, and control characters retain their
+    existing meaning.
+    """
+
+    return text.replace("\x00", "")
+
+
 def _pdf_text_chunks(
     path: Path,
     first_page: int,
@@ -156,8 +169,11 @@ def _pdf_text_chunks(
             if layout
             else page.extract_text()
         ) or ""
+        source = f"{separator if page_number > first_page else ''}--- Page {page_number} ---\n{text}"
+        source_bytes = len(source.encode("utf-8"))
+        text = _sanitize_extracted_text(text)
         prefix = separator if page_number > first_page else ""
-        yield f"{prefix}--- Page {page_number} ---\n{text}".encode("utf-8")
+        yield f"{prefix}--- Page {page_number} ---\n{text}".encode("utf-8"), source_bytes
 
 
 def pdfinfo(args: list[str]) -> None:
@@ -222,6 +238,7 @@ def pdftotext(args: list[str]) -> None:
     destination = positional[1] if len(positional) == 2 else "-"
     output = None if destination == "-" else _intermediate_path(destination)
     extracted_pages = 0
+    source_bytes = 0
     extracted_bytes = 0
     temporary_path: Path | None = None
     temporary = None
@@ -238,13 +255,16 @@ def pdftotext(args: list[str]) -> None:
         temporary_path = Path(temporary.name)
     writer = temporary if temporary is not None else sys.stdout.buffer
     try:
-        for encoded in _pdf_text_chunks(path, first_page, last_page, layout, page_breaks):
-            if extracted_bytes + len(encoded) + 1 > MAX_EXTRACTED_TEXT_BYTES:
+        for encoded, page_source_bytes in _pdf_text_chunks(
+            path, first_page, last_page, layout, page_breaks
+        ):
+            if source_bytes + page_source_bytes + 1 > MAX_EXTRACTED_TEXT_BYTES:
                 raise ValueError(
                     "extracted text exceeds the 32 MiB safety limit; "
                     "narrow the page range with -f and -l"
                 )
             writer.write(encoded)
+            source_bytes += page_source_bytes
             extracted_bytes += len(encoded)
             extracted_pages += 1
             if temporary is None:

@@ -188,6 +188,89 @@ pdftotext outputs/smoke.pdf - | rg --max-count 1 'Smoke marker page 0'
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "release smoke test; requires MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT"]
+fn managed_pdf_standard_pipeline_searches_text_with_nul() {
+    let component = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT")
+        .expect("set MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT");
+    let provider = ArtifactRuntimeProvider::discover(
+        &crate::artifact_runtime::ArtifactRuntimeDiscoveryOptions::new()
+            .with_configured_component_dir(component),
+    )
+    .unwrap();
+    let prepared = super::prepare_command_runtime_profile(
+        &provider,
+        AgentCommandRuntimeProfile::Pdf,
+        AgentCommandRuntimeKind::Python,
+    )
+    .unwrap();
+    let fixture = TempDir::new().unwrap();
+    let workspace = ManagedCommandWorkspaceLease::open(fixture.path().join("managed-run")).unwrap();
+    let command = r#"python - <<'PY'
+from pathlib import Path
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+target = Path('outputs/nul-text.pdf')
+writer = PdfWriter()
+page = writer.add_blank_page(width=612, height=792)
+font = DictionaryObject({
+    NameObject('/Type'): NameObject('/Font'),
+    NameObject('/Subtype'): NameObject('/Type1'),
+    NameObject('/BaseFont'): NameObject('/Helvetica'),
+})
+page[NameObject('/Resources')] = DictionaryObject({
+    NameObject('/Font'): DictionaryObject({NameObject('/F1'): writer._add_object(font)})
+})
+content = DecodedStreamObject()
+content.set_data(b'BT /F1 12 Tf 72 720 Td (Alpha\\000Needle Omega) Tj ET')
+page[NameObject('/Contents')] = writer._add_object(content)
+with target.open('wb') as output:
+    writer.write(output)
+assert PdfReader(str(target)).pages[0].extract_text() == 'Alpha\x00Needle Omega'
+PY
+pdftotext outputs/nul-text.pdf - | rg --max-count 1 'Needle' | rg --max-count 1 'AlphaNeedle Omega'
+"#;
+    let shell_plan = super::super::managed_pdf_shell::parse_managed_pdf_shell(command)
+        .unwrap()
+        .expect("NUL fixture uses the managed PDF shell surface");
+    let mut environment = managed_environment(&prepared.invocation, None);
+    let launch = prepare_managed_pdf_shell_launch(
+        &prepared.invocation,
+        &shell_plan,
+        &mut environment,
+        &workspace,
+        None,
+        ManagedPdfToolPaths {
+            runtime_root: provider.component_root(),
+            pdf_cli: &provider.pdf_cli_path().unwrap(),
+            ripgrep: &provider.ripgrep_executable().unwrap(),
+        },
+    )
+    .unwrap();
+    let output = CommandSpawnPlan::direct(
+        "managed PDF NUL search smoke".to_string(),
+        workspace.execution_root().to_path_buf(),
+        Some(workspace.execution_root()),
+        Some(Duration::from_secs(60)),
+        launch,
+    )
+    .build()
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "AlphaNeedle Omega"
+    );
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn managed_pdf_sandbox_fails_closed_on_unsupported_hosts() {
