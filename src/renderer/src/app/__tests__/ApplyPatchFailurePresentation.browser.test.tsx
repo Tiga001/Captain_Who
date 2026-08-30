@@ -1,5 +1,5 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import {
   getAgentFileChangeDiff,
@@ -66,32 +66,40 @@ function applyPatchCall(): AgentToolCall {
   }
 }
 
+function appliedFileChangeResult(call: AgentToolCall): AgentToolResult {
+  return {
+    callId: call.id,
+    tool: call.tool,
+    ok: true,
+    result: {
+      schemaVersion: 1,
+      status: 'applied',
+      outcome: 'applied',
+      transactionId: 'file-change-result-only',
+      operation: 'create',
+      updateStrategy: null,
+      filePath: 'existing.txt',
+      additions: 1,
+      deletions: 0,
+      lineCount: 1,
+      byteCount: 12,
+      revision: 'content-sha256-v1:result-only',
+      errorCode: null,
+      error: null,
+      message: null
+    }
+  }
+}
+
 describe('FileChange failure presentation', () => {
+  beforeEach(() => {
+    vi.mocked(getAgentFileChangeDiff).mockReset()
+    vi.mocked(getAgentFileChangeHistoryDiff).mockReset()
+  })
+
   it('loads a completed result-only Diff and keeps detail text at activity size', async () => {
     const call = applyPatchCall()
-    const transactionId = 'file-change-result-only'
-    const result: AgentToolResult = {
-      callId: call.id,
-      tool: call.tool,
-      ok: true,
-      result: {
-        schemaVersion: 1,
-        status: 'applied',
-        outcome: 'applied',
-        transactionId,
-        operation: 'create',
-        updateStrategy: null,
-        filePath: 'existing.txt',
-        additions: 1,
-        deletions: 0,
-        lineCount: 1,
-        byteCount: 12,
-        revision: 'content-sha256-v1:result-only',
-        errorCode: null,
-        error: null,
-        message: null
-      }
-    }
+    const result = appliedFileChangeResult(call)
     vi.mocked(getAgentFileChangeHistoryDiff).mockResolvedValueOnce({
       conversationId: 'conversation-1',
       assistantMessageId: 'assistant-message-1',
@@ -113,16 +121,7 @@ describe('FileChange failure presentation', () => {
         settledStatus="completed"
       />
     )
-    await vi.waitFor(() => {
-      expect(getAgentFileChangeHistoryDiff).toHaveBeenCalledWith({
-        conversationId: 'conversation-1',
-        assistantMessageId: 'assistant-message-1',
-        runId: 'run-1',
-        toolCallId: call.id,
-        offset: 0,
-        maxChars: 50_000
-      })
-    })
+    expect(getAgentFileChangeHistoryDiff).not.toHaveBeenCalled()
     expect(getAgentFileChangeDiff).not.toHaveBeenCalled()
     await screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
 
@@ -145,12 +144,111 @@ describe('FileChange failure presentation', () => {
     expect(previewToggle).not.toBeNull()
     await previewToggle?.click()
 
+    await vi.waitFor(() => {
+      expect(getAgentFileChangeHistoryDiff).toHaveBeenCalledWith({
+        conversationId: 'conversation-1',
+        assistantMessageId: 'assistant-message-1',
+        runId: 'run-1',
+        toolCallId: call.id,
+        offset: 0,
+        maxChars: 50_000
+      })
+    })
+
     await expect.element(screen.getByText('+replacement', { exact: true })).toBeVisible()
     expect(getAgentFileChangeDiff).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['failed', false],
+    ['aborted', true]
+  ] as const)(
+    'does not request history for a generic terminal %s apply_patch result',
+    async (settledStatus, cancelled) => {
+      const call = applyPatchCall()
+      const result: AgentToolResult = {
+        callId: call.id,
+        tool: call.tool,
+        ok: false,
+        result: {
+          type: 'file_change',
+          errorCode: `agent.apply_patch.${settledStatus}`,
+          message: '安全错误'
+        }
+      }
+      const screen = await render(
+        <FileChangeToolActivity
+          assistantMessageId="assistant-message-1"
+          call={call}
+          cancelled={cancelled}
+          conversationId="conversation-1"
+          result={result}
+          runId="run-1"
+          settledStatus={settledStatus === 'failed' ? 'failed' : 'cancelled'}
+        />
+      )
+
+      await screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
+
+      expect(screen.container.querySelector('.file-change-activity__toggle')).toBeNull()
+      expect(getAgentFileChangeHistoryDiff).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not request terminal history merely because a valid activity mounts again', async () => {
+    const call = applyPatchCall()
+    const props = {
+      assistantMessageId: 'assistant-message-1',
+      call,
+      conversationId: 'conversation-1',
+      result: appliedFileChangeResult(call),
+      runId: 'run-1',
+      settledStatus: 'completed' as const
+    }
+    const first = await render(<FileChangeToolActivity {...props} />)
+
+    expect(getAgentFileChangeHistoryDiff).not.toHaveBeenCalled()
+    await first.unmount()
+    const second = await render(<FileChangeToolActivity {...props} />)
+
+    expect(getAgentFileChangeHistoryDiff).not.toHaveBeenCalled()
+    await second.unmount()
+  })
+
+  it.each(['unknown result field', 'mismatched Tool Call identity'] as const)(
+    'does not offer history for an otherwise complete result with %s',
+    async (invalidity) => {
+      const call = applyPatchCall()
+      const canonical = appliedFileChangeResult(call)
+      const result: AgentToolResult =
+        invalidity === 'unknown result field'
+          ? {
+              ...canonical,
+              result: {
+                ...(canonical.result as Record<string, unknown>),
+                internalCause: 'private'
+              }
+            }
+          : { ...canonical, callId: 'different-tool-call' }
+      const screen = await render(
+        <FileChangeToolActivity
+          assistantMessageId="assistant-message-1"
+          call={call}
+          conversationId="conversation-1"
+          result={result}
+          runId="run-1"
+          settledStatus="completed"
+        />
+      )
+
+      await screen.container.querySelector<HTMLDetailsElement>('details > summary')?.click()
+
+      expect(screen.container.querySelector('.file-change-activity__toggle')).toBeNull()
+      expect(getAgentFileChangeHistoryDiff).not.toHaveBeenCalled()
+    }
+  )
+
   it('uses the structured error code without exposing the raw error', async () => {
-    vi.mocked(getAgentFileChangeDiff).mockClear()
     const call = applyPatchCall()
     const result: AgentToolResult = {
       callId: call.id,

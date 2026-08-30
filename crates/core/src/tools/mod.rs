@@ -51,7 +51,7 @@ pub(crate) use apply_patch::{
     apply_patch_action, apply_patch_request, apply_patch_wire_is_valid,
     attach_successor_observation_to_model_result,
     attach_successor_observation_to_model_result_with_proposal,
-    copy_successor_observation_projection, without_successor_observation_projection,
+    copy_successor_observation_projection,
 };
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use automation_report::AutomationReportTool;

@@ -159,7 +159,23 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
               callId: writeCall.id,
               tool: writeCall.tool,
               ok: true,
-              result: { transactionId: 'draft-child', status: 'applied' }
+              result: {
+                schemaVersion: 1,
+                status: 'applied',
+                outcome: 'applied',
+                transactionId: 'draft-child',
+                operation: 'create',
+                updateStrategy: null,
+                filePath: 'src/report.ts',
+                additions: 1,
+                deletions: 0,
+                lineCount: 1,
+                byteCount: 20,
+                revision: `content-sha256-v1:${'a'.repeat(64)}`,
+                errorCode: null,
+                error: null,
+                message: null
+              }
             }
           ],
           approvals: [],

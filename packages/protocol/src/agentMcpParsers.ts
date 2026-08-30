@@ -3652,6 +3652,11 @@ function parseAgentFileChangeResult(value: unknown, context: string): AgentFileC
   }
 }
 
+/** Strict Renderer-safe parser for a terminal FileChange result projection. */
+export function parseAgentFileChangeResultForHost(value: unknown): AgentFileChangeResult {
+  return parseAgentFileChangeResult(value, 'Agent FileChange result')
+}
+
 export function parseAgentFileChangeContentPageForHost(value: unknown): AgentFileChangeContentPage {
   const context = 'Agent FileChange content page'
   const item = expectRecord(value, context)

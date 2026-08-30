@@ -85,7 +85,7 @@ fn successor_observation_does_not_masquerade_as_an_archive_truncation() {
             "state":"existing"
         }),
     );
-    let comparison = crate::tools::without_successor_observation_projection(&model_result);
+    let comparison = raw.clone();
     let gate = ContextCapacityDetector::for_model(
         "test-model",
         crate::protocol::AgentApiStyle::OpenAiCompatible,
@@ -99,13 +99,160 @@ fn successor_observation_does_not_masquerade_as_an_archive_truncation() {
         sequence: None,
         raw_result: &raw,
         archive_result: &raw,
-        model_result: &model_result,
+        model_result: &comparison,
         model_result_for_archive_comparison: &comparison,
         model_tool_result_gate: &gate,
     })
     .unwrap();
 
     assert!(!metadata.model_projection_truncated);
+}
+
+#[test]
+fn successor_observation_is_live_and_checkpoint_only_while_durable_prefix_stays_canonical() {
+    let call = AgentToolCall {
+        id: "call-successor-projection-boundary".to_string(),
+        tool: "apply_patch".to_string(),
+        args: json!({
+            "request": {
+                "action": "apply",
+                "operation": "create",
+                "filePath": "projection.txt",
+                "observationId": "fobs_consumed"
+            }
+        }),
+        approval_status: AgentApprovalStatus::Approved,
+        reason: None,
+    };
+    let canonical = AgentToolResult {
+        exact_archive_file: None,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        ok: true,
+        result: Some(json!({
+            "schemaVersion": crate::protocol::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            "status": "applied",
+            "outcome": "applied",
+            "transactionId": "file-change-direct-v1:projection-boundary",
+            "operation": "create",
+            "updateStrategy": null,
+            "filePath": "projection.txt",
+            "additions": 1,
+            "deletions": 0,
+            "lineCount": 1,
+            "byteCount": 6,
+            "revision": crate::content_revision(b"hello\n"),
+            "errorCode": null,
+            "error": null,
+            "message": "文件变更已应用。"
+        })),
+        error: None,
+    };
+    let successor_id = format!("fobs_{}", "7".repeat(32));
+    let mut live = canonical.clone();
+    let live_output = live.result.as_mut().and_then(Value::as_object_mut).unwrap();
+    live_output.insert("observationId".to_string(), json!(successor_id.clone()));
+    live_output.insert(
+        "fileChangeTarget".to_string(),
+        json!({
+            "filePath": "projection.txt",
+            "observationId": successor_id,
+            "state": "existing"
+        }),
+    );
+    let checkpoint = live.clone();
+    let gate = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    let projections = finalize_tool_observations(
+        &gate,
+        &call.id,
+        false,
+        ToolResultProjectionLanes {
+            model: &live,
+            checkpoint: &checkpoint,
+            durable: &canonical,
+        },
+        &ConversationHistoryArchiveTraceMetadata::default(),
+        false,
+    )
+    .unwrap();
+
+    for private_projection in [&projections.model, &projections.checkpoint] {
+        let projected: Value = serde_json::from_str(private_projection).unwrap();
+        assert_eq!(projected["observationId"], successor_id);
+        assert_eq!(projected["fileChangeTarget"]["filePath"], "projection.txt");
+    }
+    let durable: Value = serde_json::from_str(&projections.durable).unwrap();
+    assert!(durable.get("observationId").is_none());
+    assert!(durable.get("fileChangeTarget").is_none());
+
+    let mut recorder = ConversationTraceRecorder::default();
+    recorder.record_tool_call(&call);
+    let sequence = recorder
+        .record_tool_result(&call, &canonical)
+        .expect("canonical FileChange result must close its ToolCall");
+    recorder
+        .record_model_message(
+            sequence,
+            0,
+            &LlmMessage::tool_result(call.id, projections.durable, false),
+        )
+        .unwrap();
+    let snapshot = recorder.snapshot();
+    let durable_snapshot = format!(
+        "{}\n{}",
+        serde_json::to_string(&snapshot.items).unwrap(),
+        serde_json::to_string(&snapshot.model_context_items).unwrap()
+    );
+    assert!(!durable_snapshot.contains("observationId"));
+    assert!(!durable_snapshot.contains("fileChangeTarget"));
+    assert!(!durable_snapshot.contains("fobs_"));
+}
+
+#[test]
+fn durable_failure_projection_preserves_a_canonical_continue_with_recovery() {
+    let failure = AgentToolResult {
+        exact_archive_file: None,
+        call_id: "call-file-change-failure-recovery".to_string(),
+        tool: "apply_patch".to_string(),
+        ok: false,
+        result: Some(json!({
+            "status": "failed",
+            "errorCode": "observationExpired",
+            "message": "文件观测已过期。",
+            "continueWith": {
+                "tool": "read_file",
+                "args": { "path": "recovery.txt" }
+            }
+        })),
+        error: Some("文件观测已过期。".to_string()),
+    };
+    let gate = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    let projections = finalize_tool_observations(
+        &gate,
+        &failure.call_id,
+        true,
+        ToolResultProjectionLanes {
+            model: &failure,
+            checkpoint: &failure,
+            durable: &failure,
+        },
+        &ConversationHistoryArchiveTraceMetadata::default(),
+        false,
+    )
+    .unwrap();
+    let durable: Value = serde_json::from_str(&projections.durable).unwrap();
+    assert_eq!(durable["continueWith"]["tool"], "read_file");
+    assert_eq!(durable["continueWith"]["args"]["path"], "recovery.txt");
 }
 
 #[test]
@@ -715,16 +862,21 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
     assert_eq!(metadata.archived_completely, Some(true));
     assert!(metadata.truncated_at_source);
     assert!(metadata.model_projection_truncated);
-    let (observation, checkpoint_observation) = finalize_tool_observations(
+    let observations = finalize_tool_observations(
         &gate,
         &call.id,
         false,
-        &model_result,
-        &raw,
+        ToolResultProjectionLanes {
+            model: &model_result,
+            checkpoint: &raw,
+            durable: &model_result,
+        },
         &metadata,
         false,
     )
     .unwrap();
+    let observation = observations.model;
+    let checkpoint_observation = observations.checkpoint;
     let projected: Value = serde_json::from_str(&observation).unwrap();
     let checkpoint_projected: Value = serde_json::from_str(&checkpoint_observation).unwrap();
     for projection in [&projected, &checkpoint_projected] {

@@ -8,6 +8,7 @@ import type {
   AgentToolCall,
   AgentToolResult
 } from '@mycopilot/protocol'
+import { parseAgentFileChangeResultForHost } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
@@ -123,28 +124,12 @@ function getCallArgs(call: AgentToolCall): Record<string, unknown> {
 function getFileChangeResult(
   result: AgentToolResult | undefined
 ): AgentFileChangeResult | undefined {
-  if (!isRecord(result?.result)) return undefined
-  const status = result.result.status
-  const operation = getOperation(result.result.operation)
-  if (
-    result.result.schemaVersion !== 1 ||
-    typeof result.result.transactionId !== 'string' ||
-    !getString(result.result.filePath) ||
-    !operation ||
-    ![
-      'applied',
-      'already_applied',
-      'failed',
-      'conflict',
-      'rejected',
-      'outcome_unknown',
-      'aborted',
-      'expired'
-    ].includes(String(status))
-  ) {
+  if (result?.tool !== 'apply_patch') return undefined
+  try {
+    return parseAgentFileChangeResultForHost(result.result)
+  } catch {
     return undefined
   }
-  return result.result as unknown as AgentFileChangeResult
 }
 
 function getStatus(item: FileChangeToolActivityGroupItem): FileChangeStatus {
@@ -395,8 +380,16 @@ function FileChangeRow({
   const terminal = !isPending(view.status)
   const inlinePatch = terminal ? null : (item.proposal?.inlineDiff?.patch ?? null)
   const previewTransactionId = terminal ? undefined : getPreviewTransactionId(item)
+  const authoritativeResult = getFileChangeResult(item.result)
   const historyIdentityAvailable = Boolean(
-    terminal && conversationId && assistantMessageId && runId && item.call.id
+    terminal &&
+    authoritativeResult &&
+    item.call.tool === 'apply_patch' &&
+    item.result?.callId === item.call.id &&
+    conversationId &&
+    assistantMessageId &&
+    runId &&
+    item.call.id
   )
   const hasLivePreview = view.status === 'running' && Boolean(item.preview)
   const displayedPreview = hasLivePreview
@@ -416,7 +409,8 @@ function FileChangeRow({
       !conversationId ||
       !assistantMessageId ||
       !runId ||
-      !historyIdentityAvailable
+      !historyIdentityAvailable ||
+      !expanded
     ) {
       return
     }
@@ -451,6 +445,7 @@ function FileChangeRow({
   }, [
     assistantMessageId,
     conversationId,
+    expanded,
     historyIdentityAvailable,
     item.call.id,
     observerRootConversationId,

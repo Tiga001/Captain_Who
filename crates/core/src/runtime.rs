@@ -2351,11 +2351,13 @@ impl AgentRuntime {
                                                 outcome: TerminalToolCallOutcome::Settled(Box::new(
                                                     SettledTerminalToolCallOutcome {
                                                         result: result.clone(),
-                                                        checkpoint_result:
+                                                        durable_result:
                                                             checkpoint_result.clone(),
                                                         model_observation:
                                                             model_observation.clone(),
                                                         checkpoint_observation:
+                                                            model_observation.clone(),
+                                                        durable_observation:
                                                             model_observation.clone(),
                                                         archive_metadata:
                                                             archive_metadata.clone(),
@@ -2979,9 +2981,16 @@ impl AgentRuntime {
                         .unwrap_or_else(|error| error.into_inner())
                         .pending_tool_result_sequence(&call.id);
                     let archive_result = tool_registry.archive_projection(&result);
-                    let mut llm_result = tool_registry.model_projection(&result);
+                    // Freeze the canonical projections before adding run-local successor
+                    // Observation authority. FileChange execution may already have committed
+                    // this exact ToolResult/model-context prefix in the Host, so the durable
+                    // Runtime recorder must reproduce it byte-for-byte. The augmented copies are
+                    // reserved for the live model and its private checkpoint only.
+                    let canonical_model_result = tool_registry.model_projection(&result);
+                    let mut llm_result = canonical_model_result.clone();
                     let trace_result = tool_registry.trace_projection(&result);
-                    let mut checkpoint_result = tool_registry.checkpoint_projection(&result);
+                    let durable_result = tool_registry.checkpoint_projection(&result);
+                    let mut checkpoint_result = durable_result.clone();
                     if call.tool == "apply_patch" {
                         if let Some(proposal) = settled_file_change_proposal.as_ref() {
                             crate::tools::attach_successor_observation_to_model_result_with_proposal(
@@ -3004,11 +3013,6 @@ impl AgentRuntime {
                             &mut checkpoint_result,
                         );
                     }
-                    let model_result_for_archive_comparison = if call.tool == "apply_patch" {
-                        crate::tools::without_successor_observation_projection(&llm_result)
-                    } else {
-                        llm_result.clone()
-                    };
                     let archive_metadata = if tool_registry.archives_result(&call.tool) {
                         archive_tool_result(ToolResultArchiveRequest {
                             storage: exact_history_storage.as_ref(),
@@ -3017,21 +3021,26 @@ impl AgentRuntime {
                             sequence: result_sequence,
                             raw_result: &result,
                             archive_result: &archive_result,
-                            model_result: &llm_result,
-                            model_result_for_archive_comparison:
-                                &model_result_for_archive_comparison,
+                            // A successor Observation is neither exact-history content nor a
+                            // durable projection. In particular, it must not make a near-limit
+                            // canonical FileChange result masquerade as archive truncation.
+                            model_result: &canonical_model_result,
+                            model_result_for_archive_comparison: &canonical_model_result,
                             model_tool_result_gate: &model_tool_result_gate,
                         })?
                     } else {
                         ConversationHistoryArchiveTraceMetadata::default()
                     };
-                    let (model_observation, checkpoint_observation) =
+                    let observations =
                         match finalize_tool_observations(
                             &model_tool_result_gate,
                             &call.id,
                             !result.ok,
-                            &llm_result,
-                            &checkpoint_result,
+                            ToolResultProjectionLanes {
+                                model: &llm_result,
+                                checkpoint: &checkpoint_result,
+                                durable: &canonical_model_result,
+                            },
                             &archive_metadata,
                             is_mcp_tool,
                         ) {
@@ -3043,7 +3052,7 @@ impl AgentRuntime {
                                         .unwrap_or_else(|poison| poison.into_inner())
                                         .record_tool_result_with_archive(
                                             &call,
-                                            &checkpoint_result,
+                                            &durable_result,
                                             archive_metadata,
                                         );
                                     settle_aborted_grouped_tool_batch(
@@ -3070,13 +3079,18 @@ impl AgentRuntime {
                                 return Err(error);
                             }
                         };
+                    let FinalizedToolObservations {
+                        model: model_observation,
+                        checkpoint: checkpoint_observation,
+                        durable: durable_observation,
+                    } = observations;
                     let recorded_result_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
                         let sequence = recorder.record_tool_result_with_archive(
                             &call,
-                            &checkpoint_result,
+                            &durable_result,
                             archive_metadata.clone(),
                         );
                         if let Some(sequence) = sequence {
@@ -3086,7 +3100,7 @@ impl AgentRuntime {
                                 0,
                                 &LlmMessage::tool_result(
                                     call.id.clone(),
-                                    checkpoint_observation.clone(),
+                                    durable_observation.clone(),
                                     !result.ok,
                                 ),
                             )
@@ -3114,9 +3128,10 @@ impl AgentRuntime {
                                     outcome: TerminalToolCallOutcome::Settled(Box::new(
                                         SettledTerminalToolCallOutcome {
                                         result: result.clone(),
-                                        checkpoint_result: checkpoint_result.clone(),
+                                        durable_result: durable_result.clone(),
                                         model_observation: model_observation.clone(),
                                         checkpoint_observation: checkpoint_observation.clone(),
+                                        durable_observation: durable_observation.clone(),
                                         archive_metadata: archive_metadata.clone(),
                                         },
                                     )),
@@ -3155,9 +3170,10 @@ impl AgentRuntime {
                                     outcome: TerminalToolCallOutcome::Settled(Box::new(
                                         SettledTerminalToolCallOutcome {
                                         result: result.clone(),
-                                        checkpoint_result: checkpoint_result.clone(),
+                                        durable_result: durable_result.clone(),
                                         model_observation: model_observation.clone(),
                                         checkpoint_observation: checkpoint_observation.clone(),
+                                        durable_observation: durable_observation.clone(),
                                         archive_metadata: archive_metadata.clone(),
                                         },
                                     )),
@@ -3590,9 +3606,10 @@ enum TerminalToolCallOutcome {
 
 struct SettledTerminalToolCallOutcome {
     result: AgentToolResult,
-    checkpoint_result: AgentToolResult,
+    durable_result: AgentToolResult,
     model_observation: String,
     checkpoint_observation: String,
+    durable_observation: String,
     archive_metadata: ConversationHistoryArchiveTraceMetadata,
 }
 
@@ -3885,43 +3902,50 @@ fn settle_terminal_grouped_tool_batch(
             let model_result = tool_registry.model_projection(&result);
             let checkpoint_result = tool_registry.checkpoint_projection(&result);
             let archive_metadata = ConversationHistoryArchiveTraceMetadata::default();
-            let (model_observation, checkpoint_observation) = finalize_tool_observations(
+            let observations = finalize_tool_observations(
                 model_tool_result_gate,
                 &call.id,
                 true,
-                &model_result,
-                &checkpoint_result,
+                ToolResultProjectionLanes {
+                    model: &model_result,
+                    checkpoint: &checkpoint_result,
+                    durable: &model_result,
+                },
                 &archive_metadata,
                 is_mcp_tool,
             )?;
             Ok::<_, AgentError>((
                 result,
                 checkpoint_result,
-                model_observation,
-                checkpoint_observation,
+                observations.model,
+                observations.checkpoint,
+                observations.durable,
                 archive_metadata,
             ))
         };
         let (
             result,
-            checkpoint_result,
+            durable_result,
             model_observation,
             checkpoint_observation,
+            durable_observation,
             archive_metadata,
         ) = match outcome {
             TerminalToolCallOutcome::Settled(settled) => {
                 let SettledTerminalToolCallOutcome {
                     result,
-                    checkpoint_result,
+                    durable_result,
                     model_observation,
                     checkpoint_observation,
+                    durable_observation,
                     archive_metadata,
                 } = *settled;
                 (
                     result,
-                    checkpoint_result,
+                    durable_result,
                     model_observation,
                     checkpoint_observation,
+                    durable_observation,
                     archive_metadata,
                 )
             }
@@ -3936,21 +3960,14 @@ fn settle_terminal_grouped_tool_batch(
             })?,
         };
         let is_error = !result.ok;
-        let result_sequence = staged_trace.record_tool_result_with_archive(
-            &call,
-            &checkpoint_result,
-            archive_metadata,
-        );
+        let result_sequence =
+            staged_trace.record_tool_result_with_archive(&call, &durable_result, archive_metadata);
         if let Some(sequence) = result_sequence {
             staged_trace
                 .record_model_message(
                     sequence,
                     0,
-                    &LlmMessage::tool_result(
-                        call.id.clone(),
-                        checkpoint_observation.clone(),
-                        is_error,
-                    ),
+                    &LlmMessage::tool_result(call.id.clone(), durable_observation, is_error),
                 )
                 .map_err(AgentError::new)?;
         }
@@ -4450,30 +4467,53 @@ pub(crate) fn finalize_model_tool_observation(
     Ok(output.content)
 }
 
-/// Applies one semantic Model projection to both the live request and its persisted replay.
+struct FinalizedToolObservations {
+    model: String,
+    checkpoint: String,
+    durable: String,
+}
+
+struct ToolResultProjectionLanes<'a> {
+    model: &'a AgentToolResult,
+    checkpoint: &'a AgentToolResult,
+    durable: &'a AgentToolResult,
+}
+
+/// Applies the live, private-checkpoint, and durable Model projections at their distinct trust
+/// boundaries.
 ///
-/// `checkpoint_result` remains the canonical recovery/audit value recorded by the checkpoint and
-/// Trace lanes. It must not be rendered into model-context history: otherwise a restart or later
-/// turn would observe a larger, different Tool result than the live model saw. MCP is the explicit
-/// exception: external result bodies are live-only by policy, so its durable replay must use the
-/// persistence-safe checkpoint projection instead.
+/// `results.checkpoint` may contain private resumability authority that the next model request
+/// needs after a crash. `results.durable` is the immutable public projection written to the
+/// conversation model-context log. They are normally identical to `results.model`; FileChange is
+/// the deliberate exception because a successful call adds a run-local successor Observation
+/// only after the Host has already committed the canonical ToolResult. MCP remains the other
+/// exception: external result bodies are live-only by policy, so both checkpoint and durable
+/// replay use the persistence-safe checkpoint projection.
 fn finalize_tool_observations(
     gate: &ModelToolResultGate,
     call_id: &str,
     is_error: bool,
-    model_result: &AgentToolResult,
-    checkpoint_result: &AgentToolResult,
+    results: ToolResultProjectionLanes<'_>,
     archive: &ConversationHistoryArchiveTraceMetadata,
     durable_replay_uses_checkpoint_projection: bool,
-) -> AgentResult<(String, String)> {
+) -> AgentResult<FinalizedToolObservations> {
     let model_observation =
-        finalize_model_tool_observation(gate, call_id, is_error, model_result, archive)?;
+        finalize_model_tool_observation(gate, call_id, is_error, results.model, archive)?;
     let checkpoint_observation = if durable_replay_uses_checkpoint_projection {
-        finalize_model_tool_observation(gate, call_id, is_error, checkpoint_result, archive)?
+        finalize_model_tool_observation(gate, call_id, is_error, results.checkpoint, archive)?
     } else {
         model_observation.clone()
     };
-    Ok((model_observation, checkpoint_observation))
+    let durable_observation = if durable_replay_uses_checkpoint_projection {
+        checkpoint_observation.clone()
+    } else {
+        finalize_model_tool_observation(gate, call_id, is_error, results.durable, archive)?
+    };
+    Ok(FinalizedToolObservations {
+        model: model_observation,
+        checkpoint: checkpoint_observation,
+        durable: durable_observation,
+    })
 }
 
 fn load_continuation_archive_metadata(
