@@ -7,6 +7,10 @@ import {
 } from '../chatMessageFactory'
 
 describe('createComposerDraft', () => {
+  it('does not invent a model selection for a new composer', () => {
+    expect(createComposerDraft().modelId).toBe('')
+  })
+
   it('uses default permission mode for a new composer', () => {
     expect(createComposerDraft().permissionMode).toBe('default')
   })

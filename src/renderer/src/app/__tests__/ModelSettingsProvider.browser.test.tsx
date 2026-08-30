@@ -361,7 +361,7 @@ describe('ModelSettingsProvider hydration', () => {
     expect(service.showToast).not.toHaveBeenCalled()
   })
 
-  it('initializes defaults only after a successful first-run read', async () => {
+  it('initializes an empty model catalog only after a successful first-run read', async () => {
     service.loadModelSettings.mockResolvedValue(null)
 
     await render(
@@ -375,7 +375,7 @@ describe('ModelSettingsProvider hydration', () => {
       expect.objectContaining({
         apiToken: '',
         apiUrl: '',
-        models: expect.arrayContaining([expect.objectContaining({ id: 'gpt-5.5' })])
+        models: []
       })
     )
     expect(service.showToast).not.toHaveBeenCalled()

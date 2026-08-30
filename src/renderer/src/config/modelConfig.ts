@@ -136,75 +136,8 @@ export const modelConfig = {
     defaultTavilyApiKey: ''
   },
   defaults: {
-    selectedModelId: 'gpt-5.5'
-  },
-  models: [
-    {
-      id: 'claude-opus-4-7',
-      displayName: 'claude-opus-4-7',
-      supportsImage: true,
-      inputPrice: '0.028',
-      cachedInputPrice: '',
-      outputPrice: '0.14',
-      providerProfileUpdate: { kind: 'select_generic' },
-      enabled: true
-    },
-    {
-      id: 'claude-sonnet-4.6',
-      displayName: 'claude-sonnet-4.6',
-      supportsImage: true,
-      inputPrice: '0.0168',
-      cachedInputPrice: '',
-      outputPrice: '0.084',
-      providerProfileUpdate: { kind: 'select_generic' },
-      enabled: true
-    },
-    {
-      id: 'gpt-5.5',
-      displayName: 'gpt-5.5',
-      supportsImage: true,
-      inputPrice: '0.021',
-      cachedInputPrice: '',
-      outputPrice: '0.126',
-      providerProfileUpdate: { kind: 'select_generic' },
-      enabled: true
-    },
-    {
-      id: 'deepseek/deepseek-v4-pro',
-      displayName: 'deepseek/deepseek-v4-pro',
-      supportsImage: false,
-      inputPrice: '0.012',
-      cachedInputPrice: '',
-      outputPrice: '0.024',
-      providerProfileUpdate: { kind: 'select_generic' },
-      enabled: true
-    },
-    {
-      id: 'deepseek/deepseek-v4-flash',
-      displayName: 'deepseek/deepseek-v4-flash',
-      supportsImage: false,
-      inputPrice: '0.00105',
-      cachedInputPrice: '',
-      outputPrice: '0.0021',
-      providerProfileUpdate: { kind: 'select_generic' },
-      enabled: true
-    },
-    {
-      id: 'minimax/minimax-m2.5',
-      displayName: 'minimax/minimax-m2.5',
-      supportsImage: false,
-      inputPrice: '0.001407',
-      cachedInputPrice: '',
-      outputPrice: '0.005628',
-      providerProfileUpdate: { kind: 'select_generic' },
-      enabled: true
-    }
-  ] satisfies ModelConfigSaveDraft[]
+    selectedModelId: ''
+  }
 } as const
 
-export const INITIAL_MODEL_SAVE_DRAFTS: ModelConfigSaveDraft[] = modelConfig.models.map(
-  (model) => ({
-    ...model,
-    providerProfileUpdate: { kind: 'select_generic' }
-  })
-)
+export const INITIAL_MODEL_SAVE_DRAFTS: ModelConfigSaveDraft[] = []
