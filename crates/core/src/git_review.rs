@@ -354,9 +354,11 @@ impl GitReviewService {
                             .map(|path| file_stamp(&repository.root.join(path))),
                     },
                 );
-                let path = repository.project_relative_path(&file.path).ok_or_else(|| {
-                    "Git returned a file outside the selected project.".to_string()
-                })?;
+                let path = repository
+                    .project_relative_path(&file.path)
+                    .ok_or_else(|| {
+                        "Git returned a file outside the selected project.".to_string()
+                    })?;
                 let previous_path = file
                     .previous_path
                     .as_deref()
