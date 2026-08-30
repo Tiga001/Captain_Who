@@ -1,17 +1,23 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type -- Node's JavaScript test runner infers these test helper types. */
 
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { chmod, mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import {
   OFFICECLI_MAX_DOWNLOAD_BYTES,
+  prepareOfficeCli,
+  prepareOfficeCliMacSigning,
+  refreshOfficeCliReceiptAfterSigning,
   loadAndValidateManifest,
   selectAsset,
   validateDownloadUrl,
-  validateManifest
+  validateManifest,
+  verifyPackagedOfficeCli
 } from './prepare-officecli.mjs'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -19,6 +25,44 @@ const manifestPath = join(repositoryRoot, 'resources', 'officecli-manifest.json'
 
 async function readRawManifest() {
   return JSON.parse(await readFile(manifestPath, 'utf8'))
+}
+
+function descriptor(bytes) {
+  return {
+    size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex')
+  }
+}
+
+async function officeCliSigningFixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'mycopilot-officecli-signing-'))
+  const outputDirectory = join(directory, 'current')
+  await mkdir(outputDirectory)
+  const manifest = await readRawManifest()
+  const executable = Buffer.concat([Buffer.from('cffaedfe', 'hex'), Buffer.from('fixture')])
+  const files = new Map([
+    ['officecli', executable],
+    ['LICENSE', Buffer.from('fixture license\n')],
+    ['NOTICE', Buffer.from('fixture notice\n')],
+    ['THIRD-PARTY-NOTICES.txt', Buffer.from('fixture third-party notices\n')]
+  ])
+  Object.assign(manifest.assets['darwin-arm64'], descriptor(executable))
+  for (const legal of manifest.legalFiles) {
+    Object.assign(legal, descriptor(files.get(legal.targetName)))
+  }
+  const fixtureManifestPath = join(directory, 'officecli-manifest.json')
+  await writeFile(fixtureManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  for (const [name, bytes] of files) {
+    await writeFile(join(outputDirectory, name), bytes)
+  }
+  await chmod(join(outputDirectory, 'officecli'), 0o755)
+  await prepareOfficeCli({
+    manifestPath: fixtureManifestPath,
+    outputDirectory,
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+  return { directory, fixtureManifestPath, outputDirectory }
 }
 
 test('pinned manifest contains exactly one asset for every supported target', async () => {
@@ -139,4 +183,146 @@ test('manifest rejects oversized or unpinned assets', async () => {
   const unpinned = await readRawManifest()
   unpinned.component.version = 'latest'
   assert.throws(() => validateManifest(unpinned), /pinned to version 1\.0\.139/)
+})
+
+test('packaged OfficeCLI signing freezes one Mach-O and atomically refreshes provenance', async () => {
+  const fixture = await officeCliSigningFixture()
+  const prepared = await prepareOfficeCliMacSigning({
+    manifestPath: fixture.fixtureManifestPath,
+    outputDirectory: fixture.outputDirectory,
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+  assert.deepEqual(
+    prepared.targets.map(({ relativePath }) => relativePath),
+    ['officecli']
+  )
+  assert.equal(prepared.receipt.schemaVersion, 2)
+  assert.deepEqual(prepared.receipt.signedMachO, [])
+
+  const executablePath = join(fixture.outputDirectory, 'officecli')
+  const unsignedBytes = await readFile(executablePath)
+  await writeFile(executablePath, Buffer.concat([unsignedBytes, Buffer.from('signed fixture')]))
+  await chmod(executablePath, 0o755)
+  const refreshed = await refreshOfficeCliReceiptAfterSigning({
+    manifestPath: fixture.fixtureManifestPath,
+    outputDirectory: fixture.outputDirectory,
+    originalReceipt: prepared.receipt,
+    signedPaths: prepared.targets.map(({ relativePath }) => relativePath),
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+
+  assert.deepEqual(refreshed.signedMachO, ['officecli'])
+  assert.deepEqual(refreshed.sourceFiles, prepared.receipt.sourceFiles)
+  assert.notDeepEqual(refreshed.files[0], prepared.receipt.files[0])
+  assert.deepEqual(refreshed.files.slice(1), prepared.receipt.files.slice(1))
+  assert.notEqual(refreshed.bundleRevision, prepared.receipt.bundleRevision)
+  assert.equal(
+    (
+      await verifyPackagedOfficeCli({
+        manifestPath: fixture.fixtureManifestPath,
+        outputDirectory: fixture.outputDirectory,
+        platform: 'darwin',
+        arch: 'arm64',
+        signed: true
+      })
+    ).receipt.bundleRevision,
+    refreshed.bundleRevision
+  )
+  await assert.rejects(
+    prepareOfficeCli({
+      manifestPath: fixture.fixtureManifestPath,
+      outputDirectory: fixture.outputDirectory,
+      platform: 'darwin',
+      arch: 'arm64',
+      verifyOnly: true
+    }),
+    /Unsigned OfficeCLI receipt/
+  )
+  assert.equal(
+    (await readdir(fixture.outputDirectory)).some((name) => name.endsWith('.tmp')),
+    false
+  )
+})
+
+test('OfficeCLI signing rejects missing Mach-O and changes outside the exact allowlist', async () => {
+  const missing = await officeCliSigningFixture()
+  const missingPrepared = await prepareOfficeCliMacSigning({
+    manifestPath: missing.fixtureManifestPath,
+    outputDirectory: missing.outputDirectory,
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+  await assert.rejects(
+    refreshOfficeCliReceiptAfterSigning({
+      manifestPath: missing.fixtureManifestPath,
+      outputDirectory: missing.outputDirectory,
+      originalReceipt: missingPrepared.receipt,
+      signedPaths: [],
+      platform: 'darwin',
+      arch: 'arm64'
+    }),
+    /at least one mutated Mach-O path/
+  )
+
+  const polluted = await officeCliSigningFixture()
+  const prepared = await prepareOfficeCliMacSigning({
+    manifestPath: polluted.fixtureManifestPath,
+    outputDirectory: polluted.outputDirectory,
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+  const receiptPath = join(polluted.outputDirectory, 'component-receipt.json')
+  const frozenReceipt = await readFile(receiptPath)
+  const executablePath = join(polluted.outputDirectory, 'officecli')
+  await writeFile(
+    executablePath,
+    Buffer.concat([await readFile(executablePath), Buffer.from('signed fixture')])
+  )
+  await chmod(executablePath, 0o755)
+  await writeFile(join(polluted.outputDirectory, 'NOTICE'), 'unexpected mutation\n')
+  await assert.rejects(
+    refreshOfficeCliReceiptAfterSigning({
+      manifestPath: polluted.fixtureManifestPath,
+      outputDirectory: polluted.outputDirectory,
+      originalReceipt: prepared.receipt,
+      signedPaths: ['officecli'],
+      platform: 'darwin',
+      arch: 'arm64'
+    }),
+    /outside the Mach-O signing allowlist changed/
+  )
+  assert.deepEqual(await readFile(receiptPath), frozenReceipt)
+})
+
+test('OfficeCLI signing rejects an extra Mach-O even when the frozen file names remain present', async () => {
+  const fixture = await officeCliSigningFixture()
+  const prepared = await prepareOfficeCliMacSigning({
+    manifestPath: fixture.fixtureManifestPath,
+    outputDirectory: fixture.outputDirectory,
+    platform: 'darwin',
+    arch: 'arm64'
+  })
+  const executablePath = join(fixture.outputDirectory, 'officecli')
+  await writeFile(
+    executablePath,
+    Buffer.concat([await readFile(executablePath), Buffer.from('signed fixture')])
+  )
+  await chmod(executablePath, 0o755)
+  await writeFile(
+    join(fixture.outputDirectory, 'NOTICE'),
+    Buffer.concat([Buffer.from('cffaedfe', 'hex'), Buffer.from('unexpected Mach-O')])
+  )
+  await assert.rejects(
+    refreshOfficeCliReceiptAfterSigning({
+      manifestPath: fixture.fixtureManifestPath,
+      outputDirectory: fixture.outputDirectory,
+      originalReceipt: prepared.receipt,
+      signedPaths: ['officecli'],
+      platform: 'darwin',
+      arch: 'arm64'
+    }),
+    /Mach-O file set changed/
+  )
 })

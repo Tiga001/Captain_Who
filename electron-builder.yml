@@ -61,9 +61,13 @@ mac:
   hardenedRuntime: true
   strictVerify: true
   entitlementsInherit: build/entitlements.mac.plist
-  # The top-level application signature still seals Resources. Avoid recursively re-signing the
-  # frozen Chromium component because codesign would change bytes covered by its receipt.
+  # The custom signer signs the exact frozen Mach-O inventories in these managed components and
+  # refreshes only their hashes before the top-level application seals Resources. Exclude each
+  # directory from osx-sign's second recursive pass so it cannot mutate data files or signed bytes
+  # behind the refreshed receipts. LibreOffice keeps its valid upstream Developer ID signatures.
   signIgnore:
+    - /Contents/Resources/components/artifact-runtime/
+    - /Contents/Resources/components/officecli/
     - /Contents/Resources/components/office-renderer/
     - /Contents/Resources/components/word-pdf-renderer/
   extraResources:

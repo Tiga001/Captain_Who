@@ -7,6 +7,12 @@ import { get as httpsGet } from 'node:https'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import {
+  assertExactMachOSigningPaths,
+  assertOnlyFrozenMachOFilesChanged,
+  collectFrozenMachOTargets
+} from './frozen-macho-signing.mjs'
+
 export const OFFICECLI_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 export const OFFICECLI_MAX_REDIRECTS = 5
 
@@ -21,6 +27,8 @@ const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux', 'win32'])
 const SUPPORTED_ARCHITECTURES = new Set(['arm64', 'x64'])
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
 const COMPONENT_RECEIPT_NAME = 'component-receipt.json'
+const OFFICECLI_BUNDLE_REVISION_PREFIX = 'officecli-bundle-sha256-v1:'
+const OFFICECLI_MAX_RECEIPT_BYTES = 1024 * 1024
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, '..')
 const DEFAULT_MANIFEST_PATH = join(REPOSITORY_ROOT, 'resources', 'officecli-manifest.json')
@@ -33,6 +41,14 @@ function requirePlainObject(value, label) {
     throw new Error(`${label} must be an object`)
   }
   return value
+}
+
+function requireExactKeys(value, expectedKeys, label) {
+  const actual = Object.keys(value).sort()
+  const expected = [...expectedKeys].sort()
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(`${label} must contain exactly: ${expected.join(', ')}`)
+  }
 }
 
 function requireNonEmptyString(value, label) {
@@ -63,6 +79,29 @@ function validateFileName(value, label) {
     throw new Error(`${label} must be a single file name`)
   }
   return name
+}
+
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalValue(value[key])])
+    )
+  }
+  return value
+}
+
+export function computeOfficeCliBundleRevision(receiptFields) {
+  const value = requirePlainObject(receiptFields, 'OfficeCLI receipt fields')
+  const payload = Object.fromEntries(
+    Object.entries(value).filter(([key]) => key !== 'bundleRevision')
+  )
+  const digest = createHash('sha256')
+    .update(JSON.stringify(canonicalValue(payload)))
+    .digest('hex')
+  return `${OFFICECLI_BUNDLE_REVISION_PREFIX}${digest}`
 }
 
 export function validateDownloadUrl(value, label = 'download URL') {
@@ -444,9 +483,22 @@ function buildExpectedFiles(manifest, asset) {
   return [asset, ...manifest.legalFiles]
 }
 
-function buildReceipt(manifest, asset, files) {
-  return {
-    schemaVersion: 1,
+function fileDescriptors(files) {
+  return files.map((file) => ({
+    name: file.targetName,
+    size: file.size,
+    sha256: file.sha256
+  }))
+}
+
+function buildReceipt(
+  manifest,
+  asset,
+  currentFiles = fileDescriptors(buildExpectedFiles(manifest, asset)),
+  signedMachO = []
+) {
+  const payload = {
+    schemaVersion: 2,
     component: manifest.component.id,
     version: manifest.component.version,
     source: manifest.component.source,
@@ -454,12 +506,11 @@ function buildReceipt(manifest, asset, files) {
     platform: asset.platform,
     arch: asset.arch,
     executable: asset.targetName,
-    files: files.map((file) => ({
-      name: file.targetName,
-      size: file.size,
-      sha256: file.sha256
-    }))
+    sourceFiles: fileDescriptors(buildExpectedFiles(manifest, asset)),
+    files: currentFiles.map(({ name, size, sha256 }) => ({ name, size, sha256 })),
+    signedMachO: [...signedMachO]
   }
+  return { ...payload, bundleRevision: computeOfficeCliBundleRevision(payload) }
 }
 
 async function verifyPreparedFiles(outputDirectory, files) {
@@ -472,6 +523,177 @@ async function verifyPreparedFiles(outputDirectory, files) {
   return failures
 }
 
+function validateReceiptFiles(value, expectedNames, label) {
+  if (!Array.isArray(value) || value.length !== expectedNames.length) {
+    throw new Error(`${label} must describe exactly ${expectedNames.length} files`)
+  }
+  let totalBytes = 0
+  return value.map((entry, index) => {
+    const descriptor = requirePlainObject(entry, `${label}[${index}]`)
+    requireExactKeys(descriptor, ['name', 'size', 'sha256'], `${label}[${index}]`)
+    const name = validateFileName(descriptor.name, `${label}[${index}].name`)
+    if (name !== expectedNames[index]) {
+      throw new Error(`${label} must preserve the frozen file order and names`)
+    }
+    if (!Number.isSafeInteger(descriptor.size) || descriptor.size < 0) {
+      throw new Error(`${label}[${index}].size must be a non-negative safe integer`)
+    }
+    totalBytes += descriptor.size
+    if (totalBytes > OFFICECLI_MAX_DOWNLOAD_BYTES * expectedNames.length) {
+      throw new Error(`${label} exceeds the bounded component size`)
+    }
+    return Object.freeze({
+      name,
+      size: descriptor.size,
+      sha256: validateSha256(descriptor.sha256, `${label}[${index}].sha256`)
+    })
+  })
+}
+
+function validateOfficeCliReceipt(receipt, manifest, asset, { signed }) {
+  const value = requirePlainObject(receipt, 'OfficeCLI receipt')
+  requireExactKeys(
+    value,
+    [
+      'schemaVersion',
+      'component',
+      'version',
+      'source',
+      'license',
+      'platform',
+      'arch',
+      'executable',
+      'sourceFiles',
+      'files',
+      'signedMachO',
+      'bundleRevision'
+    ],
+    'OfficeCLI receipt'
+  )
+  if (
+    value.schemaVersion !== 2 ||
+    value.component !== manifest.component.id ||
+    value.version !== manifest.component.version ||
+    value.source !== manifest.component.source ||
+    value.license !== manifest.component.license ||
+    value.platform !== asset.platform ||
+    value.arch !== asset.arch ||
+    value.executable !== asset.targetName
+  ) {
+    throw new Error('OfficeCLI receipt identity does not match the pinned build target')
+  }
+
+  const sourceFiles = fileDescriptors(buildExpectedFiles(manifest, asset))
+  const expectedNames = sourceFiles.map(({ name }) => name)
+  const validatedSourceFiles = validateReceiptFiles(
+    value.sourceFiles,
+    expectedNames,
+    'OfficeCLI receipt.sourceFiles'
+  )
+  if (JSON.stringify(validatedSourceFiles) !== JSON.stringify(sourceFiles)) {
+    throw new Error('OfficeCLI receipt source provenance does not match the pinned manifest')
+  }
+  const files = validateReceiptFiles(value.files, expectedNames, 'OfficeCLI receipt.files')
+  if (!Array.isArray(value.signedMachO)) {
+    throw new Error('OfficeCLI receipt.signedMachO must be an array')
+  }
+
+  if (signed) {
+    if (JSON.stringify(value.signedMachO) !== JSON.stringify([asset.targetName])) {
+      throw new Error('Signed OfficeCLI receipt must declare its one frozen Mach-O executable')
+    }
+    if (JSON.stringify(files[0]) === JSON.stringify(sourceFiles[0])) {
+      throw new Error('Signed OfficeCLI receipt executable must differ from its upstream source')
+    }
+    if (JSON.stringify(files.slice(1)) !== JSON.stringify(sourceFiles.slice(1))) {
+      throw new Error('Signed OfficeCLI receipt changed non-executable source files')
+    }
+  } else {
+    if (value.signedMachO.length !== 0) {
+      throw new Error('Unsigned OfficeCLI receipt cannot declare signed Mach-O files')
+    }
+    if (JSON.stringify(files) !== JSON.stringify(sourceFiles)) {
+      throw new Error('Unsigned OfficeCLI receipt files do not match the pinned source files')
+    }
+  }
+  if (value.bundleRevision !== computeOfficeCliBundleRevision(value)) {
+    throw new Error('OfficeCLI bundle revision does not match its receipt')
+  }
+  return value
+}
+
+async function inspectOfficeCliTree(outputDirectory, expectedFiles) {
+  const rootMetadata = await lstat(outputDirectory)
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    throw new Error('OfficeCLI component root must be a real, non-symlink directory')
+  }
+  const expectedNames = new Set([
+    ...expectedFiles.map(({ targetName }) => targetName),
+    COMPONENT_RECEIPT_NAME
+  ])
+  const entries = await readdir(outputDirectory, { withFileTypes: true })
+  if (
+    entries.length !== expectedNames.size ||
+    entries.some((entry) => !expectedNames.has(entry.name))
+  ) {
+    throw new Error('OfficeCLI component file set does not match its frozen receipt boundary')
+  }
+  for (const entry of entries) {
+    const metadata = await lstat(join(outputDirectory, entry.name))
+    if (!entry.isFile() || !metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`OfficeCLI component entry must be a regular non-symlink file: ${entry.name}`)
+    }
+  }
+
+  const files = []
+  for (const descriptor of expectedFiles) {
+    const path = join(outputDirectory, descriptor.targetName)
+    const metadata = await lstat(path)
+    files.push({
+      name: descriptor.targetName,
+      size: metadata.size,
+      sha256: await sha256File(path)
+    })
+  }
+  return files
+}
+
+async function verifyOfficeCliReceipt(outputDirectory, manifest, asset, { signed }) {
+  const receiptPath = join(outputDirectory, COMPONENT_RECEIPT_NAME)
+  const receiptMetadata = await lstat(receiptPath)
+  if (!receiptMetadata.isFile() || receiptMetadata.isSymbolicLink()) {
+    throw new Error('OfficeCLI component receipt must be a regular non-symlink file')
+  }
+  if (receiptMetadata.size <= 0 || receiptMetadata.size > OFFICECLI_MAX_RECEIPT_BYTES) {
+    throw new Error('OfficeCLI component receipt is empty or oversized')
+  }
+  const receiptBytes = await readFile(receiptPath)
+  if (receiptBytes.includes(0)) {
+    throw new Error('OfficeCLI component receipt contains a NUL byte')
+  }
+  let parsedReceipt
+  try {
+    parsedReceipt = JSON.parse(receiptBytes.toString('utf8'))
+  } catch (error) {
+    throw new Error(`OfficeCLI component receipt is not valid JSON: ${error.message}`, {
+      cause: error
+    })
+  }
+  const receipt = validateOfficeCliReceipt(parsedReceipt, manifest, asset, { signed })
+  const expectedFiles = buildExpectedFiles(manifest, asset)
+  const actualFiles = await inspectOfficeCliTree(outputDirectory, expectedFiles)
+  if (JSON.stringify(actualFiles) !== JSON.stringify(receipt.files)) {
+    throw new Error('OfficeCLI component files do not match the frozen receipt')
+  }
+  if (asset.platform !== 'win32') {
+    const executableMetadata = await lstat(join(outputDirectory, asset.targetName))
+    if ((executableMetadata.mode & 0o111) === 0) {
+      throw new Error('OfficeCLI executable must have a Unix execute bit')
+    }
+  }
+  return receipt
+}
+
 export async function prepareOfficeCli({
   manifestPath = DEFAULT_MANIFEST_PATH,
   outputDirectory = DEFAULT_OUTPUT_DIRECTORY,
@@ -482,29 +704,35 @@ export async function prepareOfficeCli({
   const manifest = await loadAndValidateManifest(manifestPath)
   const asset = selectAsset(manifest, platform, arch)
   const files = buildExpectedFiles(manifest, asset)
-  const receipt = buildReceipt(manifest, asset, files)
   const receiptPath = join(outputDirectory, COMPONENT_RECEIPT_NAME)
+
+  if (verifyOnly) {
+    const receipt = await verifyOfficeCliReceipt(outputDirectory, manifest, asset, {
+      signed: false
+    })
+    return Object.freeze({
+      version: manifest.component.version,
+      platform,
+      arch,
+      executablePath: join(outputDirectory, asset.targetName),
+      outputDirectory,
+      receipt
+    })
+  }
 
   await mkdir(outputDirectory, { recursive: true })
   await sanitizeOutputDirectory(outputDirectory, asset.targetName)
+  for (const file of files) {
+    await downloadAndPublish(
+      file,
+      join(outputDirectory, file.targetName),
+      manifest.component.maxDownloadBytes
+    )
+  }
+
   const failures = await verifyPreparedFiles(outputDirectory, files)
-  if (verifyOnly && failures.length > 0) {
-    throw new Error(`OfficeCLI component cache is incomplete or invalid: ${failures.join(', ')}`)
-  }
-
-  if (!verifyOnly) {
-    for (const file of files) {
-      await downloadAndPublish(
-        file,
-        join(outputDirectory, file.targetName),
-        manifest.component.maxDownloadBytes
-      )
-    }
-  }
-
-  const remainingFailures = await verifyPreparedFiles(outputDirectory, files)
-  if (remainingFailures.length > 0) {
-    throw new Error(`OfficeCLI component verification failed: ${remainingFailures.join(', ')}`)
+  if (failures.length > 0) {
+    throw new Error(`OfficeCLI component verification failed: ${failures.join(', ')}`)
   }
 
   if (platform !== 'win32') {
@@ -513,6 +741,7 @@ export async function prepareOfficeCli({
       await chmod(join(outputDirectory, legalFile.targetName), 0o644)
     }
   }
+  const receipt = buildReceipt(manifest, asset)
   const receiptBytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8')
   const currentReceipt = await readFile(receiptPath).catch((error) => {
     if (error?.code === 'ENOENT') {
@@ -521,22 +750,127 @@ export async function prepareOfficeCli({
     throw error
   })
   if (!currentReceipt?.equals(receiptBytes)) {
-    if (verifyOnly) {
-      throw new Error('OfficeCLI component receipt is missing or stale')
-    }
     await publishBufferAtomically(receiptPath, receiptBytes)
   }
   if (platform !== 'win32') {
     await chmod(receiptPath, 0o644)
   }
 
+  const verifiedReceipt = await verifyOfficeCliReceipt(outputDirectory, manifest, asset, {
+    signed: false
+  })
   return Object.freeze({
     version: manifest.component.version,
     platform,
     arch,
     executablePath: join(outputDirectory, asset.targetName),
-    outputDirectory
+    outputDirectory,
+    receipt: verifiedReceipt
   })
+}
+
+export async function prepareOfficeCliMacSigning({
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  outputDirectory = DEFAULT_OUTPUT_DIRECTORY,
+  platform = 'darwin',
+  arch = process.arch
+} = {}) {
+  if (platform !== 'darwin') {
+    throw new Error(`OfficeCLI macOS signing requires darwin, got ${platform}`)
+  }
+  const prepared = await prepareOfficeCli({
+    manifestPath,
+    outputDirectory,
+    platform,
+    arch,
+    verifyOnly: true
+  })
+  const targets = await collectFrozenMachOTargets({
+    outputDirectory,
+    files: prepared.receipt.files,
+    pathKey: 'name',
+    label: 'OfficeCLI'
+  })
+  if (targets.length !== 1 || targets[0].relativePath !== prepared.receipt.executable) {
+    throw new Error('OfficeCLI frozen component must contain exactly its one Mach-O executable')
+  }
+  return Object.freeze({ outputDirectory, receipt: prepared.receipt, targets })
+}
+
+export async function refreshOfficeCliReceiptAfterSigning({
+  outputDirectory,
+  originalReceipt,
+  signedPaths,
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  platform = 'darwin',
+  arch = process.arch
+}) {
+  if (platform !== 'darwin') {
+    throw new Error(`OfficeCLI macOS signing requires darwin, got ${platform}`)
+  }
+  const manifest = await loadAndValidateManifest(manifestPath)
+  const asset = selectAsset(manifest, platform, arch)
+  const frozen = validateOfficeCliReceipt(originalReceipt, manifest, asset, { signed: false })
+  const receiptPath = join(outputDirectory, COMPONENT_RECEIPT_NAME)
+  const receiptMetadata = await lstat(receiptPath)
+  if (!receiptMetadata.isFile() || receiptMetadata.isSymbolicLink()) {
+    throw new Error('OfficeCLI receipt must remain a regular non-symlink file during signing')
+  }
+  const currentReceipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+  if (JSON.stringify(currentReceipt) !== JSON.stringify(frozen)) {
+    throw new Error('OfficeCLI receipt changed during the signing transaction')
+  }
+
+  const actualFiles = await inspectOfficeCliTree(
+    outputDirectory,
+    buildExpectedFiles(manifest, asset)
+  )
+  const targets = await collectFrozenMachOTargets({
+    outputDirectory,
+    files: actualFiles,
+    pathKey: 'name',
+    label: 'OfficeCLI'
+  })
+  if (targets.length !== 1 || targets[0].relativePath !== asset.targetName) {
+    throw new Error('OfficeCLI Mach-O file set changed during the signing transaction')
+  }
+  const canonicalSignedPaths = assertExactMachOSigningPaths({
+    signedPaths,
+    targets,
+    label: 'OfficeCLI'
+  })
+  assertOnlyFrozenMachOFilesChanged({
+    beforeFiles: frozen.files,
+    afterFiles: actualFiles,
+    signedPaths: canonicalSignedPaths,
+    pathKey: 'name',
+    label: 'OfficeCLI'
+  })
+
+  const refreshed = buildReceipt(manifest, asset, actualFiles, canonicalSignedPaths)
+  validateOfficeCliReceipt(refreshed, manifest, asset, { signed: true })
+  await publishBufferAtomically(
+    receiptPath,
+    Buffer.from(`${JSON.stringify(refreshed, null, 2)}\n`, 'utf8')
+  )
+  if (process.platform !== 'win32') await chmod(receiptPath, 0o644)
+  return verifyOfficeCliReceipt(outputDirectory, manifest, asset, { signed: true })
+}
+
+export async function verifyPackagedOfficeCli({
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  outputDirectory,
+  platform = 'darwin',
+  arch = process.arch,
+  signed = true
+}) {
+  if (typeof outputDirectory !== 'string' || outputDirectory.length === 0) {
+    throw new Error('Packaged OfficeCLI output directory is required')
+  }
+  const manifest = await loadAndValidateManifest(manifestPath)
+  const asset = selectAsset(manifest, platform, arch)
+  const receipt = await verifyOfficeCliReceipt(outputDirectory, manifest, asset, { signed })
+  return Object.freeze({ outputDirectory, receipt })
 }
 
 function parseArguments(argv) {

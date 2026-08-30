@@ -75,7 +75,7 @@ export function packagedOfficeRendererDirectory(context) {
   return join(resourcesDirectory, 'components', 'office-renderer')
 }
 
-async function verifyPackagedOfficeRenderer(context) {
+export async function verifyPackagedOfficeRenderer(context) {
   const outputDirectory = packagedOfficeRendererDirectory(context)
   const arch = packagedOfficeRendererTargetArch(context)
   const platform = packagedOfficeRendererTargetPlatform(context)
@@ -89,12 +89,13 @@ async function verifyPackagedOfficeRenderer(context) {
     `Verified packaged Office renderer ${result.receipt.browser.version} ` +
       `(${result.receipt.bundleRevision}) at ${outputDirectory}`
   )
+  return result
 }
 
 export async function afterPack(context) {
-  await verifyPackagedOfficeRenderer(context)
+  return verifyPackagedOfficeRenderer(context)
 }
 
 export async function afterSign(context) {
-  await verifyPackagedOfficeRenderer(context)
+  return verifyPackagedOfficeRenderer(context)
 }

@@ -5,7 +5,11 @@
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "baebc5180542d60f2dc5e3f70965601e80b4085b013ec0014180e55a0bcb8f26"
+      "sha256": "3e85899e3cd9d044d1f021e13532b8f3b48fdd8f29735a231f377b737e0211cf"
+    },
+    "frozenMachOSigning": {
+      "path": "scripts/frozen-macho-signing.mjs",
+      "sha256": "fc6e141266cfb9a1617faa819c13fb536a5154433efa5cd974c5568147d53760"
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",

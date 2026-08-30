@@ -14,6 +14,7 @@ import {
   downloadPinnedArchive,
   loadOfficeRendererManifest,
   prepareOfficeRenderer,
+  refreshOfficeRendererReceiptAfterSigning,
   selectOfficeRendererTarget,
   validateOfficeRendererManifest
 } from './prepare-office-renderer.mjs'
@@ -220,6 +221,65 @@ test(
     const afterFault = await prepareOfficeRenderer({ outputDirectory, verifyOnly: true })
     assert.equal(afterFault.receipt.bundleRevision, initial.receipt.bundleRevision)
     assert.equal((await readdir(parent)).filter((name) => name.endsWith('.staging')).length, 0)
+  }
+)
+
+test(
+  'signing receipt refresh permits only declared frozen files to change',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const outputDirectory = join(
+      await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-signing-')),
+      'current'
+    )
+    const prepared = await prepareOfficeRenderer({ outputDirectory, installer: fixtureInstaller })
+    const executablePath = join(outputDirectory, ...prepared.receipt.browser.executable.split('/'))
+    await writeFile(executablePath, '#!/bin/sh\necho signed fixture\n', { mode: 0o755 })
+
+    const refreshed = await refreshOfficeRendererReceiptAfterSigning({
+      outputDirectory,
+      originalReceipt: prepared.receipt,
+      signedPaths: [prepared.receipt.browser.executable]
+    })
+    assert.notEqual(refreshed.bundleRevision, prepared.receipt.bundleRevision)
+    assert.notEqual(
+      refreshed.files.find(({ path }) => path === prepared.receipt.browser.executable).sha256,
+      prepared.receipt.files.find(({ path }) => path === prepared.receipt.browser.executable).sha256
+    )
+    assert.deepEqual(await prepareOfficeRenderer({ outputDirectory, verifyOnly: true }), {
+      outputDirectory,
+      receipt: refreshed,
+      reused: true
+    })
+  }
+)
+
+test(
+  'signing receipt refresh rejects changes outside its exact allowlist',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const outputDirectory = join(
+      await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-signing-boundary-')),
+      'current'
+    )
+    const prepared = await prepareOfficeRenderer({ outputDirectory, installer: fixtureInstaller })
+    const executablePath = join(outputDirectory, ...prepared.receipt.browser.executable.split('/'))
+    const resource = prepared.receipt.files.find(({ path }) => path.endsWith('icudtl.dat')).path
+    await writeFile(executablePath, '#!/bin/sh\necho signed fixture\n', { mode: 0o755 })
+    await writeFile(join(outputDirectory, ...resource.split('/')), 'unexpected mutation\n')
+
+    await assert.rejects(
+      refreshOfficeRendererReceiptAfterSigning({
+        outputDirectory,
+        originalReceipt: prepared.receipt,
+        signedPaths: [prepared.receipt.browser.executable]
+      }),
+      /outside the signing allowlist changed/
+    )
+    assert.deepEqual(
+      JSON.parse(await readFile(join(outputDirectory, 'component-receipt.json'), 'utf8')),
+      prepared.receipt
+    )
   }
 )
 

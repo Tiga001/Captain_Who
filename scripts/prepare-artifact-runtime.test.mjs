@@ -24,9 +24,11 @@ import {
   loadArtifactRuntimeManifest,
   normalizePythonConsoleScriptShebangs,
   prepareArtifactRuntime,
+  prepareArtifactRuntimeMacSigning,
   prepareArtifactRuntimeLegalEvidence,
   prepareManagedNodeDependencies,
   readPinnedZipMembers,
+  refreshArtifactRuntimeReceiptAfterSigning,
   selectArtifactRuntimeAssets,
   validateArtifactRuntimeDownloadUrl,
   validateArtifactRuntimeManifest
@@ -265,6 +267,8 @@ test('managed Python requirements freeze the reviewed dependency closure and bin
   assert.match(builder, /'--only-binary=:all:'/)
   assert.match(builder, /'--no-cache-dir'/)
   assert.match(builder, /'--no-compile'/)
+  assert.match(builder, /'-B',\s*'-m',\s*'pip'/)
+  assert.match(builder, /\['-I', '-B', '-c', pythonProbe\]/)
 })
 
 test('manifest and download policy fail closed on mutable or foreign supply-chain inputs', async () => {
@@ -815,6 +819,145 @@ test(
         outputDirectory: linkedOutput
       }),
       /offline source contains a forbidden symlink/
+    )
+  }
+)
+
+test(
+  'packaged Artifact Runtime signing freezes every Mach-O and permits no other mutation',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const source = await offlineComponentSource()
+    const machORelative = 'dependencies/python/lib/libfixture.dylib'
+    const sourceMachO = join(source.directory, ...machORelative.split('/'))
+    await mkdir(dirname(sourceMachO), { recursive: true })
+    await writeFile(
+      sourceMachO,
+      Buffer.concat([Buffer.from('cffaedfe', 'hex'), Buffer.from('unsigned fixture')])
+    )
+
+    const parent = await mkdtemp(join(tmpdir(), 'mycopilot-artifact-signing-'))
+    const base = join(parent, 'base')
+    const preparedBase = await prepareArtifactRuntime({
+      manifestPath,
+      sourceDirectory: source.directory,
+      outputDirectory: base,
+      platform: 'darwin',
+      arch: 'arm64'
+    })
+
+    const success = join(parent, 'success')
+    await cp(base, success, { recursive: true })
+    const prepared = await prepareArtifactRuntimeMacSigning({
+      manifestPath,
+      outputDirectory: success,
+      platform: 'darwin',
+      arch: 'arm64'
+    })
+    assert.deepEqual(
+      prepared.targets.map(({ relativePath }) => relativePath),
+      [machORelative]
+    )
+    await assert.rejects(
+      refreshArtifactRuntimeReceiptAfterSigning({
+        manifestPath,
+        outputDirectory: success,
+        originalReceipt: prepared.receipt,
+        signedPaths: [],
+        platform: 'darwin',
+        arch: 'arm64'
+      }),
+      /at least one mutated Mach-O path/
+    )
+
+    const machOPath = join(success, ...machORelative.split('/'))
+    await writeFile(machOPath, Buffer.concat([await readFile(machOPath), Buffer.from('signed')]))
+    const refreshed = await refreshArtifactRuntimeReceiptAfterSigning({
+      manifestPath,
+      outputDirectory: success,
+      originalReceipt: prepared.receipt,
+      signedPaths: prepared.targets.map(({ relativePath }) => relativePath),
+      platform: 'darwin',
+      arch: 'arm64'
+    })
+    assert.notEqual(refreshed.bundleRevision, prepared.receipt.bundleRevision)
+    assert.notDeepEqual(
+      refreshed.files.find(({ path }) => path === machORelative),
+      prepared.receipt.files.find(({ path }) => path === machORelative)
+    )
+    assert.equal(
+      (
+        await prepareArtifactRuntime({
+          manifestPath,
+          outputDirectory: success,
+          platform: 'darwin',
+          arch: 'arm64',
+          verifyOnly: true
+        })
+      ).receipt.bundleRevision,
+      refreshed.bundleRevision
+    )
+
+    const polluted = join(parent, 'polluted')
+    await cp(base, polluted, { recursive: true })
+    const pollutedPrepared = await prepareArtifactRuntimeMacSigning({
+      manifestPath,
+      outputDirectory: polluted,
+      platform: 'darwin',
+      arch: 'arm64'
+    })
+    const pollutedReceiptPath = join(polluted, 'component-receipt.json')
+    const frozenReceipt = await readFile(pollutedReceiptPath)
+    const pollutedMachO = join(polluted, ...machORelative.split('/'))
+    await writeFile(
+      pollutedMachO,
+      Buffer.concat([await readFile(pollutedMachO), Buffer.from('signed')])
+    )
+    await writeFile(join(polluted, 'legal', 'NOTICE'), 'unexpected mutation\n')
+    await assert.rejects(
+      refreshArtifactRuntimeReceiptAfterSigning({
+        manifestPath,
+        outputDirectory: polluted,
+        originalReceipt: pollutedPrepared.receipt,
+        signedPaths: [machORelative],
+        platform: 'darwin',
+        arch: 'arm64'
+      }),
+      /outside the Mach-O signing allowlist changed/
+    )
+    assert.deepEqual(await readFile(pollutedReceiptPath), frozenReceipt)
+
+    const extraMachO = join(parent, 'extra-macho')
+    await cp(base, extraMachO, { recursive: true })
+    const extraPrepared = await prepareArtifactRuntimeMacSigning({
+      manifestPath,
+      outputDirectory: extraMachO,
+      platform: 'darwin',
+      arch: 'arm64'
+    })
+    const extraTarget = join(extraMachO, ...machORelative.split('/'))
+    await writeFile(
+      extraTarget,
+      Buffer.concat([await readFile(extraTarget), Buffer.from('signed')])
+    )
+    await writeFile(
+      join(extraMachO, 'legal', 'NOTICE'),
+      Buffer.concat([Buffer.from('cffaedfe', 'hex'), Buffer.from('unexpected Mach-O')])
+    )
+    await assert.rejects(
+      refreshArtifactRuntimeReceiptAfterSigning({
+        manifestPath,
+        outputDirectory: extraMachO,
+        originalReceipt: extraPrepared.receipt,
+        signedPaths: [machORelative],
+        platform: 'darwin',
+        arch: 'arm64'
+      }),
+      /exactly match every frozen Mach-O file/
+    )
+    assert.equal(
+      preparedBase.receipt.files.some(({ path }) => path === machORelative),
+      true
     )
   }
 )

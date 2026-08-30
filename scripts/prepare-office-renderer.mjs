@@ -494,6 +494,29 @@ async function writeReceipt(staging, receipt) {
   await syncDirectory(staging)
 }
 
+async function replaceReceiptAtomically(outputDirectory, receipt) {
+  const receiptPath = join(outputDirectory, RECEIPT_NAME)
+  const temporaryPath = join(outputDirectory, `.${RECEIPT_NAME}.${process.pid}.${randomUUID()}.tmp`)
+  const bytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`, 'utf8')
+  if (bytes.length <= 0 || bytes.length > MAX_RECEIPT_BYTES) {
+    throw new Error('Office renderer replacement receipt is empty or oversized')
+  }
+  const handle = await open(temporaryPath, 'wx', 0o600)
+  try {
+    await handle.writeFile(bytes)
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+  try {
+    if (process.platform !== 'win32') await chmod(temporaryPath, 0o644)
+    await rename(temporaryPath, receiptPath)
+    await syncDirectory(outputDirectory)
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined)
+  }
+}
+
 function validateReceipt(receipt, manifest, target, platform, arch) {
   const value = plainObject(receipt, 'Office renderer receipt')
   exactKeys(
@@ -616,6 +639,81 @@ async function verifyReceipt(outputDirectory, manifest, target, platform, arch) 
     throw new Error('Office renderer component contains unexpected or empty directories')
   }
   return receipt
+}
+
+export async function refreshOfficeRendererReceiptAfterSigning({
+  outputDirectory,
+  originalReceipt,
+  signedPaths,
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  platform = process.platform,
+  arch = process.arch
+}) {
+  if (!Array.isArray(signedPaths) || signedPaths.length === 0) {
+    throw new Error('Office renderer signing must declare at least one mutated path')
+  }
+  const canonicalSignedPaths = signedPaths.map((path, index) =>
+    canonicalRelativePath(path, `Office renderer signedPaths[${index}]`)
+  )
+  const signedPathSet = new Set(canonicalSignedPaths)
+  if (signedPathSet.size !== canonicalSignedPaths.length) {
+    throw new Error('Office renderer signing paths must be unique')
+  }
+
+  const manifest = await loadOfficeRendererManifest(manifestPath)
+  const target = selectOfficeRendererTarget(manifest, platform, arch)
+  const frozen = validateReceipt(originalReceipt, manifest, target, platform, arch)
+  const receiptPath = join(outputDirectory, RECEIPT_NAME)
+  const currentReceiptMetadata = await lstat(receiptPath)
+  if (!currentReceiptMetadata.isFile() || currentReceiptMetadata.isSymbolicLink()) {
+    throw new Error('Office renderer receipt must remain a regular non-symlink file during signing')
+  }
+  const currentReceipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+  if (JSON.stringify(currentReceipt) !== JSON.stringify(frozen)) {
+    throw new Error('Office renderer receipt changed during the signing transaction')
+  }
+
+  const frozenByPath = new Map(frozen.files.map((file) => [file.path, file]))
+  for (const path of signedPathSet) {
+    if (!frozenByPath.has(path)) {
+      throw new Error(`Office renderer signing path is absent from the frozen receipt: ${path}`)
+    }
+  }
+
+  const actual = await inspectComponentTree(outputDirectory)
+  if (JSON.stringify(actual.directories) !== JSON.stringify(directoriesForFiles(frozen.files))) {
+    throw new Error('Office renderer directories changed during the signing transaction')
+  }
+  if (
+    actual.files.length !== frozen.files.length ||
+    actual.files.some((file, index) => file.path !== frozen.files[index].path)
+  ) {
+    throw new Error('Office renderer file set changed during the signing transaction')
+  }
+
+  const changedPaths = new Set()
+  for (const actualFile of actual.files) {
+    const frozenFile = frozenByPath.get(actualFile.path)
+    if (actualFile.size !== frozenFile.size || actualFile.sha256 !== frozenFile.sha256) {
+      changedPaths.add(actualFile.path)
+    }
+  }
+  for (const changedPath of changedPaths) {
+    if (!signedPathSet.has(changedPath)) {
+      throw new Error(`Office renderer file outside the signing allowlist changed: ${changedPath}`)
+    }
+  }
+  for (const signedPath of signedPathSet) {
+    if (!changedPaths.has(signedPath)) {
+      throw new Error(`Office renderer signing did not change expected Mach-O: ${signedPath}`)
+    }
+  }
+
+  const payload = { ...frozen, files: actual.files }
+  const refreshed = { ...payload, bundleRevision: computeBundleRevision(payload) }
+  validateReceipt(refreshed, manifest, target, platform, arch)
+  await replaceReceiptAtomically(outputDirectory, refreshed)
+  return verifyReceipt(outputDirectory, manifest, target, platform, arch)
 }
 
 async function publishDirectoryAtomically(staging, outputDirectory, hooks) {

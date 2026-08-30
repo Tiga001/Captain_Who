@@ -25,6 +25,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inflateRawSync } from 'node:zlib'
 import { extract } from 'tar'
 
+import {
+  assertExactMachOSigningPaths,
+  assertOnlyFrozenMachOFilesChanged,
+  collectFrozenMachOTargets
+} from './frozen-macho-signing.mjs'
+
 export const ARTIFACT_RUNTIME_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
 export const ARTIFACT_RUNTIME_MAX_REDIRECTS = 5
 export const ARTIFACT_RUNTIME_MAX_FILES = 100_000
@@ -79,6 +85,7 @@ const PRESENTATION_SDK_SOURCE = join(
 )
 const BUILD_INPUT_RELATIVE_PATHS = Object.freeze({
   builder: 'scripts/prepare-artifact-runtime.mjs',
+  frozenMachOSigning: 'scripts/frozen-macho-signing.mjs',
   nodeBootstrap: 'resources/artifact-runtime/node-bootstrap.mjs',
   nodeLoader: 'resources/artifact-runtime/node-loader.mjs',
   presentationSdk: 'resources/artifact-runtime/presentation-sdk.mjs',
@@ -1541,6 +1548,9 @@ async function installPythonDependencies(manifest, pythonExecutable) {
     pythonExecutable,
     [
       '-I',
+      // Isolated mode ignores PYTHONDONTWRITEBYTECODE. Pass -B explicitly so pip cannot write
+      // bytecode whose co_filename embeds this Mac's private staging path into the package.
+      '-B',
       '-m',
       'pip',
       'install',
@@ -2080,7 +2090,8 @@ async function probePreparedRuntimes(
     'assert actual == expected, (actual, expected)',
     'print(json.dumps(actual,sort_keys=True))'
   ].join(';')
-  const result = await runProcess(pythonExecutable, ['-I', '-c', pythonProbe], {
+  // -I ignores PYTHON* environment variables, so -B must be explicit here as well.
+  const result = await runProcess(pythonExecutable, ['-I', '-B', '-c', pythonProbe], {
     timeoutMs: 30_000
   })
   const actual = JSON.parse(result.stdout.trim())
@@ -2237,6 +2248,25 @@ async function writeReceipt(staging, receipt) {
   await syncDirectory(staging)
 }
 
+async function replaceReceiptAtomically(outputDirectory, receipt) {
+  const receiptPath = join(outputDirectory, RECEIPT_NAME)
+  const temporaryPath = join(outputDirectory, `.${RECEIPT_NAME}.${process.pid}.${randomUUID()}.tmp`)
+  let handle
+  try {
+    handle = await open(temporaryPath, 'wx', 0o600)
+    await handle.writeFile(`${JSON.stringify(receipt, null, 2)}\n`)
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+    if (process.platform !== 'win32') await chmod(temporaryPath, 0o644)
+    await rename(temporaryPath, receiptPath)
+    await syncDirectory(outputDirectory)
+  } finally {
+    await handle?.close().catch(() => undefined)
+    await unlinkIfPresent(temporaryPath)
+  }
+}
+
 async function verifyLegalInventory(outputDirectory, manifest, actualFiles) {
   const path = join(outputDirectory, 'component-legal.json')
   const bytes = await readFile(path)
@@ -2331,9 +2361,13 @@ async function verifyLegalInventory(outputDirectory, manifest, actualFiles) {
 
 async function verifyReceipt(outputDirectory, manifest, platform, arch) {
   const receiptPath = join(outputDirectory, RECEIPT_NAME)
+  const receiptMetadata = await lstat(receiptPath)
+  if (!receiptMetadata.isFile() || receiptMetadata.isSymbolicLink()) {
+    throw new Error('Artifact runtime receipt must be a regular non-symlink file')
+  }
   const bytes = await readFile(receiptPath)
-  if (bytes.length > 16 * 1024 * 1024 || bytes.includes(0)) {
-    throw new Error('Artifact runtime receipt is oversized or contains a NUL byte')
+  if (bytes.length <= 0 || bytes.length > 16 * 1024 * 1024 || bytes.includes(0)) {
+    throw new Error('Artifact runtime receipt is empty, oversized, or contains a NUL byte')
   }
   const receipt = JSON.parse(bytes.toString('utf8'))
   if (
@@ -2412,6 +2446,144 @@ async function verifyReceipt(outputDirectory, manifest, platform, arch) {
   }
   await verifyLegalInventory(outputDirectory, manifest, actualFiles)
   return receipt
+}
+
+function validateFrozenArtifactRuntimeReceipt(receipt, manifest, platform, arch) {
+  const value = plainObject(receipt, 'Artifact runtime frozen receipt')
+  exactKeys(
+    value,
+    [
+      'schemaVersion',
+      'providerId',
+      'bundleVersion',
+      'buildInputsRevision',
+      'platform',
+      'arch',
+      'runtimes',
+      'tools',
+      'files',
+      'bundleRevision'
+    ],
+    'Artifact runtime frozen receipt'
+  )
+  if (!Array.isArray(value.files) || value.files.length === 0) {
+    throw new Error('Artifact runtime frozen receipt must contain files')
+  }
+  if (value.files.length > ARTIFACT_RUNTIME_MAX_FILES) {
+    throw new Error('Artifact runtime frozen receipt exceeds the file-count limit')
+  }
+  let priorPath
+  let totalBytes = 0
+  for (const [index, file] of value.files.entries()) {
+    const descriptor = plainObject(file, `Artifact runtime frozen receipt.files[${index}]`)
+    exactKeys(
+      descriptor,
+      ['path', 'size', 'sha256'],
+      `Artifact runtime frozen receipt.files[${index}]`
+    )
+    const path = canonicalRelativePath(
+      descriptor.path,
+      `Artifact runtime frozen receipt.files[${index}].path`
+    )
+    if (priorPath !== undefined && Buffer.compare(Buffer.from(priorPath), Buffer.from(path)) >= 0) {
+      throw new Error('Artifact runtime frozen receipt files must be uniquely sorted by path')
+    }
+    priorPath = path
+    if (!Number.isSafeInteger(descriptor.size) || descriptor.size < 0) {
+      throw new Error('Artifact runtime frozen receipt contains an invalid file size')
+    }
+    totalBytes += descriptor.size
+    if (totalBytes > ARTIFACT_RUNTIME_MAX_TOTAL_BYTES) {
+      throw new Error('Artifact runtime frozen receipt exceeds the total byte limit')
+    }
+    sha256(descriptor.sha256, `Artifact runtime frozen receipt.files[${index}].sha256`)
+  }
+  const rebuilt = buildReceipt(manifest, platform, arch, value.files)
+  if (JSON.stringify(rebuilt) !== JSON.stringify(value)) {
+    throw new Error('Artifact runtime frozen receipt does not match the pinned manifest')
+  }
+  return value
+}
+
+export async function prepareArtifactRuntimeMacSigning({
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  outputDirectory = DEFAULT_OUTPUT_DIRECTORY,
+  platform = 'darwin',
+  arch = process.arch
+} = {}) {
+  if (platform !== 'darwin') {
+    throw new Error(`Artifact runtime macOS signing requires darwin, got ${platform}`)
+  }
+  const prepared = await prepareArtifactRuntime({
+    manifestPath,
+    outputDirectory,
+    platform,
+    arch,
+    verifyOnly: true
+  })
+  const targets = await collectFrozenMachOTargets({
+    outputDirectory,
+    files: prepared.receipt.files,
+    pathKey: 'path',
+    label: 'Artifact runtime'
+  })
+  if (targets.length === 0) {
+    throw new Error('Artifact runtime does not contain any frozen Mach-O files')
+  }
+  return Object.freeze({ outputDirectory, receipt: prepared.receipt, targets })
+}
+
+export async function refreshArtifactRuntimeReceiptAfterSigning({
+  outputDirectory,
+  originalReceipt,
+  signedPaths,
+  manifestPath = DEFAULT_MANIFEST_PATH,
+  platform = 'darwin',
+  arch = process.arch
+}) {
+  if (platform !== 'darwin') {
+    throw new Error(`Artifact runtime macOS signing requires darwin, got ${platform}`)
+  }
+  const manifest = await loadArtifactRuntimeManifest(manifestPath)
+  selectArtifactRuntimeAssets(manifest, platform, arch)
+  const frozen = validateFrozenArtifactRuntimeReceipt(originalReceipt, manifest, platform, arch)
+
+  const receiptPath = join(outputDirectory, RECEIPT_NAME)
+  const receiptMetadata = await lstat(receiptPath)
+  if (!receiptMetadata.isFile() || receiptMetadata.isSymbolicLink()) {
+    throw new Error(
+      'Artifact runtime receipt must remain a regular non-symlink file during signing'
+    )
+  }
+  const currentReceipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+  if (JSON.stringify(currentReceipt) !== JSON.stringify(frozen)) {
+    throw new Error('Artifact runtime receipt changed during the signing transaction')
+  }
+
+  const actualFiles = await walkRegularFiles(outputDirectory)
+  const targets = await collectFrozenMachOTargets({
+    outputDirectory,
+    files: actualFiles,
+    pathKey: 'path',
+    label: 'Artifact runtime'
+  })
+  const canonicalSignedPaths = assertExactMachOSigningPaths({
+    signedPaths,
+    targets,
+    label: 'Artifact runtime'
+  })
+  assertOnlyFrozenMachOFilesChanged({
+    beforeFiles: frozen.files,
+    afterFiles: actualFiles,
+    signedPaths: canonicalSignedPaths,
+    pathKey: 'path',
+    label: 'Artifact runtime'
+  })
+
+  const refreshed = buildReceipt(manifest, platform, arch, actualFiles)
+  validateFrozenArtifactRuntimeReceipt(refreshed, manifest, platform, arch)
+  await replaceReceiptAtomically(outputDirectory, refreshed)
+  return verifyReceipt(outputDirectory, manifest, platform, arch)
 }
 
 async function publishDirectoryAtomically(staging, outputDirectory, hooks = {}) {

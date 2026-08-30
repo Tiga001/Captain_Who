@@ -9,8 +9,14 @@ import {
   afterPack as verifyOfficeRendererAfterPack,
   afterSign as verifyOfficeRendererAfterSign
 } from './verify-packaged-office-renderer.mjs'
+import {
+  verifyPackagedFrozenComponentsAfterPack,
+  verifyPackagedFrozenComponentsAfterSign
+} from './verify-packaged-frozen-components.mjs'
 import { verifyPackagedWordPdfRenderer } from './verify-packaged-word-pdf-renderer.mjs'
 import { verifyPackagedMacSignatures } from './verify-packaged-macos-signatures.mjs'
+import { sanitizePackagedMacNativeCode } from './sanitize-packaged-mac-native-code.mjs'
+import { verifyPackagedPrivacy } from './verify-packaged-privacy.mjs'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const requireFromBuilder = createRequire(import.meta.resolve('electron-builder/package.json'))
@@ -133,6 +139,11 @@ export function isMacCodeSigningExplicitlyDisabled(context) {
 }
 
 export async function afterPack(context) {
+  if (context.electronPlatformName === 'darwin') {
+    await sanitizePackagedMacNativeCode(context)
+    await verifyPackagedPrivacy(context)
+  }
+  await verifyPackagedFrozenComponentsAfterPack(context)
   await verifyOfficeRendererAfterPack(context)
   await verifyPackagedWordPdfRenderer(context)
   await verifyPackagedManagedPlaywrightMcp(context)
@@ -142,10 +153,14 @@ export async function afterPack(context) {
 }
 
 export async function afterSign(context) {
-  await verifyOfficeRendererAfterSign(context)
+  const frozenComponents = await verifyPackagedFrozenComponentsAfterSign(context)
+  const officeRenderer = await verifyOfficeRendererAfterSign(context)
   if (context.electronPlatformName === 'darwin' && !isMacCodeSigningExplicitlyDisabled(context)) {
     await verifyPackagedWordPdfRenderer(context)
-    await verifyPackagedMacSignatures(context)
+    await verifyPackagedMacSignatures(context, undefined, {
+      officeRendererReceipt: officeRenderer.receipt,
+      frozenComponents
+    })
   } else if (context.electronPlatformName !== 'darwin') {
     await verifyPackagedWordPdfRenderer(context)
   }

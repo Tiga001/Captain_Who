@@ -20,7 +20,7 @@
     "test": "pnpm test:officecli && pnpm test:office-renderer && pnpm test:mac-signing && pnpm test:dev-electron-icon && pnpm test:storage-reset-dev && pnpm test:artifact-runtime && pnpm test:web && pnpm test:rust",
     "test:officecli": "node --test scripts/prepare-officecli.test.mjs",
     "test:office-renderer": "node --test scripts/prepare-office-renderer.test.mjs scripts/verify-packaged-office-renderer.test.mjs scripts/prepare-word-pdf-renderer.test.mjs scripts/verify-packaged-word-pdf-renderer.test.mjs",
-    "test:mac-signing": "node --test scripts/build-core.test.mjs scripts/sign-macos.test.mjs scripts/verify-packaged-app.test.mjs scripts/verify-packaged-macos-signatures.test.mjs",
+    "test:mac-signing": "node --test scripts/build-core.test.mjs scripts/sign-macos.test.mjs scripts/sanitize-packaged-mac-native-code.test.mjs scripts/verify-packaged-app.test.mjs scripts/verify-packaged-frozen-components.test.mjs scripts/verify-packaged-macos-signatures.test.mjs scripts/verify-packaged-privacy.test.mjs",
     "test:dev-electron-icon": "node --test scripts/prepare-dev-electron-icon.test.mjs",
     "test:storage-reset-dev": "node --test scripts/reset-dev-storage-command.test.mjs",
     "test:artifact-runtime": "node --test scripts/prepare-artifact-runtime.test.mjs scripts/pptxgenjs-notes-order.test.mjs scripts/presentation-sdk.test.mjs",
