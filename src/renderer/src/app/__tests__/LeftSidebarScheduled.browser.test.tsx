@@ -17,10 +17,12 @@ const noop = () => undefined
 
 function renderSidebar({
   attentionCount = 0,
+  onNewProject = vi.fn().mockResolvedValue(null),
   onOpenScheduled = vi.fn(),
   selected = false
 }: {
   attentionCount?: number
+  onNewProject?: () => Promise<null>
   onOpenScheduled?: () => void
   selected?: boolean
 } = {}) {
@@ -47,6 +49,7 @@ function renderSidebar({
         onArchiveProjectConversations={noop}
         onMarkConversationUnread={noop}
         onNewConversation={noop}
+        onNewProject={onNewProject}
         onOpenScheduled={onOpenScheduled}
         onOpenSettings={noop}
         onRemoveProject={async () => true}
@@ -87,5 +90,17 @@ describe('LeftSidebar scheduled navigation', () => {
 
     const cappedScreen = await renderSidebar({ attentionCount: 120 })
     await expect.element(cappedScreen.getByText('99+', { exact: true })).toBeVisible()
+  })
+
+  it('opens the native project-folder flow from the rightmost project header action', async () => {
+    const onNewProject = vi.fn().mockResolvedValue(null)
+    const screen = await renderSidebar({ onNewProject })
+    const projectActions = screen.container.querySelectorAll(
+      '.left-sidebar__projects .left-sidebar__section-action'
+    )
+
+    expect(projectActions).toHaveLength(2)
+    await screen.getByRole('button', { name: 'project.newProject', exact: true }).click()
+    expect(onNewProject).toHaveBeenCalledOnce()
   })
 })

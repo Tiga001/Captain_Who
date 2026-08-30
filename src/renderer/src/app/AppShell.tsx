@@ -168,8 +168,14 @@ export function AppShell() {
     markReady: markConversationMetasStartupReady
   } = useAppStartupStage('conversationMetas')
   const { enabledModels, models } = useModelSettings()
-  const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
-    useProjectSettings()
+  const {
+    projects,
+    deleteProject,
+    renameProject,
+    selectProjectDirectory,
+    showProjectInFolder,
+    togglePinProject
+  } = useProjectSettings()
   const {
     commitSidebarResize,
     leftResizeMetrics,
@@ -1946,6 +1952,7 @@ export function AppShell() {
               patchConversation(conversationId, { unreadAt: Date.now() })
             }
             onNewConversation={openNewConversation}
+            onNewProject={selectProjectDirectory}
             onOpenSettings={() => openSettings('general')}
             onRemoveProject={removeProject}
             onRenameConversation={(conversationId, title) =>

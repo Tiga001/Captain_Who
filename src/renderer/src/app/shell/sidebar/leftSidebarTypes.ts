@@ -31,6 +31,7 @@ export interface LeftSidebarProps {
   onArchiveProjectConversations: (projectId: string) => void
   onMarkConversationUnread: (conversationId: string) => void
   onNewConversation: (projectId?: string | null) => void
+  onNewProject: () => Promise<AppProject | null>
   onOpenSettings: () => void
   onRemoveProject: (projectId: string) => Promise<boolean>
   onRenameConversation: (conversationId: string, title: string) => void

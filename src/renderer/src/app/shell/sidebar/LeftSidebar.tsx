@@ -4,6 +4,7 @@ import {
   Folder,
   FolderOpen,
   MoreHorizontal,
+  Plus,
   Search,
   SquarePen
 } from 'lucide-react'
@@ -59,6 +60,7 @@ export function LeftSidebar({
   onArchiveProjectConversations,
   onMarkConversationUnread,
   onNewConversation,
+  onNewProject,
   onOpenSettings,
   onRemoveProject,
   onRenameConversation,
@@ -817,6 +819,18 @@ export function LeftSidebar({
             onClick={(event) => openSectionActions('projects', event.currentTarget)}
           >
             <MoreHorizontal aria-hidden="true" />
+          </button>
+          <button
+            className="left-sidebar__section-action"
+            type="button"
+            aria-label={t('project.newProject')}
+            onClick={() => {
+              closeProjectMenu()
+              closeSectionMenu()
+              void onNewProject()
+            }}
+          >
+            <Plus aria-hidden="true" />
           </button>
         </div>
       </div>

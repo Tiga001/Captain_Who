@@ -81,6 +81,7 @@
 .left-sidebar__section-actions {
   display: flex;
   align-items: center;
+  gap: 0;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
@@ -100,6 +101,11 @@
   place-items: center;
   color: var(--mc-color-icon-subtle);
   border-radius: var(--mc-radius-sm);
+}
+
+.left-sidebar__section-action svg {
+  width: var(--mc-icon-size-base);
+  height: var(--mc-icon-size-base);
 }
 
 .left-sidebar__section-action:hover,
