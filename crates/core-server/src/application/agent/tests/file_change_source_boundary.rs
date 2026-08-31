@@ -135,7 +135,7 @@ const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
         reason: "The strict Agent Builtin MCP risk union retains its current wire value.",
     },
     CurrentSemanticAllowance {
-        file: "packages/protocol/src/agentMcpParsers.ts",
+        file: "packages/protocol/src/agentParsers/builtinApprovals.ts",
         line_marker: "'file_write'",
         expected_occurrences: 1,
         reason: "The Agent parser validates the current Builtin MCP risk wire value.",
@@ -213,7 +213,7 @@ const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
         reason: "The current strict Office access DTO retains its lower-camel write-risk value.",
     },
     CurrentSemanticAllowance {
-        file: "packages/protocol/src/agentMcpParsers.ts",
+        file: "packages/protocol/src/agentParsers/actionPayloads.ts",
         line_marker: "['readOnly', 'fileWrite']",
         expected_occurrences: 1,
         reason: "The strict Agent parser validates the current Office access risk value.",

@@ -405,7 +405,7 @@ fn llm_retry_wire_has_no_provider_authored_reason_field() {
         "reason",
     );
     assert_section_excludes(
-        &root.join("packages/protocol/src/agentMcpParsers.ts"),
+        &root.join("packages/protocol/src/agentParsers/eventPayloads.ts"),
         "function parseAgentLlmRetryEvent(",
         "function parseAgentMessageStreamResetEvent(",
         "reason",
