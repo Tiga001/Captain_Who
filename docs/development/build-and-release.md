@@ -239,7 +239,7 @@ pnpm verify:playwright-packaged-startup
 
 ## 11. 当前限制
 
-- 没有 CI、统一 release orchestration、artifact attestation 或自动证据归档。
+- 已有 Linux/macOS 源码测试 CI，但没有统一 release orchestration、目标平台 package 矩阵、artifact attestation 或自动发布证据归档。
 - 没有 notarization、stapling、自动发布、更新或回滚通道。
 - Windows/Linux 没有仓库内目标平台 release acceptance 记录；目标定义不等于已验证。
 - 非 macOS afterPack 没有等价的全树 privacy scan；全部平台仍缺 packaged Core Server content digest/receipt 绑定。

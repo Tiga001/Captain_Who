@@ -52,10 +52,11 @@ const profileSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core',
       '--lib',
-      'storage::service::child_agents::tests::release_profile_tree_mailbox_event_contention_and_restart_recovery',
+      'storage::service::child_agents::tests::model_recovery::release_profile_tree_mailbox_event_contention_and_restart_recovery',
       '--',
       '--ignored',
       '--exact',
@@ -69,6 +70,7 @@ const profileSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -84,6 +86,7 @@ const profileSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -117,10 +120,11 @@ const smokeSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core',
       '--lib',
-      'storage::agent_graph_repository::tests::terminal_result_faults_rollback_and_recover_exactly_once_after_restart',
+      'storage::agent_graph_repository::tests::result_recovery::terminal_result_faults_rollback_and_recover_exactly_once_after_restart',
       '--',
       '--exact',
       '--nocapture'
@@ -132,6 +136,7 @@ const smokeSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -148,6 +153,7 @@ const smokeSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -164,6 +170,7 @@ const smokeSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -180,6 +187,7 @@ const smokeSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -196,6 +204,7 @@ const smokeSteps = [
     command: [
       'cargo',
       'test',
+      '--locked',
       '-p',
       'mycopilot-core-server',
       '--bin',
@@ -208,11 +217,19 @@ const smokeSteps = [
   },
   {
     label: 'storage: canonical v27, reset refusal, and migration failure recovery',
-    command: ['cargo', 'test', '-p', 'mycopilot-core', '--lib', 'storage::migrations::tests']
+    command: [
+      'cargo',
+      'test',
+      '--locked',
+      '-p',
+      'mycopilot-core',
+      '--lib',
+      'storage::migrations::tests'
+    ]
   },
   {
     label: 'cross-language collaboration protocol fixture',
-    command: ['cargo', 'test', '-p', 'mycopilot-protocol-rs']
+    command: ['cargo', 'test', '--locked', '-p', 'mycopilot-protocol-rs']
   },
   {
     label: 'AppShell: activity, Approval, observer, live stream, restart and root switching',

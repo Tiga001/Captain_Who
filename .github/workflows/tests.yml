@@ -1,0 +1,200 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Install Rust formatting component
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:test-layout
+      - run: pnpm format:check
+      - run: pnpm check:docs
+      - run: pnpm check:public-docs
+      - run: pnpm verify:agent-avatars
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+  script-tests:
+    name: Script tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:test-infrastructure
+      - run: pnpm test:officecli
+      - run: pnpm test:office-renderer
+      - run: pnpm test:mac-signing
+      - run: pnpm test:dev-electron-icon
+      - run: pnpm test:storage-reset-dev
+      - run: pnpm test:artifact-runtime
+      - run: pnpm test:playwright-packaged-startup
+      - run: pnpm test:playwright-conformance-report
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:unit
+
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium Linux system dependencies
+        run: pnpm exec playwright install-deps chromium
+      - run: pnpm test:browser
+      - name: Upload browser test artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-test-artifacts
+          path: |
+            test-results
+            playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
+  rust-linux:
+    name: Rust tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint:rust
+      - run: pnpm test:rust
+
+  electron-macos:
+    name: Electron tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:electron
+
+  automation-real-core:
+    name: Automation real-core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:automation-core-e2e
+
+  multi-agent-release:
+    name: Multi-Agent release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.10.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium Linux system dependencies
+        run: pnpm exec playwright install-deps chromium
+      - run: pnpm prepare:office-renderer
+      - run: pnpm test:multi-agent-release

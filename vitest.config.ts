@@ -3,27 +3,7 @@ import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { playwright } from '@vitest/browser-playwright'
 import { defineConfig } from 'vitest/config'
-
-const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
-const rightSidebarTests = 'src/renderer/src/features/rightSidebar/__tests__'
-const filesTests = 'src/renderer/src/features/files/__tests__'
-const mainWindowLifecycleTest = 'src/main/mainWindowLifecycle.test.ts'
-const workspaceFilesTests = 'src/main/workspaceFiles'
-const coreMainTests = 'src/main/core'
-const managedPlaywrightElectronE2e = 'src/main/core/managedPlaywrightBridge.electron.test.ts'
-const automationCoreE2e = 'src/main/core/automationHostRealCore.integration.test.ts'
-const mcpMainTests = 'src/main/mcp'
-const terminalMainTests = 'src/main/terminal'
-const terminalPreloadTests = 'src/preload'
-const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
-const skillsTests = 'src/renderer/src/features/skills/__tests__'
-const mcpTests = 'src/renderer/src/features/mcp/__tests__'
-const appTests = 'src/renderer/src/app/__tests__'
-const chatTests = 'src/renderer/src/features/chat/__tests__'
-const automationsTests = 'src/renderer/src/features/automations/__tests__'
-const notificationsTests = 'src/renderer/src/features/notifications/__tests__'
-const agentCollaborationTests = 'src/renderer/src/features/agentCollaboration'
-const protocolTests = 'packages/protocol/src'
+import { vitestProjectFileRules } from './scripts/vitest-project-rules.mjs'
 const officeRendererManifest = JSON.parse(
   readFileSync(resolve('resources/office-renderer-manifest.json'), 'utf8')
 ) as { targets: Record<string, { executable: string }> }
@@ -69,26 +49,7 @@ export default defineConfig({
       {
         test: {
           environment: 'node',
-          include: [
-            `${gitReviewTests}/**/*.test.ts`,
-            `${rightSidebarTests}/**/*.test.ts`,
-            mainWindowLifecycleTest,
-            `${coreMainTests}/**/*.test.ts`,
-            `${mcpMainTests}/**/*.test.ts`,
-            `${workspaceFilesTests}/**/*.test.ts`,
-            `${terminalMainTests}/**/*.test.ts`,
-            `${terminalPreloadTests}/**/*.test.ts`,
-            `${terminalRendererTests}/**/*.test.ts`,
-            `${skillsTests}/**/*.test.ts`,
-            `${mcpTests}/**/*.test.ts`,
-            `${appTests}/**/*.test.ts`,
-            `${chatTests}/**/*.test.ts`,
-            `${automationsTests}/**/*.test.ts`,
-            `${notificationsTests}/**/*.test.ts`,
-            `${agentCollaborationTests}/**/*.test.ts`,
-            `${protocolTests}/**/*.test.ts`
-          ],
-          exclude: [managedPlaywrightElectronE2e, automationCoreE2e],
+          ...vitestProjectFileRules.unit,
           name: 'unit'
         }
       },
@@ -100,18 +61,7 @@ export default defineConfig({
             instances: [{ browser: 'chromium' }],
             provider: playwright({ launchOptions: { executablePath: browserTestExecutable } })
           },
-          include: [
-            `${appTests}/**/*.browser.test.tsx`,
-            `${chatTests}/**/*.browser.test.tsx`,
-            `${automationsTests}/**/*.browser.test.tsx`,
-            `${notificationsTests}/**/*.browser.test.tsx`,
-            `${skillsTests}/**/*.browser.test.tsx`,
-            `${mcpTests}/**/*.browser.test.tsx`,
-            `${gitReviewTests}/**/*.browser.test.tsx`,
-            `${rightSidebarTests}/**/*.browser.test.tsx`,
-            `${filesTests}/**/*.browser.test.tsx`,
-            `${agentCollaborationTests}/**/*.browser.test.tsx`
-          ],
+          ...vitestProjectFileRules.browser,
           name: 'browser'
         }
       },
@@ -119,7 +69,15 @@ export default defineConfig({
         test: {
           environment: 'node',
           fileParallelism: false,
-          include: [managedPlaywrightElectronE2e],
+          ...vitestProjectFileRules['electron-fixtures'],
+          name: 'electron-fixtures'
+        }
+      },
+      {
+        test: {
+          environment: 'node',
+          fileParallelism: false,
+          ...vitestProjectFileRules['managed-playwright-e2e'],
           name: 'managed-playwright-e2e'
         }
       },
@@ -127,7 +85,7 @@ export default defineConfig({
         test: {
           environment: 'node',
           fileParallelism: false,
-          include: [automationCoreE2e],
+          ...vitestProjectFileRules['automation-core-e2e'],
           name: 'automation-core-e2e'
         }
       }

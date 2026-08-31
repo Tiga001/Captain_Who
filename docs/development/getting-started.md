@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 开发环境与启动
@@ -13,7 +13,7 @@ last_verified: 2026-08-23
 - pnpm 11.10.0；应使用仓库声明的 `packageManager` 版本。
 - Rust stable，并安装 `rustfmt`、`clippy`。
 - 当前平台的原生编译工具链。`node-pty` 与 Core Server binary 都包含原生构建步骤。
-- Chromium 仅在需要运行浏览器测试时单独安装：`pnpm test:web:install`。
+- Browser tests 会通过 `pnpm test:browser` 准备受管的锁定 Chromium；`pnpm test:web:install` 仅安装普通 Playwright Chromium，不能替代受管组件真源。
 
 安装依赖：
 
@@ -38,24 +38,30 @@ Skills。配置所有权和敏感值规则见[设置与配置](settings-and-conf
 
 ## 常用命令
 
-| 命令                | 用途                                           |
-| ------------------- | ---------------------------------------------- |
-| `pnpm format`       | 格式化 TypeScript、CSS、Markdown 与 Rust       |
-| `pnpm format:check` | 只检查格式                                     |
-| `pnpm check:docs`   | 检查文档元数据、链接、路径、命令与版本真源     |
-| `pnpm lint`         | ESLint                                         |
-| `pnpm typecheck`    | Main/Preload/Renderer TypeScript 检查          |
-| `pnpm lint:rust`    | Rust workspace 严格 Clippy                     |
-| `pnpm test:web`     | Vitest unit、browser 与 Managed Playwright E2E |
-| `pnpm test:rust`    | Rust workspace 测试                            |
-| `pnpm test`         | 脚本、Renderer/Browser 与 Rust 完整常规测试    |
-| `pnpm check`        | 格式、文档、lint、类型、Clippy 与测试总门禁    |
-| `pnpm build`        | TypeScript 检查并构建 Electron 输出            |
-| `pnpm build:core`   | 构建并校验 release Core Server binary          |
-| `pnpm build:unpack` | 构建当前平台的未封装应用                       |
+| 命令                     | 用途                                                 |
+| ------------------------ | ---------------------------------------------------- |
+| `pnpm format`            | 格式化 TypeScript、CSS、Markdown 与 Rust             |
+| `pnpm format:check`      | 只检查格式                                           |
+| `pnpm check:docs`        | 检查文档元数据、链接、路径、命令与版本真源           |
+| `pnpm check:test-layout` | 检查 Vitest 唯一归属与 Rust ignored-test registry    |
+| `pnpm lint`              | ESLint                                               |
+| `pnpm typecheck`         | Main/Preload/Renderer TypeScript 检查                |
+| `pnpm lint:rust`         | Rust workspace 严格 Clippy                           |
+| `pnpm test:unit`         | Node Vitest unit project                             |
+| `pnpm test:browser`      | locked Chromium browser project                      |
+| `pnpm test:electron`     | 真实 Electron fixture 与 Managed Playwright E2E      |
+| `pnpm test:web`          | unit、browser 与 Electron 聚合入口                   |
+| `pnpm test:rust`         | Rust workspace 测试                                  |
+| `pnpm test`              | 脚本、Renderer/Browser/Electron 与 Rust 完整常规测试 |
+| `pnpm check`             | 格式、文档、lint、类型、Clippy 与测试总门禁          |
+| `pnpm build`             | TypeScript 检查并构建 Electron 输出                  |
+| `pnpm build:core`        | 构建并校验 release Core Server binary                |
+| `pnpm build:unpack`      | 构建当前平台的未封装应用                             |
 
 `pnpm check` 当前不自动包含 Multi-Agent release gate、Playwright release gate 或平台签名验证。发布前还
 需执行[测试体系](testing.md)和[构建与发布](build-and-release.md)指定的门禁。
+
+`.github/workflows/tests.yml` 会在 pull request、`main` push 和手动触发时分开执行 Linux 静态/脚本/Node/browser/Rust、macOS Electron、Automation 真实 Core Server 与 Multi-Agent release gate；它不是发布打包或签名流水线。
 
 ## 数据与本地诊断
 

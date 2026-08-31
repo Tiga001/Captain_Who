@@ -127,8 +127,9 @@ ADR；不要悄悄重写历史。
 - 当前态、计划和历史没有混写；
 - 未复制 Token、用户路径、日志中的敏感值或私有配置。
 
-`pnpm check` 已包含 `pnpm check:docs`、`pnpm check:public-docs` 与 Agent avatar 校验；仓库目前没有 CI
-工作流，因此仍需由提交者在本地执行。增加 CI 后，应将同一命令设为必过门禁，不能维护另一套不同规则。
+`pnpm check` 已包含 `pnpm check:docs`、`pnpm check:public-docs` 与 Agent avatar 校验；
+`.github/workflows/tests.yml` 也复用这些仓库命令执行自动检查。仓库侧是否将对应 job 配置为 required check
+不由 workflow 文件本身决定；提交者在合并或发布前仍应按改动域完成本地与专项门禁，不能维护另一套不同规则。
 
 两套检查器的真源分别是 [`check-docs.mjs`](../../scripts/check-docs.mjs) 与
 [`check-public-docs.mjs`](../../scripts/check-public-docs.mjs)。新增公开页面时应从所属 `README.md` 索引；若该页

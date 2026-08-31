@@ -13,9 +13,9 @@ last_verified: 2026-08-31
 
 - Node.js：`>=22 <23`
 - pnpm：`11.10.0`
-- Rust：workspace toolchain；发布构建使用 Cargo lockfile
+- Rust：workspace toolchain；Clippy、常规测试与专项 Cargo runner 均使用 Cargo lockfile
 - Browser tests：使用 `.cache/office-renderer/current` 中 manifest 锁定的 Chromium，不使用开发者系统浏览器
-- Electron E2E：Managed Playwright 项目串行运行，`fileParallelism=false`
+- Electron E2E：真实 Electron fixture 与 Managed Playwright 项目均串行运行，`fileParallelism=false`
 
 首次准备：
 
@@ -23,7 +23,7 @@ last_verified: 2026-08-31
 pnpm install --frozen-lockfile
 ```
 
-需要 Browser tests 时，`pnpm test:web` 会先执行 `prepare:office-renderer`。`test:web:install` 是普通 Playwright Chromium 安装命令，但当前 Vitest browser project 的可执行真源仍是受管 Office renderer。
+需要 Browser tests 时，`pnpm test:browser`（以及聚合入口 `pnpm test:web`）会先执行 `prepare:office-renderer`。`test:web:install` 是普通 Playwright Chromium 安装命令，但当前 Vitest browser project 的可执行真源仍是受管 Office renderer。
 
 ## 2. 默认质量入口
 
@@ -36,43 +36,51 @@ pnpm check
 1. `pnpm format:check`：Prettier + `cargo fmt --check`
 2. `pnpm check:docs`：front matter、单 H1、本地链接/仓库路径、`package.json` scripts、docs 索引、schema/工具链/组件版本等文档漂移检查
 3. `pnpm check:public-docs`：公开文档树、元数据、索引、链接边界、必需页面与禁止占位页
-4. `pnpm verify:agent-avatars`：确定性检查 Agent avatar 资源未漂移
-5. `pnpm lint`：ESLint
-6. `pnpm typecheck`：Node + Web TypeScript
-7. `pnpm lint:rust`：workspace all-targets Clippy，warnings 视为 error
-8. `pnpm test`
+4. `pnpm check:test-layout`：检查所有 TypeScript Vitest 文件恰好属于一个 project，并核对 Rust ignored-test registry
+5. `pnpm verify:agent-avatars`：确定性检查 Agent avatar 资源未漂移
+6. `pnpm lint`：ESLint
+7. `pnpm typecheck`：Node + Web TypeScript
+8. `pnpm lint:rust`：使用 lockfile 运行 workspace all-targets Clippy，warnings 视为 error
+9. `pnpm test`
 
 `pnpm test` 当前包含：
 
+- 测试基础设施 checker 自测；
 - OfficeCLI prepare 脚本测试；
 - Office renderer 与 Word/PDF renderer prepare/package verifier 测试；
 - Core Server release path-remap、macOS signing/frozen Mach-O/privacy/package verifier 的 JavaScript 逻辑测试；
 - dev icon、storage reset、Artifact Runtime 脚本测试；
+- packaged Playwright startup verifier 与 conformance report 的确定性脚本测试；
 - `pnpm test:web`；
-- `cargo test --workspace`。
+- `cargo test --locked --workspace`。
 
 这是一条覆盖广的本地门禁，但不是完整 release gate。
 
+仓库还通过 [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml) 在 pull request、`main` push 和手动触发时并行运行静态检查、脚本测试、Node unit、locked-browser、Linux Rust、macOS Electron fixture、Automation 真实 Core Server E2E 与 Multi-Agent release gate。该 workflow 是源码测试门禁，不构建发布包，也不执行真实签名、notarization 或完整 Managed Playwright release 组合。
+
 ## 3. Vitest 项目
 
-`vitest.config.ts` 定义四个项目：
+`vitest.config.ts` 定义五个项目；文件规则集中在 `scripts/vitest-project-rules.mjs`：
 
-| project                  | 环境                             | 范围                                                                                                             | 并发特点                                   |
-| ------------------------ | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`，含 FileChange、Notification、Browser data/download | 常规并行；排除两个独立 E2E project         |
-| `browser`                | Vitest Browser + locked Chromium | App、Chat、Automation、Notification、Skill、MCP/Browser、Git、Sidebar、Files、Collaboration `.browser.test.tsx`  | headless 浏览器                            |
-| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                                                       | 文件串行                                   |
-| `automation-core-e2e`    | Node + 真实 Core Server 进程     | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation                        | 文件串行；不启动真实 Electron/系统原生通知 |
+| project                  | 环境                             | 范围                                                                                                            | 并发特点                                   |
+| ------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`，排除真实 Electron/Core Server E2E                 | 常规并行                                   |
+| `browser`                | Vitest Browser + locked Chromium | App、Chat、Automation、Notification、Skill、MCP/Browser、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                            |
+| `electron-fixtures`      | 真实 Electron                    | Browser surface failure/manager/target broker 三个 `.electron.test.ts` fixture                                  | 文件串行；仅 macOS 执行用例                |
+| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                                                      | 文件串行                                   |
+| `automation-core-e2e`    | Node + 真实 Core Server 进程     | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation                       | 文件串行；不启动真实 Electron/系统原生通知 |
 
 执行：
 
 ```bash
 pnpm test:web
-pnpm exec vitest run --project unit
-pnpm exec vitest run --project browser
-pnpm exec vitest run --project managed-playwright-e2e
-pnpm exec vitest run --project automation-core-e2e
+pnpm test:unit
+pnpm test:browser
+pnpm test:electron
+pnpm test:automation-core-e2e
 ```
+
+`pnpm test:web` 依次聚合 `test:unit`、`test:electron` 和 `test:browser`，让原生 Electron fixture 在 Chromium browser suite 之前获得隔离的冷启动窗口；`test:electron` 再依次运行 `electron-fixtures` 与 `managed-playwright-e2e`，避免两个真实 Electron project 并发争用资源。`check:test-layout` 会拒绝未归属或被多个 project 重复选择的 `src/`、`packages/` TypeScript 测试文件。
 
 修改 Main/Preload/Renderer 跨层功能时，不能只运行 Node unit；至少补 browser 或真实 Electron 边界测试。
 
@@ -81,7 +89,7 @@ pnpm exec vitest run --project automation-core-e2e
 ```bash
 pnpm test:rust
 # 等价于
-cargo test --workspace
+cargo test --locked --workspace
 ```
 
 主要层级：
@@ -95,18 +103,20 @@ cargo test --workspace
 
 两个 MCP stdio target 使用 `harness=false`，同一 repository binary 同时作为 driver 和子 MCP Server。新增模式必须保持离线、确定性和显式 allowlist。
 
-带 `#[ignore]` 的真实组件/压力测试不会被普通 `cargo test` 自动执行。专项 runner 必须用 `--ignored --exact` 明确选择，并验证确实运行了预期测试数。
+带 `#[ignore]` 的真实组件/压力测试不会被普通 `cargo test` 自动执行。`scripts/ignored-rust-tests.json` 登记其 owner、原因和专项 runner 或 manual 状态；`check:test-layout` 会拒绝源码与登记表的遗漏、过期或重复。专项 runner 必须用 `--ignored --exact` 明确选择，并验证确实运行了预期测试数。
 
 ## 5. 脚本与组件测试
 
-| 命令                          | 覆盖                                                                        |
-| ----------------------------- | --------------------------------------------------------------------------- |
-| `pnpm test:officecli`         | manifest、下载边界、hash、receipt、原子发布                                 |
-| `pnpm test:office-renderer`   | Chromium/LibreOffice prepare 与 packaged verifier                           |
-| `pnpm test:artifact-runtime`  | runtime 构建、supply-chain evidence、PPTX notes/SDK                         |
-| `pnpm test:mac-signing`       | Core Server path remap、签名/冻结 Mach-O、privacy、pack hooks/verifier 逻辑 |
-| `pnpm test:storage-reset-dev` | Electron 数据根、dry-run/confirm 参数边界                                   |
-| `pnpm test:dev-electron-icon` | 开发图标生成                                                                |
+| 命令                            | 覆盖                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `pnpm check:test-layout`        | Vitest project 唯一归属与 Rust ignored-test registry                        |
+| `pnpm test:test-infrastructure` | 两个测试布局 checker 的 Node 自测                                           |
+| `pnpm test:officecli`           | manifest、下载边界、hash、receipt、原子发布                                 |
+| `pnpm test:office-renderer`     | Chromium/LibreOffice prepare 与 packaged verifier                           |
+| `pnpm test:artifact-runtime`    | runtime 构建、supply-chain evidence、PPTX notes/SDK                         |
+| `pnpm test:mac-signing`         | Core Server path remap、签名/冻结 Mach-O、privacy、pack hooks/verifier 逻辑 |
+| `pnpm test:storage-reset-dev`   | Electron 数据根、dry-run/confirm 参数边界                                   |
+| `pnpm test:dev-electron-icon`   | 开发图标生成                                                                |
 
 这些 Node tests 多数验证脚本逻辑和 fixture，**不等于**实际下载全部组件、构建 package、使用真实 Developer ID 签名或运行产物。
 
@@ -156,6 +166,8 @@ pnpm test:automation-core-e2e
 
 **`test:automation-core-e2e` 不在 `test:web`、`test` 或 `check` 中。** 它会构建 debug Core Server，使用临时数据根，并通过生产 Preload bridge、Main IPC registrar 与 Core Server 完成 durable CRUD、revision CAS、`runNow` 入队、Run history 和 attention 调用。其 Electron transport 是进程内适配器，原生通知被模拟为不支持；它不驱动真实定时唤醒、模型完成、Approval 循环、OS 原生通知、进程重启恢复或 packaged Electron。
 
+该专项由 CI 的独立 `automation-real-core` job 自动执行，但仍不改变本地 `pnpm check` 的组成。
+
 修改该子系统时可按层定位：
 
 ```bash
@@ -174,7 +186,7 @@ pnpm test:automation-core-e2e
 pnpm test:multi-agent-release
 ```
 
-运行 4 个 profile + 9 个 smoke。它不在 `pnpm check` 内。详细阈值见 [Multi-Agent 发布门禁](../operations/multi-agent-release-gate.md)。
+运行 4 个 profile + 9 个 smoke，并拒绝声称成功但实际筛选到 0 项的 Rust 命令。它不在本地 `pnpm check` 内，但由 CI 的独立 `multi-agent-release` job 自动执行。详细阈值见 [Multi-Agent 发布门禁](../operations/multi-agent-release-gate.md)。
 
 ### Managed Playwright
 
@@ -207,8 +219,8 @@ stress 包含 100 次 connect/close、重启、并发 fixture、refresh、call �
 
 | 项目                            | 当前状态                                                       |
 | ------------------------------- | -------------------------------------------------------------- |
-| Automation 真实 Core Server E2E | 独立命令，不在 `check`                                         |
-| Multi-Agent release gate        | 独立命令，不在 `check`                                         |
+| Automation 真实 Core Server E2E | 独立命令与 CI job，不在 `check`                                |
+| Multi-Agent release gate        | 独立命令与 CI job，不在 `check`                                |
 | Managed Playwright release组合  | 独立命令，不在 `check`                                         |
 | `electron-builder` package      | 不在 `check`                                                   |
 | 实际 Developer ID 签名/验签     | 仅真实 `build:mac` 发生；普通 test 只测逻辑                    |
@@ -262,7 +274,10 @@ Scheduled Automation 或其共享 Electron Host/协议/存储链路有变化时�
 ## 11. 代码真源
 
 - npm scripts：`package.json`
-- Vitest projects：`vitest.config.ts`
+- Vitest projects：`vitest.config.ts`、`scripts/vitest-project-rules.mjs`
+- 测试布局检查：`scripts/check-vitest-project-ownership.mjs`、`scripts/check-ignored-rust-tests.mjs`
+- Rust ignored-test registry：`scripts/ignored-rust-tests.json`
+- 自动源码测试：`.github/workflows/tests.yml`
 - Rust targets：workspace `Cargo.toml` 与各 crate `Cargo.toml`
 - Multi-Agent runner：`scripts/run-multi-agent-release-gate.mjs`
 - Scheduled Automation project：`vitest.config.ts`、`src/main/core/automationHostRealCore.integration.test.ts`
@@ -292,7 +307,7 @@ pnpm check
 
 ## 13. 当前限制
 
-- 仓库没有 `.github` CI workflow，也没有自动平台矩阵或 required check。
+- 仓库已有 Linux/macOS 源码测试 workflow；仍没有 Windows job、发布包矩阵、真实签名/notarization job，且 workflow 本身不能证明仓库侧已配置 required check。
 - 没有统一 `release:verify` 命令把 `pnpm check`、专项 gate、package、签名和证据绑定起来。
 - macOS 是当前主要实测平台；Linux/Windows 的“有 manifest/target”不等于已完成 release acceptance。
 - ignored real-component tests 依赖本地 prepared component，不在默认 Cargo 测试中。

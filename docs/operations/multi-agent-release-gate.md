@@ -184,7 +184,7 @@ node --test scripts/verify-packaged-playwright-startup.test.mjs
 
 ## 11. 当前限制
 
-- 门禁没有纳入 `pnpm check`，仓库也没有 CI 自动执行。
+- 门禁没有纳入本地 `pnpm check`；CI 通过独立 `multi-agent-release` job 自动执行，但不生成或绑定发布 artifact。
 - 所有 profile 数字是确定性测试阈值，不是生产负载容量。
 - 不执行真实 Provider、真实 MCP/Skill/Command/file side effect，因此不能证明第三方系统可靠性。
 - 不构建、不签名、不 notarize，也不证明目标平台安装/升级。

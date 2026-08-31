@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "file": "crates/core/src/command/managed_runtime/tests/pdf_and_scope.rs",
+      "name": "managed_pdf_shell_runs_receipt_tools_in_one_outer_sandbox",
+      "owner": "core-runtime",
+      "reason": "Release smoke test requires a prepared artifact-runtime component.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/command/managed_runtime/tests/pdf_and_scope.rs",
+      "name": "managed_pdf_standard_pipeline_searches_text_with_nul",
+      "owner": "core-runtime",
+      "reason": "Release smoke test requires a prepared artifact-runtime component.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/render_runtime.rs",
+      "name": "prepared_component_matches_the_rust_receipt_contract",
+      "owner": "office-runtime",
+      "reason": "Requires a prepared Office renderer component.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/tests/managed_scripts.rs",
+      "name": "real_openpyxl_workbook_passes_host_reopen_gate_without_officecli_validate",
+      "owner": "office-runtime",
+      "reason": "Requires an Office test Python environment with openpyxl.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/tests/presentation.rs",
+      "name": "real_nine_slide_presentation_render_verifies_contact_sheet_layout_geometry",
+      "owner": "office-runtime",
+      "reason": "Requires managed Office components and the nine-slide fixture.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/tests/presentation.rs",
+      "name": "real_officecli_creates_and_validates_all_supported_formats",
+      "owner": "office-runtime",
+      "reason": "Requires a managed OfficeCLI component.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/tests/presentation.rs",
+      "name": "real_officecli_renders_through_the_application_managed_browser",
+      "owner": "office-runtime",
+      "reason": "Requires managed OfficeCLI, renderer, and core-server components.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/tests/presentation.rs",
+      "name": "real_presentation_edit_preserves_structure_validates_and_renders_every_page",
+      "owner": "office-runtime",
+      "reason": "Requires pinned OfficeCLI, renderer, and core-server components.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/office/word_pdf_render_runtime.rs",
+      "name": "discovers_the_real_prepared_component",
+      "owner": "office-runtime",
+      "reason": "Requires a prepared Word-to-PDF renderer component.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core/src/storage/service/child_agents/tests/model_recovery.rs",
+      "name": "release_profile_tree_mailbox_event_contention_and_restart_recovery",
+      "owner": "multi-agent-runtime",
+      "reason": "Long-running release profile for durable SQLite recovery.",
+      "runner": "pnpm test:multi-agent-release"
+    },
+    {
+      "file": "crates/core/tests/artifact_runtime_smoke.rs",
+      "name": "managed_node_and_python_create_observed_office_artifacts",
+      "owner": "core-runtime",
+      "reason": "Release smoke test requires a prepared artifact-runtime component.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core-server/src/application/agent/tests/command_sessions.rs",
+      "name": "aspen_pdf_runs_a_five_step_managed_session_workflow",
+      "owner": "core-server-runtime",
+      "reason": "Manual Aspen PDF smoke requires external prepared artifacts.",
+      "status": "manual"
+    },
+    {
+      "file": "crates/core-server/src/application/agent/tests/context_history.rs",
+      "name": "five_hundred_turn_context_compaction_release_profile",
+      "owner": "multi-agent-runtime",
+      "reason": "Long-running release profile for durable context compaction.",
+      "runner": "pnpm test:multi-agent-release"
+    },
+    {
+      "file": "crates/core-server/src/application/mcp/managed_playwright_bridge.rs",
+      "name": "managed_playwright_official_electron_e2e",
+      "owner": "playwright-runtime",
+      "reason": "Requires the managed Playwright Electron fixture wrapper.",
+      "runner": "src/main/core/managedPlaywrightBridge.electron.test.ts"
+    }
+  ]
+}

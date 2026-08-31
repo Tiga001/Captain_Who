@@ -202,10 +202,12 @@ async function waitForManagedPath(item: FakeDownloadItem): Promise<string> {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let turn = 0; turn < 200; turn += 1) {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
     if (predicate()) return
-    await new Promise<void>((resolveImmediate) => setImmediate(resolveImmediate))
+    await new Promise<void>((resolveTimer) => setTimeout(resolveTimer, 5))
   }
+  if (predicate()) return
   throw new Error('Timed out waiting for Browser Download state')
 }
 

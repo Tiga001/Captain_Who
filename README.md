@@ -72,10 +72,14 @@ pnpm dev
 | `pnpm format`                   | 格式化 TypeScript、CSS、文档与 Rust             |
 | `pnpm check:docs`               | 检查文档元数据、链接、路径、命令与版本真源      |
 | `pnpm check:public-docs`        | 检查公开文档结构、索引和边界                    |
+| `pnpm check:test-layout`        | 检查测试文件归属和 ignored Rust 测试登记        |
 | `pnpm lint`                     | 运行 ESLint                                     |
 | `pnpm typecheck`                | 检查 Main、Preload 与 Renderer 类型             |
 | `pnpm lint:rust`                | 对整个 Rust workspace 运行严格 Clippy           |
-| `pnpm test:web`                 | Vitest unit、browser 与 Managed Playwright E2E  |
+| `pnpm test:unit`                | 运行 Node Vitest unit project                   |
+| `pnpm test:browser`             | 使用锁定 Chromium 运行 Vitest browser project   |
+| `pnpm test:electron`            | 运行真实 Electron fixture 与 Managed Playwright |
+| `pnpm test:web`                 | 聚合 unit、browser 与 Electron 测试             |
 | `pnpm test:automation-core-e2e` | Automation Host API 与真实 Core Server 专项 E2E |
 | `pnpm test:rust`                | 运行 Rust workspace 测试                        |
 | `pnpm test`                     | 运行脚本、Web/Browser 与 Rust 常规测试          |

@@ -61,6 +61,7 @@ describe.runIf(process.platform === 'darwin')(
           'cargo',
           [
             'test',
+            '--locked',
             '-p',
             'mycopilot-core-server',
             'managed_playwright_official_electron_e2e',

@@ -177,7 +177,7 @@ pnpm test:web
 
 ## 10. 当前限制
 
-- 仓库当前没有 CI workflow，本文描述的是本地可执行门禁，不代表自动执行。
+- 仓库已有 Linux/macOS 源码测试 workflow，但它不执行 Windows 测试、目标平台 package、真实签名、notarization 或完整 release acceptance。
 - Main 端仍存在部分重复的 Core Server RPC 字符串常量；在完成统一前，跨语言 fixture 和双方测试是必要防漂移措施。
 - 通用 `CoreJsonRpcClient.request` 没有默认逐请求 timeout，长操作依赖子系统 deadline 和进程退出收口。
 - 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；内部文档、公开文档和 Agent 头像检查已纳入 `pnpm check`。

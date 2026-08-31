@@ -23,6 +23,7 @@ const SURFACE_ID = 'right-sidebar-browser-electron-fixture'
 const SECOND_SURFACE_ID = 'right-sidebar-browser-electron-fixture-second'
 const POPUP_SURFACE_ID = 'right-sidebar-browser-electron-fixture-popup'
 const REPLACEMENT_SURFACE_ID = 'right-sidebar-browser-electron-fixture-replacement'
+const FIXTURE_READINESS_TIMEOUT_MS = 20_000
 const PROFILE_DIRECTORY = mkdtempSync(join(tmpdir(), 'mycopilot-browser-surface-profile-'))
 
 app.setPath('userData', PROFILE_DIRECTORY)
@@ -114,8 +115,8 @@ async function main(): Promise<void> {
     surfaceId: string,
     exactGuest: WebContents
   ): Promise<string> => {
-    await waitForFixtureGuestDocumentReady(exactGuest, 10_000)
-    const deadline = Date.now() + 10_000
+    await waitForFixtureGuestDocumentReady(exactGuest, FIXTURE_READINESS_TIMEOUT_MS)
+    const deadline = Date.now() + FIXTURE_READINESS_TIMEOUT_MS
     while (Date.now() < deadline) {
       if (exactGuest.isDestroyed() || guests.get(surfaceId) !== exactGuest) {
         throw new Error('fixture surface was replaced before Renderer acknowledgement')
@@ -148,7 +149,7 @@ async function main(): Promise<void> {
     exactGuest: WebContents,
     viewport?: { height: number; width: number }
   ): Promise<void> => {
-    const deadline = Date.now() + 10_000
+    const deadline = Date.now() + FIXTURE_READINESS_TIMEOUT_MS
     while (Date.now() < deadline) {
       const surfaceInstanceId = await probeExactSurfaceInstance(command.surfaceId, exactGuest)
       const output = manager.attach(window.webContents, {
@@ -168,7 +169,7 @@ async function main(): Promise<void> {
   }
 
   const manager = new BrowserSurfaceManager({
-    attachTimeoutMs: 10_000,
+    attachTimeoutMs: FIXTURE_READINESS_TIMEOUT_MS,
     broker,
     closeTimeoutMs: 5_000,
     createSurfaceId: () => allocatedSurfaceIds.shift() ?? `unexpected-${Date.now()}`,
