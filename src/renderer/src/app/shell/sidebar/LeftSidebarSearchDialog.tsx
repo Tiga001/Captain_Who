@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { AppProject } from '../../../config/projectConfig'
-import type { ChatConversation } from '../../../features/chat/chatTypes'
 import { searchChats, type ChatSearchResult } from '../../../features/search/chatSearchClient'
+import type { SidebarConversation } from './leftSidebarTypes'
 
 const CHAT_SEARCH_LIMIT = 100
 
@@ -19,7 +19,7 @@ interface LeftSidebarSearchDialogLabels {
 }
 
 interface LeftSidebarSearchDialogProps {
-  conversations: ChatConversation[]
+  conversations: SidebarConversation[]
   labels: LeftSidebarSearchDialogLabels
   onClose: () => void
   onSelectConversation: (conversationId: string, messageId?: string | null) => void

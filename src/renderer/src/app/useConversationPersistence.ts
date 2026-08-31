@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChatConversation, ChatMessage, ChatMessageUiState } from '../features/chat/chatTypes'
 import {
   saveChatMessageUiState,
@@ -7,6 +7,7 @@ import {
   upsertChatMessages
 } from '../features/storage/storageClient'
 import type { PendingMessageSave } from './AppShellSupport'
+import { ChatMessagePersistenceQueue } from './chatMessagePersistence'
 
 type PendingMessageUpsert = {
   messages: ChatMessage[]
@@ -20,105 +21,92 @@ type PendingMessageUiStateSave = {
 }
 
 export function useConversationPersistence() {
-  const conversationSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingConversationSavesRef = useRef<Map<string, ChatConversation>>(new Map())
-  const messageUpsertQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingMessageUpsertsRef = useRef<Map<string, PendingMessageUpsert[]>>(new Map())
-  const messageSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingMessageSavesRef = useRef<Map<string, PendingMessageSave>>(new Map())
+  const [conversationSaveQueues] = useState(() => new Map<string, Promise<void>>())
+  const [pendingConversationSaves] = useState(() => new Map<string, ChatConversation>())
+  const pendingConversationSavesRef = useRef(pendingConversationSaves)
+  const [messageUpsertQueues] = useState(() => new Map<string, Promise<void>>())
+  const [pendingMessageUpserts] = useState(() => new Map<string, PendingMessageUpsert[]>())
+  const pendingMessageUpsertsRef = useRef(pendingMessageUpserts)
+  const [pendingMessageSaves] = useState(() => new Map<string, PendingMessageSave>())
+  const pendingMessageSavesRef = useRef(pendingMessageSaves)
   const messageUiStateSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
   const pendingMessageUiStateSavesRef = useRef<Map<string, PendingMessageUiStateSave>>(new Map())
 
-  const waitForConversationSaves = useCallback(async (conversationId: string) => {
-    while (true) {
-      const pendingSave = conversationSaveQueuesRef.current.get(conversationId)
-      if (!pendingSave) return
-      await pendingSave
-    }
-  }, [])
+  const waitForConversationSaves = useCallback(
+    async (conversationId: string) => {
+      while (true) {
+        const pendingSave = conversationSaveQueues.get(conversationId)
+        if (!pendingSave) return
+        await pendingSave
+      }
+    },
+    [conversationSaveQueues]
+  )
 
-  const waitForMessageUpserts = useCallback(async (conversationId: string) => {
-    while (true) {
-      const pendingUpsert = messageUpsertQueuesRef.current.get(conversationId)
-      if (!pendingUpsert) return
-      await pendingUpsert
-    }
-  }, [])
-
-  const waitForCanonicalMessageStateSave = useCallback(async (key: string) => {
-    while (true) {
-      const pendingSave = messageSaveQueuesRef.current.get(key)
-      if (!pendingSave) return
-      await pendingSave
-    }
-  }, [])
-
-  const waitForMessageStateSaves = useCallback(async (conversationId: string) => {
-    while (true) {
-      const pendingSaves = [...messageSaveQueuesRef.current.entries()]
-        .filter(([key]) => key.startsWith(`${conversationId}:`))
-        .map(([, pendingSave]) => pendingSave)
-      const pendingUiStateSaves = [...messageUiStateSaveQueuesRef.current.entries()]
-        .filter(([key]) => key.startsWith(`${conversationId}:`))
-        .map(([, pendingSave]) => pendingSave)
-      if (pendingSaves.length === 0 && pendingUiStateSaves.length === 0) return
-      await Promise.allSettled([...pendingSaves, ...pendingUiStateSaves])
-    }
-  }, [])
+  const waitForMessageUpserts = useCallback(
+    async (conversationId: string) => {
+      while (true) {
+        const pendingUpsert = messageUpsertQueues.get(conversationId)
+        if (!pendingUpsert) return
+        await pendingUpsert
+      }
+    },
+    [messageUpsertQueues]
+  )
 
   // Conversation metadata, message insertion, and message-state updates use independent queues.
   // Waiting at each boundary preserves storage ordering without blocking unrelated conversations.
-  const enqueueConversationMetaSave = useCallback((conversation: ChatConversation) => {
-    const conversationId = conversation.id
-    pendingConversationSavesRef.current.set(conversationId, conversation)
+  const enqueueConversationMetaSave = useCallback(
+    (conversation: ChatConversation) => {
+      const conversationId = conversation.id
+      pendingConversationSaves.set(conversationId, conversation)
 
-    if (conversationSaveQueuesRef.current.has(conversationId)) {
-      return
-    }
+      if (conversationSaveQueues.has(conversationId)) {
+        return
+      }
 
-    const drainSaves = async () => {
-      while (true) {
-        const payload = pendingConversationSavesRef.current.get(conversationId)
-        if (!payload) return
+      const drainSaves = async () => {
+        while (true) {
+          const payload = pendingConversationSaves.get(conversationId)
+          if (!payload) return
 
-        pendingConversationSavesRef.current.delete(conversationId)
-        try {
-          await saveConversationMeta(payload)
-        } catch (error) {
-          console.error('Failed to save conversation metadata to SQLite', error)
+          pendingConversationSaves.delete(conversationId)
+          try {
+            await saveConversationMeta(payload)
+          } catch (error) {
+            console.error('Failed to save conversation metadata to SQLite', error)
+          }
         }
       }
-    }
 
-    const nextSave = drainSaves().finally(() => {
-      conversationSaveQueuesRef.current.delete(conversationId)
-    })
-    conversationSaveQueuesRef.current.set(conversationId, nextSave)
-  }, [])
+      const nextSave = drainSaves().finally(() => {
+        conversationSaveQueues.delete(conversationId)
+      })
+      conversationSaveQueues.set(conversationId, nextSave)
+    },
+    [conversationSaveQueues, pendingConversationSaves]
+  )
 
   const enqueueChatMessagesUpsert = useCallback(
     (conversationId: string, messages: ChatMessage[], positionOffset: number) => {
-      const pendingUpserts = pendingMessageUpsertsRef.current.get(conversationId) ?? []
-      pendingMessageUpsertsRef.current.set(conversationId, [
-        ...pendingUpserts,
-        { messages, positionOffset }
-      ])
+      const pendingUpserts = pendingMessageUpserts.get(conversationId) ?? []
+      pendingMessageUpserts.set(conversationId, [...pendingUpserts, { messages, positionOffset }])
 
-      if (messageUpsertQueuesRef.current.has(conversationId)) {
+      if (messageUpsertQueues.has(conversationId)) {
         return
       }
 
       const drainUpserts = async () => {
         while (true) {
-          const pendingUpserts = pendingMessageUpsertsRef.current.get(conversationId) ?? []
+          const pendingUpserts = pendingMessageUpserts.get(conversationId) ?? []
           const payload = pendingUpserts[0]
           if (!payload) return
 
           const remainingUpserts = pendingUpserts.slice(1)
           if (remainingUpserts.length > 0) {
-            pendingMessageUpsertsRef.current.set(conversationId, remainingUpserts)
+            pendingMessageUpserts.set(conversationId, remainingUpserts)
           } else {
-            pendingMessageUpsertsRef.current.delete(conversationId)
+            pendingMessageUpserts.delete(conversationId)
           }
 
           try {
@@ -131,44 +119,70 @@ export function useConversationPersistence() {
       }
 
       const nextUpsert = drainUpserts().finally(() => {
-        messageUpsertQueuesRef.current.delete(conversationId)
+        messageUpsertQueues.delete(conversationId)
       })
-      messageUpsertQueuesRef.current.set(conversationId, nextUpsert)
+      messageUpsertQueues.set(conversationId, nextUpsert)
     },
-    [waitForConversationSaves]
+    [messageUpsertQueues, pendingMessageUpserts, waitForConversationSaves]
+  )
+
+  const [messagePersistenceQueue] = useState(
+    () =>
+      new ChatMessagePersistenceQueue(
+        {
+          save: async ({ conversationId, message }) => {
+            await waitForConversationSaves(conversationId)
+            await waitForMessageUpserts(conversationId)
+            await saveChatMessageState(conversationId, message)
+          }
+        },
+        pendingMessageSaves,
+        (error) => console.error('Failed to save chat message state to SQLite', error)
+      )
   )
 
   const enqueueChatMessageStateSave = useCallback(
     (conversationId: string, message: ChatMessage) => {
-      const key = `${conversationId}:${message.id}`
-      pendingMessageSavesRef.current.set(key, { conversationId, message })
-
-      if (messageSaveQueuesRef.current.has(key)) {
-        return
-      }
-
-      const drainSaves = async () => {
-        while (true) {
-          const payload = pendingMessageSavesRef.current.get(key)
-          if (!payload) return
-
-          pendingMessageSavesRef.current.delete(key)
-          try {
-            await waitForConversationSaves(payload.conversationId)
-            await waitForMessageUpserts(payload.conversationId)
-            await saveChatMessageState(payload.conversationId, payload.message)
-          } catch (error) {
-            console.error('Failed to save chat message state to SQLite', error)
-          }
-        }
-      }
-
-      const nextSave = drainSaves().finally(() => {
-        messageSaveQueuesRef.current.delete(key)
-      })
-      messageSaveQueuesRef.current.set(key, nextSave)
+      messagePersistenceQueue.persistNow(conversationId, message)
     },
-    [waitForConversationSaves, waitForMessageUpserts]
+    [messagePersistenceQueue]
+  )
+
+  const enqueueChatMessageCheckpoint = useCallback(
+    (conversationId: string, message: ChatMessage) => {
+      messagePersistenceQueue.scheduleCheckpoint(conversationId, message)
+    },
+    [messagePersistenceQueue]
+  )
+
+  const flushChatMessageStateSave = useCallback(
+    (conversationId: string, messageId: string) =>
+      messagePersistenceQueue.flushMessage(conversationId, messageId),
+    [messagePersistenceQueue]
+  )
+
+  const flushConversationMessageStateSaves = useCallback(
+    (conversationId: string) => messagePersistenceQueue.flushConversation(conversationId),
+    [messagePersistenceQueue]
+  )
+
+  const sealAndFlushChatMessageStateSaves = useCallback(
+    () => messagePersistenceQueue.sealAndFlushAll(),
+    [messagePersistenceQueue]
+  )
+
+  const waitForMessageStateSaves = useCallback(
+    async (conversationId: string) => {
+      while (true) {
+        await messagePersistenceQueue.flushConversation(conversationId)
+        const pendingUiStateSaves = [...messageUiStateSaveQueuesRef.current.entries()]
+          .filter(([key]) => key.startsWith(`${conversationId}:`))
+          .map(([, pendingSave]) => pendingSave)
+        if (pendingUiStateSaves.length === 0) return
+        await Promise.allSettled(pendingUiStateSaves)
+      }
+    },
+    [messagePersistenceQueue]
   )
 
   const enqueueChatMessageUiStateSave = useCallback(
@@ -189,7 +203,7 @@ export function useConversationPersistence() {
           try {
             await waitForConversationSaves(payload.conversationId)
             await waitForMessageUpserts(payload.conversationId)
-            await waitForCanonicalMessageStateSave(key)
+            await messagePersistenceQueue.flushMessage(payload.conversationId, payload.messageId)
             await saveChatMessageUiState(payload.conversationId, payload.messageId, payload.uiState)
           } catch (error) {
             console.error('Failed to save chat message UI state to SQLite', error)
@@ -202,17 +216,38 @@ export function useConversationPersistence() {
       })
       messageUiStateSaveQueuesRef.current.set(key, nextSave)
     },
-    [waitForCanonicalMessageStateSave, waitForConversationSaves, waitForMessageUpserts]
+    [messagePersistenceQueue, waitForConversationSaves, waitForMessageUpserts]
   )
+
+  useEffect(() => {
+    const flush = () => void messagePersistenceQueue.flushAll()
+    const flushWhenHidden = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+
+    window.addEventListener('beforeunload', flush)
+    window.addEventListener('pagehide', flush)
+    document.addEventListener('visibilitychange', flushWhenHidden)
+    return () => {
+      window.removeEventListener('beforeunload', flush)
+      window.removeEventListener('pagehide', flush)
+      document.removeEventListener('visibilitychange', flushWhenHidden)
+      flush()
+    }
+  }, [messagePersistenceQueue])
 
   return {
     enqueueChatMessagesUpsert,
+    enqueueChatMessageCheckpoint,
     enqueueChatMessageStateSave,
     enqueueChatMessageUiStateSave,
     enqueueConversationMetaSave,
+    flushChatMessageStateSave,
+    flushConversationMessageStateSaves,
     pendingConversationSavesRef,
     pendingMessageSavesRef,
     pendingMessageUpsertsRef,
+    sealAndFlushChatMessageStateSaves,
     waitForConversationSaves,
     waitForMessageStateSaves,
     waitForMessageUpserts

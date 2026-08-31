@@ -461,6 +461,10 @@ pub fn bind_safe_boundary(
 
 /// Atomically polls caller-visible descendant state and binds first-ready Mailbox items. This
 /// function never queries or claims the target's inbox.
+///
+/// Long-lived waiters should call [`probe_wait_ready`] between settlement attempts. The probe is
+/// read-only and intentionally permits false positives; this function remains the sole authority
+/// that advances cursors and freezes a model-visible result.
 pub fn poll_wait_ready(
     connection: &mut Connection,
     input: &PollAgentWaitInput,
@@ -788,6 +792,122 @@ pub fn poll_wait_ready(
     }))
 }
 
+/// Cheap read-only readiness probe for an already initialized `wait_agent` call.
+///
+/// `poll_wait_ready` establishes the receipt and status baselines once. Subsequent idle checks use
+/// this path so they neither acquire an IMMEDIATE transaction nor rewrite unchanged cursors. A
+/// `true` result is only a hint: the caller must re-enter `poll_wait_ready` to settle atomically.
+pub fn probe_wait_ready(
+    connection: &Connection,
+    input: &PollAgentWaitInput,
+    probed_at: i64,
+) -> Result<bool, AgentGraphError> {
+    validate_turn_identity(
+        &input.conversation_id,
+        &input.run_id,
+        &input.assistant_message_id,
+        input.model_batch_index,
+    )?;
+    validate_identity(&input.caller_agent_id, "caller_agent_id")?;
+    validate_time(probed_at)?;
+    if input.target_agent_ids.is_empty() {
+        return Err(invalid("target_agent_ids", "must not be empty"));
+    }
+    if input.maximum_messages == 0 || input.maximum_messages > MAX_SAFE_BOUNDARY_MESSAGES {
+        return Err(invalid("maximum_messages", "must be between 1 and 64"));
+    }
+    let active_agent = agent_for_active_turn(
+        connection,
+        &input.conversation_id,
+        &input.run_id,
+        &input.assistant_message_id,
+    )?
+    .ok_or_else(|| conflict("wait caller is not an active Agent Turn"))?;
+    if active_agent != input.caller_agent_id {
+        return Err(conflict(
+            "wait caller identity does not own the active Turn",
+        ));
+    }
+    let mut targets = input.target_agent_ids.clone();
+    targets.sort();
+    targets.dedup();
+    if targets.len() > MAX_WAIT_TARGETS {
+        return Err(invalid(
+            "target_agent_ids",
+            "must contain at most 32 distinct targets",
+        ));
+    }
+    for target in &targets {
+        validate_identity(target, "target_agent_id")?;
+        if !is_strict_descendant(connection, &input.caller_agent_id, target)? {
+            return Err(conflict(
+                "wait target must be the caller's strict descendant",
+            ));
+        }
+    }
+
+    let Some(receipt) = query_receipt_by_batch(connection, &input.run_id, input.model_batch_index)?
+    else {
+        // Initialization or crash recovery still belongs to the authoritative transaction.
+        return Ok(true);
+    };
+    if receipt.agent_id != input.caller_agent_id
+        || receipt.conversation_id != input.conversation_id
+        || receipt.assistant_message_id != input.assistant_message_id
+    {
+        return Err(conflict("model batch receipt identity conflict"));
+    }
+    if receipt.sampling_bound_at.is_some()
+        || !load_wait_receipt_targets(connection, &receipt.receipt_id)?.is_empty()
+        || query_open_wait_receipt_id(connection, &receipt)?.is_some()
+    {
+        return Ok(true);
+    }
+
+    for target in &targets {
+        let Some(cursor) = query_cursor(connection, &input.caller_agent_id, &input.run_id, target)?
+        else {
+            // The initial settlement pass owns baseline creation.
+            return Ok(true);
+        };
+        if target_status_version(connection, target)? > cursor.last_target_status_version {
+            return Ok(true);
+        }
+        let has_message = connection
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM agent_mailbox_messages AS mailbox
+                     LEFT JOIN agent_model_batch_receipt_items AS consumed
+                       ON consumed.message_id = mailbox.message_id
+                     WHERE mailbox.recipient_agent_id = ?1
+                       AND mailbox.sender_agent_id = ?2
+                       AND mailbox.sequence > ?3
+                       AND (
+                           mailbox.delivery_status IN ('queued', 'acknowledged')
+                           OR (
+                               mailbox.delivery_status = 'claimed'
+                               AND COALESCE(mailbox.lease_expires_at, 0) <= ?4
+                           )
+                       )
+                       AND consumed.message_id IS NULL
+                 )",
+                params![
+                    &input.caller_agent_id,
+                    target,
+                    u64_to_sql(cursor.last_message_sequence)?,
+                    probed_at
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(read_error)?;
+        if has_message {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Closes the wait Tool exchange and its batch receipt in the same SQLite transaction which
 /// froze the first-ready snapshot. A crash can therefore expose either the still-pending Mailbox
 /// facts or a complete durable ToolResult/model-context fact, never a consumed cursor without a
@@ -906,35 +1026,7 @@ fn load_open_wait_snapshot_from_previous_run(
     requested_targets: &[String],
     rebound_at: i64,
 ) -> Result<Option<(AgentWaitReadySnapshot, String)>, AgentGraphError> {
-    let previous = connection
-        .query_row(
-            "SELECT receipt.receipt_id
-             FROM agent_model_batch_receipts AS receipt
-             WHERE receipt.agent_id = ?1
-               AND receipt.run_id != ?2
-               AND receipt.sampling_bound_at IS NULL
-               AND EXISTS (
-                   SELECT 1 FROM agent_model_batch_receipt_targets AS old_target
-                   WHERE old_target.receipt_id = receipt.receipt_id
-                     AND NOT EXISTS (
-                         SELECT 1
-                         FROM agent_model_batch_receipt_targets AS sampled_target
-                         JOIN agent_model_batch_receipts AS sampled
-                           ON sampled.receipt_id = sampled_target.receipt_id
-                         WHERE sampled.agent_id = receipt.agent_id
-                           AND sampled.sampling_bound_at IS NOT NULL
-                           AND sampled_target.target_agent_id = old_target.target_agent_id
-                           AND sampled_target.target_status_version
-                               >= old_target.target_status_version
-                     )
-               )
-             ORDER BY receipt.created_at ASC, receipt.receipt_id ASC
-             LIMIT 1",
-            params![&current_receipt.agent_id, &current_receipt.run_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(read_error)?;
+    let previous = query_open_wait_receipt_id(connection, current_receipt)?;
     let Some(previous_receipt_id) = previous else {
         return Ok(None);
     };
@@ -993,6 +1085,41 @@ fn load_open_wait_snapshot_from_previous_run(
         },
         previous_receipt_id,
     )))
+}
+
+fn query_open_wait_receipt_id(
+    connection: &Connection,
+    current_receipt: &AgentModelBatchReceiptRecord,
+) -> Result<Option<String>, AgentGraphError> {
+    connection
+        .query_row(
+            "SELECT receipt.receipt_id
+             FROM agent_model_batch_receipts AS receipt
+             WHERE receipt.agent_id = ?1
+               AND receipt.run_id != ?2
+               AND receipt.sampling_bound_at IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM agent_model_batch_receipt_targets AS old_target
+                   WHERE old_target.receipt_id = receipt.receipt_id
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM agent_model_batch_receipt_targets AS sampled_target
+                         JOIN agent_model_batch_receipts AS sampled
+                           ON sampled.receipt_id = sampled_target.receipt_id
+                         WHERE sampled.agent_id = receipt.agent_id
+                           AND sampled.sampling_bound_at IS NOT NULL
+                           AND sampled_target.target_agent_id = old_target.target_agent_id
+                           AND sampled_target.target_status_version
+                               >= old_target.target_status_version
+                     )
+               )
+             ORDER BY receipt.created_at ASC, receipt.receipt_id ASC
+             LIMIT 1",
+            params![&current_receipt.agent_id, &current_receipt.run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(read_error)
 }
 
 fn wait_replay_source(

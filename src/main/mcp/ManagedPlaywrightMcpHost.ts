@@ -4113,5 +4113,3 @@ function expectRecordWithoutThrow(value: unknown): Record<string, unknown> | und
     ? (value as Record<string, unknown>)
     : undefined
 }
-
-export const MANAGED_PLAYWRIGHT_RUNTIME_VERSION = MANAGED_PLAYWRIGHT_PACKAGE_VERSION

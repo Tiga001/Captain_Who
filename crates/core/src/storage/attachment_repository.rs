@@ -320,6 +320,42 @@ pub fn list_ordinary_conversation_attachments(
     attachments
 }
 
+/// Loads attachment metadata referenced by Guidance journals in one Conversation.
+///
+/// Guidance projection needs only metadata, never file contents. The join deliberately follows
+/// ownership instead of filtering `attachments.conversation_id`, matching the former id lookup
+/// semantics while replacing one statement per attachment with a single bounded query.
+pub(crate) fn list_guidance_attachments_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT
+             attachment.id,
+             attachment.conversation_id,
+             attachment.message_id,
+             attachment.project_id,
+             attachment.kind,
+             attachment.original_name,
+             attachment.mime_type,
+             attachment.size_bytes,
+             attachment.storage_rel_path,
+             attachment.created_at
+         FROM agent_run_guidances AS guidance
+         INNER JOIN agent_run_guidance_attachments AS ownership
+           ON ownership.guidance_id = guidance.guidance_id
+         INNER JOIN attachments AS attachment
+           ON attachment.id = ownership.attachment_id
+         WHERE guidance.conversation_id = ?1
+           AND guidance.status IN ('queued', 'abandoned')
+         ORDER BY attachment.created_at ASC, attachment.id ASC",
+    )?;
+    let attachments = statement
+        .query_map([conversation_id], attachment_from_row)?
+        .collect();
+    attachments
+}
+
 pub fn list_project_deletion_attachments(
     connection: &Connection,
     project_id: &str,

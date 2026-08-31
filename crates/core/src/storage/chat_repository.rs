@@ -332,6 +332,43 @@ pub fn list_conversation_metas(
     Ok(conversations)
 }
 
+/// Lists renderer-visible task metadata while excluding child Agent conversations in SQL.
+///
+/// An unbound ordinary Conversation and a root Agent Conversation are both user-facing. Only a
+/// node with a parent is hidden, matching the former per-row `get_agent_node_by_conversation`
+/// filter without its startup N+1 queries.
+pub(crate) fn list_root_conversation_metas(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<ChatConversationMetaRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT
+             conversation.id,
+             conversation.project_id,
+             conversation.model_id,
+             conversation.title,
+             conversation.created_at,
+             conversation.updated_at,
+             conversation.pinned_at,
+             conversation.archived_at,
+             conversation.unread_at
+         FROM conversations AS conversation
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM agent_nodes AS node
+             WHERE node.conversation_id = conversation.id
+               AND node.parent_agent_id IS NOT NULL
+         )
+         ORDER BY
+             CASE WHEN conversation.pinned_at IS NULL THEN 1 ELSE 0 END ASC,
+             conversation.pinned_at DESC,
+             conversation.updated_at DESC",
+    )?;
+    let conversations = statement
+        .query_map([], conversation_meta_from_row)?
+        .collect();
+    conversations
+}
+
 pub fn get_conversation(
     connection: &Connection,
     conversation_id: &str,

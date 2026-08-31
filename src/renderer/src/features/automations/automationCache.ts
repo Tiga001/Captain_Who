@@ -23,10 +23,6 @@ export function getCachedAutomationTask(automationId: string): AutomationTask | 
   return tasks.get(automationId) ?? null
 }
 
-export function getAutomationCacheSnapshot(): ReadonlyMap<string, AutomationTask> {
-  return tasks
-}
-
 export function cacheAutomationTask(task: AutomationTask): boolean {
   const tombstoneRevision = tombstones.get(task.automationId)
   if (tombstoneRevision !== undefined && task.revision <= tombstoneRevision) return false

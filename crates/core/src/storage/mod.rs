@@ -56,13 +56,75 @@ pub use provider_transition_repository::{
     ProviderTransitionCompatibleCommitOutcome, ProviderTransitionTerminalRecord,
 };
 
-use rusqlite::Connection;
+use rusqlite::{hooks::Action, Connection};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
+
+/// Durable event journals remain the source of truth. These process-local signals only remove
+/// fixed-rate polling latency and database traffic for commits made through this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageEventStream {
+    AgentCollaboration,
+    Automation,
+    Notification,
+}
+
+#[derive(Clone)]
+pub struct StorageEventNotifications {
+    inner: Arc<StorageEventNotificationSenders>,
+}
+
+struct StorageEventNotificationSenders {
+    agent_collaboration: watch::Sender<u64>,
+    automation: watch::Sender<u64>,
+    notification: watch::Sender<u64>,
+}
+
+impl Default for StorageEventNotifications {
+    fn default() -> Self {
+        let (agent_collaboration, _) = watch::channel(0);
+        let (automation, _) = watch::channel(0);
+        let (notification, _) = watch::channel(0);
+        Self {
+            inner: Arc::new(StorageEventNotificationSenders {
+                agent_collaboration,
+                automation,
+                notification,
+            }),
+        }
+    }
+}
+
+impl StorageEventNotifications {
+    pub fn subscribe(&self, stream: StorageEventStream) -> watch::Receiver<u64> {
+        self.sender(stream).subscribe()
+    }
+
+    fn notify_table_inserted(&self, table: &str) {
+        let stream = match table {
+            "agent_collaboration_events" => StorageEventStream::AgentCollaboration,
+            "automation_events" => StorageEventStream::Automation,
+            "notification_change_events" => StorageEventStream::Notification,
+            _ => return,
+        };
+        self.sender(stream)
+            .send_modify(|sequence| *sequence = sequence.saturating_add(1));
+    }
+
+    fn sender(&self, stream: StorageEventStream) -> &watch::Sender<u64> {
+        match stream {
+            StorageEventStream::AgentCollaboration => &self.inner.agent_collaboration,
+            StorageEventStream::Automation => &self.inner.automation,
+            StorageEventStream::Notification => &self.inner.notification,
+        }
+    }
+}
 
 pub struct StorageState {
     connection: Mutex<Connection>,
+    event_notifications: StorageEventNotifications,
 }
 
 impl StorageState {
@@ -75,8 +137,19 @@ impl StorageState {
         connection.busy_timeout(Duration::from_secs(5))?;
         migrations::run_migrations(&connection)?;
 
+        let event_notifications = StorageEventNotifications::default();
+        let hook_notifications = event_notifications.clone();
+        connection.update_hook(Some(
+            move |action: Action, _database: &str, table: &str, _row_id: i64| {
+                if action == Action::SQLITE_INSERT {
+                    hook_notifications.notify_table_inserted(table);
+                }
+            },
+        ));
+
         Ok(Self {
             connection: Mutex::new(connection),
+            event_notifications,
         })
     }
 
@@ -84,6 +157,10 @@ impl StorageState {
         self.connection
             .lock()
             .map_err(|_| "数据库连接状态不可用。".to_string())
+    }
+
+    pub fn event_notifications(&self) -> StorageEventNotifications {
+        self.event_notifications.clone()
     }
 }
 

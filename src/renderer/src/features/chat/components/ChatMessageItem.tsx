@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ChevronDown,
@@ -1239,7 +1239,7 @@ function MessageInputOrigin({
   )
 }
 
-export function ChatMessageItem({
+export const ChatMessageItem = memo(function ChatMessageItem({
   agentLabelsById,
   collaborationTimelineActivities,
   conversationId,
@@ -1369,4 +1369,4 @@ export function ChatMessageItem({
       )}
     </article>
   )
-}
+})

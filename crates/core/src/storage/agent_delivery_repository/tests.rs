@@ -579,6 +579,72 @@ fn wait_freezes_status_only_first_ready_snapshot_across_sampling_and_restart() {
 }
 
 #[test]
+fn wait_readiness_probe_keeps_idle_cursor_unchanged_and_detects_status_advance() {
+    let mut connection = setup_tree();
+    begin_wait_turn(
+        &connection,
+        "conversation-root",
+        "run-probe",
+        "assistant-probe",
+        "wait-probe",
+        35,
+    );
+    let input = wait_input(
+        "agent-root",
+        "conversation-root",
+        "run-probe",
+        "assistant-probe",
+        1,
+        &["agent-child"],
+    );
+    assert!(poll_wait_ready(&mut connection, &input, 36)
+        .unwrap()
+        .is_none());
+    let cursor_updated_at = connection
+        .query_row(
+            "SELECT updated_at FROM agent_collaboration_cursors
+             WHERE caller_agent_id = 'agent-root'
+               AND run_id = 'run-probe'
+               AND target_agent_id = 'agent-child'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    let changes_before = connection.total_changes();
+
+    assert!(!probe_wait_ready(&connection, &input, 36).unwrap());
+    assert_eq!(connection.total_changes(), changes_before);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT updated_at FROM agent_collaboration_cursors
+                 WHERE caller_agent_id = 'agent-root'
+                   AND run_id = 'run-probe'
+                   AND target_agent_id = 'agent-child'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        cursor_updated_at
+    );
+
+    connection
+        .execute(
+            "INSERT INTO agent_wake_requests (
+                 wake_id, schema_version, root_agent_id, agent_id, requester_agent_id,
+                 request_id, source_agent_message_id, status, status_revision,
+                 created_at, completed_at
+             ) VALUES (
+                 'wake-probe', 1, 'agent-root', 'agent-child', 'agent-root',
+                 'wake-probe-request', NULL, 'completed', 1, 37, 37
+             )",
+            [],
+        )
+        .unwrap();
+    assert!(probe_wait_ready(&connection, &input, 38).unwrap());
+}
+
+#[test]
 fn wait_consumes_only_caller_inbox_and_coalesces_result_wake() {
     let mut connection = setup_tree();
     begin_wait_turn(

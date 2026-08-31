@@ -19,6 +19,11 @@ type UpdateAssistantMessage = (
 interface UseAgentActionDecisionHandlersOptions {
   activeConversationId: string | null
   conversationsRef: RefObject<ChatConversation[]>
+  flushMessagePersistence?: (
+    conversationId: string,
+    messageId: string,
+    runId?: string
+  ) => Promise<void>
   updateAssistantMessage: UpdateAssistantMessage
 }
 
@@ -37,6 +42,7 @@ function getRunId(
 export function useAgentActionDecisionHandlers({
   activeConversationId,
   conversationsRef,
+  flushMessagePersistence,
   updateAssistantMessage
 }: UseAgentActionDecisionHandlersOptions) {
   const handleApproveAgentAction = useCallback(
@@ -45,29 +51,35 @@ export function useAgentActionDecisionHandlers({
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
+      const persistenceBoundary =
+        flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
 
-      return applyAuthoritativePendingActionDecision({
-        runId,
-        invoke: (authoritativeRunId) =>
-          approveAgentAction(authoritativeRunId, actionId, approvalScope),
-        apply: (execution) => {
-          updateAssistantMessage(
-            conversationId,
-            messageId,
-            (message) =>
-              applyAgentActionExecutionToChatMessage(message, execution, undefined, action),
-            { touchConversation: true }
-          )
-        },
-        onError: (error) => {
-          logAgentActionDecisionError('approve', action, error)
-        },
-        onMissingRunId: () => {
-          console.warn('Cannot approve agent action without a run id', { actionId, messageId })
-        }
-      }).then((outcome) => outcome.status === 'applied')
+      return persistenceBoundary
+        .then(() =>
+          applyAuthoritativePendingActionDecision({
+            runId,
+            invoke: (authoritativeRunId) =>
+              approveAgentAction(authoritativeRunId, actionId, approvalScope),
+            apply: (execution) => {
+              updateAssistantMessage(
+                conversationId,
+                messageId,
+                (message) =>
+                  applyAgentActionExecutionToChatMessage(message, execution, undefined, action),
+                { touchConversation: true }
+              )
+            },
+            onError: (error) => {
+              logAgentActionDecisionError('approve', action, error)
+            },
+            onMissingRunId: () => {
+              console.warn('Cannot approve agent action without a run id', { actionId, messageId })
+            }
+          })
+        )
+        .then((outcome) => outcome.status === 'applied')
     },
-    [activeConversationId, conversationsRef, updateAssistantMessage]
+    [activeConversationId, conversationsRef, flushMessagePersistence, updateAssistantMessage]
   )
 
   const handleRejectAgentAction = useCallback(
@@ -76,28 +88,40 @@ export function useAgentActionDecisionHandlers({
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
+      const persistenceBoundary =
+        flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
 
-      return applyAuthoritativePendingActionDecision({
-        runId,
-        invoke: (authoritativeRunId) => rejectAgentAction(authoritativeRunId, actionId, message),
-        apply: (execution) => {
-          updateAssistantMessage(
-            conversationId,
-            messageId,
-            (currentMessage) =>
-              applyAgentActionExecutionToChatMessage(currentMessage, execution, message, action),
-            { touchConversation: true }
-          )
-        },
-        onError: (error) => {
-          logAgentActionDecisionError('reject', action, error)
-        },
-        onMissingRunId: () => {
-          console.warn('Cannot reject agent action without a run id', { actionId, messageId })
-        }
-      }).then((outcome) => outcome.status === 'applied')
+      return persistenceBoundary
+        .then(() =>
+          applyAuthoritativePendingActionDecision({
+            runId,
+            invoke: (authoritativeRunId) =>
+              rejectAgentAction(authoritativeRunId, actionId, message),
+            apply: (execution) => {
+              updateAssistantMessage(
+                conversationId,
+                messageId,
+                (currentMessage) =>
+                  applyAgentActionExecutionToChatMessage(
+                    currentMessage,
+                    execution,
+                    message,
+                    action
+                  ),
+                { touchConversation: true }
+              )
+            },
+            onError: (error) => {
+              logAgentActionDecisionError('reject', action, error)
+            },
+            onMissingRunId: () => {
+              console.warn('Cannot reject agent action without a run id', { actionId, messageId })
+            }
+          })
+        )
+        .then((outcome) => outcome.status === 'applied')
     },
-    [activeConversationId, conversationsRef, updateAssistantMessage]
+    [activeConversationId, conversationsRef, flushMessagePersistence, updateAssistantMessage]
   )
 
   const handleCancelAgentAction = useCallback(
@@ -106,31 +130,37 @@ export function useAgentActionDecisionHandlers({
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
       const runId = getRunId(conversationsRef.current, conversationId, messageId)
+      const persistenceBoundary =
+        flushMessagePersistence?.(conversationId, messageId, runId) ?? Promise.resolve()
 
-      return applyAuthoritativePendingActionDecision({
-        runId,
-        invoke: (authoritativeRunId) => cancelAgentAction(authoritativeRunId, actionId),
-        isAccepted: (cancelled) => cancelled,
-        apply: () => {
-          updateAssistantMessage(
-            conversationId,
-            messageId,
-            (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
-            { touchConversation: true }
-          )
-        },
-        onError: (error) => {
-          logAgentActionDecisionError('cancel', action, error)
-        },
-        onMissingRunId: () => {
-          console.warn('Cannot cancel agent action without a run id', { actionId, messageId })
-        },
-        onNotAccepted: () => {
-          console.warn('Agent action cancellation was not accepted', { actionId, runId })
-        }
-      }).then((outcome) => outcome.status === 'applied')
+      return persistenceBoundary
+        .then(() =>
+          applyAuthoritativePendingActionDecision({
+            runId,
+            invoke: (authoritativeRunId) => cancelAgentAction(authoritativeRunId, actionId),
+            isAccepted: (cancelled) => cancelled,
+            apply: () => {
+              updateAssistantMessage(
+                conversationId,
+                messageId,
+                (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
+                { touchConversation: true }
+              )
+            },
+            onError: (error) => {
+              logAgentActionDecisionError('cancel', action, error)
+            },
+            onMissingRunId: () => {
+              console.warn('Cannot cancel agent action without a run id', { actionId, messageId })
+            },
+            onNotAccepted: () => {
+              console.warn('Agent action cancellation was not accepted', { actionId, runId })
+            }
+          })
+        )
+        .then((outcome) => outcome.status === 'applied')
     },
-    [activeConversationId, conversationsRef, updateAssistantMessage]
+    [activeConversationId, conversationsRef, flushMessagePersistence, updateAssistantMessage]
   )
 
   return {

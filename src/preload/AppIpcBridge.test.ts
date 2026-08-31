@@ -50,4 +50,49 @@ describe('AppIpcBridge', () => {
     unsubscribe()
     expect(removeListener).toHaveBeenCalledWith(HOST_CHANNELS.app.flushBeforeQuit, listener)
   })
+
+  it('acknowledges only after every registered Renderer persistence handler settles', async () => {
+    let listener: ((event: unknown, requestId: string) => void) | undefined
+    let finishMessages: (() => void) | undefined
+    let finishDrafts: (() => void) | undefined
+    const send = vi.fn()
+    const on = vi.fn((channel, nextListener) => {
+      if (channel === HOST_CHANNELS.app.flushBeforeQuit) listener = nextListener as typeof listener
+      return {} as IpcRenderer
+    })
+    const bridge = createAppIpcBridge({
+      invoke: vi.fn(),
+      on,
+      removeListener: vi.fn(),
+      send
+    } as unknown as IpcRenderer)
+
+    bridge.onFlushBeforeQuit(
+      () =>
+        new Promise<void>((resolve) => {
+          finishMessages = resolve
+        })
+    )
+    bridge.onFlushBeforeQuit(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDrafts = resolve
+        })
+    )
+    expect(on).toHaveBeenCalledTimes(1)
+
+    listener?.({}, 'quit-all')
+    await vi.waitFor(() => {
+      expect(finishMessages).toBeTypeOf('function')
+      expect(finishDrafts).toBeTypeOf('function')
+    })
+    finishMessages?.()
+    await Promise.resolve()
+    expect(send).not.toHaveBeenCalled()
+
+    finishDrafts?.()
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(HOST_CHANNELS.app.flushBeforeQuitAck, 'quit-all')
+    )
+  })
 })

@@ -453,20 +453,22 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
         request_id: &str,
         now_ms: i64,
     ) -> Result<AgentInterruptDisposition, String> {
-        self.storage
+        let outcome = self
+            .storage
             .interrupt_agent_execution_at(caller_agent_id, target_agent_id, request_id, now_ms)
-            .map(|outcome| match outcome {
-                InterruptAgentExecutionOutcome::NoPendingExecution => {
-                    AgentInterruptDisposition::NoPendingExecution
-                }
-                InterruptAgentExecutionOutcome::QueuedWakeCancelled { wake_id } => {
-                    AgentInterruptDisposition::QueuedWakeCancelled { wake_id }
-                }
-                InterruptAgentExecutionOutcome::ActiveTurn { wake_id, run_id } => {
-                    AgentInterruptDisposition::ActiveTurn { wake_id, run_id }
-                }
-            })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.wait_notifications.notify_caller(caller_agent_id);
+        Ok(match outcome {
+            InterruptAgentExecutionOutcome::NoPendingExecution => {
+                AgentInterruptDisposition::NoPendingExecution
+            }
+            InterruptAgentExecutionOutcome::QueuedWakeCancelled { wake_id } => {
+                AgentInterruptDisposition::QueuedWakeCancelled { wake_id }
+            }
+            InterruptAgentExecutionOutcome::ActiveTurn { wake_id, run_id } => {
+                AgentInterruptDisposition::ActiveTurn { wake_id, run_id }
+            }
+        })
     }
 }
 

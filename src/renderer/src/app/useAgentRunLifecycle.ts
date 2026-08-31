@@ -50,6 +50,7 @@ import {
 import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
 import type { Translate } from '../config/translationFormat'
 import { getAgentInterruptionReason } from '../errors/userFacingError'
+import { hostClient } from '../host/hostClient'
 import { createComposerDraft, mergeConversationMessageFromBackend } from './chatMessageFactory'
 import type { ActiveRunBinding } from './appTypes'
 import {
@@ -289,7 +290,10 @@ interface UseAgentRunLifecycleOptions {
       updater: (draft: ChatComposerDraft) => ChatComposerDraft
     ) => ChatComposerDraft
   }
+  enqueueChatMessageCheckpoint: (conversationId: string, message: ChatMessage) => void
   enqueueChatMessageStateSave: (conversationId: string, message: ChatMessage) => void
+  flushChatMessageStateSave: (conversationId: string, messageId: string) => Promise<void>
+  flushConversationMessageStateSaves: (conversationId: string) => Promise<void>
   recordContextWindowSnapshot: (
     conversationId: string,
     snapshot: AgentContextWindowSnapshot
@@ -301,6 +305,7 @@ interface UseAgentRunLifecycleOptions {
   ) => void
   refs: AgentRunLifecycleRefs
   requestSkillCatalogRefresh: (scopeId: string) => void
+  sealAndFlushChatMessageStateSaves: () => Promise<void>
   showToast: (message: string) => void
   t: Translate
   uiPreferences: Pick<UiPreferencesSnapshot, 'customPermissions'>
@@ -337,11 +342,15 @@ export function useAgentRunLifecycle({
   contextWindowIndicatorEnabled,
   conversationState,
   draftState,
+  enqueueChatMessageCheckpoint,
   enqueueChatMessageStateSave,
+  flushChatMessageStateSave,
+  flushConversationMessageStateSaves,
   recordContextWindowSnapshot,
   reconcileFailedSkillActivation,
   refs,
   requestSkillCatalogRefresh,
+  sealAndFlushChatMessageStateSaves,
   showToast,
   t,
   uiPreferences
@@ -393,6 +402,7 @@ export function useAgentRunLifecycle({
   const [commandSessionHydrationRetryRevision, setCommandSessionHydrationRetryRevision] =
     useState(0)
   const lastCommandSessionActiveConversationIdRef = useRef<string | null>(null)
+  const previousActiveConversationIdRef = useRef(activeConversationId)
   const commandSessionHydrationMountedRef = useRef(true)
 
   useEffect(() => {
@@ -462,7 +472,7 @@ export function useAgentRunLifecycle({
       conversationId: string,
       messageId: string,
       updater: (message: ChatMessage) => ChatMessage,
-      options: { persist?: boolean; touchConversation?: boolean } = {}
+      options: { checkpoint?: boolean; persist?: boolean; touchConversation?: boolean } = {}
     ) => {
       let messageToSave: ChatMessage | null = null
       let conversationMetaToSave: ChatConversation | null = null
@@ -490,13 +500,17 @@ export function useAgentRunLifecycle({
       setConversations(nextConversations)
 
       if (messageToSave && options.persist !== false) {
-        enqueueChatMessageStateSave(conversationId, messageToSave)
+        if (options.checkpoint) {
+          enqueueChatMessageCheckpoint(conversationId, messageToSave)
+        } else {
+          enqueueChatMessageStateSave(conversationId, messageToSave)
+        }
       }
       if (options.touchConversation && conversationMetaToSave) {
         void saveConversationMeta(conversationMetaToSave)
       }
     },
-    [conversationsRef, enqueueChatMessageStateSave, setConversations]
+    [conversationsRef, enqueueChatMessageCheckpoint, enqueueChatMessageStateSave, setConversations]
   )
 
   const reconcileTerminalRunFromStorage = useCallback(
@@ -656,7 +670,7 @@ export function useAgentRunLifecycle({
   )
 
   const flushPendingMessageDelta = useCallback(
-    (runId: string) => {
+    (runId: string, persistence: 'checkpoint' | 'immediate' = 'immediate') => {
       const pendingDelta = pendingMessageDeltaMap.get(runId)
       if (!pendingDelta) return
 
@@ -672,7 +686,7 @@ export function useAgentRunLifecycle({
             streamId: pendingDelta.streamId,
             delta: pendingDelta.delta
           }),
-        { touchConversation: false }
+        { checkpoint: persistence === 'checkpoint', touchConversation: false }
       )
     },
     [pendingMessageDeltaMap, updateAssistantMessage]
@@ -695,13 +709,13 @@ export function useAgentRunLifecycle({
           pendingDelta.delta.includes('\n') ||
           pendingDelta.delta.length >= STREAM_DELTA_MAX_BUFFER_CHARS
         ) {
-          flushPendingMessageDelta(agentEvent.runId)
+          flushPendingMessageDelta(agentEvent.runId, 'checkpoint')
         }
         return
       }
 
       const timerId = window.setTimeout(() => {
-        flushPendingMessageDelta(agentEvent.runId)
+        flushPendingMessageDelta(agentEvent.runId, 'checkpoint')
       }, STREAM_DELTA_FLUSH_MS)
       pendingMessageDeltaMap.set(agentEvent.runId, {
         conversationId,
@@ -712,6 +726,68 @@ export function useAgentRunLifecycle({
       })
     },
     [flushPendingMessageDelta, pendingMessageDeltaMap]
+  )
+
+  const flushPendingMessageDeltas = useCallback(
+    (conversationId?: string) => {
+      for (const [runId, pendingDelta] of [...pendingMessageDeltaMap]) {
+        if (conversationId && pendingDelta.conversationId !== conversationId) continue
+        flushPendingMessageDelta(runId, 'immediate')
+      }
+    },
+    [flushPendingMessageDelta, pendingMessageDeltaMap]
+  )
+
+  const flushRunMessagePersistence = useCallback(
+    (conversationId: string, messageId: string, runId?: string) => {
+      if (runId) flushPendingMessageDelta(runId, 'immediate')
+      return flushChatMessageStateSave(conversationId, messageId)
+    },
+    [flushChatMessageStateSave, flushPendingMessageDelta]
+  )
+
+  useEffect(() => {
+    const previousConversationId = previousActiveConversationIdRef.current
+    previousActiveConversationIdRef.current = activeConversationId
+    if (!previousConversationId || previousConversationId === activeConversationId) return
+
+    flushPendingMessageDeltas(previousConversationId)
+    void flushConversationMessageStateSaves(previousConversationId)
+  }, [activeConversationId, flushConversationMessageStateSaves, flushPendingMessageDeltas])
+
+  useEffect(() => {
+    const flush = () => {
+      flushPendingMessageDeltas()
+      const conversationIds = new Set(
+        conversationsRef.current.map((conversation) => conversation.id)
+      )
+      void Promise.all(
+        [...conversationIds].map((conversationId) =>
+          flushConversationMessageStateSaves(conversationId)
+        )
+      )
+    }
+    const flushWhenHidden = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+
+    window.addEventListener('beforeunload', flush)
+    window.addEventListener('pagehide', flush)
+    document.addEventListener('visibilitychange', flushWhenHidden)
+    return () => {
+      window.removeEventListener('beforeunload', flush)
+      window.removeEventListener('pagehide', flush)
+      document.removeEventListener('visibilitychange', flushWhenHidden)
+    }
+  }, [conversationsRef, flushConversationMessageStateSaves, flushPendingMessageDeltas])
+
+  useEffect(
+    () =>
+      hostClient.app.onFlushBeforeQuit?.(() => {
+        flushPendingMessageDeltas()
+        return sealAndFlushChatMessageStateSaves()
+      }),
+    [flushPendingMessageDeltas, sealAndFlushChatMessageStateSaves]
   )
 
   useEffect(() => {
@@ -1746,6 +1822,7 @@ export function useAgentRunLifecycle({
 
   return {
     cleanupRunBinding,
+    flushRunMessagePersistence,
     removeQueuedMessageByClientId,
     requestAssistantResponse,
     restoreRejectedGuidance,

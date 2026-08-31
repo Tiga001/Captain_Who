@@ -1389,7 +1389,3 @@ function safeDownloadBytes(
 function surfaceKey(surfaceId: string, generation: number): string {
   return `${surfaceId}\u0000${generation}`
 }
-
-export function mapBrowserRiskError(error: unknown): BrowserRiskFailure | null {
-  return error instanceof BrowserRiskError ? error.failure : null
-}

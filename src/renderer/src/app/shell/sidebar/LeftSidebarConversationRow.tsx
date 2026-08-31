@@ -1,11 +1,11 @@
 // Conversation row presentation and local context-menu behavior.
 import { Archive, Mail, PencilLine, Pin } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { memo, useRef, useState } from 'react'
 import type { AppLanguage } from '../../../config/frontendTranslations'
-import type { ChatConversation } from '../../../features/chat/chatTypes'
 import { isAssistantMessageGenerating } from '../../../features/chat/assistantGeneration'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import { Tooltip } from '../../../components/overlay/Tooltip'
+import type { SidebarConversation } from './leftSidebarTypes'
 import { formatConversationAge } from './leftSidebarUtils'
 
 function ConversationPinIcon({ filled }: { filled: boolean }) {
@@ -31,14 +31,14 @@ function ConversationPinIcon({ filled }: { filled: boolean }) {
 interface ConversationRowProps {
   activeConversationId: string | null
   archiveLabel: string
-  conversation: ChatConversation
+  conversation: SidebarConversation
   justNow: string
   language: AppLanguage
   markUnreadLabel: string
   now: number
   onArchiveConversation: (conversationId: string) => void
   onMarkConversationUnread: (conversationId: string) => void
-  onRenameConversation: (conversation: ChatConversation) => void
+  onRenameConversation: (conversation: SidebarConversation) => void
   onSelectConversation: (conversationId: string) => void
   onTogglePinConversation: (conversationId: string) => void
   pinLabel: string
@@ -50,7 +50,7 @@ interface ConversationRowProps {
   nested?: boolean
 }
 
-export function ConversationRow({
+export const ConversationRow = memo(function ConversationRow({
   activeConversationId,
   archiveLabel,
   conversation,
@@ -74,10 +74,15 @@ export function ConversationRow({
   const conversationMenuRef = useRef<HTMLDivElement>(null)
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null)
   const isPinned = Boolean(conversation.pinnedAt)
-  const isPending = conversation.messages.some(isAssistantMessageGenerating)
-  const isWaitingForApproval = conversation.messages.some(
-    (message) => message.role === 'assistant' && message.agentRun?.status === 'waiting_for_approval'
-  )
+  const isPending =
+    conversation.isPending ?? conversation.messages?.some(isAssistantMessageGenerating) ?? false
+  const isWaitingForApproval =
+    conversation.isWaitingForApproval ??
+    conversation.messages?.some(
+      (message) =>
+        message.role === 'assistant' && message.agentRun?.status === 'waiting_for_approval'
+    ) ??
+    false
   const showWaitingApprovalBadge = isWaitingForApproval && conversation.id !== activeConversationId
   const isUnread = Boolean(
     conversation.unreadAt && conversation.id !== activeConversationId && !isPending
@@ -217,4 +222,4 @@ export function ConversationRow({
       )}
     </div>
   )
-}
+})

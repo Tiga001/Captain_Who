@@ -2,7 +2,7 @@ use crate::protocol::AgentGuidanceStatus;
 use crate::storage::models::AgentRunGuidanceRecord;
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Error as IoError, ErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +180,69 @@ pub fn list_guidances_for_assistant_message(
                 .ok_or(rusqlite::Error::QueryReturnedNoRows)
         })
         .collect()
+}
+
+/// Loads every Guidance journal and its ordered attachment ownership for one Conversation.
+///
+/// Renderer conversation hydration must not issue one query per Assistant message followed by
+/// another query per Guidance and attachment list. Keeping the two result sets separate avoids a
+/// join fan-out while bounding this projection to two statements regardless of history length.
+pub(crate) fn list_guidances_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<AgentRunGuidanceRecord>> {
+    let mut guidance_statement = connection.prepare(
+        "SELECT
+            guidance.guidance_id,
+            guidance.client_message_id,
+            guidance.run_id,
+            guidance.conversation_id,
+            guidance.assistant_message_id,
+            guidance.content,
+            guidance.status,
+            guidance.applied_trace_sequence,
+            guidance.terminal_reason,
+            guidance.created_at,
+            guidance.updated_at
+         FROM agent_run_guidances AS guidance
+         WHERE guidance.conversation_id = ?1
+         ORDER BY guidance.created_at ASC, guidance.guidance_id ASC",
+    )?;
+    let mut guidances = guidance_statement
+        .query_map([conversation_id], guidance_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(guidance_statement);
+
+    if guidances.is_empty() {
+        return Ok(guidances);
+    }
+
+    let mut attachment_statement = connection.prepare(
+        "SELECT ownership.guidance_id, ownership.attachment_id
+         FROM agent_run_guidance_attachments AS ownership
+         INNER JOIN agent_run_guidances AS guidance
+           ON guidance.guidance_id = ownership.guidance_id
+         WHERE guidance.conversation_id = ?1
+         ORDER BY ownership.guidance_id ASC, ownership.position ASC",
+    )?;
+    let attachment_rows = attachment_statement
+        .query_map([conversation_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut attachment_ids_by_guidance = HashMap::<String, Vec<String>>::new();
+    for (guidance_id, attachment_id) in attachment_rows {
+        attachment_ids_by_guidance
+            .entry(guidance_id)
+            .or_default()
+            .push(attachment_id);
+    }
+    for guidance in &mut guidances {
+        guidance.attachment_ids = attachment_ids_by_guidance
+            .remove(&guidance.guidance_id)
+            .unwrap_or_default();
+    }
+    Ok(guidances)
 }
 
 pub fn mark_guidance_applied(

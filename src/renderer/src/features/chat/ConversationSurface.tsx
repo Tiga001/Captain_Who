@@ -125,6 +125,35 @@ export interface ObserverConversationSurfaceProps extends ConversationSurfaceCom
 export type ConversationSurfaceProps =
   InteractiveConversationSurfaceProps | ObserverConversationSurfaceProps
 
+const EMPTY_COLLABORATION_TIMELINE_ACTIVITIES: readonly CollaborationTimelineActivity[] = []
+const EMPTY_MODEL_TRANSITION_OPERATIONS: AgentProviderTransitionOperation[] = []
+
+function useLatestCallback<Args extends unknown[], Result>(
+  callback: ((...args: Args) => Result) | undefined
+): (...args: Args) => Result {
+  const callbackRef = useRef(callback)
+
+  useLayoutEffect(() => {
+    callbackRef.current = callback
+  }, [callback])
+
+  return useCallback((...args: Args) => {
+    const currentCallback = callbackRef.current
+    if (!currentCallback) {
+      throw new Error('Attempted to invoke an unavailable conversation callback')
+    }
+    return currentCallback(...args)
+  }, [])
+}
+
+function useStableMessageIdentities(messages: readonly ChatMessage[]): readonly { id: string }[] {
+  const identitySnapshot = JSON.stringify(messages.map((message) => message.id))
+  return useMemo(
+    () => (JSON.parse(identitySnapshot) as string[]).map((id) => ({ id })),
+    [identitySnapshot]
+  )
+}
+
 function getPendingApprovalTarget(conversation: ChatConversation) {
   for (let messageIndex = conversation.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = conversation.messages[messageIndex]
@@ -211,14 +240,14 @@ interface ChatMessageListProps {
 
 export const ChatMessageList = memo(function ChatMessageList({
   agentLabelsById,
-  collaborationTimelineActivities = [],
+  collaborationTimelineActivities = EMPTY_COLLABORATION_TIMELINE_ACTIVITIES,
   conversation,
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
   editableLastUserMessageId,
   lastAssistantMessageId,
   mode = 'interactive',
-  modelTransitionOperations = [],
+  modelTransitionOperations = EMPTY_MODEL_TRANSITION_OPERATIONS,
   onApproveAgentAction,
   onCancelAgentAction,
   onContinueInNewTask,
@@ -236,21 +265,65 @@ export const ChatMessageList = memo(function ChatMessageList({
 }: ChatMessageListProps) {
   const continuationOrigin = conversation.continuationOrigin
   const collaborationAgentNavigation = mode === 'interactive' ? onOpenCollaborationAgent : undefined
+  const messageIdentities = useStableMessageIdentities(conversation.messages)
   const messageIds = useMemo(
-    () => new Set(conversation.messages.map((message) => message.id)),
-    [conversation.messages]
+    () => new Set(messageIdentities.map((message) => message.id)),
+    [messageIdentities]
   )
   const collaborationTimeline = useMemo(
     () =>
-      projectCollaborationTimelineActivities(
-        collaborationTimelineActivities,
-        conversation.messages
-      ),
-    [collaborationTimelineActivities, conversation.messages]
+      projectCollaborationTimelineActivities(collaborationTimelineActivities, messageIdentities),
+    [collaborationTimelineActivities, messageIdentities]
   )
+  const modelTransitions = useMemo(() => {
+    const completedByMessageId = new Map<string, AgentProviderTransitionOperation[]>()
+    const trailing: AgentProviderTransitionOperation[] = []
+
+    for (const operation of modelTransitionOperations) {
+      const coveredMessageId = operation.coveredThroughMessageId
+      if (
+        operation.status === 'completed' &&
+        coveredMessageId &&
+        messageIds.has(coveredMessageId)
+      ) {
+        const operations = completedByMessageId.get(coveredMessageId) ?? []
+        operations.push(operation)
+        completedByMessageId.set(coveredMessageId, operations)
+      } else {
+        trailing.push(operation)
+      }
+    }
+
+    return { completedByMessageId, trailing }
+  }, [messageIds, modelTransitionOperations])
+  const approveAgentAction = useLatestCallback(onApproveAgentAction)
+  const cancelAgentAction = useLatestCallback(onCancelAgentAction)
+  const continueInNewTask = useLatestCallback(onContinueInNewTask)
+  const editLastUserMessage = useLatestCallback(onEditLastUserMessage)
+  const messageUiStateChange = useLatestCallback(onMessageUiStateChange)
+  const modelTransitionRetry = useLatestCallback(onModelTransitionRetry)
+  const openCollaborationAgent = useLatestCallback(onOpenCollaborationAgent)
+  const rejectAgentAction = useLatestCallback(onRejectAgentAction)
+  const reviewLastTurn = useLatestCallback(onReviewLastTurn)
   const [observerTimelineCollapsed, setObserverTimelineCollapsed] = useState<
     Readonly<Record<string, boolean>>
   >({})
+  const handleContinueAssistantReply = useCallback(
+    (messageId: string) =>
+      continueInNewTask({
+        kind: 'assistant_reply',
+        assistantMessageId: messageId
+      }),
+    [continueInNewTask]
+  )
+  const handleObserverTimelineCollapsedChange = useCallback(
+    (messageId: string, collapsed: boolean) =>
+      setObserverTimelineCollapsed((current) => ({
+        ...current,
+        [messageId]: collapsed
+      })),
+    []
+  )
 
   useEffect(() => {
     setObserverTimelineCollapsed({})
@@ -262,52 +335,56 @@ export const ChatMessageList = memo(function ChatMessageList({
         <Fragment key={message.id}>
           {collaborationAgentNavigation && (
             <CollaborationTimelineActivityList
-              activities={collaborationTimeline.beforeMessage.get(message.id) ?? []}
-              onOpenAgent={collaborationAgentNavigation}
+              activities={
+                collaborationTimeline.beforeMessage.get(message.id) ??
+                EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
+              }
+              onOpenAgent={openCollaborationAgent}
             />
           )}
           <ChatMessageItem
             agentLabelsById={agentLabelsById}
             collaborationTimelineActivities={
               collaborationAgentNavigation
-                ? (collaborationTimeline.anchoredMessage.get(message.id) ?? [])
-                : []
+                ? (collaborationTimeline.anchoredMessage.get(message.id) ??
+                  EMPTY_COLLABORATION_TIMELINE_ACTIVITIES)
+                : EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
             }
             conversationId={conversation.id}
             isLastAssistantMessage={message.id === lastAssistantMessageId}
             message={message}
             mode={mode}
-            onApprove={mode === 'interactive' ? onApproveAgentAction : undefined}
-            onCancel={mode === 'interactive' ? onCancelAgentAction : undefined}
+            onApprove={
+              mode === 'interactive' && onApproveAgentAction ? approveAgentAction : undefined
+            }
+            onCancel={mode === 'interactive' && onCancelAgentAction ? cancelAgentAction : undefined}
             editSelectedModelAvailable={editSelectedModelAvailable}
             editSelectedModelSupportsImage={editSelectedModelSupportsImage}
             onEditSubmit={
-              mode === 'interactive' && message.id === editableLastUserMessageId
-                ? onEditLastUserMessage
+              mode === 'interactive' &&
+              message.id === editableLastUserMessageId &&
+              onEditLastUserMessage
+                ? editLastUserMessage
                 : undefined
             }
             onContinueInNewTask={
               mode === 'interactive' && isAssistantReplyComplete(message) && onContinueInNewTask
-                ? (messageId) =>
-                    onContinueInNewTask({
-                      kind: 'assistant_reply',
-                      assistantMessageId: messageId
-                    })
+                ? handleContinueAssistantReply
                 : undefined
             }
-            onOpenCollaborationAgent={collaborationAgentNavigation}
-            onReject={mode === 'interactive' ? onRejectAgentAction : undefined}
-            onReviewLastTurn={mode === 'interactive' ? onReviewLastTurn : undefined}
+            onOpenCollaborationAgent={
+              collaborationAgentNavigation ? openCollaborationAgent : undefined
+            }
+            onReject={mode === 'interactive' && onRejectAgentAction ? rejectAgentAction : undefined}
+            onReviewLastTurn={
+              mode === 'interactive' && onReviewLastTurn ? reviewLastTurn : undefined
+            }
             onTimelineCollapsedChange={
-              mode === 'observer'
-                ? (messageId, collapsed) =>
-                    setObserverTimelineCollapsed((current) => ({
-                      ...current,
-                      [messageId]: collapsed
-                    }))
-                : undefined
+              mode === 'observer' ? handleObserverTimelineCollapsedChange : undefined
             }
-            onUiStateChange={mode === 'interactive' ? onMessageUiStateChange : undefined}
+            onUiStateChange={
+              mode === 'interactive' && onMessageUiStateChange ? messageUiStateChange : undefined
+            }
             parentAgentId={parentAgentId}
             observerRootConversationId={observerRootConversationId}
             projectId={conversation.projectId}
@@ -326,65 +403,53 @@ export const ChatMessageList = memo(function ChatMessageList({
               }
             />
           )}
-          {modelTransitionOperations
-            .filter(
-              (operation) =>
-                operation.status === 'completed' && operation.coveredThroughMessageId === message.id
-            )
-            .map((operation) => (
-              <ConversationModelTransitionDivider
-                key={operation.operationId}
-                onContinueInNewTask={
-                  mode === 'interactive' &&
-                  operation.status === 'completed' &&
-                  operation.summaryId &&
-                  onContinueInNewTask
-                    ? () =>
-                        onContinueInNewTask({
-                          kind: 'provider_transition_boundary',
-                          operationId: operation.operationId
-                        })
-                    : undefined
-                }
-                operation={operation}
-              />
-            ))}
+          {(modelTransitions.completedByMessageId.get(message.id) ?? []).map((operation) => (
+            <ConversationModelTransitionDivider
+              key={operation.operationId}
+              onContinueInNewTask={
+                mode === 'interactive' &&
+                operation.status === 'completed' &&
+                operation.summaryId &&
+                onContinueInNewTask
+                  ? () =>
+                      continueInNewTask({
+                        kind: 'provider_transition_boundary',
+                        operationId: operation.operationId
+                      })
+                  : undefined
+              }
+              operation={operation}
+            />
+          ))}
         </Fragment>
       ))}
-      {modelTransitionOperations
-        .filter(
-          (operation) =>
-            operation.status !== 'completed' ||
-            !operation.coveredThroughMessageId ||
-            !messageIds.has(operation.coveredThroughMessageId)
-        )
-        .map((operation) => (
-          <ConversationModelTransitionDivider
-            key={operation.operationId}
-            onContinueInNewTask={
-              mode === 'interactive' &&
-              operation.status === 'completed' &&
-              operation.summaryId &&
-              onContinueInNewTask
-                ? () =>
-                    onContinueInNewTask({
-                      kind: 'provider_transition_boundary',
-                      operationId: operation.operationId
-                    })
-                : undefined
-            }
-            onRetry={
-              mode === 'interactive' && operation.status === 'failed' && onModelTransitionRetry
-                ? () => onModelTransitionRetry(operation)
-                : undefined
-            }
-            operation={operation}
-          />
-        ))}
+      {modelTransitions.trailing.map((operation) => (
+        <ConversationModelTransitionDivider
+          key={operation.operationId}
+          onContinueInNewTask={
+            mode === 'interactive' &&
+            operation.status === 'completed' &&
+            operation.summaryId &&
+            onContinueInNewTask
+              ? () =>
+                  continueInNewTask({
+                    kind: 'provider_transition_boundary',
+                    operationId: operation.operationId
+                  })
+              : undefined
+          }
+          onRetry={
+            mode === 'interactive' && operation.status === 'failed' && onModelTransitionRetry
+              ? () => modelTransitionRetry(operation)
+              : undefined
+          }
+          operation={operation}
+        />
+      ))}
       {collaborationAgentNavigation && (
         <CollaborationTimelineActivityList
           activities={collaborationTimeline.tail}
-          onOpenAgent={collaborationAgentNavigation}
+          onOpenAgent={openCollaborationAgent}
         />
       )}
     </>
@@ -439,16 +504,35 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const messagesRef = useRef<HTMLDivElement>(null)
   const handledScrollTargetRef = useRef<string | null>(null)
   const [sideChatPlaceholder, setSideChatPlaceholder] = useState<ChatQueuedMessage | null>(null)
-  const isGenerating = conversation.messages.some(isAssistantMessageGenerating)
-  const lastAssistantMessageId = [...conversation.messages]
-    .reverse()
-    .find((message) => message.role === 'assistant')?.id
-  const lastCommittedUserMessageId = [...conversation.messages]
-    .reverse()
-    .find((message) => message.role === 'user')?.id
-  const activeAssistantRun = [...conversation.messages]
-    .reverse()
-    .find(isAssistantMessageGenerating)?.agentRun
+  const messageSummary = useMemo(() => {
+    let isGenerating = false
+    let lastAssistantMessageId: string | undefined
+    let lastCommittedUserMessageId: string | undefined
+    let activeAssistantRun: ChatMessage['agentRun']
+
+    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+      const message = conversation.messages[index]
+      if (!lastAssistantMessageId && message.role === 'assistant') {
+        lastAssistantMessageId = message.id
+      }
+      if (!lastCommittedUserMessageId && message.role === 'user') {
+        lastCommittedUserMessageId = message.id
+      }
+      if (isAssistantMessageGenerating(message)) {
+        isGenerating = true
+        activeAssistantRun ??= message.agentRun
+      }
+    }
+
+    return {
+      activeAssistantRun,
+      isGenerating,
+      lastAssistantMessageId,
+      lastCommittedUserMessageId
+    }
+  }, [conversation.messages])
+  const { activeAssistantRun, isGenerating, lastAssistantMessageId, lastCommittedUserMessageId } =
+    messageSummary
   const canGuideQueuedMessages = Boolean(
     activeAssistantRun?.runId && activeAssistantRun.status === 'running'
   )

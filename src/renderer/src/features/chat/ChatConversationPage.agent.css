@@ -875,7 +875,6 @@
   gap: 2px;
 }
 
-.file-change-activity__summary,
 .file-change-activity__item-line {
   display: flex;
   align-items: center;
@@ -895,23 +894,10 @@
   font-size: inherit;
 }
 
-.file-change-activity__icon {
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: var(--mc-icon-size-sm);
-  height: var(--mc-icon-size-sm);
-  color: var(--mc-color-icon-muted);
-}
-
-.file-change-activity__icon svg,
 .file-change-activity__toggle svg {
   width: 100%;
   height: 100%;
   stroke-width: var(--mc-icon-stroke-medium);
-}
-
-.file-change-activity__spinner {
-  animation: mc-agent-todo-spin 1s linear infinite;
 }
 
 .file-change-activity__path {

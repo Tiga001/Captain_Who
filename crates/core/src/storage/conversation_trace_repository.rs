@@ -7,6 +7,7 @@ use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{Error as IoError, ErrorKind};
 
 #[derive(Debug)]
@@ -437,13 +438,70 @@ pub fn list_traces_for_conversation(
     let headers = statement
         .query_map(params![conversation_id], trace_header_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if headers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut items_by_message = trace_items_for_conversation(connection, conversation_id)?;
+    let mut pending_lifecycle_by_message =
+        pending_command_session_lifecycle_for_conversation(connection, conversation_id)?;
     headers
         .into_iter()
         .map(|header| {
-            load_trace(connection, header)
-                .and_then(|trace| overlay_pending_command_session_lifecycle(connection, trace))
+            let assistant_message_id = header.assistant_message_id.clone();
+            let trace = trace_from_stored_items(
+                header,
+                items_by_message
+                    .remove(&assistant_message_id)
+                    .unwrap_or_default(),
+            )?;
+            overlay_pending_command_session_lifecycle_rows(
+                trace,
+                pending_lifecycle_by_message
+                    .remove(&assistant_message_id)
+                    .unwrap_or_default(),
+            )
         })
         .collect()
+}
+
+type StoredTraceItem = (i64, String, String);
+
+fn trace_items_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<HashMap<String, Vec<StoredTraceItem>>> {
+    let mut statement = connection.prepare(
+        "SELECT
+             item.assistant_message_id,
+             item.sequence,
+             item.item_kind,
+             item.item_json
+         FROM conversation_turn_trace_items AS item
+         INNER JOIN conversation_turn_traces AS trace
+           ON trace.assistant_message_id = item.assistant_message_id
+         WHERE trace.conversation_id = ?1
+         ORDER BY item.assistant_message_id ASC, item.sequence ASC",
+    )?;
+    let rows = statement
+        .query_map([conversation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items_by_message = HashMap::<String, Vec<StoredTraceItem>>::new();
+    for (assistant_message_id, sequence, kind, json) in rows {
+        items_by_message
+            .entry(assistant_message_id)
+            .or_default()
+            .push((sequence, kind, json));
+    }
+    Ok(items_by_message)
 }
 
 pub fn list_in_progress_traces(
@@ -519,6 +577,13 @@ fn load_trace(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    trace_from_stored_items(header, rows)
+}
+
+fn trace_from_stored_items(
+    header: TraceHeader,
+    rows: Vec<StoredTraceItem>,
+) -> rusqlite::Result<ConversationTurnTrace> {
     let mut items = Vec::with_capacity(rows.len());
     for (stored_sequence, stored_kind, raw_item) in rows {
         let item = decode_trace_item(&raw_item).map_err(|error| {
@@ -626,16 +691,77 @@ fn pending_command_session_lifecycle(
         .collect()
 }
 
+type PendingCommandSessionLifecycle = (u64, i64, ConversationCommandSessionLifecycle);
+
+fn pending_command_session_lifecycle_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<HashMap<String, Vec<PendingCommandSessionLifecycle>>> {
+    let mut statement = connection.prepare(
+        "SELECT
+             lifecycle.assistant_message_id,
+             lifecycle.event_id,
+             lifecycle.recorded_at,
+             lifecycle.event_json
+         FROM agent_command_session_lifecycle_events AS lifecycle
+         INNER JOIN conversation_turn_traces AS trace
+           ON trace.assistant_message_id = lifecycle.assistant_message_id
+         WHERE trace.conversation_id = ?1
+           AND trace.terminal_status != 'in_progress'
+           AND lifecycle.trace_sequence IS NULL
+         ORDER BY
+             lifecycle.assistant_message_id ASC,
+             lifecycle.created_at ASC,
+             CASE lifecycle.phase WHEN 'started' THEN 0 ELSE 1 END ASC,
+             lifecycle.session_id ASC,
+             lifecycle.event_id ASC",
+    )?;
+    let rows = statement
+        .query_map([conversation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut lifecycle_by_message = HashMap::<String, Vec<PendingCommandSessionLifecycle>>::new();
+    for (assistant_message_id, event_id, recorded_at, payload) in rows {
+        let lifecycle = serde_json::from_str(&payload).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+        })?;
+        lifecycle_by_message
+            .entry(assistant_message_id)
+            .or_default()
+            .push((event_id, recorded_at, lifecycle));
+    }
+    Ok(lifecycle_by_message)
+}
+
 fn overlay_pending_command_session_lifecycle(
     connection: &Connection,
-    mut trace: ConversationTurnTrace,
+    trace: ConversationTurnTrace,
 ) -> rusqlite::Result<ConversationTurnTrace> {
     if !trace.terminal_status.is_terminal() {
         return Ok(trace);
     }
-    for (_, _, lifecycle) in
-        pending_command_session_lifecycle(connection, &trace.assistant_message_id)?
-    {
+    let rows = pending_command_session_lifecycle(connection, &trace.assistant_message_id)?;
+    overlay_pending_command_session_lifecycle_rows(trace, rows)
+}
+
+fn overlay_pending_command_session_lifecycle_rows(
+    mut trace: ConversationTurnTrace,
+    rows: Vec<PendingCommandSessionLifecycle>,
+) -> rusqlite::Result<ConversationTurnTrace> {
+    if !trace.terminal_status.is_terminal() && !rows.is_empty() {
+        return Err(corrupt_trace_data(
+            2,
+            Type::Text,
+            "nonterminal conversation trace has pending terminal command lifecycle",
+        ));
+    }
+    for (_, _, lifecycle) in rows {
         trace
             .append_command_session_lifecycle(lifecycle)
             .map_err(|message| corrupt_trace_data(2, Type::Text, message))?;

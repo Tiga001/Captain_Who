@@ -35,7 +35,6 @@ import { NewConversationPage } from '../features/chat/NewConversationPage'
 import type {
   ChatComposerDraft,
   ChatConversation,
-  ChatGuidanceTimelineItem,
   ChatMessage,
   ChatMessageUiState,
   ChatQueuedMessage,
@@ -100,6 +99,7 @@ import type { PendingMessageDelta } from './AppShellSupport'
 import { useAgentActionDecisionHandlers } from '../features/agentRun/useAgentActionDecisionHandlers'
 import { useContextWindowSnapshots } from '../features/agentRun/useContextWindowSnapshots'
 import { useAgentRunLifecycle } from './useAgentRunLifecycle'
+import { getRecoverableGuidanceSignature, isRecoverableGuidanceItem } from './recoverableGuidance'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
 import { selectRenderableModelTransitionOperations } from '../features/chat/modelTransitionUiState'
 import { useOptionalCollaborationStore } from '../features/agentCollaboration/useCollaborationStore'
@@ -245,13 +245,17 @@ export function AppShell() {
   const locallyUnconfirmedStoppedRunIdsRef = useRef<Set<string>>(new Set())
   const pendingMessageDeltasRef = useRef<Map<string, PendingMessageDelta>>(new Map())
   const {
+    enqueueChatMessageCheckpoint,
     enqueueChatMessagesUpsert,
     enqueueChatMessageStateSave,
     enqueueChatMessageUiStateSave,
     enqueueConversationMetaSave,
+    flushChatMessageStateSave,
+    flushConversationMessageStateSaves,
     pendingConversationSavesRef,
     pendingMessageSavesRef,
     pendingMessageUpsertsRef,
+    sealAndFlushChatMessageStateSaves,
     waitForConversationSaves,
     waitForMessageStateSaves,
     waitForMessageUpserts
@@ -754,17 +758,13 @@ export function AppShell() {
     [persistDraftNow, setDraftsWithRef]
   )
 
+  const recoverableGuidanceSignature = getRecoverableGuidanceSignature(conversations)
+
   useEffect(() => {
-    for (const conversation of conversations) {
+    for (const conversation of conversationsRef.current) {
       if (conversation.messagesLoaded === false) continue
       const recoverableItems = conversation.messages.flatMap((message) =>
-        (message.agentRun?.timeline ?? []).filter(
-          (item): item is ChatGuidanceTimelineItem =>
-            item.type === 'user_guidance' &&
-            item.status === 'rejected' &&
-            item.recoverable === true &&
-            item.rejectionCode === 'run_interrupted'
-        )
+        (message.agentRun?.timeline ?? []).filter(isRecoverableGuidanceItem)
       )
       const unseenItems = recoverableItems.filter((item) => {
         const key = `${conversation.id}:${item.clientMessageId}`
@@ -838,7 +838,7 @@ export function AppShell() {
         })
       })
     }
-  }, [conversations, mutateDraft, t])
+  }, [mutateDraft, recoverableGuidanceSignature, t])
 
   const restoreSubmittedSkills = useCallback(
     (
@@ -896,6 +896,7 @@ export function AppShell() {
 
   const {
     cleanupRunBinding,
+    flushRunMessagePersistence,
     removeQueuedMessageByClientId,
     requestAssistantResponse,
     restoreRejectedGuidance,
@@ -915,7 +916,10 @@ export function AppShell() {
       draftsRef,
       mutateDraft
     },
+    enqueueChatMessageCheckpoint,
     enqueueChatMessageStateSave,
+    flushChatMessageStateSave,
+    flushConversationMessageStateSaves,
     recordContextWindowSnapshot,
     reconcileFailedSkillActivation,
     refs: {
@@ -934,6 +938,7 @@ export function AppShell() {
       stopRequestedRunIds: stopRequestedRunIdsRef
     },
     requestSkillCatalogRefresh,
+    sealAndFlushChatMessageStateSaves,
     showToast,
     t,
     uiPreferences
@@ -1775,6 +1780,8 @@ export function AppShell() {
     }
     if (stopRequestedRunIdsRef.current.has(runId)) return
 
+    void flushRunMessagePersistence(activeConversationId, pendingMessage.id, runId)
+
     // The backend emits terminal Done only after the assistant message and trace have been
     // committed atomically. Keep the binding alive and let that event authoritatively settle the
     // UI instead of persisting a renderer-invented cancelled state ahead of durable storage.
@@ -1784,7 +1791,12 @@ export function AppShell() {
     void cancelAgentRun(runId).catch(() => {
       console.error('Failed to cancel agent run')
     })
-  }, [activeConversationId, conversations, scheduleStoppedRunReconciliation])
+  }, [
+    activeConversationId,
+    conversations,
+    flushRunMessagePersistence,
+    scheduleStoppedRunReconciliation
+  ])
 
   const guideQueuedMessage = useCallback(
     (queuedMessage: ChatQueuedMessage) => {
@@ -1836,6 +1848,7 @@ export function AppShell() {
           message.id === queuedMessage.id ? submittingMessage : message
         )
       }))
+      void flushRunMessagePersistence(conversationId, assistantMessage.id, runId)
       updateAssistantMessage(
         conversationId,
         assistantMessage.id,
@@ -1912,13 +1925,21 @@ export function AppShell() {
           window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
         })
     },
-    [mutateDraft, removeQueuedMessageByClientId, restoreRejectedGuidance, t, updateAssistantMessage]
+    [
+      flushRunMessagePersistence,
+      mutateDraft,
+      removeQueuedMessageByClientId,
+      restoreRejectedGuidance,
+      t,
+      updateAssistantMessage
+    ]
   )
 
   const { handleApproveAgentAction, handleCancelAgentAction, handleRejectAgentAction } =
     useAgentActionDecisionHandlers({
       activeConversationId,
       conversationsRef,
+      flushMessagePersistence: flushRunMessagePersistence,
       updateAssistantMessage
     })
 

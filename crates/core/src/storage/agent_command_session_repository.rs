@@ -21,7 +21,7 @@ use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Error as IoError, ErrorKind};
 
 pub const AGENT_COMMAND_SESSION_SCHEMA_VERSION: u32 = 2;
@@ -494,7 +494,7 @@ pub fn list_sessions_for_conversation(
         .query_map([conversation_id], record_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    attach_terminal_outputs(connection, &mut records)?;
+    attach_terminal_outputs_for_conversation(connection, conversation_id, &mut records)?;
     let mut terminal_seen = 0_usize;
     Ok(records
         .into_iter()
@@ -1192,14 +1192,74 @@ fn get_session_in_connection(
     Ok(record)
 }
 
-fn attach_terminal_outputs(
+fn attach_terminal_outputs_for_conversation(
     connection: &Connection,
+    conversation_id: &str,
     records: &mut [AgentCommandSessionRecord],
 ) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT
+             output.session_id,
+             output.name,
+             output.kind,
+             output.read_path,
+             output.mime_type,
+             output.size_bytes,
+             output.sha256,
+             output.width,
+             output.height
+         FROM agent_command_session_published_outputs AS output
+         INNER JOIN agent_command_sessions AS session
+           ON session.session_id = output.session_id
+         WHERE session.conversation_id = ?1
+         ORDER BY output.session_id ASC, output.ordinal ASC",
+    )?;
+    let rows = statement
+        .query_map([conversation_id], |row| {
+            let size_bytes = u64::try_from(row.get::<_, i64>(5)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(5, Type::Integer, Box::new(error))
+            })?;
+            let width = row
+                .get::<_, Option<i64>>(7)?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(7, Type::Integer, Box::new(error))
+                })?;
+            let height = row
+                .get::<_, Option<i64>>(8)?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(8, Type::Integer, Box::new(error))
+                })?;
+            Ok((
+                row.get::<_, String>(0)?,
+                AgentCommandPublishedOutput {
+                    name: row.get(1)?,
+                    kind: published_output_kind_from_str(&row.get::<_, String>(2)?)?,
+                    read_path: row.get(3)?,
+                    mime_type: row.get(4)?,
+                    size_bytes,
+                    sha256: row.get(6)?,
+                    width,
+                    height,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut outputs_by_session = HashMap::<String, Vec<AgentCommandPublishedOutput>>::new();
+    for (session_id, output) in rows {
+        outputs_by_session
+            .entry(session_id)
+            .or_default()
+            .push(output);
+    }
     for record in records {
         if record.snapshot.status.is_terminal() {
-            record.snapshot.outputs =
-                load_published_outputs(connection, &record.snapshot.session_id)?;
+            record.snapshot.outputs = outputs_by_session
+                .remove(&record.snapshot.session_id)
+                .unwrap_or_default();
         }
     }
     Ok(())

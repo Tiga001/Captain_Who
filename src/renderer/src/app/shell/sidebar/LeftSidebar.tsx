@@ -8,7 +8,7 @@ import {
   Search,
   SquarePen
 } from 'lucide-react'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { AppProject } from '../../../config/projectConfig'
@@ -32,6 +32,7 @@ import type {
   ProjectDragPosition,
   ProjectDragTarget,
   ProjectPointerDragState,
+  SidebarConversation,
   SidebarMenuPosition,
   SidebarSectionScope,
   SidebarSectionSubmenu
@@ -51,7 +52,115 @@ import {
 } from './leftSidebarUtils'
 import './LeftSidebar.css'
 
-export function LeftSidebar({
+const sidebarActivityCache = new WeakMap<
+  ChatConversation,
+  ReturnType<typeof computeSidebarActivity>
+>()
+
+function computeSidebarActivity(conversation: ChatConversation) {
+  let isPending = false
+  let isWaitingForApproval = false
+
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    const message = conversation.messages[index]
+    isPending ||= isAssistantMessageGenerating(message)
+    isWaitingForApproval ||=
+      message.role === 'assistant' && message.agentRun?.status === 'waiting_for_approval'
+    if (isPending && isWaitingForApproval) break
+  }
+
+  return { isPending, isWaitingForApproval }
+}
+
+function getSidebarConversationActivity(conversation: ChatConversation) {
+  const cached = sidebarActivityCache.get(conversation)
+  if (cached) return cached
+  const activity = computeSidebarActivity(conversation)
+  sidebarActivityCache.set(conversation, activity)
+  return activity
+}
+
+function useLatestCallback<Args extends unknown[], Result>(
+  callback: (...args: Args) => Result
+): (...args: Args) => Result {
+  const callbackRef = useRef(callback)
+
+  useLayoutEffect(() => {
+    callbackRef.current = callback
+  }, [callback])
+
+  return useCallback((...args: Args) => callbackRef.current(...args), [])
+}
+
+export function LeftSidebar(props: LeftSidebarProps) {
+  const conversationSnapshot = JSON.stringify(
+    props.conversations.map((conversation): SidebarConversation => {
+      const activity = getSidebarConversationActivity(conversation)
+      return {
+        archivedAt: conversation.archivedAt,
+        createdAt: conversation.createdAt,
+        id: conversation.id,
+        ...activity,
+        pinnedAt: conversation.pinnedAt,
+        projectId: conversation.projectId,
+        title: conversation.title,
+        unreadAt: conversation.unreadAt,
+        updatedAt: conversation.updatedAt
+      }
+    })
+  )
+  const conversations = useMemo(
+    () => JSON.parse(conversationSnapshot) as SidebarConversation[],
+    [conversationSnapshot]
+  )
+  const onArchiveAllProjectConversations = useLatestCallback(props.onArchiveAllProjectConversations)
+  const onArchiveAllRootConversations = useLatestCallback(props.onArchiveAllRootConversations)
+  const onArchiveConversation = useLatestCallback(props.onArchiveConversation)
+  const onArchiveProjectConversations = useLatestCallback(props.onArchiveProjectConversations)
+  const onMarkConversationUnread = useLatestCallback(props.onMarkConversationUnread)
+  const onNewConversation = useLatestCallback(props.onNewConversation)
+  const onNewProject = useLatestCallback(props.onNewProject)
+  const onOpenSettings = useLatestCallback(props.onOpenSettings)
+  const onRemoveProject = useLatestCallback(props.onRemoveProject)
+  const onRenameConversation = useLatestCallback(props.onRenameConversation)
+  const onRenameProject = useLatestCallback(props.onRenameProject)
+  const onOpenScheduled = useLatestCallback(props.onOpenScheduled)
+  const onSelectConversation = useLatestCallback(props.onSelectConversation)
+  const onShowProjectInFolder = useLatestCallback(props.onShowProjectInFolder)
+  const onTogglePinConversation = useLatestCallback(props.onTogglePinConversation)
+  const onTogglePinProject = useLatestCallback(props.onTogglePinProject)
+  const onUiPreferencesChange = useLatestCallback(props.onUiPreferencesChange)
+
+  return (
+    <LeftSidebarView
+      {...props}
+      conversations={conversations}
+      onArchiveAllProjectConversations={onArchiveAllProjectConversations}
+      onArchiveAllRootConversations={onArchiveAllRootConversations}
+      onArchiveConversation={onArchiveConversation}
+      onArchiveProjectConversations={onArchiveProjectConversations}
+      onMarkConversationUnread={onMarkConversationUnread}
+      onNewConversation={onNewConversation}
+      onNewProject={onNewProject}
+      onOpenSettings={onOpenSettings}
+      onRemoveProject={onRemoveProject}
+      onRenameConversation={onRenameConversation}
+      onRenameProject={onRenameProject}
+      onOpenScheduled={onOpenScheduled}
+      onSelectConversation={onSelectConversation}
+      onShowProjectInFolder={onShowProjectInFolder}
+      onTogglePinConversation={onTogglePinConversation}
+      onTogglePinProject={onTogglePinProject}
+      onUiPreferencesChange={onUiPreferencesChange}
+    />
+  )
+}
+
+type LeftSidebarViewProps = Omit<LeftSidebarProps, 'conversations'> & {
+  conversations: SidebarConversation[]
+}
+
+const LeftSidebarView = memo(function LeftSidebarView({
   activeConversationId,
   conversations,
   onArchiveAllProjectConversations,
@@ -75,7 +184,7 @@ export function LeftSidebar({
   scheduledAttentionCount,
   scheduledSelected,
   uiPreferences
-}: LeftSidebarProps) {
+}: LeftSidebarViewProps) {
   const { language, t } = useFrontendConfig()
   const [areProjectsOpen, setAreProjectsOpen] = useState(true)
   const [areConversationsOpen, setAreConversationsOpen] = useState(true)
@@ -87,7 +196,7 @@ export function LeftSidebar({
   const [openSectionSubmenu, setOpenSectionSubmenu] = useState<SidebarSectionSubmenu | null>(null)
   const [renamingProject, setRenamingProject] = useState<AppProject | null>(null)
   const [renameValue, setRenameValue] = useState('')
-  const [renamingConversation, setRenamingConversation] = useState<ChatConversation | null>(null)
+  const [renamingConversation, setRenamingConversation] = useState<SidebarConversation | null>(null)
   const [conversationRenameValue, setConversationRenameValue] = useState('')
   const [pendingBulkArchiveScope, setPendingBulkArchiveScope] = useState<BulkArchiveScope | null>(
     null
@@ -108,54 +217,93 @@ export function LeftSidebar({
   const projectPointerDragRef = useRef<ProjectPointerDragState | null>(null)
   const projectDragPreviewOrderRef = useRef<string[] | null>(null)
   const suppressProjectClickRef = useRef<string | null>(null)
-  const projectIds = new Set(projects.map((project) => project.id))
-  const visibleConversations = conversations.filter((conversation) => !conversation.archivedAt)
-  const conversationsByProjectId = projects.reduce<Record<string, ChatConversation[]>>(
-    (accumulator, project) => {
-      accumulator[project.id] = sortConversations(
-        visibleConversations.filter((conversation) => conversation.projectId === project.id),
+  const sidebarProjection = useMemo(() => {
+    const projectIds = new Set(projects.map((project) => project.id))
+    const conversationsByProjectId = Object.fromEntries(
+      projects.map((project) => [project.id, [] as SidebarConversation[]])
+    )
+    const visibleConversations: SidebarConversation[] = []
+    const pinnedRootConversations: SidebarConversation[] = []
+    const rootConversations: SidebarConversation[] = []
+    let activeConversation: SidebarConversation | undefined
+    let projectArchiveAllCount = 0
+    let rootArchiveAllCount = 0
+
+    for (const conversation of conversations) {
+      if (conversation.archivedAt) continue
+      visibleConversations.push(conversation)
+      if (conversation.id === activeConversationId) activeConversation = conversation
+
+      const projectId = conversation.projectId
+      if (projectId && projectIds.has(projectId)) {
+        conversationsByProjectId[projectId].push(conversation)
+        projectArchiveAllCount += 1
+      } else {
+        if (conversation.pinnedAt) pinnedRootConversations.push(conversation)
+        else rootConversations.push(conversation)
+        rootArchiveAllCount += 1
+      }
+    }
+
+    for (const [projectId, projectConversations] of Object.entries(conversationsByProjectId)) {
+      conversationsByProjectId[projectId] = sortConversations(
+        projectConversations,
         uiPreferences.sidebarConversationSort
       )
-      return accumulator
-    },
-    {}
-  )
-  const pinnedProjects = sortPinnedProjects(projects)
-  const regularProjects = sortRegularProjects(
+    }
+
+    const pinnedProjects = sortPinnedProjects(projects)
+    const regularProjects = sortRegularProjects(
+      projects,
+      conversationsByProjectId,
+      uiPreferences.sidebarProjectSort,
+      uiPreferences.sidebarProjectOrder
+    )
+
+    return {
+      activeConversation,
+      conversationsByProjectId,
+      pinnedProjects,
+      pinnedRootConversations: sortConversations(
+        pinnedRootConversations,
+        uiPreferences.sidebarConversationSort
+      ),
+      projectArchiveAllCount,
+      regularProjects,
+      rootArchiveAllCount,
+      rootConversations: sortConversations(
+        rootConversations,
+        uiPreferences.sidebarConversationSort
+      ),
+      visibleConversations
+    }
+  }, [
+    activeConversationId,
+    conversations,
     projects,
+    uiPreferences.sidebarConversationSort,
+    uiPreferences.sidebarProjectOrder,
+    uiPreferences.sidebarProjectSort
+  ])
+  const {
+    activeConversation,
     conversationsByProjectId,
-    uiPreferences.sidebarProjectSort,
-    uiPreferences.sidebarProjectOrder
-  )
-  const displayRegularProjects = projectDragPreviewOrder
-    ? sortProjectsByManualOrder(regularProjects, projectDragPreviewOrder)
-    : regularProjects
-  const pinnedRootConversations = sortConversations(
-    visibleConversations.filter(
-      (conversation) =>
-        conversation.pinnedAt &&
-        (!conversation.projectId || !projectIds.has(conversation.projectId))
-    ),
-    uiPreferences.sidebarConversationSort
-  )
-  const rootConversations = sortConversations(
-    visibleConversations.filter(
-      (conversation) =>
-        !conversation.pinnedAt &&
-        (!conversation.projectId || !projectIds.has(conversation.projectId))
-    ),
-    uiPreferences.sidebarConversationSort
-  )
-  const activeConversation = visibleConversations.find(
-    (conversation) => conversation.id === activeConversationId
+    pinnedProjects,
+    pinnedRootConversations,
+    projectArchiveAllCount,
+    regularProjects,
+    rootArchiveAllCount,
+    rootConversations,
+    visibleConversations
+  } = sidebarProjection
+  const displayRegularProjects = useMemo(
+    () =>
+      projectDragPreviewOrder
+        ? sortProjectsByManualOrder(regularProjects, projectDragPreviewOrder)
+        : regularProjects,
+    [projectDragPreviewOrder, regularProjects]
   )
   const hasPinnedItems = pinnedProjects.length > 0 || pinnedRootConversations.length > 0
-  const projectArchiveAllCount = visibleConversations.filter(
-    (conversation) => conversation.projectId && projectIds.has(conversation.projectId)
-  ).length
-  const rootArchiveAllCount = visibleConversations.filter(
-    (conversation) => !conversation.projectId || !projectIds.has(conversation.projectId)
-  ).length
   const bulkArchiveCount =
     pendingBulkArchiveScope === 'projects' ? projectArchiveAllCount : rootArchiveAllCount
 
@@ -238,10 +386,10 @@ export function LeftSidebar({
     setRenameValue('')
   }
 
-  const startRenamingConversation = (conversation: ChatConversation) => {
+  const startRenamingConversation = useCallback((conversation: SidebarConversation) => {
     setConversationRenameValue(conversation.title)
     setRenamingConversation(conversation)
-  }
+  }, [])
 
   const confirmRenameConversation = () => {
     if (!renamingConversation) return
@@ -537,12 +685,10 @@ export function LeftSidebar({
   }
 
   const archiveProjectCount = pendingArchiveProject
-    ? visibleConversations.filter(
-        (conversation) => conversation.projectId === pendingArchiveProject.id
-      ).length
+    ? (conversationsByProjectId[pendingArchiveProject.id]?.length ?? 0)
     : 0
 
-  const renderConversationRow = (conversation: ChatConversation, nested = false) => (
+  const renderConversationRow = (conversation: SidebarConversation, nested = false) => (
     <ConversationRow
       activeConversationId={activeConversationId}
       archiveLabel={t('conversation.archiveConversation')}
@@ -569,7 +715,7 @@ export function LeftSidebar({
 
   const renderConversationCollection = (
     listKey: string,
-    collection: ChatConversation[],
+    collection: SidebarConversation[],
     nested = false
   ) => {
     const stage = conversationListStages[listKey] ?? 'collapsed'
@@ -656,8 +802,8 @@ export function LeftSidebar({
     const visibleProjectConversationCount = projectConversations.length
     const isDragging = draggingProjectId === project.id
     const canDragProject = !isProjectOpen && sectionProjects.length > 1
-    const hasPendingProjectConversation = projectConversations.some((conversation) =>
-      conversation.messages.some(isAssistantMessageGenerating)
+    const hasPendingProjectConversation = projectConversations.some(
+      (conversation) => conversation.isPending
     )
     const hasUnreadProjectConversation = projectConversations.some(
       (conversation) => conversation.unreadAt && conversation.id !== activeConversationId
@@ -1028,4 +1174,4 @@ export function LeftSidebar({
       )}
     </aside>
   )
-}
+})

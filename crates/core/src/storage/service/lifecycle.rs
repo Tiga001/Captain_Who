@@ -9,6 +9,13 @@ pub struct StorageService {
 }
 
 impl StorageService {
+    pub fn subscribe_storage_events(
+        &self,
+        stream: crate::storage::StorageEventStream,
+    ) -> tokio::sync::watch::Receiver<u64> {
+        self.state.event_notifications().subscribe(stream)
+    }
+
     pub fn open(database_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         Self::open_internal(database_path, true)
     }

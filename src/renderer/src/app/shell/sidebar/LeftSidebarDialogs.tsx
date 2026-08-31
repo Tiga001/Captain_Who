@@ -1,9 +1,8 @@
 import type { TranslationKey } from '../../../config/frontendTranslations'
 import type { AppProject } from '../../../config/projectConfig'
-import type { ChatConversation } from '../../../features/chat/chatTypes'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { TextInputDialog } from '../../../components/dialog/TextInputDialog'
-import type { BulkArchiveScope } from './leftSidebarTypes'
+import type { BulkArchiveScope, SidebarConversation } from './leftSidebarTypes'
 import { formatTemplate } from './leftSidebarUtils'
 
 interface LeftSidebarDialogsProps {
@@ -27,7 +26,7 @@ interface LeftSidebarDialogsProps {
   pendingBulkArchiveScope: BulkArchiveScope | null
   pendingRemoveProject: AppProject | null
   renameValue: string
-  renamingConversation: ChatConversation | null
+  renamingConversation: SidebarConversation | null
   renamingProject: AppProject | null
   t: (key: TranslationKey) => string
 }

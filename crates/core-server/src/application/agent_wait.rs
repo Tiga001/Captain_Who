@@ -18,6 +18,14 @@ pub(crate) trait AgentWaitStore: Send + Sync {
         &self,
         input: &PollAgentWaitInput,
     ) -> Result<Option<AgentWaitReadySnapshot>, AgentGraphError>;
+
+    /// Read-only hint used between authoritative settlement attempts. False positives are safe;
+    /// false negatives are recovered by the next bounded durable recheck.
+    fn probe_ready(&self, _input: &PollAgentWaitInput) -> Result<bool, AgentGraphError> {
+        // Conservative compatibility for specialized test/adapter stores. Production SQLite
+        // overrides this with a true read-only readiness query.
+        Ok(true)
+    }
 }
 
 impl AgentWaitStore for StorageService {
@@ -26,6 +34,36 @@ impl AgentWaitStore for StorageService {
         input: &PollAgentWaitInput,
     ) -> Result<Option<AgentWaitReadySnapshot>, AgentGraphError> {
         self.poll_agent_wait_ready(input)
+    }
+
+    fn probe_ready(&self, input: &PollAgentWaitInput) -> Result<bool, AgentGraphError> {
+        self.probe_agent_wait_ready(input)
+    }
+}
+
+const DURABLE_RECHECK_MIN: Duration = Duration::from_millis(100);
+const DURABLE_RECHECK_MAX: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy)]
+struct DurableRecheckBackoff {
+    next: Duration,
+}
+
+impl DurableRecheckBackoff {
+    fn new() -> Self {
+        Self {
+            next: DURABLE_RECHECK_MIN,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = DURABLE_RECHECK_MIN;
+    }
+
+    fn take_and_advance(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(DURABLE_RECHECK_MAX);
+        delay
     }
 }
 
@@ -124,18 +162,21 @@ impl AgentWaitKernel {
         if let Some(reason) = wait_stop_reason(&cancellation, &shutdown, steer.as_ref()) {
             return Ok(AgentWaitOutcome::Stopped(reason));
         }
-        // Second check closes the check/subscription lost-wakeup window.
-        if let Some(ready) = self.storage.poll_ready(&input)? {
-            return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+        // The read-only second check closes the check/subscription lost-wakeup window without
+        // acquiring another IMMEDIATE transaction while the wait is idle.
+        if self.storage.probe_ready(&input)? {
+            if let Some(ready) = self.storage.poll_ready(&input)? {
+                return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+            }
         }
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
-        // Cross-process commits cannot publish into this process-local accelerator. A short
-        // bounded durable recheck is therefore part of correctness, while Notify removes the
-        // usual latency for same-process commits.
-        let mut durable_recheck = tokio::time::interval(Duration::from_millis(50));
-        durable_recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        durable_recheck.tick().await;
+        // Cross-process commits cannot publish into this process-local accelerator. Bounded
+        // exponential rechecks preserve recovery while quiet waits stop opening a write
+        // transaction every 50 ms.
+        let mut backoff = DurableRecheckBackoff::new();
+        let durable_recheck = tokio::time::sleep(backoff.take_and_advance());
+        tokio::pin!(durable_recheck);
         loop {
             tokio::select! {
                 biased;
@@ -155,24 +196,43 @@ impl AgentWaitKernel {
                     return Ok(AgentWaitOutcome::Stopped(AgentWaitStopReason::Shutdown));
                 }
                 _ = &mut deadline => {
+                    // Close the final fallback/deadline race: a cross-process commit that became
+                    // durable before the timeout must still get one read-only probe and atomic
+                    // settlement opportunity.
+                    if self.storage.probe_ready(&input)? {
+                        if let Some(ready) = self.storage.poll_ready(&input)? {
+                            return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+                        }
+                    }
                     return Ok(AgentWaitOutcome::Stopped(AgentWaitStopReason::TimedOut));
                 }
                 _ = &mut notified => {
                     if let Some(reason) = wait_stop_reason(&cancellation, &shutdown, steer.as_ref()) {
                         return Ok(AgentWaitOutcome::Stopped(reason));
                     }
-                    if let Some(ready) = self.storage.poll_ready(&input)? {
-                        return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+                    if self.storage.probe_ready(&input)? {
+                        if let Some(ready) = self.storage.poll_ready(&input)? {
+                            return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+                        }
                     }
+                    backoff.reset();
+                    durable_recheck.as_mut().reset(
+                        tokio::time::Instant::now() + backoff.take_and_advance()
+                    );
                     notified.set(listener.notified());
                 }
-                _ = durable_recheck.tick() => {
+                _ = &mut durable_recheck => {
                     if let Some(reason) = wait_stop_reason(&cancellation, &shutdown, steer.as_ref()) {
                         return Ok(AgentWaitOutcome::Stopped(reason));
                     }
-                    if let Some(ready) = self.storage.poll_ready(&input)? {
-                        return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+                    if self.storage.probe_ready(&input)? {
+                        if let Some(ready) = self.storage.poll_ready(&input)? {
+                            return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
+                        }
                     }
+                    durable_recheck.as_mut().reset(
+                        tokio::time::Instant::now() + backoff.take_and_advance()
+                    );
                 }
             }
         }
@@ -206,6 +266,7 @@ mod tests {
 
     struct FakeStore {
         polls: AtomicUsize,
+        probes: AtomicUsize,
         replies: Mutex<VecDeque<Option<AgentWaitReadySnapshot>>>,
     }
 
@@ -213,6 +274,7 @@ mod tests {
         fn new(replies: impl IntoIterator<Item = Option<AgentWaitReadySnapshot>>) -> Self {
             Self {
                 polls: AtomicUsize::new(0),
+                probes: AtomicUsize::new(0),
                 replies: Mutex::new(replies.into_iter().collect()),
             }
         }
@@ -237,6 +299,16 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .pop_front()
                 .flatten())
+        }
+
+        fn probe_ready(&self, _input: &PollAgentWaitInput) -> Result<bool, AgentGraphError> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .replies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .front()
+                .is_some_and(Option::is_some))
         }
     }
 
@@ -317,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_after_registration_rechecks_durable_store() {
-        let store = Arc::new(FakeStore::new([None, None]));
+        let store = Arc::new(FakeStore::new([None]));
         let notifications = AgentWaitNotifications::default();
         let kernel = AgentWaitKernel {
             storage: store.clone(),
@@ -336,7 +408,7 @@ mod tests {
                 .await
                 .unwrap()
         });
-        while store.polls.load(Ordering::SeqCst) < 2 {
+        while store.probes.load(Ordering::SeqCst) < 1 {
             tokio::task::yield_now().await;
         }
         store.publish(ready());
@@ -346,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_fallback_observes_another_process_without_notification() {
-        let store = Arc::new(FakeStore::new([None, None]));
+        let store = Arc::new(FakeStore::new([None]));
         let kernel = AgentWaitKernel {
             storage: store.clone(),
             notifications: AgentWaitNotifications::default(),
@@ -364,18 +436,62 @@ mod tests {
                 .await
                 .unwrap()
         });
-        while store.polls.load(Ordering::SeqCst) < 2 {
+        while store.probes.load(Ordering::SeqCst) < 1 {
             tokio::task::yield_now().await;
         }
         store.publish(ready());
         assert!(matches!(waiter.await.unwrap(), AgentWaitOutcome::Ready(_)));
-        assert!(store.polls.load(Ordering::SeqCst) >= 3);
+        assert_eq!(store.polls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_wait_uses_read_probes_without_repeated_settlement_transactions() {
+        let store = Arc::new(FakeStore::new([None]));
+        let kernel = AgentWaitKernel {
+            storage: store.clone(),
+            notifications: AgentWaitNotifications::default(),
+        };
+        let (cancel, shutdown, steer) = controls();
+        let stop = cancel.clone();
+        let waiter = tokio::spawn(async move {
+            kernel
+                .wait(
+                    input(),
+                    Duration::from_secs(60),
+                    cancel,
+                    shutdown,
+                    Some(steer),
+                )
+                .await
+                .unwrap()
+        });
+        while store.probes.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(Duration::from_millis(900)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            store.polls.load(Ordering::SeqCst),
+            1,
+            "an idle waiter must initialize only one write transaction"
+        );
+        assert!(
+            store.probes.load(Ordering::SeqCst) <= 5,
+            "bounded exponential fallback must sharply reduce idle reads"
+        );
+        stop.cancel();
+        assert_eq!(
+            waiter.await.unwrap(),
+            AgentWaitOutcome::Stopped(AgentWaitStopReason::Cancelled)
+        );
     }
 
     #[tokio::test]
     async fn timeout_cancel_shutdown_and_steer_are_independent_stop_domains() {
         let run = |cancelled: bool, shutdown_requested: bool, steer_requested: bool| async move {
-            let store = Arc::new(FakeStore::new([None, None]));
+            let store = Arc::new(FakeStore::new([None]));
             let kernel = AgentWaitKernel {
                 storage: store,
                 notifications: AgentWaitNotifications::default(),

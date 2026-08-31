@@ -724,20 +724,7 @@ impl StorageService {
 
     pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
         let connection = self.state.connection()?;
-        chat_repository::list_conversation_metas(&connection)
-            .map_err(storage_error)?
-            .into_iter()
-            .filter_map(
-                |conversation| match agent_graph_repository::get_agent_node_by_conversation(
-                    &connection,
-                    &conversation.id,
-                ) {
-                    Ok(Some(node)) if node.parent_agent_id.is_some() => None,
-                    Ok(_) => Some(Ok(conversation)),
-                    Err(error) => Some(Err(error.to_string())),
-                },
-            )
-            .collect()
+        chat_repository::list_root_conversation_metas(&connection).map_err(storage_error)
     }
 
     pub fn load_conversation(
@@ -2361,24 +2348,64 @@ fn attach_message_guidance_timelines(
             agent_command_session_repository::MAX_RETAINED_TERMINAL_COMMAND_SESSIONS_PER_CONVERSATION,
         )
         .map_err(storage_error)?;
+        let guidances =
+            guidance_repository::list_guidances_for_conversation(connection, &conversation.id)
+                .map_err(storage_error)?;
+        let mut guidances_by_message = HashMap::<String, Vec<AgentRunGuidanceRecord>>::new();
+        for guidance in guidances {
+            guidances_by_message
+                .entry(guidance.assistant_message_id.clone())
+                .or_default()
+                .push(guidance);
+        }
+        let guidance_attachments =
+            attachment_repository::list_guidance_attachments_for_conversation(
+                connection,
+                &conversation.id,
+            )
+            .map_err(storage_error)?
+            .into_iter()
+            .map(|attachment| (attachment.id.clone(), attachment))
+            .collect::<HashMap<_, _>>();
+        let mcp_actions = pending_action_repository::list_mcp_actions_for_conversation(
+            connection,
+            &conversation.id,
+        )
+        .map_err(storage_error)?;
+        let mut mcp_actions_by_message_and_run =
+            HashMap::<(String, String), Vec<AgentPendingActionRecord>>::new();
+        for action in mcp_actions {
+            let Some(assistant_message_id) = action.assistant_message_id.clone() else {
+                continue;
+            };
+            mcp_actions_by_message_and_run
+                .entry((assistant_message_id, action.run_id.clone()))
+                .or_default()
+                .push(action);
+        }
 
         for message in &mut conversation.messages {
             if message.role != "assistant" {
                 continue;
             }
-            let guidances =
-                guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
-                    .map_err(storage_error)?;
+            let guidances = guidances_by_message.remove(&message.id).unwrap_or_default();
             let trace = traces.get(&message.id);
             if guidances.is_empty() && trace.is_none() {
                 continue;
             }
+            let mcp_actions = trace
+                .and_then(|trace| {
+                    mcp_actions_by_message_and_run.get(&(message.id.clone(), trace.run_id.clone()))
+                })
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             message.agent_run_json = Some(project_guidance_timeline(
-                connection,
                 message.agent_run_json.as_deref(),
                 trace,
                 &guidances,
                 &command_sessions,
+                &guidance_attachments,
+                mcp_actions,
                 message.created_at,
             )?);
         }
@@ -2387,11 +2414,12 @@ fn attach_message_guidance_timelines(
 }
 
 fn project_guidance_timeline(
-    connection: &rusqlite::Connection,
     existing_run_json: Option<&str>,
     trace: Option<&ConversationTurnTrace>,
     guidances: &[AgentRunGuidanceRecord],
     command_sessions: &[agent_command_session_repository::AgentCommandSessionRecord],
+    guidance_attachments: &HashMap<String, AttachmentRecord>,
+    mcp_actions: &[AgentPendingActionRecord],
     fallback_started_at: i64,
 ) -> Result<String, String> {
     let (expected_run_id, fallback_status, fallback_completed_at) = trace
@@ -2462,7 +2490,7 @@ fn project_guidance_timeline(
             .cloned()
             .expect("canonical AgentRun projection is an object")
     };
-    project_durable_mcp_invocations(connection, &mut run, trace)?;
+    project_durable_mcp_invocations(&mut run, trace, mcp_actions)?;
     let mcp_trace_anchors = mcp_trace_anchors(&run)?;
     let existing_timeline = run
         .remove("timeline")
@@ -2758,14 +2786,12 @@ fn project_guidance_timeline(
         }
         let mut attachments = Vec::with_capacity(guidance.attachment_ids.len());
         for attachment_id in &guidance.attachment_ids {
-            let attachment = attachment_repository::get_attachment(connection, attachment_id)
-                .map_err(storage_error)?
-                .ok_or_else(|| {
-                    format!(
-                        "guidance `{}` references missing attachment `{attachment_id}`",
-                        guidance.guidance_id
-                    )
-                })?;
+            let attachment = guidance_attachments.get(attachment_id).ok_or_else(|| {
+                format!(
+                    "guidance `{}` references missing attachment `{attachment_id}`",
+                    guidance.guidance_id
+                )
+            })?;
             attachments.push(serde_json::json!({
                 "id": attachment.id,
                 "kind": attachment.kind,
@@ -2918,21 +2944,14 @@ fn project_activated_skill_from_trace_result(
 }
 
 fn project_durable_mcp_invocations(
-    connection: &rusqlite::Connection,
     run: &mut serde_json::Map<String, serde_json::Value>,
     trace: Option<&ConversationTurnTrace>,
+    rows: &[AgentPendingActionRecord],
 ) -> Result<(), String> {
     let Some(trace) = trace else {
         return Ok(());
     };
     let existing_call_ids = mcp_trace_anchors(run)?;
-    let rows = pending_action_repository::list_mcp_actions_for_assistant_run(
-        connection,
-        &trace.conversation_id,
-        &trace.assistant_message_id,
-        &trace.run_id,
-    )
-    .map_err(storage_error)?;
     let mut projected = run
         .get("mcpInvocations")
         .and_then(serde_json::Value::as_array)

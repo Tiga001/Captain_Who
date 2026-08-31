@@ -78,7 +78,3 @@ export function getActiveRunSkillSelections(
     })) ?? []
   )
 }
-
-export function getContextWindowSnapshotKey(scopeId: string, model: string) {
-  return JSON.stringify([scopeId, model])
-}

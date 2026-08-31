@@ -19,8 +19,31 @@ use crate::application::mcp::sqlite_registry::SqliteMcpRegistry;
 use mycopilot_core::BuiltinCapabilityRuntime;
 
 const MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60);
-const AGENT_COLLABORATION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const AUTOMATION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const EVENT_POLL_FALLBACK_MIN: Duration = Duration::from_millis(100);
+const EVENT_POLL_FALLBACK_MAX: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy)]
+struct EventPollBackoff {
+    next: Duration,
+}
+
+impl EventPollBackoff {
+    fn new() -> Self {
+        Self {
+            next: EVENT_POLL_FALLBACK_MIN,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = EVENT_POLL_FALLBACK_MIN;
+    }
+
+    fn take_and_advance(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(EVENT_POLL_FALLBACK_MAX);
+        delay
+    }
+}
 
 struct McpApprovalExpiryReconciler {
     cancellation: Option<oneshot::Sender<()>>,
@@ -703,18 +726,36 @@ async fn run_collaboration_event_notifier(
     initial_cursor: u64,
 ) {
     let mut cursor = initial_cursor;
-    let mut interval = tokio::time::interval(AGENT_COLLABORATION_EVENT_POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut changes = storage
+        .subscribe_storage_events(mycopilot_core::storage::StorageEventStream::AgentCollaboration);
+    let mut backoff = EventPollBackoff::new();
+    let fallback = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(fallback);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            biased;
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                backoff.reset();
+            }
+            _ = &mut fallback => {}
+        }
         let storage = Arc::clone(&storage);
         let page = tokio::task::spawn_blocking(move || {
             storage.list_global_agent_collaboration_events(cursor, 256)
         })
         .await;
         let Ok(Ok(events)) = page else {
+            fallback
+                .as_mut()
+                .reset(tokio::time::Instant::now() + backoff.take_and_advance());
             continue;
         };
+        if !events.is_empty() {
+            backoff.reset();
+        }
         for event in events {
             cursor = event.global_sequence;
             let notification = serde_json::json!({
@@ -726,6 +767,9 @@ async fn run_collaboration_event_notifier(
                 return;
             }
         }
+        fallback
+            .as_mut()
+            .reset(tokio::time::Instant::now() + backoff.take_and_advance());
     }
 }
 
@@ -735,18 +779,36 @@ pub(crate) async fn run_automation_event_notifier(
     initial_cursor: i64,
 ) {
     let mut cursor = initial_cursor;
-    let mut interval = tokio::time::interval(AUTOMATION_EVENT_POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut changes =
+        storage.subscribe_storage_events(mycopilot_core::storage::StorageEventStream::Automation);
+    let mut backoff = EventPollBackoff::new();
+    let fallback = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(fallback);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            biased;
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                backoff.reset();
+            }
+            _ = &mut fallback => {}
+        }
         let request_storage = Arc::clone(&storage);
         let page = tokio::task::spawn_blocking(move || {
             request_storage.list_automation_events_after(cursor, 256)
         })
         .await;
         let Ok(Ok(events)) = page else {
+            fallback
+                .as_mut()
+                .reset(tokio::time::Instant::now() + backoff.take_and_advance());
             continue;
         };
+        if !events.is_empty() {
+            backoff.reset();
+        }
         for event in events {
             cursor = event.sequence;
             let Ok(params) = application::automation::automation_event_dto(event) else {
@@ -761,6 +823,9 @@ pub(crate) async fn run_automation_event_notifier(
                 return;
             }
         }
+        fallback
+            .as_mut()
+            .reset(tokio::time::Instant::now() + backoff.take_and_advance());
     }
 }
 
@@ -770,18 +835,36 @@ pub(crate) async fn run_notification_event_notifier(
     initial_cursor: i64,
 ) {
     let mut cursor = initial_cursor;
-    let mut interval = tokio::time::interval(AUTOMATION_EVENT_POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut changes =
+        storage.subscribe_storage_events(mycopilot_core::storage::StorageEventStream::Notification);
+    let mut backoff = EventPollBackoff::new();
+    let fallback = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(fallback);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            biased;
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                backoff.reset();
+            }
+            _ = &mut fallback => {}
+        }
         let request_storage = Arc::clone(&storage);
         let page = tokio::task::spawn_blocking(move || {
             request_storage.list_notification_change_events_after(cursor, 256)
         })
         .await;
         let Ok(Ok(events)) = page else {
+            fallback
+                .as_mut()
+                .reset(tokio::time::Instant::now() + backoff.take_and_advance());
             continue;
         };
+        if !events.is_empty() {
+            backoff.reset();
+        }
         for event in events {
             cursor = event.sequence;
             let Ok(params) = application::notification::notification_event_dto(event) else {
@@ -796,6 +879,9 @@ pub(crate) async fn run_notification_event_notifier(
                 return;
             }
         }
+        fallback
+            .as_mut()
+            .reset(tokio::time::Instant::now() + backoff.take_and_advance());
     }
 }
 
@@ -1050,6 +1136,70 @@ mod mcp_payload_bootstrap_tests {
         UnavailableMcpApprovalPayloadStore,
     };
     use tempfile::tempdir;
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_event_polling_uses_bounded_exponential_fallback() {
+        let started = tokio::time::Instant::now();
+        let mut backoff = EventPollBackoff::new();
+        let mut queries = 0;
+        for _ in 0..5 {
+            tokio::time::sleep(backoff.take_and_advance()).await;
+            queries += 1;
+        }
+
+        assert_eq!(queries, 5);
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started),
+            Duration::from_millis(3_100),
+            "five idle fallbacks should span 3.1s instead of issuing 31 fixed 100ms queries"
+        );
+        assert_eq!(backoff.take_and_advance(), EVENT_POLL_FALLBACK_MAX);
+    }
+
+    #[tokio::test]
+    async fn storage_event_insert_wakes_the_matching_process_local_stream() {
+        let directory = tempdir().unwrap();
+        let storage = StorageService::open(&directory.path().join("event-signal.sqlite")).unwrap();
+        let mut collaboration = storage.subscribe_storage_events(
+            mycopilot_core::storage::StorageEventStream::AgentCollaboration,
+        );
+        let mut automation = storage
+            .subscribe_storage_events(mycopilot_core::storage::StorageEventStream::Automation);
+        storage
+            .save_conversation_meta(
+                mycopilot_core::storage::models::ChatConversationMetaRecord {
+                    id: "conversation-signal".to_string(),
+                    project_id: None,
+                    model_id: None,
+                    title: "Signal".to_string(),
+                    created_at: 1,
+                    updated_at: 1,
+                    pinned_at: None,
+                    archived_at: None,
+                    unread_at: None,
+                },
+            )
+            .unwrap();
+        storage
+            .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+                agent_id: "agent-signal".to_string(),
+                conversation_id: "conversation-signal".to_string(),
+                creation_request_id: "ensure-signal".to_string(),
+                task_name: "Signal".to_string(),
+            })
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(50), collaboration.changed())
+            .await
+            .expect("same-process collaboration commit should wake immediately")
+            .expect("storage signal sender should remain live");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), automation.changed())
+                .await
+                .is_err(),
+            "unrelated streams must not receive a collaboration-only signal"
+        );
+    }
 
     #[test]
     fn collaboration_startup_resync_is_a_strict_global_invalidation() {

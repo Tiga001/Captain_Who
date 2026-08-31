@@ -27,6 +27,7 @@ import type {
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../../features/chat/chatTypes'
+import { CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS } from '../chatMessagePersistence'
 
 const testState = vi.hoisted(() => ({
   automationEventListeners: new Set<(event: AutomationEvent) => void>(),
@@ -3725,6 +3726,56 @@ describe('edited turn Skill recovery', () => {
     await expect
       .element(screen.getByTestId('conversation-message-contents'))
       .toHaveTextContent('edited')
+  })
+})
+
+describe('streaming message persistence checkpoints', () => {
+  it('keeps 80ms message rendering while coalescing full saves and flushing terminal state', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await expect.poll(() => testState.saveChatMessageState.mock.calls.length).toBeGreaterThan(0)
+    await Promise.resolve()
+    testState.saveChatMessageState.mockClear()
+
+    vi.useFakeTimers()
+    for (let index = 1; index <= 9; index += 1) {
+      emitAgentEvent({
+        type: 'message_delta',
+        runId: 'run-1',
+        streamId: 'stream-1',
+        delta: String(index)
+      })
+      await vi.advanceTimersByTimeAsync(80)
+    }
+
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('123456789')
+    expect(testState.saveChatMessageState).toHaveBeenCalledTimes(2)
+    expect(CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS).toBe(300)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: '123456789'
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    vi.useRealTimers()
+
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await expect
+      .poll(() => {
+        const lastMessage = testState.saveChatMessageState.mock.calls.at(-1)?.[1] as
+          ChatMessage | undefined
+        return lastMessage?.agentRun?.status
+      })
+      .toBe('completed')
+    expect(testState.saveChatMessageState).toHaveBeenCalledTimes(3)
   })
 })
 

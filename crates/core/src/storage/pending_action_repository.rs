@@ -426,18 +426,18 @@ pub fn list_pending_actions(
     records
 }
 
-/// Lists every durable MCP action journal owned by one Assistant run.
+/// Loads every durable MCP action journal needed to project one Conversation.
 ///
 /// Unlike [`list_pending_actions`], this query intentionally includes terminal rows: automatic
 /// MCP journals scrub their payload after settlement but retain the exact Tool call binding,
 /// stable action identity and lifecycle timestamps needed for a safe read-only conversation
-/// projection. Callers must still corroborate the row with the append-only conversation trace;
-/// a journal row alone is never execution truth.
-pub(crate) fn list_mcp_actions_for_assistant_run(
+/// projection. Callers must still corroborate each row with the append-only trace.
+///
+/// The caller groups the rows by `(assistant_message_id, run_id)`. This keeps conversation
+/// hydration at one MCP statement instead of repeating the same indexed lookup for every trace.
+pub(crate) fn list_mcp_actions_for_conversation(
     connection: &Connection,
     conversation_id: &str,
-    assistant_message_id: &str,
-    run_id: &str,
 ) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
     let mut statement = connection.prepare(
         "
@@ -457,34 +457,28 @@ pub(crate) fn list_mcp_actions_for_assistant_run(
             updated_at
         FROM agent_pending_actions
         WHERE conversation_id = ?1
-          AND assistant_message_id = ?2
-          AND run_id = ?3
           AND action_type = 'mcp_tool_call'
         ORDER BY created_at ASC, action_id ASC
         ",
     )?;
-
     let records = statement
-        .query_map(
-            params![conversation_id, assistant_message_id, run_id],
-            |row| {
-                Ok(AgentPendingActionRecord {
-                    action_id: row.get(0)?,
-                    run_id: row.get(1)?,
-                    conversation_id: row.get(2)?,
-                    assistant_message_id: row.get(3)?,
-                    action_type: row.get(4)?,
-                    tool_name: row.get(5)?,
-                    tool_call_id: row.get(6)?,
-                    status: row.get(7)?,
-                    target_status: row.get(8)?,
-                    action_json: row.get(9)?,
-                    agent_input_json: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
-                })
-            },
-        )?
+        .query_map([conversation_id], |row| {
+            Ok(AgentPendingActionRecord {
+                action_id: row.get(0)?,
+                run_id: row.get(1)?,
+                conversation_id: row.get(2)?,
+                assistant_message_id: row.get(3)?,
+                action_type: row.get(4)?,
+                tool_name: row.get(5)?,
+                tool_call_id: row.get(6)?,
+                status: row.get(7)?,
+                target_status: row.get(8)?,
+                action_json: row.get(9)?,
+                agent_input_json: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?
         .collect();
     records
 }

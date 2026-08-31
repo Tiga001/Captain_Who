@@ -9,6 +9,21 @@ export type ProjectDragPosition = 'before' | 'after'
 export type ConversationListStage = 'collapsed' | 'preview' | 'expanded'
 export type SidebarMenuPosition = { left: number; top: number }
 
+export interface SidebarConversation {
+  archivedAt?: number | null
+  createdAt: number
+  id: string
+  isPending?: boolean
+  isWaitingForApproval?: boolean
+  messages?: ChatConversation['messages']
+  modelId?: string | null
+  pinnedAt?: number | null
+  projectId: string | null
+  title: string
+  unreadAt?: number | null
+  updatedAt: number
+}
+
 export interface ProjectDragTarget {
   projectId: string
   position: ProjectDragPosition

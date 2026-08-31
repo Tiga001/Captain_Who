@@ -304,8 +304,7 @@
   white-space: nowrap;
 }
 
-.skill-form-error,
-.skill-preview-expired {
+.skill-form-error {
   margin: 0;
   color: var(--mc-color-text-danger);
   font-size: var(--mc-font-size-xs);

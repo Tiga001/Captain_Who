@@ -75,4 +75,12 @@ impl StorageService {
         let mut connection = self.state.connection().map_err(unavailable)?;
         agent_delivery_repository::poll_wait_ready(&mut connection, input, now_ms())
     }
+
+    pub fn probe_agent_wait_ready(
+        &self,
+        input: &PollAgentWaitInput,
+    ) -> Result<bool, AgentGraphError> {
+        let connection = self.state.connection().map_err(unavailable)?;
+        agent_delivery_repository::probe_wait_ready(&connection, input, now_ms())
+    }
 }

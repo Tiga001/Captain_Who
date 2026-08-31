@@ -1,7 +1,6 @@
 // Pure sidebar helpers for ordering, labels, and menu placement.
 import type { AppProject } from '../../../config/projectConfig'
 import type { AppLanguage } from '../../../config/frontendTranslations'
-import type { ChatConversation } from '../../../features/chat/chatTypes'
 import type {
   SidebarConversationSort,
   SidebarProjectSort
@@ -87,8 +86,14 @@ export function formatConversationAge(
   return formatConversationAgeUnit(Math.max(1, years), 'year', language)
 }
 
-export function sortConversations(
-  conversations: ChatConversation[],
+interface SortableConversation {
+  createdAt: number
+  pinnedAt?: number | null
+  updatedAt: number
+}
+
+export function sortConversations<Conversation extends SortableConversation>(
+  conversations: Conversation[],
   sort: SidebarConversationSort
 ) {
   return [...conversations].sort((a, b) => {
@@ -144,9 +149,9 @@ export function sortProjectsByManualOrder(projects: AppProject[], projectOrder: 
   })
 }
 
-export function sortRegularProjects(
+export function sortRegularProjects<Conversation extends Pick<SortableConversation, 'updatedAt'>>(
   projects: AppProject[],
-  conversationsByProjectId: Record<string, ChatConversation[]>,
+  conversationsByProjectId: Record<string, Conversation[]>,
   sort: SidebarProjectSort,
   projectOrder: string[]
 ) {
@@ -167,6 +172,8 @@ export function sortRegularProjects(
   })
 }
 
-function latestProjectConversationUpdatedAt(conversations: ChatConversation[]) {
+function latestProjectConversationUpdatedAt(
+  conversations: Array<Pick<SortableConversation, 'updatedAt'>>
+) {
   return conversations.reduce((latest, conversation) => Math.max(latest, conversation.updatedAt), 0)
 }

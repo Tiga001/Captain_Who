@@ -1012,13 +1012,6 @@
   background: var(--mc-color-surface-info-subtle);
 }
 
-.composer-model-empty {
-  display: block;
-  padding: 16px 18px;
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-md);
-}
-
 .composer-permission-option[data-permission='default'] {
   color: var(--mc-color-text-secondary);
 }

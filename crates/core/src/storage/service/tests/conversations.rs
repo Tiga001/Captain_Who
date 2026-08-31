@@ -1,4 +1,36 @@
 use super::*;
+use std::cell::RefCell;
+
+std::thread_local! {
+    static TRACED_STORAGE_SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+fn record_storage_sql(sql: &str) {
+    TRACED_STORAGE_SQL.with(|statements| statements.borrow_mut().push(sql.to_string()));
+}
+
+fn trace_storage_selects<T>(
+    service: &StorageService,
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<String>) {
+    TRACED_STORAGE_SQL.with(|statements| statements.borrow_mut().clear());
+    {
+        let mut connection = service.state.connection().unwrap();
+        connection.trace(Some(record_storage_sql));
+    }
+    let output = operation();
+    {
+        let mut connection = service.state.connection().unwrap();
+        connection.trace(None);
+    }
+    let selects = TRACED_STORAGE_SQL.with(|statements| {
+        std::mem::take(&mut *statements.borrow_mut())
+            .into_iter()
+            .filter(|sql| sql.trim_start().to_ascii_uppercase().starts_with("SELECT"))
+            .collect()
+    });
+    (output, selects)
+}
 
 fn browser_tool_identity(
     tool_id: &str,
@@ -104,6 +136,204 @@ fn load_projected_run(service: &StorageService, conversation_id: &str) -> serde_
             .unwrap(),
     )
     .unwrap()
+}
+
+fn seed_batched_conversation_projection(
+    service: &StorageService,
+    conversation_id: &str,
+    assistant_count: usize,
+) {
+    let mut stored = conversation(conversation_id, None, &format!("{conversation_id}-user"));
+    for index in 0..assistant_count {
+        stored.messages.push(ChatMessageRecord {
+            id: format!("{conversation_id}-assistant-{index}"),
+            role: "assistant".to_string(),
+            content: format!("answer {index}"),
+            created_at: i64::try_from(index + 2).unwrap(),
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+    }
+    service.save_conversation(stored).unwrap();
+
+    for index in 0..assistant_count {
+        let assistant_message_id = format!("{conversation_id}-assistant-{index}");
+        let run_id = format!("{conversation_id}-run-{index}");
+        let mut trace = empty_projection_trace(conversation_id, &assistant_message_id, &run_id);
+        trace.terminal_status = crate::ConversationTurnTraceTerminalStatus::Completed;
+        service
+            .replace_conversation_turn_trace(
+                &trace,
+                i64::try_from(index + 2).unwrap(),
+                i64::try_from(index + 2).unwrap(),
+            )
+            .unwrap();
+    }
+
+    let connection = service.state.connection().unwrap();
+    for index in 0..assistant_count {
+        let assistant_message_id = format!("{conversation_id}-assistant-{index}");
+        let run_id = format!("{conversation_id}-run-{index}");
+        let attachment_id = format!("{conversation_id}-attachment-{index}");
+        let guidance_id = format!("{conversation_id}-guidance-{index}");
+        let created_at = i64::try_from(index + 2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO attachments (
+                     id, conversation_id, message_id, project_id, kind, original_name,
+                     mime_type, size_bytes, storage_rel_path, created_at
+                 ) VALUES (?1, ?2, ?3, NULL, 'file', ?4, 'text/plain', 1, ?5, ?6)",
+                rusqlite::params![
+                    &attachment_id,
+                    conversation_id,
+                    &assistant_message_id,
+                    format!("note-{index}.txt"),
+                    format!("{conversation_id}/{attachment_id}/note.txt"),
+                    created_at,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_run_guidances (
+                     guidance_id, client_message_id, run_id, conversation_id,
+                     assistant_message_id, content, status, applied_trace_sequence,
+                     terminal_reason, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', NULL, NULL, ?7, ?7)",
+                rusqlite::params![
+                    &guidance_id,
+                    format!("{conversation_id}-client-{index}"),
+                    &run_id,
+                    conversation_id,
+                    &assistant_message_id,
+                    format!("guidance {index}"),
+                    created_at,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_run_guidance_attachments (
+                     guidance_id, attachment_id, position
+                 ) VALUES (?1, ?2, 0)",
+                rusqlite::params![&guidance_id, &attachment_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_pending_actions (
+                     action_id, run_id, conversation_id, assistant_message_id, action_type,
+                     tool_name, tool_call_id, status, target_status, action_json,
+                     agent_input_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'mcp_tool_call', 'mcp', ?5, 'pending', NULL,
+                           '{}', '{}', ?6, ?6)",
+                rusqlite::params![
+                    format!("{conversation_id}-action-{index}"),
+                    &run_id,
+                    conversation_id,
+                    &assistant_message_id,
+                    format!("{conversation_id}-call-{index}"),
+                    created_at,
+                ],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn conversation_meta_projection_filters_child_agents_in_one_statement() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    for id in ["meta-ordinary", "meta-root"] {
+        service
+            .save_conversation(conversation(id, None, &format!("{id}-message")))
+            .unwrap();
+    }
+    let mut child = conversation("meta-child", None, "meta-child-message");
+    child.messages.clear();
+    service.save_conversation(child).unwrap();
+    bind_agent_root(&service, "meta-root-agent", "meta-root");
+    bind_agent_child(
+        &service,
+        "meta-child-agent",
+        "meta-child",
+        "meta-root-agent",
+        "meta-root",
+        "child",
+    );
+
+    let (metas, selects) =
+        trace_storage_selects(&service, || service.load_conversation_metas().unwrap());
+    let mut ids = metas.into_iter().map(|meta| meta.id).collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(ids, ["meta-ordinary".to_string(), "meta-root".to_string()]);
+    assert_eq!(selects.len(), 1, "unexpected metadata SQL: {selects:#?}");
+    assert!(selects[0].contains("NOT EXISTS"));
+    assert!(selects[0].contains("agent_nodes"));
+}
+
+#[test]
+fn conversation_detail_projection_query_count_is_independent_of_history_length() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    seed_batched_conversation_projection(&service, "projection-one", 1);
+    seed_batched_conversation_projection(&service, "projection-many", 12);
+
+    let (one, one_selects) = trace_storage_selects(&service, || {
+        service
+            .load_conversation("projection-one")
+            .unwrap()
+            .unwrap()
+    });
+    let (many, many_selects) = trace_storage_selects(&service, || {
+        service
+            .load_conversation("projection-many")
+            .unwrap()
+            .unwrap()
+    });
+
+    assert_eq!(
+        one_selects.len(),
+        many_selects.len(),
+        "one: {one_selects:#?}\nmany: {many_selects:#?}"
+    );
+    assert_eq!(
+        many_selects.len(),
+        13,
+        "unexpected detail SQL: {many_selects:#?}"
+    );
+    for table in [
+        "conversation_turn_trace_items",
+        "agent_run_guidances",
+        "agent_run_guidance_attachments",
+        "agent_pending_actions",
+        "attachments",
+    ] {
+        assert!(
+            many_selects.iter().any(|sql| sql.contains(table)),
+            "missing batched {table} query: {many_selects:#?}"
+        );
+    }
+
+    assert_eq!(one.messages.len(), 2);
+    assert_eq!(many.messages.len(), 13);
+    for message in many
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+    {
+        assert!(message.attachments.is_empty());
+        let run: serde_json::Value =
+            serde_json::from_str(message.agent_run_json.as_deref().unwrap()).unwrap();
+        assert_eq!(run["timeline"].as_array().unwrap().len(), 1);
+        assert_eq!(run["timeline"][0]["status"], "queued");
+        assert_eq!(
+            run["timeline"][0]["attachments"].as_array().unwrap().len(),
+            1
+        );
+    }
 }
 
 #[test]
