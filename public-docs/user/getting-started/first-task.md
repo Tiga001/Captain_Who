@@ -4,7 +4,7 @@ description: 配置模型并用默认权限完成一次安全、可验证的 Age
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 完成第一个任务
@@ -17,7 +17,7 @@ last_verified: 2026-08-23
 
 1. 点击左侧栏底部的个人资料区域，选择“设置”。
 2. 进入“配置”，填写 API URL 和 API Token。
-3. 确认至少一个模型处于启用状态；模型标识必须是你的服务实际接受的值。
+3. 新安装没有预置模型；进入“管理模型”新增服务实际接受的模型 ID，并将其启用。
 4. 点击“返回应用”。
 
 不要把 Token 粘贴到聊天内容里。连接配置和聊天消息是不同的数据边界。

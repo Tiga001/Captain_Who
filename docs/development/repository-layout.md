@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 仓库结构
@@ -14,6 +14,7 @@ last_verified: 2026-08-23
 | `src/main/`                       | Electron Main、窗口、IPC、原生通知、浏览器、终端和 Core Server sidecar 宿主 |
 | `src/preload/`                    | context-isolated、按领域拆分的 Renderer Host API bridge                     |
 | `src/renderer/`                   | React 界面、Feature 控制器和展示状态                                        |
+| `src/shared/`                     | Main 与 Renderer 共用的纯类型/本地化 Catalog，不依赖 Electron 进程能力      |
 | `packages/host-api/`              | Renderer 可调用的 channel 与 Host API 类型                                  |
 | `packages/protocol/`              | TypeScript 跨进程 DTO、严格 parser 和 fixture                               |
 | `packages/artifact-runtime-node/` | 受管 Artifact Runtime 的 Node 入口                                          |
@@ -22,9 +23,11 @@ last_verified: 2026-08-23
 | `crates/core-server/`             | Core Server 应用边界、JSON-RPC transport 与 Host adapters                   |
 | `crates/mcp-client/`              | MCP 协议、连接、Catalog、Manager 与 stdio transport                         |
 | `resources/`                      | 随应用分发的静态资源和受管组件描述                                          |
+| `patches/`                        | pnpm 锁定依赖补丁；属于构建输入并由 runtime manifest/hash 绑定              |
 | `scripts/`                        | 组件准备、测试门禁、打包、签名和验证脚本                                    |
 | `build/`                          | Electron Builder 图标与平台 entitlement                                     |
 | `docs/`                           | 当前开发文档、运维规则、ADR 和历史记录                                      |
+| `public-docs/`                    | 受独立检查器约束的用户、集成、发布、支持、安全与第三方公开文档              |
 
 构建缓存、`target/`、`out/`、`.cache/` 与测试临时产物不是代码真源，不应从中反推协议或版本。
 
@@ -59,9 +62,9 @@ app -> features -> components -> config / host / protocol
 [`crates/core/src`](../../crates/core/src) 主要领域包括：
 
 - `runtime`、`llm`、`context`：模型运行、Provider 与上下文；
-- `tools`、`command`、`skills`：Agent 能力和授权，包括 Automation 专用 `automation_report`；
+- `tools`、`file_change`、`command`、`skills`：Agent 能力、FileChange 事务与授权，包括 Automation 专用 `automation_report`；
 - `storage`、`conversation_trace`、`world_state`：持久化与恢复真源，包括 Automation repository；
-- `office`、`artifact_runtime`、`image_generation`、`git_review`：专项能力；
+- `office`、`artifact_runtime`、`image_generation`、`git_review`、`browser_downloads`：专项能力；
 - `protocol`：依赖 Rust Core 概念的运行时模型，不属于跨语言 transport DTO。
 
 [`crates/core-server/src`](../../crates/core-server/src) 不是通用 handler 集合：`transport` 负责 framing 和
@@ -72,7 +75,7 @@ MCP、Skills、图片生成等外部实现。详见
 ## Renderer Feature
 
 [`src/renderer/src/features`](../../src/renderer/src/features) 按领域包含 chat、agentRun、
-agentCollaboration、automations、browser、terminal、files、gitReview、mcp、skills、settings、
+agentCollaboration、automations、browser、notifications、terminal、files、gitReview、mcp、skills、settings、
 imageGeneration 等。
 共享 UI 放入 `components`；平台级组合、导航和 root-scoped store 放入 `app`。
 

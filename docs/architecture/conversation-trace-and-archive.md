@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Conversation Trace 与 Exact Archive
@@ -23,6 +23,8 @@ last_verified: 2026-08-23
 
 此外，`conversation_model_context_*` 保存模型实际观察过的安全投影；它与审计 Trace 并行，不能用当前工具实现重新计算旧结果。`ModelRequestObservation` 只保存计量和请求终态，不是内容仓库。
 
+持久 assistant message 在 pending 阶段以空 `content` 开始；正常流式与完成路径保存模型生成的用户可见正文。模型请求中断保持空正文并以 typed interruption 表达；其他受控错误或取消结算仍可能写入 Host 生成的终态可见正文。审批、Tool 状态、MCP/FileChange 卡片和系统恢复细节进入 Agent Run/Event/Trace 各自投影，不能为了 UI 方便拼接进 message content；否则历史重载会把系统生成文本误当成模型回复。
+
 ## Trace 生命周期
 
 ```text
@@ -38,6 +40,8 @@ Turn created
 当前 Trace schema version 为 `CONVERSATION_TURN_TRACE_SCHEMA_VERSION = 4`。公开 narration 一旦发出即可追加。长期历史中的 Tool Call 与 Tool Result 必须闭环；为支持审批和崩溃恢复，`in_progress` Trace 可在尾部持久化一个尚未结算的 open Tool Call，并由 Runtime/Checkpoint/pending action 保存恢复权威。该 open call 不进入已闭合 model-context 前缀，Trace 进入终态前必须由权威或合成 Tool Result 关闭。已持久化 sequence 是 append-only，不能重排、缩短或重新打开。
 
 最终 assistant message、Trace terminal、model-context projection、Usage 和 UI 终态由 Core Server 在同一结算边界提交。进程崩溃后，startup reconciliation 只在已持久证据明确证明 Run 已取消时结算为 `cancelled`；其他孤立的 `in_progress` Trace 结算为 `failed`。Trace 没有 `interrupted` 终态，也不从 Renderer 看似完成的状态推断成功。
+
+根 Agent 的 collaboration timeline 在最终 assistant response 开始流式输出时冻结。冻结快照以 `collaborationTimelineActivities` 写入本次 assistant Run projection，并保留 `rootAnchorMessageId`/`rootTraceBoundarySequence`；之后到达的子 Agent 活动仍进入 Agent Center 和持久 collaboration event log，但不能插回已经提交的父回复。未结算 Run 可使用 live projection，结算后 Renderer 只能使用该 Run 已持久化的冻结列表，不能拿“当前整棵树状态”重算旧时间线。
 
 Automation Run 在原子 HumanRoot admission 时绑定 `agent_run_id`、Conversation 和 user/assistant message。
 Automation observer 以持久 Trace terminal 和 pending action 判断 `running`、`waiting_for_approval` 与终态，
@@ -57,6 +61,8 @@ Trace 的权威终态。详见 [Scheduled Automation](../subsystems/scheduled-au
 - Runtime Extension projection：仅给同一 Run 中的扩展消费者。
 
 投影是单向的，不能用 Event 或 Trace 重建 canonical result，也不能用 Renderer payload 恢复审批。详细字段边界见[Tool Result 消费者矩阵](../subsystems/tool-result-consumer-matrix.md)。
+
+`FileChange` 还有独立的 action audit 与 diff 读取面。普通 Durable Trace 只保存安全的文件身份、operation、统计、状态和终态，不保存 `apply_patch` 的 patch/file body。成功 Direct write 会生成新的 model-only successor observation，使后续 `apply_patch` 必须基于新 observation；该 successor 属于当前 Runtime/Checkpoint 连续性，不进入 UI、Durable Trace 或 Exact Archive。已结算历史 diff 由 Core Server 使用 conversation、assistant message、Run、tool call 的精确 identity 从 durable action audit 惰性分页读取，而不是从 Trace 正文重建；活动 staged transaction 则使用 transaction id，两者不可互换。执行、Observation 与 Run grant 详见 [FileChange 子系统](../subsystems/file-change.md)。
 
 ## Exact Archive 写入
 
@@ -96,7 +102,7 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 
 - 覆盖范围内编辑/删除改变 source revision，使依赖它的 compaction 派生状态失效。
 - Turn rewrite 保留明确的 rewrite record，并在事务内更新消息、Trace/model context、Archive 引用及派生状态；不能就地伪造旧 sequence。
-- 分叉复制选中边界内的终态消息、Trace、model-context、摘要链、附件和相关 Artifact grant。Archive chunk 可复用内容，但目标必须获得新归属/ref，并重写目标 Trace 引用。
+- 分叉复制选中边界内的终态消息、Trace、model-context、摘要链、附件和相关 Artifact grant。Archive chunk 可复用内容，但目标必须获得新归属/ref，并重写目标 Trace 引用。已结算 FileChange action audit 与 collaboration timeline 冻结快照也按目标 conversation/message/Run identity 重映射，仅用于历史展示，不成为重放或写入授权。
 - Usage、普通请求 Observation、运行中 Checkpoint、Command Session 活动状态和 mutable world state 不作为历史内容复制。
 - 会话删除通过外键/服务事务清理内容和授权；审计表是否保留由其数据生命周期定义，不能仅依赖级联猜测。
 - 删除 Automation 绑定的 Conversation/message/project 前，服务事务先 terminalize 相关活动 Run 并请求
@@ -113,6 +119,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 5. Source truncation、semantic pagination、consumer truncation 和 model truncation 必须分别记录。
 6. Archive/FTS/history ref 不能绕过 conversation、project、attachment 或 Artifact 授权。
 7. 分叉后的历史不依赖源会话继续存在。
+8. 结算后的 collaboration timeline 使用 final-response stream start 时冻结的持久列表；迟到子 Agent 活动不得修改旧父回复。
+9. FileChange body 与 model-only successor observation 不进入普通 Durable Trace；历史 diff 必须回到 exact owner 的 durable action audit。
 
 ## 代码真源
 
@@ -125,6 +133,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - Rewrite/fork：`storage/conversation_turn_rewrite_repository.rs`、`conversation_fork_repository.rs`
 - 终态与修复：`crates/core/src/storage/service/messages.rs`、`trace_reconciliation.rs`
 - Tool 投影入口：`crates/core/src/tools/mod.rs`
+- FileChange observation/audit：`crates/core/src/file_change/observation.rs`、`crates/core/src/storage/file_change_repository.rs`
+- Collaboration 冻结：`crates/core-server/src/application/agent/turn_executor.rs`、`crates/core/src/storage/agent_collaboration_event_repository.rs`、`crates/core/src/storage/chat_repository/agent_run_projection.rs`
 - Automation Trace observer/admission：`crates/core-server/src/application/automation/scheduler.rs`、
   `crates/core-server/src/application/agent/automation_turn.rs`
 
@@ -140,6 +150,9 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - `crates/core/tests/fixtures/tool_result_projection_contract_v1.json`
 - `crates/core-server/src/application/automation/scheduler/tests.rs`
 - `crates/core-server/src/application/agent/tests/automation_turn.rs`
+- `src/renderer/src/features/chat/__tests__/CollaborationTimelineIntegration.browser.test.tsx`
+- `src/renderer/src/features/chat/__tests__/storageCommandOutputPersistence.test.ts`
+- `src/renderer/src/features/chat/__tests__/FileChangeDiffCard.browser.test.tsx`
 
 ## 变更检查表
 
@@ -151,6 +164,8 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - [ ] Automation Run 绑定、Approval 恢复与资源删除是否仍由持久 Trace 驱动且原子收口。
 - [ ] FTS/schema 变化保持索引可重建，权威内容不依赖索引。
 - [ ] 防止 `conversation_history` 结果递归归档。
+- [ ] 最终回复开始流式输出时冻结 collaboration timeline，结算/重载/分叉均使用同一快照。
+- [ ] FileChange body、successor observation 和历史 diff 分别保持 Trace omission、model-only 与 action-audit owner 语义。
 
 ## 当前限制
 
@@ -159,3 +174,4 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 - FTS 查询不是语义向量检索，且旧/损坏索引需要通过启动或维护流程重建。
 - 运行中尚未提交的模型流、Tool 调用和 narration 在进程崩溃时可能只剩活动 Trace/Checkpoint 已覆盖部分。
 - 历史分叉复制的是选中时刻的不可变快照，不会与源会话继续同步。
+- 父回复冻结后到达的子 Agent 活动只在 Agent Center/事件日志可见，不会追写旧消息时间线。

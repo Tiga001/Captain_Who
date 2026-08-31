@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # MyCopilot 开发文档
@@ -10,6 +10,9 @@ last_verified: 2026-08-23
 本目录是 MyCopilot 工程设计、开发流程和发布约束的权威文档入口。根目录
 [`README.md`](../README.md) 只负责项目简介和最短启动路径；实现细节以本目录及其链接的代码、契约
 fixture 和测试为准。
+
+面向最终用户、集成开发者与外部分发的内容维护在
+[`public-docs/`](../public-docs/README.md)；它与本目录分别执行结构和链接检查，不应从公开文档反向链接内部实现说明。
 
 ## 新成员阅读顺序
 
@@ -41,18 +44,20 @@ fixture 和测试为准。
 | 文档                                                              | 内容                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------- |
 | [工具、权限与审批](subsystems/tools-permissions-and-approvals.md) | 工具注册、权限、审批、取消和恢复                         |
-| [Scheduled Automation](subsystems/scheduled-automations.md)       | 定时任务、调度、Run、恢复、attention 与原生通知          |
+| [FileChange](subsystems/file-change.md)                           | `apply_patch`、Observation、审批、提交、审计和历史 Diff  |
+| [Scheduled Automation](subsystems/scheduled-automations.md)       | 定时任务、调度、Run、恢复、attention 与通知事实          |
+| [通用通知](subsystems/notifications.md)                           | 普通任务与 Automation 的事实、批次、原生投递和点击导航   |
 | [Tool Result 消费矩阵](subsystems/tool-result-consumer-matrix.md) | Model、Event、Trace、Archive 等投影消费者                |
 | [Tool Result 上限](subsystems/tool-result-limits.md)              | 截断、分页、归档和恢复契约                               |
 | [MCP](subsystems/mcp.md)                                          | 用户配置的 stdio MCP Server 与内部 HostBridge Capability |
 | [Skills](subsystems/skills.md)                                    | bundled、installed、workspace Skill 生命周期             |
-| [浏览器与自动化](subsystems/browser-automation.md)                | 手动浏览器、Managed Playwright 和风险门禁                |
+| [浏览器与自动化](subsystems/browser-automation.md)                | surface、Managed Playwright、设置、历史、下载和风险门禁  |
 | [命令与会话](subsystems/command-sessions.md)                      | 命令策略、进程组、handoff、wait 和恢复                   |
-| [Office 与 Artifact](subsystems/office-and-artifacts.md)          | Word、表格、演示文稿、PDF 与受管制品                     |
+| [Office 与 Artifact](subsystems/office-and-artifacts.md)          | Word、表格、演示文稿、PDF、受管运行时与 Artifact         |
 | [右侧栏平台](subsystems/right-sidebar.md)                         | 模块注册、实例、工作区绑定和页面生命周期                 |
 | [终端](subsystems/terminal.md)                                    | node-pty utility process、背压和清理                     |
 | [工作区文件](subsystems/workspace-files.md)                       | 路径约束、预览模式和资源预算                             |
-| [Git Review](subsystems/git-review.md)                            | diff scope、snapshot 与变更操作                          |
+| [Git Review](subsystems/git-review.md)                            | diff scope、snapshot、FileChange 历史 Diff 与变更操作    |
 | [图片生成](subsystems/image-generation.md)                        | Profile、凭据、任务日志和 Artifact 发布                  |
 
 ## 开发、发布与运维

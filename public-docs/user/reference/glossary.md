@@ -4,7 +4,7 @@ description: 用简明语言解释 MyCopilot 用户文档中的核心概念。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 术语表
@@ -23,7 +23,7 @@ last_verified: 2026-08-23
 
 ## Artifact（产物）
 
-由 Tool 生成并由应用管理的图片、PDF、浏览器下载或其他结果引用。不同 Artifact 有各自的保留和导出规则。
+由 Tool 生成并由应用管理的图片、PDF 或其他结果引用。不同 Artifact 有各自的保留和导出规则；持久浏览器下载使用独立的 Browser Download 身份。
 
 ## Attention
 
@@ -40,6 +40,10 @@ Scheduled Automation 中需要用户查看的持久标记，例如等待审批�
 ## Browser Automation（浏览器自动化）
 
 Agent 通过应用受管浏览器执行导航、点击、读取或下载等操作的能力。它与 Scheduled Automation 不同。
+
+## Browser Download（浏览器下载）
+
+手动或 Agent 浏览产生并保存到配置目录的文件。模型只获得不含绝对路径的安全引用；下载记录与文件是否仍存在是两件事。
 
 ## Checkpoint（检查点）
 
@@ -69,6 +73,10 @@ Scheduled Automation 结果进入的位置：每次新建根聊天，或在一�
 
 为受支持的执行内容保存的精确本地归档，用于历史核对。并非所有外部 MCP、浏览器或超大原始结果都会进入 Exact Archive。
 
+## FileChange
+
+Agent 创建、更新或删除单个文件时使用的统一事务。它绑定路径、文件版本、Diff、审批与终态，并在执行前再次检查冲突。
+
 ## Host
 
 应用中真正连接操作系统、本地 Core 和受管外部能力的可信边界。模型提出动作，Host 负责验证和执行。
@@ -88,6 +96,10 @@ Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协
 ## Outcome Unknown（结果未知）
 
 动作可能已经产生外部副作用，但系统没有收到可确认的终态。应先检查实际环境，不能当普通失败直接重试。
+
+## System Notification（系统通知）
+
+操作系统显示的普通任务或 Automation 状态提醒。通知不是审批、任务真相或可靠的唯一告警通道。
 
 ## Project（项目）
 

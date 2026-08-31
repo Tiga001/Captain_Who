@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 构建与发布
@@ -29,14 +29,14 @@ pnpm check
 
 ## 2. 构建命令
 
-| 命令                | 产出/用途                                                      | 签名语义                                                    |
-| ------------------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| `pnpm build`        | TypeScript typecheck + Electron Vite `out/`                    | 不打包、不签名                                              |
-| `pnpm build:core`   | Cargo locked release `core-server` + binary magic/execute 校验 | 未签名 sidecar                                              |
-| `pnpm build:unpack` | 准备组件、构建 TS/Core Server、`electron-builder --dir`        | macOS 显式 `identity=null`，仅本地目录诊断                  |
-| `pnpm build:mac`    | macOS `.app`/DMG                                               | 强制真实签名；未 notarize                                   |
-| `pnpm build:win`    | Windows NSIS installer                                         | 使用 Electron Builder 平台签名配置/环境；仓库未冻结证书流程 |
-| `pnpm build:linux`  | AppImage、snap、deb                                            | 无 macOS 式 code-sign gate                                  |
+| 命令                | 产出/用途                                                                          | 签名语义                                                    |
+| ------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `pnpm build`        | TypeScript typecheck + Electron Vite `out/`                                        | 不打包、不签名                                              |
+| `pnpm build:core`   | Cargo locked release `core-server`，去除机器私有路径后做 binary magic/execute 校验 | 未签名 sidecar                                              |
+| `pnpm build:unpack` | 准备组件、构建 TS/Core Server、`electron-builder --dir`                            | macOS 显式 `identity=null`，仅本地目录诊断                  |
+| `pnpm build:mac`    | macOS `.app`/DMG                                                                   | 强制真实签名；未 notarize                                   |
+| `pnpm build:win`    | Windows NSIS installer                                                             | 使用 Electron Builder 平台签名配置/环境；仓库未冻结证书流程 |
+| `pnpm build:linux`  | AppImage、snap、deb                                                                | 无 macOS 式 code-sign gate                                  |
 
 `build:win/mac/linux` 都按以下顺序执行：准备 OfficeCLI、Office renderer、Word/PDF renderer、Artifact Runtime → TypeScript build → Cargo `--locked --release` Core Server → Electron Builder。
 
@@ -49,7 +49,7 @@ pnpm check
   → prepare runtime components 到 .cache/*/current
   → verify receipt/hash/identity
   → typecheck + electron-vite build
-  → cargo build --locked --release core-server
+  → build-core.mjs 追加 Cargo path remap 后执行 locked release build
   → verify native binary magic/executable bit
   → electron-builder files + extraResources
   → afterPack 内容检查
@@ -59,6 +59,12 @@ pnpm check
 ```
 
 组件 prepare 使用 staging 与 receipt-last/atomic publish。禁止直接修改 `.cache/*/current` 后继续打包；校验失败应重新执行对应 prepare。
+
+`build:core` 不再直接调用 Cargo，而由 `scripts/build-core.mjs` 在保留调用方
+`CARGO_ENCODED_RUSTFLAGS` 的同时，为 workspace、Cargo home 和 Rustup home 追加
+`--remap-path-prefix`。若调用方只设置普通 `RUSTFLAGS` 而没有等价的 encoded flags，脚本会 fail closed，避免
+静默丢失 flags 或把本机绝对路径写入 release binary。Artifact Runtime prepare 同样规范化 Python console-script
+shebang；macOS afterPack 还会剥离 packaged `node-pty` Mach-O 的本地 debug/symbol 路径。
 
 ## 4. 打包内容
 
@@ -89,6 +95,7 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 
 ### afterPack 当前验证
 
+- OfficeCLI 与 Artifact Runtime 的目标平台/架构、冻结文件集、receipt 和 bundle identity；
 - Office renderer packaged receipt/文件；
 - Word/PDF renderer packaged receipt/文件；
 - `app.asar` 内 Managed Playwright MCP 包和入口：
@@ -97,14 +104,15 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
   - `playwright@1.63.0-alpha-2026-08-05`
   - `playwright-core@1.63.0-alpha-2026-08-05`
 - macOS `icon.icns` 与源文件字节一致。
+- macOS app 全树 privacy gate：拒绝敏感状态文件、绝对 symlink、当前 builder 的私有路径/用户名、高置信 secret 与未精确 allowlist 的 credentialed URL；`app.asar` 会逐 entry 检查 URL fixture。
 
 ### afterSign 当前验证
 
-- 再验证 Office renderer；
-- 非 macOS 以及未显式禁签的 macOS 再验证 Word/PDF renderer；macOS `identity=null` 路径不在 afterSign 重复该项；
-- macOS 在未显式禁签时执行真实 codesign metadata 验证。
+- 再验证 OfficeCLI、Artifact Runtime 与 Office renderer 的签名后 receipt；
+- 非 macOS，以及正式签名 macOS，再验证 Word/PDF renderer；macOS `identity=null` 路径不重复该项；
+- 正式 macOS 对 app、Core Server、Office renderer、OfficeCLI 和 Artifact Runtime 的精确 native target 执行 strict codesign 与 metadata/entitlement 验证。
 
-当前 hook **没有独立验证打包后 OfficeCLI、Artifact Runtime 或 Core Server sidecar 的完整 receipt/content**。Core Server 在打包前只经过 native magic/execute 校验；macOS Core Server sidecar 会在 afterSign 进入 codesign 验证。此缺口应在扩大正式发布声明前补齐。
+Core Server 在打包前经过 native magic/execute 校验，正式 macOS afterSign 还会单独 strict verify 该 sidecar；当前 hook 仍没有对非 macOS packaged Core Server 做内容 digest/receipt 绑定。privacy gate 当前也只在 macOS afterPack 执行，Windows/Linux 不能继承该证据。
 
 ## 6. macOS 签名契约
 
@@ -118,9 +126,12 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 - app 与 Core Server sidecar 都有 hardened runtime 和可信 timestamp
 - Core Server designated requirement 绑定稳定 identifier、Apple anchor 和 signer，不能绑定可变 cdhash
 - Core Server 使用空 entitlements；应用/继承进程使用 `build/entitlements.mac.plist`
+- Office renderer、OfficeCLI 与 Artifact Runtime 只签冻结 receipt 枚举出的完整 Mach-O 集；需要 JIT 的 Chromium、OfficeCLI 和 managed Node 只取得 `build/entitlements.jit-runtime.mac.plist` 中的 `allow-jit`，其他该类目标不带额外 entitlement
 - `codesign --verify --deep --strict` 对 app 通过，Core Server sidecar 单独 strict verify 通过
 
-Office/Word renderer 中的冻结 Chromium/LibreOffice 内容在配置指定位置避免递归重签改变 receipt bytes；顶层 app 签名仍封装 Resources。Windows 同样避免对冻结的 `chrome-headless-shell.exe` 做第二次 Authenticode mutation。
+Artifact Runtime、OfficeCLI、Office renderer 和 Word/PDF renderer 目录都被排除出 osx-sign 的第二次递归 pass。自定义 signer 先验证原 receipt，只修改精确 Mach-O allowlist，刷新且只刷新这些 hash，再由顶层 app 签名封装 Resources；LibreOffice 保留其有效上游 Developer ID 签名。任何额外 Mach-O、缺失目标、架构不一致、receipt 外文件变化或 signer identity 分裂都会 fail closed。Windows 同样避免对冻结的 `chrome-headless-shell.exe` 做第二次 Authenticode mutation。
+
+`electron-builder.yml` 还设置 `dmg.sign: true`，因此正式 `build:mac` 会请求 Electron Builder 在生成 block map 前签名 DMG 容器。仓库当前没有独立脚本重新验 DMG 签名；发布证据必须对最终 `.dmg` 另行执行系统级验签，不能只引用 app 的 afterSign 日志。
 
 ### Signing 不等于 notarization
 
@@ -146,10 +157,11 @@ notarize: false
    - MCP stdio stress/其他明确发布测试
 5. 在目标 OS/arch 执行 `pnpm build:<platform>`；不得跨 OS 伪装 native package。
 6. 检查 afterPack/afterSign 完整成功；macOS 保存 signer/Team ID 验证记录。
-7. 对实际产物计算并记录 cryptographic hash、大小、平台、架构和版本。
-8. 在隔离临时 appData 做启动 smoke；若声明内置浏览器，明确 packaged Agent E2E 仍 pending。
-9. 审核第三方 notices、当前限制、schema/reset 和 rollback 说明。
-10. 只有所有必需证据来自同一最终树时才进入发布；任何失败都应修复后完整重跑。
+7. macOS 对最终 app 与 DMG 分别验签，并明确记录 notarization 仍为 false。
+8. 对实际产物计算并记录 cryptographic hash、大小、平台、架构和版本。
+9. 在隔离临时 appData 做启动 smoke；若声明内置浏览器，明确 packaged Agent E2E 仍 pending。
+10. 审核第三方 notices、当前限制、schema/reset 和 rollback 说明。
+11. 只有所有必需证据来自同一最终树时才进入发布；任何失败都应修复后完整重跑。
 
 不要把 `build:unpack` 的 unsigned directory、脚本 unit test、旧 bundle startup 或不同 commit 的 gate 拼接成签名发布证据。
 
@@ -183,21 +195,23 @@ pnpm build:<platform>
 - OS、arch、Electron Builder 命令；
 - component manifest/receipt identity；
 - package 文件名、大小、SHA-256；
-- macOS signer、Team ID、notarization 状态；
+- macOS app/managed native target 与 DMG signer、Team ID、notarization 状态；
+- privacy gate、Core Server path-remap 与 frozen receipt 校验结果；
 - `pnpm check` 和专项 gate 日志；
 - 已知 pending/unsupported 项。
 
-回滚当前只能发布前一已验证产物或停止分发；仓库没有自动更新/回滚服务。数据库又采用开发 reset-only policy，不能假设新版本写入的 v26 后继库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略。
+回滚当前只能发布前一已验证产物或停止分发；仓库没有自动更新/回滚服务。数据库又采用开发 reset-only policy，不能假设新版本写入的 v27 后继库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略。
 
 ## 9. 代码真源
 
 - npm build/test scripts：`package.json`
 - package 配置：`electron-builder.yml`
-- Core Server verifier：`scripts/verify-core-binary.mjs`
+- Core Server build/verifier：`scripts/build-core.mjs`、`scripts/verify-core-binary.mjs`
 - target OS guard：`scripts/assert-package-platform.mjs`
 - package hooks：`scripts/verify-packaged-app.mjs`
-- macOS signer/verifier：`scripts/sign-macos.mjs`、`verify-packaged-macos-signatures.mjs`
-- entitlements：`build/entitlements.mac.plist`、`build/entitlements.core-server.mac.plist`
+- macOS signer/verifier：`scripts/sign-macos.mjs`、`scripts/verify-packaged-macos-signatures.mjs`
+- frozen Mach-O/packaged privacy：`scripts/frozen-macho-signing.mjs`、`scripts/verify-packaged-frozen-components.mjs`、`scripts/verify-packaged-privacy.mjs`
+- entitlements：`build/entitlements.mac.plist`、`build/entitlements.core-server.mac.plist`、`build/entitlements.jit-runtime.mac.plist`
 - component prepare/verify：`scripts/prepare-*.mjs`、`verify-packaged-*.mjs`
 - packaged startup：`scripts/verify-packaged-playwright-startup.mjs`
 
@@ -228,7 +242,8 @@ pnpm verify:playwright-packaged-startup
 - 没有 CI、统一 release orchestration、artifact attestation 或自动证据归档。
 - 没有 notarization、stapling、自动发布、更新或回滚通道。
 - Windows/Linux 没有仓库内目标平台 release acceptance 记录；目标定义不等于已验证。
-- afterPack 没有独立校验 packaged OfficeCLI、Artifact Runtime 与全部 Core Server content。
+- 非 macOS afterPack 没有等价的全树 privacy scan；全部平台仍缺 packaged Core Server content digest/receipt 绑定。
+- Electron Builder 已请求签名 DMG，但仓库没有独立 DMG signature verifier，也没有 notarization/stapling。
 - packaged startup gate 仅支持 macOS unpacked app，且 supplied bundle freshness 不确定。
 - Packaged Agent → Managed Playwright MCP E2E 为 pending。
 - Scheduled Automation 缺真实时钟、Provider/Approval、OS 通知点击、重启/休眠与 packaged Electron 自动化 E2E。
@@ -241,6 +256,8 @@ pnpm verify:playwright-packaged-startup
 - [ ] prepare 是否 staging + atomic publish，package hook 是否验证最终产物而非只验证缓存？
 - [ ] 新 extraResource 是否在所有平台路径、asar 策略和 runtime discovery 中一致？
 - [ ] macOS 新 executable 是否有稳定 identifier、最小 entitlements、hardened runtime 和实际验签？
+- [ ] frozen component 是否枚举完整 Mach-O 集、仅刷新被签文件 hash，并阻止 osx-sign 第二次修改 receipt 边界？
+- [ ] package 是否通过私有路径、敏感状态文件、secret/credentialed URL 与绝对 symlink 检查；非 macOS 缺口是否明确？
 - [ ] 是否明确 signing、notarization、publishing、updating 四种不同状态？
 - [ ] `pnpm check`、专项 gate、目标 package 和 startup 证据是否来自同一最终 commit？
 - [ ] Scheduled Automation 变更是否另跑 `test:automation-core-e2e`，并在目标 package 上记录未自动覆盖的调度、Approval、恢复与通知 smoke？

@@ -4,7 +4,7 @@ description: 了解 MyCopilot 当前实现的安全边界、数据流和安全�
 status: current
 audience: user
 owner: security
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 安全中心

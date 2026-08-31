@@ -2,12 +2,13 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 恢复与故障处理 Runbook
 
-本文用于开发和维护环境中的 Core Server、SQLite、Multi-Agent、MCP 与 Managed Playwright 故障。优先原则是保护持久事实和外部副作用，不通过手工改库“修绿”。
+本文用于开发和维护环境中的 Core Server、SQLite、Multi-Agent、FileChange、系统通知、MCP 与 Managed
+Playwright 故障。优先原则是保护持久事实和外部副作用，不通过手工改库“修绿”。
 
 ## 1. 先确定故障域
 
@@ -19,6 +20,7 @@ last_verified: 2026-08-23
 | 子 Agent 显示 running，但进程已崩溃                                  | trace/checkpoint/pending action/lease                                                 | 盲重放可能已有外部副作用的 Turn               |
 | 子 Agent 等待审批                                                    | 根 Agent Approval projection、原 pending action、expiry                               | 从子 Agent 页面直接写 decision                |
 | UI 丢活动或串线                                                      | 根 Agent ID、event sequence、resync、重新 hydrate                                     | 从 notification 时间戳重建状态                |
+| FileChange 卡在 applying/显示 unknown                                | transaction、pending action、audit/receipt、权威文件 digest                           | 重放 `apply_patch` 或删除 journal/草稿行      |
 | 用户 MCP Server 无法启动                                             | Registry status、launch authorization、program/cwd identity                           | 重用旧授权或把 Token 填入 argv                |
 | Managed Playwright 卡住                                              | bridge pending、dispatch certainty、Browser surface/target、Core Server/Main shutdown | 开 remote-debugging 后注入完成结果            |
 
@@ -66,7 +68,7 @@ pnpm storage:reset-dev -- --confirm-reset
 确认流程：
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
-2. 对当前或紧邻 schema，从只读源或临时副本提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。更旧的 schema 不解码配置，报告会明确显示使用默认配置。
+2. 只对当前 v27 或紧邻的 v26，从只读源或临时副本提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。更旧的 schema 不解码配置，报告会明确显示使用默认配置。
 3. 在 staging 文件创建 fresh v27 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
@@ -76,12 +78,16 @@ pnpm storage:reset-dev -- --confirm-reset
 
 - model/provider settings（含当前代码仍以本机 SQLite 明文保存的模型 Token/Tavily key）；
 - UI preferences、Agent prompt preferences；
-- 浏览器链接打开位置和下载设置（仅在源 schema 支持对应表时）；
+- 通知设置；
+- Browser 链接打开位置、下载设置和偏好（仅在源 schema 支持对应表时）；
 - Skill enablement overrides；
 - 默认 image-generation profile；
 - MCP Registry、model namespace、仍有效的 launch authorization 与 enabled/trust 状态。
 
-不恢复：Conversation、Project、message、draft、Usage、Approval、Continuation、Compaction、Fork、Agent tree/Mailbox/Wake，以及 Scheduled Automation task、Run、attention、event 与 notification outbox 等运行/会话派生状态。附件、已安装 Skill、生成图片和 credential 目录不在 reset 事务中移动；没有数据库引用的附件可在后续正常启动时被孤儿清理。
+不恢复：Conversation、Project、message、draft、Usage、Approval、Continuation、Compaction、Fork、Agent
+tree/Mailbox/Wake；Scheduled Automation task/Run/attention；notification event/batch；Browser history/download
+record；全局 Agent 模板与 Project 分配；FileChange transaction/chunk/operation/run grant/history。附件、已安装
+Skill、生成图片和 credential 目录不在 reset 事务中移动；没有数据库引用的附件可在后续正常启动时被孤儿清理。
 
 ### 备份处理
 
@@ -123,7 +129,34 @@ Wake lease 为 60 秒，Dispatcher 每 20 秒续租、每 1 秒 durable fallback
 - Approval 在 shutdown 快照后恢复的竞态由 Dispatcher 在 grace window 内重复扫描；未收口事实留给下次启动恢复。
 - 凭据 backend 不可用导致 process-only MCP approval 时，重启后无法恢复原始参数；应让原 action 明确终结，再由用户重新发起。
 
-## 5. 通知、observer 与 UI 恢复
+## 5. FileChange 恢复
+
+模型可见的普通文本/代码写入统一由 `apply_patch` 产生 FileChange。Direct update/delete 绑定当前 Run 对目标
+`read_file` 的精确 Observation；create 绑定 Host 私有的 missing observation 并以 no-clobber 发布。Staged
+事务将内容私有保存在 SQLite，单 chunk 最多 1 MiB、总内容最多 4 MiB、草稿 TTL 为 7 天；模型 Trace 与普通
+Renderer event 不持有文件正文，只保留 body-free operation/digest。
+
+### 状态与恢复动作
+
+| 权威状态/现象                               | 恢复动作                                                                                      |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `drafting` / `ready`                        | 以同一 owner 调 `status`，按返回的 `nextIndex`/`draftRevision` 继续或 `abort`；不重放旧 chunk |
+| `waiting_approval`                          | 回到原 pending action；批准/拒绝必须绑定同一 action、transaction、Run 与 frozen proposal      |
+| `applying` 且有 terminal audit/receipt      | 从 audit/receipt 结算同一事务，不再次 publication                                             |
+| `applied` / `already_applied`               | 视为完成；UI diff 从 durable audit/history 按需读取                                           |
+| `conflict`                                  | 重新读取目标并创建新提案；旧 observation/事务不能继续使用                                     |
+| `outcome_unknown`                           | 检查权威文件与预期 target digest；精确命中可 reconciliation，否则停止并由用户决定补偿         |
+| delete journal 为 prepared/tombstone 中间态 | 按 journal 与 dir/leaf identity reconcile/finalize 或 verified rollback，不手工移动 tombstone |
+
+FileChange Run grant 是一次持久 authority：它精确绑定 Run、Conversation/Project、scope、目录 identity、批准
+action 与 permission/tool/provider revisions。新的 grant 会撤销同 Run 的旧 active grant；审批被拒绝、过期、
+替换或 Run 终止时 grant 失效。若恢复后 grant/Observation/目录 identity 无法重新证明，必须 fail closed。
+
+`outcome_unknown` 不是“可重试”。先用受管读取验证目标：精确等于 frozen target 时记录为已发生；仍等于 base 或
+出现第三种状态时保留未知/冲突证据并停止。symlink、hard link、special file、父目录替换或 delete tombstone
+identity 不一致时不得通过 shell/手工文件移动绕过保护。
+
+## 6. 通知、observer 与 UI 恢复
 
 以下 notification 都只是 invalidation：
 
@@ -141,9 +174,9 @@ Wake lease 为 60 秒，Dispatcher 每 20 秒续租、每 1 秒 durable fallback
 
 页面刷新或进程内 `Notify` 丢失不应造成事实丢失。如果重新 hydrate 仍无法收敛，应优先视为数据库/协议 bug并保存 fixture，而不是清空 Renderer store 后宣称恢复成功。
 
-## 6. Scheduled Automation 恢复
+## 7. Scheduled Automation 恢复
 
-Scheduled Automation 只在应用和 Core Server 运行时调度；SQLite 中的 task、Run、Agent Turn identity、Trace、pending Approval、attention 与 notification outbox 才是恢复真相。`automation.event`、`automation.resync` 和 `notification_requested` 都只是唤醒/失效信号。详细状态机见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
+Scheduled Automation 只在应用和 Core Server 运行时调度；SQLite 中的 task、Run、Agent Turn identity、Trace、pending Approval、attention 与通用 notification event/batch 才是恢复真相。`automation.event`、`automation.resync` 和 `notification_requested` 都只是唤醒/失效信号。详细状态机见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
 ### 调度与 admission lease
 
@@ -165,23 +198,28 @@ Scheduler 每 30 秒 fallback scan，并在 create/update/enable/runNow、worker
 
 - 默认权限的 command/patch 可能让 Run 进入 `waiting_for_approval`；这是持久等待，不是失败。
 - `agent_pending_actions`、Run binding 和 Conversation Trace 是 authority。Automation attention 与原生通知只负责把用户带回该 action。
-- 重启后 approval/rejection 必须继续原 `agentRunId + actionId`；settlement 会 suppress 旧的 `approval_required` outbox，并继续同一 Turn，不新增用户 message。
+- 重启后 approval/rejection 必须继续原 `agentRunId + actionId`；settlement 会 resolve/suppress 旧的 `approval_required` Notification event/batch，并继续同一 Turn，不新增用户 message。
 - 若 UI 没有显示 Approval，先按 Run 的 `conversationId`、`assistantMessageId` 重新打开 authoritative Conversation，再刷新 pending action；不要再次运行任务或直接改 Run 为 `running`。
 - Full 或 Custom 权限模式被设置关闭时，admission 会 fail closed，把未 admission Run 结算为 failed 并将 task 标为 `permission_disabled`；系统不会静默回退到 Default。
 
-### notification outbox 恢复
+### 通用系统通知 batch 恢复
 
-Automation 原生通知由 Electron Main 消费 Core Server 的 durable outbox，与 Scheduler admission lease 完全分离：
+Core Server 现在为普通根任务（`human_root`）和 Scheduled Automation（`automation`）统一保存 notification
+event/batch，Electron Main 只有原生展示职责。它与 Scheduler admission lease 完全分离：
 
-1. Main 启动时立即 drain，此后每 30 秒 polling；Automation event/resync 只降低延迟。
-2. 每批最多 10 条，delivery claim lease 为 60 秒。Main 在显示前向 Core Server 做最终语义校验；任务删除、blocked 已修复、Approval 已结算或 Run revision 已变化时会 suppress stale delivery。
-3. 只有 Electron 发出 `show` 后才 ACK delivered。创建/显示/校验失败会 release 并设置 60 秒 retry；release 本身失败时，lease expiry 是后备恢复路径。
-4. 同一 Main 进程会记住“已 show、未 ACK”，被重 claim 时只重试 ACK，不重复显示；如果进程恰在 show 与 ACK 之间崩溃，重启后仍可能重复一次。
-5. 平台不支持原生通知时 Main 不 claim；outbox 与 attention 保留。当前没有 Renderer toast fallback，通知缺失不代表 Run 丢失。
+1. Main 启动时立即 drain，此后每 30 秒 polling；notification event 只降低延迟。
+2. 每次 claim 最多 10 个 batch，delivery lease 为 60 秒。Main 在显示前重新校验；任务已读/删除、blocked 已修复、Approval 已结算或 revision 变化时会 suppress stale delivery。
+3. 全局 disabled 会由 Rust Core 直接 suppress；应用前台或平台不支持原生通知时，Main claim 后以 foreground/disabled disposition 终态 suppress。它们不会无限保留 pending。
+4. 只有 Electron 发出 `show` 后才 ACK delivered。创建/显示/校验失败会 release 并进入最长 60 秒的有界 backoff，最多 5 次；lease expiry 是 release 失败时的后备恢复路径。
+5. 同一 Main 进程会记住“已 show、未 ACK”，被重 claim 时只重试 ACK；如果进程恰在 show 与 ACK 之间崩溃，重启后仍可能重复一次。
+6. Electron 39 无稳定 replacement ID，普通 batch 增量只 ACK、不重复弹 toast；升级到 attention priority 时可替换一次。当前没有 Renderer toast fallback，通知缺失不代表任务事实丢失。
 
-恢复时先正常重启同一数据根并从 Scheduled 页面重新 list/get/history/attention。`blocked` 应按 code 修复 model/project/Conversation/schedule/permission 后保存新 revision；`queued`/`starting` 应检查 Core Server、容量和 lease，不手工改时间；`waiting_for_approval` 应回到精确 Conversation 处理 action。通知异常只处理 outbox/系统权限，不能改变 Run 结果。
+恢复时先正常重启同一数据根，并从所属 Conversation 或 Scheduled 页面重新读取权威状态。`blocked` 应按 code
+修复 model/project/Conversation/schedule/permission 后保存新 revision；`queued`/`starting` 应检查 Core Server、
+容量和 lease，不手工改时间；`waiting_for_approval` 应回到精确 Conversation 处理 action。通知异常只处理
+notification settings/batch/系统权限，不能改变 Run 结果。
 
-## 7. MCP stdio 恢复
+## 8. MCP stdio 恢复
 
 1. 从 MCP management status 获取 typed error，确认是 config、authorization、negotiation、catalog、timeout、transport close 还是 unknown outcome。
 2. executable/cwd/code identity 改变时 authorization 应变 stale；通过原生预览重新授权，不复用旧 digest。
@@ -190,7 +228,7 @@ Automation 原生通知由 Electron Main 消费 Core Server 的 durable outbox�
 5. Catalog incomplete 时修复 cursor/schema/limit 问题并显式 refresh；不要调用部分 Catalog 中的 Tool。
 6. 不把 stderr、Tool args/result 或凭据复制到普通诊断日志。只保留 safe error、server ID、revision 和 certainty。
 
-## 8. Managed Playwright 恢复
+## 9. Managed Playwright 恢复
 
 - bridge request 的 dispatch phase 只能单调前进。已 `possibly_dispatched` 但没有完成响应的 Tool 必须按 unknown outcome 处理。
 - Core Server shutdown 期间仍要让 Main 回传 `mcp.builtinPlaywright.dispatchPhase`/`mcp.builtinPlaywright.complete`；不要先切断 stdin 或添加外部 completion hook。
@@ -198,7 +236,7 @@ Automation 原生通知由 Electron Main 消费 Core Server 的 durable outbox�
 - idle runtime 可在 10 分钟后关闭；下一次允许调用再按管理生命周期重建。
 - packaged startup gate 不提供真实 Agent 驱动能力，不能用它排除业务链路故障。
 
-## 9. 强制终止与关停超时
+## 10. 强制终止与关停超时
 
 正常 `core.shutdown` 的顺序是：停止/取消 Browser risk → Managed Playwright runtime settlement（期间只继续接收反向 bridge 收口请求）→ MCP management stop admission → expiry reconciler → 各 dispatcher、图片执行、Multi-Agent Dispatcher、active Run、MCP tasks/Manager 有界并行收口 → 返回 shutdown response → drain outbound。
 
@@ -211,13 +249,14 @@ Automation 原生通知由 Electron Main 消费 Core Server 的 durable outbox�
 - 下一次启动按上述 reconciliation 分类；
 - 连续复现应保存具体 subsystem shutdown report，并添加确定性测试，不能无限扩大 watchdog 掩盖泄漏。
 
-## 10. 代码真源
+## 11. 代码真源
 
 - schema/reset：`crates/core/src/storage/migrations.rs`、`crates/core-server/src/bin/storage-reset-dev.rs`、`scripts/reset-dev-storage*.mjs`
 - 数据库锁：`crates/core/src/storage/database_instance_lock.rs` 及 bootstrap 使用点
 - Dispatcher/recovery：`crates/core-server/src/application/agent_dispatcher.rs`、`crates/core/src/storage/agent_graph_repository.rs`
 - wait：`crates/core-server/src/application/agent_wait.rs`
 - Approval/startup reconciliation：`crates/core-server/src/application/agent`、`transport/bootstrap.rs`
+- FileChange：`crates/core/src/file_change`、`crates/core/src/tools/apply_patch.rs`、`crates/core/src/storage/file_change_repository.rs`、`crates/core/src/storage/file_change_run_grant_repository.rs`
 - MCP lifecycle：`crates/mcp-client/src/manager`、`transports/stdio.rs`
 - managed bridge：`crates/core-server/src/application/mcp/managed_playwright_bridge.rs`、`src/main/core/managedPlaywrightBridge*`
 - Renderer replay：`src/renderer/src/features/agentCollaboration`
@@ -225,13 +264,15 @@ Automation 原生通知由 Electron Main 消费 Core Server 的 durable outbox�
 - Automation Main IPC：`src/main/ipc/automationIpc.ts`
 - 通用系统通知：`src/main/ipc/notificationIpc.ts`、`src/main/notifications/systemNotificationCoordinator.ts`
 
-## 11. 测试
+## 12. 测试
 
 ```bash
 pnpm test:storage-reset-dev
 cargo test -p mycopilot-core --lib storage::migrations::tests
 cargo test -p mycopilot-core-server application::agent_dispatcher
 cargo test -p mycopilot-core-server application::agent_wait
+cargo test -p mycopilot-core file_change
+cargo test -p mycopilot-core-server file_change
 pnpm test:multi-agent-release -- --smoke-only
 cargo test -p mycopilot-mcp-client --test stdio_integration
 pnpm exec vitest run --project managed-playwright-e2e
@@ -240,30 +281,32 @@ cargo test -p mycopilot-core-server application::automation
 pnpm test:automation-core-e2e
 ```
 
-reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保留原库、配置保留矩阵、MCP identity、`quick_check`、foreign keys 和临时文件清理。恢复变更必须覆盖 lease deadline、重启、Approval race、unknown outcome 和通知 gap。Scheduled Automation 还应覆盖 missed-occurrence 合并、原子 admission、绑定 Trace 恢复、permission revocation、outbox claim/validate/show/ACK/release 与 stale suppression。
+reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保留原库、配置保留矩阵、MCP identity、`quick_check`、foreign keys 和临时文件清理。恢复变更必须覆盖 lease deadline、重启、Approval race、unknown outcome 和通知 gap。FileChange 还应覆盖 Observation/Run-grant identity、staged replay/CAS、publication 前后故障、delete journal 与 audit/Trace 原子性。Scheduled Automation 还应覆盖 missed-occurrence 合并、原子 admission、绑定 Trace 恢复、permission revocation、batch claim/validate/show/ACK/release 与 stale suppression。
 
-## 12. 当前限制
+## 13. 当前限制
 
 - 仅提供开发 reset，不提供生产原地迁移或通用 backup restore 工具。
 - 备份没有自动 retention、加密或异地复制；其中可能含明文本机模型/搜索凭据。
 - `outcome_unknown` 没有通用自动补偿，需要核验外部状态后显式发起新任务。
 - Windows MCP stdio 没有 Job Object 进程树隔离保证。
-- 通知正确性依赖 SQLite replay/polling，当前没有外部运维 dashboard 或 alert。
+- 通知正确性依赖 SQLite replay/polling，当前没有外部运维 dashboard 或 alert；前台/disabled/不支持场景会终态 suppress，不能事后补发。
 - Scheduled Automation 没有操作系统后台 Scheduler；应用退出时不执行，离线 missed occurrence 只合并为一个 recovery Run。
 - 原生通知不受支持时没有 Renderer fallback；show 与 ACK 之间崩溃仍有一次重复显示窗口。
 - Scheduled Automation 没有真实定时器、Provider/Approval、OS 通知点击、休眠唤醒或 packaged Electron 自动化 E2E。
 - 没有 CI 自动运行恢复演练，也没有统一命令验证真实用户数据根；所有测试必须继续使用临时 fixture。
 - Packaged Agent→Managed Playwright 的离线 E2E 尚未建立。
+- FileChange 只支持普通 UTF-8 文本、单目标且最多 4 MiB；Office/Artifact/二进制输出仍走各自受管发布路径。
 
-## 13. 变更检查表
+## 14. 变更检查表
 
 - [ ] 是否先保护并记录原数据库/backup，且未手工改 schema 或状态？
 - [ ] 新 schema 是否更新 version、fingerprint、fresh/legacy/tamper/reset tests？
 - [ ] reset preservation allowlist 是否有明确安全理由和精确计数验证？
 - [ ] 新长期任务是否有 durable identity、owner、lease、checkpoint 和 startup reconciliation？
 - [ ] Scheduled Automation 是否区分 admission lease、已绑定 Trace 与 notification delivery lease，并证明 restart 不重复 Turn？
-- [ ] Approval/outbox 恢复是否保持 exact identity、最终语义校验、ACK-after-show 与 stale suppression？
+- [ ] Approval/notification batch 恢复是否保持 exact identity、最终语义校验、ACK-after-show 与 stale suppression？
 - [ ] 新外部副作用是否在无法证明安全时进入 `outcome_unknown`？
+- [ ] FileChange 是否仍绑定 read Observation、Run grant、目录 identity、audit/receipt，并覆盖 publication/delete crash window？
 - [ ] 通知丢失后是否仍能从 authoritative snapshot/event log 收敛？
 - [ ] Approval 与子 Agent observer 是否仍经根 Agent authority，不新增旁路？
 - [ ] shutdown 是否停止 admission、有界收口并保留未完成事实供重启恢复？

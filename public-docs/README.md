@@ -4,7 +4,7 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # MyCopilot 文档
@@ -19,7 +19,7 @@ MyCopilot 是一款本地优先的桌面 AI 工作助手。它可以在你授权
 
 ### 查找具体功能
 
-前往[能力指南](user/capabilities/README.md)，了解工具、Skill、MCP、Multi-Agent、浏览器自动化和 Scheduled Automation；遇到问题时查看[自助排查](support/README.md)。
+前往[能力指南](user/capabilities/README.md)，了解工具、Skill、MCP、Multi-Agent、浏览器自动化、Scheduled Automation 和系统通知；遇到问题时查看[自助排查](support/README.md)。
 
 ### 理解 Agent 技术
 

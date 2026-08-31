@@ -4,7 +4,7 @@ description: 使用内置 Skill Creator，把项目中的稳定做法沉淀为�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 创建一个 Workspace Skill
@@ -72,7 +72,7 @@ Skill Creator 会根据需要创建精确大小写的 `SKILL.md`，并可能加�
 - **找不到 Skill Creator**：前往“设置 → 技能”确认它已启用，再刷新输入框的 Skill 目录。
 - **新 Skill 没出现**：必须开启新对话或新 Run，并刷新目录；确认文件名是精确的 `SKILL.md`。
 - **同名冲突**：为 Skill 使用更明确的唯一名称，不要依赖模糊的同名覆盖。
-- **脚本无法运行**：当前 Skill Script 仅支持 Skill 已声明的 Python 脚本，需要“完全权限”，并且每次执行都要审批；缺失依赖不会自动安装。
+- **脚本无法运行**：当前 Skill Script 仅支持 Skill 已声明的 Python 脚本，需要全部读写与 Full Access 前置条件；Workspace Skill 每次执行都要审批，缺失依赖不会自动安装。
 - **想修改已安装 Skill**：不要直接改应用受管目录。复制到 Workspace 形成可编辑版本，再审查和测试。
 
 继续阅读[Skill 与 MCP](../learn/skills-and-mcp.md)和[编写有效任务](../best-practices/writing-effective-tasks.md)。

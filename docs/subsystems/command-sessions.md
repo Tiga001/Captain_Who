@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 命令运行时与 Command Session
@@ -39,9 +39,13 @@ model command + cwd + inputs + expectedOutputs + timeout
 
 ## 输入与运行环境
 
-命令默认在已验证 workspace/cwd 中运行。Attachment、Skill Resource 和 Artifact 输入先解析为不可变 `AgentFileInputRef`，再放入私有只读 input root；模型可见 URI/alias 不直接传为宿主路径。当前最多 16 个输入、单项 64 MiB、合计 128 MiB。
+命令默认在已验证 workspace/cwd 中运行。Attachment、Skill Resource、Generic Artifact 和 durable Browser Download 输入先解析为不可变 `AgentFileInputRef`，再放入私有只读 input root；模型可见 URI/alias/`browser-download:<uuid>` 不直接传为宿主路径。当前最多 16 个输入、单项 64 MiB、合计 128 MiB。
+
+Browser Download materialization 对 Agent 下载先验证当前 conversation/project 或受信 Agent task tree authority；手动下载仅在当前输入策略明确允许 manual download 时接受。随后重新核对 durable record 的 size/hash/文件身份；missing、modified、越权或已替换文件 fail closed。其宿主下载路径只在 Rust Core/Electron Main 私有边界存在，命令看到的是受限 mount。未知 virtual resource prefix 不能回退为普通文件路径。
 
 Runtime Profile 可以要求 packaged Artifact Runtime 中的 Node、Python、ripgrep 和固定依赖。Discovery 校验 component receipt、文件 hash、版本和 runtime fingerprint。运行时发现只证明可用性和完整性，不授予执行权限。
+
+受管 PDF 文本提取会在尺寸预算完成后移除 U+0000，再交给 ripgrep/文本消费者，避免合法提取结果被误判为二进制；该清洗不改变原始文件、hash 或预算计量，也不意味着任意 binary output 可当文本处理。
 
 受管 PDF、Office builder 和 presentation editor 使用额外的命令形状、语法预检、环境变量、输出路径和超时。不得通过普通 `run_command` 参数伪造 managed profile。
 
@@ -120,6 +124,7 @@ Core Server 持久化 session identity、state、projection、输出 chunks、�
 5. initial yield、wait deadline 和 process hard timeout 是三个不同概念。
 6. terminal Archive 只写一次；轮询不递归归档。
 7. unknown outcome 禁止自动重启或声称成功。
+8. Browser Download 等 virtual input 每次 materialize 都重新校验 owner 与内容 identity，绝对来源路径不进入模型、Trace 或 Renderer。
 
 ## 代码真源
 
@@ -129,6 +134,7 @@ Core Server 持久化 session identity、state、projection、输出 chunks、�
 - Session：`command/session.rs`、`session_manager.rs`
 - Managed runtime：`command/managed_runtime.rs`、`runtime_profile.rs`
 - Artifact observation：`command/artifact_observer.rs`、`managed_output_publication.rs`
+- File input/resource locator：`crates/core/src/file_input.rs`、`crates/core/src/resource_locator.rs`
 - Tool：`crates/core/src/tools/run_command.rs`、`command_session.rs`
 - 持久 repository：`crates/core/src/storage/agent_command_session_repository.rs`
 - Core Server lifecycle：`crates/core-server/src/application/agent/command_sessions.rs`
@@ -150,6 +156,7 @@ Core Server 持久化 session identity、state、projection、输出 chunks、�
 - [ ] 新 shell 语法在 lexer/segment 和风险组合中 fail closed。
 - [ ] allowlist/risk 变更覆盖 automatic 与 explicit 两个授权来源及跨平台测试。
 - [ ] frozen request 包含 cwd、inputs、timeout、runtime/expected-output identity。
+- [ ] Browser Download/其他 virtual input 覆盖 owner、task-tree、missing/modified、hash、未知 prefix 和 path-free projection。
 - [ ] 新 Session 状态更新内存、protocol、repository、Renderer 和 startup recovery。
 - [ ] output sequence、head/tail retention、model receipt 在并发/崩溃下不跳项。
 - [ ] cancellation/interrupt/force-kill 覆盖子进程组和 completion hook。

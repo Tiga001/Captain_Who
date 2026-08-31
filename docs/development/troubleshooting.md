@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 故障排查
@@ -55,8 +55,11 @@ pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。当前或紧邻 schema 会恢复 allowlisted 配置；更旧的 schema 会在输出中明确说明改用默认配置。应用或 Core Server 仍持锁时命令会拒绝执行。不要删除原库或
-手工修改 `PRAGMA user_version`；详见[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
+第一条是非破坏性预检，第二条才会备份并重建。当前 v27 或紧邻的 v26 会恢复 allowlisted 配置；更旧
+schema 会在输出中明确说明改用默认配置。通知设置、Browser 下载设置和链接偏好属于配置保留项，通知
+事实、浏览/下载记录、Agent 模板与分配、FileChange 事务和会话运行状态不会恢复。应用或 Core Server 仍持锁时
+命令会拒绝执行。不要删除原库或手工修改 `PRAGMA user_version`；详见
+[存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。
 
 ## 页面一直停留在启动状态
 
@@ -84,17 +87,37 @@ App startup gate 会等待项目、模型和 Electron Host 状态。先定位具
 
 保存修复时若出现 revision conflict，应先刷新最新 task 再重新应用编辑；不要手工改 SQLite 的 health、revision、Run status 或 lease。完整状态机见 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
-## Scheduled Automation 原生通知未出现或重复
+## 系统通知未出现、语言不对或重复
 
-Run、attention 与通知是不同事实；没有系统通知不能推断 Run 未执行。
+通用 notification event/batch 现在同时服务普通根任务与 Scheduled Automation。Run、attention、Conversation 与通知是不同事实；
+没有系统通知不能推断任务未执行。
 
-1. 核对目标操作系统是否支持 Electron `Notification`，以及用户是否允许 MyCopilot 发送通知。平台不支持时 Main 不会 claim，pending outbox 与 attention 会保留。
-2. 保持应用运行并打开 Scheduled 页面核对 attention/Run history。Main 启动时立即 drain，之后每 30 秒 polling，Automation event/resync 只用于降低延迟。
-3. 最终校验调用异常或原生 display 失败会释放 claim 并将 retry 至少推迟 60 秒；60 秒 delivery lease 过期后也可被后续 Main 恢复。不要删除 outbox 行。
-4. Electron 发出 `show` 后 Main 才 ACK；若进程恰在 show 与 ACK 之间崩溃，重启后可能重复显示一次。这是当前原生 API 边界，不能通过反复重启消除。
-5. 当前没有 Renderer toast fallback；通知点击在 Renderer 未 ready 时只保留一个 pending open request，连续多次点击可能只打开最后一次请求。
+1. 先检查 General > Notifications 的总开关、普通任务模式/自定义状态、声音和“显示任务内容”，再检查操作系统通知权限。普通任务的 Never 只关闭四种普通任务状态，不关闭 Automation 类别。
+2. Main 启动时立即 drain，之后每 30 秒 polling；Core Server 的 notification event 只用于降低延迟。应用位于前台、原生通知不受支持、通知已禁用或批次已过期时，批次会被 durable suppress，而不是永久留在 pending。
+3. 最终校验调用异常或原生 display 失败会释放 claim 并进入有界重试；claim lease 为 60 秒，单批最多尝试 5 次。不要删除或手工重置 outbox/batch 行。
+4. Electron 发出 `show` 后 Main 才 ACK；若进程恰在 show 与 ACK 之间崩溃，重启后可能重复显示一次。同一进程内只重试 ACK，不会再次显示。
+5. Electron 39 没有稳定的原生 replacement ID。普通批次增量会 ACK 而不再弹一张 toast；只有升级到 attention priority 时允许替换一次。当前没有 Renderer toast fallback。
+6. 原生通知语言由 Renderer 的应用语言驱动，Main 仅持有严格校验的 `notification-locale-v1.json` 冷启动镜像。镜像损坏或不受支持时会回退默认语言；重新选择应用语言可让 Renderer 写回，不要手工扩展 locale 文件。
 
-若通知内容已经过期，Electron Main 在显示前触发的 Core Server 最终校验会 suppress 已删除任务、已修复 blocked 状态、已结算 Approval 等 stale delivery。通知恢复与 outbox 语义见[恢复 Runbook](../operations/recovery-runbook.md)。
+若通知内容已经过期，Electron Main 在显示前触发的 Core Server 最终校验会 suppress 已删除/已读事实、已修复
+blocked 状态、已结算 Approval 等 stale delivery。通知恢复与 batch 语义见
+[恢复 Runbook](../operations/recovery-runbook.md)。
+
+## `apply_patch` / FileChange 失败
+
+普通文本和代码写入只有 `apply_patch` 这一条模型可见路径。先按错误分类处理，不要改用 shell 重定向、已退役
+writer 名称或手工修改数据库绕过 FileChange：
+
+- update/delete 必须带同一 Run 对目标文件最近一次 `read_file` 或成功 `apply_patch` 返回的
+  `fileChangeTarget.observationId`；create 不带该 ID，并以原子 no-clobber 证明目标缺失；
+- `observation_expired`、`observation_owner_mismatch`、`observation_path_mismatch`、`observation_stale`、`revision_conflict` 或 `conflict` 时，重新读取目标并基于当前内容生成新提案；成功写入返回的 successor observation 可供下一次写入复用；
+- Staged 写入每块最多 1 MiB、总内容最多 4 MiB，草稿 7 天过期；mutation index、draft revision 或 owner 不匹配时，从 `status` 获取权威状态，不要重放旧 chunk；
+- `outcome_unknown` 表示系统不能证明 publication 结果。先读取权威文件并比对目标 digest；精确目标已存在时按已执行处理，分歧时停止并由用户决定补偿，绝不盲重放；
+- symlink、hard link、特殊文件或被交换的父目录会 fail closed。不要通过改变链接结构绕过检查。
+
+审批卡与历史卡中的 diff 来自冻结 FileChange/audit 快照并按需分页；模型 Trace 只保留 body-free digest。若 UI
+无法打开 diff，应保留 action/run identity，排查 audit/history 路由，而不是把完整文件内容写进日志。恢复流程见
+[恢复 Runbook](../operations/recovery-runbook.md)。
 
 ## MCP Server 无法连接
 
@@ -115,6 +138,11 @@ Run、attention 与通知是不同事实；没有系统通知不能推断 Run �
 - 需要页面的工具已绑定有效 surface/page；
 - 下载、上传、截图和文件访问经过 Electron Main broker；
 - fixed catalog、schema digest 与受管 Playwright 版本一致。
+
+页面加载失败和 guest renderer crash 是两个独立的 Host-owned 状态。使用内置错误页上的 retry/recreate；不要让
+Renderer 猜测 URL、复用旧 page generation 或打开 remote debugging 注入结果。下载中心和历史页只接收
+path-free 投影；“每次询问保存位置”只适用于用户手动下载，Agent 发起的下载不会弹原生保存对话框。需要交给
+Agent 的文件应使用 `browser-download:*` 身份，不要从 Renderer 日志或 SQLite 猜本机绝对路径。
 
 运行发布专项检查见[测试体系](testing.md)。当前 packaged startup 验证仍不等于完整的打包 Agent→MCP
 链路通过，不能扩大测试结论。
@@ -141,7 +169,11 @@ Terminal 输出问题应检查 sequence/ACK/背压和 Renderer/WebContents 所�
 ## 打包或 macOS 签名失败
 
 安装包必须在目标系统原生构建。macOS `build:mac` 强制签名、hardened runtime 和严格验签；当前未配置
-notarization。不要用 `--config.mac.identity=null` 的 unpack 结果冒充可发布安装包。完整步骤见
+notarization。若失败发生在 Core Server build，先检查是否只设置了普通 `RUSTFLAGS`；release 构建要求保留
+`CARGO_ENCODED_RUSTFLAGS` 并追加 path remap。若失败发生在 afterPack/afterSign，不要修改 frozen receipt 或
+扩大签名 allowlist；先定位 privacy gate、目标架构、额外 Mach-O、JIT entitlement、receipt hash 或 signer/Team ID
+中的首个差异。`dmg.sign: true` 不替代对最终 DMG 的系统级验签。不要用
+`--config.mac.identity=null` 的 unpack 结果冒充可发布安装包。完整步骤见
 [构建与发布](build-and-release.md)。
 
 ## 仍无法定位

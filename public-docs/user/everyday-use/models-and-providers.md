@@ -4,12 +4,14 @@ description: 配置模型 API、管理模型能力与费用估算，并在对话
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 模型与服务商
 
 MyCopilot 不附带可直接使用的模型账户。你需要提供一个兼容的 API 地址、Token 和模型标识。
+
+新安装的模型目录为空，不会自动创建或启用示例模型。这样可以避免把占位模型误认为已经连接；首次使用必须明确新增至少一个模型。
 
 ## 当前兼容方式
 

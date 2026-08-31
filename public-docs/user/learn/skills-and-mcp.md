@@ -4,7 +4,7 @@ description: 区分“教 Agent 怎样做”的 Skill 和“给 Agent 新工具�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Skill 与 MCP
@@ -31,7 +31,7 @@ Skill 和 MCP 都能扩展 Agent，但解决的问题不同：**Skill 主要提�
 
 激活通常只对当前 Run 有效。包在激活时绑定到一个精确版本；运行中修改源文件不会悄悄替换已加载的说明。
 
-Skill 的“可信来源”也不等于权限。写文件、运行脚本、生成 Office 文档仍要经过各自的校验与审批。当前 Skill Script 只支持受约束的 Python 路径，要求较高权限，并且每次执行都需批准；系统不会自动安装缺失依赖。
+Skill 的“可信来源”也不等于权限。写文件、运行脚本、生成 Office 文档仍要经过各自校验。当前 Skill Script 只支持受约束的 Python 路径并要求较高权限；Installed/Workspace 脚本始终逐次批准，只有重新验证的应用内置脚本可在内置执行策略允许时自动批准。系统不会自动安装缺失依赖。
 
 ## MCP：把工具接进 Agent
 

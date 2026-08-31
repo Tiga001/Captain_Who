@@ -2,12 +2,12 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 工作区文件与预览
 
-Files 模块提供项目目录树和只读预览。它是 Electron Main 通过 Host API 管理的工作区浏览能力，不是 Agent `read_file` Tool、附件解析或 Office 文档渲染能力。页面管理见 [右侧栏平台](./right-sidebar.md)，Git 文件跳转见 [Git Review](./git-review.md)。
+Files 模块提供项目目录树和只读预览。它是 Electron Main 通过 Host API 管理的工作区浏览能力，不是 Agent `read_file`、统一 `FileChange`、附件解析或 Office 文档渲染能力。页面管理见 [右侧栏平台](./right-sidebar.md)，Git 文件跳转见 [Git Review](./git-review.md)。
 
 ## 职责边界
 
@@ -19,6 +19,8 @@ Files 模块提供项目目录树和只读预览。它是 Electron Main 通过 H
 | Rust Core Storage            | 保存 project id 与配置路径，供 Main 解析项目根                                               |
 
 Renderer 不能提交绝对路径，不能从预览结果推导任意文件系统权限。Files 模块只读；复制和 reveal 由 Main 对已验证路径执行。
+
+Agent 的 create/update/delete 与 direct `apply_patch` 现在统一投影为 `FileChange`。它们在聊天 Tool activity/审批对话框中显示 path、状态、统计和按需 diff，并由 Rust Core/Core Server 持有 transaction、observation 和写入授权；不会给 Files panel 增加保存按钮，也不会复用 `WorkspaceFilesService` 作为写入后门。写入完成后，Files 通过下一次 refresh/readPreview 观察磁盘现状，不从 FileChange 卡片乐观修改树。完整写入契约见 [FileChange 子系统](./file-change.md)。
 
 ## 目录列举
 
@@ -94,6 +96,7 @@ page state 保存相对路径、`tabState`、Markdown view、PDF page 和 wrap-l
 5. 文件读取以实际 bytes 进行上限检查，Renderer 还要执行行数/解码预算。
 6. 异步目录和预览响应必须绑定 project、path、generation/request id。
 7. Markdown 链接不能让主 Renderer 导航到外部或未知协议。
+8. FileChange、Git Review 和 Files 可以复用语法/diff 展示组件，但 transaction、snapshot 和 project-relative path identity 不可互换。
 
 ## 代码真源
 
@@ -131,6 +134,7 @@ page state 保存相对路径、`tabState`、Markdown view、PDF page 和 wrap-l
 - [ ] project/path 切换会取消或隔离迟到响应。
 - [ ] copy/reveal 仍由 Main 解析路径，Renderer 不接收绝对路径。
 - [ ] 与 Agent 附件、Office 或 Git Review 的能力区别在用户文案中清晰。
+- [ ] FileChange 发生后通过权威 refresh 观察文件，不把聊天 diff 或审批状态写入 Files cache。
 
 ## 当前限制
 

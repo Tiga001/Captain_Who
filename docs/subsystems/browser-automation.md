@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 浏览器与自动化
@@ -15,13 +15,13 @@ MCP Tool。这里的“自动化”只指浏览器控制，不是 Scheduled 中�
 
 ## 职责边界
 
-| 层                      | 当前职责                                                                                                                                                  |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Renderer `BrowserPanel` | 地址栏、前进/后退/刷新、缩放、清除浏览数据、页面标题/favicon；创建受管 `<webview>`；报告可见 surface 和 viewport                                          |
-| 右侧栏平台              | Browser 多页面、keep-alive、全局上下文；响应 Main 的 reveal/create/select/resize/close 命令                                                               |
-| Electron Main           | guest 附加与安全配置；持久 Session；surface/instance/selection 身份；Target/CDP；网络 Guard；风险协调；上传/下载/Artifact Broker；Managed Playwright Host |
-| Rust Core               | 内置 capability 启用策略；Agent 授权和敏感 Tool 审批；反向桥请求；风险批准；调用生命周期与持久事件                                                        |
-| Managed Playwright Host | 固定、审查过的官方 Tool 目录与执行；只通过 Main 提供的受管 BrowserContext 工作                                                                            |
+| 层                      | 当前职责                                                                                                                                                         |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Renderer `BrowserPanel` | 地址栏、前进/后退/刷新、缩放、错误/崩溃恢复控件、下载中心；创建受管 `<webview>`；投影 Main-owned surface state；报告可见 surface 和 viewport                     |
+| 右侧栏平台              | Browser 多页面、keep-alive、全局上下文；响应 Main 的 reveal/create/select/resize/close 命令                                                                      |
+| Electron Main           | guest 附加与安全配置；持久 Session；surface 导航/错误/crash 状态；链接路由；Target/CDP；网络 Guard；风险协调；上传/下载/Artifact Broker；Managed Playwright Host |
+| Rust Core               | 内置 capability 启用策略；Agent 授权和敏感 Tool 审批；浏览历史/偏好/下载记录；反向桥请求；风险批准；调用生命周期与持久事件                                       |
+| Managed Playwright Host | 固定、审查过的官方 Tool 目录与执行；只通过 Main 提供的受管 BrowserContext 工作                                                                                   |
 
 Renderer 不获得 guest WebContents id、CDP target id、调试端点、目标绑定 token、原始文件路径或 Artifact 托管路径。Rust Core 不直接控制 Electron WebContents；Main 不自行授予 Agent 权限。
 
@@ -43,6 +43,14 @@ Main 在 `will-attach-webview` 校验 partition 与初始 URL、收紧 webPrefer
 - 可选、受限的 viewport
 
 结果区分 `applied`、`noop` 与 `stale`。`not_registered`/`instance_mismatch` 可在严格预算内重新探测；expired、superseded、cancelled 或 closed 请求不能重放。
+
+### Host-owned 导航、错误与 crash
+
+地址栏、reload、back 和 forward 都以 `BrowserSurfaceActionInput` 发给 Main。Main 在 exact surface incarnation 上执行动作，并发布单调 `stateRevision` 的 `BrowserSurfaceState`：逻辑 `url`、title/favicon、back/forward/loading 和 `presentation`。Renderer 必须同时匹配 `surfaceId`、`surfaceInstanceId`，并拒绝倒退 revision；不能从 `<webview>.src`、DOM 事件或内部错误页 URL 重建权威状态。
+
+`presentation` 为 `content`、`error-page`、`crash-page` 或 `host-fallback`。网络加载错误由 Main 归类为 offline、DNS、connection refused、timeout、certificate 或 generic，再生成 Renderer-safe 文案。guest renderer crash/unresponsive 使用独立 crash kind；它不是主应用 Renderer crash。内部错误/恢复页面在受管 Session 中由 `BrowserInternalPageStore` 安装，真实内部 URL 永不跨过 Host API。若内部页也无法加载，Main 仍通过 `host-fallback` 提供可恢复状态。
+
+同名 `surfaceId` 重建会获得新的 `surfaceInstanceId` 和 revision 域。旧 guest 的 load、title、favicon、crash、history 或 action completion 都必须丢弃，不能覆盖新 incarnation。
 
 ## 可见页面选择
 
@@ -74,7 +82,23 @@ Main 对 guest 强制：
 - Electron popup 本身永远拒绝。当前应用在 Electron Main 的导航与网络策略允许后，为合法 `target=_blank` 创建一个非活动的受管新 surface；网页不会获得真实 popup WebContents，也不会直接决定 surface identity。
 - 非法导航/redirect 被阻止；日志不打印可能含 query/credential 的完整 URL。
 
-清除浏览数据同时清理该 Session 的 cache/storage 和 favicon cache。
+应用页面中的 HTTP/HTTPS 链接按 Rust Core-owned `linkOpenTarget` 选择系统浏览器或内置受管 surface；`mailto:` 始终交给系统。该决定由 `BrowserLinkRouter` 在 Main 执行，外部链接从不导航主 Renderer。favicon 也通过受管 Browser Session 与网络策略抓取，不能借主 Renderer 网络栈绕过分区策略。
+
+## 浏览历史、偏好与清除数据
+
+Browser data schema 当前为 v1。Rust Core SQLite 持久化用户可见的 HTTP/HTTPS 历史与 app-owned link preference；Main 在 exact surface/incarnation 的成功导航后登记历史，并在随后 title/favicon 到达时更新同一项。内部 bootstrap/error/PDF URL、失败导航和 stale guest 事件不进入历史。
+
+Browser Settings 是独立 `browser` 页面，而不是 MCP 子页。它组合：
+
+- `browser_automation` capability 开关；
+- 应用链接使用 system 或 builtin Browser；
+- 下载目录展示、手动询问、下载历史；
+- 浏览历史查询/删除；
+- 按时间范围和类别清除数据。
+
+偏好通过 revision/CAS 保存。历史列表和下载列表各自最多返回 500 项并显式 `truncated`；Renderer event 只使缓存失效，列表仍回读 Rust Core。
+
+清除数据时间范围为最近 1 小时、24 小时、7 天、4 周或全部；类别为 history、cookies/site data、cache、download history。Main 将 Rust Core-owned 历史/下载事务与 Electron Session cookie/cache 操作组合为一个结构化结果。选中 history 或 cache 时同步清理 favicon cache；未选类别不得被顺带清除。
 
 ## 内置 `browser_automation` capability
 
@@ -102,6 +126,8 @@ Main 只加载固定 manifest/catalog 中审查过的官方 Tool。当前锁定 
 - Rust Core 审批后签发只适用于该参数、资源和目标的 grant；Main 调用前再次核对 opaque `targetBindingId`。
 
 敏感风险种类包括文件读写/上传/下载、cookie、local/session storage、storage state 导入导出、敏感网络读取、页面脚本和不安全代码执行。拒绝、取消、过期、Run/capability/grant 撤销或 shutdown 都必须释放绑定及准备文件。
+
+`builtinExecution` 决定应用内置 capability 激活、Browser 风险和内置 MCP Tool 的类型化批准是否需要本次人工点击。`auto_approve` 仍必须完成相同的 target preparation、参数/来源校验、持久 audit、dispatch fence 和执行前复核；它不绕过 hard deny，也不把旧 grant 扩展到新 URL、参数、surface 或 Run。`require_approval` 则保持 pending ticket，直到用户明确决定。
 
 ## 网络策略与审批
 
@@ -142,18 +168,26 @@ Renderer/模型不提供绝对路径。Main 用原生 picker 获取文件，按 
 
 ### 下载
 
-受管 Session 的下载由 `BrowserDownloadBroker` 接管，并通过网络风险流程审批。下载内容发布为 Electron Main-owned Browser Artifact，而不是自动写入任意用户路径。
+受管 Session 的下载由 `BrowserDownloadBroker` 接管。Agent 发起下载仍经过网络风险与敏感 Tool 授权链，是否需要人工点击由有效 `builtinExecution` 决定；手动下载按用户的 Browser 设置保存。协议 v2 的 durable 引用形如 `browser-download:<uuid>`，只包含 display name、MIME、size、SHA-256、时间和 `manual|agent` 来源，不包含宿主路径。
+
+下载设置对 Renderer 只暴露 `locationMode=system|custom`、安全 `displayPath`、`askWhereToSave` 和 revision；真实 custom directory 留在 Electron Main/Rust Core 私有记录中。`askWhereToSave` 只作用于手动下载，Agent 下载绝不弹原生 save dialog，也不能借此等待一个不可见用户交互。
+
+BrowserPanel 的 live download center 显示 path-free snapshot：progressing、paused、completed、cancelled 或 interrupted，以及 pause/resume/cancel/reveal/copy URL/copy path/remove 的 capability booleans。所有 action 都回到 Main；即使 UI 显示 copy/reveal，Renderer 也不会先收到路径。下载历史重新检查实际文件并标记 available、missing 或 modified，不能仅相信数据库记录。
+
+已发布 Browser Download 可以作为后续 Agent file input。Agent 下载要求当前 conversation、同 project 或受信 Agent task tree 授权匹配；用户手动下载只有在当前 file-input 调用明确允许 manual download（当前对应 unrestricted read）时可用。Rust Core 还会核对记录 identity/size/hash，再把文件复制到私有只读 input root；模型和 Renderer 始终只使用 opaque reference。该能力不把一次下载升级为任意目录读取权限。
 
 ### Browser Artifact
 
-模型和 Renderer 只看到 `BrowserArtifactReference`：opaque id、kind、display name、MIME、大小、时间、生命周期和 preview 类型。引用不含 outputDir、Target、Tool 参数、网页内容或托管路径。
+Browser Artifact 与 durable Browser Download 是不同对象。模型和 Renderer 只看到 `BrowserArtifactReference`：opaque id、kind、display name、MIME、大小、时间、生命周期和 preview 类型。引用不含 outputDir、Target、Tool 参数、网页内容或托管路径。
 
 协议上单个 Artifact 最大 128 MiB、最长生命周期 24 小时；图片预览最大 8 MiB，文本预览最大 256 KiB。当前 `BrowserArtifactBroker` 默认进一步收紧为单个 64 MiB、每个 Run 128 MiB、全局 256 MiB，最多 256 个 Artifact（每个 Run 最多 64 个）。预览由 Electron Main 有界读取；导出必须经过 Main save dialog，返回 path-free 的 `exported/cancelled` 结果。
 
 ## 关闭与恢复
 
 - Browser page 关闭触发 exact surface/instance 清理，不能让重建后的同名 surface 继承旧 target binding。
+- guest load failure 进入 Main-owned error presentation；renderer crash/unresponsive 进入独立 crash presentation。恢复动作仍绑定当前 instance，不能重放旧 action 或把 Browser guest crash 误判成主 Renderer 终止。
 - Run、Tool call 和 capability 结束时分别清理网络、上传和 Artifact 资源。
+- durable 下载记录与用户保存文件不随 surface/Run 清除；live transfer、Agent 临时 binding 和 path materialization 则按其 owner 清理。
 - 应用退出时先让 Core Server 关闭 Managed MCP Manager，再关闭 Main bridge 和 surfaces，最后关闭 Broker；顺序见 [Electron Host 与进程架构](../architecture/electron-host.md)。
 - guest 崩溃、Target 关闭、catalog drift、timeout 和 cancel 都返回类型化安全错误；不得自动重放可能已执行的调用。
 
@@ -166,19 +200,26 @@ Renderer/模型不提供绝对路径。Main 用原生 picker 获取文件，按 
 5. Electron Main hard boundary 不能通过用户审批绕过。
 6. 任何可能产生副作用的失败都必须保留 dispatch certainty。
 7. Renderer/模型 payload 不得含 CDP identity、HMAC、target binding id、绝对文件路径或托管 Artifact 路径。
+8. logical URL、load/crash presentation 和 history 写入只接受当前 surface incarnation 的 Main-owned revision。
+9. Browser Download reference、Browser Artifact reference 与 Generic Managed Artifact URI 是三种授权模型，不可互换。
 
 ## 代码真源
 
 - Browser surface 协议：`packages/protocol/src/browser.ts`
+- Browser data/download 协议：`packages/protocol/src/browserData.ts`、`browserDownloads.ts`
 - Artifact 协议：`packages/protocol/src/browserArtifacts.ts`
 - Playwright/风险桥协议：`packages/protocol/src/mcp/managedPlaywrightBridge.ts`
 - Renderer panel：`src/renderer/src/features/browser/BrowserPanel.tsx`
 - Renderer surface bridge：`src/renderer/src/features/browser/browserSurface.ts`
 - Renderer webview hook：`src/renderer/src/features/browser/useBrowserWebview.ts`
+- Renderer 下载中心/数据 client：`src/renderer/src/features/browser/BrowserDownloadCenter.tsx`、`useBrowserDownloadCenter.ts`、`browserDataClient.ts`
+- Browser Settings：`src/renderer/src/features/mcp/BrowserAutomationSettingsPage.tsx`、`BrowserHistoryPage.tsx`、`BrowserDownloadHistoryPage.tsx`
 - Main webview policy：`src/main/webviews/managedWebviewSecurity.ts`
 - Surface/Target：`src/main/browser/BrowserSurfaceManager.ts`、`BrowserTargetBroker.ts`
+- 内部页、历史与链接：`src/main/browser/BrowserInternalPageStore.ts`、`BrowserHistoryService.ts`、`BrowserLinkRouter.ts`
 - 网络与风险：`src/main/browser/BrowserNetworkPolicy.ts`、`BrowserNetworkGuard.ts`、`BrowserRiskCoordinator.ts`
 - 文件与 Artifact：`src/main/browser/BrowserFileBroker.ts`、`BrowserDownloadBroker.ts`、`BrowserArtifactBroker.ts`
+- Browser data/download IPC：`src/main/ipc/browserDataIpc.ts`、`browserDownloadIpc.ts`
 - Managed MCP Host：`src/main/mcp/ManagedPlaywrightBridgeHost.ts`、`ManagedPlaywrightMcpHost.ts`
 - 固定目录：`src/main/mcp/managedPlaywrightManifest.ts`、`managedPlaywrightCatalog.ts`
 - 敏感绑定：`src/main/mcp/ManagedPlaywrightSensitiveTargetBindingBroker.ts`
@@ -188,10 +229,15 @@ Renderer/模型不提供绝对路径。Main 用原生 picker 获取文件，按 
 关键测试：
 
 - `packages/protocol/src/browser.test.ts`
+- `packages/protocol/src/browserData.test.ts`
+- `packages/protocol/src/browserDownloads.test.ts`
 - `packages/protocol/src/browserArtifacts.test.ts`
 - `packages/protocol/src/mcp/managedPlaywrightBridge.test.ts`
 - `src/main/core/managedWebviewSecurity.test.ts`
 - `src/main/browser/*.test.ts`
+- `src/main/core/browserDataIpc.test.ts`
+- `src/main/core/browserDownloadIpc.test.ts`
+- `src/main/core/browserSurfaceFailures.electron.test.ts`
 - `src/main/mcp/ManagedPlaywrightBridgeHost.test.ts`
 - `src/main/mcp/ManagedPlaywrightMcpHost.test.ts`
 - `src/main/mcp/managedPlaywrightRound3Stress.test.ts`
@@ -209,12 +255,15 @@ pnpm verify:playwright-round3-release
 ## 变更检查表
 
 - [ ] surface command/ready/selection 的 schema、instance 和 stale 行为同步更新。
+- [ ] action/state、load error、crash 和 history metadata 只接受当前 surface instance/revision，内部 URL 不进入 Renderer/历史。
 - [ ] guest 在导航前已安装 partition、webPreferences、权限和网络策略。
 - [ ] 新 Tool 进入固定 catalog，69/61 数量、处理模式、参数/输出预算和 catalog drift 测试同步更新。
 - [ ] 新风险被正确归类为 hard deny、网络审批或敏感 Tool 审批。
 - [ ] grant 绑定 exact Run/call/arguments/resource/target/expiry，并在所有终止路径释放。
 - [ ] 副作用路径的 dispatch phase 和 outcome_unknown 测试已覆盖。
-- [ ] 上传不接受 Renderer 路径；下载和 Artifact 不暴露托管路径。
+- [ ] 上传不接受 Renderer 路径；下载和 Artifact 不暴露托管路径；手动询问保存位置不影响 Agent 下载。
+- [ ] 下载 live/history/settings、文件 identity 检查和 path-free Agent input materialization 均覆盖 available/missing/modified 与 task-tree 隔离。
+- [ ] Browser data 按类别/时间范围清理，偏好更新使用 CAS，app link 不导航主 Renderer。
 - [ ] 手动浏览与 Agent 自动化权限没有混用。
 - [ ] 打包环境 Playwright 启动和关闭顺序已验证，且没有把 startup evidence 宣称为 packaged Agent E2E。
 
@@ -225,5 +274,7 @@ pnpm verify:playwright-round3-release
 - Browser guest 的网页权限请求全部拒绝，摄像头、麦克风、通知、地理位置等站点功能不可用。
 - Browser 页面只支持 HTTP/HTTPS 和窄化的内部 PDF viewer；不支持任意自定义协议。
 - Artifact 是 Run 生命周期资源，不是永久文档库；需要长期保留时必须显式导出。
+- Browser Download 是本机持久记录而非跨设备文件库；文件可能被用户移动或修改，历史会显示 missing/modified。
+- 当前没有跨设备 Browser history/download/preferences 同步，也不恢复已经结束的 live transfer。
 - 自动化只作用于受管 BrowserContext，不连接用户系统浏览器或任意外部调试端点。
 - `verify:playwright-round3-release` 仍缺真实 packaged Agent→Managed Playwright→local fixture E2E，并且 supplied bundle freshness 未建立。

@@ -2,12 +2,12 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Agent Runtime 与模型 Provider
 
-本文描述 Rust Core 中一次 Agent Run 如何被创建、暂停、恢复和结算，以及模型 Provider 如何在不改变 Agent 语义的前提下接入。本文只描述后端权威状态；上下文压缩见[上下文管理](./context-management.md)，Tool 持久投影见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)，数据库边界见[SQLite 存储与数据生命周期](./storage-and-data-lifecycle.md)。
+本文描述 Rust Core 中一次 Agent Run 如何被创建、暂停、恢复和结算，以及模型 Provider 如何在不改变 Agent 语义的前提下接入。本文只描述后端权威状态；上下文压缩见[上下文管理](./context-management.md)，Tool 持久投影见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)，文件写入见[FileChange 子系统](../subsystems/file-change.md)，数据库边界见[SQLite 存储与数据生命周期](./storage-and-data-lifecycle.md)。
 
 ## 职责边界
 
@@ -67,11 +67,13 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
       -> 需要 Core Server 执行或用户审批
   -> 每个闭环生成 Model/Event/Trace/Archive/Checkpoint 投影
   -> 继续下一次模型请求，或暂停为 pending action
-  -> 原子提交 assistant message、Trace 终态、Usage/UI 终态
+  -> 原子提交模型生成的 assistant message、Trace 终态、Usage/UI 终态
   -> 释放 Turn reservation
 ```
 
 模型返回一批 Tool 调用时，Runtime 保留调用顺序与 Provider 要求的批次语义。Tool 调用不能在未形成权威结果时被当作已完成；需要审批的调用在 Checkpoint 中冻结，批准后由 Core Server 从持久状态恢复，而不是重新让模型生成一次。
+
+Turn admission 创建的 pending assistant message 正文为空；系统不再把“正在思考”之类 UI placeholder 写进消息。流式 narration/final content 与终态正文只能来自模型输出或明确的错误/取消结算路径，展示占位符不得进入可压缩历史或被当作模型主张。
 
 ## Checkpoint 与恢复
 
@@ -83,7 +85,11 @@ Checkpoint 至少绑定以下事实：
 - World State epoch、扩展快照及可恢复的 Provider continuation 引用；
 - 审批动作所需的安全投影，而不是任意原始 secret 或不可信参数。
 
+FileChange 的恢复状态横跨两类私有存储：checkpoint 保存 pending/queued Observation、模型已观察的 successor 和可选 Run grant ref；Host pending action/audit/Staged store 保存 exact proposal binding 与待处理 transaction。Observation/run-grant ref 都不是独立 authority：恢复与 effect boundary 必须从 Host 持久 action/audit/grant 重新验证 owner、revision、scope 和 receipt；Event/Trace/Archive 不得提供这些字段。
+
 恢复时必须重新验证版本、归属、调用 ID、Tool 身份、权限和 Provider 能力。外部 MCP Server 调用与未知 Tool 不能仅凭普通 Checkpoint 保存其原始参数；它们需要各自的授权信封或明确失败。Tool 定义在暂停后变化时，应遵循冻结契约或返回结构化恢复错误，不能静默按新定义执行旧调用。
+
+审批 ticket 与 sealed/process execution material 的生命周期分开：MCP Server、Browser risk、内置敏感 Tool 和 Skill 安装即使临时 payload 已过期，ticket 也不会因此自动结算；它仍等待用户决定或所属 Run 的取消/终态流程收口。晚批准时若 Host 已无法取得精确材料，continuation 必须接收 definitely-not-dispatched 的 failed Tool Result 并继续模型闭环，不能重新生成调用、自动 retry 或声称用户决定已过期。
 
 ## Provider continuation
 
@@ -105,6 +111,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 - 取消令牌贯穿模型、压缩和 Tool 执行。只读且无外部承诺的 Tool 可 interrupt；可能跨过外部副作用或持久提交边界的 Tool 必须返回 authoritative settlement。
 - 已发送但无法确认 Provider/Core Server 是否执行成功的动作必须报告不确定终态，禁止自动重放。
 - assistant 终态持久化有短暂、有限重试；如果仍失败，应暴露持久化错误，不重新调用模型或 Tool。
+- Managed Playwright 的 Tool timeout 由 Main 拥有，显式 BrowserRisk 人工等待会暂停但不重置预算；Rust reverse `CallTool` 仍受 cancellation/shutdown，而不叠加会抢先到期的 transport deadline。
 
 ## 不变量
 
@@ -116,6 +123,9 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 6. 模型响应已返回后，诊断/观测写入失败不能触发模型重放。
 7. frozen toolset、Provider policy 与 checkpoint identity 必须共同校验，不能只比较 Tool 名。
 8. Automation Run 的配置与权限在入队/admission 边界冻结；普通 UI 设置变化不得重写已开始的 Turn。
+9. pending assistant content 为空且不属于模型历史；任何 UI thinking 状态只能是派生展示。
+10. FileChange successor Observation 与 Run grant ref 仅在私有恢复边界有效，不能从公共 Trace/Renderer 重建。
+11. 人工审批 ticket 不随短期 payload TTL 自动结算；材料缺失的晚批准只能产生 definitely-not-dispatched 失败。
 
 ## 代码真源
 
@@ -128,6 +138,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 - Provider 切换：`crates/core-server/src/application/agent/provider_transition.rs`
 - 工具集冻结：`crates/core/src/tools/tool_set.rs`
 - Automation HumanRoot Turn：`crates/core-server/src/application/agent/automation_turn.rs`
+- FileChange checkpoint/恢复：`crates/core/src/runtime/checkpoint.rs`、`crates/core-server/src/application/agent/pending_action_store.rs`
 
 ## 测试
 
@@ -140,6 +151,8 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 - `crates/core-server/src/application/agent/tests/provider_transition.rs`
 - `crates/core-server/src/application/agent/tests/pending_actions.rs`
 - `crates/core-server/src/application/agent/tests/automation_turn.rs`
+- `crates/core-server/src/application/agent/tests/file_change_permissions.rs`
+- `crates/core-server/src/application/agent/tests/mcp_approval_expiry.rs`
 
 建议最小验证：
 
@@ -158,6 +171,8 @@ cargo test -p mycopilot-core-server provider
 - [ ] 明确新 Provider 的工具交换、Usage、stream、partial trace、continuation 和 checkpoint 能力。
 - [ ] 新重试条件证明“请求尚可安全重放”，并覆盖 cancellation/timeout。
 - [ ] Checkpoint schema 变更提供版本校验、旧数据失败方式和恢复测试。
+- [ ] FileChange Observation/run-grant ref 只进私有 checkpoint，恢复时由 durable Host authority 重新验证。
+- [ ] 人工 ticket 与 execution material TTL 分开测试，材料缺失的晚批准不会 dispatch。
 - [ ] Toolset 或 Capability 变更覆盖暂停后恢复与同 Turn 激活。
 - [ ] continuation 变更覆盖加密、promotion、release、fork、rewrite、delete 和 Provider 切换。
 - [ ] 终态持久化失败不会重复产生模型调用或 Core Server-owned 副作用。
@@ -170,3 +185,4 @@ cargo test -p mycopilot-core-server provider
 - Runtime 仍有固定的 Tool 迭代与压缩尝试保险上限，不保证任意长度任务永不终止。
 - 进程崩溃后只能恢复已进入持久边界的状态；纯内存中且未提交的模型流片段会丢失。
 - 诊断和测试大量依赖 SQLite 开发 schema；非当前 schema 的开发数据库不会原地升级。
+- 人工审批没有通用自动超时；ticket 可长期 pending，而短生命周期执行材料可能在用户决定前失效。

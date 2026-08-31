@@ -4,7 +4,7 @@ description: 解释 Agent、子 Agent、Scheduled Automation 和 MCP 界面中�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 状态说明
@@ -24,6 +24,10 @@ last_verified: 2026-08-23
 | 已取消   | Run 收到取消并已结算           | 检查可能已经发生的副作用         |
 
 “已完成”表示运行流程完成，不自动保证业务结果正确；最终仍需按验收条件检查。
+
+## FileChange
+
+文件修改卡可能显示准备中、等待审批、正在应用、已应用、冲突、失败、已拒绝、已取消或结果未知。冲突通常表示文件已在读取后变化，应重新读取再生成修改；结果未知表示提交边界无法确认，必须先检查磁盘内容，不能直接重试。
 
 ## 子 Agent
 

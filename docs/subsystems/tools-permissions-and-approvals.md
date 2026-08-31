@@ -2,12 +2,12 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-24
+last_verified: 2026-08-31
 ---
 
 # Tool 体系、权限与审批
 
-本文说明 Agent Tool 如何注册、暴露、授权、审批、执行、投影和恢复。具体 Tool 输出字段见[Tool Result 消费者矩阵](./tool-result-consumer-matrix.md)，大小限制见[Tool Result 上限、分页与恢复](./tool-result-limits.md)，后台任务的完整状态机见[Scheduled Automation 子系统](./scheduled-automations.md)。
+本文说明 Agent Tool 如何注册、暴露、授权、审批、执行、投影和恢复。具体 Tool 输出字段见[Tool Result 消费者矩阵](./tool-result-consumer-matrix.md)，大小限制见[Tool Result 上限、分页与恢复](./tool-result-limits.md)，文件写入的权威执行契约见[FileChange 子系统](./file-change.md)，后台任务的完整状态机见[Scheduled Automation 子系统](./scheduled-automations.md)。
 
 ## 职责边界
 
@@ -34,7 +34,7 @@ last_verified: 2026-08-24
 当前注册面可按以下族理解：
 
 - 文件与检索：attachments、`read_*`、workspace/search、web、Git；
-- 写入与执行：唯一文件修改 Tool `apply_patch`，以及 `run_command`、`command_session`；
+- 写入与执行：唯一专用结构化文本文件修改 Tool `apply_patch`，以及可能产生独立副作用的 `run_command`、`command_session`；
 - Office 与图像：三个 Office Tool、`image_generation`；
 - Skills：resource list/read/materialize、script preflight/run、install prepare/commit，以及运行扩展 `skills_activate`；
 - 历史与协作：`conversation_history`、spawn/send/followup/wait/list/interrupt；
@@ -89,7 +89,7 @@ Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更�
 
 解析过程执行规范化、父目录与 symlink/reparse 检查、conversation grant 校验、文件 identity/revision 校验，并为命令/Office 创建私有只读输入 mount。当前一次文件输入最多 16 项，单项 64 MiB、合计 128 MiB；视觉输入单项上限为 8 MiB。URI 是稳定引用，不是裸本地路径，不能被字符串替换绕过授权。
 
-文件修改只通过 `apply_patch`：Direct 模式用于一次性 create/update/delete，Staged 模式使用同一 FileChange transaction/store 分块组装，当前单事务目标上限 4 MiB。create/begin-create 不接收公开 observation；Host 私下冻结 missing/parent 状态并以 no-clobber 提交，成功后才签发第一个公开 ID。update/delete 与 begin-update 绑定准确 `read_file` observation；成功 apply 或 Staged update commit 后，Runtime 重新验证写后目标并把同一个 ID 续约到新状态，供同一 Run 的后续模型响应使用。同一 Provider Tool Call 批次重复使用该 ID 会在副作用前拒绝。签发或续约失败只要求重新读取，不会把已经提交的结果误报为失败。两种模式始终绑定目标 scope、无 symlink 父链、基础 revision、frozen target/diff digest 和原子发布检查；create 始终 no-clobber，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过 proposal、Pending、Checkpoint、dispatch claim 或执行前复核。
+模型通过专用结构化文本修改 Tool 写文件时只使用 `apply_patch`：Direct 模式用于一次性 create/update/delete，Staged 模式使用同一 FileChange transaction/store 分块组装，当前单事务目标上限 4 MiB。create/begin-create 不接收公开 Observation；Host 私下冻结 Missing/parent 状态并以 no-clobber 提交，成功后才签发第一个公开 ID。update/delete 与 begin-update 绑定准确 `read_file` Observation；成功 apply 或 Staged update commit 后，Runtime 重新验证写后目标并把同一个 ID 续约到新状态，供同一 Run 的后续模型响应使用。同一 Provider Tool Call 批次重复使用该 ID 会在副作用前拒绝。签发或续约失败只要求重新读取，不会把已经提交的结果误报为失败。两种模式始终绑定目标 scope、无 symlink 父链、基础 revision、frozen target/diff digest 和原子发布检查；create 始终 no-clobber，并拒绝不支持的 Office/PDF 二进制修改。AutoApprove 只跳过用户点击，不跳过 proposal、Pending、Checkpoint、dispatch claim 或执行前复核。命令与 Office/Builder 的文件副作用不进入这套 Observation/audit 契约，分别按自身边界授权和记录。完整 schema、状态、限额、持久表和历史 Diff 见 [FileChange 子系统](./file-change.md)。
 
 ## 审批状态机
 
@@ -116,11 +116,15 @@ model ToolCall
 
 “无需弹窗”不一定等于“直接执行”。自动 MCP Server 调用或需要冻结资源的动作仍必须先 prepare，以便 Core Server 获得一次性的权威 payload、TOCTOU 校验和审计身份。
 
+人工审批票据与短生命周期执行材料是两类状态。MCP Server、Browser risk、内置 MCP 敏感调用和 Skill 安装的票据会保持 pending，直到用户决定或所属 Run 的取消/终态流程显式收口；sealed payload、进程内 grant 或已准备包过期不再替用户作决定。用户稍后批准但执行材料已不可用时，Host 必须提交一个 `definitely_not_dispatched` 的 failed Tool Result，并恢复模型继续处理，不能把票据重新标成“过期后请重试”或实际 dispatch。
+
+FileChange 还允许用户对 create/update 选择“本 Run 剩余 `apply_patch`”。该选择先持久化无 authority 的 pending intent，只有当前 FileChange 以匹配 receipt 成功结算后才激活 Run grant；grant 只覆盖同 Run、同冻结权限/Toolset/Provider revision、同 workspace 或精确 external parent 下的后续 create/update，永不覆盖 delete。每次 effect boundary 都重新加载 durable grant；终态、取消、恢复身份不匹配或目录 identity 变化时撤销或 fail closed。详见 [FileChange 子系统](./file-change.md#4-审批与-run-grant)。
+
 ### 后台 Automation Approval 与报告
 
 Scheduled Automation 复用普通 HumanRoot pending action、audit、Checkpoint 和审批恢复，不建立第二套审批系统：
 
-- 默认/自定义权限要求审批时，Run 从 `running` 投影为 `waiting_for_approval`，写入 Run attention，并在持久 outbox 中请求 `approval_required` 原生通知；Renderer 不必保持打开。
+- 默认/自定义权限要求审批时，Run 从 `running` 投影为 `waiting_for_approval`，写入 Run attention，并由 HumanRoot producer 原子记录共享的 `approval_required` Notification event；batch 决定原生投递，Renderer 不必保持打开。
 - 用户批准或拒绝仍通过原 pending-action CAS。进程重启后，Scheduler 从 in-progress Trace 与 durable pending action 恢复 observer；公开状态中的 `waiting_for_approval` 不是新的执行授权。
 - 离开等待态会确认对应 attention，并 suppress 尚未展示的 stale approval notification；Main 在真正展示通知前还必须调用 Host-only validation。
 - `automation_report` 仅通过 `automation_run.agent_run_id` 解析出的 run-scoped sink 注册。普通 HumanRoot、子 Agent和 admission 前的 Run 都得不到该 Tool；approval continuation/restart 则可从相同绑定恢复。
@@ -133,7 +137,7 @@ Scheduled Automation 复用普通 HumanRoot pending action、audit、Checkpoint 
 - 外部 MCP Server Tool 使用 typed MCP identity；模型可见名不能用于判断来源。其原始参数由受限授权信封处理，普通 Checkpoint 禁止直接持久未知/外部 MCP 参数。
 - `activate_capability` 的授权语义是当前任务批准；实际 live grant 绑定当前 Run、manifest digest 与 policy revision，只存在于 Core Server 进程内存。`builtin execution=auto_approve` 时 Host 自动结算同一个 typed action 并写 durable receipt；否则由用户点击。新 Run 仍需重新建立 grant，Checkpoint 不序列化该 grant。激活后 Tool 进入 dynamic Toolset 并触发 `ToolSetChanged`。
 - Managed Playwright Browser Tool 通过内部 HostBridge 运行；敏感操作还需 per-Tool 或 Browser risk approval，并绑定当前 managed surface/origin、activation ID、schema/manifest digest。
-- Managed Playwright/MCP Server 结果已经由 Main/Core Server 做安全 Artifact 投影，不进入普通 Exact Archive。截图可额外发布 `image-artifact://` readPath；下载等其他产物保留为 Run 生命周期的 Browser Artifact 引用，由 Main 的 broker 预览或导出。
+- Managed Playwright/MCP Server 结果已经由 Main/Core Server 做安全 Artifact 投影，不进入普通 Exact Archive。截图可额外发布 `image-artifact://` readPath；受管下载由 Main 捕获、Rust Core 持久化，并以无宿主路径的 `browser-download:<uuid>` 引用进入文件输入。授权可来自当前 Conversation、同一 Agent task tree、同 Project，或 read=all 下的手工下载能力；opaque 引用本身不构成授权。
 
 ## Skill Script 权限特例
 
@@ -163,13 +167,15 @@ Tool 声明两类 settlement：
 5. AutoApprove 保留与手动审批相同的安全执行路径。
 6. Event/Trace projection 无执行权；Checkpoint 只保存工具声明的安全投影。
 7. outcome unknown 禁止自动重放。
+8. 人工审批票据不会因临时执行材料 TTL 到期而替用户结算；晚批准缺少材料时只能产生 definitely-not-dispatched 失败。
+9. FileChange successor Observation 只属于模型与私有 checkpoint；公共持久投影不得把它变成可复制 authority。
 
 ## 代码真源
 
 - Registry/trait/projection：`crates/core/src/tools/mod.rs`
 - Effective toolset：`crates/core/src/tools/tool_set.rs`
 - 权限和 proposed action：`crates/core/src/protocol.rs`
-- 文件输入与修改：`crates/core/src/file_input.rs`、`crates/core/src/file_change/`、`crates/core/src/tools/apply_patch.rs`
+- 文件输入与修改：`crates/core/src/file_input.rs`、`crates/core/src/file_change/`、`crates/core/src/tools/apply_patch.rs`、`crates/core/src/tools/file_change_staged.rs`
 - 命令策略：`crates/core/src/command/policy.rs`、`risk.rs`、`spawn_plan.rs`
 - Runtime 审批边界：`crates/core/src/runtime.rs`、`runtime/checkpoint/`
 - Pending action：`crates/core/src/storage/service/pending_actions.rs`
@@ -186,6 +192,8 @@ Tool 声明两类 settlement：
 - `crates/core/src/runtime/tests/approval_resume.rs`
 - `crates/core/src/runtime/checkpoint/tests/`
 - `crates/core-server/src/application/agent/tests/file_change_permissions.rs`
+- `crates/core-server/src/application/agent/tests/file_change_source_boundary.rs`
+- `crates/core-server/src/application/agent/tests/staged_file_change_execution.rs`
 - `crates/core-server/src/application/agent/tests/pending_actions.rs`
 - `crates/core-server/src/application/agent/tests/mcp_approval_lifecycle.rs`
 - `crates/core-server/src/application/agent/tests/cancellation.rs`
@@ -200,10 +208,12 @@ Tool 声明两类 settlement：
 - [ ] 声明 permission policy、取消 settlement 与 checkpoint persistence。
 - [ ] 为 prepare/execute 绑定 call/action/Run/conversation 和资源 revision。
 - [ ] 覆盖 denied、auto-approved、approved、rejected、expired、cancelled、crash-resume、unknown outcome。
+- [ ] 人工票据与 sealed/process payload 分开测试；晚批准缺少执行材料时生成安全 failed Tool Result 而不 dispatch。
 - [ ] 实现 Model/Event/Trace/Archive/Checkpoint 投影并更新 projection fixture。
 - [ ] Tool 列表/能力变更更新自动化 inventory，而不是仅更新文档表。
 - [ ] Automation Tool/权限变更覆盖 frozen snapshot、设置撤销 TOCTOU、后台 approval restart 和 `automation_report` 单次写入。
 - [ ] 文件/命令/MCP Server 路径无 symlink、TOCTOU、secret 和跨会话授权绕过。
+- [ ] FileChange Run grant 仅从 applied granting receipt 激活，effect boundary 复核且不授权 delete。
 - [ ] 更新 Tool Result matrix/limits 和受影响子系统文档。
 
 ## 当前限制

@@ -2,19 +2,19 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-27
+last_verified: 2026-08-31
 ---
 
 # SQLite 存储与数据生命周期
 
-本文说明 Rust Core 的本地 SQLite 权威存储、schema 发布策略、事务边界、文件型数据和启动恢复。本文不复制完整 DDL；`canonical_schema.sql` 及其 fingerprint 测试是唯一 schema 真源。Trace、上下文和 Scheduled Automation 的逻辑契约分别见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)、[上下文管理](./context-management.md)和[Scheduled Automation 子系统](../subsystems/scheduled-automations.md)。
+本文说明 Rust Core 的本地 SQLite 权威存储、schema 发布策略、事务边界、文件型数据和启动恢复。本文不复制完整 DDL；`canonical_schema.sql` 及其 fingerprint 测试是唯一 schema 真源。Trace、上下文、FileChange 和 Scheduled Automation 的逻辑契约分别见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)、[上下文管理](./context-management.md)、[FileChange 子系统](../subsystems/file-change.md)和[Scheduled Automation 子系统](../subsystems/scheduled-automations.md)。
 
 ## 职责边界
 
 - `StorageService` 向 application 层提供领域操作；repository 负责单一表组的 SQL 与映射。
 - Core Server 负责把一次业务结算组合成事务，不允许 Renderer 直接写数据库。
 - SQLite 保存元数据、消息、Trace、审批、Run 恢复、设置和索引；大型附件、受管 Artifact、命令 spool 等内容保存在受管文件目录，SQLite 保存身份、hash、授权和生命周期。
-- OS Keychain/受保护 credential backend 保存主密钥或 Provider secret；数据库不应保存可直接使用的明文密钥。
+- 模型 Token 与 Tavily Key 当前以明文保存在 SQLite；签名发行版的图片生成凭据使用 OS Keychain/受保护 credential backend，开发构建使用应用私有文件 backend。所有凭据都不得进入日志、Trace 或普通 Renderer 投影。
 
 ## 数据库定位与单实例
 
@@ -34,25 +34,28 @@ last_verified: 2026-08-27
 
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
-开发库重置前应先关闭应用并备份数据根；删除/移动整个权威根目录后再启动，由 bootstrap 重建。不要只删除主 `.sqlite3` 而遗留 attachments、artifacts、spool 或 lock 文件。
+开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
 ## 领域数据地图
 
 DDL 按领域大致分为：
 
-| 领域                  | 代表数据                                                                                                  | 生命周期要点                                         |
-| --------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 配置与目录            | Provider/model、MCP Server registry/policy、image profile、项目、模板、偏好                               | revision/CAS；secret 与公开配置分离                  |
-| 会话内容              | conversations、messages、attachments、drafts、guidance                                                    | 会话/项目归属；附件文件与行记录一致提交              |
-| Agent Run             | usage、pending actions、action audit、Turn diff、world state                                              | Run/call/action identity 幂等；审批状态单向推进      |
-| Trace 与上下文        | Turn Trace/items、model-context、history blob/chunk、compaction summary/head/receipt、request observation | append-only 或 immutable 派生；rewrite/fork 显式事务 |
-| Provider continuation | encrypted envelopes、Tool Call bindings、transition records                                               | 私有、加密、绑定 profile/revision；promotion/release |
-| Command Session       | session、output chunks、published outputs、read receipts、lifecycle                                       | 顺序 transcript；重启后保守结算/恢复                 |
-| Skills                | enablement override、安装/来源相关持久快照                                                                | Skill 包内容寻址；安装发布 CAS 与 tombstone          |
-| Artifacts/图像        | managed Artifacts/grants、generation execution/Artifact/config staging                                    | 内容寻址；授权与私有路径分开；启动清理               |
-| 多 Agent              | nodes、mailbox、wake/interrupt、delivery receipt/replay、context snapshot、collaboration event            | 图和队列限制在事务内复核；cursor/receipt 幂等        |
-| Scheduled Automation  | Task、Run、Event、原生通知 outbox                                                                         | CAS、非重叠 Run、lease、Trace 恢复与 tombstone       |
-| 搜索索引              | message/archive FTS 等                                                                                    | 可重建，不是权威内容                                 |
+| 领域                  | 代表数据                                                                                                  | 生命周期要点                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| 配置与目录            | Provider/model、MCP Server registry/policy、image profile、项目、模板、偏好                               | revision/CAS；secret 与公开配置分离                   |
+| 会话内容              | conversations、messages、attachments、drafts、guidance                                                    | 会话/项目归属；附件文件与行记录一致提交               |
+| Agent Run             | usage、pending actions、action audit、Turn diff、world state                                              | Run/call/action identity 幂等；审批状态单向推进       |
+| FileChange            | Staged transaction/chunk/operation、Run grant、terminal action audit                                      | Direct/Staged 共用 receipt；grant runtime-only        |
+| Trace 与上下文        | Turn Trace/items、model-context、history blob/chunk、compaction summary/head/receipt、request observation | append-only 或 immutable 派生；rewrite/fork 显式事务  |
+| Provider continuation | encrypted envelopes、Tool Call bindings、transition records                                               | 私有、加密、绑定 profile/revision；promotion/release  |
+| Command Session       | session、output chunks、published outputs、read receipts、lifecycle                                       | 顺序 transcript；重启后保守结算/恢复                  |
+| Skills                | enablement override、安装/来源相关持久快照                                                                | Skill 包内容寻址；安装发布 CAS 与 tombstone           |
+| Artifacts/图像        | managed Artifacts/grants、generation execution/Artifact/config staging                                    | 内容寻址；授权与私有路径分开；启动清理                |
+| Browser               | download settings/preferences/history、durable downloads                                                  | Host 捕获字节；Rust Core 保存身份、hash、scope 与历史 |
+| 多 Agent              | nodes、mailbox、wake/interrupt、delivery receipt/replay、context snapshot、collaboration event            | 图和队列限制在事务内复核；cursor/receipt 幂等         |
+| Scheduled Automation  | Task、Run、Event、Automation notification producer ledger                                                 | CAS、非重叠 Run、lease、Trace 恢复与 tombstone        |
+| Shared Notification   | settings、immutable event、batch/item、change event                                                       | HumanRoot/Automation 共用；batch 是原生投递 authority |
+| 搜索索引              | message/archive FTS 等                                                                                    | 可重建，不是权威内容                                  |
 
 新增表前先确定领域 owner、父对象、删除策略、敏感级别、幂等键和恢复行为。不要把跨领域工作流塞进单个 repository。
 
@@ -60,16 +63,22 @@ DDL 按领域大致分为：
 
 Automation 在 canonical schema v27 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
-| 表                               | 权威内容                                                                  | 关键不变量                                                                                                          |
-| -------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `automations`                    | Task 配置、状态/健康、目标快照、权限/推理/schedule JSON、next/last、CAS   | `active` / `paused` 与 `ok` / `blocked` 正交；revision 单调；paused/blocked/tombstone 时没有未来 `next_run_at`      |
-| `automation_runs`                | 不可变配置快照、trigger、admission lease、Agent/消息绑定、报告与终态      | 同 Task 只允许一个非终态 Run；scheduled occurrence 和 manual request 各自唯一；内部 `admitting` 对外为 `starting`   |
-| `automation_events`              | 全局有序的失效/refetch 事件                                               | AUTOINCREMENT sequence；Task/Run revision 与事件绑定；公开通知不携带内部 payload JSON                               |
-| `automation_notification_outbox` | `run_result`、`approval_required`、`configuration_blocked` 的持久投递状态 | `pending` / `delivered` / `suppressed`；claim lease 可恢复；按 Run/Task revision 去重；展示前必须再次验证语义仍有效 |
+| 表                               | 权威内容                                                                        | 关键不变量                                                                                                        |
+| -------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `automations`                    | Task 配置、状态/健康、目标快照、权限/推理/schedule JSON、next/last、CAS         | `active` / `paused` 与 `ok` / `blocked` 正交；revision 单调；paused/blocked/tombstone 时没有未来 `next_run_at`    |
+| `automation_runs`                | 不可变配置快照、trigger、admission lease、Agent/消息绑定、报告与终态            | 同 Task 只允许一个非终态 Run；scheduled occurrence 和 manual request 各自唯一；内部 `admitting` 对外为 `starting` |
+| `automation_events`              | 全局有序的失效/refetch 事件                                                     | AUTOINCREMENT sequence；Task/Run revision 与事件绑定；公开通知不携带内部 payload JSON                             |
+| `automation_notification_outbox` | `run_result`、`approval_required`、`configuration_blocked` 的 producer/兼容状态 | 新行原子投影 shared event 并转 `projected`；按 Run/Task revision 去重；不是当前 Main native claim authority       |
 
 Task 的权限、destination、schedule 和 reasoning 使用版本化 JSON；Run 在排队时保存最多 128 KiB 的 `config_snapshot_json`，worker 不得从更新后的 Task 重建 authority。数据库唯一索引负责 manual request 幂等、同一 scheduled occurrence 去重和每 Task 单非终态 Run，进程内集合或 Renderer 缓存不承担这些约束。
 
 Automation 删除当前是 tombstone，不物理删除 Task/Run/Event；pending 原生通知被 suppress。Conversation/project/model 删除或归档/禁用通过 canonical trigger 将仍存在的 Task 变成可修复的 `blocked`；Agent-tree 删除事务会暂时禁用 trigger，因此必须调用 `invalidate_automations_before_trigger_disabled_*` 和 `terminalize_automation_runs_before_*` 在父消息/Trace 消失前投影等价效果。
+
+HumanRoot 与 Automation 共用 `notification_settings`、`notification_events`、
+`notification_batches`、`notification_batch_items`、`notification_change_events`。event 是不可变事实，
+seen/resolved/superseded 是其 projection；batch 负责 collecting/pending/claimed/displayed/sealed/suppressed
+原生投递生命周期。legacy Automation outbox 的 trigger 在同一 transaction 生成 generic event，因此
+`automation.notifications.*` 与 `notifications.*` 不能被实现成两套独立投递真源。
 
 ## 事务原则
 
@@ -80,6 +89,7 @@ Automation 删除当前是 tombstone，不物理删除 Task/Run/Event；pending 
 5. **幂等 identity。** `request_id`、`run_id`、`call_id`、`action_id`、execution fingerprint 等必须在数据库约束/CAS 下判定，不靠内存去重。
 6. **文件采用 staging + fsync/原子发布。** 数据库记录和最终文件路径必须有明确提交顺序及启动清理策略。
 7. **调用方事务。** 标注 `*_in_transaction` 的 repository 函数不自行 begin/commit；事务所有权属于组合业务操作。
+8. **文件副作用有独立 journal。** FileChange 在 pending/audit 中冻结 exact binding，先持久 dispatch 边界，再以 bound I/O 发布并保存 receipt；Renderer Diff 或 Trace digest 不能替代该 journal。
 
 Automation 还要求两个专用原子边界：
 
@@ -100,6 +110,8 @@ Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema 
 - Artifact staging、临时文件、过期 grant/安装 session；
 - collaboration delivery、wake/interrupt 和子 Agent snapshot receipt。
 - Automation 的 `admitting` lease、已绑定 `running`/`waiting_for_approval` Run、删除取消请求、Trace 终态和 durable pending action。
+- FileChange 的 executing action audit、`applying` Staged transaction、Direct delete journal，以及 pending/active Run grant。
+- shared Notification collecting/claimed/displayed batch、过期 claim 与 immutable event/change sequence；进程通知丢失后从 cursor 重放。
 
 Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admitting` 立即回到 `queued`（已 tombstone Task 则取消），不等待旧 60 秒 lease；已经原子绑定的 `running`/`waiting_for_approval` 不重建消息，只从准确的 Conversation Trace 和 pending action 恢复 observer。多个离线 missed occurrence 合并为一个 `recovery` Run，而不是逐条补跑。进程内 scheduler wake 和 Agent event 只降延迟，不能代替这些行。
 
@@ -109,8 +121,9 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 - API key、Provider credential、continuation 加密主密钥不进入日志、Trace 或普通配置行。
 - Provider continuation payload 加密后存储，元数据仍必须最小化并绑定归属。
-- Attachment、Artifact、Skill package 和 command workspace 通过服务解析 URI/ID；数据库路径不是 Renderer/模型 API。
-- Artifact 使用内容 hash 标识与 conversation grant 分离；删除会话时撤销授权，并按引用/保留策略清理物理内容。
+- Attachment、Artifact、Browser download、Skill package 和 command workspace 通过统一 locator/service 解析 URI/ID；数据库路径不是 Renderer/模型 API。未知 `scheme:` 或 `@namespace` fail closed；需要同名本地文件时用显式 `./...` 消歧。
+- Artifact 使用内容 hash 标识与 conversation grant 分离；Browser download 以 `browser-download:<uuid>` 暴露且不含宿主路径。当前 Conversation 之外的访问必须由 Host 从 Project 或 `agent_nodes` 中的 exact `root_agent_id + root_conversation_id` 推导，模型/Renderer 自报 root 无效。
+- 同一 Agent task tree 内，attachment library、managed Artifact 和 Agent browser download 可以父/子/兄弟双向复用，即使没有 Project；普通 Conversation 与其他根树继续隔离。Agent 完成或归档不自动撤销 durable child result 的树内可读性。
 - Exact Archive 只保存安全文本投影；二进制和 data URL 被省略并记录诊断。
 - action audit 可能有意晚于消息内容存活；删除策略必须由 service 显式实现，不能假设所有外键都 cascade。
 
@@ -131,6 +144,9 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 7. 删除、rewrite、fork 和 startup reconciliation 必须保持跨表/文件引用完整。
 8. Automation 的 Task revision、Run status revision、admission token 和 Event sequence 只能在 repository 事务中推进；公开 `starting` 不得反向写成新的持久状态。
 9. 已绑定 Automation Run 只能由匹配的 durable Trace 结算；admission 前失败不得伪造 Conversation/Trace 身份。
+10. FileChange visible Staged history 与 terminal audit 可按 fork policy 重映射；pending/executing action 和 Run grant 不复制。
+11. Notification event 是不可变事实，batch 是 native delivery authority；legacy Automation ledger 只能原子投影，不能单独驱动 Main 重复显示。
+12. Agent-tree 私有资源 scope 只能从持久 `agent_nodes` 解析，不能接受调用参数提供 root identity。
 
 ## 代码真源
 
@@ -141,6 +157,9 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 - Repositories：`crates/core/src/storage/*_repository.rs`
 - 领域组合事务：`crates/core/src/storage/service/`
 - Automation：`crates/core/src/storage/automation_repository.rs`、`storage/service/automations.rs`
+- FileChange：`crates/core/src/storage/file_change_repository.rs`、`file_change_run_grant_repository.rs`、`agent_action_audit_repository.rs`
+- Notification：`crates/core/src/storage/notification_repository.rs`、`storage/service/notifications.rs`
+- Tree-scoped inputs：`crates/core/src/storage/agent_tree_resource_scope.rs`、`attachment_repository.rs`、`managed_artifact_repository.rs`、`storage/service/browser_downloads.rs`
 - Bootstrap：`crates/core-server/src/transport/bootstrap.rs`
 
 ## 测试
@@ -152,6 +171,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 - `crates/core/src/storage/service/tests/trace_reconciliation.rs`
 - `crates/core/src/storage/agent_command_session_repository/tests.rs`
 - `crates/core/src/storage/automation_repository/tests.rs`
+- `crates/core/src/storage/notification_repository.rs` 内测试与 `storage/service/tests/notifications.rs`
+- `crates/core/src/storage/conversation_fork_repository/tests.rs` 的 FileChange/tree-resource policy 测试
 - `crates/core-server/src/application/automation/scheduler/tests.rs`
 - `crates/core-server/src/application/agent/tests/automation_turn.rs`
 - Core Server 的 pending action、Provider transition、Command Session、image generation 和 collaboration 测试
@@ -165,6 +186,9 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 - [ ] 外部工作在事务外执行，提交时重新校验 revision/CAS。
 - [ ] 新文件目录采用受管根、staging、原子发布与 orphan cleanup。
 - [ ] startup reconciliation 覆盖进程在每个提交边界崩溃的状态。
+- [ ] FileChange schema 变更覆盖 Staged history、private audit/receipt、Run grant、fork 和 delete journal。
+- [ ] Notification schema 变更保持 generic event/batch authority，并验证 Automation trigger 的原子 projection。
+- [ ] 新 attachment/Artifact/download 授权从 Host-resolved Conversation/Project/tree scope 推导，覆盖跨树与普通 Conversation 负向测试。
 - [ ] Automation schema 变更覆盖 occurrence/manual/nonterminal 唯一索引、父资源 trigger、Event/outbox 去重和 admission 崩溃窗口。
 - [ ] fork/rewrite/delete/backup 行为同步更新相关领域文档。
 
@@ -174,5 +198,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 - 单连接 Mutex 设计偏向桌面本地一致性，不适合多进程或高并发服务端部署。
 - 自动保留期限、跨设备同步、在线增量备份和用户级导出策略尚未形成统一公共契约。
 - Automation 当前没有 history/Event/outbox retention 或物理 GC 公共流程；tombstone 与事件日志会随使用增长。
+- Shared Notification event/batch 也没有统一的用户可配置 retention/GC；native delivery 最多尝试 5 次，失败耗尽后转为 suppressed，尚无独立修复 UI。
+- Agent task tree 的 durable 资源共享当前以不可变 root identity 为边界；没有跨树转授权或细粒度成员级撤销协议。
 - 物理文件和 SQLite 无法共享单个 ACID 事务，依赖 staging、原子改名和 reconciliation 收敛。
 - SQLite FTS/索引损坏时需要重建；索引不可替代原始消息或 Archive。

@@ -4,7 +4,7 @@ description: 安装 MyCopilot、认识界面并完成第一个 Agent 任务和�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 快速开始
@@ -24,7 +24,7 @@ last_verified: 2026-08-23
 ## 开始前准备
 
 - 一份由项目团队提供的可信 MyCopilot 构建；当前尚无公开下载渠道。
-- 一个兼容的模型 API 地址、Token 和模型标识。
+- 一个兼容的模型 API 地址、Token 和模型标识；新安装不会预置可选模型，需要先手动添加并启用。
 - 如果要使用联网搜索，一枚 Tavily API Key。
 - 如果要处理项目，一个你有权访问和修改的本地文件夹。
 

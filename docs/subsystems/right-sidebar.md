@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 右侧栏平台
@@ -38,7 +38,7 @@ last_verified: 2026-08-23
 - capability 不可用或 workspace 被删除时关闭还是保留页面。
 - 关联页面在每个工作区的数量上限。
 
-`RightSidebarPage` 保存平台身份和轻量展示状态：page/module id、title、icon、resourceKey、workspace key/path/session key，以及模块特定的 tagged `moduleState`。页面状态当前支持 browser surface、workspace file preview、最近一次 Turn 的 Git 导航和 Agent Center list/detail。
+`RightSidebarPage` 保存平台身份和轻量展示状态：page/module id、title、icon、resourceKey、workspace key/path/session key，以及模块特定的 tagged `moduleState`。页面状态当前支持 browser `surfaceId`/逻辑 URL/viewport、workspace file preview、最近一次 Turn 的 Git 导航和 Agent Center list/detail。Browser 的 `surfaceInstanceId`、state revision、真实 guest URL 和下载路径不属于 Renderer page state。
 
 ## 当前模块矩阵
 
@@ -107,7 +107,11 @@ Files 第一次打开文件时复用同一 workspace session 的空 Files 页（
 
 ## Browser surface 交接
 
-Browser page 的 `surfaceId` 稳定地由 page id 派生，`surfaceInstanceId` 则由 Main 为某一次精确 guest incarnation 生成。AppShell 接收 Main 的 surface command，平台打开/激活相应 Browser 页面，`BrowserPanel` 完成 guest 注册后回传精确 request/surface/instance/viewport。
+Browser page 的 `surfaceId` 稳定地由 page id 派生，`surfaceInstanceId` 则由 Main 为某一次精确 guest incarnation 生成。AppShell 接收 Main 的 surface command，平台打开/激活相应 Browser 页面，`BrowserPanel` 完成 guest 注册后回传精确 request/surface/instance/viewport。地址栏动作由 Main 执行；面板只接受匹配 instance 且 `stateRevision` 不倒退的 logical URL/title/favicon/loading/error/crash projection。
+
+下载中心是 Browser toolbar 中 portal 到 `document.body` 的 popover，不是独立右侧栏 page；切换 Browser 页、关闭/失焦和锚点销毁时必须收口。它只持有 path-free live snapshot，pause/resume/cancel/reveal/copy/remove 都通过 Host API 返回 Main。Browser menu 可导航到独立 Browser Settings 的 history/downloads 子视图，不把它们注册成 MCP 页面或右侧栏模块。
+
+关闭 Browser page 必须同时撤销 exact surface command、selection、instance、guest subscription 和 Main surface；仅变为 background/dormant 不清理。新建同名 page/`surfaceId` 后的 guest 是新 incarnation，旧 state/error/download callback 不得写回。
 
 平台只协调 UI 页面；它不持有 WebContents、Target 或 CDP 权限。完整协议见 [浏览器与自动化](./browser-automation.md)。
 
@@ -121,11 +125,11 @@ Agent Center 是当前根 Agent Conversation 的只读子 Agent 索引：
 - Observer 没有 composer、send、edit、retry、fork、stop/guide 或 approval 控件。Core Server/Rust Core 仍会校验精确根 Agent 与子 Agent Conversation，因此隐藏控件不是授权边界。
 - 共享会话 surface 在 280 px 侧栏最小宽度下使用局部布局覆盖，不维护第二套聊天实现。
 
-AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；当前实现发布有界的最近 2,048 条语义活动窗口。只有能解析到持久根 Agent assistant-message/trace-boundary anchor 的事件进入根 Agent chat 时间线。Agent Center 当前状态、observer live envelope 和根 Agent chat 历史是三种不同投影，不能互相推导。
+AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；当前实现发布有界的最近 2,048 条语义活动窗口。只有能解析到持久根 Agent assistant-message/trace-boundary anchor 的事件进入根 Agent chat 时间线；父 Agent 最终回复开始流式输出时，该回复的 collaboration timeline 即冻结。之后的子 Agent 活动仍可更新 Agent Center，但不能追写已结算父消息。Agent Center 当前状态、observer live envelope 和根 Agent chat 历史是三种不同投影，不能互相推导。
 
 Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assistant-message 身份。hydration revision 会在 gap、restart resync 或 reload 后失效全部 observer；子 Agent A 的迟到响应不能显示在子 Agent B 下。live observer envelope 只是有界、进程内的低延迟覆盖，持久 Conversation 和 collaboration event log 在恢复后重新成为权威。
 
-Agent Center 的设置入口打开通用 Agent template 设置页。模板 CRUD 是 project-scoped，保存精确 `model_config_id`；已删除/禁用模型必须明确替换后才能保存或重新启用。模板编辑只影响后续 Agent，现有 Agent 显示创建时快照。
+Agent Center 的设置入口打开通用 Agent template 设置页。模板定义现在是 workspace-wide library，CRUD 不绑定单个 project；每个模板以独立 assignment 关联零到多个 project，只有分配给当前 project 且 enabled 的模板可用于该树。模板保存精确 `model_config_id`；已删除/禁用模型必须明确替换后才能保存或重新启用。表单的 description/instructions 提供 guidance-oriented placeholder，但 placeholder 不会写入空字段。模板编辑或 assignment 变化只影响后续 Agent，现有 Agent 显示创建时快照。
 
 持久化的是 Agent、状态、模板、审批、子 Agent Conversation 和语义事件。Agent Center 当前打开页/detail、折叠和滚动位置不会跨完整 Renderer reload 恢复。当前没有子 Agent 删除、图画布或跨根 Agent dashboard。
 
@@ -156,6 +160,7 @@ Agent Center 的设置入口打开通用 Agent template 设置页。模板 CRUD 
 4. capability 必须来自权威探测，并绑定对应 `contextKey`；旧项目结果不得作用于新项目。
 5. 未选中页面必须 `aria-hidden`；覆盖/隐藏整个侧栏时活动变为 dormant。
 6. Browser guest 必须通过 Electron Main 身份校验，Agent observer 必须通过 Core Server/Rust Core 会话树校验；UI 页存在不代表拥有访问权。
+7. Browser logical state 必须匹配 exact instance/revision；download center capability 不等于路径已经暴露给 Renderer。
 
 ## 代码真源
 
@@ -171,6 +176,8 @@ Agent Center 的设置入口打开通用 Agent template 设置页。模板 CRUD 
 - Runtime 注入：`src/renderer/src/features/rightSidebar/RightSidebarRuntimeContext.tsx`
 - Webview host：`src/renderer/src/features/rightSidebar/surfaces/WebviewSurface.tsx`
 - Agent Center：`src/renderer/src/features/agentCollaboration/AgentCenterPanel.tsx`
+- Agent Template 设置：`src/renderer/src/features/settings/pages/AgentTemplatesSettingsPage.tsx`
+- Browser panel/download center：`src/renderer/src/features/browser/BrowserPanel.tsx`、`BrowserDownloadCenter.tsx`
 
 ## 测试与变更检查表
 
@@ -182,6 +189,7 @@ Agent Center 的设置入口打开通用 Agent template 设置页。模板 CRUD 
 - `FilesPanel.browser.test.tsx`
 - `BrowserPanelLifecycle.browser.test.tsx`
 - `BrowserSurfaceRightSidebar.browser.test.tsx`
+- `BrowserDownloadCenter.browser.test.tsx`
 - `AgentCenterRightSidebar.browser.test.tsx`
 
 变更前后检查：
@@ -192,6 +200,7 @@ Agent Center 的设置入口打开通用 Agent template 设置页。模板 CRUD 
 - [ ] 单实例、resourceKey 去重、transient/stable 预览、重复点击固定、斜体标签、页面上限和关闭后的选中项有 reducer 与 Browser 测试。
 - [ ] 键盘、焦点、`aria-hidden` 和 dormant 行为已验证。
 - [ ] Webview 权限仍由 Electron Main 校验，observer 权限仍由 Core Server/Rust Core 校验。
+- [ ] Browser state、错误/crash、下载 popover 和关闭清理均绑定当前 instance/revision，旧 guest 不会复活页面。
 - [ ] 更新了本模块矩阵和相关子系统链接。
 
 ## 当前限制

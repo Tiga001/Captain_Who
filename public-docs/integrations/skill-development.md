@@ -4,7 +4,7 @@ description: 为 MyCopilot 创建、测试和安装面向任务的 Skill 包。
 status: current
 audience: integration-developer
 owner: developer-relations
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 开发 Skill
@@ -66,7 +66,7 @@ release-review/
 
 ## 脚本与权限
 
-当前 Skill Script 只支持 `scripts/*.py`，并依赖电脑上工作区之外可用的 Python 3。脚本执行不是操作系统沙箱：需要完整的读写与命令权限，并且每次运行都会请求明确批准。依赖缺失时 MyCopilot 只报告问题，不会自动安装包。
+当前 Skill Script 只支持 `scripts/*.py`，并依赖电脑上工作区之外可用的 Python 3。脚本执行不是操作系统沙箱：预检和执行都需要完整的读写与命令权限。Installed/Workspace Skill 脚本每次运行都会请求明确批准；只有应用能重新证明来源、revision 和内容完整性的 Bundled Skill 脚本，才可能在用户启用“内置执行自动批准”且其他条件均满足时免去点击。依赖缺失时 MyCopilot 只报告问题，不会自动安装包。
 
 因此，能用说明或模板解决时不必添加脚本。添加脚本时应使用结构化参数、限制输入输出、说明副作用，并避免读取未授权位置。
 

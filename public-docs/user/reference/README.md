@@ -4,7 +4,7 @@ description: 快速查询设置、状态、键盘操作、能力限制和常用�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 用户参考
@@ -17,4 +17,4 @@ last_verified: 2026-08-23
 - [能力限制](capability-limits.md)
 - [术语表](glossary.md)
 
-页面记录的是 2026-08-23 已在代码和界面中确认的当前行为，不是未来路线图。
+页面记录的是 2026-08-31 已在代码和界面中确认的当前行为，不是未来路线图。

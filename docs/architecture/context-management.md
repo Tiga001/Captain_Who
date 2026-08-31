@@ -2,12 +2,12 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 上下文管理
 
-本文定义主模型上下文的事实来源、组装、计量和压缩。Trace、Exact Archive、历史检索与分叉见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)；Provider wire 协议见[Agent Runtime 与模型 Provider](./agent-runtime-and-providers.md)。
+本文定义主模型上下文的事实来源、组装、计量和压缩。Trace、Exact Archive、历史检索与分叉见[Conversation Trace 与 Exact Archive](./conversation-trace-and-archive.md)；Provider wire 协议见[Agent Runtime 与模型 Provider](./agent-runtime-and-providers.md)；FileChange 的 Observation/投影边界见[FileChange 子系统](../subsystems/file-change.md)。
 
 ## 职责边界
 
@@ -40,7 +40,7 @@ messages + terminal traces + active compaction head
  compaction planner -> summary generation -> atomic commit
 ```
 
-`agent_run_json`、Renderer 事件和 timeline 只用于展示，不得反向重建模型历史。Provider payload 必须从 Provider-neutral `LlmMessage` 生成；这适用于 OpenAI-compatible、Anthropic-compatible 和 DeepSeek，而不是只适用于某两个 Provider。
+`agent_run_json`、Renderer 事件和 timeline 只用于展示，不得反向重建模型历史。终态 parent message 中冻结的 `collaborationTimelineActivities` 也只是展示 snapshot；final-response stream 开始后发生的子 Agent 活动仍留在 Agent Center/event log，但不会被补入已提交回复或模型上下文。Provider payload 必须从 Provider-neutral `LlmMessage` 生成；这适用于 OpenAI-compatible、Anthropic-compatible 和 DeepSeek，而不是只适用于某两个 Provider。
 
 ## 逻辑日志顺序
 
@@ -56,6 +56,8 @@ trace terminal record
 ```
 
 消息位置和 Trace sequence 决定顺序，不能只按墙钟时间拼接。运行中的 narration 与已闭合 Tool Result 可先持久化；活动 Trace 只允许在尾部暂存一个用于审批/恢复的 open Tool Call，该调用不进入已闭合 model-context 前缀或压缩边界。最终助手消息和 Trace 终态在同一持久边界结算。
+
+pending assistant message 的持久正文为空；“正在思考”等 UI placeholder 不属于逻辑日志。FileChange 的 `apply_patch` durable Tool Call 只保存 body-free operation 与 content/edit digest，不保存完整 content、old/new text 或 Observation ID；精确执行材料属于 Host 私有 action audit/Staged store。成功写后的 successor `fileChangeTarget` 只用于同 Run 的下一次模型 continuation 和私有 checkpoint，不进入普通 Event/Trace/Archive。
 
 用户消息的持久正文保持原样。组装时后端可加入确定性的 `<backend_conversation_timing>` 元数据，记录该用户消息和相邻上一条 assistant 的时间；时间来自 SQLite 毫秒时间戳，并按本机时区渲染为带偏移的 RFC 3339。不要修改 assistant 历史正文来承载内部时间标记。
 
@@ -83,7 +85,7 @@ trace terminal record
 + request-only 内容
 ```
 
-后端 `ContinuityIndexV2` 用于定位与审计，默认不作为主模型消息发送。附件、Skill Resource 和 Artifact 必须先通过各自的引用与授权解析，模型字符串本身不是文件系统权限。
+后端 `ContinuityIndexV2` 用于定位与审计，默认不作为主模型消息发送。附件、Skill Resource、Artifact 与 Browser download 必须先通过统一 locator 和各自授权解析，模型字符串本身不是文件系统权限。Host 可以从 `agent_nodes` 推导同一 Agent task tree 的 exact root scope，使父/子/兄弟复用 durable attachment/artifact/download；模型、Prompt 或 Renderer 不能自报 root identity，未知 scheme-like/`@namespace` locator 必须 fail closed。
 
 Automation HumanRoot Turn 还会追加 `automation_execution` 来源的 retained、Run-scoped system item，包含
 Host 从持久 Run 绑定构造的任务/Run identity、计划时间、上次运行时间和 trigger kind。它不修改用户
@@ -162,7 +164,7 @@ capacity exceeded
 
 每次实际 Provider 请求在发送边界创建版本化观测：purpose、各 ContextFrame 分类估算、estimator identity/version、context revision、Provider usage、finish reason/有界错误及 billable request count。
 
-Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文或 API key。普通请求的观测持久化失败不能重放已经完成的模型请求；压缩成功时 observation 与 summary/head/receipt 同事务提交。
+这里的 ModelRequestObservation 是请求计量/诊断记录，不是 `read_file` 产生的 File Observation。它不保存 prompt、消息正文、Tool Result、网页/文件正文或 API key。普通请求的观测持久化失败不能重放已经完成的模型请求；压缩成功时 observation 与 summary/head/receipt 同事务提交。
 
 ## 分叉、删除与回退对上下文的影响
 
@@ -183,6 +185,9 @@ Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文�
 6. `run_transient` 在主模型成功观察前不可压缩。
 7. Provider 私有 continuation 不得伪装成公开上下文文本。
 8. Automation execution context 只能由 Host 从持久 Run 构造，Renderer 或 Prompt 不能声明该身份。
+9. pending assistant placeholder 与 collaboration timeline 都是展示状态，不得进入 Provider-neutral 历史。
+10. FileChange call body/Observation authority 不进入普通 durable Trace；successor 只能由 commit 后验证生成并保留在模型/私有 checkpoint 边界。
+11. Agent-tree 资源共享 scope 必须由 Host 从持久节点解析，locator 文本不构成授权。
 
 ## 代码真源
 
@@ -194,6 +199,8 @@ Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文�
 - Observation：`crates/core/src/model_request_observation.rs`、`storage/model_request_observation_repository.rs`
 - 逻辑 Trace：`crates/core/src/conversation_trace.rs`
 - Automation system context：`crates/core/src/protocol.rs`、`crates/core/src/runtime/preparation.rs`
+- FileChange context projection：`crates/core/src/tools/apply_patch.rs`、`crates/core/src/file_change_support.rs`、`crates/core/src/runtime/checkpoint.rs`
+- Tree resource scope：`crates/core/src/storage/agent_tree_resource_scope.rs`、`crates/core/src/resource_locator.rs`
 
 ## 测试
 
@@ -210,6 +217,8 @@ Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文�
 - [ ] 新上下文来源被明确分类为 fixed、durable、run-transient 或 request-only。
 - [ ] 容量检测、实际 request builder、Observation 和 UI 使用同一计量结果。
 - [ ] 新日志项定义安全压缩边界，并覆盖 Tool Call/Tool Result 原子性。
+- [ ] FileChange call body、Observation 与 successor 在 Trace/model/private checkpoint 之间保持脱权投影。
+- [ ] 新虚拟资源由统一 locator 分类，并在组装前用 Host-resolved Conversation/Project/tree scope 授权。
 - [ ] 摘要 schema、source revision、lineage、fork/rewrite/delete 行为均有迁移或失败策略。
 - [ ] Provider 新增的私有内容由 Provider policy 计量，不泄漏进普通消息。
 - [ ] 压缩失败、过期提交、取消和重启测试不改变旧 active head。
@@ -222,3 +231,4 @@ Observation 不保存 prompt、消息正文、Tool Result、网页/文件正文�
 - ContextFrame 的增量缓存只在 revision 连续时有效，复杂重写会退回全量重建。
 - Continuity Index 是有限引用集合，不是完整目录；精确内容必须通过历史工具打开。
 - 正在执行且未提交的流式模型片段不会成为可恢复的长期上下文。
+- final-response stream 开始后的协作活动不会回填已冻结的 parent message timeline；完整后续状态需从 Agent Center/event log 查询。

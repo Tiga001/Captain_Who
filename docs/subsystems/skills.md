@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Skills 平台
@@ -96,7 +96,11 @@ URI 不暴露源绝对路径。每次读取重新校验当前 Run 激活、revis
 
 `skills_preflight_script` 不启动解释器、不导入模块也不安装依赖；它从宿主 `$PATH` 依次寻找工作区外的可执行 `python3`/`python`，校验解释器 identity，并以有界方式读取 distribution metadata/命令依赖。当前只支持 `scripts/*.py` 和逻辑 interpreter `python3`。该路径不是打包固定版本的 Artifact Runtime，也不是容器或 OS 进程沙箱。
 
-`skills_preflight_script` 与 `skills_run_script` 当前都要求 `read=all`、`write=all` 和 `command safety=full_access`。前者的 Tool safety 仍是 ReadOnly 且不弹审批，但权限前置条件不会因此放宽；后者固定 `approval_mode=Always`，总是以 frozen `skill://` script、结构化 argv、声明 requirements、runtime fingerprint、timeout 和审批 identity 建立 proposed action，并要求每次明确批准。执行前会重复 preflight，比较 Skill revision、脚本 digest、requirements 和 runtime fingerprint；缺失依赖只报告，不自动安装。脚本 cwd 固定为当前 workspace root，当前请求 schema 不接受任意 cwd 或 input mount。
+`skills_preflight_script` 与 `skills_run_script` 当前都要求 `read=all`、`write=all` 和 `command safety=full_access`。前者的 Tool safety 仍是 ReadOnly 且不弹审批，但权限前置条件不会因此放宽。后者始终以 frozen `skill://` script、结构化 argv、声明 requirements、runtime fingerprint、timeout 和授权 identity 建立 proposed action；workspace/installed Skill 仍逐次要求明确批准，只有来源证明精确匹配 `bundled:application`、source kind/trust/SkillId 一致，且 `builtinExecution=auto_approve` 时，才可跳过本次点击自动执行。
+
+`builtinExecution` 是与 `command`、`commandSafety`、`read`、`write` 和 `patch` 分离的权限维度。默认值是 `require_approval`；Full permission preset 将其设为 `auto_approve`，General Settings 的 Custom permission 可单独切换。AutoApprove 只省略 application-owned bundled Skill/插件工具或脚本的显式批准，不扩大路径、读写、命令、manifest、revision、digest、runtime fingerprint 或依赖安全边界。Automation permission snapshot 也包含该字段，并在 admission 时与当前权限 ceiling 求交。
+
+执行前会重复 preflight，比较 source proof、Skill revision、脚本 digest、requirements 和 runtime fingerprint；缺失依赖只报告，不自动安装。脚本 cwd 固定为当前 workspace root，当前请求 schema 不接受任意 cwd 或 input mount。即使模型 Tool definition 仍声明 approval-required safety，Core Server 的 frozen dispatch 才是判断 exact application bundle 是否满足自动执行条件的权威，Renderer/模型不能自报 trust 来改变路由。
 
 脚本 bytes 先复制到私有临时 snapshot，再以 Python isolated mode（`-I`）和结构化 argv 启动，不经 shell 拼接。当前默认 timeout 120 秒、最大 600 秒；最多 128 个参数、参数总计 64 KiB、requirements 最多 128 项。stdout/stderr 使用与命令相同的 128 KiB 预览和 64 MiB Exact Capture。取消终止进程组；若副作用可能发生，终态必须明确。
 
@@ -147,6 +151,7 @@ GitHub acquisition 支持受控的仓库、目录或精确 `SKILL.md` URL，下�
 5. Installed package 内容不可变；current receipt 通过 CAS 切换 generation。
 6. 准备、批准和 commit 绑定同一 package/provenance/revision；过期 ref fail closed。
 7. 同一 Turn 激活改变 dynamic Toolset revision，恢复必须验证这一变化。
+8. `builtinExecution=auto_approve` 只适用于 exact application-owned source proof；installed/workspace 脚本和任何校验漂移仍要求审批或 fail closed。
 
 ## 代码真源
 
@@ -157,6 +162,7 @@ GitHub acquisition 支持受控的仓库、目录或精确 `SKILL.md` URL，下�
 - Installation：`skills/installation_workflow/`、`managed_installer/`、`managed_store.rs`
 - Acquisition：`skills/github_source_resolution.rs`、`github_acquisition.rs`、`acquisition_provenance.rs`
 - Tool adapters：`crates/core/src/tools/skills_*.rs`
+- Script dispatch：`crates/core/src/runtime/command_dispatch.rs`、`crates/core-server/src/application/agent/action_execution/runners.rs`
 - Core Server adapter：`crates/core-server/src/adapters/skills_adapter/`
 
 ## 测试
@@ -167,6 +173,7 @@ GitHub acquisition 支持受控的仓库、目录或精确 `SKILL.md` URL，下�
 - `crates/core/src/skills/installation_workflow/tests/`
 - `crates/core/src/skills/managed_installer/tests/`
 - `crates/core/src/runtime/tests/skill_activation.rs`
+- `crates/core/src/runtime/tests/builtin_capability.rs`
 - `crates/core-server/src/application/agent/tests/skills.rs`
 - `crates/core-server/src/application/agent/tests/pending_actions.rs` 的 Skill 恢复用例
 
@@ -178,6 +185,7 @@ GitHub acquisition 支持受控的仓库、目录或精确 `SKILL.md` URL，下�
 - [ ] 同一 Turn 激活、Checkpoint 恢复、包变化/缺失均有测试。
 - [ ] 新 capability 由 Rust Core/Core Server 验证的 application manifest 推导，并与权限求交。
 - [ ] script/materialize 使用 frozen URI、结构化输入、审批和 cancellation settlement。
+- [ ] builtin-execution 变更覆盖默认/Full/Custom、exact bundled source、workspace/installed source、Automation ceiling、恢复与 source/digest 漂移。
 - [ ] 安装来源新增 adapter 时实现 provenance、refresh schema、安全 capture 和多候选流程。
 - [ ] prepare/commit/expiry/cancel/crash/CAS/uninstall-ABA 覆盖完整。
 - [ ] 更新 bundled contract 和用户可见说明。
@@ -187,5 +195,5 @@ GitHub acquisition 支持受控的仓库、目录或精确 `SKILL.md` URL，下�
 - 激活作用域当前仅为单次 Run，不是跨会话常驻激活。
 - Workspace 目录在读取期间仍可能被协作进程修改；通过 no-follow/identity/revision 检查 fail closed，但不是对恶意共享文件系统的强隔离。
 - 安装源主要支持 GitHub 与已授权本地目录；其他 registry 需新增受审计 acquisition adapter。
-- Skill Script 当前依赖工作区外 `$PATH` 上经校验的宿主 Python 3；版本未由应用 bundle 固定，也没有 OS 级进程沙箱，因此必须满足 unrestricted read/write + Full Access，并逐次批准执行。
+- Skill Script 当前依赖工作区外 `$PATH` 上经校验的宿主 Python 3；版本未由应用 bundle 固定，也没有 OS 级进程沙箱，因此必须满足 unrestricted read/write + Full Access。workspace/installed 脚本仍逐次批准；只有 exact application-bundled script 可按 builtin-execution preference 自动执行。
 - 模型 discovery 目录有固定 token/数量预算，超大 catalog 会有诊断和裁剪。

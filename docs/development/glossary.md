@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 术语表
@@ -45,45 +45,55 @@ last_verified: 2026-08-23
 | Automation          | 用户配置并由 Core Server 持久调度的 Agent 定时任务；不要用它泛指浏览器自动化 |
 | Automation Run      | 一次计划、手动或恢复触发的 Automation 执行实例                               |
 | Attention           | Automation 中需要用户查看或处理的持久提醒投影，不等同于原生通知              |
+| Agent Template      | 工作区模板库中的子 Agent 配置；通过显式项目分配控制可用范围                  |
 
 中文正文统一写 `Agent`、`Turn`、`Run`，不交替使用“智能体”“轮次”“回合”“执行任务”来指代同一
 领域对象。“多智能体”可作为产品能力名称，具体实体仍写根 Agent/子 Agent。
 
 ## 模型、工具与扩展
 
-| 规范名称           | 含义                                                              |
-| ------------------ | ----------------------------------------------------------------- |
-| Provider           | 模型协议/服务适配边界                                             |
-| Model              | Provider 下的具体模型配置                                         |
-| Provider Profile   | Provider dialect、endpoint 能力和默认行为的配置档案               |
-| Continuation       | Provider 原生的可恢复会话状态；不等同于 Conversation              |
-| Tool               | Agent Runtime 可调用的结构化工具                                  |
-| Skill              | 带 `SKILL.md`、资源和可选脚本的版本化能力包；不要翻译成“技能插件” |
-| Capability         | 需要显式激活或由 Host 管理的一组能力                              |
-| MCP Server         | 通过 MCP 提供能力的 peer；用户配置的 Server 当前仅支持 stdio      |
-| HostBridge         | 应用内部、编译期允许的 MCP transport；不是用户 Server transport   |
-| Managed Playwright | Host 管理的内置浏览器自动化链路                                   |
+| 规范名称           | 含义                                                                |
+| ------------------ | ------------------------------------------------------------------- |
+| Provider           | 模型协议/服务适配边界                                               |
+| Model              | Provider 下的具体模型配置                                           |
+| Provider Profile   | Provider dialect、endpoint 能力和默认行为的配置档案                 |
+| Continuation       | Provider 原生的可恢复会话状态；不等同于 Conversation                |
+| Tool               | Agent Runtime 可调用的结构化工具                                    |
+| FileChange         | Agent 对单个 UTF-8 文本目标执行 create/update/delete 的统一领域动作 |
+| File Observation   | `read_file` 产生并绑定 Run、Conversation、目标与文件版本的写前证明  |
+| Run grant          | 用户在当前 Run 内授予后续同类动作的持久授权；不是永久 Permission    |
+| Skill              | 带 `SKILL.md`、资源和可选脚本的版本化能力包；不要翻译成“技能插件”   |
+| Capability         | 需要显式激活或由 Host 管理的一组能力                                |
+| MCP Server         | 通过 MCP 提供能力的 peer；用户配置的 Server 当前仅支持 stdio        |
+| HostBridge         | 应用内部、编译期允许的 MCP transport；不是用户 Server transport     |
+| Managed Playwright | Host 管理的内置浏览器自动化链路                                     |
 
 “外部 MCP”必须写清是“用户配置的 stdio MCP Server”；“内置 MCP”必须写清是 HostBridge/内置
 Capability，不能让读者误以为产品已支持用户 HTTP MCP Server。
 
 ## 数据与展示
 
-| 规范名称        | 含义                                                                |
-| --------------- | ------------------------------------------------------------------- |
-| Artifact        | Host 管理、具有身份、完整性和访问授权的生成制品                     |
-| Attachment      | 用户输入或 Conversation 绑定的附件                                  |
-| Trace           | append-only 的运行与审计事实流                                      |
-| Exact Archive   | 受限、可分页查询的精确历史归档，不等同于模型活跃上下文              |
-| Model Context   | 当前一次模型请求实际可见的内容                                      |
-| projection      | 从权威状态生成的有界消费者视图；正文可写“投影”                      |
-| snapshot        | 某个身份/revision 下的只读快照；不表示自动持续同步                  |
-| revision        | 领域记录的并发/版本身份                                             |
-| schema version  | SQLite canonical schema 版本；当前真源是 `STORAGE_SCHEMA_VERSION`   |
-| `schemaVersion` | 某个 DTO/envelope 自身的协议版本；不能与 SQLite schema version 混用 |
+| 规范名称                 | 含义                                                                      |
+| ------------------------ | ------------------------------------------------------------------------- |
+| Artifact                 | Host 管理、具有身份、完整性和访问授权的生成制品                           |
+| Generic Managed Artifact | Rust Core 发布的内容寻址受管制品；授权模型不同于 Browser Artifact         |
+| Browser Artifact         | Main broker 管理的短期 Browser 产物引用，例如截图；不是持久下载文件       |
+| Browser Download         | 保存到用户配置目录、由 Rust Core 持久登记并以无绝对路径引用暴露的下载文件 |
+| Attachment               | 用户输入或 Conversation 绑定的附件                                        |
+| Trace                    | append-only 的运行与审计事实流                                            |
+| Exact Archive            | 受限、可分页查询的精确历史归档，不等同于模型活跃上下文                    |
+| Model Context            | 当前一次模型请求实际可见的内容                                            |
+| Notification Fact        | 与业务状态同边界提交的不可变通知事实；不是 Event 或展示文案               |
+| Notification Batch       | Rust Core 合并、租约和结算的一组待投递通知事实                            |
+| System Notification      | Main 通过操作系统展示的原生提醒；不是业务状态、Approval 或 Attention      |
+| projection               | 从权威状态生成的有界消费者视图；正文可写“投影”                            |
+| snapshot                 | 某个身份/revision 下的只读快照；不表示自动持续同步                        |
+| revision                 | 领域记录的并发/版本身份                                                   |
+| canonical schema version | SQLite canonical schema 版本；当前为 v27，真源是 `STORAGE_SCHEMA_VERSION` |
+| `schemaVersion`          | 某个 DTO/envelope 自身的协议版本；不能与 SQLite canonical schema 混用     |
 
-Artifact 首次出现可写“Artifact（制品）”，之后保持 `Artifact`。不要用“产物、文件、附件、Artifact”
-交替描述同一受管对象。
+Artifact 首次出现可写“Artifact（制品）”，之后保持 `Artifact`。Generic Managed Artifact、Browser
+Artifact、Browser Download 和 Attachment 是四种不同授权模型，不要仅因它们最终可关联文件就混称。
 
 ## UI 与测试
 

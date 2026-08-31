@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # IPC 与协议
@@ -13,10 +13,10 @@ last_verified: 2026-08-23
 
 跨进程接口分为两个 workspace package：
 
-| 包                    | 职责                                                                    | 典型内容                                                                                        |
-| --------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `@mycopilot/protocol` | 与传输无关的 DTO、schema version、解析器、限制常量和 JSON-RPC method 名 | Agent、Automation、MCP、Skill、Browser、Git、Terminal、workspace files、image generation 等协议 |
-| `@mycopilot/host-api` | Electron Renderer 可见的 API 形状和 IPC channel 名                      | `HOST_CHANNELS`、领域 HostApi、`HostInvocationResult`、`getHostApi()`                           |
+| 包                    | 职责                                                                    | 典型内容                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `@mycopilot/protocol` | 与传输无关的 DTO、schema version、解析器、限制常量和 JSON-RPC method 名 | Agent、Automation、Notification、MCP、Skill、Browser、Git、Terminal、workspace files、image generation 等协议 |
+| `@mycopilot/host-api` | Electron Renderer 可见的 API 形状和 IPC channel 名                      | `HOST_CHANNELS`、领域 HostApi、`HostInvocationResult`、`getHostApi()`                                         |
 
 Main、Preload、Renderer 应导入这两个包，而不是复制字符串或重新声明近似类型。Rust 侧同一 JSON-RPC 契约由 Rust Core/Core Server 类型和 serde 校验实现；涉及双运行时排序、digest 或枚举时，代码注释和测试必须保持字节级一致。
 
@@ -64,6 +64,7 @@ Rust Core notification 或 Main service event
 - `git`
 - `imageGeneration`
 - `mcp`
+- `notifications`
 - `office`
 - `resources`
 - `search`
@@ -78,7 +79,7 @@ Rust Core notification 或 Main service event
 
 `src/preload/index.ts` 构造完整 `HostApi`，并仅在 `process.contextIsolated` 时通过 `contextBridge.exposeInMainWorld('mycopilot', { host })` 暴露。否则 Preload 直接失败。
 
-领域较复杂时使用独立 bridge，例如 `AgentIpcBridge`、`AutomationIpcBridge`、`BrowserIpcBridge`、`McpIpcBridge` 和 `TerminalIpcBridge`。简单只读调用可以内联，但仍必须使用 `HOST_CHANNELS` 和共享类型。
+领域较复杂时使用独立 bridge，例如 `AgentIpcBridge`、`AutomationIpcBridge`、`NotificationIpcBridge`、`BrowserIpcBridge`、`McpIpcBridge` 和 `TerminalIpcBridge`。简单只读调用可以内联，但仍必须使用 `HOST_CHANNELS` 和共享类型。
 
 Preload 的职责包括：
 
@@ -132,9 +133,9 @@ Main 通过 `captureHostInvocation()` 保留 Core Server JSON-RPC 的 code/data�
 
 - `invoke/handle`：需要唯一结果或结构化错误的请求。
 - `send/on`：允许丢弃或无需应答的高频命令，例如 terminal 输入与 ACK。
-- Main → Renderer event：窗口状态、Agent、MCP changed、Skill changed、Terminal output/exit、Browser surface command。
-- Main → Renderer event：Automation event/resync 和原生通知点击产生的导航 intent。
-- Main ↔ Core Server JSON-RPC notification：长任务事件、Automation event/resync 和 Managed Playwright 反向桥命令。
+- Main → Renderer event：窗口状态、Agent、MCP changed、Skill changed、Terminal output/exit、Browser surface command/state/download 和数据变更。
+- Main → Renderer event：Automation event/resync、Notification event/resync 和原生通知点击产生的导航 intent。
+- Main ↔ Core Server JSON-RPC notification：长任务事件、Automation/Notification event/resync 和 Managed Playwright 反向桥命令。
 
 选用单向传输不等于不需要校验。必须有 owner、session/Run/request id、序列或 generation，并定义服务退出时如何终止。
 
@@ -156,9 +157,13 @@ list / get / create / update / setEnabled / runNow / delete
 listRuns / attentionSummary / acknowledgeAttention
 ```
 
-它还暴露三个可解除订阅的输入面：`onEvent`、`onResync` 和 `onOpenRequested`。对应 Electron channel 统一定义在 `HOST_CHANNELS.automations`；Preload 只转发固定 invoke/event，并在 listener ready 后发送 `resyncReady` 握手，不提供任意 automation method 或通用 IPC。
+它还暴露 `onEvent`、`onResync`；历史 `onOpenRequested`/`host:automation.openRequested` 仅保留兼容契约，当前原生通知 producer 不再使用它。对应 Electron channel 统一定义在 `HOST_CHANNELS.automations`；Preload 只转发固定 invoke/event，并在 listener ready 后发送 `resyncReady` 握手，不提供任意 automation method 或通用 IPC。
 
-Main ↔ Core Server 使用同名的十个 Automation 业务 JSON-RPC method。应用级通知另有独立协议；其中原生投递方法为 **Host-only**：
+Main ↔ Core Server 使用同名的十个 Automation 业务 JSON-RPC method。Automation event/resync 的排序、snapshot 重载与 mutation CAS 仍只说明 Scheduled 业务状态；原生交付由下节的通用 Notification 协议负责。
+
+## Notification 协议边界
+
+通用通知共享普通 `human_root` 根任务与 Automation，详细语义见[通用通知](../subsystems/notifications.md)。`NOTIFICATION_SCHEMA_VERSION = 1`；它不是 Automation 或 SQLite schema。Core Server JSON-RPC 方法包括：
 
 ```text
 notifications.claim / validate / acknowledge / release / suppress
@@ -166,16 +171,29 @@ notifications.list / summary / markSeen
 notifications.settings.get / settings.update
 ```
 
-claim/validate/acknowledge/release/suppress/list/summary 只供 Main 的 `SystemNotificationCoordinator` 使用，不得加入 Renderer Host API 或 Electron invoke allowlist。Renderer 只获得 settings、原生点击导航，以及用于点击失败补偿的精确 event `markSeen`；没有通知列表或 badge API。claim token、lease、最终 validation 和 ACK/release 都由 Core Server/Rust Core 持久状态校验；Renderer 不是投递授权边界。
+其中 claim/validate/acknowledge/release/suppress/list/summary 是原生 delivery Host-only 方法，只供 Main 的 `SystemNotificationCoordinator`/通知 registrar 使用，不得加入 Renderer Host API 或 Electron invoke allowlist。Renderer-facing `NotificationsHostApi` 只暴露 `setLocale`、`markSeen`、`getSettings`、`updateSettings`、`onEvent`、`onResync` 和 `onOpenRequested`；当前没有通知列表或 badge API。claim token、lease、最终 validation 和 ACK/release 都由 Core Server/Rust Core 持久状态校验；Renderer 不是投递授权边界。
 
-Core Server 主动发送两类 notification：
+Core Server 主动发送两组领域 notification：
 
 - `automation.event`：包含 `sequence`、`eventId`、kind、`automationId`、可选 `runId`/`resourceRevision`。它是有序失效通知，不携带完整 Automation task/Run 真相。
 - `automation.resync`：当前 reason 为 `core_started`，携带冻结的 `lastSequence`。Main 缓存启动 resync，Preload 完成 `resyncReady` 后重放；Renderer 收到后重新读取权威 snapshot。
+- `notification.event` / `notification.resync`：通知事实、seen/resolved/settings 变化和启动水位；用于唤醒 Main delivery、刷新设置或导航补偿，不是 native receipt。
 
-Main 另以 `host:automation.openRequested` 发送经 parser 校验的 `AutomationOpenRequest`。这是原生通知点击后的导航 intent，只允许打开精确 Automation task 或 Conversation/message；它既不是 Core Server JSON-RPC notification，也不能证明 Automation Run 已成功。
+Main 以 `host:notifications.openRequested` 发送经 parser 校验的 `NotificationOpenRequest`。这是原生通知点击后的导航 intent，只允许 application、精确 Conversation/message/approval 或 Automation/run；它既不是 Core Server JSON-RPC notification，也不能证明业务 Run 已成功。`openRequestedReady` 与 resync readiness 分离，避免 settings listener 已 ready 而 AppShell 导航 handler 尚未安装。
 
 事件正确性依赖 identity 与排序：Renderer 必须丢弃重复/倒序 `sequence`，发现 resync 或不能证明连续性时重新 list/get/listRuns/attention；不能通过 event 文案、到达时间或 `resourceRevision` 猜测缺失状态。update/enable/delete 使用 Automation task revision/CAS，create/runNow 使用稳定 request identity，结构化冲突必须保留到 UI recovery。
+
+## Browser 与 FileChange 契约
+
+Browser 有四条独立 schema 线：surface v1、data/preferences/history v1、download v2 和短期 Browser Artifact v1。Surface action/state 必须绑定 `surfaceId + surfaceInstanceId + stateRevision`；Main 持有逻辑 URL、加载错误和 crash presentation，Renderer 丢弃错误 incarnation 或倒退 revision。Browser history/preferences/download rows 由 Rust Core 持久化，Main 组合 Electron Session 数据和原生操作；Renderer 永远不接收 WebContents、Target、托管下载绝对路径或自定义下载目录真值。详细契约见[浏览器与自动化](../subsystems/browser-automation.md)。
+
+Agent `FileChange` 使用 v1 协议，并通过 `AgentHostApi` 暴露；完整执行与恢复契约见 [FileChange 子系统](../subsystems/file-change.md)：
+
+```text
+readFileChange / getFileChangeDiff / getFileChangeHistoryDiff
+```
+
+活动 staged transaction 以 transaction id 分页读取内容/diff；已结算历史 diff 以 conversation、assistant message、Run 和 tool call 的精确组合查询 durable action audit。`getFileChangeHistoryDiff` 不重放 Tool，也不授予写权限。UI 获得 workspace-relative 或权限允许的外部 display path、安全状态/统计和有界 patch；private canonical target、execution binding 与 file bytes 不进入 Renderer。历史与活动查询不可互换，也不能把 Git Review snapshot id 当作 FileChange authority。
 
 ## 原生能力
 
@@ -184,6 +202,7 @@ Renderer 不能提交任意路径来替代原生选择：
 - MCP executable/cwd、项目目录、头像、附件和 Skill 安装目录由 Main 打开原生 picker。
 - Browser Artifact 导出由 Main 打开 save dialog；Renderer 只提交不可变 Artifact reference。
 - Browser 自动化文件上传先由 Main picker 选择并准备 process-only 路径能力。
+- Browser 手动下载的“每次询问位置”由 Main save dialog 执行；Agent 下载不弹该对话框。下载历史/live center 只携带 path-free reference，copy/reveal/open directory 均由 Main 处理。
 
 picker 只授予对应操作所需的最小能力。“用户选择了路径”不能自动授权执行、递归读取或后续不同请求复用。
 
@@ -208,9 +227,11 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 5. 权限字段、revision、digest、owner 和 instance identity 只能由权威一侧生成或验证。
 6. 绝对托管路径和 process-only capability 不得进入 Renderer、持久会话消息或模型 JSON。
 7. 订阅必须可解除，迟到事件必须通过身份和 generation 拒绝。
-8. Automation Host-only 通知投递 RPC 永远不进入 Renderer allowlist；`resyncReady` 只声明 listener ready，不授予业务权限。
+8. 通用 Notification delivery Host-only RPC 永远不进入 Renderer allowlist；`resyncReady` 只声明 listener ready，不授予业务权限。
 9. Automation event/resync 不是状态或系统通知送达 receipt；业务消费者必须回读 SQLite 派生的权威 snapshot。
 10. Automation DTO schema v1、permission mode v2 和 SQLite schema v27 必须分别命名、分别验证。
+11. Notification active click channel 是 `HOST_CHANNELS.notifications.openRequested`；Automation 同名旧 channel 只作兼容，不能接入第二个 native producer。
+12. Browser 和 FileChange 的安全 DTO 必须绑定 exact instance/revision/owner；Renderer 展示引用不能转换为路径或执行 authority。
 
 ## 代码真源
 
@@ -218,16 +239,21 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 - Renderer Host API 类型与错误：`packages/host-api/src/index.ts`
 - 共享协议与 parser：`packages/protocol/src/`
 - Automation TypeScript 协议：`packages/protocol/src/automations.ts`
+- Notification TypeScript 协议：`packages/protocol/src/notifications.ts`
+- Browser 协议：`packages/protocol/src/browser.ts`、`browserData.ts`、`browserDownloads.ts`、`browserArtifacts.ts`
 - Automation 跨语言 fixture：`packages/protocol/fixtures/automation-contract-v1.json`
 - Automation Rust DTO/method：`crates/protocol-rs/src/automations.rs`、`crates/protocol-rs/src/methods.rs`
 - Preload 组合：`src/preload/index.ts`
 - Preload 领域桥：`src/preload/*IpcBridge.ts`
 - Automation Preload bridge：`src/preload/AutomationIpcBridge.ts`
+- Notification/Browser Preload bridge：`src/preload/NotificationIpcBridge.ts`、`BrowserIpcBridge.ts`
 - Main IPC 组合：`src/main/ipc.ts`
 - Main 领域 registrar：`src/main/ipc/*.ts`
 - Automation Main registrar：`src/main/ipc/automationIpc.ts`
 - 通用原生通知 owner：`src/main/notifications/systemNotificationCoordinator.ts`
 - 通知 Main registrar：`src/main/ipc/notificationIpc.ts`
+- Browser Main registrar：`src/main/ipc/browserSurfaceIpc.ts`、`browserDataIpc.ts`、`browserDownloadIpc.ts`、`browserArtifactIpc.ts`
+- Agent/FileChange Main registrar：`src/main/ipc/agentIpc.ts`
 - 发送方信任包装：`src/main/ipc/trustedIpc.ts`
 - Renderer Host 客户端：`src/renderer/src/host/hostClient.ts`
 - Main/Core Server JSON-RPC：`src/main/core/jsonRpcClient.ts`、`src/main/core/coreServer.ts`
@@ -267,7 +293,9 @@ Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`�
 - [ ] 原生路径和敏感 identity 没有进入 Renderer payload。
 - [ ] 事件有稳定 owner/sequence/generation，并可解除订阅。
 - [ ] schema version、Rust/TypeScript 枚举顺序和 digest 规则保持一致。
-- [ ] Automation 变更同步核对 DTO schema、permission mode version、Electron channel、十个 Renderer request、四个 Host-only method 和双语言 fixture。
+- [ ] Automation 变更同步核对 DTO schema、permission mode version、Electron channel、十个 Renderer request、event/resync 和双语言 fixture。
+- [ ] Notification 变更同步核对 schema、Host-only claim/validate/ACK/release/suppress/list/summary、Renderer settings/markSeen/events/open 和 ready 握手。
+- [ ] Browser/FileChange 变更同步核对 exact owner/instance/revision、分页预算、path-free projection 和 history-vs-live query。
 - [ ] Automation event/resync 的 sequence、startup replay、unsubscribe、Renderer ready handshake 和 authoritative reload 均有测试。
 - [ ] 对应架构或子系统文档已更新。
 
@@ -280,3 +308,4 @@ Automation 分层测试真源包括 `packages/protocol/src/automations.test.ts`�
 - Automation 的真实 Core Server E2E 不在默认 `pnpm check` 内，跨层变更必须显式运行专项命令。
 - 当前没有由单一 IDL 自动生成 TypeScript/Rust Automation DTO；schema v1、method 和限制依赖 fixture、严格 parser 与双端测试防漂移。
 - Main 当前按单主 Renderer 产品形态缓存 startup resync 和最新 pending Automation navigation；多窗口广播 event，但原生通知点击只交付给最近 listener-ready 的受信 Renderer。
+- Browser 与 FileChange 各由多条独立 schema 演进线组成，当前没有单一 IDL 自动生成 TypeScript/Rust/Electron 三端契约。

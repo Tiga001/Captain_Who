@@ -2,7 +2,7 @@
 status: current
 audience: maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 文档维护规范
@@ -11,6 +11,13 @@ last_verified: 2026-08-23
 
 开发文档应回答“系统现在如何工作、为什么这样设计、怎样安全地修改和验证”，而不是重复代码或保存
 过期计划。Markdown 是唯一维护源；PDF 仅在需要对外发布时由 Markdown 生成，不反向编辑。
+
+仓库现在维护两棵边界不同的文档树：
+
+- [`docs/`](../README.md) 面向开发者和维护者，可链接代码真源、内部限制、发布门禁与恢复步骤；
+- [`public-docs/`](../../public-docs/README.md) 面向用户与集成开发者，只描述可验证的产品行为，不链接或泄露内部开发文档。
+
+同一事实需要同时服务两类读者时，应分别按读者任务组织内容，并以代码为共同真源；不要让公开文档反向成为内部协议或安全边界的 authority。
 
 ## 文档分类
 
@@ -27,6 +34,10 @@ last_verified: 2026-08-23
 一个主题只保留一篇权威文档。跨主题内容使用链接，不复制容易漂移的版本号、工具全集、DDL 或协议
 字符串。超过约 500 行且包含多个独立生命周期时，应拆分。
 
+`public-docs/` 另按用户任务分为 `user/`、`integrations/`、`releases/`、`support/`、`security/` 和
+`legal/`。每一级 `README.md` 都是该层索引；公开页面不得用占位内容承诺尚未建立的隐私政策、服务条款、
+漏洞报告通道、版本生命周期或支持渠道。
+
 ## 必需元数据
 
 每篇 Markdown 在标题前使用：
@@ -42,6 +53,10 @@ last_verified: YYYY-MM-DD
 
 `last_verified` 表示已经对照代码和测试核验，而不是最后一次文字修改。历史文档使用
 `status: historical`，草案使用 `status: draft`。
+
+公开文档还必须提供 `title` 和 `description`，`audience` 只能是 `public`、`user` 或
+`integration-developer`，并统一使用 `status: current`。未验证的公开主题应暂不创建，而不是发布 draft 或
+空白占位页。
 
 ## 推荐结构
 
@@ -76,6 +91,7 @@ schema version、DTO `schemaVersion`、领域 `revision` 是不同概念，必�
 - TypeScript/Rust 双端协议必须链接共享 fixture 或两端契约测试。
 - 工具、RPC、IPC、表和测试全集不得靠人工清单宣称“完整”，除非有自动漂移检查。
 - 外部规范只链接官方来源；文档中明确本项目已实现的子集。
+- 公开文档的本地链接必须留在 `public-docs/` 边界内；允许的仓库外部文件目前仅是两份第三方声明。
 
 ## 变更触发器
 
@@ -100,6 +116,7 @@ ADR；不要悄悄重写历史。
 提交文档前至少完成：
 
 - `pnpm check:docs` 通过；
+- 修改公开文档时 `pnpm check:public-docs` 通过；
 - Markdown 经 Prettier 检查；
 - 所有本地链接和代码路径存在；
 - 命令与 `package.json`/Cargo 配置一致；
@@ -110,5 +127,10 @@ ADR；不要悄悄重写历史。
 - 当前态、计划和历史没有混写；
 - 未复制 Token、用户路径、日志中的敏感值或私有配置。
 
-`pnpm check` 已包含 `pnpm check:docs`；仓库目前没有 CI 工作流，因此仍需由提交者在本地执行。增加 CI
-后，应将同一命令设为必过门禁，不能维护另一套不同规则。
+`pnpm check` 已包含 `pnpm check:docs`、`pnpm check:public-docs` 与 Agent avatar 校验；仓库目前没有 CI
+工作流，因此仍需由提交者在本地执行。增加 CI 后，应将同一命令设为必过门禁，不能维护另一套不同规则。
+
+两套检查器的真源分别是 [`check-docs.mjs`](../../scripts/check-docs.mjs) 与
+[`check-public-docs.mjs`](../../scripts/check-public-docs.mjs)。新增公开页面时应从所属 `README.md` 索引；若该页
+属于发布必需集合，再更新后者的必需文档清单。删除尚未具备事实基础的页面时同步维护 forbidden placeholder
+清单。

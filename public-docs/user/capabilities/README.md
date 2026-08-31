@@ -1,10 +1,10 @@
 ---
 title: 能力指南
-description: 了解 Tool、Skill、MCP、Multi-Agent、Scheduled Automation、浏览器与 Office 产物能力。
+description: 了解 Tool、Skill、MCP、Multi-Agent、Scheduled Automation、通知、浏览器与 Office 产物能力。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 能力指南
@@ -18,6 +18,7 @@ MyCopilot 的能力由几层组成。先区分它们，能避免把“有说明�
 | [MCP](mcp.md)                                 | 连接外部工具的通用插座           | 配置本地 Server，授权启动和调用  |
 | [Multi-Agent](multi-agent.md)                 | 由根 Agent 管理的协作小组        | 定义分工，观察子 Agent，处理审批 |
 | [Scheduled Automation](automations.md)        | 定时启动根 Agent 任务            | 设置计划、目标、权限和通知       |
+| [系统通知](notifications.md)                  | 普通任务与 Automation 状态提醒   | 配置条件、声音和内容预览         |
 | [浏览器自动化](browser-automation.md)         | Agent 控制受管网页               | 开启能力，准备页面，审批敏感动作 |
 | [Office 与 Artifact](artifacts-and-office.md) | 处理文档、表格、演示、PDF 和图片 | 选择 Skill、提供输入并核对输出   |
 

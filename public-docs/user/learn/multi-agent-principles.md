@@ -4,7 +4,7 @@ description: 理解根 Agent、子 Agent、任务树、消息与并行协作是�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Multi-Agent 原理
@@ -36,6 +36,8 @@ Multi-Agent 不是让多个模型随意聊天，而是让一个根 Agent 把可�
 
 父子之间的消息会先持久保存。单纯发送消息不一定让一个空闲 Agent 立即运行；需要继续工作时，父 Agent 会分配 follow-up，创建新的执行机会。一次 Turn 结束也不会删除该 Agent，后续仍可唤醒。
 
+同一任务树还形成受信资源范围：根 Agent 与后代可以使用树内其他对话中获准的附件、受管 Artifact 和 Agent 下载引用。范围来自数据库中的树身份，不来自模型参数；独立树之间仍保持隔离。
+
 ## 并行并非越多越好
 
 所有交互式根 Agent、子 Agent 和 Scheduled Automation 都共享有限的进程并发容量。子任务如果大量读取相同文件、依赖同一前置结论或需要频繁互相等待，拆开反而会变慢。
@@ -48,7 +50,7 @@ Multi-Agent 不是让多个模型随意聊天，而是让一个根 Agent 把可�
 
 ## 用户需要记住的边界
 
-- 子 Agent 模板按项目管理，修改只影响未来创建的节点；
+- 子 Agent 模板位于工作区库，通过项目分配控制可用范围，修改只影响未来创建的节点；
 - 用户不能直接编辑或启动子 Agent 对话；
 - Scheduled Automation 不能直接以子 Agent 对话为目标；
 - Multi-Agent 不自动保证结论一致，根 Agent 仍需比较证据；

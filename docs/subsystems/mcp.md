@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # MCP 子系统
@@ -85,6 +85,8 @@ stdio connector 使用 rmcp Auto 生命周期：
 
 progress notification 不持久化，也不延长 Host-owned hard deadline。取消是 best effort。一旦请求可能发出，timeout、cancel、transport close 或子进程丢失会产生 `OutcomeUnknown`；不得自动 retry/replay。JSON-RPC error response 与 `isError=true` 是已收到的权威响应，不属于 unknown。
 
+人工审批 ticket 与短生命周期 sealed/process payload 分开。外部 MCP Server、内置敏感 Tool、Browser risk 或 Skill installation 的票据会保持 pending，直到用户决定或所属 Run 的取消/终态流程显式收口；payload TTL 不再替用户结算。若用户晚批准时精确执行材料已不可用，Host 提交一个 `dispatchCertainty=definitely_not_dispatched`、`retryable=false` 的 failed Tool Result，让原 Run/Automation continuation 正常继续；它不是 dispatch、不是 OutcomeUnknown，也不能自动重新调用。
+
 ## 5. Transport 边界
 
 ### 用户 stdio MCP Server
@@ -109,6 +111,8 @@ stdio connector 负责：
 - complete/dispatchPhase 必须 schema 与 operation 匹配，certainty 只能单调前进；
 - 10 分钟 idle timeout 后可关闭 Managed Playwright runtime；
 - 关停时 Core Server 与 Main 完成专门的反向 settlement。
+
+Managed Playwright `CallTool` 的执行预算由 Electron Main 计时，以便显式 BrowserRisk 人工等待暂停但不重置剩余预算。Rust reverse bridge 对 `CallTool` 等待 completion 时不再叠加 transport deadline，但仍接受 Manager cancellation 与 shutdown；非 `CallTool` bridge operation 保留原 transport deadline。用户配置的 stdio MCP Server 仍使用 Manager-owned hard deadline，不继承该特例。
 
 未来新增 HostBridge channel 必须有独立 manifest、Host adapter、风险策略和 E2E；不得接受任意字符串通道后动态加载。
 
@@ -150,6 +154,7 @@ Registry 只持久化显式 allowlist：MCP Server identity/display、scope/sour
 - master key 应位于 OS Credential Store，不与 SQLite ciphertext 同存。安全 credential backend 不可用时只保留进程内 payload，重启后审批不能继续。
 - checkpoint、trace、IPC 和 Renderer 只接收 typed identity 与有界 safe projection。
 - 原始 MCP result 不做 exact archive。过大结果在 transport 拒绝；binary/image/audio/resource block 不进入普通模型上下文。
+- Managed browser download 的字节由 Main broker 捕获，Core Server 通过 Rust Core storage 保存无路径 identity、hash、scope、设置与历史。模型/Renderer 只接收 `browser-download:<uuid>` 和安全元数据，不能看到受管绝对路径。
 
 ## 9. 中央安全限额
 
@@ -184,6 +189,8 @@ Registry 只持久化显式 allowlist：MCP Server identity/display、scope/sour
 
 Main 不把任意网页或系统浏览器直接交给模型。BrowserSurface、target、network、file、download 和 Artifact 都由独立 broker 管理；敏感 target/file/action 绑定通过 `mcp.browserRisk.authorize/cancel` 与内置 pending action 流程完成。
 
+成功下载会从 `browser_click`、`browser_get_config`、`browser_wait_for` 等结果/进度中投影 path-free reference；当前引用 contract 为 schema v2，Agent Tool Result 只接受 `source=agent`，每个结果最多 16 个，单项最多 2 GiB。后续 `read_file`、Command/Office 输入等使用该引用时，Rust Core 重新校验当前 Conversation、同一 Agent task tree、同 Project，或 read=all 下显式允许的手工下载能力。task tree scope 从持久 `agent_nodes` 推导；opaque ID、自报 root 或外部 Conversation 不能授权读取。
+
 跨 Core Server/Main 协议当前为 Managed Playwright bridge schema v4，方法包括：
 
 - `mcp.builtinPlaywright.command`
@@ -203,6 +210,7 @@ Main 不把任意网页或系统浏览器直接交给模型。BrowserSurface、t
 - Playwright manifest：`crates/core-server/src/application/mcp/playwright_manifest.rs` 及 `crates/core-server/resources/playwright-*.json`
 - HostBridge：`crates/core-server/src/application/mcp/managed_playwright_bridge.rs`
 - Browser Host：`src/main/mcp`、`src/main/core/browser*`、`managedPlaywrightBridge*`
+- Browser download：`src/main/browser/BrowserDownloadBroker.ts`、`crates/core/src/browser_downloads.rs`、`crates/core/src/storage/service/browser_downloads.rs`
 - 跨语言协议：`packages/protocol/src/mcp`、`crates/protocol-rs/src/managed_playwright_bridge.rs`
 
 ## 12. 测试
@@ -215,6 +223,7 @@ cargo test -p mycopilot-core-server --test mcp_stdio_runtime_e2e
 pnpm test:playwright-fixed-catalog
 pnpm test:playwright-round3-stress
 pnpm exec vitest run --project managed-playwright-e2e
+pnpm exec vitest run --project unit src/main/core/browserDownloadIpc.test.ts src/main/core/browserDownloadBroker.test.ts
 pnpm test:playwright-conformance-report
 ```
 
@@ -230,6 +239,7 @@ repository-owned stdio fixture 必须确定性、离线、只启动 `current_exe
 - Windows stdio 当前不能声明 process-tree isolation 或 release acceptance。
 - Manager lifecycle 使用进程内 channel；通知风暴虽会 coalesce，未来更高流量仍需 bounded/lag-aware queue。
 - Managed Playwright 尚无“61 个模型可见 Tool × 成功/非法输入/取消/超限/target-close”的完整自动矩阵；69 是 upstream 总数，不能与 exposed 数混用。
+- Browser download 的同树/同 Project 复用是本地授权便利，不是跨树共享；当前没有跨设备同步或成员级转授权。
 - Packaged Managed Playwright gate 目前只证明指定的 unpacked macOS bundle 中应用/Core Server/Renderer 与锁定依赖可以启动；真实 packaged Agent → Managed MCP Server → 本地 fixture 仍为 pending，详见构建发布文档。
 
 ## 14. 变更检查表
@@ -240,7 +250,10 @@ repository-owned stdio fixture 必须确定性、离线、只启动 `current_exe
 - [ ] config/launch/tool/risk 四类授权是否没有被合并或绕过？
 - [ ] 新参数/结果是否有 byte/depth/count 上限、redaction 和持久化策略？
 - [ ] timeout/cancel/close 是否定义 dispatch certainty 和 `OutcomeUnknown`？
+- [ ] 人工 ticket 与 sealed/process payload TTL 是否分离，晚批准缺少材料时只生成 definitely-not-dispatched 失败？
 - [ ] 新 HostBridge 是否是编译期 allowlist，且有严格 schema、pending 上限、idle/shutdown？
+- [ ] Managed `CallTool` timeout 是否仍由 Main 计时、只暂停显式人工等待，并保留 cancellation/shutdown？
+- [ ] 下载是否只投影 path-free reference，并在后续消费时重新校验 Conversation/tree/Project scope？
 - [ ] 更新 Playwright 包或 Tool 时，是否同步 upstream Catalog、reviewed manifest、digests、package verifier 和 conformance report？
 - [ ] 是否运行 stdio、Core Server E2E、Main/Renderer、固定 Catalog、stress 和打包相关测试？
 - [ ] 是否更新本文的支持矩阵与当前限制，且未扩大 conformance 声明？

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 前端架构
@@ -63,6 +63,8 @@ Feature 之间可以在明确的产品组合点复用，例如 Files 复用 Git 
 
 启动门要求 `core`、`modelSettings`、`projects`、`uiPreferences`、`composerDrafts`、`conversationMetas` 全部 ready。工作区组件会立即挂载，但 ready 前处于 `inert`/`aria-hidden` 状态。这允许各领域启动 effect 执行，同时防止用户操作部分加载的数据。
 
+React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend config，用共享 language registry 设置静态启动壳的 `lang`、`dir`、loading 和 ambient 文案；损坏或不可读的 localStorage 回退 `zh-CN`，不能阻断首屏。当前 registry 支持 `zh-CN`、`zh-TW`、`en-US`、`en-GB`、`ko-KR`、`ja-JP`、`fr-FR`、`it-IT` 和 `ru-RU`，Renderer、启动壳与 Main 的原生通知文案必须复用该目录，不能各自维护语言枚举。
+
 重试会递增 startup attempt。任何异步加载都应捕获本次 attempt、request sequence 或业务 identity；迟到的旧尝试不得覆盖新状态。
 
 ## AppShell 编排边界
@@ -74,6 +76,7 @@ Feature 之间可以在明确的产品组合点复用，例如 Files 复用 Git 
 - Agent Run 绑定、事件缓冲、流式文本刷新、停止与权威终态对账。
 - 待审批动作、命令会话恢复、steer/排队消息、编辑重写和 Provider transition。
 - Multi-Agent collaboration store、审批和 observer surface。
+- 通用通知 settings/event/resync、原生点击导航和 Main locale mirror；不在前端实现第二份投递 outbox。
 - 左侧栏、中央会话页、Automation 的 Scheduled 主视图、右侧栏 workspace/capability 和全屏设置页。
 
 复杂流程应提取为 `app/use*.ts` 或相应 feature hook；AppShell 只保留跨领域组合与顶层回调。Feature 不得反向导入 AppShell。
@@ -88,6 +91,8 @@ Feature 之间可以在明确的产品组合点复用，例如 Files 复用 Git 
 
 Automation 在 UI 中显示为 `Scheduled`。它由左侧栏入口切换为独立 `primaryView`，覆盖中央会话页和右侧栏，而不是注册成右侧栏页面；左侧栏仍保留，用于切回 Conversation。`AppShell` 只持有视图切换、外部导航请求和本次应用会话的 drawer 宽度偏好，Automation task、Automation Run 和 attention 的业务状态仍来自 Core Server。
 
+Projects 标题栏的新增按钮直接调用 Main 的原生文件夹选择器并创建项目；Renderer 会接收并保存该 picker 已授权的绝对路径，但不能自报任意新目录来绕过选择器。首次安装的模型目录为空，`selectedModelId=''`，用户必须在 Configuration 中配置模型；UI 不得以历史内置模型列表作为后端默认值。
+
 设置页以覆盖主工作区的全屏视图呈现。`AppShellWorkspace` 在设置打开时保持挂载，但设为 `inert` 和 `aria-hidden`，从而保留会话、终端和浏览器状态，同时隔离焦点和辅助技术树。
 
 会话视图分两种能力面：
@@ -99,16 +104,18 @@ Automation 在 UI 中显示为 `Scheduled`。它由左侧栏入口切换为独�
 
 ## 状态归属
 
-| 状态                                             | 当前真源                                                             | Renderer 责任                                                   |
-| ------------------------------------------------ | -------------------------------------------------------------------- | --------------------------------------------------------------- |
-| 语言、明暗偏好、主题 id                          | `localStorage` 的 frontend config                                    | 启动前容错读取；规范化；同步 DOM 属性和 Electron native theme   |
-| 模型设置、项目、会话、消息、草稿、UI preferences | Rust Core 管理的 SQLite，经 Storage Host API                         | hydration、局部编辑、按规定顺序写回；不能绕过协议直接访问数据库 |
-| 图片生成、MCP、Skill、Agent 模板等管理状态       | Rust Core 或 Electron Main service 的权威快照与 revision             | 使用 CAS/precondition；冲突后刷新，不在前端合并猜测             |
-| 图片生成凭据                                     | Rust Core 选择的凭据存储                                             | 只暂存用户当前输入，成功后立即清空；从不回读明文                |
-| 活动 Run、pending action、command session        | Rust Core 事件和存储记录                                             | 绑定权威 id、缓冲早到事件、reload 时重新 hydrate/reconcile      |
-| Automation task、Automation Run、attention       | Core Server/Rust Core 管理的 SQLite Automation task/Run/event/outbox | 按 `revision`、事件 `sequence` 和请求身份合并；通知只触发刷新   |
-| 右侧栏页面、选中项、滚动/局部预览状态            | Renderer 内存                                                        | 按 module 策略保活或卸载；应用重启后重建                        |
-| Toast、对话框、焦点、临时请求状态                | Renderer 内存                                                        | 生命周期结束时清理；不得成为业务授权依据                        |
+| 状态                                             | 当前真源                                                                 | Renderer 责任                                                      |
+| ------------------------------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| 语言、明暗偏好、主题 id                          | `localStorage` 的 frontend config                                        | 启动前容错读取；规范化；同步 DOM 属性和 Electron native theme      |
+| 模型设置、项目、会话、消息、草稿、UI preferences | Rust Core 管理的 SQLite，经 Storage Host API                             | hydration、局部编辑、按规定顺序写回；不能绕过协议直接访问数据库    |
+| 图片生成、MCP、Skill、Agent 模板等管理状态       | Rust Core 或 Electron Main service 的权威快照与 revision                 | 使用 CAS/precondition；冲突后刷新，不在前端合并猜测                |
+| 图片生成凭据                                     | Rust Core 选择的凭据存储                                                 | 只暂存用户当前输入，成功后立即清空；从不回读明文                   |
+| 活动 Run、pending action、command session        | Rust Core 事件和存储记录                                                 | 绑定权威 id、缓冲早到事件、reload 时重新 hydrate/reconcile         |
+| Automation task、Automation Run、attention       | Core Server/Rust Core 管理的 SQLite Automation task/Run/event            | 按 `revision`、事件 `sequence` 和请求身份合并；通知只触发刷新      |
+| 通知事实、批次、设置和投递 disposition           | Core Server/Rust Core；原生显示由 Electron Main                          | settings 使用 CAS；event/resync 只触发刷新；点击只执行 typed 导航  |
+| Browser 逻辑导航、历史、偏好和下载               | Main surface/session + Rust Core-owned history/preferences/download rows | 只投影 safe DTO；按 `surfaceInstanceId/stateRevision` 拒绝迟到状态 |
+| 右侧栏页面、选中项、滚动/局部预览状态            | Renderer 内存                                                            | 按 module 策略保活或卸载；应用重启后重建                           |
+| Toast、对话框、焦点、临时请求状态                | Renderer 内存                                                            | 生命周期结束时清理；不得成为业务授权依据                           |
 
 新增状态前必须先确定真源。需要跨重启、跨窗口或参与授权判断的状态不应只存在 React state/localStorage。
 
@@ -123,6 +130,10 @@ Automation 在 UI 中显示为 `Scheduled`。它由左侧栏入口切换为独�
 - stop 只是请求；最终 completed/failed/cancelled 状态必须来自后端事件或权威存储对账。
 - reload 后重新加载 pending actions、command sessions 和未完成 Run，而不是根据 UI 文本推断。
 - edit/rewrite、Provider transition 和 Skill 恢复均使用 epoch/revision，迟到结果不得回退更新后的选择。
+- assistant message 从空正文开始；正常流式/完成路径接收模型 delta/final content，模型请求中断保持空正文并显示 typed interruption。其他受控错误或取消结算可能包含 Host 持久化的终态可见正文，Renderer 必须按权威 message/run 状态呈现，不能自行把原始 Provider/异常文本拼接进去。
+- 审批按钮只在提交期间锁定；Host 返回未接受或请求失败时必须重新启用，pending ticket 是否结算仍以 Rust Core 的权威决定为准，不能由一次前端点击乐观终止。
+- 流式 Markdown 保持已完成代码块的组件身份和 wrap/copy 状态；代码仅追加时可保留已高亮前缀，非追加修改必须丢弃旧 highlight snapshot，避免展示与源码不一致。
+- `FileChange` 统一承载 staged 与 direct 文本写入。活动交易按 transaction id 分页读取 diff；历史卡片以 conversation/assistant message/Run/tool call 精确身份惰性读取 durable action audit。Renderer 只显示路径、统计、状态与有界 diff，不持有执行 authority；完整执行契约见 [FileChange 子系统](../subsystems/file-change.md)。
 
 后端上下文算法见 [上下文管理](./context-management.md)；Tool 结果投影规则见 [Tool 结果消费者矩阵](../subsystems/tool-result-consumer-matrix.md) 和 [Tool 结果限制](../subsystems/tool-result-limits.md)。
 
@@ -155,9 +166,11 @@ Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode �
 
 ## 设置架构
 
-设置页的页面 id 和导航清单以 `features/settings/SettingsPage.tsx` 为准。当前精确 id 为 `general`、`profile`、`appearance`、`configuration`、`personalization`、`usageBilling`、`skills`、`agentTemplates`、`mcp`、`environment` 和 `archivedConversations`。
+设置页的页面 id 和导航清单以 `features/settings/SettingsPage.tsx` 为准。当前精确 id 为 `general`、`profile`、`appearance`、`configuration`、`personalization`、`usageBilling`、`skills`、`browser`、`agentTemplates`、`mcp`、`environment` 和 `archivedConversations`。
 
-设置不是单一存储域：外观中的语言/主题在 localStorage，其他 UI preferences 多数通过 Storage API，MCP/Skill/图片生成使用各自的权威服务。页面组件应调用所属领域 hook/client，不应建立第二份通用设置对象。
+设置不是单一存储域：外观中的语言/主题在 localStorage，其他 UI preferences 多数通过 Storage API，MCP/Skill/图片生成、Browser 和通知使用各自的权威服务。Browser 独立页组合 automation capability、app-owned link 目标、下载设置/历史、浏览历史与清除数据；MCP 页只维护 MCP Server 列表。General 页的普通任务通知 preset 使用 Rust Core revision/CAS；Never 只关闭四个普通任务开关，不连带关闭 Automation 通知。页面组件应调用所属领域 hook/client，不应建立第二份通用设置对象。
+
+Agent Templates 页展示 workspace-wide template library；定义 CRUD 与 project assignment 是分开的 Host mutation。表单可以一次勾选多个 project，保存时逐项对账 assignment；任一步失败都重新加载 canonical 列表，不能在本地假定部分 mutation 已回滚。模板使用不可用模型时可查看/编辑，但必须重新选择 enabled model 后才能保存或重新启用。
 
 MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前必须确认丢弃。新增带草稿的设置页时，应实现同等的 dirty 生命周期，而不是依赖组件卸载静默丢弃。
 
@@ -173,6 +186,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
 10. Automation DTO schema v1、permission mode v2 与 SQLite schema v27 必须分开命名和演进。
+11. FileChange diff 卡片、Browser 下载中心和原生通知点击只消费安全投影；UI 中可见的路径、卡片或按钮不授予文件/Browser/通知权限。
 
 ## 代码真源
 
@@ -181,17 +195,23 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 - 顶层编排：`src/renderer/src/app/AppShell.tsx`
 - 工作区/设置隔离：`src/renderer/src/app/AppShellWorkspace.tsx`
 - Agent 运行协调：`src/renderer/src/app/useAgentRunLifecycle.ts`
-- 启动状态：`src/renderer/src/features/startup/`
-- 主题与语言：`src/renderer/src/config/FrontendConfigProvider.tsx`
+- 启动状态与静态壳：`src/renderer/src/features/startup/`、`src/renderer/src/features/startup/bootstrapStartupEntry.ts`
+- 主题与语言：`src/renderer/src/config/FrontendConfigProvider.tsx`、`src/shared/i18n/languageRegistry.ts`
+- 安全错误投影：`src/renderer/src/errors/userFacingError.ts`
+- Markdown/代码块：`src/renderer/src/features/chat/components/ChatMarkdown.tsx`、`ChatCodeBlock.tsx`
 - Host API 客户端：`src/renderer/src/host/hostClient.ts`
 - Storage 投影：`src/renderer/src/features/storage/storageClient.ts`
 - 会话能力面：`src/renderer/src/features/chat/ConversationSurface.tsx`
+- FileChange 展示：`src/renderer/src/features/chat/components/toolActivities/FileChangeToolActivity.tsx`、`FileChangeDiffCard.tsx`
+- 通知：`src/renderer/src/features/notifications/`
+- Browser：`src/renderer/src/features/browser/`
 - Automation 页面与状态：`src/renderer/src/features/automations/`
 - Scheduled 顶层组合：`src/renderer/src/features/automations/ScheduledPageLayer.tsx`
 - Automation Host client：`src/renderer/src/features/automations/automationClient.ts`
 - Automation cache/realtime：`src/renderer/src/features/automations/automationCache.ts`、`src/renderer/src/features/automations/automationRealtime.ts`
 - Scheduled 布局：`src/renderer/src/features/automations/automationLayout.ts`、`useAutomationLayout.ts`
 - 设置导航：`src/renderer/src/features/settings/SettingsPage.tsx`
+- Agent Template library：`src/renderer/src/features/settings/pages/AgentTemplatesSettingsPage.tsx`
 - 静态依赖规则：`eslint.config.mjs`
 
 ## 测试与验证
@@ -225,6 +245,9 @@ pnpm test:automation-core-e2e
 - [ ] Automation mutation 使用稳定 request identity 或 revision/CAS，迟到响应不会回退共享 cache。
 - [ ] Automation event gap、Core Server restart resync、原生通知导航和 dirty drawer 离开保护均有覆盖。
 - [ ] Scheduled 表单的 timezone 与权限模式提交语义没有被展示控件或本地默认值悄悄改变。
+- [ ] FileChange 活动/历史分页绑定精确 identity，超预算时安全降级；observer 没有获得 mutation 能力。
+- [ ] Browser surface state、下载和历史事件检查 instance/revision；通知设置使用 CAS，点击只消费 typed destination。
+- [ ] Agent Template 定义与 project assignment 的部分失败会刷新 canonical 列表，不把本地勾选当成已提交事实。
 
 ## 当前限制
 
@@ -236,3 +259,4 @@ pnpm test:automation-core-e2e
 - Scheduled drawer 宽度只在本次应用会话保留，不写入 UI preferences。
 - 保存 Automation 编辑会采用当前电脑 timezone；UI 当前不提供独立 timezone 选择器。
 - Automation 的真实 Core Server E2E 是独立命令，默认 `pnpm check` 不会运行。
+- 当前没有通用通知 inbox 或 badge；Renderer 只提供设置、event/resync 和原生点击导航。

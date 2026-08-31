@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 系统架构总览
@@ -22,7 +22,7 @@ Main（进程、窗口、Browser、文件选择等 Host 权限）
   │ stdin/stdout，每行一个 JSON-RPC 2.0 消息
   ▼
 Core Server（Rust 应用与传输边界）
-  ├─ mycopilot-core：Agent Runtime、领域模型、SQLite repository
+  ├─ mycopilot-core：Agent Runtime、FileChange、领域模型、SQLite repository
   ├─ mycopilot-mcp-client：MCP Registry/Manager/Catalog/transport
   ├─ AutomationService / AutomationScheduler：持久定时任务与 HumanRoot Turn
   ├─ NotificationService：通用通知事实、合并批次、已读/解决与投递恢复
@@ -78,14 +78,18 @@ transport/application → adapters → core/protocol
 - 进程退出会拒绝 Main 中全部未完成请求。当前通用客户端没有逐请求超时；具体子系统必须自行拥有 deadline 或 cancellation。
 - Managed Playwright 是反向命令桥：Core Server 发 `mcp.builtinPlaywright.command`/`mcp.builtinPlaywright.cancel` notification，Main 回 `mcp.builtinPlaywright.complete`/`mcp.builtinPlaywright.dispatchPhase` 请求。`core.shutdown` 期间 request loop 仍接收后两类收口消息。
 - Automation 的任务、Run 和 attention 经普通请求读取；`automation.event`/`automation.resync` 只驱动
-  Renderer 失效重读。原生通知由 SQLite outbox 持久化，再由 Main-only 投递 RPC 领取和确认。
+  Renderer 失效重读。legacy Automation outbox 只保留 producer ledger/兼容状态，并在同一事务投影到共享
+  Notification event；共享 event/batch 才是原生投递真源，由 Main-only RPC 领取和确认。
+- FileChange、Notification、Browser data/download 各有独立版本线和窄 DTO；展示 Diff、通知文案、
+  下载 display path 都是脱权投影，不能反向构造执行授权或本机绝对路径。
 
 跨语言协议的代码真源是 `crates/protocol-rs/src/methods.rs`、对应 Rust DTO，以及 `packages/protocol` 的 TypeScript DTO/parsers/fixtures。新增或修改协议必须同时更新两端测试；不得只在 Main 中复制字符串常量后宣称协议已统一。
 
 ## 4. 数据与恢复真相
 
 - Electron 的 `app.getPath('userData')` 是正式应用的数据根；Main 通过 `MYCOPILOT_APP_DATA_ROOT` 把该能力显式交给 Core Server，并移除父环境中的数据库重定向。
-- `storage.sqlite` 是 Conversation、Agent、Mailbox、Wake、Approval、Automation task/Run/event/outbox
+- `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
+  audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
 - 当前 canonical schema 为 **v27**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
@@ -97,8 +101,8 @@ transport/application → adapters → core/protocol
 
 1. 解析并规范化数据根，取得数据库实例锁。
 2. 打开 canonical storage、MCP Registry、凭据与各 application service。
-3. 执行图片、MCP action、孤立 trace、Approval 等启动对账。
-4. 冻结 collaboration 与 Automation event cursor，连接 outbound，发布各自 resync。
+3. 执行图片、MCP action、孤立 trace、Approval、FileChange 和 Notification 等启动对账。
+4. 冻结 collaboration、Automation 与 Notification event cursor，连接 outbound，发布各自 resync。
 5. 启动唯一进程级 Multi-Agent Dispatcher，并恢复 Automation admission lease、Run observer 与到期任务。
 6. 启动 Automation Scheduler，使 queued/recoverable Run 可在无 Renderer 操作时继续执行。
 7. 创建其余有界 dispatchers/request trackers，最后进入 JSON-RPC request loop。
@@ -115,13 +119,20 @@ transport/application → adapters → core/protocol
 - 子 Agent Conversation 对用户只读；用户只在根 Agent Conversation 发起交互或处理投影后的审批。
 - Automation 是无人值守入口：权限在保存时冻结，执行前只允许当前设置撤销，不能因配置变化自动扩权；
   后台 Approval 仍必须由用户显式处理。
+- FileChange 的读取 Observation、私有 binding 和 Run grant 才参与执行授权；Renderer Diff、Trace、
+  Archive 和 Git 相对展示路径都不能授权写入。
+- Browser Download 的真实保存路径留在 Core Server/Main 信任边界，Renderer 和模型只接收安全引用与
+  display path；系统通知同样只投递受限 subject，不能携带完整结果、secret 或审批 payload。
 
 ## 7. 相关文档
 
 - [Core Server 架构](core-server.md)
 - [Multi-Agent 当前架构](multi-agent.md)
 - [MCP 子系统](../subsystems/mcp.md)
+- [FileChange](../subsystems/file-change.md)
+- [浏览器与自动化](../subsystems/browser-automation.md)
 - [Scheduled Automation](../subsystems/scheduled-automations.md)
+- [通用通知](../subsystems/notifications.md)
 - [测试策略](../development/testing.md)
 - [构建与发布](../development/build-and-release.md)
 - [运行时组件](../development/runtime-components.md)
@@ -137,6 +148,10 @@ transport/application → adapters → core/protocol
 - TypeScript 协议：`packages/protocol/src`
 - canonical schema：`crates/core/src/storage/canonical_schema.sql`、`crates/core/src/storage/migrations.rs`
 - Automation：`crates/core-server/src/application/automation`、`crates/core/src/storage/automation_repository.rs`
+- FileChange：`crates/core/src/file_change/`、`crates/core/src/tools/apply_patch.rs`
+- Notification：`crates/core-server/src/application/notification.rs`、`crates/core/src/storage/notification_repository.rs`
+- Browser data/download：`src/main/browser/`、`crates/core/src/storage/browser_data_repository.rs`、
+  `crates/core/src/storage/browser_download_repository.rs`
 - 打包边界：`package.json`、`electron-builder.yml`
 
 文档中的版本和限额是便于阅读的快照。代码常量、锁定 manifest 和可执行 gate 与本文冲突时，应先停止发布并更新实现或本文，不能静默选择一方。
@@ -147,6 +162,8 @@ transport/application → adapters → core/protocol
 
 ```bash
 pnpm format:check
+pnpm check:docs
+pnpm check:public-docs
 pnpm lint
 pnpm typecheck
 pnpm lint:rust
@@ -163,7 +180,7 @@ pnpm test:web
 - 仓库当前没有 CI workflow，本文描述的是本地可执行门禁，不代表自动执行。
 - Main 端仍存在部分重复的 Core Server RPC 字符串常量；在完成统一前，跨语言 fixture 和双方测试是必要防漂移措施。
 - 通用 `CoreJsonRpcClient.request` 没有默认逐请求 timeout，长操作依赖子系统 deadline 和进程退出收口。
-- 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；文档校验 `pnpm check:docs` 已纳入 `pnpm check`。
+- 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；内部文档、公开文档和 Agent 头像检查已纳入 `pnpm check`。
 - Automation 真实 Core Server E2E 也不在 `pnpm check`，且尚无定时触发到操作系统通知点击的
   packaged E2E。
 - 当前没有生产数据库原地迁移、notarization 或自动更新通道。
@@ -175,6 +192,8 @@ pnpm test:web
 - [ ] 新持久事实是否进入 canonical schema、版本/fingerprint 和 reset 测试？
 - [ ] 新异步任务是否有 admission 上限、生命周期 owner、取消与有界关停？
 - [ ] 新通知是否仍是 invalidation，而非第二份状态真相？
+- [ ] 新 FileChange operation 是否保持 Observation、私有 binding、审计、冲突与恢复边界？
+- [ ] 新原生通知是否由持久 fact/batch 驱动，并在显示前重新校验？
 - [ ] 新后台调度是否定义 occurrence 幂等、配置 snapshot、lease、恢复和原生通知 outbox？
 - [ ] 新外部副作用是否定义 dispatch certainty、幂等与 `outcome_unknown`？
 - [ ] 新运行时依赖是否被锁定、校验、打包并加入第三方声明？

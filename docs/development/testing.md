@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 测试策略与矩阵
@@ -35,16 +35,18 @@ pnpm check
 
 1. `pnpm format:check`：Prettier + `cargo fmt --check`
 2. `pnpm check:docs`：front matter、单 H1、本地链接/仓库路径、`package.json` scripts、docs 索引、schema/工具链/组件版本等文档漂移检查
-3. `pnpm lint`：ESLint
-4. `pnpm typecheck`：Node + Web TypeScript
-5. `pnpm lint:rust`：workspace all-targets Clippy，warnings 视为 error
-6. `pnpm test`
+3. `pnpm check:public-docs`：公开文档树、元数据、索引、链接边界、必需页面与禁止占位页
+4. `pnpm verify:agent-avatars`：确定性检查 Agent avatar 资源未漂移
+5. `pnpm lint`：ESLint
+6. `pnpm typecheck`：Node + Web TypeScript
+7. `pnpm lint:rust`：workspace all-targets Clippy，warnings 视为 error
+8. `pnpm test`
 
 `pnpm test` 当前包含：
 
 - OfficeCLI prepare 脚本测试；
 - Office renderer 与 Word/PDF renderer prepare/package verifier 测试；
-- macOS signing/package verifier 的 JavaScript 逻辑测试；
+- Core Server release path-remap、macOS signing/frozen Mach-O/privacy/package verifier 的 JavaScript 逻辑测试；
 - dev icon、storage reset、Artifact Runtime 脚本测试；
 - `pnpm test:web`；
 - `cargo test --workspace`。
@@ -55,12 +57,12 @@ pnpm check
 
 `vitest.config.ts` 定义四个项目：
 
-| project                  | 环境                             | 范围                                                                                      | 并发特点                                   |
-| ------------------------ | -------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`                              | 常规并行；排除两个独立 E2E project         |
-| `browser`                | Vitest Browser + locked Chromium | App、Chat、Automation、Skill、MCP、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                            |
-| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                                | 文件串行                                   |
-| `automation-core-e2e`    | Node + 真实 Core Server 进程     | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation | 文件串行；不启动真实 Electron/系统原生通知 |
+| project                  | 环境                             | 范围                                                                                                             | 并发特点                                   |
+| ------------------------ | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`，含 FileChange、Notification、Browser data/download | 常规并行；排除两个独立 E2E project         |
+| `browser`                | Vitest Browser + locked Chromium | App、Chat、Automation、Notification、Skill、MCP/Browser、Git、Sidebar、Files、Collaboration `.browser.test.tsx`  | headless 浏览器                            |
+| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                                                       | 文件串行                                   |
+| `automation-core-e2e`    | Node + 真实 Core Server 进程     | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation                        | 文件串行；不启动真实 Electron/系统原生通知 |
 
 执行：
 
@@ -97,14 +99,14 @@ cargo test --workspace
 
 ## 5. 脚本与组件测试
 
-| 命令                          | 覆盖                                                 |
-| ----------------------------- | ---------------------------------------------------- |
-| `pnpm test:officecli`         | manifest、下载边界、hash、receipt、原子发布          |
-| `pnpm test:office-renderer`   | Chromium/LibreOffice prepare 与 packaged verifier    |
-| `pnpm test:artifact-runtime`  | runtime 构建、supply-chain evidence、PPTX notes/SDK  |
-| `pnpm test:mac-signing`       | signer 参数、pack hooks、签名 metadata verifier 逻辑 |
-| `pnpm test:storage-reset-dev` | Electron 数据根、dry-run/confirm 参数边界            |
-| `pnpm test:dev-electron-icon` | 开发图标生成                                         |
+| 命令                          | 覆盖                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------- |
+| `pnpm test:officecli`         | manifest、下载边界、hash、receipt、原子发布                                 |
+| `pnpm test:office-renderer`   | Chromium/LibreOffice prepare 与 packaged verifier                           |
+| `pnpm test:artifact-runtime`  | runtime 构建、supply-chain evidence、PPTX notes/SDK                         |
+| `pnpm test:mac-signing`       | Core Server path remap、签名/冻结 Mach-O、privacy、pack hooks/verifier 逻辑 |
+| `pnpm test:storage-reset-dev` | Electron 数据根、dry-run/confirm 参数边界                                   |
+| `pnpm test:dev-electron-icon` | 开发图标生成                                                                |
 
 这些 Node tests 多数验证脚本逻辑和 fixture，**不等于**实际下载全部组件、构建 package、使用真实 Developer ID 签名或运行产物。
 
@@ -118,13 +120,29 @@ cargo test --workspace
 4. Core Server transport tests；
 5. 必要时 Preload/Renderer allowlist 与 UI scenario。
 
-当前 `packages/protocol/fixtures` 包含 Agent、Automation、Collaboration、MCP、Skill 等版本化 JSON
+当前 `packages/protocol/fixtures` 包含 Agent、Automation、Notification、Collaboration、MCP、Skill 与持久 Agent Run projection 等版本化 JSON
 fixture。fixture 是代表性 wire contract，不替代所有 DTO 的双端生成；新增字段必须遵守
 required/nullable/default 和 unknown-field 策略。
 
 协议方法名应由 `packages/protocol` 与 `crates/protocol-rs/src/methods.rs` 维护。Main 尚有部分重复字符串，因此相关 test 必须断言精确方法名，直到所有权完全收敛。
 
 ## 7. 专项 gate
+
+### FileChange、Notification 与 Browser data
+
+这些新增链路没有单独的 npm release gate，而是进入默认 `unit`/`browser` 与 workspace Cargo tests。改动时应先用下列精确入口定位，再运行 `pnpm check`：
+
+```bash
+pnpm exec vitest run --project unit packages/protocol/src/notifications.test.ts packages/protocol/src/browserData.test.ts packages/protocol/src/browserDownloads.test.ts src/main/core/systemNotificationCoordinator.test.ts src/main/core/browserDataIpc.test.ts src/main/core/browserDownloadBroker.test.ts
+pnpm exec vitest run --project browser src/renderer/src/features/notifications/__tests__ src/renderer/src/features/mcp/__tests__/McpSettingsPage.browser.test.tsx src/renderer/src/features/rightSidebar/__tests__/BrowserDownloadCenter.browser.test.tsx src/renderer/src/features/chat/__tests__/FileChangeDiffCard.browser.test.tsx
+cargo test -p mycopilot-core file_change
+cargo test -p mycopilot-core-server file_change
+cargo test -p mycopilot-core notification
+```
+
+FileChange 的安全证据还包括 source-boundary、权限/Approval、Staged 恢复、run grant、content redaction、durable history 和 crash reconciliation tests。只验证 Renderer diff 卡不能证明文件副作用正确；必须同时覆盖 Rust planner/committer、SQLite authority 和 Core Server settlement。
+
+Notification tests 必须区分 notification fact、聚合 batch 与 native presentation，并覆盖前台/禁用/不支持时 suppress、claim/validate/ACK/release、五次失败上限、优先级升级、locale 与 show/ACK 崩溃窗口。Browser tests 必须使用受管 session 和临时目录，不读取真实 history、下载目录、Cookie 或 profile。
 
 ### Scheduled Automation
 
@@ -187,16 +205,18 @@ stress 包含 100 次 connect/close、重启、并发 fixture、refresh、call �
 
 ## 8. 当前 `pnpm check` 未覆盖
 
-| 项目                            | 当前状态                                    |
-| ------------------------------- | ------------------------------------------- |
-| Automation 真实 Core Server E2E | 独立命令，不在 `check`                      |
-| Multi-Agent release gate        | 独立命令，不在 `check`                      |
-| Managed Playwright release组合  | 独立命令，不在 `check`                      |
-| `electron-builder` package      | 不在 `check`                                |
-| 实际 Developer ID 签名/验签     | 仅真实 `build:mac` 发生；普通 test 只测逻辑 |
-| notarization                    | 未配置                                      |
-| packaged Agent→browser E2E      | pending                                     |
-| Windows/Linux 目标平台验收      | 无仓库 CI 自动运行                          |
+| 项目                            | 当前状态                                                       |
+| ------------------------------- | -------------------------------------------------------------- |
+| Automation 真实 Core Server E2E | 独立命令，不在 `check`                                         |
+| Multi-Agent release gate        | 独立命令，不在 `check`                                         |
+| Managed Playwright release组合  | 独立命令，不在 `check`                                         |
+| `electron-builder` package      | 不在 `check`                                                   |
+| 实际 Developer ID 签名/验签     | 仅真实 `build:mac` 发生；普通 test 只测逻辑                    |
+| macOS DMG 实际签名与验证        | `dmg.sign=true` 只在真实 package 发生；仓库无独立 DMG verifier |
+| macOS packaged privacy scan     | 真实 macOS afterPack 执行；普通 test 使用 fixture              |
+| notarization                    | 未配置                                                         |
+| packaged Agent→browser E2E      | pending                                                        |
+| Windows/Linux 目标平台验收      | 无仓库 CI 自动运行                                             |
 
 维护者不能因为 `pnpm check` 绿色就声称已完成 release acceptance。
 
@@ -249,6 +269,10 @@ Scheduled Automation 或其共享 Electron Host/协议/存储链路有变化时�
 - Scheduled Automation Rust tests：`crates/core-server/src/application/automation`、`crates/core/src/storage/automation_repository/tests.rs`
 - Playwright report/gates：`scripts/playwright-conformance-report.mjs`、`verify-packaged-playwright-startup.mjs`
 - package hooks tests：`scripts/*.test.mjs`
+- public docs checker：`scripts/check-public-docs.mjs`
+- FileChange：`crates/core/src/file_change`、`crates/core/src/tools/apply_patch.rs`、`crates/core-server/src/application/agent/tests/file_change_permissions.rs`
+- Notification：`packages/protocol/src/notifications.ts`、`crates/core/src/storage/notification_repository.rs`、`src/main/notifications/systemNotificationCoordinator.ts`
+- Browser data/download：`packages/protocol/src/browserData.ts`、`packages/protocol/src/browserDownloads.ts`、`src/main/browser`
 - cross-language fixtures：`packages/protocol/fixtures`、`packages/protocol/src`、`crates/protocol-rs/src/tests.rs`
 
 ## 12. 测试本文变更
@@ -258,12 +282,13 @@ Scheduled Automation 或其共享 Electron Host/协议/存储链路有变化时�
 ```bash
 pnpm format:check
 pnpm check:docs
+pnpm check:public-docs
 pnpm lint
 pnpm typecheck
 pnpm check
 ```
 
-若只调整文档且完整 `pnpm check` 成本过高，至少运行 `pnpm format:check` 与 `pnpm check:docs`；最终合并责任仍应按改动域完成相应 gate。
+若只调整内部文档且完整 `pnpm check` 成本过高，至少运行 scoped Prettier 与 `pnpm check:docs`；涉及公开文档时还必须运行 `pnpm check:public-docs`。最终合并责任仍应按改动域完成相应 gate。
 
 ## 13. 当前限制
 
@@ -274,6 +299,8 @@ pnpm check
 - packaged startup verifier 不确认 supplied bundle 与当前源码的新鲜度。
 - Managed Playwright 仍缺完整 69-Tool 行为矩阵、重复真实 Electron 压力/RSS gate 和 packaged Agent E2E。
 - Scheduled Automation 没有自动化的真实时钟唤醒、真实 Provider/Approval、OS 通知点击、休眠唤醒或 packaged Electron E2E。
+- 通用 Notification 没有跨真实目标系统通知中心/锁屏的自动化 E2E；普通 tests 不能证明 OS 展示、声音或点击路由。
+- Browser history/download 与 crash recovery 有真实 Electron 局部测试，但仍缺完整 packaged Agent→download→file-input 端到端验收。
 - 官方 MCP conformance 未接入锁定 runner。
 
 ## 14. 变更检查表
@@ -284,6 +311,8 @@ pnpm check
 - [ ] 跨语言协议是否同时覆盖 Rust、TypeScript、Main/Preload/Renderer？
 - [ ] 并发/恢复测试是否使用确定性 barrier 而非放宽 sleep？
 - [ ] 新 package/runtime 依赖是否有 prepare、verify、afterPack/afterSign 或 startup 证据？
+- [ ] FileChange 是否覆盖 read observation、权限/Approval、CAS、Staged、crash reconciliation、redaction 与历史 diff？
+- [ ] Notification 是否覆盖 fact/batch/presentation 分层和 suppress/retry/priority/locale，而未把 native mock 当作 OS E2E？
 - [ ] Scheduled Automation 变更是否运行独立 `test:automation-core-e2e`，并将未覆盖的定时、通知和 packaged 场景保留为限制？
 - [ ] 是否明确它属于 `pnpm check`、专项 gate、发布必需或仅诊断？
 - [ ] 是否更新 `package.json`、本矩阵和相关发布文档，避免命令漂移？

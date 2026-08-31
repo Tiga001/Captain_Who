@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Multi-Agent 当前架构
@@ -23,6 +23,7 @@ last_verified: 2026-08-23
 8. 所有结果、状态和 cursor 先提交 SQLite，再发布通知。channel、`Notify` 和 Renderer store 不是权威状态。
 9. Turn 的 completed/failed/interrupted 不会删除 Agent；后续 `followup_task` 可再次唤醒。长期生命周期另由 active/disabled/archived 表示。
 10. 对未知外部副作用绝不自动重放；恢复无法证明安全时必须得到 `outcome_unknown`。
+11. 同一 task tree 可复用 durable attachment、managed Artifact 与 Agent browser download，但 scope 只能由 Host 从 `agent_nodes` 的 root identity 解析；opaque locator 或调用方自报 root 不构成授权。
 
 Scheduled Automation 与 Multi-Agent 共用 Agent Runtime 和进程级 Turn gate，但不是 Agent 树调度器。
 `existing_chat` destination 只接受活跃根 Agent Conversation，不能直接绑定或唤醒子 Agent；需要协作时，
@@ -70,8 +71,8 @@ AgentDispatcher → 统一 Turn executor → 原 Agent Runtime/Tool
 - 子 Agent spawn 在同一事务创建/导入 Conversation、冻结 snapshot、AgentNode、initial task Mailbox、唯一投影/ack 和 queued Wake。
 - task path 由后端从父子关系生成；不得接受模型传入的完整路径。
 - 模板更新只影响未来节点；模型 snapshot 冻结精确 `model_config_id` 与审计能力，不复制 Token、URL 或 Provider 凭据。
-- 模板定义属于全局模板库；`project_agent_template_bindings` 决定一个项目未来可以 spawn 哪些模板。删除项目或取消关联只删除授权关系，不改写已创建节点的模板 snapshot。
-- `fork_turns=none | all | N` 复制已结算的逻辑轮次；active 尾部、Usage、pending action、Command Session、provider continuation 等不复制。
+- 模板定义属于工作区级模板库；`project_agent_template_bindings` 决定一个项目未来可以 spawn 哪些模板。删除项目或取消关联只删除授权关系，不改写已创建节点的模板 snapshot。
+- `fork_turns=none | all | N` 复制已结算的逻辑轮次；FileChange 可见 Staged history 与 terminal audit 按专用逻辑重映射，active 尾部、Usage、pending action、FileChange Run grant、Command Session、provider continuation 等不复制。
 
 ### MailboxMessage
 
@@ -135,6 +136,17 @@ Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：�
 - 已开始 Run 冻结权限；Approval continuation 使用 checkpoint 原权限。下一次 Wake 才读取新的收紧策略。
 - 根 Agent 可交互，子 Agent 只能通过精确的根 Agent Conversation + 子 Agent Conversation observer RPC 读取。旧历史、搜索、meta、start/steer/cancel/fork/Provider transition 和 Approval 等写入口均受同一根 Agent guard。
 
+### 树内私有资源
+
+`agent_tree_resource_scope` 从当前 Conversation 对应的 `agent_nodes` 行读取不可变
+`root_agent_id + root_conversation_id`。这个 Host-private identity 使同一树的 root、child 和 sibling 可以
+双向使用 durable attachment、managed Artifact 和 Agent browser download，也适用于没有 Project 的树；
+节点完成或归档不会使其已发布结果立刻失效。
+
+普通 Conversation、另一棵根树和猜测的 locator 继续隔离。attachment library 仍可额外按 Project
+共享；browser download 也可按 Project 授权，但两者都不能用模型传入的 root ID 绕过 repository JOIN。
+未知 `scheme:`/`@namespace` 被统一 locator 拒绝；确需访问同名本地文件时用显式 `./...` 消歧。
+
 ## 6. Dispatcher、等待与恢复
 
 ### Dispatcher
@@ -187,6 +199,8 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 根聊天的 semantic activity 只来自后端持久 mutation：started、updated、waiting_approval、completed、failed、interrupted。Tool 名、模型文案、时间戳或 Mailbox JSON 不得被 UI 用来反推状态。observer live event 是低延迟 overlay，durable Conversation 与 event log 才是恢复真相。
 
+父 Agent 开始 final-response stream 时，Core Server 记录该 root 的 collaboration event sequence cut；只有不晚于 cut、且带 exact parent assistant message/Trace anchor 的活动会写入终态 message 的 `collaborationTimelineActivities`（内部最多 2,048 条）。stream reset 会丢弃旧 cut；非 final stream 或中断结算不伪造 cut。之后发生的 child activity 仍持久化并出现在 Agent Center/event replay，但不能回填已经提交的父回复，避免终态 Timeline 随后台事件变化。
+
 ## 8. Schema
 
 当前 canonical storage 是 **v27**。唯一真源：
@@ -207,6 +221,8 @@ pub const STORAGE_SCHEMA_VERSION: i32 = 27;
 - 授权：`crates/core-server/src/application/collaboration_authorization.rs`
 - RPC/DTO：`crates/protocol-rs/src/agent_collaboration.rs`、`packages/protocol/src/agentCollaboration.ts`
 - Renderer：`src/renderer/src/features/agentCollaboration` 与 `ConversationSurface`
+- Tree resource scope：`crates/core/src/storage/agent_tree_resource_scope.rs`、`attachment_repository.rs`、`managed_artifact_repository.rs`、`storage/service/browser_downloads.rs`
+- Terminal Timeline cut：`crates/core-server/src/application/agent/turn_executor.rs`、`crates/core/src/storage/agent_collaboration_event_repository.rs`、`chat_repository.rs`
 
 ## 10. 测试
 
@@ -216,6 +232,7 @@ cargo test -p mycopilot-core --lib storage::migrations::tests
 cargo test -p mycopilot-core-server application::agent_dispatcher
 cargo test -p mycopilot-core-server application::agent::tests::collaboration_harness
 cargo test -p mycopilot-protocol-rs
+cargo test -p mycopilot-core storage::conversation_fork_repository
 pnpm exec vitest run --project unit src/main/core/coreServer.collaboration.test.ts
 pnpm exec vitest run --project browser src/renderer/src/features/agentCollaboration
 ```
@@ -232,6 +249,8 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - 内存 notification 不支持跨进程广播；正确性依赖 SQLite polling/event replay。
 - `outcome_unknown` 需要用户或维护者理解外部系统状态，当前没有通用自动补偿引擎。
 - `send_message` 的子 Agent → 父 Agent 方向目前只写在 Tool 描述中，后端 Authorizer 仅强制同树；需要把方向作为安全不变量时必须先补实现与负向测试。
+- 树内资源共享当前按整棵不可变 root identity 授权，没有成员级 grant、跨树转授权或对单个已发布 Artifact 的即时树内撤销。
+- 已冻结 parent Timeline 不追踪 final-response stream 开始后的 child activity；用户需在 Agent Center 查看后续真实状态。
 - Main 的 6 秒 shutdown watchdog 短于 Dispatcher 两阶段理论上限；超时退出依赖 SQLite 恢复，尚未形成完全对齐的优雅关停预算。
 
 ## 12. 变更检查表
@@ -244,5 +263,7 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 根 Agent/子 Agent/project/祖先权限是否从持久事实解析，而不是调用参数？
 - [ ] wait 是否保持 SQLite 权威、first-ready、独立停止域和 precommitted ToolResult？
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
+- [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
+- [ ] terminal parent Timeline 是否在 final stream 开始处冻结，且后续事件只留在 event log/Agent Center？
 - [ ] 是否更新 schema v27 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

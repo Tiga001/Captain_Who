@@ -4,7 +4,7 @@ description: 添加本地 stdio MCP Server，授权启动并让 Agent 安全调�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # MCP
@@ -68,9 +68,9 @@ MCP（Model Context Protocol）让 MyCopilot 连接外部工具服务。当前�
 
 停用会阻止新调用并关闭连接。删除只移除 MyCopilot 配置，不会卸载本地程序；活动调用的最终结果可能仍无法确认。
 
-## 内置 MCP 与外部 Server
+## 受管 MCP 能力与外部 Server
 
-“设置 → MCP”的“内置”区域当前包含浏览器自动化。它由应用管理，不填写可执行文件或参数，也不属于你的外部 Server 列表。使用方法见[浏览器自动化](browser-automation.md)。
+“设置 → MCP”当前只管理用户添加的本地 stdio Server。浏览器自动化在底层使用应用受管的 MCP 通道，但配置入口已经独立到“设置 → 浏览器”；它不填写可执行文件或参数，也不属于你的外部 Server 列表。使用方法见[浏览器自动化](browser-automation.md)。
 
 ## 当前限制
 

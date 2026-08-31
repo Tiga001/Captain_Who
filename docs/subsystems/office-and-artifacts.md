@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-30
+last_verified: 2026-08-31
 ---
 
 # Office 自动化与受管 Artifact
@@ -11,7 +11,7 @@ last_verified: 2026-08-30
 
 ## 职责边界
 
-Office 子系统负责把 typed semantic intent 编译、批准并执行为受验证的文档检查或渲染；Artifact Runtime 负责发现和校验打包工具链；Generic Managed Artifact 子系统负责内容寻址发布与 conversation grant。三者都不从模型字符串推导权限，也不把私有物理路径作为公开 API。Office workspace output、Generic Managed Artifact、image-generation Artifact 和 Browser Artifact 是不同授权模型，不能混为一个 store。
+Office 子系统负责把 typed semantic intent 编译、批准并执行为受验证的文档检查或渲染；Artifact Runtime 负责发现和校验打包工具链；Generic Managed Artifact 子系统负责内容寻址发布与 conversation grant，以及同一受信 Agent task tree 内的受控读取。三者都不从模型字符串推导权限，也不把私有物理路径作为公开 API。Office workspace output、Generic Managed Artifact、image-generation Artifact、durable Browser Download 和短期 Browser Artifact 是不同授权模型，不能混为一个 store。
 
 ## 四个容易混淆的概念
 
@@ -42,6 +42,8 @@ Artifact Runtime 只提供可复现 executable/dependency 发现和 preflight，
 内部 Office Engine 仍用 `OfficeOperation` 的 `help/create/view/get/query/validate/set/add/remove/move/swap` 安全集合表达 Rust Core-owned 编译结果和历史恢复；它不是模型可直接调用的 CLI allowlist。`install/config/watch/open/close/mcp/serve/server/raw/raw-set/add-part/batch/dump/merge` 等管理、驻留、网络或 raw OOXML 操作仍显式拒绝。
 
 通用 `read_word`、`read_spreadsheet`、`read_presentation` 是文本读取 Tool，与 Office Engine 分开。PDF 不由旧 `read_pdf` Tool 处理；应通过 bundled PDF Skill、`run_command`、`read_image` 或 Office 的受管 PDF render 流程处理。
+
+受管 PDF `pdftotext` 在 Host-owned 文本生产边界移除提取结果中的 U+0000，避免 ripgrep 把其余文本误判为二进制；32 MiB 安全预算仍按清理前字节计数，其他 Unicode、空白、分页符和控制字符保持原语义。
 
 ## 语义请求编译
 
@@ -93,7 +95,11 @@ Bundle/Runtime status 的 availability 只有 `available` 或 `unavailable`；�
 
 Artifact ID 是 `sha256:<digest>`，物理对象位于私有 `objects/` 下。SQLite `managed_artifacts` 保存 kind、format、media type、size、hash、尺寸和 storage-relative path；`managed_artifact_grants` 将 Artifact 绑定 conversation/Run/call。
 
-URI 不是全局公开地址。`file_input`、`read_image` 或其他消费者在每次解析时校验：URI scheme 与 kind 相符、conversation 有 grant、记录路径安全、文件非 symlink、size/hash/格式仍匹配。物理 absolute path 不离开 Rust Core StorageService/Core Server 边界。
+URI 不是全局公开地址。`file_input`、`read_image` 或其他消费者在每次解析时校验：URI scheme 与 kind 相符、当前 conversation 有 direct grant，或其受信 `root_agent_id/root_conversation_id` 与生产者属于同一 Agent task tree；记录路径安全、文件非 symlink、size/hash/格式仍匹配。task-tree authority 只由 `agent_nodes` 解析，模型/Renderer 不能自报 root identity。普通独立 Conversation 没有 tree scope；Generic Managed Artifact 不因“同 project”获得额外共享，只能依赖 direct grant 或受信 task-tree scope，附件则继续保留既有 project sharing。物理 absolute path 不离开 Rust Core StorageService/Core Server 边界。
+
+附件使用同一 task-tree root 规则：根 Agent 与子 Agent 可读取树内已授权附件/Artifact，即使生产子 Agent 已完成或归档；grant 仍保存在原生产 conversation 上，不复制成每个子 Agent 的新 grant。既有 project attachment 共享规则继续适用。Browser Artifact 仍是短期 Run scope，不自动继承该 tree sharing；durable Browser Download 由自己的 conversation/project/tree 与文件 identity 检查授权。
+
+`resource_locator` 对登记的 virtual scheme 分派到对应 resolver。未知或格式错误的 virtual prefix 必须 fail closed，不能退回为普通 workspace path；否则模型可借一个拼错的 URI 绕过其真实 store 的 grant 检查。
 
 ## 发布状态机
 
@@ -118,12 +124,12 @@ Generic Image 当前最多 8 MiB，PDF 当前最多 128 MiB。独立的 image-ge
 
 ## Artifact 生产者与消费者
 
-| 生产者                          | 产物/引用                                         | 关键边界                                                            |
-| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------- |
-| Office render                   | 已批准 final path 的图片/PDF `readPath`           | Office engine/renderer revision、coverage、OfficeOperation approval |
-| `run_command` / managed builder | Generic PNG/JPEG/WebP/PDF Artifact                | before/after observation、completion hook、commit unknown           |
-| Image generation                | 独立 generation image Artifact                    | paid request idempotency、下载网络策略、generation journal          |
-| Managed Playwright              | Browser Artifact；screenshot 可另发 Generic Image | HostBridge 清洗、最多 16 refs、单 ref 128 MiB、Run 生命周期         |
+| 生产者                          | 产物/引用                                                  | 关键边界                                                                     |
+| ------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Office render                   | 已批准 final path 的图片/PDF `readPath`                    | Office engine/renderer revision、coverage、OfficeOperation approval          |
+| `run_command` / managed builder | Generic PNG/JPEG/WebP/PDF Artifact                         | before/after observation、completion hook、commit unknown                    |
+| Image generation                | 独立 generation image Artifact                             | paid request idempotency、下载网络策略、generation journal                   |
+| Managed Playwright              | Browser Artifact/Download；screenshot 可另发 Generic Image | HostBridge 清洗、路径不外泄；Artifact 为 Run 生命周期，Download 独立持久授权 |
 
 Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他显式声明相应 file-input kind 的 Tool，以及受控导出流程；Office workspace `readPath` 继续按文件权限解析。Renderer 只消费安全 DTO。模型只能传回 Tool 返回的完整 URI/readPath，不应猜 digest、改 scheme 或使用内部 `savedPath`。Browser Artifact 不等同于 Generic Managed Artifact：Renderer 通过 Main broker 预览/导出，模型只有在 screenshot 返回 `image-artifact://` readPath 时才能交给 `read_image`。
 
@@ -137,9 +143,9 @@ Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他�
 
 ## 删除、分叉与保留
 
-- 分叉复制可见历史及相关 Generic Managed Artifact grant，不依赖源 conversation 后续存在；具体复制事务由 fork service 决定。
+- 分叉复制可见历史及相关 Generic Managed Artifact grant，不依赖源 conversation 后续存在；具体复制事务由 fork service 决定。它与运行中 task-tree 共享是两条不同授权路径。
 - 删除 conversation 撤销/删除其 Generic grant；共享内容对象只有在无引用且满足保留策略时才能清理。
-- 同一 digest 可被多个 Run/call/conversation 授权，但一个 grant 不授予其他 conversation。
+- 同一 digest 可被多个 Run/call/conversation 授权；一个 grant 只直接授予其 owning conversation，但同一受信 Agent task tree 可通过不可伪造的 root scope 读取。
 - 临时 staging、命令 workspace、Office render scratch 和 Browser Artifact 有各自清理期；Browser ref 最长 24 小时且生命周期为 Run，不能当长期用户文件或自动随历史分叉。
 - 当前没有面向用户的统一永久保留/导出 SLA；清理代码必须保守且以数据库引用为准。
 
@@ -152,6 +158,7 @@ Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他�
 5. 私有绝对路径、staging path 和 credential 不进入 Model/Event/Trace/Renderer。
 6. 发布先验证并原子化内容，再注册/grant；失败可幂等重试和清理。
 7. Artifact URI 每次消费都重新校验 kind、grant、size 和 hash。
+8. task-tree 共享只由持久 `agent_nodes` root identity 推导；普通 Conversation、相同 project 或客户端自报字段不能伪造该 authority。
 
 ## 代码真源
 
@@ -160,8 +167,11 @@ Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他�
 - Office Tool：`crates/core/src/tools/office.rs`
 - Artifact Runtime：`crates/core/src/artifact_runtime/`
 - Generic Artifact：`crates/core/src/storage/service/managed_artifacts.rs`、`storage/managed_artifact_repository.rs`
+- Agent tree resource scope：`crates/core/src/storage/agent_tree_resource_scope.rs`
 - File input/URI：`crates/core/src/file_input.rs`、`tools/read_image.rs`
+- Resource locator：`crates/core/src/resource_locator.rs`
 - Command publication：`crates/core/src/command/artifact_observer.rs`、`managed_output_publication.rs`
+- PDF runtime CLI：`crates/core/src/command/pdf_runtime_cli.py`
 - Browser projection/broker：`crates/core/src/browser_artifacts.rs`、`src/main/browser/BrowserArtifactBroker.ts`
 - Image generation：`crates/core/src/image_generation/`、`tools/image_generation.rs`
 
@@ -173,6 +183,7 @@ Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他�
 - `crates/core/src/artifact_runtime/discovery.rs` 内 receipt/integrity 测试
 - `crates/core/src/storage/service/managed_artifacts.rs` 内 publication/grant 测试
 - `crates/core/src/file_input.rs` 与 `tools/read_image.rs` 的 URI 隔离测试
+- `crates/core/src/storage/service/tests/attachments.rs` 与 task-tree managed artifact tests
 - `crates/core-server/src/application/agent/tests/office.rs`
 - `crates/core-server/src/application/agent/tests/image_generation.rs`
 - Core Server/Main 的 Managed Playwright screenshot/download 与 pending action 测试
@@ -186,6 +197,8 @@ Generic Image/PDF 的主要消费者是 `read_image`、`run_command` 和其他�
 - [ ] 新 Artifact kind 定义 scheme、格式探测、大小限、读取工具和 grant 语义。
 - [ ] 发布路径覆盖 staging、原子冲突、数据库失败、孤儿清理和幂等重试。
 - [ ] fork/delete/retention 更新 grant/reference 测试。
+- [ ] task-tree 共享覆盖根/子/兄弟、已归档子 Agent、独立 Conversation、伪造 root 和删除场景；grant 不被误写为逐节点复制。
+- [ ] 新 virtual scheme 在 resource locator 显式注册，未知 prefix 不会回退成文件路径。
 - [ ] Model/Event/Trace/Renderer 去除 absolute path、secret 和 binary，并更新消费者 fixture。
 
 ## 当前限制

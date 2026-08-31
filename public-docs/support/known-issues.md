@@ -4,7 +4,7 @@ description: MyCopilot 当前已确认的产品限制与尚未完成的发布能
 status: current
 audience: user
 owner: product
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 已知问题
@@ -14,7 +14,7 @@ last_verified: 2026-08-23
 ## 发布与平台
 
 - 当前没有可验证的公开下载渠道、Release Notes、自动更新或自动回滚；构建版本号本身不代表公开支持周期。
-- macOS 打包支持签名，但尚未配置 Apple notarization。
+- macOS 正式打包强制签署应用、受管原生组件和 DMG，但尚未配置 Apple notarization。
 - Windows 和 Linux 有构建入口与组件目标，但尚无完整公开发行验收记录。
 - 最低操作系统版本尚未公布。
 
@@ -23,7 +23,7 @@ last_verified: 2026-08-23
 - 模型 Token 和 Tavily Key 当前以明文保存在本机 SQLite 数据库中，不使用系统钥匙串。
 - 没有面向用户的一键数据导出、诊断包或完整备份/恢复向导。
 - 移除项目会永久删除应用内的项目对话与附件记录；项目目录文件不会被删除。
-- 当前没有统一的 Automation 历史、事件和通知 outbox 保留/清理策略。
+- 当前没有统一的 Automation 历史/Event 与通用 Notification event/batch 保留或清理策略。
 
 ## 模型与上下文
 
@@ -35,7 +35,7 @@ last_verified: 2026-08-23
 ## Skill 与 MCP
 
 - Skill 只在当前 Run 激活；没有跨对话常驻激活。
-- Skill Script 依赖本机 Python 3，没有操作系统级脚本沙箱，并且每次运行都需要批准。
+- Skill Script 依赖本机 Python 3，且没有操作系统级脚本沙箱；Installed/Workspace 脚本每次运行都需要批准，符合严格条件的应用内置脚本可自动批准。
 - 外部 MCP Server 仅支持本机 stdio；HTTP、OAuth、环境变量/SecretRef 和 MCP Resources/Prompts 等尚未开放。
 - Windows 上外部 MCP Server 的完整进程树隔离尚不能保证。
 - MCP 调用在超时或断开后可能是结果未知，不能安全自动重试。
@@ -44,7 +44,8 @@ last_verified: 2026-08-23
 
 - 受管网页默认不能使用摄像头、麦克风、定位和网页通知。
 - 浏览器自动化不连接系统浏览器，只操作应用管理的浏览器环境。
-- 浏览器 Artifact 是 Run 生命周期资源；要长期保留必须显式导出。
+- 浏览器下载会持久保存，但当前没有自动清理或统一保留期限；清除下载历史不删除磁盘文件。
+- 截图等非下载 Browser Artifact 仍是 Run 生命周期资源；要长期保留必须显式导出。
 - 扫描 PDF 没有文本层时可能无法读取；旧版 `.ppt`、`.xls` 不支持，`.doc` 读取仅限 macOS。
 
 ## Scheduled Automation
@@ -54,6 +55,6 @@ last_verified: 2026-08-23
 - 暂停任务不会停止当前 Run；界面没有独立的活动 Run 取消按钮。
 - Blocked 状态不会因外部资源恢复自动解除，需要修复后重新保存。
 - 没有 Renderer Toast 作为原生通知后备；通知可能延迟、缺失，或在极小崩溃窗口重复一次。
-- 通知点击发生在界面尚未准备好时，只保留最后一个待打开请求。
+- 通知点击发生在界面尚未准备好时最多排队 32 个；超出时最早请求会被丢弃。
 
 遇到未列出的可重复问题时，可按[诊断信息与日志](diagnostics-and-logs.md)在本地保留脱敏的最小复现材料。

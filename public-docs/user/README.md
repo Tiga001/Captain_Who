@@ -4,7 +4,7 @@ description: 从第一次启动到使用 Agent、Skill、MCP、多智能体和�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 用户指南
@@ -25,7 +25,7 @@ MyCopilot 是一款**本地优先的桌面 AI 工作助手**：应用、项目�
 ### 按功能查找
 
 - [日常使用](everyday-use/README.md)：对话、文件、Git、联网、模型、权限和历史。
-- [能力指南](capabilities/README.md)：Tool、Skill、MCP、Multi-Agent、Scheduled Automation、浏览器自动化和 Office 产物。
+- [能力指南](capabilities/README.md)：Tool、Skill、MCP、Multi-Agent、Scheduled Automation、系统通知、浏览器自动化和 Office 产物。
 - [任务教程](tutorials/README.md)：围绕真实目标完成一整套操作。
 - [最佳实践](best-practices/README.md)：更清晰地描述任务、管理大型项目并安全使用 Agent。
 - [参考手册](reference/README.md)：快速查询设置、状态、快捷键、能力边界和术语。

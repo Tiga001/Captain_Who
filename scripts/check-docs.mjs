@@ -243,6 +243,18 @@ for (const [component, version] of runtimeFacts) {
   }
 }
 
+for (const [runtime, dependencies] of [
+  ['Node', artifactRuntimeManifest.node.dependencies],
+  ['Python', artifactRuntimeManifest.python.dependencies]
+]) {
+  for (const dependency of dependencies) {
+    const expected = `${dependency.name}@${dependency.version}`
+    if (!runtimeComponentsMarkdown.includes(expected)) {
+      fail(runtimeComponents, `missing Artifact Runtime ${runtime} dependency: ${expected}`)
+    }
+  }
+}
+
 for (const documentPath of [
   'docs/subsystems/mcp.md',
   'docs/subsystems/browser-automation.md',
@@ -345,6 +357,90 @@ if (!automationSchemaVersion || !automationPermissionModeVersion || !automationE
   }
 }
 
+const protocolVersionGroups = [
+  {
+    label: 'Notification schema',
+    sources: [
+      ['packages/protocol/src/notifications.ts', /NOTIFICATION_SCHEMA_VERSION\s*=\s*(\d+)/],
+      ['crates/protocol-rs/src/notifications.rs', /NOTIFICATION_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/]
+    ],
+    documents: [
+      ['docs/subsystems/notifications.md', (version) => `Notification schema v${version}`],
+      [
+        'docs/architecture/ipc-and-protocol.md',
+        (version) => `NOTIFICATION_SCHEMA_VERSION = ${version}`
+      ]
+    ]
+  },
+  {
+    label: 'FileChange schema',
+    sources: [
+      ['packages/protocol/src/agent.ts', /AGENT_FILE_CHANGE_SCHEMA_VERSION\s*=\s*(\d+)/],
+      [
+        'crates/core/src/protocol.rs',
+        /AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/
+      ],
+      ['crates/core/src/file_change/model.rs', /FILE_CHANGE_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/]
+    ],
+    documents: [
+      ['docs/subsystems/file-change.md', (version) => `FileChange schema v${version}`],
+      ['docs/architecture/ipc-and-protocol.md', (version) => `\`FileChange\` 使用 v${version} 协议`]
+    ]
+  },
+  {
+    label: 'Browser data schema',
+    sources: [
+      ['packages/protocol/src/browserData.ts', /BROWSER_DATA_SCHEMA_VERSION\s*=\s*(\d+)/],
+      ['crates/core/src/storage/models.rs', /BROWSER_DATA_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/]
+    ],
+    documents: [
+      [
+        'docs/subsystems/browser-automation.md',
+        (version) => `Browser data schema 当前为 v${version}`
+      ],
+      ['docs/architecture/ipc-and-protocol.md', (version) => `data/preferences/history v${version}`]
+    ]
+  },
+  {
+    label: 'Browser download schema',
+    sources: [
+      ['packages/protocol/src/browserDownloads.ts', /BROWSER_DOWNLOAD_SCHEMA_VERSION\s*=\s*(\d+)/],
+      ['crates/core/src/storage/models.rs', /BROWSER_DOWNLOAD_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/]
+    ],
+    documents: [
+      ['docs/subsystems/browser-automation.md', (version) => `协议 v${version} 的 durable 引用`],
+      ['docs/architecture/ipc-and-protocol.md', (version) => `download v${version}`]
+    ]
+  }
+]
+
+for (const group of protocolVersionGroups) {
+  const versions = group.sources.map(([repositoryPath, pattern]) => {
+    const file = path.join(repositoryRoot, repositoryPath)
+    const version = pattern.exec(readFileSync(file, 'utf8'))?.[1]
+    if (!version) fail(file, `could not read ${group.label}`)
+    return { repositoryPath, version }
+  })
+  const expectedVersion = versions.find(({ version }) => version)?.version
+  if (!expectedVersion) continue
+
+  for (const { repositoryPath, version } of versions) {
+    if (version && version !== expectedVersion) {
+      failures.push(
+        `${repositoryPath}: ${group.label} ${version} does not match ${expectedVersion}`
+      )
+    }
+  }
+
+  for (const [documentPath, expectedFact] of group.documents) {
+    const file = path.join(repositoryRoot, documentPath)
+    const expected = expectedFact(expectedVersion)
+    if (!readFileSync(file, 'utf8').includes(expected)) {
+      fail(file, `missing ${group.label} fact: ${expected}`)
+    }
+  }
+}
+
 const automationE2eScript = 'test:automation-core-e2e'
 if (!packageJson.scripts[automationE2eScript]) {
   failures.push(`package.json: missing pnpm script ${automationE2eScript}`)
@@ -364,7 +460,8 @@ if (!packageJson.scripts[automationE2eScript]) {
 const forbiddenCurrentClaims = [
   ['crates/core-server/src/agent.rs', 'removed Core Server path'],
   ['当前项目没有配置代码签名', 'obsolete code-signing statement'],
-  ['notifications are `collaboration.', 'obsolete collaboration notification namespace']
+  ['notifications are `collaboration.', 'obsolete collaboration notification namespace'],
+  ['`notification_facts`', 'nonexistent notification table; use notification_events']
 ]
 for (const { file, markdown } of currentDocuments) {
   for (const [needle, description] of forbiddenCurrentClaims) {

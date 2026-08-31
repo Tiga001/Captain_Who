@@ -4,7 +4,7 @@ description: 查看 MyCopilot 当前的构建目标、发布证据边界和升�
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 版本与发布

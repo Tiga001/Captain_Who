@@ -4,7 +4,7 @@ description: 用最小权限和可验证步骤安全使用 Agent、Skill、MCP �
 status: current
 audience: user
 owner: security
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 安全使用
@@ -29,11 +29,13 @@ last_verified: 2026-08-23
 
 模型给出的“安全”“只读”或“不会收费”等文字不能替代实际审批内容。
 
+FileChange 审批应等待完整或分页 Diff 加载完毕；“本轮后续创建/更新无需审批”会扩大当前 Run 的便利范围，只有在任务边界清晰时才选择。
+
 ## 使用 Skill
 
 - 安装前查看来源、`SKILL.md`、资源列表和脚本。
 - Workspace Skill 来自当前项目，应像项目代码一样审查。
-- Skill Script 没有 OS 级沙箱，需要高权限并逐次批准；不理解脚本时不要运行。
+- Skill Script 没有 OS 级沙箱且需要高权限；Installed/Workspace 脚本始终逐次批准，内置自动批准只适用于应用重新验证过的 Bundled 脚本。不理解脚本时不要运行。
 - 已安装 Skill 应通过“设置 → 技能”管理，不要直接改应用管理目录。
 
 ## 使用 MCP
@@ -56,6 +58,7 @@ last_verified: 2026-08-23
 - 先手动运行同样的 Prompt，确认模型、Tool 和审批行为。
 - 无人值守任务优先使用默认或最小自定义权限。
 - 不依赖系统通知作为唯一告警；定期检查 Scheduled 页面和 Run 历史。
+- 锁屏或共享设备上处理敏感任务时，关闭系统通知的任务内容预览。
 - 修改自定义权限后，同步编辑已经保存的 Automation。
 - 暂停不会停止当前 Run；安排可能有外部副作用的任务前预留人工检查方式。
 

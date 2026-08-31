@@ -4,7 +4,7 @@ description: 查看 MyCopilot 当前对 Provider、Skill、MCP 和文件能力�
 status: current
 audience: user
 owner: product
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # 集成兼容性
@@ -32,7 +32,7 @@ last_verified: 2026-08-23
 | 任意在线 Skill Registry             | 尚未开放                              |
 | 常驻跨 Run 激活                     | 不支持                                |
 
-Skill Script 当前仅支持 Python 3 脚本，并要求高权限前置条件和逐次批准。
+Skill Script 当前仅支持 Python 3 脚本，并要求高权限前置条件。Installed/Workspace 脚本逐次批准；符合严格来源校验的 Bundled 脚本可在用户允许内置执行自动批准时免去点击。
 
 ## MCP
 

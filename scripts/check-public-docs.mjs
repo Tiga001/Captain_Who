@@ -30,6 +30,7 @@ const requiredDocuments = [
   'user/capabilities/mcp.md',
   'user/capabilities/multi-agent.md',
   'user/capabilities/automations.md',
+  'user/capabilities/notifications.md',
   'user/capabilities/browser-automation.md',
   'user/capabilities/artifacts-and-office.md',
   'user/tutorials/README.md',

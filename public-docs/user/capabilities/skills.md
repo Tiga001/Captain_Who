@@ -4,7 +4,7 @@ description: 选择、安装和管理 Skill，并理解 Skill 与工具、权限
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Skill
@@ -63,9 +63,11 @@ Agent 也可以从当前可用目录中发现并激活匹配 Skill。激活只�
 
 ## Skill 脚本的特殊边界
 
-当前 Skill Script 只支持包内 Python 脚本，并依赖本机可验证的 Python 3。运行脚本要求完全读写范围和 Full Access 前置条件，而且每次执行都需要明确审批；缺少 Python 依赖时只会报告，不会自动安装。
+当前 Skill Script 只支持包内 Python 脚本，并依赖本机可验证的 Python 3。预检和运行要求全部读写范围及 Full Access 前置条件；缺少 Python 依赖时只会报告，不会自动安装。
 
-这意味着“脚本来自一个 Skill”不是自动执行理由。审批时仍应核对 Skill、脚本、参数、依赖和目标项目。
+Installed 和 Workspace Skill 脚本始终需要明确审批。只有应用自带、来源/revision/内容均重新验证的 Bundled Skill 脚本，在当前权限满足全部前置条件且“内置执行”允许自动批准时，Host 才可能替代人工点击；该选项不会绕过路径、依赖或运行时校验。
+
+这意味着“脚本来自一个 Skill”本身不是自动执行理由。需要审批时仍应核对 Skill、脚本、参数、依赖和目标项目。
 
 ## 内置 Office Skill
 

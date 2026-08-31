@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Scheduled Automation 子系统
@@ -23,19 +23,20 @@ Scheduled UI
   -> Main -> JSON-RPC
   -> Core Server AutomationService
        ├─ schedule normalization / target validation / permission resolution
-       ├─ SQLite task, Run, event and notification outbox
+       ├─ SQLite task, Run, event and Automation notification producer ledger
        └─ AutomationScheduler -> HumanRoot Turn -> normal Agent Runtime
                                       └─ automation_report
 
 SQLite event -> Core Server notification -> Main -> Renderer invalidation/refetch
-SQLite outbox -> Main native notification -> trusted open request -> Scheduled/chat
+Automation producer ledger -> shared notification event/batch -> Main native notification
+  -> trusted open request -> Scheduled/chat
 ```
 
 职责划分：
 
 - Renderer 负责列表、筛选、表单、详情 Drawer、Run 历史和 attention 展示，不计算调度权威结果。
-- Main/Preload 负责受信 IPC、Core Server 生命周期、原生通知投递和点击后的窗口导航，不运行调度器。
-- Core Server 负责 CRUD、CAS、目标与权限校验、调度 admission、恢复、Run 结算和事件投影。
+- Main/Preload 负责受信 IPC、Core Server 生命周期、共享原生通知投递和点击后的窗口导航，不运行调度器。
+- Core Server 负责 CRUD、CAS、目标与权限校验、调度 admission、恢复、Run 结算，以及 Automation/Notification 两类事件投影。
 - Rust Core 负责 canonical schema、repository 事务、Agent Runtime 和 Automation 专用 Tool。
 
 ## 2. 任务配置
@@ -129,6 +130,8 @@ snapshot；要改变冻结权限必须编辑任务。
 后台 Run 仍走普通 Approval 状态机。需要用户处理时，Run 进入 `waiting_for_approval`、产生 attention，
 并可发出原生通知；应用/进程重启后从持久 pending action 与 Trace 恢复，不默认批准。
 
+Approval ticket 不因 MCP、Browser risk、Skill 安装等短生命周期执行材料过期而自动消失；它会保持待决定。用户稍后批准但材料已不可用时，正常 Run/Automation continuation 收到 definitely-not-dispatched 的 failed Tool Result，而不是伪装执行成功或重新 dispatch。
+
 ## 5. 实时更新与前端状态
 
 Renderer 可调用 list/get/create/update/setEnabled/runNow/delete、runs.list、attention.summary 和
@@ -151,33 +154,49 @@ Run 历史和打开精确 Conversation/message。页面覆盖聊天和右侧栏�
 Attention 是需要用户查看的持久投影，当前包括待 Approval、Run 失败、重要更新和配置 blocked。确认
 attention 只更新已读状态，不改变 Run 或任务配置。
 
-通知 policy 按 destination 收窄：
+Automation 通知 policy 按 destination 收窄：
 
 | destination     | 可选 policy                              | 终态投递语义                                                                           |
 | --------------- | ---------------------------------------- | -------------------------------------------------------------------------------------- |
 | `new_chat`      | `all_runs`、`unsuccessful_only`          | 每次终态，或仅失败/取消                                                                |
 | `existing_chat` | `important_updates`、`unsuccessful_only` | 失败/取消，以及报告为 `important_update`、`completed` 或 `unknown`；`no_change` 不通知 |
 
-Approval 和配置 blocked 可产生对应通知。通知先与业务状态在 SQLite outbox 中持久化，再由 Main 领取：
-每批最多 10 条、claim lease 60 秒、默认每 30 秒扫描；`notification_requested` 和 resync 只用于提前唤醒。
-Main 显示前再次向 Core Server 校验 lease 和语义时效，收到 Electron `show` 后才 ACK；展示失败或 15 秒
-未确认则释放，60 秒后重试。Renderer 不能调用 claim/validate/acknowledge/release 这四个 Host-only RPC。
+Approval 和配置 blocked 可产生对应通知。Automation 业务事务先写
+`automation_notification_outbox`；canonical trigger 在同一提交中把它投影为 shared
+`notification_events`，并把旧行标记为 `projected`。因此该表仍是 Automation producer/兼容 ledger，
+不是 Main 的原生投递 authority；不可变 notification event 与 `notification_batches` 才是 Notification
+Center 和 native delivery 的权威事实。
 
-点击通知时，Main 只发送经过严格解析的 `NotificationOpenRequest`：有 Conversation 时打开精确消息，
+shared pipeline 同时接收 HumanRoot 与 Automation：approval/configuration-blocked 的收集窗口为 500 ms，
+failed 为 1 秒，其他为 2 秒；一个 batch 最长收集 5 秒、最多 100 项，并可在 60 秒 replacement window
+内升级。Main 每次通过 `notifications.claim` 领取最多 10 个 batch，lease 为 60 秒，默认每 30 秒扫描；
+`notification.event`、`notification.resync` 和旧 Automation invalidation 只用于降延迟/重读。Main 显示前
+再次 `notifications.validate`，收到 Electron `show` 后才 acknowledge；展示失败或 15 秒未确认则 release，
+最多尝试 5 次且单次 retry delay 不超过 60 秒。Renderer 不能调用 claim/validate/acknowledge/release/
+suppress 这些 Host-only delivery RPC。
+
+通知 event 的 seen、resolved、superseded 是持久 projection，不改写原始事实。协议虽定义
+`notifications.list/summary`，当前只由 Main 为点击快照等 Host 流程使用，未暴露为 Renderer Host API；
+Renderer 只使用 `markSeen`、settings、event/resync 和点击导航，当前没有应用内通知中心。点击通知时，Main
+只发送经过严格解析的 `NotificationOpenRequest`：有 Conversation 时打开精确消息，
 否则打开 Scheduled 任务/Run。合并通知选择当次可见快照中优先级最高、同级最新的可导航成员；窗口尚未
 ready 时以 FIFO 暂存最多 32 个请求，并在 `openRequestedReady` 后恢复、显示和聚焦。
 
 ## 7. 持久化、恢复与删除联动
 
-SQLite canonical schema 当前为 **v27**，而 Automation DTO、permission mode 和 Automation 表记录的
-`schemaVersion` 各为 **v1**；这些版本域不能混用。四组权威数据为：
+SQLite canonical schema 当前为 **v27**；Automation DTO 与 Automation 表记录的 `schemaVersion` 各为 **v1**，permission mode v2，shared Notification contract 为 v1；这些版本域不能混用。Automation 专属四组数据为：
 
 - `automations`：配置、schedule、目标/权限 snapshot、revision、health、attention 和 tombstone；
 - `automation_runs`：不可变配置 snapshot、admission lease、Agent/Conversation 绑定、终态和结果投影；
 - `automation_events`：单调 sequence 的失效/重同步日志；
-- `automation_notification_outbox`：待投递、已投递或已抑制的原生通知。
+- `automation_notification_outbox`：Automation producer/兼容 ledger；新事实原子投影到 shared notification，并转为 `projected`。
 
-启动时 Core Server 回收过期 `admitting` lease、把离线期间到期的 occurrence 标为 `recovery`、恢复
+共享通知另使用 `notification_settings`、`notification_events`、`notification_batches`、
+`notification_batch_items`、`notification_change_events`。event 是不可变通知事实及 list/summary 投影输入，
+batch 是 native delivery authority；旧 `automation.notifications.*` 方法保留兼容用途，当前 Main 原生
+投递必须走 `notifications.*`。
+
+启动时 Core Server 回收全部上一进程遗留的 `admitting`（不等待旧 lease 过期）、把离线期间到期的 occurrence 标为 `recovery`、恢复
 `running`/`waiting_for_approval` Run 的 Trace observer，再启动 Scheduler。持久 Trace 是 Agent Turn
 终态真源；进程内 worker、timer、event notification 和 Renderer cache 都不是恢复依据。
 
@@ -190,7 +209,7 @@ Run 保持冻结 snapshot 并由正常取消/Trace 结算路径收口，避免�
 - Renderer 提交的目标名称、权限投影、reasoning、RRULE、Run 状态和通知内容都不是授权事实。
 - 实际执行前必须重查目标有效性和当前 permission mode enablement，但不得重解析成更宽权限。
 - Scheduler 不在等待 Provider、MCP、Approval 或全局并发 gate 时持有 SQLite transaction。
-- 任务 revision、Run status revision、schedule occurrence、manual request、admission lease 和通知 claim 均
+- 任务 revision、Run status revision、schedule occurrence、manual request、admission lease 和 shared batch claim 均
   由短事务/唯一约束保证；内存去重只优化延迟。
 - 原生通知只含有界安全投影，不携带 Prompt、Tool 参数、原始结果、Token 或凭据。
 - 删除、失效或 Approval 已结算后，已 claim 但尚未显示的通知必须再次验证并抑制。
@@ -215,9 +234,17 @@ Run 保持冻结 snapshot 并由正常取消/Trace 结算路径收口，避免�
   [`canonical_schema.sql`](../../crates/core/src/storage/canonical_schema.sql)
 - Automation 专用 Tool：
   [`automation_report.rs`](../../crates/core/src/tools/automation_report.rs)
+- shared Notification DTO/fixture：
+  [`notifications.ts`](../../packages/protocol/src/notifications.ts)、
+  [`notification-contract-v1.json`](../../packages/protocol/fixtures/notification-contract-v1.json)
+- shared Notification service/repository：
+  [`notification.rs`](../../crates/core-server/src/application/notification.rs)、
+  [`notification_rpc.rs`](../../crates/core-server/src/transport/notification_rpc.rs)、
+  [`notification_repository.rs`](../../crates/core/src/storage/notification_repository.rs)
 - Main/Preload：
   [`automationIpc.ts`](../../src/main/ipc/automationIpc.ts)、
   [`systemNotificationCoordinator.ts`](../../src/main/notifications/systemNotificationCoordinator.ts)、
+  [`notificationIpc.ts`](../../src/main/ipc/notificationIpc.ts)、
   [`AutomationIpcBridge.ts`](../../src/preload/AutomationIpcBridge.ts)
 - Renderer：
   [`features/automations`](../../src/renderer/src/features/automations)
@@ -229,19 +256,20 @@ cargo test -p mycopilot-core
 cargo test -p mycopilot-core-server
 cargo test -p mycopilot-protocol-rs
 pnpm exec vitest run --project unit packages/protocol/src/automations.test.ts src/main/core src/preload/AutomationIpcBridge.test.ts src/renderer/src/features/automations/__tests__
+pnpm exec vitest run --project unit packages/protocol/src/notifications.test.ts src/main/notifications src/main/core/coreServer.notifications.test.ts
 pnpm exec vitest run --project browser src/renderer/src/features/automations/__tests__
 pnpm test:automation-core-e2e
 ```
 
-Rust 测试覆盖 schedule/DST、CAS/唯一约束、lease、权限冻结、Scheduler/Approval/重启恢复、outbox 和
-Automation Turn；协议 fixture 同时由 TypeScript 与 Rust 消费。`automation-core-e2e` 启动真实的
+Rust 测试覆盖 schedule/DST、CAS/唯一约束、lease、权限冻结、Scheduler/Approval/重启恢复、Automation
+producer ledger、shared notification batching 和 Automation Turn；协议 fixture 同时由 TypeScript 与 Rust 消费。`automation-core-e2e` 启动真实的
 Core Server，验证 Host API 的 CRUD、CAS、`runNow`、历史和 attention；但它是独立 project，当前
 不在 `pnpm test:web`、`pnpm test` 或 `pnpm check` 中。
 
 ## 11. 当前限制
 
 - UI 不能停止一个活动 Run；暂停只影响后续 schedule，删除会走取消请求。
-- 没有独立 attention inbox，也没有 Renderer toast 作为系统不支持原生通知时的 fallback。
+- Automation attention 仍在 Scheduled 领域确认；notification event 的 seen 状态不会替代 attention acknowledge。系统不支持原生通知时仍没有 Renderer toast fallback 或应用内通知中心。
 - Main 在“原生通知已显示、durable ACK 尚未完成”之间崩溃时，重启后可能重复显示一次。
 - Renderer ready 前最多保留 32 个通知打开请求；极端连续点击溢出时丢弃最早请求。
 - Scheduler 是单 Core Server 进程内轮询器，不是分布式 scheduler，也不承诺秒级准点。
@@ -251,7 +279,7 @@ Core Server，验证 Host API 的 CRUD、CAS、`runNow`、历史和 attention；
 - Automation 配置不接受附件、显式 Skill 选择、temperature/maxTokens 或独立 reasoning override；新
   Conversation 的 reasoning 只是模型配置投影，执行仍读取同一 model id 的当前模型配置，现有
   Conversation 也使用执行时的当前绑定。
-- admission、等待 Approval 和通知重试没有统一次数/时长上限；通知 outbox 当前没有 dead-letter。
+- admission 与等待 Approval 没有统一次数/时长上限；shared native delivery 最多尝试 5 次，失败耗尽后转为 suppressed，但没有面向用户的独立 dead-letter 修复工作流。
 - 真实 Core Server E2E 尚未覆盖定时到期、完整模型执行、Approval 往返、操作系统通知点击、进程重启和
   packaged 应用全链路。
 
@@ -263,7 +291,8 @@ Core Server，验证 Host API 的 CRUD、CAS、`runNow`、历史和 attention；
 - [ ] 权限是否由 Core Server 解析、冻结并在 admission 时仅作撤销复核？
 - [ ] 新 Run 路径是否共享 Agent gate、Trace、Approval、取消、Usage 和恢复？
 - [ ] 新事件是否只用于 invalidation，并覆盖 gap/resync/ready-handshake？
-- [ ] 新通知是否先写 outbox，再 claim、validate、show、ACK/release？
+- [ ] 新 Automation 通知是否先写 producer ledger 并原子投影 shared event，再按 batch claim、validate、show、acknowledge/release？
+- [ ] legacy `automation.notifications.*` 与 canonical `notifications.*` 是否没有被误当成两套 native delivery authority？
 - [ ] 父资源删除、任务删除和关停是否不会留下悬空 Run 或失效通知？
 - [ ] 是否运行 Rust、协议、Main/Preload、Renderer 和独立真实 Core Server E2E？
 - [ ] 是否同步更新[测试策略](../development/testing.md)、[恢复 Runbook](../operations/recovery-runbook.md)

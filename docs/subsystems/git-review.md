@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-08-31
 ---
 
 # Git Review 子系统
@@ -29,7 +29,7 @@ Git Review 在右侧栏中提供仓库变更摘要、按文件差异、完整内
 - `staged`：索引相对 `HEAD` 的变化，只允许取消暂存；必须先取消暂存，才能从 `unstaged` 范围恢复。
 - `lastTurn`：最近一次 Agent Turn 前后记录的工作区变化，只读，并要求 `conversationId`。
 
-文件状态包括 `modified`、`added`、`deleted`、`renamed`、`copied`、`untracked` 和 `conflicted`。摘要返回 `repositoryId`、`snapshotId`、统计信息、文件列表及 `truncated` 标记。后续 diff、完整内容和变更请求都必须携带同一身份信息；Renderer 不应自行拼接 Git 路径或推断重命名关系。
+文件状态包括 `modified`、`added`、`deleted`、`renamed`、`copied`、`untracked` 和 `conflicted`。公开的 `path` 使用斜杠分隔，并始终相对当前选中 project root；即使 project 是更大 Git worktree 的子目录，也不能把仓库根前缀泄漏到 UI。`previousPath` 只在旧路径同样位于该 project 内时出现。摘要返回 `repositoryId`、`snapshotId`、统计信息、文件列表及 `truncated` 标记。后续 diff、完整内容和变更请求都必须携带同一身份信息；Renderer 不应自行拼接 Git 路径或推断重命名关系。
 
 ### 响应降级
 
@@ -81,6 +81,8 @@ Agent Run 会持久化 Turn 开始前与结束后的 Git 状态。`lastTurn` 通
 
 面板支持统一/分栏 diff、换行、文本搜索、范围切换，并可通过右侧栏 Files 模块打开文件。该跳转使用 Files 的 transient preview 语义：连续查看可替换临时页，重复打开同一文件会将其稳定化；详情见[工作区文件](./workspace-files.md)。语法高亮在 Worker 中按需执行，超出预算时保持纯文本或降级视图。`loadFullFiles` 与 `showAllFileTypes` 等偏好仅存入 Renderer 的 `localStorage`；仓库元数据、文件内容和 diff 不得持久化到该位置。
 
+Agent `FileChange` 卡片和审批对话框复用 `GitPatchRenderer`、parser 与渲染预算来显示分栏 patch，但它们不是 Git Review：FileChange 的活动 diff 绑定 transaction，历史 diff 绑定 conversation/message/Run/tool-call action audit；Git Review 绑定 repository/snapshot/scope。复用展示组件不允许复用 mutation callback、snapshot id 或缓存 key，也不使 FileChange 获得 stage/restore 权限。详见 [FileChange 子系统](./file-change.md)。
+
 ## 状态与安全不变量
 
 1. `repositoryId + snapshotId + scope + conversationId` 共同限定一次 Review；任何一项变化都必须隔离旧请求与缓存。
@@ -91,6 +93,8 @@ Agent Run 会持久化 Turn 开始前与结束后的 Git 状态。`lastTurn` 通
 6. 二进制、超限、冲突和不支持状态必须保留为结构化状态。
 7. 恢复操作必须经过用户确认，且只能作用于快照中的单个受控文件身份。
 8. 异步结果写入 UI 前必须验证当前项目、会话、范围和快照身份。
+9. 所有公开 Git path 均相对 selected project root；仓库根前缀和 project 外 `previousPath` 不进入协议。
+10. Git Review 与 FileChange 可共享 renderer，但 authority、分页和 mutation 永远分离。
 
 ## 代码真源
 
@@ -103,6 +107,7 @@ Agent Run 会持久化 Turn 开始前与结束后的 Git 状态。`lastTurn` 通
 - Renderer 能力：`src/renderer/src/features/gitReview/useGitRepositoryCapability.ts`
 - Renderer 编排与缓存：`src/renderer/src/features/gitReview/useGitReview.ts`
 - Renderer 渲染预算：`src/renderer/src/features/gitReview/diff/gitDiffRenderBudget.ts`
+- 共享 patch renderer：`src/renderer/src/features/gitReview/GitReviewDiffRenderer.tsx`
 - Git Review UI：`src/renderer/src/features/gitReview/GitReviewPanel.tsx`
 
 字段名称、枚举与限制以代码和协议为准；本文用于解释跨层约束。
@@ -125,10 +130,12 @@ Agent Run 会持久化 Turn 开始前与结束后的 Git 状态。`lastTurn` 通
 - [ ] 新范围或状态明确快照身份、是否可变更及失效行为。
 - [ ] 新 Git 命令仍使用固定参数、超时、输出上界和字面 pathspec。
 - [ ] 路径操作覆盖仓库逃逸、符号链接、目录、重命名与外部 filter。
+- [ ] project 位于更大 worktree 子目录时，摘要/diff/完整内容与 mutation 均只使用 project-relative path，project 外旧路径不进入 `previousPath`。
 - [ ] Rust Core 上界与 Renderer 加载/渲染预算一并评估。
 - [ ] 切换项目、会话、范围、快照时，旧异步结果不能污染新视图。
 - [ ] 危险操作有确认、结构化结果及操作后的权威刷新。
 - [ ] 更新相关单元测试、集成测试和本文的限制说明。
+- [ ] FileChange 复用只发生在纯展示层，没有混用 Git snapshot/cache/mutation identity。
 
 ## 当前限制
 
