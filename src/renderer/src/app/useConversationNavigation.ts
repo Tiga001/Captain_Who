@@ -11,7 +11,6 @@ import {
   forkConversation,
   loadConversation,
   loadConversationMetas,
-  saveComposerDraft,
   saveConversationMeta
 } from '../features/storage/storageClient'
 import { createComposerDraft, createForkComposerDraft, createId } from './chatMessageFactory'
@@ -45,6 +44,7 @@ interface UseConversationNavigationOptions {
   hydrateConversation: (conversationId: string) => Promise<ChatConversation | null>
   messages: ConversationNavigationMessages
   onActiveConversationArchived: (conversation: ChatConversation) => void
+  persistDraftNow: (scopeId: string, draft: ChatComposerDraft) => Promise<void>
   setActiveConversationId: Dispatch<SetStateAction<string | null>>
   setActiveConversationInitialScrollTop: Dispatch<SetStateAction<number | null>>
   setConversationScrollToBottomSignal: Dispatch<SetStateAction<number>>
@@ -64,6 +64,7 @@ export function useConversationNavigation({
   hydrateConversation,
   messages,
   onActiveConversationArchived,
+  persistDraftNow,
   setActiveConversationId,
   setActiveConversationInitialScrollTop,
   setConversationScrollToBottomSignal,
@@ -160,7 +161,7 @@ export function useConversationNavigation({
           ...currentDrafts,
           [newConversation.id]: newDraft
         }))
-        void saveComposerDraft(newConversation.id, newDraft)
+        void persistDraftNow(newConversation.id, newDraft)
         conversationScrollPositionsRef.current.delete(newConversation.id)
         activeConversationIdRef.current = newConversation.id
         setScrollTargetMessageId(null)
@@ -185,6 +186,7 @@ export function useConversationNavigation({
       drafts,
       messages.continueInNewTaskFailed,
       messages.activeCommandSession,
+      persistDraftNow,
       setActiveConversationId,
       setActiveConversationInitialScrollTop,
       setConversationScrollToBottomSignal,

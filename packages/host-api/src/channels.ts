@@ -7,6 +7,8 @@ export const HOST_CHANNELS = {
     ping: 'host:core.ping'
   },
   app: {
+    flushBeforeQuit: 'host:app.flushBeforeQuit',
+    flushBeforeQuitAck: 'host:app.flushBeforeQuitAck',
     getWindowState: 'host:app.getWindowState',
     openExternal: 'host:app.openExternal',
     setNativeThemeSource: 'host:app.setNativeThemeSource',
@@ -193,6 +195,7 @@ export const HOST_CHANNELS = {
     saveChatMessageState: 'host:storage.saveChatMessageState',
     saveChatMessageUiState: 'host:storage.saveChatMessageUiState',
     saveComposerDraft: 'host:storage.saveComposerDraft',
+    saveComposerDraftMessage: 'host:storage.saveComposerDraftMessage',
     saveConversationMeta: 'host:storage.saveConversationMeta',
     saveModelSettings: 'host:storage.saveModelSettings',
     saveProject: 'host:storage.saveProject',

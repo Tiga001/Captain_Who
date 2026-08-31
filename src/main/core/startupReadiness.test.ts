@@ -44,6 +44,56 @@ describe('application startup readiness', () => {
     expect(readyIndex).toBeGreaterThan(hostIpcIndex)
   })
 
+  it('flushes Renderer-owned state before Core stops accepting requests during quit', () => {
+    const mainEntry = readFileSync(resolve('src/main/index.ts'), 'utf8')
+    const beforeQuitIndex = mainEntry.indexOf("app.on('before-quit'")
+    const hideWindowIndex = mainEntry.indexOf('mainWindow?.hide()', beforeQuitIndex)
+    const rendererFlushIndex = mainEntry.indexOf(
+      'await disposeHostIpc?.flushRendererBeforeQuit(mainWindow?.webContents)',
+      beforeQuitIndex
+    )
+    const coreShutdownIndex = mainEntry.indexOf('coreServer.shutdown()', rendererFlushIndex)
+
+    expect(beforeQuitIndex).toBeGreaterThan(-1)
+    expect(hideWindowIndex).toBeGreaterThan(beforeQuitIndex)
+    expect(rendererFlushIndex).toBeGreaterThan(hideWindowIndex)
+    expect(rendererFlushIndex).toBeGreaterThan(beforeQuitIndex)
+    expect(coreShutdownIndex).toBeGreaterThan(rendererFlushIndex)
+  })
+
+  it('routes non-macOS window closes through app quit while the Renderer is still alive', () => {
+    const mainEntry = readFileSync(resolve('src/main/index.ts'), 'utf8')
+    const closeHandlerIndex = mainEntry.indexOf("window.on('close'")
+    const platformFenceIndex = mainEntry.indexOf("process.platform !== 'darwin'", closeHandlerIndex)
+    const preventDefaultIndex = mainEntry.indexOf('event.preventDefault()', platformFenceIndex)
+    const quitIndex = mainEntry.indexOf('app.quit()', preventDefaultIndex)
+
+    expect(closeHandlerIndex).toBeGreaterThan(-1)
+    expect(platformFenceIndex).toBeGreaterThan(closeHandlerIndex)
+    expect(preventDefaultIndex).toBeGreaterThan(platformFenceIndex)
+    expect(quitIndex).toBeGreaterThan(preventDefaultIndex)
+  })
+
+  it('does not reveal the Renderer again after the shutdown flush fence begins', () => {
+    const mainEntry = readFileSync(resolve('src/main/index.ts'), 'utf8')
+    const readyToShowIndex = mainEntry.indexOf("window.on('ready-to-show'")
+    const readyFenceIndex = mainEntry.indexOf('isServiceShutdownInProgress', readyToShowIndex)
+    const readyShowIndex = mainEntry.indexOf('window.show()', readyFenceIndex)
+    const activateIndex = mainEntry.indexOf('function activateMainWindow')
+    const activateFenceIndex = mainEntry.indexOf('isServiceShutdownInProgress', activateIndex)
+    const activateShowIndex = mainEntry.indexOf(
+      'mainWindowLifecycle.showExisting',
+      activateFenceIndex
+    )
+
+    expect(readyToShowIndex).toBeGreaterThan(-1)
+    expect(readyFenceIndex).toBeGreaterThan(readyToShowIndex)
+    expect(readyShowIndex).toBeGreaterThan(readyFenceIndex)
+    expect(activateIndex).toBeGreaterThan(-1)
+    expect(activateFenceIndex).toBeGreaterThan(activateIndex)
+    expect(activateShowIndex).toBeGreaterThan(activateFenceIndex)
+  })
+
   it('holds trusted renderers until Host initialization is complete', async () => {
     const ipcMain = new FakeIpcMain()
     const readiness = registerStartupReadiness(ipcMain, () => true)

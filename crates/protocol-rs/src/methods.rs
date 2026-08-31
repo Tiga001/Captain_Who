@@ -140,6 +140,7 @@ pub const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD: &str = "storage.saveChatMessag
 pub const STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD: &str = "storage.saveChatMessageUiState";
 pub const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD: &str = "storage.loadComposerDrafts";
 pub const STORAGE_SAVE_COMPOSER_DRAFT_METHOD: &str = "storage.saveComposerDraft";
+pub const STORAGE_SAVE_COMPOSER_DRAFT_MESSAGE_METHOD: &str = "storage.saveComposerDraftMessage";
 pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences";
 pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
 pub const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD: &str = "storage.loadAttachmentImage";

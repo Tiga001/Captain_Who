@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentContextWindowSnapshot, SkillSelection } from '@mycopilot/protocol'
+import type {
+  AgentContextWindowSnapshot,
+  AgentPermissions,
+  SkillSelection
+} from '@mycopilot/protocol'
 import { getContextWindowSnapshot } from '../agent/agentClient'
 import { resolveChatPermissions } from '../chat/chatPermissions'
 import type { ChatPermissionMode } from '../chat/chatTypes'
@@ -21,6 +25,43 @@ interface UseContextWindowSnapshotsOptions {
   skills: SkillSelection[]
 }
 
+interface ContextWindowSnapshotRequestDescriptor {
+  conversationId: string | null
+  modelId: string | null
+  permissions: AgentPermissions
+  projectId: string | null
+  scopeId: string
+  skills: SkillSelection[]
+}
+
+function requestDescriptorKey({
+  conversationId,
+  customPermissions,
+  modelId,
+  permissionMode,
+  projectId,
+  scopeId,
+  skills
+}: Omit<UseContextWindowSnapshotsOptions, 'enabled'>): string {
+  const permissions = resolveChatPermissions(permissionMode, customPermissions)
+  const descriptor: ContextWindowSnapshotRequestDescriptor = {
+    conversationId: conversationId ?? null,
+    modelId,
+    permissions: {
+      read: permissions.read,
+      write: permissions.write,
+      command: permissions.command,
+      commandSafety: permissions.commandSafety,
+      patch: permissions.patch,
+      builtinExecution: permissions.builtinExecution
+    },
+    projectId,
+    scopeId,
+    skills: skills.map(({ id, revision }) => ({ id, revision }))
+  }
+  return JSON.stringify(descriptor)
+}
+
 export function useContextWindowSnapshots({
   conversationId,
   customPermissions,
@@ -36,23 +77,35 @@ export function useContextWindowSnapshots({
   const [snapshots, setSnapshots] = useState<Record<string, AgentContextWindowSnapshot>>({})
   const activeSnapshotKey = modelId ? snapshotKey(scopeId, modelId) : null
   const activeSnapshot = enabled && activeSnapshotKey ? snapshots[activeSnapshotKey] : undefined
+  const requestKey = requestDescriptorKey({
+    conversationId,
+    customPermissions,
+    modelId,
+    permissionMode,
+    projectId,
+    scopeId,
+    skills
+  })
 
   useEffect(() => {
-    if (!enabled || !modelId) return undefined
+    if (!enabled) return undefined
+
+    const request = JSON.parse(requestKey) as ContextWindowSnapshotRequestDescriptor
+    if (!request.modelId) return undefined
 
     const requestSequence = requestSequenceRef.current + 1
     requestSequenceRef.current = requestSequence
-    const requestedSnapshotKey = snapshotKey(scopeId, modelId)
+    const requestedSnapshotKey = snapshotKey(request.scopeId, request.modelId)
     const eventSequenceAtRequest = eventSequenceRef.current.get(requestedSnapshotKey) ?? 0
     let cancelled = false
 
     void getContextWindowSnapshot({
-      conversationId,
-      projectId,
-      modelId,
+      conversationId: request.conversationId ?? undefined,
+      projectId: request.projectId,
+      modelId: request.modelId,
       maxTokens: DEFAULT_AGENT_MAX_TOKENS,
-      skills: skills.length > 0 ? skills : undefined,
-      permissions: resolveChatPermissions(permissionMode, customPermissions)
+      skills: request.skills.length > 0 ? request.skills : undefined,
+      permissions: request.permissions
     })
       .then(({ snapshot }) => {
         if (cancelled || requestSequenceRef.current !== requestSequence) return
@@ -60,7 +113,7 @@ export function useContextWindowSnapshots({
           return
         }
         setSnapshots((current) => {
-          if (snapshot?.model === modelId) {
+          if (snapshot?.model === request.modelId) {
             return { ...current, [requestedSnapshotKey]: snapshot }
           }
           if (!(requestedSnapshotKey in current)) return current
@@ -76,16 +129,7 @@ export function useContextWindowSnapshots({
     return () => {
       cancelled = true
     }
-  }, [
-    conversationId,
-    customPermissions,
-    enabled,
-    modelId,
-    permissionMode,
-    projectId,
-    scopeId,
-    skills
-  ])
+  }, [enabled, requestKey])
 
   const recordSnapshot = useCallback(
     (eventScopeId: string, snapshot: AgentContextWindowSnapshot) => {

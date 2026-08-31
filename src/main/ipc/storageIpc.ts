@@ -96,6 +96,9 @@ export function registerStorageIpc(
   ipcMain.handle(HOST_CHANNELS.storage.saveComposerDraft, (_event, draft) =>
     coreServer.saveComposerDraft(draft)
   )
+  ipcMain.handle(HOST_CHANNELS.storage.saveComposerDraftMessage, (_event, input) =>
+    coreServer.saveComposerDraftMessage(input)
+  )
   ipcMain.handle(HOST_CHANNELS.storage.loadUiPreferences, () => coreServer.loadUiPreferences())
   ipcMain.handle(HOST_CHANNELS.storage.saveUiPreferences, (_event, preferences) =>
     coreServer.saveUiPreferences(preferences)

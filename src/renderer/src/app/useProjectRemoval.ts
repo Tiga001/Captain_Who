@@ -12,6 +12,7 @@ import type { ChatComposerDraft, ChatConversation, ChatMessage } from '../featur
 import { saveUiPreferences, type UiPreferencesSnapshot } from '../features/storage/storageClient'
 import type { ActiveRunBinding } from './appTypes'
 import type { PendingMessageSave } from './AppShellSupport'
+import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import { createComposerDraft } from './chatMessageFactory'
 
 type MutableRef<T> = { current: T }
@@ -25,12 +26,16 @@ interface UseProjectRemovalOptions {
   conversationScrollPositionsRef: MutableRef<Map<string, number>>
   conversationsRef: MutableRef<ChatConversation[]>
   deleteProject(projectId: string): Promise<void>
+  discardDraft(scopeId: string): Promise<void>
+  draftsRef: MutableRef<Record<string, ChatComposerDraft>>
   editSubmissionSeqRef: MutableRef<number>
   enqueueChatMessageStateSave(conversationId: string, message: ChatMessage): void
   pendingConversationSavesRef: MutableRef<Map<string, ChatConversation>>
   pendingMessageSavesRef: MutableRef<Map<string, PendingMessageSave>>
   pendingMessageUpsertsRef: MutableRef<Map<string, unknown>>
+  persistDraftNow(scopeId: string, draft: ChatComposerDraft): Promise<void>
   removeFailedMessage: string
+  resumeDraft(scopeId: string): void
   setActiveConversationId: Dispatch<SetStateAction<string | null>>
   setActiveConversationInitialScrollTop: Dispatch<SetStateAction<number | null>>
   setConversationsWithRef: Dispatch<SetStateAction<ChatConversation[]>>
@@ -52,12 +57,16 @@ export function useProjectRemoval({
   conversationScrollPositionsRef,
   conversationsRef,
   deleteProject,
+  discardDraft,
+  draftsRef,
   editSubmissionSeqRef,
   enqueueChatMessageStateSave,
   pendingConversationSavesRef,
   pendingMessageSavesRef,
   pendingMessageUpsertsRef,
+  persistDraftNow,
   removeFailedMessage,
+  resumeDraft,
   setActiveConversationId,
   setActiveConversationInitialScrollTop,
   setConversationsWithRef,
@@ -117,9 +126,22 @@ export function useProjectRemoval({
         })
       ])
 
+      const composerScopeIds = new Set(conversationIds)
+      for (const [scopeId, draft] of Object.entries(draftsRef.current)) {
+        if (draft.projectId === projectId) composerScopeIds.add(scopeId)
+      }
+      await Promise.all([...composerScopeIds].map((scopeId) => discardDraft(scopeId)))
+
       try {
         await deleteProject(projectId)
       } catch (error) {
+        for (const scopeId of composerScopeIds) resumeDraft(scopeId)
+        await Promise.all(
+          [...composerScopeIds].map((scopeId) => {
+            const currentDraft = draftsRef.current[scopeId]
+            return currentDraft ? persistDraftNow(scopeId, currentDraft) : Promise.resolve()
+          })
+        )
         console.error('Failed to remove project', error)
         const cancelledAt = Date.now()
         const reconciledConversations = conversationsRef.current.map((conversation) => {
@@ -188,6 +210,11 @@ export function useProjectRemoval({
             ])
         )
       )
+      if (composerScopeIds.has(NEW_CONVERSATION_DRAFT_ID)) {
+        resumeDraft(NEW_CONVERSATION_DRAFT_ID)
+        const currentDraft = draftsRef.current[NEW_CONVERSATION_DRAFT_ID]
+        if (currentDraft) await persistDraftNow(NEW_CONVERSATION_DRAFT_ID, currentDraft)
+      }
       setUiPreferences((currentPreferences) => {
         const sidebarProjectOrder = currentPreferences.sidebarProjectOrder.filter(
           (orderedProjectId) => orderedProjectId !== projectId
@@ -225,12 +252,16 @@ export function useProjectRemoval({
       conversationScrollPositionsRef,
       conversationsRef,
       deleteProject,
+      discardDraft,
+      draftsRef,
       editSubmissionSeqRef,
       enqueueChatMessageStateSave,
       pendingConversationSavesRef,
       pendingMessageSavesRef,
       pendingMessageUpsertsRef,
+      persistDraftNow,
       removeFailedMessage,
+      resumeDraft,
       setActiveConversationId,
       setActiveConversationInitialScrollTop,
       setConversationsWithRef,

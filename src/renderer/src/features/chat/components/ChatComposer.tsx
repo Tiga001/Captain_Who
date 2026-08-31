@@ -299,7 +299,7 @@ export function ChatComposer({
       const nextDraft = {
         ...draftRef.current,
         message: nextMessage,
-        updatedAt: Date.now()
+        updatedAt: Math.max(Date.now(), draftRef.current.updatedAt + 1)
       }
       setMessage(nextMessage)
       draftRef.current = nextDraft
@@ -317,7 +317,7 @@ export function ChatComposer({
       const nextDraft = {
         ...currentDraft,
         ...patch,
-        updatedAt: Date.now()
+        updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
       }
       if (patch.message !== undefined) {
         setMessage(patch.message)

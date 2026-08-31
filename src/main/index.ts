@@ -58,6 +58,7 @@ const coreServer = new CoreServer({ appDataRoot })
 const notificationLocaleStore = new NotificationLocaleStore(appDataRoot)
 const terminalBridge = new TerminalBridge()
 let isQuittingAfterServiceShutdown = false
+let isServiceShutdownInProgress = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: HostIpcRegistration | null = null
 let mainWindow: BrowserWindow | null = null
@@ -196,6 +197,13 @@ function createWindow(): void {
       app.quit()
       return
     }
+    // Keep the live Renderer available long enough for before-quit to drain debounced state on
+    // platforms where closing the last window would otherwise destroy it before app.quit().
+    if (process.platform !== 'darwin' && !isQuittingAfterServiceShutdown) {
+      event.preventDefault()
+      app.quit()
+      return
+    }
     if (mainWindowLifecycle.requestClose(window, isQuittingAfterServiceShutdown)) {
       event.preventDefault()
     }
@@ -206,6 +214,7 @@ function createWindow(): void {
   })
 
   window.on('ready-to-show', () => {
+    if (isServiceShutdownInProgress || isQuittingAfterServiceShutdown) return
     window.show()
     sendAppWindowState(window)
     // A cold-start backlog must not race the window that the user just opened. Native delivery
@@ -254,6 +263,7 @@ function createWindow(): void {
 }
 
 function activateMainWindow(): void {
+  if (isServiceShutdownInProgress || isQuittingAfterServiceShutdown) return
   const window = mainWindowLifecycle.showExisting(mainWindow)
   if (!window) {
     createWindow()
@@ -453,15 +463,25 @@ app.on('before-quit', (event) => {
     coreServer.stop()
     return
   }
+  if (isServiceShutdownInProgress) {
+    event.preventDefault()
+    return
+  }
 
   event.preventDefault()
-  isQuittingAfterServiceShutdown = true
+  isServiceShutdownInProgress = true
   // Stop the native system-notification producer before any await in the shutdown path. Keep
   // the remaining IPC and MCP reverse bridge registered until Core has completed its own bounded
   // shutdown; only this producer could otherwise issue a lazy request that respawns Core.
   const notificationShutdown = disposeHostIpc?.beginNotificationShutdown()
   mainWindowLifecycle.prepareForQuit()
+  // Once quit has been accepted, remove the remaining input surface while retaining its live
+  // webContents for the bounded Renderer flush below.
+  mainWindow?.hide()
   void (async () => {
+    // Renderer owns debounced Composer state. Finish that bounded write while Core still accepts
+    // requests; unloading the window after Core shutdown would otherwise lose the final keystrokes.
+    await disposeHostIpc?.flushRendererBeforeQuit(mainWindow?.webContents)
     // Keep the exact Main reverse bridge and BrowserSurface alive until Core has stopped the
     // managed MCP Manager. Core shutdown sends a reviewed close command and awaits its bounded
     // completion; tearing down Main in parallel would turn a graceful close into an unknown
@@ -483,7 +503,10 @@ app.on('before-quit', (event) => {
     browserFileBroker = null
     await browserArtifactBroker?.shutdown().catch(() => undefined)
     browserArtifactBroker = null
-  })().finally(() => app.quit())
+  })().finally(() => {
+    isQuittingAfterServiceShutdown = true
+    app.quit()
+  })
 })
 
 app.on('will-quit', () => {

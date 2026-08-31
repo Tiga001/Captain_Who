@@ -69,9 +69,14 @@ impl StorageService {
                     ) {
                         eprintln!("failed to prune expired file changes: {error}");
                     }
-                    if let Err(error) = service.cleanup_orphan_attachment_files(&connection) {
-                        eprintln!("failed to cleanup orphan attachment files: {error}");
-                    }
+                }
+                Err(error) => eprintln!("failed to open storage for startup maintenance: {error}"),
+            }
+            if let Err(error) = service.cleanup_orphan_attachment_files() {
+                eprintln!("failed to cleanup orphan attachment files: {error}");
+            }
+            match service.state.connection() {
+                Ok(mut connection) => {
                     if let Err(error) =
                         context_compaction_receipt_repository::mark_in_progress_receipts_interrupted(
                             &mut connection,
@@ -81,7 +86,9 @@ impl StorageService {
                         eprintln!("failed to mark interrupted context compactions: {error}");
                     }
                 }
-                Err(error) => eprintln!("failed to open storage for startup maintenance: {error}"),
+                Err(error) => {
+                    eprintln!("failed to reopen storage for startup maintenance: {error}")
+                }
             }
         }
 

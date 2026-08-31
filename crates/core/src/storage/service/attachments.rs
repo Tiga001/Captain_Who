@@ -331,21 +331,7 @@ impl StorageService {
         &self,
         prepared: PreparedConversationTurnRewriteAttachments,
     ) {
-        let connection = self.state.connection().ok();
-        for path in prepared.paths_created_by_this_process {
-            let committed = prepared.records.iter().any(|record| {
-                self.attachment_root.join(&record.storage_rel_path) == path
-                    && connection.as_ref().is_some_and(|connection| {
-                        attachment_repository::get_attachment(connection, &record.id)
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    })
-            });
-            if !committed {
-                let _ = fs::remove_file(path);
-            }
-        }
+        cleanup_new_attachment_files(self, &prepared.paths_created_by_this_process);
     }
 
     /// Resolves only the durable Conversation owner for an attachment. Host authorization uses
@@ -379,6 +365,7 @@ impl StorageService {
         else {
             return Ok(None);
         };
+        drop(connection);
 
         let Some(mime_type) = image_preview_mime_type(&attachment) else {
             return Ok(None);
@@ -423,7 +410,9 @@ impl StorageService {
         let connection = self.state.connection()?;
         ensure_conversation_exists(&connection, conversation_id)?;
         ensure_project_reference_exists(&connection, project_id)?;
+        drop(connection);
 
+        let mut prepared = Vec::with_capacity(attachments.len());
         for attachment in attachments {
             let bytes = input_attachment_bytes(attachment)?;
             let attachment_id = safe_path_component(&attachment.id, "attachment");
@@ -434,28 +423,76 @@ impl StorageService {
                 &attachment.name,
             );
             let storage_path = self.attachment_root.join(&storage_rel_path);
+            prepared.push((
+                AttachmentRecord {
+                    id: attachment_id,
+                    conversation_id: conversation_id.to_string(),
+                    message_id: message_id.to_string(),
+                    project_id: project_id.map(ToString::to_string),
+                    kind: input_attachment_kind_label(attachment.kind).to_string(),
+                    original_name: attachment.name.clone(),
+                    mime_type: attachment.mime_type.clone(),
+                    size_bytes: bytes.len() as u64,
+                    storage_rel_path: slash_path(&storage_rel_path),
+                    created_at,
+                },
+                storage_path,
+                bytes,
+            ));
+        }
+
+        let mut newly_created_paths = Vec::new();
+        for (_, storage_path, bytes) in &prepared {
             let parent = storage_path
                 .parent()
                 .ok_or_else(|| "附件存储路径无效。".to_string())?;
             fs::create_dir_all(parent).map_err(|error| format!("创建附件目录失败：{error}"))?;
-            fs::write(&storage_path, &bytes).map_err(|error| format!("写入附件失败：{error}"))?;
-
-            let record = AttachmentRecord {
-                id: attachment_id,
-                conversation_id: conversation_id.to_string(),
-                message_id: message_id.to_string(),
-                project_id: project_id.map(ToString::to_string),
-                kind: input_attachment_kind_label(attachment.kind).to_string(),
-                original_name: attachment.name.clone(),
-                mime_type: attachment.mime_type.clone(),
-                size_bytes: bytes.len() as u64,
-                storage_rel_path: slash_path(&storage_rel_path),
-                created_at,
+            let created = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(storage_path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(error) = file.write_all(bytes) {
+                        let _ = fs::remove_file(storage_path);
+                        cleanup_new_attachment_files(self, &newly_created_paths);
+                        return Err(format!("写入附件失败：{error}"));
+                    }
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Err(error) = fs::write(storage_path, bytes) {
+                        cleanup_new_attachment_files(self, &newly_created_paths);
+                        return Err(format!("写入附件失败：{error}"));
+                    }
+                    false
+                }
+                Err(error) => {
+                    cleanup_new_attachment_files(self, &newly_created_paths);
+                    return Err(format!("写入附件失败：{error}"));
+                }
             };
-            attachment_repository::save_attachment(&connection, &record).map_err(storage_error)?;
+            if created {
+                newly_created_paths.push(storage_path.clone());
+            }
         }
 
-        Ok(())
+        let database_result = (|| -> Result<(), String> {
+            let mut connection = self.state.connection()?;
+            let transaction = connection.transaction().map_err(storage_error)?;
+            ensure_conversation_exists(&transaction, conversation_id)?;
+            ensure_project_reference_exists(&transaction, project_id)?;
+            for (record, _, _) in &prepared {
+                attachment_repository::save_attachment(&transaction, record)
+                    .map_err(storage_error)?;
+            }
+            transaction.commit().map_err(storage_error)
+        })();
+        if database_result.is_err() {
+            cleanup_new_attachment_files(self, &newly_created_paths);
+        }
+        database_result
     }
 
     /// Persists every guidance attachment and its ownership journal before queue admission.
@@ -486,11 +523,9 @@ impl StorageService {
 
         fs::create_dir_all(&self.attachment_root)
             .map_err(|error| format!("创建附件库目录失败：{error}"))?;
-        let mut connection = self.state.connection()?;
+        let connection = self.state.connection()?;
         ensure_conversation_exists(&connection, &record.conversation_id)?;
         ensure_project_reference_exists(&connection, project_id)?;
-
-        let mut prepared = Vec::with_capacity(attachments.len());
         for attachment in attachments {
             if attachment_repository::get_attachment(&connection, &attachment.id)
                 .map_err(storage_error)?
@@ -498,6 +533,11 @@ impl StorageService {
             {
                 return Err(format!("附件 id 已存在：{}", attachment.id));
             }
+        }
+        drop(connection);
+
+        let mut prepared = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
             let bytes = input_attachment_bytes(attachment)?;
             let storage_rel_path = attachment_storage_rel_path(
                 &record.conversation_id,
@@ -542,15 +582,24 @@ impl StorageService {
                     file.sync_all()
                 });
             if let Err(error) = write_result {
-                cleanup_new_guidance_attachment_files(self, &written_paths);
+                cleanup_new_attachment_files(self, &written_paths);
                 return Err(format!("写入引导附件失败：{error}"));
             }
             written_paths.push(storage_path.clone());
         }
 
         let database_result = (|| -> Result<AgentRunGuidanceStoreOutcome, String> {
+            let mut connection = self.state.connection()?;
             let transaction = connection.transaction().map_err(storage_error)?;
+            ensure_conversation_exists(&transaction, &record.conversation_id)?;
+            ensure_project_reference_exists(&transaction, project_id)?;
             for (attachment, _, _) in &prepared {
+                if attachment_repository::get_attachment(&transaction, &attachment.id)
+                    .map_err(storage_error)?
+                    .is_some()
+                {
+                    return Err(format!("附件 id 已存在：{}", attachment.id));
+                }
                 attachment_repository::insert_attachment(&transaction, attachment)
                     .map_err(storage_error)?;
             }
@@ -567,7 +616,7 @@ impl StorageService {
         })();
 
         if database_result.is_err() {
-            cleanup_new_guidance_attachment_files(self, &written_paths);
+            cleanup_new_attachment_files(self, &written_paths);
         }
         database_result
     }
@@ -577,12 +626,18 @@ impl StorageService {
         attachment_ids: &[String],
     ) -> Result<Vec<AgentInputAttachment>, String> {
         let connection = self.state.connection()?;
-        let mut attachments = Vec::new();
+        let records = attachment_ids
+            .iter()
+            .map(|attachment_id| {
+                attachment_repository::get_attachment(&connection, attachment_id)
+                    .map_err(storage_error)?
+                    .ok_or_else(|| format!("附件不存在：{attachment_id}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        drop(connection);
 
-        for attachment_id in attachment_ids {
-            let attachment = attachment_repository::get_attachment(&connection, attachment_id)
-                .map_err(storage_error)?
-                .ok_or_else(|| format!("附件不存在：{attachment_id}"))?;
+        let mut attachments = Vec::with_capacity(records.len());
+        for attachment in records {
             let storage_path = safe_existing_attachment_storage_path(
                 &self.attachment_root,
                 &attachment.storage_rel_path,
@@ -670,7 +725,8 @@ impl StorageService {
         &self,
         connection: &rusqlite::Connection,
         conversations: &mut [ChatConversationRecord],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<AttachmentRecord>, String> {
+        let mut preview_attachments = Vec::new();
         for conversation in conversations {
             let attachments = attachment_repository::list_ordinary_conversation_attachments(
                 connection,
@@ -684,10 +740,13 @@ impl StorageService {
             let mut attachments_by_message_id: HashMap<String, Vec<ChatMessageAttachmentRecord>> =
                 HashMap::new();
             for attachment in attachments {
+                if image_preview_mime_type(&attachment).is_some() {
+                    preview_attachments.push(attachment.clone());
+                }
                 attachments_by_message_id
                     .entry(attachment.message_id.clone())
                     .or_default()
-                    .push(self.chat_message_attachment_record(attachment));
+                    .push(Self::chat_message_attachment_record(attachment));
             }
 
             for message in &mut conversation.messages {
@@ -697,17 +756,13 @@ impl StorageService {
             }
         }
 
-        Ok(())
+        Ok(preview_attachments)
     }
 
     pub(super) fn chat_message_attachment_record(
-        &self,
         attachment: AttachmentRecord,
     ) -> ChatMessageAttachmentRecord {
         let preview_mime_type = image_preview_mime_type(&attachment);
-        let preview_data = preview_mime_type
-            .as_ref()
-            .and_then(|_| self.read_attachment_preview_data(&attachment));
 
         ChatMessageAttachmentRecord {
             id: attachment.id,
@@ -715,9 +770,37 @@ impl StorageService {
             name: attachment.original_name,
             mime_type: attachment.mime_type,
             size_bytes: attachment.size_bytes,
-            preview_data,
+            preview_data: None,
             preview_mime_type,
             created_at: attachment.created_at,
+        }
+    }
+
+    /// Completes eager preview hydration after the caller releases its SQLite connection guard.
+    pub(super) fn hydrate_message_attachment_previews(
+        &self,
+        conversations: &mut [ChatConversationRecord],
+        preview_attachments: Vec<AttachmentRecord>,
+    ) {
+        let mut preview_data_by_id = preview_attachments
+            .into_iter()
+            .filter_map(|attachment| {
+                self.read_attachment_preview_data(&attachment)
+                    .map(|preview_data| (attachment.id, preview_data))
+            })
+            .collect::<HashMap<_, _>>();
+        if preview_data_by_id.is_empty() {
+            return;
+        }
+
+        for conversation in conversations {
+            for message in &mut conversation.messages {
+                for attachment in &mut message.attachments {
+                    if let Some(preview_data) = preview_data_by_id.remove(&attachment.id) {
+                        attachment.preview_data = Some(preview_data);
+                    }
+                }
+            }
         }
     }
 
@@ -763,18 +846,18 @@ impl StorageService {
         }
     }
 
-    pub(super) fn cleanup_orphan_attachment_files(
-        &self,
-        connection: &rusqlite::Connection,
-    ) -> Result<(), String> {
+    pub(super) fn cleanup_orphan_attachment_files(&self) -> Result<(), String> {
         if !self.attachment_root.exists() {
             return Ok(());
         }
 
-        let referenced_paths = attachment_repository::list_attachment_storage_rel_paths(connection)
-            .map_err(storage_error)?
-            .into_iter()
-            .collect::<HashSet<_>>();
+        let referenced_paths = {
+            let connection = self.state.connection()?;
+            attachment_repository::list_attachment_storage_rel_paths(&connection)
+                .map_err(storage_error)?
+                .into_iter()
+                .collect::<HashSet<_>>()
+        };
         let mut errors = Vec::new();
         self.cleanup_orphan_attachment_dir(&self.attachment_root, &referenced_paths, &mut errors);
 
@@ -900,9 +983,25 @@ impl StorageService {
     }
 }
 
-fn cleanup_new_guidance_attachment_files(service: &StorageService, paths: &[PathBuf]) {
+fn cleanup_new_attachment_files(service: &StorageService, paths: &[PathBuf]) {
+    let referenced_paths = {
+        let Ok(connection) = service.state.connection() else {
+            return;
+        };
+        let Ok(referenced_paths) =
+            attachment_repository::list_attachment_storage_rel_paths(&connection)
+        else {
+            return;
+        };
+        referenced_paths.into_iter().collect::<HashSet<_>>()
+    };
     let mut errors = Vec::new();
     for path in paths {
+        if orphan_scan_relative_path(&service.attachment_root, path)
+            .is_some_and(|relative_path| referenced_paths.contains(&relative_path))
+        {
+            continue;
+        }
         match fs::remove_file(path) {
             Ok(()) => service.prune_empty_attachment_dirs(path.parent(), &mut errors),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

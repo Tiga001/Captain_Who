@@ -220,3 +220,23 @@ describe('model settings IPC', () => {
     })
   })
 })
+
+describe('Composer draft IPC', () => {
+  it('routes a text-only autosave without expanding it into a full draft', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const saveComposerDraftMessage = vi.fn().mockResolvedValue(true)
+    registerStorageIpc(ipcMain as never, { saveComposerDraftMessage } as never, {} as never)
+    const input = { scopeId: 'conversation-1', message: 'latest', updatedAt: 42 }
+
+    await expect(handlers.get('host:storage.saveComposerDraftMessage')?.({}, input)).resolves.toBe(
+      true
+    )
+    expect(saveComposerDraftMessage).toHaveBeenCalledWith(input)
+  })
+})

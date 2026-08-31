@@ -67,4 +67,13 @@ describe('Storage IPC bridge', () => {
     await expect(bridge.forkConversation(input)).resolves.toBe(response)
     expect(invoke).toHaveBeenCalledWith('host:storage.forkConversation', input)
   })
+
+  it('routes lightweight Composer text autosaves without the full draft payload', async () => {
+    const invoke = vi.fn().mockResolvedValue(true)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const input = { scopeId: 'conversation-1', message: 'latest text', updatedAt: 42 }
+
+    await expect(bridge.saveComposerDraftMessage(input)).resolves.toBe(true)
+    expect(invoke).toHaveBeenCalledWith('host:storage.saveComposerDraftMessage', input)
+  })
 })

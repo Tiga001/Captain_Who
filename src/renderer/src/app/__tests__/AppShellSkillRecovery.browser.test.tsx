@@ -57,6 +57,7 @@ const testState = vi.hoisted(() => ({
   preflightProviderTransition: vi.fn(),
   saveChatMessageState: vi.fn(),
   saveComposerDraft: vi.fn(),
+  saveComposerDraftMessage: vi.fn(),
   saveConversationMeta: vi.fn(),
   showToast: vi.fn(),
   rewriteConversationTurn: vi.fn(),
@@ -200,6 +201,7 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
     loadUiPreferences: testState.loadUiPreferences,
     saveChatMessageState: testState.saveChatMessageState,
     saveComposerDraft: testState.saveComposerDraft,
+    saveComposerDraftMessage: testState.saveComposerDraftMessage,
     saveConversationMeta: testState.saveConversationMeta,
     saveUiPreferences: vi.fn(),
     upsertChatMessages: testState.upsertChatMessages
@@ -1012,6 +1014,7 @@ beforeEach(() => {
       })
     )
   testState.saveComposerDraft.mockReset().mockResolvedValue(undefined)
+  testState.saveComposerDraftMessage.mockReset().mockResolvedValue(true)
   testState.saveConversationMeta
     .mockReset()
     .mockImplementation(async (conversation: ChatConversation) => {

@@ -284,6 +284,7 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
     saveChatMessageState: vi.fn(),
     saveChatMessageUiState: vi.fn(),
     saveComposerDraft: vi.fn(),
+    saveComposerDraftMessage: vi.fn().mockResolvedValue(true),
     saveConversationMeta: vi.fn(),
     saveUiPreferences: vi.fn(),
     upsertChatMessages: vi.fn()

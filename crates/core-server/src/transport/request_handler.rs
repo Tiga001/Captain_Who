@@ -566,6 +566,23 @@ pub(crate) fn handle_request(
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
+        STORAGE_SAVE_COMPOSER_DRAFT_MESSAGE_METHOD => {
+            let input = match parse_params::<SaveComposerDraftMessageRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.authorize_user_conversation_write(&input.scope_id) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.save_composer_draft_message(
+                        &input.scope_id,
+                        &input.message,
+                        input.updated_at,
+                    ),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
         STORAGE_LOAD_UI_PREFERENCES_METHOD => {
             storage_response(request.id, storage.load_ui_preferences())
         }
@@ -650,4 +667,12 @@ pub(crate) struct ChatMessageUiStateRecord {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SaveComposerDraftRequest {
     pub(crate) draft: ComposerDraftRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SaveComposerDraftMessageRequest {
+    pub(crate) scope_id: String,
+    pub(crate) message: String,
+    pub(crate) updated_at: i64,
 }

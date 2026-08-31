@@ -43,6 +43,8 @@ export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): Storage
     loadComposerDrafts: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadComposerDrafts),
     saveComposerDraft: (draft) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveComposerDraft, draft),
+    saveComposerDraftMessage: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.storage.saveComposerDraftMessage, input),
     loadUiPreferences: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadUiPreferences),
     saveUiPreferences: (preferences) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveUiPreferences, preferences),

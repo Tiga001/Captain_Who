@@ -13,6 +13,7 @@ interface AppShellSettingsViewProps {
   initialBrowserView?: BrowserAutomationView
   initialProjectId?: string | null
   onBack: () => void
+  onBeforeConversationDelete: (conversationId: string) => Promise<void>
   onConversationPatch: (conversationId: string, patch: Partial<ChatConversation>) => void
   onConversationsChange: Dispatch<SetStateAction<ChatConversation[]>>
   onRemoveProject: (projectId: string) => Promise<boolean>
@@ -27,6 +28,7 @@ export function AppShellSettingsView({
   initialBrowserView,
   initialProjectId,
   onBack,
+  onBeforeConversationDelete,
   onConversationPatch,
   onConversationsChange,
   onRemoveProject,
@@ -55,9 +57,11 @@ export function AppShellSettingsView({
             return false
           })
 
-          deletedConversationIds.forEach(
-            (conversationId) => void deleteStoredConversation(conversationId)
-          )
+          deletedConversationIds.forEach((conversationId) => {
+            void onBeforeConversationDelete(conversationId)
+              .then(() => deleteStoredConversation(conversationId))
+              .catch((error) => console.error('Failed to delete stored conversation', error))
+          })
           return nextConversations
         })
       }
@@ -65,7 +69,9 @@ export function AppShellSettingsView({
         onConversationsChange((currentConversations) =>
           currentConversations.filter((conversation) => conversation.id !== conversationId)
         )
-        void deleteStoredConversation(conversationId)
+        void onBeforeConversationDelete(conversationId)
+          .then(() => deleteStoredConversation(conversationId))
+          .catch((error) => console.error('Failed to delete stored conversation', error))
       }}
       onRemoveProject={onRemoveProject}
       onUnarchiveConversation={(conversationId) =>

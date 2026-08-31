@@ -238,6 +238,13 @@ export interface StorageComposerDraftRecord {
   updatedAt: number
 }
 
+/** Lightweight autosave payload for text-only Composer edits. */
+export interface StorageComposerDraftMessageUpdate {
+  scopeId: string
+  message: string
+  updatedAt: number
+}
+
 export interface StorageUiPreferencesRecord {
   profileAvatarDataUrl?: string | null
   profileDisplayName: string

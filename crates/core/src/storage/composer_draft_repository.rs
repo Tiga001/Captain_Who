@@ -82,6 +82,32 @@ pub fn save_composer_draft(
     Ok(())
 }
 
+/// Updates only the rapidly changing text field while preserving heavyweight draft payloads.
+/// Returns `false` only when the scope has no durable draft yet, allowing the caller to seed it
+/// once through the full save path. A stale update still returns `true` without overwriting data.
+pub fn save_composer_draft_message(
+    connection: &Connection,
+    scope_id: &str,
+    message: &str,
+    updated_at: i64,
+) -> rusqlite::Result<bool> {
+    let changed = connection.execute(
+        "UPDATE composer_drafts
+         SET message = ?1, updated_at = ?2
+         WHERE scope_id = ?3 AND updated_at <= ?2",
+        params![message, updated_at, scope_id],
+    )?;
+    if changed > 0 {
+        return Ok(true);
+    }
+
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM composer_drafts WHERE scope_id = ?1)",
+        params![scope_id],
+        |row| row.get(0),
+    )
+}
+
 pub fn delete_composer_draft(connection: &Connection, scope_id: &str) -> rusqlite::Result<()> {
     connection.execute(
         "DELETE FROM composer_drafts WHERE scope_id = ?1",

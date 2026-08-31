@@ -666,6 +666,7 @@ impl StorageService {
                 Ok(())
             })?;
         }
+        drop(connection);
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted project attachment files: {error}");
         }
@@ -676,8 +677,11 @@ impl StorageService {
         let connection = self.state.connection()?;
         let mut conversations =
             chat_repository::list_active_conversations(&connection).map_err(storage_error)?;
-        self.attach_message_attachments(&connection, &mut conversations)?;
+        let preview_attachments =
+            self.attach_message_attachments(&connection, &mut conversations)?;
         attach_message_guidance_timelines(&connection, &mut conversations)?;
+        drop(connection);
+        self.hydrate_message_attachment_previews(&mut conversations, preview_attachments);
         Ok(conversations)
     }
 
@@ -744,9 +748,20 @@ impl StorageService {
         let mut conversation =
             chat_repository::get_active_conversation(&connection, conversation_id)
                 .map_err(storage_error)?;
-        if let Some(conversation) = &mut conversation {
-            self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
+        let preview_attachments = if let Some(conversation) = &mut conversation {
+            let preview_attachments =
+                self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
             attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
+            preview_attachments
+        } else {
+            Vec::new()
+        };
+        drop(connection);
+        if let Some(conversation) = &mut conversation {
+            self.hydrate_message_attachment_previews(
+                std::slice::from_mut(conversation),
+                preview_attachments,
+            );
         }
         Ok(conversation)
     }
@@ -770,7 +785,8 @@ impl StorageService {
             transaction.commit().map_err(storage_error)?;
             return Ok(None);
         };
-        self.attach_message_attachments(&transaction, std::slice::from_mut(&mut conversation))?;
+        let preview_attachments =
+            self.attach_message_attachments(&transaction, std::slice::from_mut(&mut conversation))?;
         attach_message_guidance_timelines(&transaction, std::slice::from_mut(&mut conversation))?;
         let mut input_origins =
             agent_graph_repository::conversation_message_origins(&transaction, conversation_id)
@@ -801,6 +817,11 @@ impl StorageService {
             );
         }
         transaction.commit().map_err(storage_error)?;
+        drop(connection);
+        self.hydrate_message_attachment_previews(
+            std::slice::from_mut(&mut conversation),
+            preview_attachments,
+        );
         Ok(Some(ConversationObserverSnapshot {
             conversation,
             input_origins,
@@ -839,10 +860,19 @@ impl StorageService {
                 "Conversation Turn admission snapshot is internally inconsistent.".to_string(),
             );
         }
-        if let Some(conversation) = &mut conversation {
-            self.attach_message_attachments(&transaction, std::slice::from_mut(conversation))?;
-        }
+        let preview_attachments = if let Some(conversation) = &mut conversation {
+            self.attach_message_attachments(&transaction, std::slice::from_mut(conversation))?
+        } else {
+            Vec::new()
+        };
         transaction.commit().map_err(storage_error)?;
+        drop(connection);
+        if let Some(conversation) = &mut conversation {
+            self.hydrate_message_attachment_previews(
+                std::slice::from_mut(conversation),
+                preview_attachments,
+            );
+        }
         Ok((conversation, revision))
     }
 
@@ -922,11 +952,17 @@ impl StorageService {
             )
             .map_err(storage_error)?
             .ok_or_else(|| "分叉记录指向的新任务不存在。".to_string())?;
-            self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
+            let preview_attachments = self
+                .attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
             attach_message_guidance_timelines(
                 &connection,
                 std::slice::from_mut(&mut conversation),
             )?;
+            drop(connection);
+            self.hydrate_message_attachment_previews(
+                std::slice::from_mut(&mut conversation),
+                preview_attachments,
+            );
             return Ok(conversation);
         }
 
@@ -1004,6 +1040,7 @@ impl StorageService {
             Ok(())
         })();
         if let Err(error) = prepare_files {
+            drop(connection);
             cleanup_fork_files(&staged_files, &committed_files);
             return Err(error.into());
         }
@@ -1015,14 +1052,21 @@ impl StorageService {
                 &provider_continuations,
             )
         {
+            drop(connection);
             cleanup_fork_files(&staged_files, &committed_files);
             return Err(error);
         }
         let mut conversation = chat_repository::get_conversation(&connection, &plan.target.id)
             .map_err(storage_error)?
             .ok_or_else(|| "新任务创建后无法重新读取。".to_string())?;
-        self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
+        let preview_attachments =
+            self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
         attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))?;
+        drop(connection);
+        self.hydrate_message_attachment_previews(
+            std::slice::from_mut(&mut conversation),
+            preview_attachments,
+        );
         Ok(conversation)
     }
 
@@ -2165,6 +2209,7 @@ impl StorageService {
                 .map_err(storage_error)?;
         }
         transaction.commit().map_err(storage_error)?;
+        drop(connection);
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove rolled-back Turn attachments: {error}");
         }
@@ -2246,6 +2291,7 @@ impl StorageService {
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
         }
+        drop(connection);
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted conversation attachment files: {error}");
         }
@@ -2287,6 +2333,7 @@ impl StorageService {
             transaction.commit().map_err(storage_error)?;
             attachments
         };
+        drop(connection);
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted message attachment files: {error}");
         }

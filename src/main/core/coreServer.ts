@@ -210,6 +210,7 @@ import type {
   StorageChatMessageStateRecord,
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
+  StorageComposerDraftMessageUpdate,
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord,
   StorageProjectRecord,
@@ -506,6 +507,7 @@ const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD = 'storage.saveChatMessageState'
 const STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD = 'storage.saveChatMessageUiState'
 const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD = 'storage.loadComposerDrafts'
 const STORAGE_SAVE_COMPOSER_DRAFT_METHOD = 'storage.saveComposerDraft'
+const STORAGE_SAVE_COMPOSER_DRAFT_MESSAGE_METHOD = 'storage.saveComposerDraftMessage'
 const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
@@ -2445,6 +2447,13 @@ export class CoreServer {
     return this.rpc.request<StorageComposerDraftRecord, { draft: StorageComposerDraftRecord }>(
       STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
       { draft }
+    )
+  }
+
+  saveComposerDraftMessage(input: StorageComposerDraftMessageUpdate): Promise<boolean> {
+    return this.rpc.request<boolean, StorageComposerDraftMessageUpdate>(
+      STORAGE_SAVE_COMPOSER_DRAFT_MESSAGE_METHOD,
+      input
     )
   }
 

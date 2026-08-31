@@ -13,6 +13,7 @@ import type {
   StorageChatMessageStateRecord,
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
+  StorageComposerDraftMessageUpdate,
   StorageForkConversationRequest,
   StorageImageFileRecord,
   StorageModelConfigRecord,
@@ -230,6 +231,12 @@ export async function saveComposerDraft(
   return mapDraftFromStorage(
     await hostClient.storage.saveComposerDraft(mapDraftToStorage(scopeId, draft))
   )
+}
+
+export async function saveComposerDraftMessage(
+  input: StorageComposerDraftMessageUpdate
+): Promise<boolean> {
+  return hostClient.storage.saveComposerDraftMessage(input)
 }
 
 export async function loadUiPreferences(): Promise<UiPreferencesSnapshot> {

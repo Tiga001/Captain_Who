@@ -4,7 +4,8 @@ import type {
   OpenDialogOptions,
   OpenDialogReturnValue,
   SaveDialogOptions,
-  SaveDialogReturnValue
+  SaveDialogReturnValue,
+  WebContents
 } from 'electron'
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
@@ -30,6 +31,7 @@ import { registerCoreServiceIpc } from './ipc/serviceIpc'
 import { registerStorageIpc } from './ipc/storageIpc'
 import { registerTerminalIpc } from './ipc/terminalIpc'
 import { createTrustedIpcMain } from './ipc/trustedIpc'
+import { RendererQuitFlushCoordinator } from './ipc/rendererQuitFlush'
 import { registerWorkspaceFilesIpc } from './ipc/workspaceFilesIpc'
 import type { BrowserSurfaceManager } from './browser/BrowserSurfaceManager'
 import { registerBrowserSurfaceIpc } from './ipc/browserSurfaceIpc'
@@ -308,6 +310,7 @@ export interface HostIpcRegistration {
   beginAutomationShutdown(): Promise<void>
   beginNotificationDelivery(): void
   beginNotificationShutdown(): Promise<void>
+  flushRendererBeforeQuit(target: WebContents | null | undefined, timeoutMs?: number): Promise<void>
 }
 
 export function registerHostIpc(
@@ -326,6 +329,7 @@ export function registerHostIpc(
     getProjectPath(coreServer, projectId)
   )
   const ipcMain = createTrustedIpcMain(isTrustedRenderer)
+  const rendererQuitFlush = new RendererQuitFlushCoordinator(ipcMain)
 
   registerCoreServiceIpc(ipcMain, coreServer)
   registerAgentIpc(ipcMain, coreServer)
@@ -378,6 +382,7 @@ export function registerHostIpc(
     faviconResourceCache.resolveFavicon(input)
   )
   const dispose = (): void => {
+    rendererQuitFlush.dispose()
     disposeNotificationIpc()
     disposeAutomationIpc()
     disposeMcpIpc()
@@ -386,6 +391,8 @@ export function registerHostIpc(
   }
   dispose.beginNotificationShutdown = (): Promise<void> => disposeNotificationIpc.beginShutdown()
   dispose.beginNotificationDelivery = (): void => disposeNotificationIpc.beginDelivery()
+  dispose.flushRendererBeforeQuit = (target, timeoutMs): Promise<void> =>
+    rendererQuitFlush.flush(target, timeoutMs)
   // Retain the old lifecycle name while callers migrate; it now fences the application-wide
   // notification pump rather than the removed Automation-only pump.
   dispose.beginAutomationShutdown = dispose.beginNotificationShutdown

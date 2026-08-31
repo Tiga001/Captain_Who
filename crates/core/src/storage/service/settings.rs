@@ -308,6 +308,25 @@ impl StorageService {
         Ok(draft)
     }
 
+    pub fn save_composer_draft_message(
+        &self,
+        scope_id: &str,
+        message: &str,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        if scope_id.trim().is_empty() || updated_at < 0 {
+            return Err("stored_composer_draft_malformed".to_string());
+        }
+        let connection = self.state.connection()?;
+        composer_draft_repository::save_composer_draft_message(
+            &connection,
+            scope_id,
+            message,
+            updated_at,
+        )
+        .map_err(storage_error)
+    }
+
     /// Loads effective enablement for a batch of complete, opaque Skill ids.
     ///
     /// An absent override is intentionally enabled by default. The returned

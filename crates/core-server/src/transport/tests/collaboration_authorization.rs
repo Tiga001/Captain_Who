@@ -287,6 +287,14 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
             }),
         ),
         (
+            STORAGE_SAVE_COMPOSER_DRAFT_MESSAGE_METHOD,
+            serde_json::json!({
+                "scopeId": child_conversation,
+                "message": "forged",
+                "updatedAt": 3
+            }),
+        ),
+        (
             STORAGE_DELETE_CHAT_MESSAGES_METHOD,
             serde_json::json!({
                 "conversationId": child_conversation,

@@ -200,6 +200,7 @@ import type {
   StorageChatMessageStateRecord,
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
+  StorageComposerDraftMessageUpdate,
   StorageImageFileRecord,
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord,
@@ -368,6 +369,7 @@ export interface StorageHostApi {
   }): Promise<void>
   loadComposerDrafts(): Promise<StorageComposerDraftRecord[]>
   saveComposerDraft(draft: StorageComposerDraftRecord): Promise<StorageComposerDraftRecord>
+  saveComposerDraftMessage(input: StorageComposerDraftMessageUpdate): Promise<boolean>
   loadUiPreferences(): Promise<StorageUiPreferencesRecord>
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord>
   selectProfileAvatar(): Promise<string | null>
@@ -599,6 +601,7 @@ export interface HostApi {
   app: {
     getWindowState(): Promise<AppWindowState>
     openExternal(url: string): Promise<void>
+    onFlushBeforeQuit(handler: () => void | Promise<void>): () => void
     onWindowStateChange(handler: (state: AppWindowState) => void): () => void
     setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
     whenReady(): Promise<void>

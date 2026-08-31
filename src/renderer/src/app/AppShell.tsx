@@ -56,7 +56,6 @@ import {
   loadConversation,
   loadConversationMetas,
   loadInputAttachments,
-  saveComposerDraft,
   saveUiPreferences
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
@@ -81,6 +80,7 @@ import {
   getEditableLastTurn
 } from './appShellConversationUtils'
 import { useConversationPersistence } from './useConversationPersistence'
+import { useComposerDraftPersistence } from './useComposerDraftPersistence'
 import { useShellLayout } from './useShellLayout'
 import { useConversationNavigation } from './useConversationNavigation'
 import { usePersistedShellHydration } from './usePersistedShellHydration'
@@ -256,6 +256,8 @@ export function AppShell() {
     waitForMessageStateSaves,
     waitForMessageUpserts
   } = useConversationPersistence()
+  const { discardDraft, flushDraft, persistDraftNow, resumeDraft, scheduleMessageSave } =
+    useComposerDraftPersistence()
   const pendingActionsHydratedRef = useRef<Set<string>>(new Set())
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
@@ -312,6 +314,7 @@ export function AppShell() {
     rootConversationId: collaborationTree?.rootConversationId ?? null
   })
   const activeDraftId = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
+  const previousActiveDraftIdRef = useRef(activeDraftId)
   const activeDraft =
     drafts[activeDraftId] ??
     createComposerDraft({ projectId: activeConversation?.projectId ?? null })
@@ -601,6 +604,12 @@ export function AppShell() {
     )
   }, [activeDraftId])
 
+  useEffect(() => {
+    const previousScopeId = previousActiveDraftIdRef.current
+    previousActiveDraftIdRef.current = activeDraftId
+    if (previousScopeId !== activeDraftId) void flushDraft(previousScopeId)
+  }, [activeDraftId, flushDraft])
+
   const hydrateConversation = useCallback(
     (conversationId: string): Promise<ChatConversation | null> => {
       const currentConversation = conversationsRef.current.find(
@@ -712,18 +721,21 @@ export function AppShell() {
         ...currentDrafts,
         [scopeId]: draft
       }))
-      void saveComposerDraft(scopeId, draft)
+      void persistDraftNow(scopeId, draft)
     },
-    [setDraftsWithRef]
+    [persistDraftNow, setDraftsWithRef]
   )
 
-  const persistDraftMessageOnly = useCallback((scopeId: string, draft: ChatComposerDraft) => {
-    draftsRef.current = {
-      ...draftsRef.current,
-      [scopeId]: draft
-    }
-    void saveComposerDraft(scopeId, draft)
-  }, [])
+  const persistDraftMessageOnly = useCallback(
+    (scopeId: string, draft: ChatComposerDraft) => {
+      draftsRef.current = {
+        ...draftsRef.current,
+        [scopeId]: draft
+      }
+      scheduleMessageSave(scopeId, draft)
+    },
+    [scheduleMessageSave]
+  )
 
   const mutateDraft = useCallback(
     (scopeId: string, updater: (draft: ChatComposerDraft) => ChatComposerDraft) => {
@@ -736,10 +748,10 @@ export function AppShell() {
         ...draftsRef.current,
         [scopeId]: nextDraft
       })
-      void saveComposerDraft(scopeId, nextDraft)
+      void persistDraftNow(scopeId, nextDraft)
       return nextDraft
     },
-    [setDraftsWithRef]
+    [persistDraftNow, setDraftsWithRef]
   )
 
   useEffect(() => {
@@ -842,12 +854,12 @@ export function AppShell() {
         // A user may already have started composing the next turn. Preserve that live choice for
         // duplicate ids and only restore submitted selections that are currently missing.
         skills: mergeSkillSelections(currentDraft.skills, submittedSkills),
-        updatedAt: Date.now()
+        updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
       }
       setDraftsWithRef({ ...draftsRef.current, [scopeId]: nextDraft })
-      void saveComposerDraft(scopeId, nextDraft)
+      void persistDraftNow(scopeId, nextDraft)
     },
-    [setDraftsWithRef]
+    [persistDraftNow, setDraftsWithRef]
   )
 
   const reconcileFailedSkillActivation = useCallback(
@@ -864,12 +876,12 @@ export function AppShell() {
       const nextDraft = {
         ...currentDraft,
         skills: reconcileSkillActivationSelections(currentDraft.skills, recovery),
-        updatedAt: Date.now()
+        updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
       }
       setDraftsWithRef({ ...draftsRef.current, [scopeId]: nextDraft })
-      void saveComposerDraft(scopeId, nextDraft)
+      void persistDraftNow(scopeId, nextDraft)
     },
-    [setDraftsWithRef]
+    [persistDraftNow, setDraftsWithRef]
   )
 
   const requestSkillCatalogRefresh = useCallback(
@@ -1547,6 +1559,7 @@ export function AppShell() {
       originOpenFailed: t('chat.continuationOriginOpenFailed')
     },
     onActiveConversationArchived: handleActiveConversationArchived,
+    persistDraftNow,
     setActiveConversationId,
     setActiveConversationInitialScrollTop,
     setConversationScrollToBottomSignal,
@@ -1723,12 +1736,16 @@ export function AppShell() {
     conversationScrollPositionsRef,
     conversationsRef,
     deleteProject,
+    discardDraft,
+    draftsRef,
     editSubmissionSeqRef,
     enqueueChatMessageStateSave,
     pendingConversationSavesRef,
     pendingMessageSavesRef,
     pendingMessageUpsertsRef,
+    persistDraftNow,
     removeFailedMessage: t('project.removeFailed'),
+    resumeDraft,
     setActiveConversationId,
     setActiveConversationInitialScrollTop,
     setConversationsWithRef,
@@ -2178,6 +2195,7 @@ export function AppShell() {
             initialPage={settingsInitialPage}
             initialProjectId={rightSidebarWorkspaceProject?.id}
             onBack={closeSettings}
+            onBeforeConversationDelete={discardDraft}
             onConversationPatch={patchConversation}
             onConversationsChange={setConversationsWithRef}
             onRemoveProject={removeProject}

@@ -3218,6 +3218,40 @@ fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
 }
 
 #[test]
+fn composer_draft_message_save_preserves_heavy_payloads_and_rejects_stale_text() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+
+    let mut draft = composer_draft("message-only", None, "before");
+    draft.updated_at = 10;
+    draft.attachments_json = r#"[{"id":"attachment-1","kind":"file","name":"large.bin","sizeBytes":1,"encoding":"base64","data":"YQ=="}]"#.to_string();
+    draft.skills_json =
+        r#"[{"id":"workspace:workspace:skill-1","revision":"skill-sha256-v1:test"}]"#.to_string();
+    service.save_composer_draft(draft.clone()).unwrap();
+
+    assert!(service
+        .save_composer_draft_message("message-only", "after", 11)
+        .unwrap());
+    assert!(service
+        .save_composer_draft_message("message-only", "stale", 9)
+        .unwrap());
+    assert!(!service
+        .save_composer_draft_message("missing", "seed me", 1)
+        .unwrap());
+
+    let stored = service
+        .load_composer_drafts()
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.scope_id == "message-only")
+        .unwrap();
+    assert_eq!(stored.message, "after");
+    assert_eq!(stored.updated_at, 11);
+    assert_eq!(stored.attachments_json, draft.attachments_json);
+    assert_eq!(stored.skills_json, draft.skills_json);
+}
+
+#[test]
 fn composer_draft_save_rejects_non_current_nested_payloads() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

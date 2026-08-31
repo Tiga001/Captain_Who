@@ -1,10 +1,25 @@
 use super::*;
 use crate::storage::models::ConversationContinuationOriginRecord;
 
+fn png_image(width: u32, height: u32) -> Vec<u8> {
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    let image = RgbaImage::from_fn(width, height, |x, y| {
+        Rgba([(x % 255) as u8, (y % 255) as u8, 120, 255])
+    });
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
+
 #[test]
 fn input_attachments_are_persisted_and_rehydrated() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
+    let original_png = png_image(640, 320);
     service
         .save_conversation(conversation(
             "conversation-1",
@@ -22,7 +37,7 @@ fn input_attachments_are_persisted_and_rehydrated() {
                 AgentInputAttachmentKind::Image,
                 "pixel.png",
                 Some("image/png"),
-                b"png-bytes",
+                &original_png,
             )],
             10,
         )
@@ -38,7 +53,24 @@ fn input_attachments_are_persisted_and_rehydrated() {
     assert_eq!(attachment.kind, "image");
     assert_eq!(attachment.name, "pixel.png");
     assert_eq!(attachment.preview_mime_type.as_deref(), Some("image/png"));
-    assert!(attachment.preview_data.is_some());
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(attachment.preview_data.as_deref().unwrap())
+            .unwrap(),
+        original_png
+    );
+
+    let original = service
+        .load_attachment_image("attachment-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.mime_type, "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&original.data)
+            .unwrap(),
+        original_png
+    );
 
     let library = service
         .build_attachment_library_context("conversation-1", Some("project-1"))
@@ -570,4 +602,259 @@ fn project_attachment_library_excludes_current_conversation_and_delete_cleans_fi
         .build_attachment_library_context("conversation-current", Some("project-1"))
         .unwrap();
     assert!(library.project_attachments.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn conversation_preview_file_read_does_not_hold_the_storage_connection() {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let fixture = StorageFixture::new();
+    let service = Arc::new(fixture.service());
+    let original_png = png_image(64, 32);
+    service
+        .save_conversation(conversation("conversation-lock", None, "message-lock"))
+        .unwrap();
+    service
+        .save_input_attachments(
+            "conversation-lock",
+            "message-lock",
+            None,
+            &[input_attachment(
+                "attachment-lock",
+                AgentInputAttachmentKind::Image,
+                "lock.png",
+                Some("image/png"),
+                &original_png,
+            )],
+            10,
+        )
+        .unwrap();
+    let library = service
+        .build_attachment_library_context("conversation-lock", None)
+        .unwrap();
+    let storage_path = PathBuf::from(library.root_path.unwrap())
+        .join(&library.conversation_attachments[0].storage_rel_path);
+    fs::remove_file(&storage_path).unwrap();
+    let fifo_path = CString::new(storage_path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+    let (load_tx, load_rx) = mpsc::channel();
+    let load_service = Arc::clone(&service);
+    let loader = thread::spawn(move || {
+        let result = load_service.load_conversation("conversation-lock");
+        load_tx.send(result).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut writer = loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&storage_path)
+        {
+            Ok(writer) => break writer,
+            Err(error)
+                if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("failed to rendezvous with attachment preview reader: {error}"),
+        }
+    };
+
+    let (query_tx, query_rx) = mpsc::channel();
+    let query_service = Arc::clone(&service);
+    let query = thread::spawn(move || {
+        query_tx.send(query_service.load_projects()).unwrap();
+    });
+    let concurrent_query = query_rx.recv_timeout(Duration::from_millis(500));
+
+    writer.write_all(&original_png).unwrap();
+    drop(writer);
+    let conversation = load_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    loader.join().unwrap();
+    query.join().unwrap();
+
+    assert!(
+        concurrent_query.is_ok(),
+        "a blocked attachment read must not retain the global SQLite connection guard"
+    );
+    let preview_data = conversation.messages[0].attachments[0]
+        .preview_data
+        .as_deref()
+        .unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(preview_data)
+            .unwrap(),
+        original_png
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn input_attachment_file_write_does_not_hold_the_storage_connection() {
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let fixture = StorageFixture::new();
+    let service = Arc::new(fixture.service());
+    service
+        .save_conversation(conversation(
+            "conversation-write-lock",
+            None,
+            "message-write-lock",
+        ))
+        .unwrap();
+    let payload = vec![0x5a; 2 * 1024 * 1024];
+    let attachment = input_attachment(
+        "attachment-write-lock",
+        AgentInputAttachmentKind::File,
+        "slow.bin",
+        Some("application/octet-stream"),
+        &payload,
+    );
+    let storage_path = service.attachment_root.join(attachment_storage_rel_path(
+        "conversation-write-lock",
+        "message-write-lock",
+        &attachment.id,
+        &attachment.name,
+    ));
+    fs::create_dir_all(storage_path.parent().unwrap()).unwrap();
+    let fifo_path = CString::new(storage_path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    let mut reader = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&storage_path)
+        .unwrap();
+
+    let (save_tx, save_rx) = mpsc::channel();
+    let save_service = Arc::clone(&service);
+    let saver = thread::spawn(move || {
+        let result = save_service.save_input_attachments(
+            "conversation-write-lock",
+            "message-write-lock",
+            None,
+            &[attachment],
+            10,
+        );
+        save_tx.send(result).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut first_byte = [0_u8; 1];
+    loop {
+        match reader.read(&mut first_byte) {
+            Ok(1) => break,
+            Ok(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(_) => panic!("timed out waiting for the attachment writer"),
+            Err(error) => panic!("failed to rendezvous with attachment writer: {error}"),
+        }
+    }
+
+    let (query_tx, query_rx) = mpsc::channel();
+    let query_service = Arc::clone(&service);
+    let query = thread::spawn(move || {
+        query_tx.send(query_service.load_projects()).unwrap();
+    });
+    let concurrent_query = query_rx.recv_timeout(Duration::from_millis(500));
+
+    let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) },
+        0
+    );
+    let mut remaining = Vec::new();
+    reader.read_to_end(&mut remaining).unwrap();
+    assert_eq!(remaining.len() + 1, payload.len());
+    save_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    saver.join().unwrap();
+    query.join().unwrap();
+
+    assert!(
+        concurrent_query.is_ok(),
+        "a blocked attachment write must not retain the global SQLite connection guard"
+    );
+}
+
+#[test]
+fn failed_attachment_database_commit_removes_new_file() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(conversation(
+            "conversation-commit-failure",
+            None,
+            "message-commit-failure",
+        ))
+        .unwrap();
+    let attachment = input_attachment(
+        "attachment-commit-failure",
+        AgentInputAttachmentKind::File,
+        "cleanup.bin",
+        Some("application/octet-stream"),
+        b"cleanup-after-database-failure",
+    );
+    let storage_path = service.attachment_root.join(attachment_storage_rel_path(
+        "conversation-commit-failure",
+        "message-commit-failure",
+        &attachment.id,
+        &attachment.name,
+    ));
+    {
+        let connection = service.state.connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_attachment_insert
+                 BEFORE INSERT ON attachments
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced attachment insert failure');
+                 END;",
+            )
+            .unwrap();
+    }
+
+    assert!(service
+        .save_input_attachments(
+            "conversation-commit-failure",
+            "message-commit-failure",
+            None,
+            &[attachment],
+            10,
+        )
+        .is_err());
+    assert!(!storage_path.exists());
+    let connection = service.state.connection().unwrap();
+    assert!(
+        attachment_repository::get_attachment(&connection, "attachment-commit-failure")
+            .unwrap()
+            .is_none()
+    );
 }
