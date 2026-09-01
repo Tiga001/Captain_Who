@@ -36,7 +36,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-const TOOL_NAME: &str = "image_generation";
+pub(super) const TOOL_NAME: &str = "image_generation";
 const MAX_REASON_CHARS: usize = 240;
 const MAX_INPUT_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_MODEL_IMAGE_DELIVERY_BYTES: u64 = 8 * 1024 * 1024;
@@ -212,27 +212,7 @@ impl AgentTool for ImageGenerationTool {
     }
 
     fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
-        let mut projected = self.trace_call_projection(call);
-        let operation = call
-            .args
-            .get("request")
-            .and_then(|request| request.get("operation"))
-            .and_then(Value::as_str)
-            .filter(|operation| matches!(*operation, "generate" | "edit"))
-            .unwrap_or("unknown");
-        let has_input_image = call
-            .args
-            .get("request")
-            .and_then(|request| request.get("inputPath"))
-            .is_some();
-        projected.args = json!({
-            "request": {
-                "operation": operation,
-                "hasInputImage": has_input_image,
-            },
-            "reason": projected.reason,
-        });
-        projected
+        image_generation_event_call_projection(call)
     }
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
@@ -495,11 +475,49 @@ fn stable_model_visual_delivery(status: &str) -> &'static str {
     }
 }
 
-fn image_generation_event_projection(result: &AgentToolResult) -> AgentToolResult {
-    canonical_tool_result_for_context(&clone_result_without_fields(
-        result,
-        &["image", "savedPath", "visualInputStatus"],
-    ))
+pub(super) fn image_generation_event_call_projection(call: &AgentToolCall) -> AgentToolCall {
+    let mut projected = call.clone();
+    projected.reason = call
+        .args
+        .get("reason")
+        .and_then(Value::as_str)
+        .and_then(normalize_reason);
+    let operation = call
+        .args
+        .get("request")
+        .and_then(|request| request.get("operation"))
+        .and_then(Value::as_str)
+        .filter(|operation| matches!(*operation, "generate" | "edit"))
+        .unwrap_or("unknown");
+    let has_input_image = call
+        .args
+        .get("request")
+        .and_then(|request| request.get("inputPath"))
+        .is_some();
+    projected.args = json!({
+        "request": {
+            "operation": operation,
+            "hasInputImage": has_input_image,
+        },
+        "reason": projected.reason,
+    });
+    projected
+}
+
+pub(super) fn image_generation_event_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected_result = result.result.as_ref().map(|value| {
+        serde_json::from_value::<AgentImageGenerationResult>(value.clone())
+            .and_then(serde_json::to_value)
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    });
+    canonical_tool_result_for_context(&AgentToolResult {
+        exact_archive_file: None,
+        call_id: result.call_id.clone(),
+        tool: result.tool.clone(),
+        ok: result.ok,
+        result: projected_result,
+        error: result.error.clone(),
+    })
 }
 
 fn clone_result_without_fields(result: &AgentToolResult, omitted: &[&str]) -> AgentToolResult {
@@ -2085,6 +2103,9 @@ mod tests {
         assert!(event_value.get("image").is_none());
         serde_json::from_value::<AgentImageGenerationResult>(event_value.clone())
             .expect("Renderer event remains the closed public v1 contract");
+
+        let restored_event = image_generation_event_projection(&vision_tool.trace_projection(&raw));
+        assert_eq!(restored_event.result, event.result);
     }
 
     #[test]

@@ -113,6 +113,26 @@ use web_fetch::WebFetchTool;
 use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
 
+/// Reprojects a durable Trace call into the same presentation-safe shape emitted live.
+/// Most Trace projections are already Renderer-safe; tools with a deliberately richer durable
+/// contract are adapted here without constructing their execution dependencies.
+pub(crate) fn renderer_call_projection_from_trace(call: &AgentToolCall) -> AgentToolCall {
+    match call.tool.as_str() {
+        image_generation::TOOL_NAME => {
+            image_generation::image_generation_event_call_projection(call)
+        }
+        _ => call.clone(),
+    }
+}
+
+/// Reprojects a durable Trace result into the same presentation-safe shape emitted live.
+pub(crate) fn renderer_result_projection_from_trace(result: &AgentToolResult) -> AgentToolResult {
+    match result.tool.as_str() {
+        image_generation::TOOL_NAME => image_generation::image_generation_event_projection(result),
+        _ => canonical_tool_result_for_context(result),
+    }
+}
+
 pub(super) use context::ToolExecutionContext;
 use document_text::{
     complete_document_text_result, extract_with_textutil, join_named_text, normalize_text_output,

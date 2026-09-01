@@ -2533,14 +2533,46 @@ fn project_guidance_timeline(
         std::mem::take(&mut presentation_suffix)
     };
     let mut emitted_mcp_invocations = HashSet::new();
-    let mut tool_calls = run
+    let existing_tool_calls = run
         .remove("toolCalls")
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
-    let mut tool_results = run
+    let existing_tool_results = run
         .remove("toolResults")
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
+    let mut tool_calls = if trace_is_authoritative {
+        existing_tool_calls
+            .into_iter()
+            .map(|value| {
+                let call = serde_json::from_value::<AgentToolCall>(value).map_err(|error| {
+                    format!("decode existing Renderer ToolCall for Trace projection: {error}")
+                })?;
+                serde_json::to_value(crate::tools::renderer_call_projection_from_trace(&call))
+                    .map_err(|error| {
+                        format!("encode existing Renderer ToolCall for Trace projection: {error}")
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        existing_tool_calls
+    };
+    let mut tool_results = if trace_is_authoritative {
+        existing_tool_results
+            .into_iter()
+            .map(|value| {
+                let result = serde_json::from_value::<AgentToolResult>(value).map_err(|error| {
+                    format!("decode existing Renderer ToolResult for Trace projection: {error}")
+                })?;
+                serde_json::to_value(crate::tools::renderer_result_projection_from_trace(&result))
+                    .map_err(|error| {
+                        format!("encode existing Renderer ToolResult for Trace projection: {error}")
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        existing_tool_results
+    };
     let mut projected_command_sessions = run
         .remove("commandSessions")
         .and_then(|value| value.as_object().cloned())
@@ -2644,13 +2676,18 @@ fn project_guidance_timeline(
                         }
                     } else {
                         if projected_tool_call_ids.insert(call_id.clone()) {
-                            tool_calls.push(serde_json::json!({
-                                "id": call_id,
-                                "tool": tool,
-                                "args": operation,
-                                "approvalStatus": approval_status,
-                                "reason": serde_json::Value::Null,
-                            }));
+                            let call = crate::tools::renderer_call_projection_from_trace(
+                                &AgentToolCall {
+                                    id: call_id.clone(),
+                                    tool: tool.clone(),
+                                    args: operation.clone(),
+                                    approval_status: *approval_status,
+                                    reason: None,
+                                },
+                            );
+                            tool_calls.push(serde_json::to_value(call).map_err(|error| {
+                                format!("encode reconstructed Renderer ToolCall: {error}")
+                            })?);
                         }
                         timeline.push(serde_json::json!({
                             "id": format!("tool-call-{call_id}"),
@@ -2691,19 +2728,19 @@ fn project_guidance_timeline(
                     if !mcp_trace_anchors.contains_key(call_id)
                         && projected_tool_result_ids.insert(call_id.clone())
                     {
-                        let mut projected = serde_json::json!({
-                            "callId": call_id,
-                            "tool": tool,
-                            "ok": success,
-                            "result": observation,
-                        });
-                        if let Some(error) = error {
-                            projected
-                                .as_object_mut()
-                                .expect("projected ToolResult is an object")
-                                .insert("error".to_string(), error.clone().into());
-                        }
-                        tool_results.push(projected);
+                        let result = crate::tools::renderer_result_projection_from_trace(
+                            &AgentToolResult {
+                                exact_archive_file: None,
+                                call_id: call_id.clone(),
+                                tool: tool.clone(),
+                                ok: *success,
+                                result: Some(observation.clone()),
+                                error: error.clone(),
+                            },
+                        );
+                        tool_results.push(serde_json::to_value(result).map_err(|error| {
+                            format!("encode reconstructed Renderer ToolResult: {error}")
+                        })?);
                     }
                 }
                 ConversationTurnTraceItem::ContextCompactionLifecycle {

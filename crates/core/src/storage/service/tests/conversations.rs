@@ -716,6 +716,159 @@ fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_
 }
 
 #[test]
+fn loading_a_durable_image_generation_result_restores_the_live_renderer_contract() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-image-generation-reload";
+    let assistant_message_id = "assistant-image-generation-reload";
+    let run_id = "run-image-generation-reload";
+    let call_id = "call-image-generation-reload";
+    let digest = "a".repeat(64);
+    let artifact_uri = format!("image-artifact://sha256/{digest}");
+    let operation = serde_json::json!({
+        "request": {
+            "operation": "generate",
+            "prompt": "private prompt"
+        },
+        "reason": "Create a title image."
+    });
+    let durable_observation = serde_json::json!({
+        "schemaVersion": 1,
+        "status": "succeeded",
+        "operation": "generate",
+        "artifact": {
+            "artifactId": format!("sha256:{digest}"),
+            "uri": artifact_uri.clone(),
+            "kind": "image",
+            "format": "jpeg",
+            "mimeType": "image/jpeg",
+            "width": 1024,
+            "height": 768,
+            "sizeBytes": 12345,
+            "sha256": digest.clone()
+        },
+        "audit": {
+            "executionId": "agent-v1:image-reload",
+            "requestFingerprint": format!("sha256:{}", "b".repeat(64)),
+            "providerProfileId": "default",
+            "adapterId": "smartmlSeedream",
+            "profileRevision": 1,
+            "modelId": "image-model",
+            "createdAt": 3,
+            "completedAt": 4,
+            "durationMs": 1
+        },
+        "path": artifact_uri.clone(),
+        "savedPath": "/private/generated-image.jpg",
+        "visualInputStatus": "unsupportedByCurrentModel",
+        "binaryOmittedFromHistory": true
+    });
+    let mut existing_run: serde_json::Value = serde_json::from_str(
+        &crate::storage::chat_repository::canonical_agent_run_lifecycle_projection(
+            None,
+            run_id,
+            "completed",
+            2,
+            5,
+            Some(5),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    existing_run["toolCalls"] = serde_json::json!([{
+        "id": call_id,
+        "tool": "image_generation",
+        "args": operation.clone(),
+        "approvalStatus": "not_required",
+        "reason": null
+    }]);
+    existing_run["toolResults"] = serde_json::json!([{
+        "callId": call_id,
+        "tool": "image_generation",
+        "ok": true,
+        "result": durable_observation.clone()
+    }]);
+    let mut stored = conversation(conversation_id, None, "message-user");
+    stored.messages.push(ChatMessageRecord {
+        id: assistant_message_id.to_string(),
+        role: "assistant".to_string(),
+        content: "Done".to_string(),
+        created_at: 2,
+        status: Some("sent".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: Some(existing_run.to_string()),
+        ui_state_json: None,
+    });
+    service.save_conversation(stored).unwrap();
+    service
+        .replace_conversation_turn_trace(
+            &ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: run_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+                terminal_error: None,
+                truncated: false,
+                items: vec![
+                    ConversationTurnTraceItem::ToolCall {
+                        sequence: 0,
+                        call_id: call_id.to_string(),
+                        tool: "image_generation".to_string(),
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "image_generation".to_string(),
+                        },
+                        operation,
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolResult {
+                        sequence: 1,
+                        call_id: call_id.to_string(),
+                        tool: "image_generation".to_string(),
+                        status: crate::ConversationTraceToolResultStatus::Succeeded,
+                        success: true,
+                        observation: durable_observation,
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        error: None,
+                        truncated: false,
+                        archive: Default::default(),
+                    },
+                ],
+            },
+            2,
+            5,
+        )
+        .unwrap();
+
+    let loaded = service.load_conversation(conversation_id).unwrap().unwrap();
+    let run: serde_json::Value = serde_json::from_str(
+        loaded.messages[1]
+            .agent_run_json
+            .as_deref()
+            .expect("completed durable image generation should restore an AgentRun"),
+    )
+    .unwrap();
+    let call = &run["toolCalls"][0];
+    assert_eq!(call["reason"], "Create a title image.");
+    assert_eq!(call["args"]["request"]["operation"], "generate");
+    assert_eq!(call["args"]["request"]["hasInputImage"], false);
+    assert!(call["args"]["request"].get("prompt").is_none());
+
+    let result = &run["toolResults"][0]["result"];
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(result["artifact"]["uri"], artifact_uri);
+    for private_field in [
+        "path",
+        "savedPath",
+        "visualInputStatus",
+        "binaryOmittedFromHistory",
+    ] {
+        assert!(result.get(private_field).is_none());
+    }
+}
+
+#[test]
 fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
     let fixture = tempfile::tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
