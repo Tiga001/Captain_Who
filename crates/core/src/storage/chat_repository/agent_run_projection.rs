@@ -1176,6 +1176,132 @@ fn current_command_output_is_safe(output: &serde_json::Map<String, serde_json::V
     }
 }
 
+const MAX_CURRENT_ARTIFACT_OBSERVATION_BYTES: usize = 512 * 1024;
+const MAX_CURRENT_ARTIFACT_CHANGES: usize = 256;
+const MAX_CURRENT_ARTIFACT_EXPECTED_OUTPUTS: usize = 32;
+const MAX_CURRENT_ARTIFACT_WARNINGS: usize = 64;
+const MAX_CURRENT_ARTIFACT_PATH_BYTES: usize = 16 * 1024;
+const MAX_CURRENT_ARTIFACT_TEXT_BYTES: usize = 16 * 1024;
+
+fn current_artifact_text_is_safe(value: &str, maximum: usize) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= maximum
+        && !value.bytes().any(|byte| byte <= b'\x1f' || byte == b'\x7f')
+}
+
+fn current_artifact_metadata_is_safe(metadata: &crate::AgentCommandArtifactMetadata) -> bool {
+    metadata.size_bytes <= MAX_JS_SAFE_INTEGER
+        && metadata.sha256.as_ref().is_none_or(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        && metadata.validation.code.as_deref().is_none_or(|value| {
+            current_artifact_text_is_safe(value, MAX_CURRENT_ARTIFACT_TEXT_BYTES)
+        })
+        && metadata.validation.message.as_deref().is_none_or(|value| {
+            current_artifact_text_is_safe(value, MAX_CURRENT_ARTIFACT_TEXT_BYTES)
+        })
+}
+
+fn current_artifact_snapshot_coverage_is_safe(
+    coverage: &crate::AgentCommandArtifactSnapshotCoverage,
+) -> bool {
+    [
+        coverage.roots_scanned,
+        coverage.directory_entries_scanned,
+        coverage.office_files_seen,
+        coverage.files_hashed,
+        coverage.files_unhashed,
+        coverage.bytes_hashed,
+        coverage.symlinks_skipped,
+        coverage.excluded_directories,
+        coverage.duration_ms,
+    ]
+    .into_iter()
+    .all(|value| value <= MAX_JS_SAFE_INTEGER)
+}
+
+fn current_command_artifact_observation_is_safe(value: &serde_json::Value) -> bool {
+    if serde_json::to_vec(value)
+        .ok()
+        .is_none_or(|encoded| encoded.len() > MAX_CURRENT_ARTIFACT_OBSERVATION_BYTES)
+    {
+        return false;
+    }
+    let Ok(observation) =
+        serde_json::from_value::<crate::AgentCommandArtifactObservation>(value.clone())
+    else {
+        return false;
+    };
+    let complete = matches!(
+        observation.status,
+        crate::AgentCommandArtifactObservationStatus::Complete
+    );
+    if observation.schema_version != crate::AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION
+        || complete == observation.partial
+        || observation.stop_reasons.len() > MAX_CURRENT_ARTIFACT_WARNINGS
+        || observation.changes.len() > MAX_CURRENT_ARTIFACT_CHANGES
+        || observation.expected_outputs.len() > MAX_CURRENT_ARTIFACT_EXPECTED_OUTPUTS
+        || observation.warnings.len() > MAX_CURRENT_ARTIFACT_WARNINGS
+        || observation.returned != observation.changes.len() as u64
+        || [
+            observation.scanned,
+            observation.returned,
+            observation.omitted,
+            observation.changes_omitted,
+            observation.coverage.expected_output_count,
+            observation.coverage.additional_root_count,
+        ]
+        .into_iter()
+        .any(|number| number > MAX_JS_SAFE_INTEGER)
+        || !current_artifact_snapshot_coverage_is_safe(&observation.coverage.before)
+        || !current_artifact_snapshot_coverage_is_safe(&observation.coverage.after)
+        || observation
+            .stop_reasons
+            .iter()
+            .any(|reason| !current_artifact_text_is_safe(reason, MAX_CURRENT_ARTIFACT_TEXT_BYTES))
+    {
+        return false;
+    }
+
+    let changes_are_safe = observation.changes.iter().all(|change| {
+        current_artifact_text_is_safe(&change.path, MAX_CURRENT_ARTIFACT_PATH_BYTES)
+            && change.previous_path.as_deref().is_none_or(|path| {
+                current_artifact_text_is_safe(path, MAX_CURRENT_ARTIFACT_PATH_BYTES)
+            })
+            && (change.previous_path.is_some() == change.previous_scope.is_some())
+            && change
+                .before
+                .as_ref()
+                .is_none_or(current_artifact_metadata_is_safe)
+            && change
+                .after
+                .as_ref()
+                .is_none_or(current_artifact_metadata_is_safe)
+    });
+    let expected_outputs_are_safe = observation.expected_outputs.iter().all(|output| {
+        current_artifact_text_is_safe(&output.requested_path, MAX_CURRENT_ARTIFACT_PATH_BYTES)
+            && output.path.as_deref().is_none_or(|path| {
+                current_artifact_text_is_safe(path, MAX_CURRENT_ARTIFACT_PATH_BYTES)
+            })
+            && output
+                .metadata
+                .as_ref()
+                .is_none_or(current_artifact_metadata_is_safe)
+    });
+    let warnings_are_safe = observation.warnings.iter().all(|warning| {
+        current_artifact_text_is_safe(&warning.code, MAX_CURRENT_ARTIFACT_TEXT_BYTES)
+            && warning.path.as_deref().is_none_or(|path| {
+                current_artifact_text_is_safe(path, MAX_CURRENT_ARTIFACT_PATH_BYTES)
+            })
+            && current_artifact_text_is_safe(&warning.message, MAX_CURRENT_ARTIFACT_TEXT_BYTES)
+    });
+
+    changes_are_safe && expected_outputs_are_safe && warnings_are_safe
+}
+
 fn current_command_sessions_are_safe(
     value: &serde_json::Value,
     run_command_call_ids: &HashSet<&str>,
@@ -1192,7 +1318,13 @@ fn current_command_sessions_are_safe(
                 && exact_required_optional_keys(
                     session,
                     &["callId", "status", "latestSequence", "outputTruncated"],
-                    &["startedAt", "endedAt", "exitCode", "outputs"],
+                    &[
+                        "startedAt",
+                        "endedAt",
+                        "exitCode",
+                        "outputs",
+                        "artifactObservation",
+                    ],
                 )
                 && session["callId"] == *call_id
                 && matches!(
@@ -1219,6 +1351,9 @@ fn current_command_sessions_are_safe(
                             })
                     })
                 })
+                && session
+                    .get("artifactObservation")
+                    .is_none_or(current_command_artifact_observation_is_safe)
         })
 }
 

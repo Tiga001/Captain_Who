@@ -2333,14 +2333,14 @@ fn attach_message_guidance_timelines(
     conversations: &mut [ChatConversationRecord],
 ) -> Result<(), String> {
     for conversation in conversations {
-        let traces = conversation_trace_repository::list_traces_for_conversation(
+        let traces = conversation_trace_repository::list_trace_records_for_conversation(
             connection,
             &conversation.id,
         )
         .map_err(storage_error)?;
         let traces = traces
             .into_iter()
-            .map(|trace| (trace.assistant_message_id.clone(), trace))
+            .map(|record| (record.trace.assistant_message_id.clone(), record))
             .collect::<HashMap<_, _>>();
         let command_sessions = agent_command_session_repository::list_sessions_for_conversation(
             connection,
@@ -2389,8 +2389,9 @@ fn attach_message_guidance_timelines(
                 continue;
             }
             let guidances = guidances_by_message.remove(&message.id).unwrap_or_default();
-            let trace = traces.get(&message.id);
-            if guidances.is_empty() && trace.is_none() {
+            let trace_record = traces.get(&message.id);
+            let trace = trace_record.map(|record| &record.trace);
+            if guidances.is_empty() && trace_record.is_none() {
                 continue;
             }
             let mcp_actions = trace
@@ -2401,7 +2402,7 @@ fn attach_message_guidance_timelines(
                 .unwrap_or_default();
             message.agent_run_json = Some(project_guidance_timeline(
                 message.agent_run_json.as_deref(),
-                trace,
+                trace_record,
                 &guidances,
                 &command_sessions,
                 &guidance_attachments,
@@ -2415,13 +2416,15 @@ fn attach_message_guidance_timelines(
 
 fn project_guidance_timeline(
     existing_run_json: Option<&str>,
-    trace: Option<&ConversationTurnTrace>,
+    trace_record: Option<&conversation_trace_repository::ConversationTurnTraceRecord>,
     guidances: &[AgentRunGuidanceRecord],
     command_sessions: &[agent_command_session_repository::AgentCommandSessionRecord],
     guidance_attachments: &HashMap<String, AttachmentRecord>,
     mcp_actions: &[AgentPendingActionRecord],
     fallback_started_at: i64,
 ) -> Result<String, String> {
+    let trace = trace_record.map(|record| &record.trace);
+    let trace_completed_at = trace_record.and_then(|record| record.completed_at);
     let (expected_run_id, fallback_status, fallback_completed_at) = trace
         .map(|trace| {
             let status = match trace.terminal_status {
@@ -2434,7 +2437,11 @@ fn project_guidance_timeline(
                 trace.run_id.as_str(),
                 status,
                 (trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress)
-                    .then_some(fallback_started_at),
+                    .then_some(
+                        trace_completed_at
+                            .unwrap_or(fallback_started_at)
+                            .max(fallback_started_at),
+                    ),
             )
         })
         .or_else(|| {
@@ -2480,7 +2487,7 @@ fn project_guidance_timeline(
             expected_run_id,
             fallback_status,
             fallback_started_at,
-            fallback_started_at,
+            fallback_completed_at.unwrap_or(fallback_started_at),
             fallback_completed_at,
         )
         .map_err(storage_error)?;
@@ -2561,18 +2568,30 @@ fn project_guidance_timeline(
             crate::ConversationTurnTraceTerminalStatus::InProgress => {}
             crate::ConversationTurnTraceTerminalStatus::Completed => {
                 run.insert("status".to_string(), "completed".into());
-                run.entry("completedAt".to_string())
-                    .or_insert_with(|| fallback_started_at.into());
+                run.insert(
+                    "completedAt".to_string(),
+                    fallback_completed_at
+                        .expect("terminal Trace has a projected completion time")
+                        .into(),
+                );
             }
             crate::ConversationTurnTraceTerminalStatus::Failed => {
                 run.insert("status".to_string(), "failed".into());
-                run.entry("completedAt".to_string())
-                    .or_insert_with(|| fallback_started_at.into());
+                run.insert(
+                    "completedAt".to_string(),
+                    fallback_completed_at
+                        .expect("terminal Trace has a projected completion time")
+                        .into(),
+                );
             }
             crate::ConversationTurnTraceTerminalStatus::Cancelled => {
                 run.insert("status".to_string(), "cancelled".into());
-                run.entry("completedAt".to_string())
-                    .or_insert_with(|| fallback_started_at.into());
+                run.insert(
+                    "completedAt".to_string(),
+                    fallback_completed_at
+                        .expect("terminal Trace has a projected completion time")
+                        .into(),
+                );
             }
         }
         for item in &trace.items {
@@ -2773,6 +2792,13 @@ fn project_guidance_timeline(
         }
         if let Some(exit_code) = snapshot.exit_code {
             object.insert("exitCode".to_string(), exit_code.into());
+        }
+        if let Some(artifact_observation) = &snapshot.artifact_observation {
+            object.insert(
+                "artifactObservation".to_string(),
+                serde_json::to_value(artifact_observation)
+                    .map_err(|error| format!("serialize command artifact observation: {error}"))?,
+            );
         }
         projected_command_sessions.insert(snapshot.call_id.clone(), projection);
     }

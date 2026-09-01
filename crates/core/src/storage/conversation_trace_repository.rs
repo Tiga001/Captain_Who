@@ -414,6 +414,19 @@ pub fn list_traces_for_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<ConversationTurnTrace>> {
+    list_trace_records_for_conversation(connection, conversation_id)
+        .map(|records| records.into_iter().map(|record| record.trace).collect())
+}
+
+pub struct ConversationTurnTraceRecord {
+    pub trace: ConversationTurnTrace,
+    pub completed_at: Option<i64>,
+}
+
+pub fn list_trace_records_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<ConversationTurnTraceRecord>> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -423,7 +436,8 @@ pub fn list_traces_for_conversation(
             trace.schema_version,
             trace.terminal_status,
             trace.terminal_error,
-            trace.truncated
+            trace.truncated,
+            trace.completed_at
         FROM conversation_turn_traces AS trace
         INNER JOIN messages AS message
             ON message.id = trace.assistant_message_id
@@ -436,7 +450,9 @@ pub fn list_traces_for_conversation(
         ",
     )?;
     let headers = statement
-        .query_map(params![conversation_id], trace_header_from_row)?
+        .query_map(params![conversation_id], |row| {
+            Ok((trace_header_from_row(row)?, row.get::<_, Option<i64>>(7)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     if headers.is_empty() {
@@ -448,7 +464,7 @@ pub fn list_traces_for_conversation(
         pending_command_session_lifecycle_for_conversation(connection, conversation_id)?;
     headers
         .into_iter()
-        .map(|header| {
+        .map(|(header, completed_at)| {
             let assistant_message_id = header.assistant_message_id.clone();
             let trace = trace_from_stored_items(
                 header,
@@ -456,12 +472,16 @@ pub fn list_traces_for_conversation(
                     .remove(&assistant_message_id)
                     .unwrap_or_default(),
             )?;
-            overlay_pending_command_session_lifecycle_rows(
+            let trace = overlay_pending_command_session_lifecycle_rows(
                 trace,
                 pending_lifecycle_by_message
                     .remove(&assistant_message_id)
                     .unwrap_or_default(),
-            )
+            )?;
+            Ok(ConversationTurnTraceRecord {
+                trace,
+                completed_at,
+            })
         })
         .collect()
 }

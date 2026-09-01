@@ -84,6 +84,78 @@ fn current_projection_with_suffix(run_id: Option<&str>, suffix: &str) -> serde_j
     })
 }
 
+fn current_artifact_observation() -> crate::AgentCommandArtifactObservation {
+    serde_json::from_value(serde_json::json!({
+        "schemaVersion": crate::AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+        "status": "complete",
+        "partial": false,
+        "stopReasons": [],
+        "scanned": 1,
+        "returned": 1,
+        "omitted": 0,
+        "coverage": {
+            "workspaceIncluded": true,
+            "expectedOutputCount": 1,
+            "additionalRootCount": 0,
+            "before": {
+                "rootsScanned": 1,
+                "directoryEntriesScanned": 1,
+                "officeFilesSeen": 0,
+                "filesHashed": 0,
+                "filesUnhashed": 0,
+                "bytesHashed": 0,
+                "symlinksSkipped": 0,
+                "excludedDirectories": 0,
+                "durationMs": 1,
+                "timeBudgetExceeded": false,
+                "cancelled": false,
+                "truncated": false
+            },
+            "after": {
+                "rootsScanned": 1,
+                "directoryEntriesScanned": 2,
+                "officeFilesSeen": 1,
+                "filesHashed": 1,
+                "filesUnhashed": 0,
+                "bytesHashed": 1024,
+                "symlinksSkipped": 0,
+                "excludedDirectories": 0,
+                "durationMs": 2,
+                "timeBudgetExceeded": false,
+                "cancelled": false,
+                "truncated": false
+            }
+        },
+        "changes": [{
+            "kind": "created",
+            "artifactKind": "presentation",
+            "path": "reports/child-report.pptx",
+            "scope": "workspace",
+            "after": {
+                "sizeBytes": 1024,
+                "sha256": "a".repeat(64),
+                "validation": { "status": "valid" }
+            }
+        }],
+        "changesTruncated": false,
+        "changesOmitted": 0,
+        "expectedOutputs": [{
+            "requestedPath": "reports/child-report.pptx",
+            "outcome": "created",
+            "path": "reports/child-report.pptx",
+            "scope": "workspace",
+            "artifactKind": "presentation",
+            "metadata": {
+                "sizeBytes": 1024,
+                "sha256": "a".repeat(64),
+                "validation": { "status": "valid" }
+            }
+        }],
+        "warnings": []
+    }))
+    .unwrap()
+}
+
 fn empty_projection_trace(
     conversation_id: &str,
     assistant_message_id: &str,
@@ -902,6 +974,54 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
     let run_id = "run-observer-command";
     let call_id = "call-observer-command";
     let session_id = "cmd_000000000000000000000000000000c1";
+    let artifact_observation = current_artifact_observation();
+    let stored_run = serde_json::json!({
+        "runId": run_id,
+        "status": "completed",
+        "startedAt": 2,
+        "completedAt": 2,
+        "toolDefinitions": [],
+        "toolCalls": [{
+            "id": call_id,
+            "tool": "run_command",
+            "args": { "command": "render-report" },
+            "approvalStatus": "approved",
+            "reason": null
+        }],
+        "toolResults": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "approvals": [],
+        "fileChangeProposals": [],
+        "fileChanges": [],
+        "mcpInvocations": [],
+        "messageStreamCheckpoints": {},
+        "timeline": [],
+        "commandSessions": {
+            "call-observer-command": {
+                "callId": call_id,
+                "status": "exited",
+                "startedAt": 2,
+                "endedAt": 2,
+                "exitCode": 0,
+                "latestSequence": 1,
+                "outputTruncated": false,
+                "artifactObservation": serde_json::to_value(&artifact_observation).unwrap()
+            }
+        },
+        "collaborationTimelineActivities": [{
+            "activityId": "activity-command-child",
+            "agentId": "agent-command-child",
+            "occurredAt": 2,
+            "rootAnchorMessageId": assistant_message_id,
+            "rootTraceBoundarySequence": 1,
+            "runId": run_id,
+            "semantic": "completed",
+            "sequence": 1,
+            "taskNameSnapshot": "Create report",
+            "turnId": null
+        }]
+    });
     let mut stored = conversation(conversation_id, None, "message-command-user");
     stored.messages.push(ChatMessageRecord {
         id: assistant_message_id.to_string(),
@@ -910,7 +1030,7 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
-        agent_run_json: None,
+        agent_run_json: Some(stored_run.to_string()),
         ui_state_json: None,
     });
     service.save_conversation(stored).unwrap();
@@ -986,7 +1106,7 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
                 archive_ref: None,
                 terminal_reason: None,
                 published_outputs: &[output],
-                artifact_observation: None,
+                artifact_observation: Some(&artifact_observation),
                 committed_at: 3,
             },
         )
@@ -1001,6 +1121,16 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
         "reports/child-report.pdf"
     );
     assert_eq!(run["commandSessions"][call_id]["exitCode"], 0);
+    assert_eq!(
+        run["commandSessions"][call_id]["artifactObservation"],
+        serde_json::to_value(&artifact_observation).unwrap()
+    );
+    assert_eq!(run["startedAt"], 2);
+    assert_eq!(run["completedAt"], 3);
+    assert_eq!(
+        run["collaborationTimelineActivities"][0]["agentId"],
+        "agent-command-child"
+    );
 }
 
 #[test]

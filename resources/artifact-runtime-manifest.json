@@ -5,7 +5,7 @@
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "e38355654afc7235910fcda236838d65fd4ef5df34bf0c1d024e8d85a1e50d17"
+      "sha256": "e2f1ca2ae9175ce46f6c19f265d29252b808a51fd784c5bb79dc414ad02aeeb2"
     },
     "frozenMachOSigning": {
       "path": "scripts/frozen-macho-signing.mjs",

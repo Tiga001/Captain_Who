@@ -12,6 +12,77 @@ fn approval_is_safe(value: &serde_json::Value) -> bool {
         .is_some_and(current_persisted_approval_is_safe)
 }
 
+fn current_artifact_observation() -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": crate::AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+        "status": "complete",
+        "partial": false,
+        "stopReasons": [],
+        "scanned": 1,
+        "returned": 1,
+        "omitted": 0,
+        "coverage": {
+            "workspaceIncluded": true,
+            "expectedOutputCount": 1,
+            "additionalRootCount": 0,
+            "before": {
+                "rootsScanned": 1,
+                "directoryEntriesScanned": 1,
+                "officeFilesSeen": 0,
+                "filesHashed": 0,
+                "filesUnhashed": 0,
+                "bytesHashed": 0,
+                "symlinksSkipped": 0,
+                "excludedDirectories": 0,
+                "durationMs": 1,
+                "timeBudgetExceeded": false,
+                "cancelled": false,
+                "truncated": false
+            },
+            "after": {
+                "rootsScanned": 1,
+                "directoryEntriesScanned": 2,
+                "officeFilesSeen": 1,
+                "filesHashed": 1,
+                "filesUnhashed": 0,
+                "bytesHashed": 1024,
+                "symlinksSkipped": 0,
+                "excludedDirectories": 0,
+                "durationMs": 2,
+                "timeBudgetExceeded": false,
+                "cancelled": false,
+                "truncated": false
+            }
+        },
+        "changes": [{
+            "kind": "created",
+            "artifactKind": "presentation",
+            "path": "report.pptx",
+            "scope": "workspace",
+            "after": {
+                "sizeBytes": 1024,
+                "sha256": "a".repeat(64),
+                "validation": { "status": "valid" }
+            }
+        }],
+        "changesTruncated": false,
+        "changesOmitted": 0,
+        "expectedOutputs": [{
+            "requestedPath": "report.pptx",
+            "outcome": "created",
+            "path": "report.pptx",
+            "scope": "workspace",
+            "artifactKind": "presentation",
+            "metadata": {
+                "sizeBytes": 1024,
+                "sha256": "a".repeat(64),
+                "validation": { "status": "valid" }
+            }
+        }],
+        "warnings": []
+    })
+}
+
 fn current_browser_tool_identity(
     tool_id: &str,
     raw_name: &str,
@@ -1094,9 +1165,22 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
                 "endedAt": 3,
                 "exitCode": 0,
                 "latestSequence": 1,
-                "outputTruncated": false
+                "outputTruncated": false,
+                "artifactObservation": current_artifact_observation()
             }
         },
+        "collaborationTimelineActivities": [{
+            "activityId": "activity-1",
+            "agentId": "agent-child-1",
+            "occurredAt": 3,
+            "rootAnchorMessageId": "message-assistant-1",
+            "rootTraceBoundarySequence": 1,
+            "runId": "run-1",
+            "semantic": "completed",
+            "sequence": 1,
+            "taskNameSnapshot": "Create presentation",
+            "turnId": null
+        }],
         "activatedSkills": [{
             "id": "workspace:example",
             "name": "Example",
@@ -1139,6 +1223,14 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
     assert_eq!(
         recovered["commandSessions"]["command-call"]["status"],
         "exited"
+    );
+    assert_eq!(
+        recovered["commandSessions"]["command-call"]["artifactObservation"]["status"],
+        "complete"
+    );
+    assert_eq!(
+        recovered["collaborationTimelineActivities"][0]["agentId"],
+        "agent-child-1"
     );
     assert_eq!(recovered["activatedSkills"][0]["name"], "Example");
     assert_eq!(
@@ -1185,6 +1277,12 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
                 .as_object_mut()
                 .unwrap()
                 .remove("reason");
+            invalid
+        },
+        {
+            let mut invalid = valid_presentation.clone();
+            invalid["commandSessions"]["command-call"]["artifactObservation"]["privateField"] =
+                true.into();
             invalid
         },
         {

@@ -586,6 +586,15 @@ async function offlineComponentSource() {
       await writeFile(license, `fixture license for ${dependency.name}\n`)
     }
   }
+  const pandas = manifest.python.dependencies.find(({ name }) => name === 'pandas')
+  assert.ok(pandas)
+  const pandasMetadataSuffix = `/pandas-${pandas.version}.dist-info/METADATA`
+  assert.ok(pandas.identityFile.endsWith(pandasMetadataSuffix))
+  const pandasSitePackages = pandas.identityFile.slice(0, -pandasMetadataSuffix.length)
+  const pandasTestsRelative = `${pandasSitePackages}/pandas/tests`
+  const pandasTests = join(directory, ...pandasTestsRelative.split('/'))
+  await mkdir(pandasTests, { recursive: true })
+  await writeFile(join(pandasTests, 'test_html.py'), 'fixture must not ship\n')
   const ripgrepExecutable = join(directory, ...manifest.tools.ripgrep.executable.unix.split('/'))
   await mkdir(dirname(ripgrepExecutable), { recursive: true })
   await writeFile(
@@ -616,7 +625,7 @@ async function offlineComponentSource() {
   await writeFile(pythonLicense, 'fixture CPython license\n')
   await mkdir(join(directory, 'legal'), { recursive: true })
   await writeFile(join(directory, 'legal', 'NOTICE'), 'offline fixture\n')
-  return { directory, manifest }
+  return { directory, manifest, pandasTestsRelative }
 }
 
 test(
@@ -634,6 +643,14 @@ test(
     assert.equal(first.reused, false)
     assert.match(first.receipt.bundleRevision, /^artifact-runtime-bundle-sha256-v1:[a-f0-9]{64}$/)
     assert.ok((await stat(join(output, 'component-receipt.json'))).isFile())
+    const pandasTestPrefix = `${source.pandasTestsRelative}/`
+    assert.equal(
+      first.receipt.files.some(({ path }) => path.startsWith(pandasTestPrefix)),
+      false
+    )
+    await assert.rejects(stat(join(output, ...source.pandasTestsRelative.split('/'))), {
+      code: 'ENOENT'
+    })
     assert.ok(
       first.receipt.runtimes.node.identityFiles.includes(
         'dependencies/node/node-package-evidence.json'

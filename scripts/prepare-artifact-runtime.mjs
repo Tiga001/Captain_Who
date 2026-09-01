@@ -1569,6 +1569,37 @@ async function installPythonDependencies(manifest, pythonExecutable) {
   )
 }
 
+async function pruneManagedPythonTestFixtures(manifest, staging) {
+  const pandas = manifest.python.dependencies.find((dependency) => dependency.name === 'pandas')
+  if (!pandas) {
+    throw new Error('Managed Python test pruning requires the pinned pandas dependency')
+  }
+
+  const metadataSuffix = `/pandas-${pandas.version}.dist-info/METADATA`
+  if (!pandas.identityFile.endsWith(metadataSuffix)) {
+    throw new Error('Managed pandas identity file has an unexpected package layout')
+  }
+  const sitePackagesRoot = pandas.identityFile.slice(0, -metadataSuffix.length)
+  const testsRelative = `${sitePackagesRoot}/pandas/tests`
+  const testsDirectory = join(staging, ...testsRelative.split('/'))
+  let metadata
+  try {
+    metadata = await lstat(testsDirectory)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new Error('Pinned pandas wheel is missing its expected removable test fixture tree')
+    }
+    throw error
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error('Pinned pandas test fixture tree must be a real directory')
+  }
+
+  // pandas wheels include their upstream test suite. It is not needed at runtime and contains
+  // credential-shaped URL fixtures that must never be copied into the distributable application.
+  await rm(testsDirectory, { recursive: true, force: false })
+}
+
 export async function normalizePythonConsoleScriptShebangs(pythonExecutable) {
   if (process.platform === 'win32') return Object.freeze([])
 
@@ -2631,6 +2662,7 @@ async function buildComponentSource({ manifestPath, manifest, staging, downloadD
     downloadDirectory
   )
   await installPythonDependencies(manifest, pythonExecutable)
+  await pruneManagedPythonTestFixtures(manifest, staging)
   await normalizePythonConsoleScriptShebangs(pythonExecutable)
   const ripgrepExecutable = await acquireRipgrep(manifest, ripgrepAsset, staging, downloadDirectory)
   await copyRuntimeSupportFiles(manifestPath, manifest, staging, downloadDirectory)
@@ -2683,6 +2715,7 @@ export async function prepareArtifactRuntime({
       }
       await copyTreeRejectingSymlinks(source, staging, { destinationExists: true })
       await verifyPreparedManagedNodeDependencies(manifest, staging)
+      await pruneManagedPythonTestFixtures(manifest, staging)
       const nodeExecutableRelative =
         platform === 'win32' ? manifest.node.executable.win32 : manifest.node.executable.unix
       const pythonExecutableRelative =
