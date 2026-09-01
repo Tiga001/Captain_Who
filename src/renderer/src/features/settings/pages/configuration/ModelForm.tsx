@@ -1,6 +1,11 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ChevronDown } from 'lucide-react'
-import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
+import type {
+  ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
 import { DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS } from '../../../../config/modelConfig'
@@ -8,25 +13,37 @@ import { SettingsSelect } from '../../components/SettingsSelect'
 import type { SettingsSelectOption } from '../../components/SettingsSelect'
 import type { ModelConfig, ModelFormValues } from './configurationTypes'
 import {
+  applyResolvedProviderPolicy,
+  detectProviderProtocolDialect,
   initialProviderProfileFormState,
   initialNewProviderProfileFormState,
-  selectProviderProfile,
+  selectProviderVendor,
   updateDeepSeekProviderSettings,
+  updateMoonshotProviderSettings,
   type ProviderProfileSelection
 } from './providerProfileForm'
 import {
-  providerSettingsEditors,
-  type DeepSeekProviderSettingsDraft
+  DeepSeekProviderSettingsEditor,
+  MoonshotProviderSettingsEditor
 } from './providerSettingsEditors'
 import { SecretInput } from './SecretInput'
 import { classifyModelSettingsSaveError, type ModelSettingsSaveError } from './modelSettingsErrors'
 
 interface ModelFormProps {
   model?: ModelConfig
+  globalApiUrl: string
   providerProfileDescriptors: readonly ProviderProfileUiDescriptor[]
+  providerVendorDescriptors: readonly ProviderVendorDescriptor[]
+  resolveProviderVendorModelPolicy: (
+    input: ProviderVendorModelPolicyInput
+  ) => Promise<ProviderVendorModelPolicyDescriptor>
   onCancel: () => void
   onSave: (values: ModelFormValues) => void | Promise<void>
 }
+
+type PolicyResolutionState =
+  | { status: 'idle' | 'loading' | 'failed' | 'stored_unsupported' }
+  | { status: 'resolved'; descriptor: ProviderVendorModelPolicyDescriptor }
 
 function isValidPriceInput(value: string): boolean {
   const normalized = value.trim().replaceAll(',', '')
@@ -70,7 +87,15 @@ function toFormValues(model?: ModelConfig): ModelFormValues {
   }
 }
 
-export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave }: ModelFormProps) {
+export function ModelForm({
+  model,
+  globalApiUrl,
+  providerProfileDescriptors,
+  providerVendorDescriptors,
+  resolveProviderVendorModelPolicy,
+  onCancel,
+  onSave
+}: ModelFormProps) {
   const { t } = useFrontendConfig()
   const initialValues = useMemo(() => toFormValues(model), [model])
   const initialProviderProfile = useMemo(
@@ -82,6 +107,10 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
   )
   const [values, setValues] = useState<ModelFormValues>(initialValues)
   const [providerProfile, setProviderProfile] = useState(initialProviderProfile)
+  const [policyResolution, setPolicyResolution] = useState<PolicyResolutionState>({
+    status: initialProviderProfile.selection === 'unsupported' ? 'stored_unsupported' : 'loading'
+  })
+  const policyRequestRef = useRef(0)
   const [isProviderSettingsOpen, setProviderSettingsOpen] = useState(false)
   const [isSaving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<ModelSettingsSaveError | null>(null)
@@ -101,6 +130,29 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
   const hasOverrideToken = values.apiTokenOverride.trim().length > 0
   const isConnectionPairComplete = hasOverrideUrl === hasOverrideToken
   const isOverrideUrlValid = isValidApiUrl(values.apiUrlOverride)
+  const effectiveApiUrl = values.apiUrlOverride.trim() || globalApiUrl
+  const originalEffectiveApiUrl = model?.apiUrlOverride?.trim() || globalApiUrl
+  const wireIdentityUnchanged =
+    Boolean(model) &&
+    values.id.trim() === model?.id &&
+    effectiveApiUrl.trim() === originalEffectiveApiUrl.trim()
+  const resolvedPolicy = policyResolution.status === 'resolved' ? policyResolution.descriptor : null
+  const supportedPolicy =
+    resolvedPolicy?.status === 'supported' && resolvedPolicy.vendorId === providerProfile.selection
+      ? resolvedPolicy
+      : null
+  const canPreserveUnchangedProfile =
+    providerProfile.update.kind === 'unchanged' &&
+    !providerProfile.explicitSelection &&
+    wireIdentityUnchanged
+  const isProviderStateValid =
+    policyResolution.status === 'stored_unsupported'
+      ? canPreserveUnchangedProfile
+      : policyResolution.status === 'resolved'
+        ? resolvedPolicy?.status === 'supported'
+          ? supportedPolicy !== null
+          : canPreserveUnchangedProfile
+        : false
   const canSave =
     values.id.trim().length > 0 &&
     isContextWindowValid &&
@@ -108,40 +160,104 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
     isCachedInputPriceValid &&
     isOutputPriceValid &&
     isConnectionPairComplete &&
-    isOverrideUrlValid
+    isOverrideUrlValid &&
+    isProviderStateValid
 
-  const deepSeekDescriptor = providerProfileDescriptors.find(
-    (descriptor) =>
-      descriptor.profileId === 'deepseek_v4_chat' &&
-      descriptor.settingsKind === 'deepseek_v4_chat' &&
-      descriptor.selectable
-  )
+  useEffect(() => {
+    const selection = providerProfile.selection
+    const modelId = values.id.trim()
+    if (selection === 'unsupported') {
+      policyRequestRef.current += 1
+      setPolicyResolution({ status: 'stored_unsupported' })
+      return
+    }
+    if (!modelId) {
+      policyRequestRef.current += 1
+      setPolicyResolution({ status: 'idle' })
+      return
+    }
+    const requestId = policyRequestRef.current + 1
+    policyRequestRef.current = requestId
+    setPolicyResolution({ status: 'loading' })
+    void resolveProviderVendorModelPolicy({
+      vendorId: selection,
+      modelId,
+      dialect: detectProviderProtocolDialect(effectiveApiUrl)
+    })
+      .then((descriptor) => {
+        if (policyRequestRef.current !== requestId) return
+        setPolicyResolution({ status: 'resolved', descriptor })
+        if (descriptor.status !== 'supported') return
+        setProviderProfile((current) => applyResolvedProviderPolicy(current, descriptor))
+        if (descriptor.imageInput !== 'user_configurable') {
+          const supportsImage = descriptor.imageInput === 'supported'
+          setValues((current) =>
+            current.supportsImage === supportsImage ? current : { ...current, supportsImage }
+          )
+        }
+      })
+      .catch(() => {
+        if (policyRequestRef.current === requestId) setPolicyResolution({ status: 'failed' })
+      })
+  }, [effectiveApiUrl, providerProfile.selection, resolveProviderVendorModelPolicy, values.id])
+
+  const selectableVendorOptions: SettingsSelectOption<ProviderProfileSelection>[] = []
+  for (const descriptor of providerVendorDescriptors) {
+    if (!descriptor.selectable) continue
+    if (descriptor.vendorId === 'generic') {
+      selectableVendorOptions.push({
+        label: t('configuration.providerProfile.generic'),
+        value: 'generic'
+      })
+    } else if (descriptor.vendorId === 'deepseek') {
+      selectableVendorOptions.push({
+        label: t('configuration.providerProfile.deepSeek'),
+        value: 'deepseek'
+      })
+    } else if (descriptor.vendorId === 'moonshot') {
+      selectableVendorOptions.push({
+        label: t('configuration.providerProfile.moonshot'),
+        value: 'moonshot'
+      })
+    }
+  }
+  if (
+    providerProfile.selection !== 'unsupported' &&
+    !selectableVendorOptions.some((option) => option.value === providerProfile.selection)
+  ) {
+    const label =
+      providerProfile.selection === 'generic'
+        ? t('configuration.providerProfile.generic')
+        : providerProfile.selection === 'deepseek'
+          ? t('configuration.providerProfile.deepSeek')
+          : t('configuration.providerProfile.moonshot')
+    selectableVendorOptions.unshift({ disabled: true, label, value: providerProfile.selection })
+  }
   const providerProfileOptions: SettingsSelectOption<ProviderProfileSelection>[] = [
-    ...(providerProfile.unsupportedProfile
+    ...(providerProfile.selection === 'unsupported'
       ? [
           {
             disabled: true,
-            label: `${t('configuration.providerProfile.unsupported')} (${providerProfile.unsupportedProfile.id}@${providerProfile.unsupportedProfile.version})`,
+            label: t('configuration.providerProfile.unsupported'),
             value: 'unsupported' as const
           }
         ]
       : []),
-    {
-      label: t('configuration.providerProfile.generic'),
-      value: 'generic'
-    },
-    ...(deepSeekDescriptor
-      ? [
-          {
-            label: deepSeekDescriptor.displayName,
-            value: 'deepseek_v4_chat' as const
-          }
-        ]
-      : [])
+    ...selectableVendorOptions
   ]
-  const ProviderSettingsEditor = deepSeekDescriptor
-    ? providerSettingsEditors[deepSeekDescriptor.settingsKind]
-    : undefined
+  const deepSeekSettingsDescriptor =
+    supportedPolicy &&
+    (supportedPolicy.settings.kind === 'deepseek_v4_chat' ||
+      supportedPolicy.settings.kind === 'deepseek_v4_vision')
+      ? supportedPolicy.settings
+      : null
+  const moonshotSettingsDescriptor =
+    supportedPolicy &&
+    (supportedPolicy.settings.kind === 'moonshot_k3_chat' ||
+      supportedPolicy.settings.kind === 'moonshot_k2_7_code_chat' ||
+      supportedPolicy.settings.kind === 'moonshot_k2_6_chat')
+      ? supportedPolicy.settings
+      : null
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -319,6 +435,9 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
             type="button"
             role="switch"
             aria-checked={values.supportsImage}
+            disabled={
+              supportedPolicy?.imageInput !== 'user_configurable' && Boolean(supportedPolicy)
+            }
             data-state={values.supportsImage ? 'on' : 'off'}
             onClick={() =>
               setValues((current) => ({ ...current, supportsImage: !current.supportsImage }))
@@ -327,6 +446,13 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
             <span className="settings-switch__thumb" aria-hidden="true" />
             <span className="sr-only">{t('configuration.supportsImageInput')}</span>
           </button>
+          {supportedPolicy?.imageInput !== 'user_configurable' && supportedPolicy && (
+            <small className="model-form-capability-note">
+              {supportedPolicy.imageInput === 'supported'
+                ? t('configuration.providerProfile.imageSupportedByProvider')
+                : t('configuration.providerProfile.imageUnsupportedByProvider')}
+            </small>
+          )}
         </div>
 
         <div className="model-form-more-row">
@@ -362,17 +488,12 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
                   value={values.apiUrlOverride}
                   placeholder={t('configuration.modelApiUrlPlaceholder')}
                   tabIndex={isAdvancedOpen ? 0 : -1}
-                  onChange={(event) => {
+                  onChange={(event) =>
                     setValues((current) => ({
                       ...current,
                       apiUrlOverride: event.target.value
                     }))
-                    setProviderProfile((current) =>
-                      current.selection === 'generic'
-                        ? selectProviderProfile(current, 'generic')
-                        : current
-                    )
-                  }}
+                  }
                 />
                 {!isOverrideUrlValid && (
                   <small className="model-form-field-error">
@@ -422,13 +543,20 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
                   value={providerProfile.selection}
                   onChange={(selection) => {
                     if (selection === 'unsupported') return
-                    setProviderProfile((current) => selectProviderProfile(current, selection))
+                    setProviderSettingsOpen(false)
+                    setProviderProfile((current) => {
+                      const selected = selectProviderVendor(current, selection)
+                      return supportedPolicy?.vendorId === selection
+                        ? applyResolvedProviderPolicy(selected, supportedPolicy)
+                        : selected
+                    })
                   }}
                 />
               </span>
             </div>
 
-            {providerProfile.selection === 'deepseek_v4_chat' && deepSeekDescriptor && (
+            {(providerProfile.selection === 'deepseek' ||
+              providerProfile.selection === 'moonshot') && (
               <div className="configuration-field settings-list-row">
                 <span className="settings-list-row__text">
                   <span className="settings-list-row__title">
@@ -438,12 +566,41 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
                 <button
                   className="secondary-settings-button model-provider-settings-button"
                   type="button"
+                  disabled={!deepSeekSettingsDescriptor && !moonshotSettingsDescriptor}
                   tabIndex={isAdvancedOpen ? 0 : -1}
                   onClick={() => setProviderSettingsOpen(true)}
                 >
                   {t('configuration.providerSettings.open')}
                 </button>
               </div>
+            )}
+
+            {policyResolution.status === 'loading' && (
+              <p className="model-provider-policy-message" role="status">
+                {t('configuration.providerProfile.resolving')}
+              </p>
+            )}
+            {policyResolution.status === 'failed' && (
+              <p className="model-provider-policy-message model-form-field-error" role="alert">
+                {t('configuration.providerProfile.resolveFailed')}
+              </p>
+            )}
+            {resolvedPolicy?.status === 'unsupported' && (
+              <div className="model-provider-policy-message" role="alert">
+                <p>
+                  {resolvedPolicy.reason === 'unsupported_model'
+                    ? t('configuration.providerProfile.unsupportedModel')
+                    : resolvedPolicy.reason === 'unsupported_dialect'
+                      ? t('configuration.providerProfile.unsupportedDialect')
+                      : t('configuration.providerProfile.unsupportedVendor')}
+                </p>
+                <p>{t('configuration.providerProfile.unsupportedGuidance')}</p>
+              </div>
+            )}
+            {providerProfile.familyChanged && (
+              <p className="model-provider-policy-message" role="status">
+                {t('configuration.providerProfile.familyChanged')}
+              </p>
             )}
           </div>
         </div>
@@ -473,18 +630,34 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
         </button>
       </div>
 
-      {isProviderSettingsOpen && ProviderSettingsEditor && (
-        <ProviderSettingsEditor
-          initialSettings={{ reasoning: providerProfile.reasoning }}
-          onCancel={() => setProviderSettingsOpen(false)}
-          onConfirm={(settings: DeepSeekProviderSettingsDraft) => {
-            setProviderProfile((current) =>
-              updateDeepSeekProviderSettings(current, settings.reasoning)
-            )
-            setProviderSettingsOpen(false)
-          }}
-        />
-      )}
+      {isProviderSettingsOpen &&
+        providerProfile.selection === 'deepseek' &&
+        providerProfile.settings &&
+        deepSeekSettingsDescriptor && (
+          <DeepSeekProviderSettingsEditor
+            descriptor={deepSeekSettingsDescriptor}
+            initialSettings={providerProfile.settings}
+            onCancel={() => setProviderSettingsOpen(false)}
+            onConfirm={(settings) => {
+              setProviderProfile((current) => updateDeepSeekProviderSettings(current, settings))
+              setProviderSettingsOpen(false)
+            }}
+          />
+        )}
+      {isProviderSettingsOpen &&
+        providerProfile.selection === 'moonshot' &&
+        providerProfile.settings &&
+        moonshotSettingsDescriptor && (
+          <MoonshotProviderSettingsEditor
+            descriptor={moonshotSettingsDescriptor}
+            initialSettings={providerProfile.settings}
+            onCancel={() => setProviderSettingsOpen(false)}
+            onConfirm={(settings) => {
+              setProviderProfile((current) => updateMoonshotProviderSettings(current, settings))
+              setProviderSettingsOpen(false)
+            }}
+          />
+        )}
     </form>
   )
 }

@@ -59,6 +59,7 @@ describe('CoreServer model settings client', () => {
       vendorId: 'moonshot',
       modelFamily: 'moonshot_k2_6_chat',
       settingsKind: 'moonshot',
+      imageInput: 'supported',
       settings: {
         kind: 'moonshot_k2_6_chat',
         thinkingModes: ['provider_default', 'enabled', 'disabled', 'enabled_keep_all'],

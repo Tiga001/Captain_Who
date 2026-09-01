@@ -143,7 +143,7 @@ pub use provider_registration::{
     resolve_provider_vendor_model_policy, resolve_provider_vendor_registration,
     resolve_ui_selectable_provider_registration, ProviderCheckpointPrivateArgumentsSemantics,
     ProviderContextProjectionSemantics, ProviderContinuationRequirement,
-    ProviderFamilySettingsDescriptor, ProviderPartialTraceSemantics,
+    ProviderFamilySettingsDescriptor, ProviderImageInputPolicy, ProviderPartialTraceSemantics,
     ProviderPrivateReplaySemantics, ProviderProfileSettingsKind, ProviderProfileUiDescriptor,
     ProviderRegistration, ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics,
     ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics, ProviderTurnRuntimePolicy,

@@ -7,6 +7,8 @@ import type { ModelSettingsSnapshot } from '../../features/storage/storageClient
 const service = vi.hoisted(() => ({
   loadModelSettings: vi.fn(),
   loadProviderProfileUiDescriptors: vi.fn(),
+  loadProviderVendorDescriptors: vi.fn(),
+  resolveProviderVendorModelPolicy: vi.fn(),
   saveModelSettings: vi.fn(),
   showToast: vi.fn()
 }))
@@ -14,6 +16,8 @@ const service = vi.hoisted(() => ({
 vi.mock('../../features/storage/storageClient', () => ({
   loadModelSettings: service.loadModelSettings,
   loadProviderProfileUiDescriptors: service.loadProviderProfileUiDescriptors,
+  loadProviderVendorDescriptors: service.loadProviderVendorDescriptors,
+  resolveProviderVendorModelPolicy: service.resolveProviderVendorModelPolicy,
   saveModelSettings: service.saveModelSettings
 }))
 
@@ -55,7 +59,14 @@ const storedSettings: ModelSettingsSnapshot = {
 }
 
 function ModelSettingsProbe() {
-  const { apiUrl, enabledModels, providerProfileDescriptors, setApiUrl } = useModelSettings()
+  const {
+    apiUrl,
+    enabledModels,
+    providerProfileDescriptors,
+    providerVendorDescriptors,
+    resolveProviderVendorModelPolicy,
+    setApiUrl
+  } = useModelSettings()
 
   return (
     <div>
@@ -64,6 +75,21 @@ function ModelSettingsProbe() {
       <span data-testid="provider-profiles">
         {providerProfileDescriptors.map((profile) => profile.profileId).join(',')}
       </span>
+      <span data-testid="provider-vendors">
+        {providerVendorDescriptors.map((vendor) => vendor.vendorId).join(',')}
+      </span>
+      <button
+        type="button"
+        onClick={() => {
+          void resolveProviderVendorModelPolicy({
+            vendorId: 'moonshot',
+            modelId: 'kimi-k3',
+            dialect: 'openai_chat_completions'
+          })
+        }}
+      >
+        resolve vendor
+      </button>
       <button type="button" onClick={() => setApiUrl('https://api.anthropic.com/v1/messages')}>
         change URL
       </button>
@@ -95,6 +121,23 @@ function ModelRenameProbe() {
 beforeEach(() => {
   service.loadModelSettings.mockReset()
   service.loadProviderProfileUiDescriptors.mockReset().mockResolvedValue([])
+  service.loadProviderVendorDescriptors.mockReset().mockResolvedValue([
+    { vendorId: 'generic', displayName: 'Generic', selectable: true },
+    { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
+    { vendorId: 'moonshot', displayName: 'Moonshot', selectable: true }
+  ])
+  service.resolveProviderVendorModelPolicy.mockReset().mockResolvedValue({
+    status: 'supported',
+    vendorId: 'moonshot',
+    modelFamily: 'moonshot_k3_chat',
+    settingsKind: 'moonshot',
+    imageInput: 'supported',
+    settings: {
+      kind: 'moonshot_k3_chat',
+      reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+      defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+    }
+  })
   service.saveModelSettings.mockReset().mockImplementation(async (settings) => settings)
   service.showToast.mockReset()
 })
@@ -242,6 +285,27 @@ describe('ModelSettingsProvider hydration', () => {
     expect(service.loadProviderProfileUiDescriptors).toHaveBeenCalledTimes(1)
   })
 
+  it('exposes Host-projected vendor descriptors and delegates policy resolution to Host', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelSettingsProbe />
+      </ModelSettingsProvider>
+    )
+
+    await expect
+      .element(screen.getByTestId('provider-vendors'))
+      .toHaveTextContent('generic,deepseek,moonshot')
+    await screen.getByRole('button', { name: 'resolve vendor' }).click()
+    await expect.poll(() => service.resolveProviderVendorModelPolicy.mock.calls.length).toBe(1)
+    expect(service.resolveProviderVendorModelPolicy).toHaveBeenCalledWith({
+      vendorId: 'moonshot',
+      modelId: 'kimi-k3',
+      dialect: 'openai_chat_completions'
+    })
+  })
+
   it('keeps model settings usable when the safe descriptor projection is unavailable', async () => {
     service.loadModelSettings.mockResolvedValue(storedSettings)
     service.loadProviderProfileUiDescriptors.mockRejectedValue(
@@ -257,6 +321,22 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.element(screen.getByTestId('api-url')).toHaveTextContent(storedSettings.apiUrl)
     await expect.element(screen.getByTestId('provider-profiles')).toHaveTextContent('')
     expect(service.saveModelSettings).not.toHaveBeenCalled()
+  })
+
+  it('keeps the workspace usable when the optional vendor directory is unavailable', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.loadProviderVendorDescriptors.mockRejectedValue(new Error('mixed-version Host'))
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelSettingsProbe />
+      </ModelSettingsProvider>
+    )
+
+    await expect.element(screen.getByTestId('api-url')).toHaveTextContent(storedSettings.apiUrl)
+    await expect.element(screen.getByTestId('provider-vendors')).toHaveTextContent('')
+    expect(service.loadModelSettings).toHaveBeenCalledTimes(1)
+    expect(service.showToast).not.toHaveBeenCalled()
   })
 
   it('replaces optimistic values with the Host-authoritative save result', async () => {

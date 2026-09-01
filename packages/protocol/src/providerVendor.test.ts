@@ -54,6 +54,7 @@ describe('Provider vendor protocol', () => {
       vendorId: 'moonshot',
       modelFamily: 'moonshot_k3_chat',
       settingsKind: 'moonshot',
+      imageInput: 'supported',
       settings: {
         kind: 'moonshot_k3_chat',
         reasoningEfforts: ['provider_default', 'low', 'high', 'max'],

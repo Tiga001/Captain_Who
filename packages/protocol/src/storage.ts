@@ -97,8 +97,9 @@ export interface ProviderProfileConfigV2 {
 }
 
 /**
- * Persisted Profile config. V1 remains losslessly readable and is retained by `unchanged` saves;
- * only an explicit family-aware Provider selection writes V2.
+ * Persisted Profile config. V1 remains losslessly readable and is retained by ordinary
+ * `unchanged` saves. An explicit family-aware Provider selection writes V2; the Host may also
+ * reconcile an exact Provider-owned official endpoint/model pair to its canonical V2 family.
  */
 export type ProviderProfileConfig = ProviderProfileConfigV1 | ProviderProfileConfigV2
 
@@ -118,6 +119,9 @@ export type ProviderModelFamilyId =
   | 'moonshot_k2_6_chat'
 
 export type ProviderVendorSettingsKind = 'none' | 'deepseek' | 'moonshot'
+
+/** Public model-editor policy; runtime Provider capabilities remain Host-private. */
+export type ProviderImageInputPolicy = 'user_configurable' | 'supported' | 'unsupported'
 
 export type ProviderFamilySettingsDescriptor =
   | {
@@ -164,6 +168,7 @@ export type ProviderVendorModelPolicyDescriptor =
       vendorId: ProviderVendorId
       modelFamily: ProviderModelFamilyId
       settingsKind: ProviderVendorSettingsKind
+      imageInput: ProviderImageInputPolicy
       settings: ProviderFamilySettingsDescriptor
     }
   | {

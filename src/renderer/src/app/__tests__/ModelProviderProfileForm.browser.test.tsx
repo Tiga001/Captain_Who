@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { HostInvocationError } from '@mycopilot/host-api'
-import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
+import type {
+  ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput
+} from '@mycopilot/protocol'
 import type { ModelConfig } from '../../config/modelConfig'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -12,7 +17,7 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 
 const { ModelForm } = await import('../../features/settings/pages/configuration/ModelForm')
 
-const descriptors: ProviderProfileUiDescriptor[] = [
+const profileDescriptors: ProviderProfileUiDescriptor[] = [
   {
     profileId: 'generic_openai_chat',
     profileVersion: 1,
@@ -28,11 +33,152 @@ const descriptors: ProviderProfileUiDescriptor[] = [
     compatibleDialects: ['openai_chat_completions'],
     settingsKind: 'deepseek_v4_chat',
     selectable: true
+  },
+  {
+    profileId: 'deepseek_v4_vision',
+    profileVersion: 1,
+    displayName: 'DeepSeek Vision',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
+  },
+  {
+    profileId: 'moonshot_k3_chat',
+    profileVersion: 1,
+    displayName: 'Moonshot Kimi K3',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
+  },
+  {
+    profileId: 'moonshot_k2_7_code_chat',
+    profileVersion: 1,
+    displayName: 'Moonshot Kimi K2.7 Code',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
+  },
+  {
+    profileId: 'moonshot_k2_6_chat',
+    profileVersion: 1,
+    displayName: 'Moonshot Kimi K2.6',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
   }
 ]
 
+const vendorDescriptors: ProviderVendorDescriptor[] = [
+  { vendorId: 'generic', displayName: 'Generic internal label', selectable: true },
+  { vendorId: 'deepseek', displayName: 'DeepSeek internal label', selectable: true },
+  { vendorId: 'moonshot', displayName: 'Moonshot internal label', selectable: true },
+  { vendorId: 'future_vendor.v1', displayName: 'Future internal label', selectable: true }
+]
+
+function genericPolicy(input: ProviderVendorModelPolicyInput): ProviderVendorModelPolicyDescriptor {
+  return {
+    status: 'supported',
+    vendorId: 'generic',
+    modelFamily:
+      input.dialect === 'anthropic_messages' ? 'generic_anthropic_messages' : 'generic_openai_chat',
+    settingsKind: 'none',
+    imageInput: 'user_configurable',
+    settings: { kind: 'generic', defaultSettings: { kind: 'generic' } }
+  }
+}
+
+function resolvePolicy(
+  input: ProviderVendorModelPolicyInput
+): Promise<ProviderVendorModelPolicyDescriptor> {
+  if (input.vendorId === 'generic') return Promise.resolve(genericPolicy(input))
+  if (input.dialect !== 'openai_chat_completions') {
+    return Promise.resolve({
+      status: 'unsupported',
+      vendorId: input.vendorId,
+      reason: 'unsupported_dialect'
+    })
+  }
+  if (input.vendorId === 'deepseek' && input.modelId === 'deepseek-v4-flash') {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_v4_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'unsupported',
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_v4_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
+      }
+    })
+  }
+  if (input.vendorId === 'moonshot' && input.modelId === 'kimi-k3') {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      }
+    })
+  }
+  if (
+    input.vendorId === 'moonshot' &&
+    (input.modelId === 'kimi-k2.7-code' || input.modelId === 'kimi-k2.7-code-highspeed')
+  ) {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k2_7_code_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      settings: {
+        kind: 'moonshot_k2_7_code_chat',
+        defaultSettings: { kind: 'moonshot_k2_7_code_chat' }
+      }
+    })
+  }
+  if (input.vendorId === 'moonshot' && input.modelId === 'kimi-k2.6') {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k2_6_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      settings: {
+        kind: 'moonshot_k2_6_chat',
+        thinkingModes: ['provider_default', 'enabled', 'disabled', 'enabled_keep_all'],
+        defaultSettings: { kind: 'moonshot_k2_6_chat', thinkingMode: 'provider_default' }
+      }
+    })
+  }
+  return Promise.resolve({
+    status: 'unsupported',
+    vendorId: input.vendorId,
+    reason: 'unsupported_model'
+  })
+}
+
+function deferred<Value>() {
+  let resolve!: (value: Value) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, reject, resolve }
+}
+
 const model: ModelConfig = {
-  id: 'provider-model',
+  id: 'deepseek-v4-flash',
   displayName: 'Provider Model',
   supportsImage: false,
   contextWindowTokens: 128_000,
@@ -48,250 +194,405 @@ const model: ModelConfig = {
   enabled: true
 }
 
-describe('ModelForm Provider Profile controls', () => {
-  it('builds the registered choices only from selectable Host descriptors', async () => {
-    const screen = await render(
-      <ModelForm
-        model={model}
-        providerProfileDescriptors={descriptors.map((descriptor) =>
-          descriptor.profileId === 'deepseek_v4_chat'
-            ? { ...descriptor, selectable: false }
-            : descriptor
-        )}
-        onCancel={vi.fn()}
-        onSave={vi.fn()}
-      />
-    )
+const commonProps = {
+  globalApiUrl: 'https://provider.example/v1/chat/completions',
+  providerProfileDescriptors: profileDescriptors,
+  providerVendorDescriptors: vendorDescriptors,
+  resolveProviderVendorModelPolicy: vi.fn(resolvePolicy),
+  onCancel: vi.fn()
+}
 
+describe('ModelForm vendor controls', () => {
+  it('shows only localized vendor names and never projects family/profile identities', async () => {
+    const screen = await render(<ModelForm {...commonProps} model={model} onSave={vi.fn()} />)
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await screen
       .getByRole('button', {
         name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
       })
       .click()
-    expect(
-      Array.from(
-        document.querySelectorAll<HTMLElement>(
-          '.model-provider-profile-select .settings-select__option-label'
-        )
-      ).map((option) => option.textContent)
-    ).toEqual(['configuration.providerProfile.generic'])
+    const labels = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '.model-provider-profile-select .settings-select__option-label'
+      )
+    ).map((option) => option.textContent)
+    expect(labels).toEqual([
+      'configuration.providerProfile.generic',
+      'configuration.providerProfile.deepSeek',
+      'configuration.providerProfile.moonshot'
+    ])
+    expect(document.body.textContent).not.toMatch(/V4 Chat|Kimi K3|deepseek_v4|moonshot_k3|@1/)
   })
 
-  it('keeps an unsupported profile visible as a disabled current option', async () => {
+  it('keeps an unknown stored profile opaque while allowing an unchanged round-trip', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
     const screen = await render(
       <ModelForm
+        {...commonProps}
         model={{
           ...model,
           providerProfileConfig: {
             schemaVersion: 1,
-            profile: { id: 'future_vendor_chat', version: 7 },
+            profile: { id: 'future_private_profile', version: 7 },
             reasoning: { mode: 'provider_default', effort: 'provider_default' }
           }
         }}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
-        onSave={vi.fn()}
-      />
-    )
-
-    const triggerName =
-      'configuration.providerProfile.vendor: configuration.providerProfile.unsupported (future_vendor_chat@7)'
-    await screen.getByRole('button', { name: triggerName }).click()
-    const unsupported = document.querySelector<HTMLButtonElement>(
-      '.model-provider-profile-select .settings-select__option:disabled'
-    )
-
-    expect(unsupported?.textContent).toContain('future_vendor_chat@7')
-    expect(unsupported?.disabled).toBe(true)
-    await expect
-      .poll(() => document.activeElement?.textContent)
-      .toContain('configuration.providerProfile.generic')
-    await expect
-      .element(screen.getByRole('option', { name: 'configuration.providerProfile.generic' }))
-      .toBeVisible()
-  })
-
-  it('offers an explicit Generic rematch when the stored Generic dialect may be stale', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined)
-    const screen = await render(
-      <ModelForm
-        model={model}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
         onSave={onSave}
       />
     )
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    expect(document.body.textContent).toContain('configuration.providerProfile.unsupported')
+    expect(document.body.textContent).not.toContain('future_private_profile')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({ kind: 'unchanged' })
+  })
 
+  it('keeps a future version of a known V2 family opaque without downgrading it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={{
+          ...model,
+          id: 'kimi-k3',
+          providerProfileConfig: {
+            schemaVersion: 2,
+            vendorId: 'moonshot',
+            profile: { id: 'moonshot_k3_chat', version: 99 },
+            settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+          }
+        }}
+        onSave={onSave}
+      />
+    )
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    expect(document.body.textContent).toContain('configuration.providerProfile.unsupported')
+    expect(document.body.textContent).not.toMatch(/moonshot_k3_chat|@99/)
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({ kind: 'unchanged' })
+  })
+
+  it('submits DeepSeek Low through the vendor-owned V2 settings union', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(<ModelForm {...commonProps} model={model} onSave={onSave} />)
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await screen
       .getByRole('button', {
         name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
       })
       .click()
-    await screen.getByRole('option', { name: 'configuration.providerProfile.generic' }).click()
-    await screen.getByRole('button', { name: 'configuration.save' }).click()
-
-    await expect.poll(() => onSave.mock.calls.length).toBe(1)
-    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({
-      kind: 'select_generic'
-    })
-  })
-
-  it('atomically rematches Generic when a model-level API URL is explicitly changed', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined)
-    const screen = await render(
-      <ModelForm
-        model={model}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
-        onSave={onSave}
-      />
-    )
-
-    await screen.getByRole('button', { name: 'configuration.more' }).click()
-    await screen
-      .getByPlaceholder('configuration.modelApiUrlPlaceholder')
-      .fill('https://api.anthropic.com/v1/messages')
-    await screen
-      .getByPlaceholder('configuration.modelApiTokenPlaceholder')
-      .fill('replacement-token')
-    await screen.getByRole('button', { name: 'configuration.save' }).click()
-
-    await expect.poll(() => onSave.mock.calls.length).toBe(1)
-    expect(onSave.mock.calls[0]![0]).toEqual(
-      expect.objectContaining({
-        apiUrlOverride: 'https://api.anthropic.com/v1/messages',
-        providerProfileUpdate: { kind: 'select_generic' }
-      })
-    )
-  })
-
-  it('submits separate cache-miss and cache-hit prices while preserving blank inheritance', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined)
-    const screen = await render(
-      <ModelForm
-        model={{ ...model, inputPrice: '0.012', cachedInputPrice: '' }}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
-        onSave={onSave}
-      />
-    )
-
-    const cacheMissInput = screen.getByRole('textbox', {
-      name: 'configuration.inputPriceCacheMiss'
-    })
-    const cacheHitInput = screen.getByRole('textbox', {
-      name: 'configuration.inputPriceCacheHit'
-    })
-
-    await expect.element(cacheMissInput).toHaveValue('0.012')
-    await expect.element(cacheHitInput).toHaveValue('')
+    await screen.getByRole('option', { name: 'configuration.providerProfile.deepSeek' }).click()
     await expect
-      .element(cacheHitInput)
-      .toHaveAttribute('placeholder', 'configuration.inputPriceCacheHitPlaceholder')
-
-    await cacheHitInput.fill('0.002')
-    await screen.getByRole('button', { name: 'configuration.save' }).click()
-
-    await expect.poll(() => onSave.mock.calls.length).toBe(1)
-    expect(onSave.mock.calls[0]![0]).toEqual(
-      expect.objectContaining({
-        inputPrice: '0.012',
-        cachedInputPrice: '0.002'
-      })
-    )
-  })
-
-  it('submits an explicit DeepSeek selection with public settings only', async () => {
-    const onSave = vi.fn().mockResolvedValue(undefined)
-    const screen = await render(
-      <ModelForm
-        model={model}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
-        onSave={onSave}
-      />
-    )
-
-    await screen.getByRole('button', { name: 'configuration.more' }).click()
-    await screen
-      .getByRole('button', {
-        name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
-      })
-      .click()
-    await screen.getByRole('option', { name: 'DeepSeek V4 Chat' }).click()
-
+      .poll(
+        () =>
+          (
+            screen
+              .getByRole('button', { name: 'configuration.providerSettings.open' })
+              .element() as HTMLButtonElement
+          ).disabled
+      )
+      .toBe(false)
     await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
-    await screen
-      .getByRole('button', {
-        name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingProviderDefault'
-      })
-      .click()
-    await screen
-      .getByRole('option', { name: 'configuration.deepSeekSettings.thinkingEnabled' })
-      .click()
     await screen
       .getByRole('button', {
         name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortProviderDefault'
       })
       .click()
-    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortHigh' }).click()
+    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortLow' }).click()
     await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
     await screen.getByRole('button', { name: 'configuration.save' }).click()
-
     await expect.poll(() => onSave.mock.calls.length).toBe(1)
-    const submitted = onSave.mock.calls[0]![0]
-    expect(submitted.providerProfileUpdate).toEqual({
-      kind: 'select_registered_profile',
-      profileId: 'deepseek_v4_chat',
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({
+      kind: 'select_vendor',
+      vendorId: 'deepseek',
       settings: {
         kind: 'deepseek_v4_chat',
-        reasoning: { mode: 'enabled', effort: 'high' }
+        reasoning: { mode: 'provider_default', effort: 'low' }
       }
     })
-    expect(JSON.stringify(submitted.providerProfileUpdate)).not.toMatch(
-      /profileVersion|revision|capabilit/i
-    )
   })
 
-  it('stays open and presents only a stable local error when the Host save fails', async () => {
-    const onSave = vi.fn().mockRejectedValue(new Error('raw provider payload'))
+  it('restores legacy DeepSeek settings after cancelling and reopening the dialog', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
     const screen = await render(
       <ModelForm
-        model={model}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
+        {...commonProps}
+        model={{
+          ...model,
+          providerProfileConfig: {
+            schemaVersion: 1,
+            profile: { id: 'deepseek_v4_chat', version: 1 },
+            reasoning: { mode: 'enabled', effort: 'high' }
+          }
+        }}
         onSave={onSave}
       />
     )
 
-    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Rejected draft')
+    await expect
+      .poll(
+        () =>
+          (
+            screen
+              .getByRole('button', { name: 'configuration.providerSettings.open' })
+              .element() as HTMLButtonElement
+          ).disabled
+      )
+      .toBe(false)
+    await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingEnabled'
+        })
+      )
+      .toBeVisible()
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortHigh'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortMax' }).click()
+    await screen.getByText('configuration.providerSettings.cancel').click()
+
+    await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingEnabled'
+        })
+      )
+      .toBeVisible()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortHigh'
+        })
+      )
+      .toBeVisible()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('keeps save disabled while resolving and ignores an older response that finishes last', async () => {
+    const older = deferred<ProviderVendorModelPolicyDescriptor>()
+    const newer = deferred<ProviderVendorModelPolicyDescriptor>()
+    let olderDelivered = false
+    const resolver = vi.fn((input: ProviderVendorModelPolicyInput) => {
+      if (input.modelId !== 'older-model') return newer.promise
+      return older.promise.then((policy) => {
+        olderDelivered = true
+        return policy
+      })
+    })
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={{ ...model, id: 'older-model' }}
+        resolveProviderVendorModelPolicy={resolver}
+        onSave={vi.fn()}
+      />
+    )
+    const save = screen.getByRole('button', { name: 'configuration.save' })
+
+    await expect.poll(() => resolver.mock.calls.length).toBe(1)
+    await expect.element(save).toBeDisabled()
+    await screen.getByPlaceholder('configuration.modelIdPlaceholder').fill('newer-model')
+    await expect.poll(() => resolver.mock.calls.length).toBe(2)
+    await expect.element(save).toBeDisabled()
+
+    newer.resolve({
+      status: 'unsupported',
+      vendorId: 'generic',
+      reason: 'unsupported_model'
+    })
+    await expect
+      .element(screen.getByText('configuration.providerProfile.unsupportedModel'))
+      .toBeVisible()
+    await expect.element(save).toBeDisabled()
+
+    older.resolve(
+      genericPolicy({
+        vendorId: 'generic',
+        modelId: 'older-model',
+        dialect: 'openai_chat_completions'
+      })
+    )
+    await expect.poll(() => olderDelivered).toBe(true)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await expect
+      .element(screen.getByText('configuration.providerProfile.unsupportedModel'))
+      .toBeVisible()
+    await expect.element(save).toBeDisabled()
+  })
+
+  it('recovers after a resolver rejection only after a later model resolves successfully', async () => {
+    const resolver = vi.fn((input: ProviderVendorModelPolicyInput) =>
+      input.modelId === 'rejected-model'
+        ? Promise.reject(new Error('resolver unavailable'))
+        : Promise.resolve(genericPolicy(input))
+    )
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={{ ...model, id: 'rejected-model' }}
+        resolveProviderVendorModelPolicy={resolver}
+        onSave={vi.fn()}
+      />
+    )
+    const save = screen.getByRole('button', { name: 'configuration.save' })
+
+    await expect
+      .element(screen.getByText('configuration.providerProfile.resolveFailed'))
+      .toBeVisible()
+    await expect.element(save).toBeDisabled()
+
+    await screen.getByPlaceholder('configuration.modelIdPlaceholder').fill('recovered-model')
+    await expect.poll(() => resolver.mock.calls.length).toBe(2)
+    await expect
+      .element(screen.getByText('configuration.providerProfile.resolveFailed'))
+      .not.toBeInTheDocument()
+    await expect.element(save).toBeEnabled()
+  })
+
+  it('uses the K3 descriptor, enables image input, and saves Moonshot settings explicitly', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(
+      <ModelForm {...commonProps} model={{ ...model, id: 'kimi-k3' }} onSave={onSave} />
+    )
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await screen
       .getByRole('button', {
         name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
       })
       .click()
-    await screen.getByRole('option', { name: 'DeepSeek V4 Chat' }).click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.moonshot' }).click()
+    await expect
+      .poll(
+        () =>
+          (
+            screen
+              .getByRole('button', { name: 'configuration.providerSettings.open' })
+              .element() as HTMLButtonElement
+          ).disabled
+      )
+      .toBe(false)
+    await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
+    expect(document.body.textContent).toContain(
+      'configuration.moonshotSettings.alwaysPreservedThinking'
+    )
+    expect(document.body.textContent).not.toContain('configuration.moonshotSettings.thinkingMode')
+    await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
     await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      supportsImage: true,
+      providerProfileUpdate: {
+        kind: 'select_vendor',
+        vendorId: 'moonshot',
+        settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      }
+    })
+  })
 
+  it('resets settings and warns when the Host resolves a different Moonshot family', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const k3Model: ModelConfig = {
+      ...model,
+      id: 'kimi-k3',
+      supportsImage: true,
+      providerProfileConfig: {
+        schemaVersion: 2,
+        vendorId: 'moonshot',
+        profile: { id: 'moonshot_k3_chat', version: 1 },
+        settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+      }
+    }
+    const screen = await render(<ModelForm {...commonProps} model={k3Model} onSave={onSave} />)
+    await screen.getByPlaceholder('configuration.modelIdPlaceholder').fill('kimi-k2.6')
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await expect
+      .element(screen.getByText('configuration.providerProfile.familyChanged'))
+      .toBeVisible()
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({
+      kind: 'select_vendor',
+      vendorId: 'moonshot',
+      settings: { kind: 'moonshot_k2_6_chat', thinkingMode: 'provider_default' }
+    })
+  })
+
+  it('does not auto-migrate a Kimi alias stored as DeepSeek on a custom endpoint', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        globalApiUrl="https://proxy.example/v1/chat/completions"
+        model={{
+          ...model,
+          id: 'kimi-k3',
+          providerProfileConfig: {
+            schemaVersion: 1,
+            profile: { id: 'deepseek_v4_chat', version: 1 },
+            reasoning: { mode: 'enabled', effort: 'high' }
+          }
+        }}
+        onSave={onSave}
+      />
+    )
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await expect
+      .element(screen.getByText('configuration.providerProfile.unsupportedModel'))
+      .toBeVisible()
+    expect(
+      screen.getByRole('button', {
+        name: 'configuration.providerProfile.vendor: configuration.providerProfile.deepSeek'
+      })
+    ).toBeTruthy()
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({ kind: 'unchanged' })
+  })
+
+  it('blocks an unknown Moonshot model and keeps the Host save rejection sanitized', async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error('raw provider payload'))
+    const screen = await render(
+      <ModelForm {...commonProps} model={{ ...model, id: 'future-kimi' }} onSave={onSave} />
+    )
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await screen
+      .getByRole('button', {
+        name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.moonshot' }).click()
+    await expect
+      .element(screen.getByText('configuration.providerProfile.unsupportedModel'))
+      .toBeVisible()
+    await expect.element(screen.getByRole('button', { name: 'configuration.save' })).toBeDisabled()
+
+    await screen
+      .getByRole('button', {
+        name: 'configuration.providerProfile.vendor: configuration.providerProfile.moonshot'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.generic' }).click()
+    await expect
+      .poll(
+        () =>
+          (
+            screen
+              .getByRole('button', { name: 'configuration.save' })
+              .element() as HTMLButtonElement
+          ).disabled
+      )
+      .toBe(false)
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
     await expect
       .element(screen.getByRole('alert'))
       .toHaveTextContent('configuration.saveFailedSafe')
-    await expect
-      .element(screen.getByRole('heading', { name: 'configuration.editModel' }))
-      .toBeVisible()
-    await expect
-      .element(screen.getByPlaceholder('configuration.displayNamePlaceholder'))
-      .toHaveValue('Provider Model')
-    await expect
-      .element(
-        screen.getByRole('button', {
-          name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
-        })
-      )
-      .toBeVisible()
     expect(document.body.textContent).not.toContain('raw provider payload')
   })
 
@@ -307,17 +608,18 @@ describe('ModelForm Provider Profile controls', () => {
         }
       })
     )
-    const screen = await render(
-      <ModelForm
-        model={model}
-        providerProfileDescriptors={descriptors}
-        onCancel={vi.fn()}
-        onSave={onSave}
-      />
-    )
-
+    const screen = await render(<ModelForm {...commonProps} model={model} onSave={onSave} />)
+    await expect
+      .poll(
+        () =>
+          (
+            screen
+              .getByRole('button', { name: 'configuration.save' })
+              .element() as HTMLButtonElement
+          ).disabled
+      )
+      .toBe(false)
     await screen.getByRole('button', { name: 'configuration.save' }).click()
-
     await expect
       .element(screen.getByRole('alert'))
       .toHaveTextContent('configuration.duplicateModelId:deepseek-v4-flash')

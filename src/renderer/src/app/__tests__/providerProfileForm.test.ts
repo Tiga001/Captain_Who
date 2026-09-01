@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import type {
-  LegacyProviderProfileConfigV1,
   ProviderProfileConfig,
-  ProviderProfileUiDescriptor
+  ProviderProfileUiDescriptor,
+  ProviderVendorModelPolicyDescriptor
 } from '@mycopilot/protocol'
 import { prepareModelsForGlobalApiUrlChange, type ModelConfig } from '../../config/modelConfig'
 import {
-  initialProviderProfileFormState,
+  applyResolvedProviderPolicy,
+  detectProviderProtocolDialect,
   initialNewProviderProfileFormState,
-  selectProviderProfile,
-  updateDeepSeekProviderSettings
+  initialProviderProfileFormState,
+  selectProviderVendor,
+  updateDeepSeekProviderSettings,
+  updateMoonshotProviderSettings
 } from '../../features/settings/pages/configuration/providerProfileForm'
 
 const descriptors: ProviderProfileUiDescriptor[] = [
@@ -36,165 +39,258 @@ const descriptors: ProviderProfileUiDescriptor[] = [
     compatibleDialects: ['openai_chat_completions'],
     settingsKind: 'deepseek_v4_chat',
     selectable: true
+  },
+  {
+    profileId: 'deepseek_v4_vision',
+    profileVersion: 1,
+    displayName: 'DeepSeek Vision',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
+  },
+  {
+    profileId: 'moonshot_k3_chat',
+    profileVersion: 1,
+    displayName: 'Moonshot Kimi K3',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
+  },
+  {
+    profileId: 'moonshot_k2_7_code_chat',
+    profileVersion: 1,
+    displayName: 'Moonshot Kimi K2.7 Code',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
+  },
+  {
+    profileId: 'moonshot_k2_6_chat',
+    profileVersion: 1,
+    displayName: 'Moonshot Kimi K2.6',
+    compatibleDialects: ['openai_chat_completions'],
+    settingsKind: 'none',
+    selectable: false
   }
 ]
 
-function profile(
-  id: ProviderProfileConfig['profile']['id'],
-  version: number,
-  mode: LegacyProviderProfileConfigV1['reasoning']['mode'] = 'provider_default',
-  effort: LegacyProviderProfileConfigV1['reasoning']['effort'] = 'provider_default'
-): LegacyProviderProfileConfigV1 {
-  return { schemaVersion: 1, profile: { id, version }, reasoning: { mode, effort } }
+const deepSeekPolicy: ProviderVendorModelPolicyDescriptor = {
+  status: 'supported',
+  vendorId: 'deepseek',
+  modelFamily: 'deepseek_v4_chat',
+  settingsKind: 'deepseek',
+  imageInput: 'unsupported',
+  settings: {
+    kind: 'deepseek_v4_chat',
+    reasoningModes: ['provider_default', 'enabled', 'disabled'],
+    reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+    defaultSettings: {
+      kind: 'deepseek_v4_chat',
+      reasoning: { mode: 'provider_default', effort: 'provider_default' }
+    }
+  }
 }
 
-describe('Provider Profile model form state', () => {
-  it('starts a newly created model with an explicit Generic selection', () => {
-    const state = initialNewProviderProfileFormState()
+const k3Policy: ProviderVendorModelPolicyDescriptor = {
+  status: 'supported',
+  vendorId: 'moonshot',
+  modelFamily: 'moonshot_k3_chat',
+  settingsKind: 'moonshot',
+  imageInput: 'supported',
+  settings: {
+    kind: 'moonshot_k3_chat',
+    reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+    defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+  }
+}
 
-    expect(state.selection).toBe('generic')
-    expect(state.update).toEqual({ kind: 'select_generic' })
+const k26Policy: ProviderVendorModelPolicyDescriptor = {
+  status: 'supported',
+  vendorId: 'moonshot',
+  modelFamily: 'moonshot_k2_6_chat',
+  settingsKind: 'moonshot',
+  imageInput: 'supported',
+  settings: {
+    kind: 'moonshot_k2_6_chat',
+    thinkingModes: ['provider_default', 'enabled', 'disabled', 'enabled_keep_all'],
+    defaultSettings: { kind: 'moonshot_k2_6_chat', thinkingMode: 'provider_default' }
+  }
+}
+
+function legacyProfile(
+  id: ProviderProfileConfig['profile']['id'],
+  version = 1
+): ProviderProfileConfig {
+  return {
+    schemaVersion: 1,
+    profile: { id, version },
+    reasoning: { mode: 'enabled', effort: 'high' }
+  }
+}
+
+describe('vendor-aware Provider form state', () => {
+  it('starts new models with explicit Generic selection', () => {
+    expect(initialNewProviderProfileFormState()).toMatchObject({
+      selection: 'generic',
+      settings: { kind: 'generic' },
+      update: { kind: 'select_generic' }
+    })
   })
 
-  it('preserves a supported stored profile until the user explicitly changes it', () => {
-    const generic = initialProviderProfileFormState(
-      profile('generic_anthropic_messages', 1),
-      descriptors
-    )
-    const deepSeek = initialProviderProfileFormState(
-      profile('deepseek_v4_chat', 1, 'enabled', 'high'),
-      descriptors
-    )
-
-    expect(generic.update).toEqual({ kind: 'unchanged' })
-    expect(deepSeek.update).toEqual({ kind: 'unchanged' })
-  })
-
-  it('shows an unsupported version without silently replacing it', () => {
-    const state = initialProviderProfileFormState(
-      profile('deepseek_v4_chat', 999, 'enabled', 'max'),
-      descriptors
-    )
-
-    expect(state.selection).toBe('unsupported')
-    expect(state.unsupportedProfile).toEqual({ id: 'deepseek_v4_chat', version: 999 })
-    expect(state.update).toEqual({ kind: 'unchanged' })
-    expect(selectProviderProfile(state, 'generic').update).toEqual({ kind: 'select_generic' })
-  })
-
-  it('treats an unknown config schema as unsupported even when its profile is registered', () => {
-    const future = {
-      ...profile('deepseek_v4_chat', 1, 'enabled', 'max'),
-      schemaVersion: 99
-    } as unknown as ProviderProfileConfig
-
-    const state = initialProviderProfileFormState(future, descriptors)
-
-    expect(state.selection).toBe('unsupported')
-    expect(state.update).toEqual({ kind: 'unchanged' })
-  })
-
-  it('preserves an unknown future profile ID as unsupported presentation state', () => {
-    const future = {
-      schemaVersion: 1,
-      profile: { id: 'future_vendor_chat', version: 7 },
-      reasoning: { mode: 'provider_default', effort: 'provider_default' }
-    } as unknown as ProviderProfileConfig
-
-    const state = initialProviderProfileFormState(future, descriptors)
-
-    expect(state.selection).toBe('unsupported')
-    expect(state.unsupportedProfile).toEqual({ id: 'future_vendor_chat', version: 7 })
-    expect(state.update).toEqual({ kind: 'unchanged' })
-  })
-
-  it('preserves v2 DeepSeek state while keeping unexposed Moonshot profiles unsupported', () => {
-    const deepSeek = initialProviderProfileFormState(
+  it('loads legacy DeepSeek unchanged and accepts V2 Low without downgrading it', () => {
+    const legacy = initialProviderProfileFormState(legacyProfile('deepseek_v4_chat'), descriptors)
+    const v2 = initialProviderProfileFormState(
       {
         schemaVersion: 2,
-        profile: { id: 'deepseek_v4_chat', version: 1 },
         vendorId: 'deepseek',
-        settings: {
-          kind: 'deepseek_v4_chat',
-          reasoning: { mode: 'enabled', effort: 'high' }
-        }
-      },
-      descriptors
-    )
-    const moonshot = initialProviderProfileFormState(
-      {
-        schemaVersion: 2,
-        profile: { id: 'moonshot_k3_chat', version: 1 },
-        vendorId: 'moonshot',
-        settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
-      },
-      descriptors
-    )
-    const mismatchedVendor = initialProviderProfileFormState(
-      {
-        schemaVersion: 2,
         profile: { id: 'deepseek_v4_chat', version: 1 },
-        vendorId: 'moonshot',
         settings: {
           kind: 'deepseek_v4_chat',
-          reasoning: { mode: 'enabled', effort: 'high' }
+          reasoning: { mode: 'enabled', effort: 'low' }
         }
       },
       descriptors
     )
 
-    expect(deepSeek).toMatchObject({
-      selection: 'deepseek_v4_chat',
-      reasoning: { mode: 'enabled', effort: 'high' },
+    expect(legacy).toMatchObject({ selection: 'deepseek', update: { kind: 'unchanged' } })
+    expect(v2).toMatchObject({
+      selection: 'deepseek',
+      settings: { reasoning: { mode: 'enabled', effort: 'low' } },
       update: { kind: 'unchanged' }
     })
-    expect(moonshot).toMatchObject({
-      selection: 'unsupported',
-      update: { kind: 'unchanged' },
-      unsupportedProfile: { id: 'moonshot_k3_chat', version: 1 }
-    })
-    expect(mismatchedVendor).toMatchObject({
-      selection: 'unsupported',
-      update: { kind: 'unchanged' },
-      unsupportedProfile: { id: 'deepseek_v4_chat', version: 1 }
+  })
+
+  it.each([
+    {
+      schemaVersion: 2,
+      vendorId: 'moonshot',
+      profile: { id: 'moonshot_k3_chat', version: 1 },
+      settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+    },
+    {
+      schemaVersion: 2,
+      vendorId: 'moonshot',
+      profile: { id: 'moonshot_k2_7_code_chat', version: 1 },
+      settings: { kind: 'moonshot_k2_7_code_chat' }
+    },
+    {
+      schemaVersion: 2,
+      vendorId: 'moonshot',
+      profile: { id: 'moonshot_k2_6_chat', version: 1 },
+      settings: { kind: 'moonshot_k2_6_chat', thinkingMode: 'enabled_keep_all' }
+    }
+  ] as const)('loads Moonshot family config %# unchanged', (config) => {
+    expect(initialProviderProfileFormState(config, descriptors)).toMatchObject({
+      selection: 'moonshot',
+      settings: config.settings,
+      update: { kind: 'unchanged' }
     })
   })
 
-  it('normalizes disabled Thinking and emits only the public DeepSeek settings union', () => {
-    const state = updateDeepSeekProviderSettings(
-      selectProviderProfile(initialNewProviderProfileFormState(), 'deepseek_v4_chat'),
-      { mode: 'disabled', effort: 'max' }
-    )
-
-    expect(state.reasoning).toEqual({ mode: 'disabled', effort: 'provider_default' })
-    expect(state.update).toEqual({
-      kind: 'select_registered_profile',
-      profileId: 'deepseek_v4_chat',
-      settings: {
-        kind: 'deepseek_v4_chat',
-        reasoning: { mode: 'disabled', effort: 'provider_default' }
-      }
-    })
-    expect(JSON.stringify(state.update)).not.toMatch(/version|revision|capabilit/i)
-  })
-
-  it('drops the inactive DeepSeek draft when explicitly switching back to Generic', () => {
-    const deepSeek = initialProviderProfileFormState(
-      profile('deepseek_v4_chat', 1, 'enabled', 'max'),
+  it('keeps unknown stored configs opaque and never exposes their identity in state', () => {
+    const state = initialProviderProfileFormState(
+      legacyProfile('future_private_profile', 9),
       descriptors
     )
-    const generic = selectProviderProfile(deepSeek, 'generic')
-
-    expect(generic.reasoning).toEqual({
-      mode: 'provider_default',
-      effort: 'provider_default'
+    expect(state).toMatchObject({
+      selection: 'unsupported',
+      settings: null,
+      update: { kind: 'unchanged' }
     })
-    expect(generic.update).toEqual({ kind: 'select_generic' })
-    expect(JSON.stringify(generic.update)).not.toContain('deepseek')
+    expect(JSON.stringify(state)).not.toContain('future_private_profile')
+  })
+
+  it('keeps a future version of a known V2 family opaque and unchanged', () => {
+    const state = initialProviderProfileFormState(
+      {
+        schemaVersion: 2,
+        vendorId: 'moonshot',
+        profile: { id: 'moonshot_k3_chat', version: 99 },
+        settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+      },
+      descriptors
+    )
+    expect(state).toEqual({
+      selection: 'unsupported',
+      settings: null,
+      modelFamily: null,
+      update: { kind: 'unchanged' },
+      explicitSelection: false,
+      familyChanged: false
+    })
+  })
+
+  it('preserves compatible settings in-family and resets on a Host-resolved family change', () => {
+    let state = applyResolvedProviderPolicy(
+      initialProviderProfileFormState(
+        {
+          schemaVersion: 2,
+          vendorId: 'moonshot',
+          profile: { id: 'moonshot_k3_chat', version: 1 },
+          settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+        },
+        descriptors
+      ),
+      k3Policy
+    )
+    expect(state).toMatchObject({
+      settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' },
+      update: { kind: 'unchanged' }
+    })
+
+    state = applyResolvedProviderPolicy(state, k26Policy)
+    expect(state).toMatchObject({
+      settings: { kind: 'moonshot_k2_6_chat', thinkingMode: 'provider_default' },
+      familyChanged: true,
+      update: {
+        kind: 'select_vendor',
+        vendorId: 'moonshot',
+        settings: { kind: 'moonshot_k2_6_chat', thinkingMode: 'provider_default' }
+      }
+    })
+  })
+
+  it('writes only family-owned public settings after explicit confirmation', () => {
+    const selected = applyResolvedProviderPolicy(
+      selectProviderVendor(initialNewProviderProfileFormState(), 'deepseek'),
+      deepSeekPolicy
+    )
+    const deepSeek = updateDeepSeekProviderSettings(selected, {
+      kind: 'deepseek_v4_chat',
+      reasoning: { mode: 'enabled', effort: 'max' }
+    })
+    expect(deepSeek.update).toEqual({
+      kind: 'select_vendor',
+      vendorId: 'deepseek',
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoning: { mode: 'enabled', effort: 'max' }
+      }
+    })
+
+    const moonshot = updateMoonshotProviderSettings(
+      applyResolvedProviderPolicy(selectProviderVendor(deepSeek, 'moonshot'), k3Policy),
+      { kind: 'moonshot_k3_chat', reasoningEffort: 'high' }
+    )
+    expect(moonshot.update).toEqual({
+      kind: 'select_vendor',
+      vendorId: 'moonshot',
+      settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'high' }
+    })
+    expect(JSON.stringify(moonshot.update)).not.toMatch(/profile|version|capabilit/i)
+  })
+
+  it('mirrors the Host dialect classification without inferring model family', () => {
+    expect(detectProviderProtocolDialect('https://api.anthropic.com/v1/messages')).toBe(
+      'anthropic_messages'
+    )
+    expect(detectProviderProtocolDialect('https://api.moonshot.cn/v1/chat/completions')).toBe(
+      'openai_chat_completions'
+    )
   })
 })
 
-describe('global API URL Provider Profile updates', () => {
+describe('global API URL Generic rematch', () => {
   const baseModel: ModelConfig = {
     id: 'model',
     displayName: 'Model',
@@ -202,77 +298,33 @@ describe('global API URL Provider Profile updates', () => {
     inputPrice: '0',
     cachedInputPrice: '',
     outputPrice: '0',
-    providerProfileConfig: profile('generic_openai_chat', 1),
+    providerProfileConfig: legacyProfile('generic_openai_chat'),
     providerProfileUpdate: { kind: 'unchanged' },
     enabled: true
   }
 
-  it('requests Host Generic resolution only for inherited known Generic models', () => {
+  it('rematches both V1 and V2 inherited Generic models but leaves vendor configs untouched', () => {
     const models: ModelConfig[] = [
+      baseModel,
       {
         ...baseModel,
-        id: 'generic',
-        providerProfileConfig: profile('generic_openai_chat', 1)
-      },
-      {
-        ...baseModel,
-        id: 'override',
-        apiUrlOverride: 'https://override.example/v1',
-        apiTokenOverride: 'token',
-        providerProfileConfig: profile('generic_openai_chat', 1)
+        id: 'generic-v2',
+        providerProfileConfig: {
+          schemaVersion: 2,
+          vendorId: 'generic',
+          profile: { id: 'generic_openai_chat', version: 1 },
+          settings: { kind: 'generic' }
+        }
       },
       {
         ...baseModel,
         id: 'deepseek',
-        providerProfileConfig: profile('deepseek_v4_chat', 1)
-      },
-      {
-        ...baseModel,
-        id: 'unsupported-version',
-        providerProfileConfig: profile('generic_openai_chat', 99)
+        providerProfileConfig: legacyProfile('deepseek_v4_chat')
       }
     ]
-
     const updated = prepareModelsForGlobalApiUrlChange(models, descriptors)
-
-    expect(updated.find((model) => model.id === 'generic')?.providerProfileUpdate).toEqual({
-      kind: 'select_generic'
-    })
-    expect(updated.find((model) => model.id === 'override')?.providerProfileUpdate).toEqual({
-      kind: 'unchanged'
-    })
-    expect(updated.find((model) => model.id === 'deepseek')?.providerProfileUpdate).toEqual({
-      kind: 'unchanged'
-    })
-    expect(
-      updated.find((model) => model.id === 'unsupported-version')?.providerProfileUpdate
-    ).toEqual({ kind: 'unchanged' })
-  })
-
-  it('does not overwrite an existing explicit Provider Profile update draft', () => {
-    const registeredDraft: ModelConfig = {
-      ...baseModel,
-      id: 'registered-draft',
-      providerProfileConfig: profile('generic_openai_chat', 1),
-      providerProfileUpdate: {
-        kind: 'select_registered_profile',
-        profileId: 'deepseek_v4_chat',
-        settings: {
-          kind: 'deepseek_v4_chat',
-          reasoning: { mode: 'enabled', effort: 'max' }
-        }
-      }
-    }
-    const genericDraft: ModelConfig = {
-      ...baseModel,
-      id: 'generic-draft',
-      providerProfileConfig: profile('generic_openai_chat', 1),
-      providerProfileUpdate: { kind: 'select_generic' }
-    }
-
-    const updated = prepareModelsForGlobalApiUrlChange([registeredDraft, genericDraft], descriptors)
-
-    expect(updated[0]?.providerProfileUpdate).toEqual(registeredDraft.providerProfileUpdate)
-    expect(updated[1]?.providerProfileUpdate).toEqual(genericDraft.providerProfileUpdate)
+    expect(updated[0]?.providerProfileUpdate).toEqual({ kind: 'select_generic' })
+    expect(updated[1]?.providerProfileUpdate).toEqual({ kind: 'select_generic' })
+    expect(updated[2]?.providerProfileUpdate).toEqual({ kind: 'unchanged' })
   })
 })

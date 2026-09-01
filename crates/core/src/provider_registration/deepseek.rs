@@ -3,8 +3,9 @@
 //! Keep every DeepSeek model id, setting default and runtime capability decision here.
 
 use super::{
-    ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
-    ProviderContextProjectionSemantics, ProviderFamilySettings, ProviderFamilySettingsDescriptor,
+    matches_official_https_endpoint, no_official_profile_normalization, ProviderAdapterKind,
+    ProviderCheckpointPrivateArgumentsSemantics, ProviderContextProjectionSemantics,
+    ProviderFamilySettings, ProviderFamilySettingsDescriptor, ProviderImageInputPolicy,
     ProviderModelFamilyId, ProviderModelIdPolicy, ProviderPartialTraceSemantics,
     ProviderPrivateReplaySemantics, ProviderProfileId, ProviderProfileRef,
     ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
@@ -13,12 +14,52 @@ use super::{
     ProviderVendorId, ProviderVendorSettingsKind,
 };
 use crate::provider_profile::{
-    ProviderFamilyReasoningPolicy, ProviderReasoningEffort, ReasoningMode,
-    DEEPSEEK_V4_CHAT_PROFILE_VERSION, DEEPSEEK_V4_VISION_PROFILE_VERSION,
+    ProviderFamilyReasoningPolicy, ProviderProfileConfig, ProviderReasoningEffort, ReasoningEffort,
+    ReasoningMode, DEEPSEEK_V4_CHAT_PROFILE_VERSION, DEEPSEEK_V4_VISION_PROFILE_VERSION,
 };
 
 const V4_CHAT_MODEL_IDS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
 const V4_VISION_MODEL_IDS: &[&str] = &["deepseek-v4-flash-vision-exp"];
+const OFFICIAL_HOSTS: &[&str] = &["api.deepseek.com"];
+const OFFICIAL_CHAT_PATHS: &[&str] = &["/chat/completions", "/v1/chat/completions"];
+
+fn normalize_official_v4_flash(
+    api_url: &str,
+    model_id: &str,
+    current: &ProviderProfileConfig,
+) -> Option<ProviderProfileConfig> {
+    if model_id != "deepseek-v4-flash"
+        || !matches_official_https_endpoint(api_url, OFFICIAL_HOSTS, OFFICIAL_CHAT_PATHS)
+    {
+        return None;
+    }
+    let reasoning = match current {
+        ProviderProfileConfig::V1(config)
+            if config.profile.id == ProviderProfileId::DeepSeekV4Chat =>
+        {
+            ProviderFamilyReasoningPolicy {
+                mode: config.reasoning.mode,
+                effort: match config.reasoning.effort {
+                    ReasoningEffort::ProviderDefault => ProviderReasoningEffort::ProviderDefault,
+                    ReasoningEffort::High => ProviderReasoningEffort::High,
+                    ReasoningEffort::Max => ProviderReasoningEffort::Max,
+                },
+            }
+        }
+        ProviderProfileConfig::V2(config) if config.vendor_id == ProviderVendorId::DeepSeek => {
+            match config.settings {
+                ProviderFamilySettings::DeepseekV4Chat { reasoning } => reasoning,
+                _ => ProviderFamilyReasoningPolicy::provider_default(),
+            }
+        }
+        _ => ProviderFamilyReasoningPolicy::provider_default(),
+    };
+    Some(ProviderProfileConfig::from_family_settings(
+        ProviderProfileRef::deepseek_v4_chat(),
+        ProviderVendorId::DeepSeek,
+        ProviderFamilySettings::DeepseekV4Chat { reasoning },
+    ))
+}
 
 // This is DeepSeek's own versioned runtime contract, not a shared cross-vendor Profile helper.
 const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
@@ -102,6 +143,8 @@ pub(crate) static DEEPSEEK_V4_CHAT_REGISTRATION: ProviderRegistration = Provider
     "深度求索 / DeepSeek（V4 Chat）",
     ProviderProfileSettingsKind::DeepseekV4Chat,
     ProviderVendorSettingsKind::Deepseek,
+    ProviderImageInputPolicy::Unsupported,
+    normalize_official_v4_flash,
     chat_settings_descriptor,
     accepts_chat_settings,
     true,
@@ -122,6 +165,8 @@ pub(crate) static DEEPSEEK_V4_VISION_REGISTRATION: ProviderRegistration = Provid
     "DeepSeek Vision",
     ProviderProfileSettingsKind::None,
     ProviderVendorSettingsKind::Deepseek,
+    ProviderImageInputPolicy::Supported,
+    no_official_profile_normalization,
     vision_settings_descriptor,
     accepts_vision_settings,
     false,

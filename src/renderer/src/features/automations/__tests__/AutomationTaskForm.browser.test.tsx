@@ -476,7 +476,30 @@ describe('AutomationTaskForm', () => {
       />
     )
 
-    await expect.element(screen.getByText('automation.reasoningXHigh')).toBeVisible()
+    await expect.element(screen.getByText('automation.reasoningMax')).toBeVisible()
+  })
+
+  it('renders Low for a V2 vendor model instead of treating it as the provider default', async () => {
+    const lowMoonshotModel = {
+      ...testModel,
+      providerProfileConfig: {
+        schemaVersion: 2 as const,
+        profile: { id: 'moonshot_k3_chat' as const, version: 1 },
+        vendorId: 'moonshot' as const,
+        settings: { kind: 'moonshot_k3_chat' as const, reasoningEffort: 'low' as const }
+      }
+    }
+    const screen = await render(
+      <AutomationTaskForm
+        {...commonProps}
+        initialDraft={makeAutomationDraft()}
+        mode="edit"
+        models={[lowMoonshotModel]}
+      />
+    )
+
+    await expect.element(screen.getByText('automation.reasoningLow')).toBeVisible()
+    await expect.element(screen.getByText('automation.reasoningFromModel')).not.toBeInTheDocument()
   })
 
   it('keeps missing project and model snapshots visible until the user chooses replacements', async () => {

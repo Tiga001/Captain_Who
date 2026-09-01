@@ -242,7 +242,7 @@ fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
         .find(|descriptor| descriptor["vendorId"] == "moonshot")
         .unwrap();
     assert_eq!(moonshot["displayName"], "月之暗面");
-    assert_eq!(moonshot["selectable"], false);
+    assert_eq!(moonshot["selectable"], true);
     assert!(moonshot.get("profileId").is_none());
     assert!(moonshot.get("runtimeCapabilities").is_none());
 
@@ -263,6 +263,7 @@ fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
     assert_eq!(policy["result"]["vendorId"], "moonshot");
     assert_eq!(policy["result"]["modelFamily"], "moonshot_k3_chat");
     assert_eq!(policy["result"]["settingsKind"], "moonshot");
+    assert_eq!(policy["result"]["imageInput"], "supported");
     assert!(policy["result"].get("profileId").is_none());
     assert!(policy["result"].get("profileVersion").is_none());
 

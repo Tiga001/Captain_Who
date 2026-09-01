@@ -122,6 +122,15 @@ pub enum ProviderVendorSettingsKind {
     Moonshot,
 }
 
+/// Safe model-editor policy. This is deliberately separate from runtime capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderImageInputPolicy {
+    UserConfigurable,
+    Supported,
+    Unsupported,
+}
+
 /// Safe, bounded request used only to preview the Host-authoritative vendor/model resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -191,6 +200,7 @@ pub enum ProviderVendorModelPolicyDescriptor {
         vendor_id: ProviderVendorId,
         model_family: ProviderModelFamilyId,
         settings_kind: ProviderVendorSettingsKind,
+        image_input: ProviderImageInputPolicy,
         settings: ProviderFamilySettingsDescriptor,
     },
     Unsupported {
@@ -401,6 +411,34 @@ impl ProviderModelIdPolicy {
 
 type ProviderSettingsDescriptorFactory = fn() -> ProviderFamilySettingsDescriptor;
 type ProviderSettingsValidator = fn(ProviderFamilySettings) -> bool;
+type ProviderOfficialProfileNormalizer =
+    fn(&str, &str, &ProviderProfileConfig) -> Option<ProviderProfileConfig>;
+
+fn no_official_profile_normalization(
+    _api_url: &str,
+    _model_id: &str,
+    _current: &ProviderProfileConfig,
+) -> Option<ProviderProfileConfig> {
+    None
+}
+
+pub(super) fn matches_official_https_endpoint(
+    api_url: &str,
+    hosts: &[&str],
+    paths: &[&str],
+) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_url.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.host_str().is_some_and(|host| hosts.contains(&host))
+        && paths.contains(&url.path())
+}
 
 #[derive(Debug)]
 pub struct ProviderRegistration {
@@ -414,6 +452,8 @@ pub struct ProviderRegistration {
     display_name: &'static str,
     settings_kind: ProviderProfileSettingsKind,
     vendor_settings_kind: ProviderVendorSettingsKind,
+    image_input: ProviderImageInputPolicy,
+    official_profile_normalizer: ProviderOfficialProfileNormalizer,
     settings_descriptor: ProviderSettingsDescriptorFactory,
     settings_validator: ProviderSettingsValidator,
     accepts_legacy_v1: bool,
@@ -444,6 +484,8 @@ impl ProviderRegistration {
         display_name: &'static str,
         settings_kind: ProviderProfileSettingsKind,
         vendor_settings_kind: ProviderVendorSettingsKind,
+        image_input: ProviderImageInputPolicy,
+        official_profile_normalizer: ProviderOfficialProfileNormalizer,
         settings_descriptor: ProviderSettingsDescriptorFactory,
         settings_validator: ProviderSettingsValidator,
         accepts_legacy_v1: bool,
@@ -460,6 +502,8 @@ impl ProviderRegistration {
             display_name,
             settings_kind,
             vendor_settings_kind,
+            image_input,
+            official_profile_normalizer,
             settings_descriptor,
             settings_validator,
             accepts_legacy_v1,
@@ -497,6 +541,19 @@ impl ProviderRegistration {
 
     pub const fn vendor_settings_kind(&self) -> ProviderVendorSettingsKind {
         self.vendor_settings_kind
+    }
+
+    pub const fn image_input_policy(&self) -> ProviderImageInputPolicy {
+        self.image_input
+    }
+
+    fn normalize_official_profile(
+        &self,
+        api_url: &str,
+        model_id: &str,
+        current: &ProviderProfileConfig,
+    ) -> Option<ProviderProfileConfig> {
+        (self.official_profile_normalizer)(api_url, model_id, current)
     }
 
     pub fn ui_descriptor(&self) -> ProviderProfileUiDescriptor {
@@ -611,8 +668,8 @@ static PROVIDER_REGISTRATIONS: [&ProviderRegistration; 7] = [
     &MOONSHOT_K2_6_CHAT_REGISTRATION,
 ];
 
-// Compatibility surface consumed by the current Renderer. Keep contents, order, labels and
-// profile-level settings kinds frozen until the dedicated vendor UI ships in round two.
+// Compatibility surface for legacy profile selection. New vendor selection never submits one of
+// these internal Profile identities.
 static LEGACY_PROVIDER_UI_REGISTRATIONS: [&ProviderRegistration; 3] = [
     &GENERIC_OPENAI_CHAT_REGISTRATION,
     &GENERIC_ANTHROPIC_MESSAGES_REGISTRATION,
@@ -626,7 +683,7 @@ pub(crate) fn is_registered_provider_profile(profile: ProviderProfileRef) -> boo
 }
 
 pub fn provider_profile_ui_descriptors() -> Vec<ProviderProfileUiDescriptor> {
-    LEGACY_PROVIDER_UI_REGISTRATIONS
+    PROVIDER_REGISTRATIONS
         .iter()
         .map(|registration| registration.ui_descriptor())
         .collect()
@@ -638,6 +695,22 @@ pub fn provider_vendor_descriptors() -> Vec<ProviderVendorDescriptor> {
         deepseek::vendor_descriptor(),
         moonshot::vendor_descriptor(),
     ]
+}
+
+/// Returns a strict V2 replacement only for a Provider-owned exact official endpoint/model pair.
+pub(crate) fn normalize_official_provider_profile(
+    api_url: &str,
+    model_id: &str,
+    current: &ProviderProfileConfig,
+) -> Option<ProviderProfileConfig> {
+    if current.validate().is_err() {
+        return None;
+    }
+    PROVIDER_REGISTRATIONS.iter().find_map(|registration| {
+        registration
+            .normalize_official_profile(api_url, model_id, current)
+            .filter(|normalized| normalized != current)
+    })
 }
 
 pub fn resolve_provider_vendor_registration(
@@ -674,6 +747,7 @@ pub fn resolve_provider_vendor_model_policy(
             vendor_id: registration.vendor_id(),
             model_family: registration.family_id(),
             settings_kind: registration.vendor_settings_kind(),
+            image_input: registration.image_input_policy(),
             settings: registration.vendor_settings_descriptor(),
         },
         Err(error) => ProviderVendorModelPolicyDescriptor::Unsupported {
@@ -784,7 +858,7 @@ mod tests {
     #[test]
     fn renderer_projection_is_safe_and_registered_selection_is_host_versioned() {
         let descriptors = provider_profile_ui_descriptors();
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), PROVIDER_REGISTRATIONS.len());
         let wire = serde_json::to_value(&descriptors).unwrap();
         let deepseek = wire
             .as_array()
@@ -850,7 +924,7 @@ mod tests {
             json!([
                 {"vendorId": "generic", "displayName": "通用兼容", "selectable": true},
                 {"vendorId": "deepseek", "displayName": "DeepSeek", "selectable": true},
-                {"vendorId": "moonshot", "displayName": "月之暗面", "selectable": false}
+                {"vendorId": "moonshot", "displayName": "月之暗面", "selectable": true}
             ])
         );
         let encoded = vendors.to_string();
@@ -867,6 +941,7 @@ mod tests {
         assert_eq!(wire["vendorId"], "moonshot");
         assert_eq!(wire["modelFamily"], "moonshot_k3_chat");
         assert_eq!(wire["settingsKind"], "moonshot");
+        assert_eq!(wire["imageInput"], "supported");
         assert_eq!(
             wire["settings"]["defaultSettings"]["reasoningEffort"],
             "max"
@@ -1084,6 +1159,188 @@ mod tests {
             ),
             Err(ProviderProfileValidationError::IncompatibleDialect { .. })
         ));
+    }
+
+    #[test]
+    fn exact_official_endpoints_normalize_only_the_two_explicit_development_models() {
+        let generic = ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        );
+        for endpoint in [
+            "https://api.deepseek.com/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
+            " HTTPS://API.DEEPSEEK.COM:443/v1/chat/completions ",
+        ] {
+            let normalized =
+                normalize_official_provider_profile(endpoint, "deepseek-v4-flash", &generic)
+                    .unwrap();
+            assert_eq!(normalized.schema_version(), 2);
+            assert_eq!(normalized.vendor_id(), Some(ProviderVendorId::DeepSeek));
+            assert!(matches!(
+                normalized.family_settings(),
+                Some(ProviderFamilySettings::DeepseekV4Chat { .. })
+            ));
+        }
+        for endpoint in [
+            "https://api.moonshot.ai/v1/chat/completions",
+            "https://api.moonshot.cn/v1/chat/completions",
+        ] {
+            let normalized =
+                normalize_official_provider_profile(endpoint, "kimi-k3", &generic).unwrap();
+            assert_eq!(normalized.schema_version(), 2);
+            assert_eq!(normalized.vendor_id(), Some(ProviderVendorId::Moonshot));
+            assert_eq!(
+                normalized.family_settings(),
+                Some(&ProviderFamilySettings::MoonshotK3Chat {
+                    reasoning_effort: ProviderReasoningEffort::Max,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn official_normalization_rejects_aliases_proxies_and_endpoint_spoofs() {
+        let generic = ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        );
+        for endpoint in [
+            "http://api.deepseek.com/v1/chat/completions",
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com/v1/chat/completions/",
+            "https://api.deepseek.com.evil.test/v1/chat/completions",
+            "https://api.deepseek.com:444/v1/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions?proxy=1",
+            "https://user@api.deepseek.com/v1/chat/completions",
+            "https://proxy.example/v1/chat/completions",
+        ] {
+            assert!(
+                normalize_official_provider_profile(endpoint, "deepseek-v4-flash", &generic)
+                    .is_none()
+            );
+        }
+        assert!(normalize_official_provider_profile(
+            "https://api.deepseek.com/v1/chat/completions",
+            "deepseek-v4-pro",
+            &generic
+        )
+        .is_none());
+        assert!(normalize_official_provider_profile(
+            "https://api.moonshot.cn/v1/chat/completions",
+            "kimi-k3-future",
+            &generic
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn official_normalization_preserves_compatible_reasoning_and_is_idempotent() {
+        let deepseek_v1 = ProviderProfileConfig::V1(ProviderProfileConfigV1 {
+            schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+            profile: ProviderProfileRef::deepseek_v4_chat(),
+            reasoning: ReasoningPolicy {
+                mode: ReasoningMode::Enabled,
+                effort: ReasoningEffort::High,
+            },
+        });
+        let deepseek = normalize_official_provider_profile(
+            "https://api.deepseek.com/v1/chat/completions",
+            "deepseek-v4-flash",
+            &deepseek_v1,
+        )
+        .unwrap();
+        assert_eq!(
+            deepseek.provider_reasoning_effort(),
+            ProviderReasoningEffort::High
+        );
+        assert!(normalize_official_provider_profile(
+            "https://api.deepseek.com/v1/chat/completions",
+            "deepseek-v4-flash",
+            &deepseek,
+        )
+        .is_none());
+
+        let moonshot = normalize_official_provider_profile(
+            "https://api.moonshot.cn/v1/chat/completions",
+            "kimi-k3",
+            &deepseek_v1,
+        )
+        .unwrap();
+        assert_eq!(
+            moonshot.provider_reasoning_effort(),
+            ProviderReasoningEffort::High
+        );
+        assert!(normalize_official_provider_profile(
+            "https://api.moonshot.cn/v1/chat/completions",
+            "kimi-k3",
+            &moonshot,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn official_normalization_preserves_future_and_unknown_profile_configs_opaque() {
+        let mut future_deepseek = ProviderProfileConfig::from_family_settings(
+            ProviderProfileRef::deepseek_v4_chat(),
+            ProviderVendorId::DeepSeek,
+            ProviderFamilySettings::DeepseekV4Chat {
+                reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+            },
+        );
+        let ProviderProfileConfig::V2(config) = &mut future_deepseek else {
+            unreachable!("family settings constructor must produce schema v2")
+        };
+        config.profile.version = 99;
+        assert!(normalize_official_provider_profile(
+            "https://api.deepseek.com/v1/chat/completions",
+            "deepseek-v4-flash",
+            &future_deepseek,
+        )
+        .is_none());
+
+        let mut future_moonshot = ProviderProfileConfig::from_family_settings(
+            ProviderProfileRef::moonshot_k3_chat(),
+            ProviderVendorId::Moonshot,
+            ProviderFamilySettings::MoonshotK3Chat {
+                reasoning_effort: ProviderReasoningEffort::Low,
+            },
+        );
+        let ProviderProfileConfig::V2(config) = &mut future_moonshot else {
+            unreachable!("family settings constructor must produce schema v2")
+        };
+        config.profile.version = 99;
+        assert!(normalize_official_provider_profile(
+            "https://api.moonshot.cn/v1/chat/completions",
+            "kimi-k3",
+            &future_moonshot,
+        )
+        .is_none());
+
+        let unknown = ProviderProfileConfig::V1(ProviderProfileConfigV1 {
+            schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+            profile: ProviderProfileRef {
+                id: ProviderProfileId::parse("future_profile").unwrap(),
+                version: 1,
+            },
+            reasoning: ReasoningPolicy::provider_default(),
+        });
+        assert!(normalize_official_provider_profile(
+            "https://api.deepseek.com/v1/chat/completions",
+            "deepseek-v4-flash",
+            &unknown,
+        )
+        .is_none());
+
+        let future_schema = ProviderProfileConfig::V1(ProviderProfileConfigV1 {
+            schema_version: 99,
+            profile: ProviderProfileRef::deepseek_v4_chat(),
+            reasoning: ReasoningPolicy::provider_default(),
+        });
+        assert!(normalize_official_provider_profile(
+            "https://api.deepseek.com/v1/chat/completions",
+            "deepseek-v4-flash",
+            &future_schema,
+        )
+        .is_none());
     }
 
     #[test]

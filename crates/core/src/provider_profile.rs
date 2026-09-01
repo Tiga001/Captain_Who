@@ -566,7 +566,8 @@ impl ReasoningPolicy {
     }
 }
 
-/// Exact legacy wire shape. Existing settings remain schema v1 until an explicit vendor update.
+/// Exact legacy wire shape. It remains losslessly readable; only an exact, Provider-owned
+/// official endpoint/model reconciliation or an explicit vendor update may replace it with v2.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderProfileConfigV1 {
@@ -588,7 +589,8 @@ pub struct ProviderProfileConfigV2 {
 /// Persisted, user-selectable configuration for a provider profile.
 ///
 /// Untagged decoding preserves the exact v1 JSON contract while allowing new vendor selections to
-/// use a strong, family-tagged v2 settings union. No load path upgrades or rewrites v1 values.
+/// use a strong, family-tagged v2 settings union. Ordinary loads do not rewrite v1 values. Storage
+/// startup separately reconciles only explicitly registered official endpoint/model pairs.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum ProviderProfileConfig {

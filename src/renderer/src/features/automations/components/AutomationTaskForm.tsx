@@ -42,7 +42,32 @@ function cloneDraft(draft: AutomationDraft): AutomationDraft {
 
 function legacyReasoningProjection(model: ModelConfig | null) {
   const config = model?.providerProfileConfig
-  return config?.schemaVersion === 1 ? config.reasoning : undefined
+  if (!config) return undefined
+  if (config.schemaVersion === 1) return config.reasoning
+  if (
+    config.settings.kind === 'deepseek_v4_chat' ||
+    config.settings.kind === 'deepseek_v4_vision'
+  ) {
+    return config.settings.reasoning
+  }
+  if (config.settings.kind === 'moonshot_k3_chat') {
+    return { mode: 'enabled' as const, effort: config.settings.reasoningEffort }
+  }
+  if (config.settings.kind === 'moonshot_k2_7_code_chat') {
+    return { mode: 'enabled' as const, effort: 'provider_default' as const }
+  }
+  if (config.settings.kind === 'moonshot_k2_6_chat') {
+    return {
+      mode:
+        config.settings.thinkingMode === 'disabled'
+          ? ('disabled' as const)
+          : config.settings.thinkingMode === 'provider_default'
+            ? ('provider_default' as const)
+            : ('enabled' as const),
+      effort: 'provider_default' as const
+    }
+  }
+  return { mode: 'provider_default' as const, effort: 'provider_default' as const }
 }
 
 export function validateAutomationFormDraft(
@@ -475,11 +500,13 @@ export function AutomationTaskForm({
                     >
                       {reasoningProjection?.mode === 'disabled'
                         ? t('automation.reasoningNone')
-                        : reasoningProjection?.effort === 'max'
-                          ? t('automation.reasoningXHigh')
-                          : reasoningProjection?.effort === 'high'
-                            ? t('automation.reasoningHigh')
-                            : t('automation.reasoningFromModel')}
+                        : reasoningProjection?.effort === 'low'
+                          ? t('automation.reasoningLow')
+                          : reasoningProjection?.effort === 'max'
+                            ? t('automation.reasoningMax')
+                            : reasoningProjection?.effort === 'high'
+                              ? t('automation.reasoningHigh')
+                              : t('automation.reasoningFromModel')}
                     </span>
                   </AutomationField>
                 )}

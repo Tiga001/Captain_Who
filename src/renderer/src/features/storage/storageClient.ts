@@ -3,9 +3,16 @@ import type {
   AgentPermissions,
   AgentPromptPreferences
 } from '@mycopilot/protocol'
+import {
+  parseProviderVendorDescriptors,
+  parseProviderVendorModelPolicyDescriptor
+} from '@mycopilot/protocol'
 import { unwrapHostInvocation } from '@mycopilot/host-api'
 import type {
   ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
@@ -96,6 +103,18 @@ export async function loadModelSettings(): Promise<ModelSettingsSnapshot | null>
 
 export async function loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]> {
   return hostClient.storage.loadProviderProfileUiDescriptors()
+}
+
+export async function loadProviderVendorDescriptors(): Promise<ProviderVendorDescriptor[]> {
+  return parseProviderVendorDescriptors(await hostClient.storage.loadProviderVendorDescriptors())
+}
+
+export async function resolveProviderVendorModelPolicy(
+  input: ProviderVendorModelPolicyInput
+): Promise<ProviderVendorModelPolicyDescriptor> {
+  return parseProviderVendorModelPolicyDescriptor(
+    await hostClient.storage.resolveProviderVendorModelPolicy(input)
+  )
 }
 
 export async function saveModelSettings(

@@ -27,6 +27,8 @@ export function ConfigurationSettingsPage({
     deleteModel,
     models,
     providerProfileDescriptors,
+    providerVendorDescriptors,
+    resolveProviderVendorModelPolicy,
     searchMode,
     setApiToken,
     setApiUrl,
@@ -119,7 +121,10 @@ export function ConfigurationSettingsPage({
         />
         <ModelForm
           model={view === 'editModel' ? editingModel : undefined}
+          globalApiUrl={apiUrl}
           providerProfileDescriptors={providerProfileDescriptors}
+          providerVendorDescriptors={providerVendorDescriptors}
+          resolveProviderVendorModelPolicy={resolveProviderVendorModelPolicy}
           onCancel={() => setView('manager')}
           onSave={saveModel}
         />

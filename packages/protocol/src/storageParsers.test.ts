@@ -1,9 +1,111 @@
 import { describe, expect, it } from 'vitest'
 import {
+  parseProviderVendorDescriptors,
+  parseProviderVendorModelPolicyDescriptor,
   parseStorageForkConversationErrorData,
   parseStorageForkConversationRequest,
   parseStorageModelSettingsValidationErrorData
 } from './storageParsers'
+
+describe('Provider vendor descriptor parsers', () => {
+  const vendors = [
+    { vendorId: 'generic', displayName: 'Generic', selectable: true },
+    { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
+    { vendorId: 'moonshot', displayName: 'Moonshot', selectable: true }
+  ] as const
+
+  it('accepts the bounded public vendor directory and exact K3 policy union', () => {
+    expect(parseProviderVendorDescriptors(vendors)).toEqual(vendors)
+    const policy = {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      }
+    } as const
+    expect(parseProviderVendorModelPolicyDescriptor(policy)).toEqual(policy)
+  })
+
+  it('keeps future bounded vendors opaque instead of rejecting the whole directory', () => {
+    const future = { vendorId: 'future_vendor.v1', displayName: 'Future', selectable: true }
+    expect(parseProviderVendorDescriptors([...vendors, future])).toEqual([...vendors, future])
+    expect(
+      parseProviderVendorModelPolicyDescriptor({
+        status: 'unsupported',
+        vendorId: future.vendorId,
+        reason: 'unsupported_vendor'
+      })
+    ).toEqual({
+      status: 'unsupported',
+      vendorId: future.vendorId,
+      reason: 'unsupported_vendor'
+    })
+  })
+
+  it.each([
+    [...vendors, { vendorId: 'moonshot', displayName: 'Duplicate', selectable: true }],
+    [{ vendorId: 'Future Vendor', displayName: 'Future', selectable: true }],
+    [{ vendorId: 'a'.repeat(33), displayName: 'Future', selectable: true }],
+    [{ vendorId: 'moonshot', displayName: 'Moonshot', selectable: true, profileId: 'private' }]
+  ])('rejects malformed or expanded vendor descriptors %#', (value) => {
+    expect(() => parseProviderVendorDescriptors(value)).toThrow(
+      'Invalid Provider vendor descriptors'
+    )
+  })
+
+  it.each([
+    {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      profileVersion: 1,
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      }
+    },
+    {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'deepseek_v4_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'supported',
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_v4_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
+      }
+    },
+    {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'high', 'max'],
+        defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+      }
+    }
+  ])('rejects private, cross-family, or internally inconsistent policy fields %#', (value) => {
+    expect(() => parseProviderVendorModelPolicyDescriptor(value)).toThrow(
+      'Invalid Provider vendor model policy descriptor'
+    )
+  })
+})
 
 const valid = {
   type: 'conversation_fork',

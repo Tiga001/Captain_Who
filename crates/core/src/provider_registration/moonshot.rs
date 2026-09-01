@@ -3,8 +3,9 @@
 //! Its preserved-thinking capability declaration is local so future protocol changes stay local.
 
 use super::{
-    ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
-    ProviderContextProjectionSemantics, ProviderFamilySettings, ProviderFamilySettingsDescriptor,
+    matches_official_https_endpoint, no_official_profile_normalization, ProviderAdapterKind,
+    ProviderCheckpointPrivateArgumentsSemantics, ProviderContextProjectionSemantics,
+    ProviderFamilySettings, ProviderFamilySettingsDescriptor, ProviderImageInputPolicy,
     ProviderModelFamilyId, ProviderModelIdPolicy, ProviderPartialTraceSemantics,
     ProviderPrivateReplaySemantics, ProviderProfileId, ProviderProfileRef,
     ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
@@ -13,13 +14,50 @@ use super::{
     ProviderVendorId, ProviderVendorSettingsKind,
 };
 use crate::provider_profile::{
-    MoonshotK26ThinkingMode, ProviderReasoningEffort, MOONSHOT_K2_6_CHAT_PROFILE_VERSION,
-    MOONSHOT_K2_7_CODE_CHAT_PROFILE_VERSION, MOONSHOT_K3_CHAT_PROFILE_VERSION,
+    MoonshotK26ThinkingMode, ProviderProfileConfig, ProviderReasoningEffort, ReasoningMode,
+    MOONSHOT_K2_6_CHAT_PROFILE_VERSION, MOONSHOT_K2_7_CODE_CHAT_PROFILE_VERSION,
+    MOONSHOT_K3_CHAT_PROFILE_VERSION,
 };
 
 const K3_MODEL_IDS: &[&str] = &["kimi-k3"];
 const K2_7_CODE_MODEL_IDS: &[&str] = &["kimi-k2.7-code", "kimi-k2.7-code-highspeed"];
 const K2_6_MODEL_IDS: &[&str] = &["kimi-k2.6"];
+const OFFICIAL_HOSTS: &[&str] = &["api.moonshot.ai", "api.moonshot.cn"];
+const OFFICIAL_CHAT_PATHS: &[&str] = &["/v1/chat/completions"];
+
+fn normalize_official_k3(
+    api_url: &str,
+    model_id: &str,
+    current: &ProviderProfileConfig,
+) -> Option<ProviderProfileConfig> {
+    if model_id != "kimi-k3"
+        || !matches_official_https_endpoint(api_url, OFFICIAL_HOSTS, OFFICIAL_CHAT_PATHS)
+    {
+        return None;
+    }
+    let reasoning_effort = match current {
+        ProviderProfileConfig::V2(config) if config.vendor_id == ProviderVendorId::Moonshot => {
+            match config.settings {
+                ProviderFamilySettings::MoonshotK3Chat { reasoning_effort } => reasoning_effort,
+                _ => ProviderReasoningEffort::Max,
+            }
+        }
+        _ if current.reasoning_mode() == ReasoningMode::Enabled => {
+            match current.provider_reasoning_effort() {
+                ProviderReasoningEffort::Low => ProviderReasoningEffort::Low,
+                ProviderReasoningEffort::High => ProviderReasoningEffort::High,
+                ProviderReasoningEffort::Max => ProviderReasoningEffort::Max,
+                ProviderReasoningEffort::ProviderDefault => ProviderReasoningEffort::Max,
+            }
+        }
+        _ => ProviderReasoningEffort::Max,
+    };
+    Some(ProviderProfileConfig::from_family_settings(
+        ProviderProfileRef::moonshot_k3_chat(),
+        ProviderVendorId::Moonshot,
+        ProviderFamilySettings::MoonshotK3Chat { reasoning_effort },
+    ))
+}
 
 const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
     ProviderRuntimeCapabilities {
@@ -86,8 +124,7 @@ pub(super) const fn vendor_descriptor() -> ProviderVendorDescriptor {
     ProviderVendorDescriptor {
         vendor_id: ProviderVendorId::Moonshot,
         display_name: "月之暗面",
-        // Round one exposes the Host contract while keeping the current Renderer unchanged.
-        selectable: false,
+        selectable: true,
     }
 }
 
@@ -105,6 +142,8 @@ pub(crate) static MOONSHOT_K3_CHAT_REGISTRATION: ProviderRegistration = Provider
     "Moonshot Kimi K3",
     ProviderProfileSettingsKind::None,
     ProviderVendorSettingsKind::Moonshot,
+    ProviderImageInputPolicy::Supported,
+    normalize_official_k3,
     k3_settings_descriptor,
     accepts_k3_settings,
     false,
@@ -126,6 +165,8 @@ pub(crate) static MOONSHOT_K2_7_CODE_CHAT_REGISTRATION: ProviderRegistration =
         "Moonshot Kimi K2.7 Code",
         ProviderProfileSettingsKind::None,
         ProviderVendorSettingsKind::Moonshot,
+        ProviderImageInputPolicy::Supported,
+        no_official_profile_normalization,
         k2_7_code_settings_descriptor,
         accepts_k2_7_code_settings,
         false,
@@ -146,6 +187,8 @@ pub(crate) static MOONSHOT_K2_6_CHAT_REGISTRATION: ProviderRegistration = Provid
     "Moonshot Kimi K2.6",
     ProviderProfileSettingsKind::None,
     ProviderVendorSettingsKind::Moonshot,
+    ProviderImageInputPolicy::Supported,
+    no_official_profile_normalization,
     k2_6_settings_descriptor,
     accepts_k2_6_settings,
     false,

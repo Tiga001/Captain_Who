@@ -917,6 +917,36 @@
   font-weight: var(--mc-font-weight-strong);
 }
 
+.provider-settings-dialog__notice,
+.model-provider-policy-message,
+.model-form-capability-note {
+  margin: 0;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-relaxed);
+}
+
+.provider-settings-dialog__notice {
+  padding: 10px 12px;
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-control);
+}
+
+.model-provider-policy-message {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+}
+
+.model-provider-policy-message p {
+  margin: 0;
+}
+
+.model-form-capability-note {
+  grid-column: 2;
+  justify-self: end;
+}
+
 .provider-settings-dialog__close {
   position: absolute;
   top: 18px;

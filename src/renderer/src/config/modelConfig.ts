@@ -91,7 +91,12 @@ function hasRegisteredGenericProfile(
   descriptors: readonly ProviderProfileUiDescriptor[]
 ): boolean {
   const config = model.providerProfileConfig
-  if (config.schemaVersion !== 1) return false
+  if (
+    config.schemaVersion === 2 &&
+    (config.vendorId !== 'generic' || config.settings.kind !== 'generic')
+  ) {
+    return false
+  }
   const profileId = String(config.profile.id)
   if (profileId !== 'generic_openai_chat' && profileId !== 'generic_anthropic_messages') {
     return false

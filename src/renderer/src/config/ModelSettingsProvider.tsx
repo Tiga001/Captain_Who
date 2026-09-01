@@ -1,10 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
+import type {
+  ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput
+} from '@mycopilot/protocol'
 import { useToast } from '../components/toast/ToastContext'
 import {
   loadModelSettings,
   loadProviderProfileUiDescriptors,
+  loadProviderVendorDescriptors,
+  resolveProviderVendorModelPolicy as resolveProviderVendorModelPolicyFromStorage,
   saveModelSettings
 } from '../features/storage/storageClient'
 import type { ModelSettingsSnapshot } from '../features/storage/storageClient'
@@ -27,6 +34,10 @@ interface ModelSettingsContextValue {
   enabledModels: ModelConfig[]
   models: ModelConfig[]
   providerProfileDescriptors: ProviderProfileUiDescriptor[]
+  providerVendorDescriptors: ProviderVendorDescriptor[]
+  resolveProviderVendorModelPolicy: (
+    input: ProviderVendorModelPolicyInput
+  ) => Promise<ProviderVendorModelPolicyDescriptor>
   searchMode: SearchMode
   tavilyApiKey: string
   deleteModel: (modelId: string) => void
@@ -71,6 +82,9 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   }))
   const [providerProfileDescriptors, setProviderProfileDescriptors] = useState<
     ProviderProfileUiDescriptor[]
+  >([])
+  const [providerVendorDescriptors, setProviderVendorDescriptors] = useState<
+    ProviderVendorDescriptor[]
   >([])
   const [hydrationStatus, setHydrationStatus] = useState<ModelSettingsHydrationStatus>('loading')
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -151,13 +165,17 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
         }
 
         try {
-          const [storedSettings, descriptors] = await Promise.all([
+          const [storedSettings, descriptors, vendorDescriptors] = await Promise.all([
             loadModelSettings(),
-            loadProviderProfileUiDescriptors().catch(() => [])
+            loadProviderProfileUiDescriptors().catch(() => []),
+            // The directory only powers model-management choices. A transient/mixed-version
+            // descriptor failure must not make chat and the rest of the workspace unavailable.
+            loadProviderVendorDescriptors().catch(() => [])
           ])
           if (isCancelled) return
 
           setProviderProfileDescriptors(descriptors)
+          setProviderVendorDescriptors(vendorDescriptors)
           if (storedSettings) {
             lastSuccessfulSettingsRef.current = storedSettings
             applySettings(storedSettings)
@@ -264,6 +282,8 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       enabledModels,
       models,
       providerProfileDescriptors,
+      providerVendorDescriptors,
+      resolveProviderVendorModelPolicy: resolveProviderVendorModelPolicyFromStorage,
       searchMode,
       tavilyApiKey,
       deleteModel: (modelId) => {
@@ -292,7 +312,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       },
       upsertModel
     }
-  }, [providerProfileDescriptors, settings, updateSettings, upsertModel])
+  }, [providerProfileDescriptors, providerVendorDescriptors, settings, updateSettings, upsertModel])
 
   return <ModelSettingsContext.Provider value={value}>{children}</ModelSettingsContext.Provider>
 }

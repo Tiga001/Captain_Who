@@ -103,6 +103,7 @@ pub fn save_model_settings(
     connection: &mut Connection,
     settings: ModelSettingsRecord,
 ) -> rusqlite::Result<()> {
+    let (settings, _) = canonicalize_official_provider_profiles(settings);
     let previous = load_model_settings_snapshot(connection)?;
     let incoming_model_ids = settings
         .models
@@ -288,6 +289,57 @@ pub fn save_model_settings(
     }
 
     transaction.commit()
+}
+
+fn canonicalize_official_provider_profiles(
+    mut settings: ModelSettingsRecord,
+) -> (ModelSettingsRecord, bool) {
+    let global_api_url = settings.api_url.clone();
+    let global_api_token = settings.api_token.clone();
+    let mut changed = false;
+    for model in &mut settings.models {
+        let override_url = model
+            .api_url_override
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let override_token = model
+            .api_token_override
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let effective_api_url = match (override_url, override_token) {
+            (Some(url), Some(_)) => url,
+            (None, None)
+                if !global_api_url.trim().is_empty() && !global_api_token.trim().is_empty() =>
+            {
+                global_api_url.as_str()
+            }
+            _ => continue,
+        };
+        if let Some(profile) = crate::provider_registration::normalize_official_provider_profile(
+            effective_api_url,
+            &model.id,
+            &model.provider_profile_config,
+        ) {
+            model.provider_profile_config = profile;
+            changed = true;
+        }
+    }
+    (settings, changed)
+}
+
+/// Idempotently upgrades only exact official endpoint/model pairs before storage is exposed.
+pub(crate) fn reconcile_official_provider_profiles(
+    connection: &mut Connection,
+) -> rusqlite::Result<bool> {
+    let Some(current) = load_model_settings(connection)? else {
+        return Ok(false);
+    };
+    let (normalized, changed) = canonicalize_official_provider_profiles(current);
+    if !changed {
+        return Ok(false);
+    }
+    save_model_settings(connection, normalized)?;
+    Ok(true)
 }
 
 struct LoadedModels {

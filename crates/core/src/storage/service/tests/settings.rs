@@ -42,6 +42,28 @@ fn renderer_save_request(
     serde_json::from_value(value).unwrap()
 }
 
+fn official_profile_test_model(
+    id: &str,
+    api_url_override: Option<&str>,
+    api_token_override: Option<&str>,
+) -> ModelConfigRecord {
+    ModelConfigRecord {
+        id: id.to_string(),
+        display_name: format!("Test {id}"),
+        api_url_override: api_url_override.map(ToString::to_string),
+        api_token_override: api_token_override.map(ToString::to_string),
+        supports_image: false,
+        context_window_tokens: Some(128_000),
+        provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+            crate::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
+        input_price: "1.25".to_string(),
+        cached_input_price: "0.25".to_string(),
+        output_price: "2.5".to_string(),
+        enabled: true,
+    }
+}
+
 #[test]
 fn duplicate_model_id_is_a_typed_validation_error_with_the_trimmed_id() {
     let fixture = StorageFixture::new();
@@ -245,6 +267,354 @@ fn generic_vendor_selection_keeps_custom_aliases_on_generic_compatibility() {
             "vendorId": "generic",
             "settings": {"kind": "generic"}
         })
+    );
+}
+
+#[test]
+fn save_boundary_corrects_exact_official_deepseek_flash_and_moonshot_k3_profiles() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut deepseek = official_profile_test_model("deepseek-v4-flash", None, None);
+    deepseek.display_name = "DeepSeek Flash metadata".to_string();
+    deepseek.context_window_tokens = Some(96_000);
+    let mut moonshot = official_profile_test_model(
+        "kimi-k3",
+        Some("https://api.moonshot.cn/v1/chat/completions"),
+        Some("moonshot-model-token"),
+    );
+    moonshot.display_name = "Kimi K3 metadata".to_string();
+    moonshot.supports_image = true;
+    moonshot.context_window_tokens = Some(64_000);
+    moonshot.input_price = "3.75".to_string();
+    let settings = ModelSettingsRecord {
+        api_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
+        api_token: "deepseek-global-token".to_string(),
+        search_mode: "tavily".to_string(),
+        tavily_api_key: "search-token".to_string(),
+        models: vec![deepseek, moonshot],
+    };
+    let mut expected = settings.clone();
+    expected.models[0].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::deepseek_v4_chat(),
+        crate::ProviderVendorId::DeepSeek,
+        crate::ProviderFamilySettings::DeepseekV4Chat {
+            reasoning: crate::ProviderFamilyReasoningPolicy::provider_default(),
+        },
+    );
+    expected.models[1].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::moonshot_k3_chat(),
+        crate::ProviderVendorId::Moonshot,
+        crate::ProviderFamilySettings::MoonshotK3Chat {
+            reasoning_effort: crate::ProviderReasoningEffort::Max,
+        },
+    );
+
+    service.save_model_settings(settings).unwrap();
+    let stored = service.load_model_settings().unwrap().unwrap();
+
+    assert_eq!(
+        serde_json::to_value(stored).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+        "profile-only correction must retain credentials, search settings and every model field"
+    );
+}
+
+#[test]
+fn save_boundary_does_not_infer_official_profiles_from_proxies_aliases_or_custom_models() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = ModelSettingsRecord {
+        api_url: "https://deepseek-proxy.example/v1/chat/completions".to_string(),
+        api_token: "proxy-global-token".to_string(),
+        search_mode: "disabled".to_string(),
+        tavily_api_key: "preserved-unused-search-token".to_string(),
+        models: vec![
+            official_profile_test_model("deepseek-v4-flash", None, None),
+            official_profile_test_model(
+                "deepseek-v4-flash-latest",
+                Some("https://api.deepseek.com/v1/chat/completions"),
+                Some("deepseek-alias-token"),
+            ),
+            official_profile_test_model(
+                "kimi-k3",
+                Some("https://moonshot-proxy.example/v1/chat/completions"),
+                Some("moonshot-proxy-token"),
+            ),
+            official_profile_test_model(
+                "kimi-k3-latest",
+                Some("https://api.moonshot.ai/v1/chat/completions"),
+                Some("moonshot-alias-token"),
+            ),
+            official_profile_test_model(
+                "company-private-model",
+                Some("https://api.moonshot.cn/v1/chat/completions"),
+                Some("custom-model-token"),
+            ),
+        ],
+    };
+    let expected = serde_json::to_value(&settings).unwrap();
+
+    service.save_model_settings(settings).unwrap();
+    let stored = service.load_model_settings().unwrap().unwrap();
+
+    assert_eq!(serde_json::to_value(stored).unwrap(), expected);
+}
+
+#[test]
+fn save_boundary_does_not_correct_an_incomplete_global_connection() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = ModelSettingsRecord {
+        api_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
+        api_token: "   ".to_string(),
+        search_mode: "disabled".to_string(),
+        tavily_api_key: "preserved-search-token".to_string(),
+        models: vec![official_profile_test_model("deepseek-v4-flash", None, None)],
+    };
+    let expected = serde_json::to_value(&settings).unwrap();
+
+    service.save_model_settings(settings).unwrap();
+    let stored = service.load_model_settings().unwrap().unwrap();
+
+    assert_eq!(serde_json::to_value(stored).unwrap(), expected);
+}
+
+#[test]
+fn startup_reconciliation_corrects_only_profiles_and_is_idempotent() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut deepseek = official_profile_test_model(
+        "deepseek-v4-flash",
+        Some("https://deepseek-proxy.example/v1/chat/completions"),
+        Some("deepseek-model-token"),
+    );
+    let mut deepseek_legacy = crate::ProviderProfileConfig::deepseek_v4_default();
+    let crate::ProviderProfileConfig::V1(config) = &mut deepseek_legacy else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning.mode = crate::ReasoningMode::Enabled;
+    config.reasoning.effort = crate::ReasoningEffort::High;
+    deepseek.provider_profile_config = deepseek_legacy;
+
+    let mut moonshot = official_profile_test_model(
+        "kimi-k3",
+        Some("https://moonshot-proxy.example/v1/chat/completions"),
+        Some("moonshot-model-token"),
+    );
+    let mut moonshot_legacy = crate::ProviderProfileConfig::deepseek_v4_default();
+    let crate::ProviderProfileConfig::V1(config) = &mut moonshot_legacy else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning.mode = crate::ReasoningMode::Enabled;
+    config.reasoning.effort = crate::ReasoningEffort::High;
+    moonshot.provider_profile_config = moonshot_legacy;
+    moonshot.supports_image = true;
+
+    let alias = official_profile_test_model(
+        "deepseek-v4-flash-latest",
+        Some("https://api.deepseek.com/chat/completions"),
+        Some("deepseek-alias-token"),
+    );
+    let custom = official_profile_test_model(
+        "company-private-model",
+        Some("https://api.moonshot.ai/v1/chat/completions"),
+        Some("custom-model-token"),
+    );
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://global-proxy.example/v1/chat/completions".to_string(),
+            api_token: "global-provider-token".to_string(),
+            search_mode: "tavily".to_string(),
+            tavily_api_key: "search-provider-token".to_string(),
+            models: vec![deepseek, moonshot, alias, custom],
+        })
+        .unwrap();
+
+    {
+        let connection = service.state.connection().unwrap();
+        connection
+            .execute(
+                "UPDATE models SET api_url_override = ?1 WHERE id = 'deepseek-v4-flash'",
+                ["https://api.deepseek.com/chat/completions"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE models SET api_url_override = ?1 WHERE id = 'kimi-k3'",
+                ["https://api.moonshot.ai/v1/chat/completions"],
+            )
+            .unwrap();
+    }
+
+    let before = service.load_model_settings_snapshot().unwrap().unwrap();
+    drop(service);
+
+    let reopened = fixture.service();
+    let after = reopened.load_model_settings_snapshot().unwrap().unwrap();
+    let mut expected = before.settings.clone();
+    expected.models[0].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::deepseek_v4_chat(),
+        crate::ProviderVendorId::DeepSeek,
+        crate::ProviderFamilySettings::DeepseekV4Chat {
+            reasoning: crate::ProviderFamilyReasoningPolicy {
+                mode: crate::ReasoningMode::Enabled,
+                effort: crate::ProviderReasoningEffort::High,
+            },
+        },
+    );
+    expected.models[1].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::moonshot_k3_chat(),
+        crate::ProviderVendorId::Moonshot,
+        crate::ProviderFamilySettings::MoonshotK3Chat {
+            reasoning_effort: crate::ProviderReasoningEffort::High,
+        },
+    );
+
+    assert_eq!(
+        serde_json::to_value(&after.settings).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+        "startup reconciliation must alter only the two exact official Profile configurations"
+    );
+    assert_ne!(after.configuration_revision, before.configuration_revision);
+    assert_eq!(
+        after.provider_connection_revisions, before.provider_connection_revisions,
+        "a Profile-only correction must not rotate credentials/endpoints"
+    );
+    assert_eq!(
+        after.search_connection_revision, before.search_connection_revision,
+        "provider Profile correction must not rotate search credentials"
+    );
+    for model_id in ["deepseek-v4-flash", "kimi-k3"] {
+        assert_ne!(
+            after.provider_protocol_revisions[model_id],
+            before.provider_protocol_revisions[model_id],
+            "the corrected model must receive a new protocol identity"
+        );
+    }
+    for model_id in ["deepseek-v4-flash-latest", "company-private-model"] {
+        assert_eq!(
+            after.provider_protocol_revisions[model_id],
+            before.provider_protocol_revisions[model_id],
+            "aliases and custom models must retain their protocol identity"
+        );
+    }
+
+    {
+        let mut connection = reopened.state.connection().unwrap();
+        assert!(
+            !crate::storage::config_repository::reconcile_official_provider_profiles(
+                &mut connection
+            )
+            .unwrap(),
+            "a second reconciliation must be a no-op"
+        );
+    }
+    let idempotent = reopened.load_model_settings_snapshot().unwrap().unwrap();
+    assert_eq!(
+        idempotent.configuration_revision,
+        after.configuration_revision
+    );
+    assert_eq!(
+        idempotent.provider_connection_revisions,
+        after.provider_connection_revisions
+    );
+    assert_eq!(
+        idempotent.provider_protocol_revisions,
+        after.provider_protocol_revisions
+    );
+    assert_eq!(
+        idempotent.search_connection_revision,
+        after.search_connection_revision
+    );
+}
+
+#[test]
+fn exact_official_reconciliation_keeps_a_future_profile_opaque() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
+            api_token: "deepseek-global-token".to_string(),
+            search_mode: "tavily".to_string(),
+            tavily_api_key: "search-token".to_string(),
+            models: vec![official_profile_test_model("deepseek-v4-flash", None, None)],
+        })
+        .unwrap();
+
+    let future_profile = serde_json::json!({
+        "schemaVersion": 2,
+        "profile": {"id": "deepseek_v4_chat", "version": 99},
+        "vendorId": "deepseek",
+        "settings": {
+            "kind": "deepseek_v4_chat",
+            "reasoning": {"mode": "enabled", "effort": "low"}
+        }
+    });
+    {
+        let connection = service.state.connection().unwrap();
+        connection
+            .execute(
+                "UPDATE models SET provider_profile_config_json = ?1 WHERE id = 'deepseek-v4-flash'",
+                [future_profile.to_string()],
+            )
+            .unwrap();
+    }
+    let before = service.load_model_settings_snapshot().unwrap().unwrap();
+    drop(service);
+
+    let reopened = fixture.service();
+    let after_startup = reopened.load_model_settings_snapshot().unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&after_startup.settings.models[0].provider_profile_config).unwrap(),
+        future_profile
+    );
+    assert_eq!(
+        after_startup.configuration_revision,
+        before.configuration_revision
+    );
+    assert_eq!(
+        after_startup.provider_connection_revisions,
+        before.provider_connection_revisions
+    );
+    assert_eq!(
+        after_startup.provider_protocol_revisions,
+        before.provider_protocol_revisions
+    );
+    assert_eq!(
+        after_startup.search_connection_revision,
+        before.search_connection_revision
+    );
+
+    let mut price_edit = after_startup.settings.clone();
+    price_edit.models[0].input_price = "9.5".to_string();
+    reopened
+        .save_model_settings_request(renderer_save_request(
+            &price_edit,
+            serde_json::json!({"kind": "unchanged"}),
+            None,
+        ))
+        .unwrap();
+    let after_save = reopened.load_model_settings_snapshot().unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&after_save.settings.models[0].provider_profile_config).unwrap(),
+        future_profile
+    );
+    assert_ne!(
+        after_save.configuration_revision,
+        after_startup.configuration_revision
+    );
+    assert_eq!(
+        after_save.provider_connection_revisions,
+        after_startup.provider_connection_revisions
+    );
+    assert_eq!(
+        after_save.provider_protocol_revisions,
+        after_startup.provider_protocol_revisions
+    );
+    assert_eq!(
+        after_save.search_connection_revision,
+        after_startup.search_connection_revision
     );
 }
 
