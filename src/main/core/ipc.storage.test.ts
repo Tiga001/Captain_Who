@@ -155,6 +155,50 @@ describe('model settings IPC', () => {
     expect(coreServer.saveModelSettings).toHaveBeenCalledWith(settings)
   })
 
+  it('routes Provider vendor descriptors and model policy resolution without reshaping them', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const descriptors = [
+      { vendorId: 'generic', displayName: 'Generic', selectable: true },
+      { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
+      { vendorId: 'moonshot', displayName: 'Moonshot AI', selectable: true }
+    ]
+    const input = {
+      vendorId: 'moonshot',
+      modelId: 'kimi-k3',
+      dialect: 'openai_chat_completions'
+    }
+    const policy = {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      }
+    }
+    const coreServer = {
+      loadProviderVendorDescriptors: vi.fn().mockResolvedValue(descriptors),
+      resolveProviderVendorModelPolicy: vi.fn().mockResolvedValue(policy)
+    }
+    registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
+
+    await expect(handlers.get('host:storage.loadProviderVendorDescriptors')?.({})).resolves.toBe(
+      descriptors
+    )
+    await expect(
+      handlers.get('host:storage.resolveProviderVendorModelPolicy')?.({}, input)
+    ).resolves.toBe(policy)
+    expect(coreServer.resolveProviderVendorModelPolicy).toHaveBeenCalledWith(input)
+  })
+
   it('projects only the bounded duplicate-model validation error', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     const ipcMain = {

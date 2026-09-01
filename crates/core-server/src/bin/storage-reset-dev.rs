@@ -26,7 +26,8 @@ use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::storage::{acquire_database_instance_lock, create_verified_sqlite_snapshot};
 use mycopilot_core::{ProviderProfileConfig, ProviderProtocolDialect};
 use mycopilot_mcp_client::{McpRegistry, McpTrustLevel};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::types::Value as SqliteValue;
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use sqlite_registry::{
     launch_authorization_is_valid, McpPersistedRegistryRecord, McpRegistryMutationPrecondition,
@@ -45,6 +46,13 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const PREVIOUS_STORAGE_SCHEMA_VERSION: i32 =
     mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION - 1;
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
+const EXACT_CONFIGURATION_TABLES: &[&str] = &[
+    "model_provider_settings",
+    "models",
+    "image_generation_profiles",
+    "image_generation_credential_staging",
+    "image_generation_credential_cleanup",
+];
 const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
     "models",
@@ -69,15 +77,43 @@ struct ResetOptions {
 #[derive(Debug)]
 struct PreservedConfiguration {
     model_settings: Option<ModelSettingsRecord>,
+    exact_configuration_tables: Vec<ExactConfigurationTableSnapshot>,
     ui_preferences: UiPreferencesRecord,
     agent_prompt_preferences: AgentPromptPreferencesRecord,
     skill_enablement_overrides: Vec<(String, bool)>,
     image_generation_profile: Option<ImageGenerationProfileRecord>,
+    image_generation_profile_count: usize,
     notification_settings: Option<NotificationSettingsRecord>,
     browser_download_settings: Option<BrowserDownloadSettingsRecord>,
     browser_preferences: Option<BrowserPreferencesRecord>,
     mcp_records: Vec<McpPersistedRegistryRecord>,
     mcp_server_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigurationColumnSignature {
+    cid: i64,
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    primary_key_position: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ExactConfigurationTableSnapshot {
+    name: String,
+    create_sql: String,
+    columns: Vec<ConfigurationColumnSignature>,
+    rows: Vec<Vec<SqliteValue>>,
+}
+
+impl ExactConfigurationTableSnapshot {
+    fn has_same_schema(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.create_sql == other.create_sql
+            && self.columns == other.columns
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +346,7 @@ fn inspect_source(
     if !can_preserve_development_configuration(schema_version) {
         return Ok((None, count_all_business_rows(&connection)?));
     }
+    let exact_configuration_tables = load_exact_configuration_table_snapshots(&connection)?;
     let model_settings = load_model_settings_for_development_reset(&connection)?;
     let model_settings = model_settings.map(validate_model_profiles).transpose()?;
     let ui_preferences = load_ui_preferences_for_development_reset(&connection)?;
@@ -322,12 +359,8 @@ fn inspect_source(
         DEFAULT_IMAGE_GENERATION_PROFILE_ID,
     )
     .map_err(redacted_storage_error)?;
-    let image_profile_count = count_rows_if_table_exists(&connection, "image_generation_profiles")?;
-    if image_profile_count > u64::from(image_generation_profile.is_some()) {
-        return Err(invalid_data(
-            "unsupported non-default image-generation profiles exist; remove them explicitly before resetting",
-        ));
-    }
+    let image_generation_profile_count =
+        count_rows_if_table_exists(&connection, "image_generation_profiles")? as usize;
     ensure_no_image_credential_reconciliation(&connection)?;
     let notification_settings =
         if count_rows_if_table_exists(&connection, "notification_settings")? == 1 {
@@ -375,10 +408,12 @@ fn inspect_source(
     };
     let configuration = PreservedConfiguration {
         model_settings,
+        exact_configuration_tables,
         ui_preferences,
         agent_prompt_preferences,
         skill_enablement_overrides,
         image_generation_profile,
+        image_generation_profile_count,
         notification_settings,
         browser_download_settings,
         browser_preferences,
@@ -397,6 +432,163 @@ fn storage_schema_version(connection: &Connection) -> io::Result<i32> {
 fn can_preserve_development_configuration(schema_version: i32) -> bool {
     let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
     schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
+}
+
+fn load_exact_configuration_table_snapshots(
+    source: &Connection,
+) -> io::Result<Vec<ExactConfigurationTableSnapshot>> {
+    let source_snapshots = snapshot_exact_configuration_tables(source)?;
+    let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
+    mycopilot_core::storage::migrations::run_migrations(&canonical)
+        .map_err(redacted_storage_error)?;
+    let canonical_snapshots = snapshot_exact_configuration_tables(&canonical)?;
+    if source_snapshots.len() != canonical_snapshots.len()
+        || source_snapshots
+            .iter()
+            .zip(&canonical_snapshots)
+            .any(|(source, canonical)| !source.has_same_schema(canonical))
+    {
+        return Err(invalid_data(
+            "configuration table schema differs from the canonical development schema",
+        ));
+    }
+    Ok(source_snapshots)
+}
+
+fn snapshot_exact_configuration_tables(
+    connection: &Connection,
+) -> io::Result<Vec<ExactConfigurationTableSnapshot>> {
+    EXACT_CONFIGURATION_TABLES
+        .iter()
+        .map(|table| snapshot_exact_configuration_table(connection, table))
+        .collect()
+}
+
+fn snapshot_exact_configuration_table(
+    connection: &Connection,
+    table: &str,
+) -> io::Result<ExactConfigurationTableSnapshot> {
+    let create_sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(redacted_storage_error)?;
+    let columns = {
+        let mut statement = connection
+            .prepare(
+                "SELECT cid, name, type, \"notnull\", dflt_value, pk
+                 FROM pragma_table_info(?1)
+                 ORDER BY cid",
+            )
+            .map_err(redacted_storage_error)?;
+        let columns = statement
+            .query_map([table], |row| {
+                Ok(ConfigurationColumnSignature {
+                    cid: row.get(0)?,
+                    name: row.get(1)?,
+                    declared_type: row.get(2)?,
+                    not_null: row.get::<_, i64>(3)? != 0,
+                    default_value: row.get(4)?,
+                    primary_key_position: row.get(5)?,
+                })
+            })
+            .map_err(redacted_storage_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(redacted_storage_error)?;
+        columns
+    };
+    if columns.is_empty() {
+        return Err(invalid_data(format!(
+            "configuration table {table} has no columns"
+        )));
+    }
+    let projection = columns
+        .iter()
+        .map(|column| quote_sqlite_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let table_identifier = quote_sqlite_identifier(table);
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {projection} FROM {table_identifier} ORDER BY rowid"
+        ))
+        .map_err(redacted_storage_error)?;
+    let column_count = columns.len();
+    let rows = statement
+        .query_map([], |row| {
+            (0..column_count)
+                .map(|index| row.get::<_, SqliteValue>(index))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(redacted_storage_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(redacted_storage_error)?;
+    Ok(ExactConfigurationTableSnapshot {
+        name: table.to_string(),
+        create_sql,
+        columns,
+        rows,
+    })
+}
+
+fn quote_sqlite_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn restore_exact_configuration_tables(
+    database_path: &Path,
+    expected: &[ExactConfigurationTableSnapshot],
+) -> io::Result<()> {
+    let mut connection = Connection::open(database_path).map_err(redacted_storage_error)?;
+    let transaction = connection.transaction().map_err(redacted_storage_error)?;
+    for snapshot in expected {
+        let current = snapshot_exact_configuration_table(&transaction, &snapshot.name)?;
+        if !current.has_same_schema(snapshot) {
+            return Err(invalid_data(format!(
+                "fresh configuration table {} has an incompatible schema",
+                snapshot.name
+            )));
+        }
+        if !current.rows.is_empty() {
+            return Err(invalid_data(format!(
+                "fresh configuration table {} was unexpectedly populated",
+                snapshot.name
+            )));
+        }
+        if snapshot.rows.is_empty() {
+            continue;
+        }
+        let table_identifier = quote_sqlite_identifier(&snapshot.name);
+        let projection = snapshot
+            .columns
+            .iter()
+            .map(|column| quote_sqlite_identifier(&column.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders = (1..=snapshot.columns.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = transaction
+            .prepare(&format!(
+                "INSERT INTO {table_identifier} ({projection}) VALUES ({placeholders})"
+            ))
+            .map_err(redacted_storage_error)?;
+        for row in &snapshot.rows {
+            if row.len() != snapshot.columns.len() {
+                return Err(invalid_data(format!(
+                    "configuration table {} snapshot row width changed",
+                    snapshot.name
+                )));
+            }
+            statement
+                .execute(params_from_iter(row.iter()))
+                .map_err(redacted_storage_error)?;
+        }
+    }
+    transaction.commit().map_err(redacted_storage_error)
 }
 
 /// Preserves only the UI configuration from the current or immediately previous development
@@ -623,11 +815,6 @@ fn build_fresh_database(
     let storage = StorageService::open_for_development_reset(database_path)
         .map_err(|_| io::Error::other("failed to create the canonical storage schema"))?;
     if let Some(configuration) = configuration {
-        if let Some(settings) = &configuration.model_settings {
-            storage
-                .save_model_settings(settings.clone())
-                .map_err(|_| io::Error::other("failed to restore normalized model settings"))?;
-        }
         storage
             .save_ui_preferences(configuration.ui_preferences.clone())
             .map_err(|_| io::Error::other("failed to restore UI preferences"))?;
@@ -638,28 +825,6 @@ fn build_fresh_database(
             storage
                 .set_skill_enablement_override(skill_id, *enabled)
                 .map_err(|_| io::Error::other("failed to restore a Skill enablement override"))?;
-        }
-        if let Some(profile) = &configuration.image_generation_profile {
-            match storage
-                .compare_and_set_image_generation_profile(
-                    DEFAULT_IMAGE_GENERATION_PROFILE_ID,
-                    0,
-                    profile,
-                )
-                .map_err(|_| {
-                    io::Error::other("failed to restore the image-generation profile")
-                })? {
-                image_generation_repository::ImageGenerationProfileCompareAndSetOutcome::Updated(
-                    _,
-                ) => {}
-                image_generation_repository::ImageGenerationProfileCompareAndSetOutcome::Conflict(
-                    _,
-                ) => {
-                    return Err(io::Error::other(
-                        "fresh image-generation profile unexpectedly conflicted",
-                    ));
-                }
-            }
         }
         if let Some(preferences) = &configuration.browser_preferences {
             storage
@@ -674,6 +839,12 @@ fn build_fresh_database(
     }
     drop(storage);
 
+    if let Some(configuration) = configuration {
+        restore_exact_configuration_tables(
+            database_path,
+            &configuration.exact_configuration_tables,
+        )?;
+    }
     if let Some(settings) = configuration.and_then(|value| value.notification_settings.as_ref()) {
         restore_notification_settings(database_path, settings)?;
     }
@@ -879,9 +1050,31 @@ fn verify_fresh_database(
             }
             _ => return Err(invalid_data("restored model settings count mismatch")),
         }
+        if let Some(expected) = &configuration.image_generation_profile {
+            let restored = storage
+                .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
+                .map_err(|_| {
+                    io::Error::other(
+                        "restored image-generation configuration could not be verified",
+                    )
+                })?;
+            if restored.as_ref() != Some(expected) {
+                return Err(invalid_data(
+                    "restored image-generation configuration differs from its preserved value",
+                ));
+            }
+        }
     }
     drop(storage);
     let connection = open_read_only(database_path)?;
+    if let Some(configuration) = configuration {
+        let restored_configuration = snapshot_exact_configuration_tables(&connection)?;
+        if restored_configuration != configuration.exact_configuration_tables {
+            return Err(invalid_data(
+                "restored model, search, or image-generation configuration differs from its exact snapshot",
+            ));
+        }
+    }
     let quick_check = pragma_rows(&connection, "PRAGMA quick_check")?;
     if quick_check.as_slice() != ["ok"] {
         return Err(invalid_data("fresh database failed SQLite quick_check"));
@@ -958,7 +1151,7 @@ fn verify_fresh_database(
         verify_table_count(
             &connection,
             "image_generation_profiles",
-            usize::from(configuration.image_generation_profile.is_some()),
+            configuration.image_generation_profile_count,
         )?;
     }
     Ok(())
@@ -1181,9 +1374,9 @@ fn report_from_configuration(
             configuration.skill_enablement_overrides.len()
         }),
         mcp_server_count: configuration.map_or(0, |configuration| configuration.mcp_server_count),
-        image_generation_profile_count: configuration
-            .and_then(|configuration| configuration.image_generation_profile.as_ref())
-            .map_or(0, |_| 1),
+        image_generation_profile_count: configuration.map_or(0, |configuration| {
+            configuration.image_generation_profile_count
+        }),
         discarded_conversation_rows,
         preserved_configuration: configuration.is_some(),
     }
@@ -1374,8 +1567,10 @@ mod tests {
             models: vec![ModelConfigRecord {
                 id: "model-a".to_string(),
                 display_name: "Model A".to_string(),
-                api_url_override: None,
-                api_token_override: None,
+                api_url_override: Some(
+                    "https://per-model.example.test/v1/chat/completions".to_string(),
+                ),
+                api_token_override: Some(format!("model-{secret}")),
                 supports_image: false,
                 context_window_tokens: Some(32_000),
                 provider_profile_config: ProviderProfileConfig::generic_for_dialect(
@@ -1511,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_rejects_non_default_image_profiles_instead_of_dropping_them() {
+    fn reset_preserves_non_default_image_profiles_exactly() {
         let fixture = tempfile::tempdir().unwrap();
         let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
         let extra_profile = ImageGenerationProfileRecord {
@@ -1536,15 +1731,23 @@ mod tests {
                 .unwrap(),
             image_generation_repository::ImageGenerationProfileCompareAndSetOutcome::Updated(_)
         ));
+        let expected = storage
+            .load_image_generation_profile("future-profile")
+            .unwrap()
+            .unwrap();
         drop(storage);
 
-        let error = execute(options(fixture.path(), false)).unwrap_err();
+        let report = execute(options(fixture.path(), true)).unwrap();
 
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error
-            .to_string()
-            .contains("unsupported non-default image-generation profiles"));
-        assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
+        assert_eq!(report.image_generation_profile_count, 1);
+        let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        assert_eq!(
+            storage
+                .load_image_generation_profile("future-profile")
+                .unwrap()
+                .as_ref(),
+            Some(&expected)
+        );
     }
 
     #[test]
@@ -1588,6 +1791,31 @@ mod tests {
         assert!(error
             .to_string()
             .contains("current Provider Protocol revision"));
+        assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn reset_fails_closed_when_a_configuration_table_has_unknown_columns() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "reset-unknown-column-token");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "ALTER TABLE models ADD COLUMN future_provider_setting TEXT",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let source_digest = file_digest(&database).unwrap();
+
+        let error = execute(options(fixture.path(), false)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("configuration table schema differs"));
+        assert_eq!(file_digest(&database).unwrap(), source_digest);
         assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
     }
 
@@ -1676,6 +1904,9 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let secret = "reset-test-api-token";
         populated_storage(fixture.path(), secret);
+        let source = Connection::open(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        let exact_configuration_before = snapshot_exact_configuration_tables(&source).unwrap();
+        drop(source);
 
         let report = execute(options(fixture.path(), true)).unwrap();
 
@@ -1693,10 +1924,20 @@ mod tests {
         let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
         let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.settings.api_token, secret);
+        assert_eq!(snapshot.settings.search_mode, "tavily");
+        assert_eq!(snapshot.settings.tavily_api_key, format!("search-{secret}"));
+        assert_eq!(
+            snapshot.settings.models[0].api_url_override.as_deref(),
+            Some("https://per-model.example.test/v1/chat/completions")
+        );
+        assert_eq!(
+            snapshot.settings.models[0].api_token_override.as_deref(),
+            Some(format!("model-{secret}").as_str())
+        );
         assert_eq!(
             snapshot.settings.models[0]
                 .provider_profile_config
-                .profile
+                .profile()
                 .id,
             mycopilot_core::ProviderProfileId::GenericOpenAiChat
         );
@@ -1734,6 +1975,10 @@ mod tests {
         assert_eq!(mcp_servers[0].config.display_name, "Reset Test MCP");
         drop(registry);
         let connection = open_read_only(&report.database_path).unwrap();
+        assert_eq!(
+            snapshot_exact_configuration_tables(&connection).unwrap(),
+            exact_configuration_before
+        );
         assert_eq!(
             count_rows_if_table_exists(&connection, "projects").unwrap(),
             0

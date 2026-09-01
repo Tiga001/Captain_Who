@@ -2,7 +2,7 @@ use mycopilot_core::protocol::{
     AgentBuiltinExecutionPermission, AgentCommandPermission, AgentCommandSafetyPolicy,
     AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
 };
-use mycopilot_core::provider_profile::{ReasoningEffort, ReasoningMode};
+use mycopilot_core::provider_profile::{ProviderReasoningEffort, ReasoningMode};
 use mycopilot_core::storage::models::{ModelConfigRecord, UiPreferencesRecord};
 use mycopilot_protocol_rs::{
     AutomationBuiltinExecutionPermissionDto, AutomationCommandPermissionDto,
@@ -207,21 +207,25 @@ pub(crate) fn permissions_from_projection(
     }
 }
 
-/// Read-only projection used by new-chat automation DTOs. Reasoning remains model-owned in v1;
+/// Read-only projection used by new-chat automation DTOs. Reasoning remains model-owned;
 /// there is deliberately no independent automation override.
 pub(crate) fn reasoning_projection(model: &ModelConfigRecord) -> AutomationReasoningProjectionDto {
-    let reasoning = model.provider_profile_config.reasoning;
+    let mode = model.provider_profile_config.reasoning_mode();
+    let effort = model.provider_profile_config.provider_reasoning_effort();
     AutomationReasoningProjectionDto {
         source: AutomationReasoningSourceDto::ModelConfig,
-        mode: match reasoning.mode {
+        mode: match mode {
             ReasoningMode::ProviderDefault => AutomationReasoningModeDto::ProviderDefault,
             ReasoningMode::Enabled => AutomationReasoningModeDto::Enabled,
             ReasoningMode::Disabled => AutomationReasoningModeDto::Disabled,
         },
-        effort: match reasoning.effort {
-            ReasoningEffort::ProviderDefault => AutomationReasoningEffortDto::ProviderDefault,
-            ReasoningEffort::High => AutomationReasoningEffortDto::High,
-            ReasoningEffort::Max => AutomationReasoningEffortDto::Max,
+        effort: match effort {
+            ProviderReasoningEffort::ProviderDefault => {
+                AutomationReasoningEffortDto::ProviderDefault
+            }
+            ProviderReasoningEffort::Low => AutomationReasoningEffortDto::Low,
+            ProviderReasoningEffort::High => AutomationReasoningEffortDto::High,
+            ProviderReasoningEffort::Max => AutomationReasoningEffortDto::Max,
         },
     }
 }
@@ -252,7 +256,9 @@ fn full_chat_permissions() -> AgentPermissions {
 mod tests {
     use super::*;
     use mycopilot_core::provider_profile::{
-        ProviderProfileConfig, ReasoningPolicy, PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+        ProviderFamilyReasoningPolicy, ProviderFamilySettings, ProviderProfileConfig,
+        ProviderProfileConfigV1, ProviderProfileRef, ProviderVendorId, ReasoningEffort,
+        ReasoningPolicy, PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
     };
 
     fn preferences() -> UiPreferencesRecord {
@@ -488,18 +494,18 @@ mod tests {
             mode: ReasoningMode::Enabled,
             effort: ReasoningEffort::Max,
         };
-        let model = ModelConfigRecord {
+        let mut model = ModelConfigRecord {
             id: "deepseek-v4".to_string(),
             display_name: "DeepSeek V4".to_string(),
             api_url_override: None,
             api_token_override: None,
             supports_image: false,
             context_window_tokens: None,
-            provider_profile_config: ProviderProfileConfig {
+            provider_profile_config: ProviderProfileConfig::V1(ProviderProfileConfigV1 {
                 schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-                profile: mycopilot_core::provider_profile::ProviderProfileRef::deepseek_v4_chat(),
+                profile: ProviderProfileRef::deepseek_v4_chat(),
                 reasoning,
-            },
+            }),
             input_price: String::new(),
             cached_input_price: String::new(),
             output_price: String::new(),
@@ -513,6 +519,36 @@ mod tests {
                 mode: AutomationReasoningModeDto::Enabled,
                 effort: AutomationReasoningEffortDto::Max,
             }
+        );
+
+        model.provider_profile_config = ProviderProfileConfig::from_family_settings(
+            ProviderProfileRef::deepseek_v4_chat(),
+            ProviderVendorId::DeepSeek,
+            ProviderFamilySettings::DeepseekV4Chat {
+                reasoning: ProviderFamilyReasoningPolicy {
+                    mode: ReasoningMode::Enabled,
+                    effort: ProviderReasoningEffort::High,
+                },
+            },
+        );
+        assert_eq!(
+            reasoning_projection(&model).effort,
+            AutomationReasoningEffortDto::High
+        );
+
+        model.provider_profile_config = ProviderProfileConfig::from_family_settings(
+            ProviderProfileRef::deepseek_v4_chat(),
+            ProviderVendorId::DeepSeek,
+            ProviderFamilySettings::DeepseekV4Chat {
+                reasoning: ProviderFamilyReasoningPolicy {
+                    mode: ReasoningMode::Enabled,
+                    effort: ProviderReasoningEffort::Low,
+                },
+            },
+        );
+        assert_eq!(
+            reasoning_projection(&model).effort,
+            AutomationReasoningEffortDto::Low
         );
     }
 }

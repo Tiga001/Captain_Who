@@ -124,17 +124,127 @@ fn registered_profile_selection_is_host_versioned_normalized_and_authoritative()
 
     let config = &saved.models[0].provider_profile_config;
     assert_eq!(
-        config.profile,
+        config.profile(),
         crate::ProviderProfileRef::deepseek_v4_chat()
     );
-    assert_eq!(config.reasoning.mode, crate::ReasoningMode::Disabled);
+    let reasoning = config
+        .legacy_reasoning()
+        .expect("legacy registered selection must remain schema v1");
+    assert_eq!(reasoning.mode, crate::ReasoningMode::Disabled);
+    assert_eq!(reasoning.effort, crate::ReasoningEffort::ProviderDefault);
     assert_eq!(
-        config.reasoning.effort,
-        crate::ReasoningEffort::ProviderDefault
+        service.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
+        saved.models[0].provider_profile_config
+    );
+}
+
+#[test]
+fn vendor_selection_resolves_moonshot_family_and_persists_v2_settings() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].id = "kimi-k3".to_string();
+    settings.models[0].display_name = "Kimi K3".to_string();
+
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            serde_json::json!({
+                "kind": "select_vendor",
+                "vendorId": "moonshot",
+                "settings": {
+                    "kind": "moonshot_k3_chat",
+                    "reasoningEffort": "low"
+                }
+            }),
+            None,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(&saved.models[0].provider_profile_config).unwrap(),
+        serde_json::json!({
+            "schemaVersion": 2,
+            "profile": {"id": "moonshot_k3_chat", "version": 1},
+            "vendorId": "moonshot",
+            "settings": {
+                "kind": "moonshot_k3_chat",
+                "reasoningEffort": "low"
+            }
+        })
     );
     assert_eq!(
         service.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
         saved.models[0].provider_profile_config
+    );
+}
+
+#[test]
+fn vendor_selection_fails_closed_for_unknown_model_and_mismatched_family_settings() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].id = "kimi-future".to_string();
+
+    let unknown = renderer_save_request(
+        &settings,
+        serde_json::json!({
+            "kind": "select_vendor",
+            "vendorId": "moonshot",
+            "settings": {
+                "kind": "moonshot_k3_chat",
+                "reasoningEffort": "max"
+            }
+        }),
+        None,
+    );
+    assert!(service.save_model_settings_request(unknown).is_err());
+    assert!(service.load_model_settings().unwrap().is_none());
+
+    settings.models[0].id = "kimi-k3".to_string();
+    let mismatched = renderer_save_request(
+        &settings,
+        serde_json::json!({
+            "kind": "select_vendor",
+            "vendorId": "moonshot",
+            "settings": {
+                "kind": "moonshot_k2_6_chat",
+                "thinkingMode": "provider_default"
+            }
+        }),
+        None,
+    );
+    assert!(service.save_model_settings_request(mismatched).is_err());
+    assert!(service.load_model_settings().unwrap().is_none());
+}
+
+#[test]
+fn generic_vendor_selection_keeps_custom_aliases_on_generic_compatibility() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].id = "private-company-alias".to_string();
+
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            serde_json::json!({
+                "kind": "select_vendor",
+                "vendorId": "generic",
+                "settings": {"kind": "generic"}
+            }),
+            None,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(&saved.models[0].provider_profile_config).unwrap(),
+        serde_json::json!({
+            "schemaVersion": 2,
+            "profile": {"id": "generic_openai_chat", "version": 1},
+            "vendorId": "generic",
+            "settings": {"kind": "generic"}
+        })
     );
 }
 
@@ -204,7 +314,11 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
         initial_revision
     );
     assert_eq!(
-        changed.models[0].provider_profile_config.reasoning.effort,
+        changed.models[0]
+            .provider_profile_config
+            .legacy_reasoning()
+            .expect("registered legacy selection must write schema v1")
+            .effort,
         crate::ReasoningEffort::Max
     );
 }
@@ -224,7 +338,7 @@ fn select_generic_resolves_from_the_effective_anthropic_dialect() {
         .unwrap();
 
     assert_eq!(
-        saved.models[0].provider_profile_config.profile,
+        saved.models[0].provider_profile_config.profile(),
         crate::ProviderProfileRef::generic_for_dialect(
             crate::ProviderProtocolDialect::AnthropicMessages
         )
@@ -258,7 +372,7 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
         ))
         .unwrap();
     assert_eq!(
-        saved.models[0].provider_profile_config.profile.id,
+        saved.models[0].provider_profile_config.profile().id,
         crate::ProviderProfileId::GenericAnthropicMessages
     );
 }
@@ -473,8 +587,11 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
     );
 
     let mut thinking = crate::ProviderProfileConfig::deepseek_v4_default();
-    thinking.reasoning.mode = crate::ReasoningMode::Enabled;
-    thinking.reasoning.effort = crate::ReasoningEffort::High;
+    let crate::ProviderProfileConfig::V1(config) = &mut thinking else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning.mode = crate::ReasoningMode::Enabled;
+    config.reasoning.effort = crate::ReasoningEffort::High;
     settings.models[0].provider_profile_config = thinking;
     service.save_model_settings(settings.clone()).unwrap();
     let deepseek_thinking = service.load_model_settings_snapshot().unwrap().unwrap();
@@ -536,6 +653,34 @@ fn provider_profile_config_round_trips_through_model_storage() {
 }
 
 #[test]
+fn unchanged_save_preserves_the_legacy_v1_profile_shape() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_profile_config =
+        crate::ProviderProfileConfig::deepseek_v4_default();
+    service.save_model_settings(settings.clone()).unwrap();
+
+    settings.models[0].display_name = "Metadata edit".to_string();
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            serde_json::json!({"kind": "unchanged"}),
+            None,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(&saved.models[0].provider_profile_config).unwrap(),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "profile": {"id": "deepseek_v4_chat", "version": 1},
+            "reasoning": {"mode": "provider_default", "effort": "provider_default"}
+        })
+    );
+}
+
+#[test]
 fn save_wire_requires_an_explicit_profile_update() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
@@ -590,8 +735,8 @@ fn unsupported_persisted_provider_profile_remains_visible_but_cannot_resolve() {
 
     let loaded = service.load_model_settings().unwrap().unwrap();
     let config = &loaded.models[0].provider_profile_config;
-    assert_eq!(config.profile.id.as_str(), "future_profile");
-    assert_eq!(config.profile.version, 1);
+    assert_eq!(config.profile().id.as_str(), "future_profile");
+    assert_eq!(config.profile().version, 1);
     assert!(config.validate().is_err());
 }
 
@@ -629,7 +774,11 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
         ))
         .unwrap();
     assert_eq!(
-        saved.models[0].provider_profile_config.profile.id.as_str(),
+        saved.models[0]
+            .provider_profile_config
+            .profile()
+            .id
+            .as_str(),
         "future_profile"
     );
     assert_eq!(
@@ -654,7 +803,7 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
     assert_eq!(
         renamed.models[0]
             .provider_profile_config
-            .profile
+            .profile()
             .id
             .as_str(),
         "future_profile"

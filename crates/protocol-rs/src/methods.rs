@@ -122,6 +122,10 @@ pub const GIT_MUTATE_REVIEW_FILE_METHOD: &str = "git.mutateReviewFile";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
 pub const STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD: &str =
     "storage.loadProviderProfileUiDescriptors";
+pub const STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD: &str =
+    "storage.loadProviderVendorDescriptors";
+pub const STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD: &str =
+    "storage.resolveProviderVendorModelPolicy";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
 pub const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.loadAgentPromptPreferences";
 pub const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.saveAgentPromptPreferences";

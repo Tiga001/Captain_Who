@@ -13,6 +13,7 @@ use crate::llm::{
 };
 use crate::protocol::{AgentAssistantTurnCheckpointIdentity, ProviderContinuationRef};
 use crate::provider_profile::ProviderProtocolKey;
+pub(crate) use crate::storage::provider_continuation_repository::ProviderContinuationProjection;
 use crate::storage::provider_continuation_repository::{
     ProviderContinuationEnvelopeRecord, ProviderContinuationPromotionOutcome,
     ProviderContinuationRecordState, ProviderContinuationReleaseOutcome,
@@ -156,6 +157,7 @@ pub(crate) struct LoadedProviderAssistantTurn {
     pub(crate) assistant_message_id: String,
     pub(crate) run_id: String,
     pub(crate) request_index: u64,
+    pub(crate) projection: Option<ProviderContinuationProjection>,
     pub(crate) assistant_turn: LlmAssistantTurn,
 }
 
@@ -275,12 +277,50 @@ impl ProviderContinuationVault {
         }
         validate_binding(binding, turn)?;
         let runtime_tool_calls = runtime_tool_identities(turn)?;
+        if runtime_tool_calls.is_empty() {
+            return Err(ProviderContinuationStoreError::InvalidBinding);
+        }
         let encoded = encode_turn(turn)?;
         let continuation_ref = ProviderContinuationRef::new();
         let record = self.encrypt_turn(&continuation_ref, binding, runtime_tool_calls, encoded)?;
         match self
             .storage
             .store_staged_provider_continuation(&record)
+            .map_err(|_| ProviderContinuationStoreError::RepositoryUnavailable)?
+        {
+            ProviderContinuationStoreOutcome::Inserted { .. } => Ok(Some(continuation_ref)),
+            ProviderContinuationStoreOutcome::Idempotent { continuation_id } => {
+                Ok(Some(parse_ref(&continuation_id)?))
+            }
+            ProviderContinuationStoreOutcome::Conflict => {
+                Err(ProviderContinuationStoreError::PayloadConflict)
+            }
+        }
+    }
+
+    /// Seals an ordinary provider-native turn and binds it to one exact Host-private durable
+    /// projection. The row remains invisible until the trace observer or terminal-message
+    /// transaction commits that exact owner.
+    pub(crate) fn persist_staged_with_projection(
+        &self,
+        binding: ProviderContinuationBinding<'_>,
+        projection: ProviderContinuationProjection,
+        turn: &LlmAssistantTurn,
+    ) -> Result<Option<ProviderContinuationRef>, ProviderContinuationStoreError> {
+        if !requires_private_provider_replay(turn)? {
+            return Ok(None);
+        }
+        validate_binding(binding, turn)?;
+        let runtime_tool_calls = runtime_tool_identities(turn)?;
+        if !runtime_tool_calls.is_empty() {
+            return Err(ProviderContinuationStoreError::InvalidBinding);
+        }
+        let encoded = encode_turn(turn)?;
+        let continuation_ref = ProviderContinuationRef::new();
+        let record = self.encrypt_turn(&continuation_ref, binding, runtime_tool_calls, encoded)?;
+        match self
+            .storage
+            .store_staged_provider_continuation_with_projection(&record, projection)
             .map_err(|_| ProviderContinuationStoreError::RepositoryUnavailable)?
         {
             ProviderContinuationStoreOutcome::Inserted { .. } => Ok(Some(continuation_ref)),
@@ -763,6 +803,7 @@ impl ProviderContinuationVault {
             assistant_message_id: record.assistant_message_id,
             run_id: record.run_id,
             request_index: record.request_index,
+            projection: record.projection,
             assistant_turn,
         })
     }

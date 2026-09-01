@@ -57,7 +57,8 @@ use crate::protocol::{
     AgentToolIdentity, AgentToolResult, AgentToolSafety,
 };
 use crate::provider_profile::{
-    ProviderProfileRef, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+    ProviderProfileConfigV1, ProviderProfileRef, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+    PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
 };
 use crate::usage::extract_usage;
 use crate::world_state::{
@@ -85,9 +86,11 @@ fn deepseek_provider_profile(
     mode: ReasoningMode,
     effort: ReasoningEffort,
 ) -> ProviderProfileConfig {
-    let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning = ReasoningPolicy { mode, effort };
-    profile
+    ProviderProfileConfig::V1(ProviderProfileConfigV1 {
+        schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+        profile: ProviderProfileRef::deepseek_v4_chat(),
+        reasoning: ReasoningPolicy { mode, effort },
+    })
 }
 
 fn deepseek_provider_protocol(profile: &ProviderProfileConfig, model: &str) -> ProviderProtocolKey {
@@ -336,5 +339,6 @@ fn historical_trace_call_id() -> String {
 mod deepseek_projection;
 mod deepseek_runtime;
 mod generic_payloads;
+mod moonshot_wire;
 mod retries;
 mod streaming_and_usage;

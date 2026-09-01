@@ -222,6 +222,84 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
 }
 
 #[test]
+fn provider_vendor_policy_projection_is_safe_and_host_authoritative() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let vendors = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications.clone(),
+        request(STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD, None),
+    );
+    assert_eq!(vendors["result"].as_array().unwrap().len(), 3);
+    let moonshot = vendors["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|descriptor| descriptor["vendorId"] == "moonshot")
+        .unwrap();
+    assert_eq!(moonshot["displayName"], "月之暗面");
+    assert_eq!(moonshot["selectable"], false);
+    assert!(moonshot.get("profileId").is_none());
+    assert!(moonshot.get("runtimeCapabilities").is_none());
+
+    let policy = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications.clone(),
+        request(
+            STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+            Some(serde_json::json!({
+                "vendorId": "moonshot",
+                "modelId": "kimi-k3",
+                "dialect": "openai_chat_completions"
+            })),
+        ),
+    );
+    assert_eq!(policy["result"]["status"], "supported");
+    assert_eq!(policy["result"]["vendorId"], "moonshot");
+    assert_eq!(policy["result"]["modelFamily"], "moonshot_k3_chat");
+    assert_eq!(policy["result"]["settingsKind"], "moonshot");
+    assert!(policy["result"].get("profileId").is_none());
+    assert!(policy["result"].get("profileVersion").is_none());
+
+    let unsupported = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications.clone(),
+        request(
+            STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+            Some(serde_json::json!({
+                "vendorId": "moonshot",
+                "modelId": "future-kimi",
+                "dialect": "openai_chat_completions"
+            })),
+        ),
+    );
+    assert_eq!(unsupported["result"]["status"], "unsupported");
+    assert_eq!(unsupported["result"]["reason"], "unsupported_model");
+
+    let forged = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications,
+        request(
+            STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+            Some(serde_json::json!({
+                "vendorId": "moonshot",
+                "modelId": "kimi-k3",
+                "dialect": "openai_chat_completions",
+                "profileVersion": 99
+            })),
+        ),
+    );
+    assert_eq!(forged["error"]["code"], -32602);
+}
+
+#[test]
 fn renderer_cannot_submit_profile_version_revision_or_capabilities() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());

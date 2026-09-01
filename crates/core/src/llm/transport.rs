@@ -317,9 +317,13 @@ where
     streamed.usage = Some(usage_for_request(streamed.usage));
 
     let diagnostic = streaming_response_diagnostic(&streamed);
+    let has_private_model_action = ProviderAdapterRegistry::resolve_key(&provider_protocol)?
+        .has_private_model_action(&provider_protocol, &streamed.assistant_turn)
+        .map_err(|error| error.with_usage(streamed.usage.clone()))?;
     validate_llm_response(
         streamed.content(),
         streamed.provider_tool_calls(),
+        has_private_model_action,
         &diagnostic,
         streamed.finish_reason.as_deref(),
         validation,
@@ -334,12 +338,48 @@ pub(super) fn parse_non_stream_response(
     provider_protocol: &ProviderProtocolKey,
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
-    let registration = crate::resolve_provider_registration_for_key(provider_protocol)
-        .map_err(|error| AgentError::new(format!("Provider protocol key 无效：{error}")))?;
-    let provider_profile = crate::ProviderProfileConfig {
-        schema_version: crate::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-        profile: registration.profile(),
-        reasoning: crate::ReasoningPolicy::provider_default(),
+    use crate::provider_profile::{
+        MoonshotK26ThinkingMode, ProviderFamilyReasoningPolicy, ProviderFamilySettings,
+        ProviderProfileId, ProviderReasoningEffort, ProviderVendorId,
+    };
+    let provider_profile = match provider_protocol.profile.id {
+        ProviderProfileId::GenericOpenAiChat | ProviderProfileId::GenericAnthropicMessages => {
+            crate::ProviderProfileConfig::generic_for_dialect(provider_protocol.dialect)
+        }
+        ProviderProfileId::DeepSeekV4Chat => crate::ProviderProfileConfig::deepseek_v4_default(),
+        ProviderProfileId::DeepSeekV4Vision => crate::ProviderProfileConfig::from_family_settings(
+            provider_protocol.profile,
+            ProviderVendorId::DeepSeek,
+            ProviderFamilySettings::DeepseekV4Vision {
+                reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+            },
+        ),
+        ProviderProfileId::MoonshotK3Chat => crate::ProviderProfileConfig::from_family_settings(
+            provider_protocol.profile,
+            ProviderVendorId::Moonshot,
+            ProviderFamilySettings::MoonshotK3Chat {
+                reasoning_effort: ProviderReasoningEffort::Max,
+            },
+        ),
+        ProviderProfileId::MoonshotK27CodeChat => {
+            crate::ProviderProfileConfig::from_family_settings(
+                provider_protocol.profile,
+                ProviderVendorId::Moonshot,
+                ProviderFamilySettings::MoonshotK27CodeChat,
+            )
+        }
+        ProviderProfileId::MoonshotK26Chat => crate::ProviderProfileConfig::from_family_settings(
+            provider_protocol.profile,
+            ProviderVendorId::Moonshot,
+            ProviderFamilySettings::MoonshotK26Chat {
+                thinking_mode: MoonshotK26ThinkingMode::ProviderDefault,
+            },
+        ),
+        _ => {
+            return Err(AgentError::new(
+                "Provider profile 未注册，无法构造测试 response parser。",
+            ));
+        }
     };
     parse_non_stream_response_with_profile(body, &provider_profile, provider_protocol, validation)
 }
@@ -363,24 +403,27 @@ pub(super) fn parse_non_stream_response_with_profile(
         )
     })?;
     let adapter = ProviderAdapterRegistry::resolve_key(provider_protocol)?;
-    let usage = usage_for_request(adapter.project_usage(&value));
+    let usage = usage_for_request(adapter.project_usage(provider_profile, &value));
     if let Some(error) = extract_api_error(&value) {
         let _ = error;
-        return Err(LlmProviderFailure::from_embedded_error(
-            provider_protocol.dialect.api_style(),
-            body,
-        )
-        .to_agent_error()
-        .with_usage(Some(usage)));
+        return Err(
+            LlmProviderFailure::from_embedded_error_for_protocol(provider_protocol, body)
+                .to_agent_error()
+                .with_usage(Some(usage)),
+        );
     }
 
     let assistant_turn = adapter
         .parse_non_streaming_response(provider_profile, provider_protocol, &value)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
     let finish_reason = extract_finish_reason(&value);
+    let has_private_model_action = adapter
+        .has_private_model_action(provider_protocol, &assistant_turn)
+        .map_err(|error| error.with_usage(Some(usage.clone())))?;
     validate_llm_response(
         assistant_turn.visible_text(),
         assistant_turn.provider_tool_calls(),
+        has_private_model_action,
         body,
         finish_reason.as_deref(),
         validation,
@@ -518,8 +561,8 @@ async fn send_llm_request_with_stream_timeout(
             // 429 or its Retry-After and turn it into an aggressively retried network failure.
             Err(_) => String::new(),
         };
-        let failure = LlmProviderFailure::from_http_response(
-            request.api_style(),
+        let failure = LlmProviderFailure::from_http_response_for_protocol(
+            &request.provider_protocol,
             status,
             &response_headers,
             &body,
@@ -691,6 +734,7 @@ pub(super) fn validate_request(request: &LlmChatRequest) -> AgentResult<()> {
 pub(super) fn validate_llm_response(
     content: &str,
     tool_calls: &[LlmToolCall],
+    has_private_model_action: bool,
     raw_response: &str,
     finish_reason: Option<&str>,
     validation: LlmResponseValidation,
@@ -698,6 +742,7 @@ pub(super) fn validate_llm_response(
     if validation == LlmResponseValidation::RequireModelAction
         && content.trim().is_empty()
         && tool_calls.is_empty()
+        && !has_private_model_action
     {
         let repairable = matches!(finish_reason, Some("stop" | "end_turn"));
         return Err(AgentError::structured(

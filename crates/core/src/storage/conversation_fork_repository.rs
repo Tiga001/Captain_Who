@@ -1023,6 +1023,18 @@ fn build_single_conversation_fork_plan_at_point(
         .transpose()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
+    let summary_covered_projections = summaries
+        .last()
+        .map(|version| {
+            context_compaction_repository::covered_provider_projection_cursors_through_cursor(
+                connection,
+                &source.id,
+                &version.summary.covered_through,
+            )
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
     let source_adaptation = conversation_context_adaptation_repository::get(connection, &source.id)
         .map_err(database_error)?;
     let selected_summary_ids = summaries
@@ -1034,6 +1046,7 @@ fn build_single_conversation_fork_plan_at_point(
             connection,
             &source.id,
             &source_message_ids,
+            &summary_covered_projections,
             &summary_covered_runtime_tool_calls,
         )
         .map_err(database_error)?;
@@ -2307,13 +2320,26 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         insert_snapshot_messages(&transaction, member.history.as_ref())?;
     }
 
-    for prepared in provider_continuations {
-        match provider_continuation_repository::store_active_in_connection(
-            &transaction,
-            &prepared.record,
-        )
-        .map_err(database_error)?
-        {
+    for (mapping, prepared) in plan
+        .provider_continuation_mappings
+        .iter()
+        .zip(provider_continuations)
+    {
+        let outcome = match mapping.source_record.projection {
+            Some(projection) => {
+                provider_continuation_repository::store_active_with_projection_in_connection(
+                    &transaction,
+                    &prepared.record,
+                    projection,
+                )
+            }
+            None => provider_continuation_repository::store_active_in_connection(
+                &transaction,
+                &prepared.record,
+            ),
+        }
+        .map_err(database_error)?;
+        match outcome {
             provider_continuation_repository::ProviderContinuationStoreOutcome::Inserted {
                 ..
             } => {}

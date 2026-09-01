@@ -68,7 +68,10 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
             .unwrap(),
     );
     let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning = ReasoningPolicy {
+    let ProviderProfileConfig::V1(config) = &mut profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning = ReasoningPolicy {
         mode: ReasoningMode::Enabled,
         effort: ReasoningEffort::High,
     };
@@ -286,7 +289,10 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
             .unwrap(),
     );
     let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning = ReasoningPolicy {
+    let ProviderProfileConfig::V1(config) = &mut profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning = ReasoningPolicy {
         mode: ReasoningMode::Enabled,
         effort: ReasoningEffort::High,
     };
@@ -513,7 +519,10 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
             .unwrap(),
     );
     let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning = ReasoningPolicy {
+    let ProviderProfileConfig::V1(config) = &mut profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning = ReasoningPolicy {
         mode: ReasoningMode::Enabled,
         effort: ReasoningEffort::High,
     };
@@ -930,7 +939,10 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
             .unwrap(),
     );
     let mut provider_profile = ProviderProfileConfig::deepseek_v4_default();
-    provider_profile.reasoning = ReasoningPolicy {
+    let ProviderProfileConfig::V1(config) = &mut provider_profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning = ReasoningPolicy {
         mode: ReasoningMode::Enabled,
         effort: ReasoningEffort::Max,
     };
@@ -1276,4 +1288,419 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
         .list_replayable_for_conversation(MISSING_CONVERSATION_ID, &provider_protocol)
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::protocol::{
+        AgentCommandPermission, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use crate::provider_profile::{
+        ProviderFamilyReasoningPolicy, ProviderFamilySettings, ProviderProfileRef,
+        ProviderReasoningEffort, ProviderVendorId,
+    };
+    use crate::storage::models::{
+        AgentRunGuidanceRecord, ChatConversationRecord, ChatMessageRecord,
+    };
+    use crate::storage::service::StorageService;
+    use crate::{
+        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
+        ProviderProtocolKey, ReasoningMode,
+    };
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    const MODEL_ID: &str = "deepseek-v4-flash";
+    const CONVERSATION_ID: &str = "conversation-deepseek-ordinary-restart";
+    const FIRST_ASSISTANT_ID: &str = "assistant-deepseek-ordinary-first";
+    const NEXT_ASSISTANT_ID: &str = "assistant-deepseek-ordinary-next";
+    const FIRST_RUN_ID: &str = "run-deepseek-ordinary-first";
+    const NEXT_RUN_ID: &str = "run-deepseek-ordinary-next";
+    const GUIDANCE_ID: &str = "guidance-deepseek-ordinary";
+    const CLIENT_MESSAGE_ID: &str = "client-deepseek-ordinary";
+    const STEER_REASONING: &str = "deepseek-private-ordinary-steer-reasoning-canary";
+    const FINAL_REASONING: &str = "deepseek-private-ordinary-final-reasoning-canary";
+    const STEER_VISIBLE: &str = "Visible DeepSeek answer before steering.";
+    const FINAL_VISIBLE: &str = "Visible DeepSeek final answer.";
+
+    fn pending_assistant(id: &str, created_at: i64) -> ChatMessageRecord {
+        ChatMessageRecord {
+            id: id.to_string(),
+            role: "assistant".to_string(),
+            content: String::new(),
+            created_at,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        }
+    }
+
+    fn runtime_input(
+        api_url: &str,
+        profile: ProviderProfileConfig,
+        protocol: ProviderProtocolKey,
+        assistant_message_id: &str,
+        messages: Vec<AgentChatMessage>,
+    ) -> AgentChatInput {
+        let mut input = conversation_context_input(messages);
+        input.api_url = api_url.to_string();
+        input.api_token = "deepseek-runtime-test-token".to_string();
+        input.provider_profile_config = Some(profile);
+        input.provider_protocol_key = Some(protocol);
+        input.model = MODEL_ID.to_string();
+        input.stream = Some(false);
+        input.assistant_message_id = Some(assistant_message_id.to_string());
+        input.context = Some(AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: Some(CONVERSATION_ID.to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: Default::default(),
+        });
+        input
+    }
+
+    fn durable_assistant_history(
+        storage: &StorageService,
+        assistant_message_id: &str,
+    ) -> AgentChatMessage {
+        let conversation = storage
+            .load_conversation(CONVERSATION_ID)
+            .unwrap()
+            .expect("restart must reload the durable DeepSeek conversation");
+        let assistant = conversation
+            .messages
+            .iter()
+            .find(|message| message.id == assistant_message_id)
+            .expect("restart must reload the durable DeepSeek assistant message");
+        AgentChatMessage {
+            message_id: Some(assistant_message_id.to_string()),
+            role: "assistant".to_string(),
+            content: assistant.content.clone(),
+            created_at: Some(assistant.created_at),
+            conversation_turn_trace: Some(
+                storage
+                    .get_conversation_turn_trace(assistant_message_id)
+                    .unwrap()
+                    .expect("restart must reload the durable DeepSeek trace"),
+            ),
+            conversation_model_context_items: storage
+                .get_conversation_model_context_log(assistant_message_id)
+                .unwrap()
+                .expect("restart must reload the exact DeepSeek model context")
+                .items,
+        }
+    }
+
+    fn count_request_occurrences(request: &Value, needle: &str) -> usize {
+        serde_json::to_string(request)
+            .unwrap()
+            .matches(needle)
+            .count()
+    }
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("runtime.sqlite");
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some(MODEL_ID.to_string()),
+            title: "DeepSeek ordinary restart".to_string(),
+            messages: vec![
+                pending_assistant(FIRST_ASSISTANT_ID, 1),
+                pending_assistant(NEXT_ASSISTANT_ID, 2),
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .store_agent_run_guidance(AgentRunGuidanceRecord {
+            guidance_id: GUIDANCE_ID.to_string(),
+            client_message_id: CLIENT_MESSAGE_ID.to_string(),
+            run_id: FIRST_RUN_ID.to_string(),
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: FIRST_ASSISTANT_ID.to_string(),
+            content: "Continue after this ordinary response.".to_string(),
+            status: crate::AgentGuidanceStatus::Queued,
+            attachment_ids: Vec::new(),
+            applied_trace_sequence: None,
+            terminal_reason: None,
+            created_at: 3,
+            updated_at: 3,
+        })
+        .unwrap();
+
+    let credentials = Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+    let vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(
+            Arc::clone(&storage),
+            Arc::clone(&credentials),
+        )
+        .unwrap(),
+    );
+    let profile = ProviderProfileConfig::from_family_settings(
+        ProviderProfileRef::deepseek_v4_chat(),
+        ProviderVendorId::DeepSeek,
+        ProviderFamilySettings::DeepseekV4Chat {
+            reasoning: ProviderFamilyReasoningPolicy {
+                mode: ReasoningMode::Enabled,
+                effort: ProviderReasoningEffort::Low,
+            },
+        },
+    );
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        MODEL_ID,
+        None,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let api_url = format!("http://{address}/v1/chat/completions");
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_for_server = Arc::clone(&requests);
+    let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+    let (release_first_response_tx, release_first_response_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut first_request_seen_tx = Some(first_request_seen_tx);
+        let mut release_first_response_rx = Some(release_first_response_rx);
+        for request_index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            requests_for_server.lock().unwrap().push(request);
+            if request_index == 0 {
+                first_request_seen_tx.take().unwrap().send(()).unwrap();
+                release_first_response_rx.take().unwrap().await.unwrap();
+            }
+            let response = match request_index {
+                0 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": STEER_VISIBLE,
+                            "reasoning_content": STEER_REASONING
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+                1 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": FINAL_VISIBLE,
+                            "reasoning_content": FINAL_REASONING
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+                _ => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "DeepSeek future-tools replay verified.",
+                            "reasoning_content": "private follow-up reasoning"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            };
+            write_runtime_test_json_response(&mut stream, response).await;
+        }
+    });
+
+    let snapshots = Arc::new(Mutex::new(Vec::<ConversationTraceSnapshot>::new()));
+    let snapshots_for_observer = Arc::clone(&snapshots);
+    let storage_for_observer = Arc::clone(&storage);
+    let observer_timestamp = Arc::new(AtomicI64::new(10));
+    let observer_timestamp_for_callback = Arc::clone(&observer_timestamp);
+    let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        let updated_at = observer_timestamp_for_callback.fetch_add(1, Ordering::SeqCst);
+        storage_for_observer
+            .append_in_progress_conversation_turn_trace_and_apply_guidances(
+                &snapshot.in_progress_audit_trace(
+                    FIRST_RUN_ID,
+                    CONVERSATION_ID,
+                    FIRST_ASSISTANT_ID,
+                ),
+                &snapshot.model_context_items,
+                1,
+                updated_at,
+            )
+            .map_err(AgentError::new)?;
+        snapshots_for_observer.lock().unwrap().push(snapshot);
+        Ok(None)
+    });
+
+    let queue = AgentSteerInputQueue::new();
+    let first_input = runtime_input(
+        &api_url,
+        profile.clone(),
+        protocol.clone(),
+        FIRST_ASSISTANT_ID,
+        vec![message(
+            "user",
+            "Begin the DeepSeek ordinary reasoning turn.",
+        )],
+    );
+    let runtime_queue = queue.clone();
+    let runtime_vault = Arc::clone(&vault);
+    let runtime_storage = Arc::clone(&storage);
+    let first_runtime = tokio::spawn(async move {
+        AgentRuntime::default()
+            .send_chat_with_events_and_cancellation(
+                first_input,
+                Some(FIRST_RUN_ID.to_string()),
+                None,
+                AgentCancellationToken::new(),
+                Some(
+                    AgentRuntimeHostServices::new()
+                        .with_storage(runtime_storage)
+                        .with_provider_continuation_vault(runtime_vault)
+                        .with_trace_observer(trace_observer)
+                        .with_steer_input(runtime_queue),
+                ),
+            )
+            .await
+            .unwrap()
+    });
+    first_request_seen_rx.await.unwrap();
+    assert_eq!(
+        queue
+            .enqueue(runtime_steer_input(
+                GUIDANCE_ID,
+                CLIENT_MESSAGE_ID,
+                "Continue after this ordinary response.",
+            ))
+            .unwrap(),
+        AgentSteerEnqueueOutcome::Queued
+    );
+    release_first_response_tx.send(()).unwrap();
+    let first_output = first_runtime.await.unwrap();
+    assert_eq!(first_output.status, AgentRunStatus::Completed);
+    assert_eq!(first_output.content, FINAL_VISIBLE);
+    let terminal_trace = first_output
+        .conversation_turn_trace
+        .clone()
+        .expect("DeepSeek runtime must return its terminal trace");
+    let last_snapshot = snapshots
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("DeepSeek steer must publish a durable snapshot");
+    storage
+        .finalize_chat_message_with_conversation_trace_model_context_and_usage(
+            CONVERSATION_ID,
+            FIRST_ASSISTANT_ID,
+            &first_output.content,
+            Some("sent"),
+            "completed",
+            &terminal_trace,
+            Some(&last_snapshot.model_context_items),
+            1,
+            100,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        vault
+            .list_replayable_for_conversation(CONVERSATION_ID, &protocol)
+            .unwrap()
+            .len(),
+        2
+    );
+    for public_projection in [
+        serde_json::to_string(&first_output).unwrap(),
+        serde_json::to_string(&terminal_trace).unwrap(),
+        serde_json::to_string(&last_snapshot.model_context_items).unwrap(),
+    ] {
+        assert!(!public_projection.contains(STEER_REASONING));
+        assert!(!public_projection.contains(FINAL_REASONING));
+        assert!(!public_projection.contains("providerContinuation"));
+    }
+
+    drop(vault);
+    drop(storage);
+    let restarted_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted_vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(
+            Arc::clone(&restarted_storage),
+            Arc::clone(&credentials),
+        )
+        .unwrap(),
+    );
+    let durable_history = durable_assistant_history(&restarted_storage, FIRST_ASSISTANT_ID);
+    let mut restarted_input = runtime_input(
+        &api_url,
+        profile,
+        protocol,
+        NEXT_ASSISTANT_ID,
+        vec![
+            message("user", "Begin the DeepSeek ordinary reasoning turn."),
+            durable_history,
+            message("user", "Use the available tools if needed."),
+        ],
+    );
+    restarted_input.context.as_mut().unwrap().workspace = Some(AgentWorkspaceContext {
+        project_id: None,
+        display_name: Some("DeepSeek future-tools workspace".to_string()),
+        root_path: Some(workspace.to_string_lossy().into_owned()),
+    });
+    restarted_input.context.as_mut().unwrap().permissions = AgentPermissions {
+        read: AgentReadPermission::All,
+        write: AgentWritePermission::All,
+        command: AgentCommandPermission::RequireApproval,
+        command_safety: AgentCommandSafetyPolicy::FullAccess,
+        patch: Default::default(),
+        builtin_execution: Default::default(),
+    };
+    let forbidden_executor: AgentHostActionExecutor = Arc::new(|_, _, _| {
+        Err(AgentError::new(
+            "future-tools replay test must not execute a tool",
+        ))
+    });
+    let restarted_output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            restarted_input,
+            Some(NEXT_RUN_ID.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_host_actions(forbidden_executor, Arc::clone(&restarted_storage))
+                    .with_provider_continuation_vault(restarted_vault),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restarted_output.status, AgentRunStatus::Completed);
+
+    server.await.unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(count_request_occurrences(&requests[0], STEER_REASONING), 0);
+    assert_eq!(count_request_occurrences(&requests[0], FINAL_REASONING), 0);
+    assert_eq!(count_request_occurrences(&requests[2], STEER_REASONING), 1);
+    assert_eq!(count_request_occurrences(&requests[2], FINAL_REASONING), 1);
+    assert!(requests[2]
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty()));
 }

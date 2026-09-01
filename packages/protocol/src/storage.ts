@@ -1,27 +1,176 @@
 import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from './agent'
 
 export type KnownProviderProfileId =
-  'generic_openai_chat' | 'generic_anthropic_messages' | 'deepseek_v4_chat'
+  | 'generic_openai_chat'
+  | 'generic_anthropic_messages'
+  | 'deepseek_v4_chat'
+  | 'deepseek_v4_vision'
+  | 'moonshot_k3_chat'
+  | 'moonshot_k2_7_code_chat'
+  | 'moonshot_k2_6_chat'
 
 /** Persisted ids are tolerant so unsupported future profiles can be displayed without reset. */
 export type ProviderProfileId = KnownProviderProfileId | (string & {})
 
 export type ProviderProtocolDialect = 'openai_chat_completions' | 'anthropic_messages'
 
-export type ProviderReasoningMode = 'provider_default' | 'enabled' | 'disabled'
-export type ProviderReasoningEffort = 'provider_default' | 'high' | 'max'
+export type KnownProviderVendorId = 'generic' | 'deepseek' | 'moonshot'
 
-export interface ProviderProfileConfig {
-  schemaVersion: number
+/** Persisted ids are tolerant; Host registration remains authoritative for support. */
+export type ProviderVendorId = KnownProviderVendorId | (string & {})
+
+export type ProviderReasoningMode = 'provider_default' | 'enabled' | 'disabled'
+/** Legacy v1 Profile settings never accepted `low`. */
+export type LegacyProviderReasoningEffort = 'provider_default' | 'high' | 'max'
+/** Family-owned Profile v2 effort. */
+export type ProviderReasoningEffort = 'provider_default' | 'low' | 'high' | 'max'
+export type MoonshotK26ThinkingMode =
+  'provider_default' | 'enabled' | 'disabled' | 'enabled_keep_all'
+
+export interface ProviderFamilyReasoningPolicy {
+  mode: ProviderReasoningMode
+  effort: ProviderReasoningEffort
+}
+
+export interface ProviderProfileConfigV1 {
+  schemaVersion: 1
   profile: {
     id: ProviderProfileId
     version: number
   }
   reasoning: {
     mode: ProviderReasoningMode
-    effort: ProviderReasoningEffort
+    effort: LegacyProviderReasoningEffort
   }
 }
+
+/** Explicit legacy name for consumers that project only the original Profile shape. */
+export type LegacyProviderProfileConfigV1 = ProviderProfileConfigV1
+
+export interface GenericProviderSettingsV1 {
+  kind: 'generic'
+}
+
+export interface DeepSeekV4ChatProviderSettingsV1 {
+  kind: 'deepseek_v4_chat'
+  reasoning: ProviderFamilyReasoningPolicy
+}
+
+export interface DeepSeekV4VisionProviderSettingsV1 {
+  kind: 'deepseek_v4_vision'
+  reasoning: ProviderFamilyReasoningPolicy
+}
+
+export interface MoonshotK3ChatProviderSettingsV1 {
+  kind: 'moonshot_k3_chat'
+  reasoningEffort: ProviderReasoningEffort
+}
+
+export interface MoonshotK27CodeChatProviderSettingsV1 {
+  kind: 'moonshot_k2_7_code_chat'
+}
+
+export interface MoonshotK26ChatProviderSettingsV1 {
+  kind: 'moonshot_k2_6_chat'
+  thinkingMode: MoonshotK26ThinkingMode
+}
+
+/** Versioned, model-family-owned settings used by Provider Profile config schema v2. */
+export type ProviderFamilySettings =
+  | GenericProviderSettingsV1
+  | DeepSeekV4ChatProviderSettingsV1
+  | DeepSeekV4VisionProviderSettingsV1
+  | MoonshotK3ChatProviderSettingsV1
+  | MoonshotK27CodeChatProviderSettingsV1
+  | MoonshotK26ChatProviderSettingsV1
+
+export type ProviderVendorPublicSettings = ProviderFamilySettings
+
+export interface ProviderProfileConfigV2 {
+  schemaVersion: 2
+  vendorId: ProviderVendorId
+  profile: {
+    id: ProviderProfileId
+    version: number
+  }
+  settings: ProviderFamilySettings
+}
+
+/**
+ * Persisted Profile config. V1 remains losslessly readable and is retained by `unchanged` saves;
+ * only an explicit family-aware Provider selection writes V2.
+ */
+export type ProviderProfileConfig = ProviderProfileConfigV1 | ProviderProfileConfigV2
+
+export interface ProviderVendorDescriptor {
+  vendorId: ProviderVendorId
+  displayName: string
+  selectable: boolean
+}
+
+export type ProviderModelFamilyId =
+  | 'generic_openai_chat'
+  | 'generic_anthropic_messages'
+  | 'deepseek_v4_chat'
+  | 'deepseek_v4_vision'
+  | 'moonshot_k3_chat'
+  | 'moonshot_k2_7_code_chat'
+  | 'moonshot_k2_6_chat'
+
+export type ProviderVendorSettingsKind = 'none' | 'deepseek' | 'moonshot'
+
+export type ProviderFamilySettingsDescriptor =
+  | {
+      kind: 'generic'
+      defaultSettings: GenericProviderSettingsV1
+    }
+  | {
+      kind: 'deepseek_v4_chat'
+      reasoningModes: ProviderReasoningMode[]
+      reasoningEfforts: ProviderReasoningEffort[]
+      defaultSettings: DeepSeekV4ChatProviderSettingsV1
+    }
+  | {
+      kind: 'deepseek_v4_vision'
+      reasoningModes: ProviderReasoningMode[]
+      reasoningEfforts: ProviderReasoningEffort[]
+      defaultSettings: DeepSeekV4VisionProviderSettingsV1
+    }
+  | {
+      kind: 'moonshot_k3_chat'
+      reasoningEfforts: ProviderReasoningEffort[]
+      defaultSettings: MoonshotK3ChatProviderSettingsV1
+    }
+  | {
+      kind: 'moonshot_k2_7_code_chat'
+      defaultSettings: MoonshotK27CodeChatProviderSettingsV1
+    }
+  | {
+      kind: 'moonshot_k2_6_chat'
+      thinkingModes: MoonshotK26ThinkingMode[]
+      defaultSettings: MoonshotK26ChatProviderSettingsV1
+    }
+
+export interface ProviderVendorModelPolicyInput {
+  vendorId: ProviderVendorId
+  modelId: string
+  dialect: ProviderProtocolDialect
+}
+
+/** Safe Host-authoritative model-family/settings projection for the settings UI. */
+export type ProviderVendorModelPolicyDescriptor =
+  | {
+      status: 'supported'
+      vendorId: ProviderVendorId
+      modelFamily: ProviderModelFamilyId
+      settingsKind: ProviderVendorSettingsKind
+      settings: ProviderFamilySettingsDescriptor
+    }
+  | {
+      status: 'unsupported'
+      vendorId: ProviderVendorId
+      reason: 'unsupported_vendor' | 'unsupported_model' | 'unsupported_dialect'
+    }
 
 /**
  * Safe, read-only projection of one code-owned Provider Profile registration.
@@ -44,7 +193,7 @@ export interface DeepSeekV4ChatProviderSettings {
   kind: 'deepseek_v4_chat'
   reasoning: {
     mode: ProviderReasoningMode
-    effort: ProviderReasoningEffort
+    effort: LegacyProviderReasoningEffort
   }
 }
 
@@ -62,6 +211,12 @@ export type StorageProviderProfileUpdate =
       kind: 'select_registered_profile'
       profileId: ProviderProfileId
       settings: ProviderProfileSettings
+    }
+  | {
+      /** Host resolves the exact family/Profile/version from vendor, model id and dialect. */
+      kind: 'select_vendor'
+      vendorId: ProviderVendorId
+      settings: ProviderFamilySettings
     }
 
 export interface StorageModelConfigRecord {

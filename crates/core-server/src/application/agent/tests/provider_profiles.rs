@@ -284,7 +284,7 @@ fn current_model_freezes_the_generic_profile_for_the_resolved_dialect() {
         key.dialect,
         mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions
     );
-    assert_eq!(key.profile, config.profile);
+    assert_eq!(key.profile, config.profile());
     assert_eq!(key.model_id, "model-1");
     assert_eq!(
         key.provider_configuration_revision.as_deref(),
@@ -330,16 +330,16 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
     let authoritative = storage.save_model_settings_request(request).unwrap();
     let stored = &authoritative.models[0].provider_profile_config;
     assert_eq!(
-        stored.profile,
+        stored.profile(),
         mycopilot_core::ProviderProfileRef::deepseek_v4_chat()
     );
     assert_eq!(
-        stored.reasoning.mode,
+        stored.reasoning_mode(),
         mycopilot_core::ReasoningMode::Enabled
     );
     assert_eq!(
-        stored.reasoning.effort,
-        mycopilot_core::ReasoningEffort::High
+        stored.provider_reasoning_effort(),
+        mycopilot_core::ProviderReasoningEffort::High
     );
 
     let prepared = prepare_conversation_turn(
@@ -352,9 +352,9 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
     let frozen_config = prepared.agent_input.provider_profile_config.unwrap();
     let frozen_key = prepared.agent_input.provider_protocol_key.unwrap();
     assert_eq!(frozen_config, stored.clone());
-    assert_eq!(frozen_key.profile, stored.profile);
+    assert_eq!(frozen_key.profile, stored.profile());
     let registration = mycopilot_core::resolve_provider_registration_for_key(&frozen_key).unwrap();
-    assert_eq!(registration.profile(), stored.profile);
+    assert_eq!(registration.profile(), stored.profile());
     assert_eq!(
         registration.runtime_capabilities().tool_exchange(),
         mycopilot_core::ProviderToolExchangeSemantics::ExactProviderGrouped
@@ -401,7 +401,7 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
     let frozen_config = prepared.agent_input.provider_profile_config.unwrap();
     let frozen_key = prepared.agent_input.provider_protocol_key.unwrap();
     assert_eq!(
-        frozen_config.profile,
+        frozen_config.profile(),
         mycopilot_core::ProviderProfileRef::generic_for_dialect(
             mycopilot_core::ProviderProtocolDialect::AnthropicMessages
         )
@@ -410,7 +410,7 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
         mycopilot_core::resolve_provider_registration_for_key(&frozen_key)
             .unwrap()
             .profile(),
-        frozen_config.profile
+        frozen_config.profile()
     );
 }
 
@@ -1417,14 +1417,16 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
-        Some(mycopilot_core::ProviderProfileConfig {
-            schema_version: mycopilot_core::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-            profile: mycopilot_core::ProviderProfileRef::deepseek_v4_chat(),
-            reasoning: mycopilot_core::ReasoningPolicy {
-                mode: mycopilot_core::ReasoningMode::Enabled,
-                effort: mycopilot_core::ReasoningEffort::High,
+        Some(mycopilot_core::ProviderProfileConfig::V1(
+            mycopilot_core::ProviderProfileConfigV1 {
+                schema_version: mycopilot_core::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+                profile: mycopilot_core::ProviderProfileRef::deepseek_v4_chat(),
+                reasoning: mycopilot_core::ReasoningPolicy {
+                    mode: mycopilot_core::ReasoningMode::Enabled,
+                    effort: mycopilot_core::ReasoningEffort::High,
+                },
             },
-        }),
+        )),
     );
     storage
         .save_conversation(ChatConversationRecord {
@@ -2423,7 +2425,10 @@ async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_av
             "deepseek",
             Some({
                 let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-                profile.reasoning.mode = mycopilot_core::ReasoningMode::Disabled;
+                let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
+                    unreachable!("legacy DeepSeek constructor must produce schema v1")
+                };
+                config.reasoning.mode = mycopilot_core::ReasoningMode::Disabled;
                 profile
             }),
         ),
@@ -2506,7 +2511,10 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
     let database_path = fixture.path().join("deepseek-no-provider-vault.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning.mode = mycopilot_core::ReasoningMode::Disabled;
+    let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning.mode = mycopilot_core::ReasoningMode::Disabled;
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),

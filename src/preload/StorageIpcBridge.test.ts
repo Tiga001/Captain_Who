@@ -42,6 +42,41 @@ describe('Storage IPC bridge', () => {
     )
   })
 
+  it('routes the safe Provider vendor directory and model policy resolver', async () => {
+    const descriptors = [
+      { vendorId: 'generic', displayName: 'Generic', selectable: true },
+      { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
+      { vendorId: 'moonshot', displayName: 'Moonshot AI', selectable: true }
+    ]
+    const policy = {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      }
+    }
+    const input = {
+      vendorId: 'moonshot',
+      modelId: 'kimi-k3',
+      dialect: 'openai_chat_completions'
+    } as const
+    const invoke = vi.fn().mockResolvedValueOnce(descriptors).mockResolvedValueOnce(policy)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+
+    await expect(bridge.loadProviderVendorDescriptors()).resolves.toBe(descriptors)
+    await expect(bridge.resolveProviderVendorModelPolicy(input)).resolves.toBe(policy)
+    expect(invoke).toHaveBeenNthCalledWith(1, 'host:storage.loadProviderVendorDescriptors')
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      'host:storage.resolveProviderVendorModelPolicy',
+      input
+    )
+  })
+
   it('passes the structured conversation-fork result through without throwing', async () => {
     const response = {
       ok: false,

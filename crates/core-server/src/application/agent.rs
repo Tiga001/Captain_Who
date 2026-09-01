@@ -678,6 +678,11 @@ impl AgentService {
                 global_agent_concurrency_limit,
             )
             .map_err(|error| error.to_string())?;
+        storage
+            .reconcile_staged_provider_continuations_on_startup(now_ms())
+            .map_err(|error| {
+                format!("failed to reconcile staged Provider continuations: {error}")
+            })?;
         // Process handles are intentionally not recoverable across Host restarts. Reconcile the
         // operational projection before generic orphaned-run handling so no stale row is ever
         // advertised as controllable by this process.

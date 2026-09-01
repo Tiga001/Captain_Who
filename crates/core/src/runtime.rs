@@ -178,13 +178,47 @@ fn hydrate_provider_continuation_history(
             json!({ "type": "providerContextBoundary" }),
         ));
     }
-    if !context.has_tool_bearing_assistant_turns() {
-        if required_refs.is_none_or(|refs| refs.is_empty()) {
-            return Ok(None);
+    if let (Some(conversation_id), Some(storage)) = (conversation_id, storage) {
+        let visible_projections = context.journal_provider_continuation_projections();
+        if storage
+            .has_released_provider_continuations_for_projections(
+                conversation_id,
+                &visible_projections,
+            )
+            .map_err(|_| {
+                provider_continuation_runtime_error(
+                    crate::ProviderContinuationStoreError::RepositoryUnavailable,
+                )
+            })?
+        {
+            return Err(AgentError::structured(
+                "provider_context_boundary_required",
+                "当前上下文会暴露已释放的 Provider Assistant Turn。",
+                json!({
+                    "type": "providerContextBoundary",
+                    "recovery": "restartFromSafeContextBoundary"
+                }),
+            ));
         }
-        return Err(provider_continuation_runtime_error(
-            crate::ProviderContinuationStoreError::PayloadNotFound,
-        ));
+    }
+    let has_explicit_replay_state = required_refs.is_some_and(|refs| !refs.is_empty())
+        || !context.provider_continuation_refs()?.is_empty()
+        || context.has_tool_bearing_assistant_turns();
+    let has_stored_replay_state = match (conversation_id, vault, storage) {
+        (Some(conversation_id), Some(vault), _) => vault
+            .has_replayable_for_conversation(conversation_id)
+            .map_err(provider_continuation_runtime_error)?,
+        (Some(conversation_id), None, Some(storage)) => storage
+            .has_replayable_provider_continuations_for_conversation(conversation_id)
+            .map_err(|_| {
+                provider_continuation_runtime_error(
+                    crate::ProviderContinuationStoreError::RepositoryUnavailable,
+                )
+            })?,
+        _ => false,
+    };
+    if !has_explicit_replay_state && !has_stored_replay_state {
+        return Ok(None);
     }
     let conversation_id = conversation_id.ok_or_else(|| {
         provider_continuation_runtime_error(crate::ProviderContinuationStoreError::InvalidBinding)
@@ -197,10 +231,23 @@ fn hydrate_provider_continuation_history(
     let loaded = vault
         .list_replayable_for_conversation(conversation_id, protocol)
         .map_err(provider_continuation_runtime_error)?;
+    // Freeze durable visibility before restoring anything. In particular, inserting an empty
+    // steer-boundary Assistant must not make a second, corrupt narration projection at the same
+    // sequence appear eligible later in this loop.
+    let visible = loaded
+        .iter()
+        .map(|loaded_turn| match loaded_turn.projection {
+            Some(projection) => context.contains_provider_continuation_projection(
+                &loaded_turn.assistant_message_id,
+                projection,
+            ),
+            None => context.contains_trace_for_assistant_message(&loaded_turn.assistant_message_id),
+        })
+        .collect::<Vec<_>>();
     let mut restored_refs = std::collections::BTreeSet::new();
     let mut current_assistant_turn = None;
-    for loaded_turn in loaded {
-        if !context.contains_trace_for_assistant_message(&loaded_turn.assistant_message_id) {
+    for (loaded_turn, projection_is_visible) in loaded.into_iter().zip(visible) {
+        if !projection_is_visible {
             continue;
         }
         restored_refs.insert(loaded_turn.continuation_ref.id.clone());
@@ -209,6 +256,7 @@ fn hydrate_provider_continuation_history(
         }
         context.restore_provider_assistant_turn(
             &loaded_turn.assistant_message_id,
+            loaded_turn.projection,
             loaded_turn.assistant_turn,
         )?;
     }
@@ -227,13 +275,120 @@ fn hydrate_provider_continuation_history(
             ));
         }
     }
-    context.ensure_tool_bearing_turns_replayable(protocol, profile.reasoning.mode)?;
+    context.ensure_tool_bearing_turns_replayable(protocol, profile.reasoning_mode())?;
     if current_assistant_turn_id.is_some() && current_assistant_turn.is_none() {
         return Err(provider_continuation_runtime_error(
             crate::ProviderContinuationStoreError::CheckpointStateMissing,
         ));
     }
     Ok(current_assistant_turn)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_ordinary_provider_assistant_turn(
+    mut turn: crate::llm::LlmAssistantTurn,
+    capabilities: crate::ProviderRuntimeCapabilities,
+    reasoning_mode: crate::ReasoningMode,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+    run_id: &str,
+    request_index: usize,
+    protocol: &ProviderProtocolKey,
+    vault: Option<&Arc<crate::ProviderContinuationVault>>,
+    projection: crate::ProviderContinuationProjection,
+) -> AgentResult<(
+    crate::llm::LlmAssistantTurn,
+    Option<PendingProviderContinuationHandoff>,
+)> {
+    if !turn.provider_tool_calls().is_empty() {
+        return Err(provider_continuation_runtime_error(
+            crate::ProviderContinuationStoreError::InvalidTurn,
+        ));
+    }
+    let has_provider_continuation = turn.provider_continuation().is_some();
+    let turn_policy = capabilities.classify_turn(
+        !turn.provider_tool_calls().is_empty(),
+        has_provider_continuation,
+        reasoning_mode,
+    );
+    if matches!(
+        (
+            turn_policy.continuation_requirement(),
+            has_provider_continuation
+        ),
+        (ProviderContinuationRequirement::Required, false)
+            | (ProviderContinuationRequirement::Forbidden, true)
+    ) {
+        return Err(provider_continuation_runtime_error(
+            crate::ProviderContinuationStoreError::InvalidTurn,
+        ));
+    }
+    if !turn_policy.requires_private_replay() {
+        return Ok((turn, None));
+    }
+
+    let conversation_id = conversation_id.ok_or_else(|| {
+        provider_continuation_runtime_error(crate::ProviderContinuationStoreError::InvalidBinding)
+    })?;
+    let assistant_message_id = assistant_message_id.ok_or_else(|| {
+        provider_continuation_runtime_error(crate::ProviderContinuationStoreError::InvalidBinding)
+    })?;
+    let vault = vault.cloned().ok_or_else(|| {
+        provider_continuation_runtime_error(
+            crate::ProviderContinuationStoreError::CredentialUnavailable,
+        )
+    })?;
+    let request_index = u64::try_from(request_index).map_err(|_| {
+        provider_continuation_runtime_error(crate::ProviderContinuationStoreError::InvalidBinding)
+    })?;
+    let assistant_turn_id = turn.stable_id();
+    let assistant_turn_digest = turn.stable_digest();
+    let binding = crate::provider_continuation_store::ProviderContinuationBinding {
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        request_index,
+        assistant_turn_id: &assistant_turn_id,
+        assistant_turn_digest: &assistant_turn_digest,
+        provider_protocol: protocol,
+    };
+    let continuation_ref = vault
+        .persist_staged_with_projection(binding, projection, &turn)
+        .map_err(provider_continuation_runtime_error)?
+        .ok_or_else(|| {
+            provider_continuation_runtime_error(
+                crate::ProviderContinuationStoreError::PayloadNotFound,
+            )
+        })?;
+    turn = match turn.with_provider_continuation_ref(continuation_ref.clone()) {
+        Ok(turn) => turn,
+        Err(error) => {
+            let _ = vault.release(
+                &continuation_ref,
+                crate::provider_continuation_store::ProviderContinuationOwner {
+                    conversation_id,
+                    assistant_message_id,
+                    run_id,
+                },
+                now_ms(),
+            );
+            return Err(error);
+        }
+    };
+    Ok((
+        turn,
+        Some(PendingProviderContinuationHandoff {
+            vault,
+            continuation_ref,
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            run_id: run_id.to_string(),
+            request_index,
+            assistant_turn_id,
+            assistant_turn_digest,
+            provider_protocol: protocol.clone(),
+        }),
+    ))
 }
 
 fn provider_continuation_runtime_error(error: crate::ProviderContinuationStoreError) -> AgentError {
@@ -729,7 +884,7 @@ impl AgentRuntime {
                     .classify_turn(
                         !turn.provider_tool_calls().is_empty(),
                         turn.provider_continuation().is_some(),
-                        llm_request.provider_profile_config.reasoning.mode,
+                        llm_request.provider_profile_config.reasoning_mode(),
                     )
                     .settles_entire_batch_on_terminal()
             })
@@ -891,6 +1046,7 @@ impl AgentRuntime {
                                 apply_steer_inputs(
                                     &run_id,
                                     trace_assistant_message_id.as_deref(),
+                                    None,
                                     None,
                                     pending,
                                     &mut active_context,
@@ -1500,13 +1656,24 @@ impl AgentRuntime {
                         continue;
                     }
                     if tool_requests.is_empty() {
+                        assistant_turn.set_runtime_visible_text(retained_assistant_content);
                         if let Some(steer_input) = &steer_input {
                             match steer_input.take_pending_or_close() {
                                 AgentSteerDrainOrClose::Pending(pending) => {
                                     apply_steer_inputs(
                                         &run_id,
                                         trace_assistant_message_id.as_deref(),
-                                        Some(&response_content),
+                                        Some(assistant_turn),
+                                        Some(OrdinaryProviderContinuationPersistence {
+                                            capabilities: provider_runtime_capabilities,
+                                            reasoning_mode: llm_request
+                                                .provider_profile_config
+                                                .reasoning_mode(),
+                                            conversation_id: trace_conversation_id.as_deref(),
+                                            request_index: model_request_index,
+                                            protocol: &llm_request.provider_protocol_key,
+                                            vault: provider_continuation_vault.as_ref(),
+                                        }),
                                         pending,
                                         &mut active_context,
                                         &conversation_trace,
@@ -1520,6 +1687,23 @@ impl AgentRuntime {
                                 AgentSteerDrainOrClose::Closed => {}
                             }
                         }
+                        // The encrypted final turn remains staged until the Host commits the
+                        // terminal ConversationMessage. That terminal transaction promotes the
+                        // exact owner, so a failed message write can never expose orphaned raw
+                        // Provider state to a later run.
+                        let (_staged_final_turn, _terminal_message_handoff) =
+                            stage_ordinary_provider_assistant_turn(
+                            assistant_turn,
+                            provider_runtime_capabilities,
+                            llm_request.provider_profile_config.reasoning_mode(),
+                            trace_conversation_id.as_deref(),
+                            trace_assistant_message_id.as_deref(),
+                            &run_id,
+                            model_request_index,
+                            &llm_request.provider_protocol_key,
+                            provider_continuation_vault.as_ref(),
+                            crate::ProviderContinuationProjection::ConversationMessage,
+                        )?;
                         break 'agent_loop response_content;
                     }
                     response_fence_corrections = 0;
@@ -1614,7 +1798,7 @@ impl AgentRuntime {
                     let provider_turn_policy = provider_runtime_capabilities.classify_turn(
                         !assistant_turn.provider_tool_calls().is_empty(),
                         has_provider_continuation,
-                        llm_request.provider_profile_config.reasoning.mode,
+                        llm_request.provider_profile_config.reasoning_mode(),
                     );
                     let continuation_requirement =
                         provider_turn_policy.continuation_requirement();
@@ -4121,11 +4305,22 @@ fn unavailable_tool_error(tool_set: &EffectiveToolSet, tool_name: &str) -> Agent
     }
 }
 
+#[derive(Clone, Copy)]
+struct OrdinaryProviderContinuationPersistence<'a> {
+    capabilities: crate::ProviderRuntimeCapabilities,
+    reasoning_mode: crate::ReasoningMode,
+    conversation_id: Option<&'a str>,
+    request_index: usize,
+    protocol: &'a ProviderProtocolKey,
+    vault: Option<&'a Arc<crate::ProviderContinuationVault>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_steer_inputs(
     run_id: &str,
     trace_assistant_message_id: Option<&str>,
-    preceding_assistant_content: Option<&str>,
+    mut preceding_assistant_turn: Option<crate::llm::LlmAssistantTurn>,
+    provider_continuation_persistence: Option<OrdinaryProviderContinuationPersistence<'_>>,
     inputs: Vec<AgentSteerInput>,
     active_context: &mut ContextFrame,
     conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
@@ -4148,10 +4343,64 @@ fn apply_steer_inputs(
         })
         .collect::<AgentResult<Vec<_>>>()?;
 
-    let preceding_assistant_content = preceding_assistant_content
+    let preceding_assistant_content = preceding_assistant_turn
+        .as_ref()
+        .map(crate::llm::LlmAssistantTurn::visible_text)
         .map(str::trim)
         .filter(|content| !content.is_empty())
         .map(ToString::to_string);
+    let expected_next_trace_sequence = preceding_assistant_turn.as_ref().map(|_| {
+        conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .next_sequence()
+    });
+    let expected_preceding_narration_sequence = preceding_assistant_content
+        .as_ref()
+        .and(expected_next_trace_sequence);
+    let expected_steer_boundary_sequence = preceding_assistant_turn
+        .as_ref()
+        .filter(|_| preceding_assistant_content.is_none())
+        .and(expected_next_trace_sequence);
+    let mut pending_provider_continuation_handoff = None;
+    if let (Some(sequence), Some(persistence)) = (
+        expected_next_trace_sequence,
+        provider_continuation_persistence,
+    ) {
+        let turn = preceding_assistant_turn.take().ok_or_else(|| {
+            provider_continuation_runtime_error(crate::ProviderContinuationStoreError::InvalidTurn)
+        })?;
+        let projection = if preceding_assistant_content.is_some() {
+            crate::ProviderContinuationProjection::ConversationTraceItem {
+                sequence,
+                ordinal: 0,
+            }
+        } else {
+            crate::ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: sequence,
+            }
+        };
+        let (turn, pending) = stage_ordinary_provider_assistant_turn(
+            turn,
+            persistence.capabilities,
+            persistence.reasoning_mode,
+            persistence.conversation_id,
+            trace_assistant_message_id,
+            run_id,
+            persistence.request_index,
+            persistence.protocol,
+            persistence.vault,
+            projection,
+        )?;
+        preceding_assistant_turn = Some(turn);
+        pending_provider_continuation_handoff = pending;
+        if pending_provider_continuation_handoff.is_some() && trace_observer.is_none() {
+            release_pending_provider_continuation(&mut pending_provider_continuation_handoff)?;
+            return Err(provider_continuation_runtime_error(
+                crate::ProviderContinuationStoreError::InvalidBinding,
+            ));
+        }
+    }
     let mut applied = Vec::with_capacity(inputs.len());
     let preceding_assistant_sequence;
     {
@@ -4159,9 +4408,17 @@ fn apply_steer_inputs(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         preceding_assistant_sequence = match preceding_assistant_content.as_deref() {
-            Some(content) => recorder
-                .record_narration(content)
-                .map_err(AgentError::new)?,
+            Some(content) => {
+                let sequence = recorder
+                    .record_narration(content)
+                    .map_err(AgentError::new)?;
+                if sequence != expected_preceding_narration_sequence {
+                    return Err(provider_continuation_runtime_error(
+                        crate::ProviderContinuationStoreError::InvalidBinding,
+                    ));
+                }
+                sequence
+            }
             None => None,
         };
         for input in &inputs {
@@ -4182,6 +4439,13 @@ fn apply_steer_inputs(
                 })?;
             let (attachments, _) = trace_attachments_from_input(&input.attachments);
             applied.push((input.clone(), attachments, sequence));
+        }
+    }
+    if let Some(expected_sequence) = expected_steer_boundary_sequence {
+        if applied.first().map(|(_, _, sequence)| *sequence) != Some(expected_sequence) {
+            return Err(provider_continuation_runtime_error(
+                crate::ProviderContinuationStoreError::InvalidBinding,
+            ));
         }
     }
     {
@@ -4208,20 +4472,33 @@ fn apply_steer_inputs(
         }
     }
     let baseline = publish_trace_snapshot(conversation_trace, trace_observer)?;
+    // The authoritative storage observer promotes this exact trace projection inside the same
+    // transaction that makes its Trace/ModelContext owner durable. Runtime must not promote here:
+    // an arbitrary observer can acknowledge an in-memory snapshot without persisting it, and a
+    // commit-unknown observer can return an error after the transaction already succeeded.
+    // Dropping this handoff leaves the former safely staged for reconciliation and the latter
+    // already active through the storage transaction's idempotent exact-projection promotion.
+    drop(pending_provider_continuation_handoff.take());
 
-    if let Some(content) = preceding_assistant_content {
-        active_context.push(ContextItem::new(
-            LlmMessage::text(LlmMessageRole::Assistant, content),
-            with_trace_origin(
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
+    if let Some(turn) = preceding_assistant_turn {
+        let checkpoint_turn = turn.without_raw_continuation_for_checkpoint();
+        let provider_projection_sequence =
+            preceding_assistant_sequence.or(expected_steer_boundary_sequence);
+        active_context.push(
+            ContextItem::new(
+                LlmMessage::from_assistant_turn(turn),
+                with_trace_origin(
+                    ContextMetadata::new(
+                        ContextSource::ModelResponse,
+                        ContextScope::Run,
+                        ContextRetention::Retained,
+                    ),
+                    trace_assistant_message_id,
+                    provider_projection_sequence,
                 ),
-                trace_assistant_message_id,
-                preceding_assistant_sequence,
-            ),
-        ));
+            )
+            .with_checkpoint_message(LlmMessage::from_assistant_turn(checkpoint_turn)),
+        );
     }
     for ((input, attachments, sequence), attachment_context) in
         applied.into_iter().zip(attachment_contexts)

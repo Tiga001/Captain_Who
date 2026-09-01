@@ -8,6 +8,10 @@ export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): Storage
     loadModelSettings: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadModelSettings),
     loadProviderProfileUiDescriptors: () =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderProfileUiDescriptors),
+    loadProviderVendorDescriptors: () =>
+      ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderVendorDescriptors),
+    resolveProviderVendorModelPolicy: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.storage.resolveProviderVendorModelPolicy, input),
     saveModelSettings: (settings) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveModelSettings, settings),
     loadAgentPromptPreferences: () =>

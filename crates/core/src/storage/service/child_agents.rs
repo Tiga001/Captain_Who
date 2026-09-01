@@ -591,9 +591,13 @@ fn validate_reasoning_effort(
     let Some(requested) = requested else {
         return Ok(());
     };
-    if requested == crate::ReasoningEffort::ProviderDefault {
-        return Err(ChildAgentSpawnError::UnsupportedReasoningEffort(requested));
-    }
+    let requested_provider_effort = match requested {
+        crate::ReasoningEffort::ProviderDefault => {
+            return Err(ChildAgentSpawnError::UnsupportedReasoningEffort(requested));
+        }
+        crate::ReasoningEffort::High => crate::ProviderReasoningEffort::High,
+        crate::ReasoningEffort::Max => crate::ProviderReasoningEffort::Max,
+    };
     let model = settings
         .settings
         .models
@@ -641,8 +645,8 @@ fn validate_reasoning_effort(
             reason: crate::AgentModelUnavailableReason::UnsupportedRuntime,
         }
     })?;
-    if profile.reasoning.mode != crate::ReasoningMode::Enabled
-        || profile.reasoning.effort != requested
+    if profile.reasoning_mode() != crate::ReasoningMode::Enabled
+        || profile.provider_reasoning_effort() != requested_provider_effort
     {
         return Err(ChildAgentSpawnError::UnsupportedReasoningEffort(requested));
     }

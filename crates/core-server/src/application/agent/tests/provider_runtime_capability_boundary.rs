@@ -1,17 +1,32 @@
 use std::path::{Path, PathBuf};
 
 const ALLOWED_PROVIDER_BOUNDARIES: &[&str] = &[
+    // Crate-root façade: public type re-exports only, with no runtime decisions.
+    "crates/core/src/lib.rs",
     "crates/core/src/provider_profile.rs",
     "crates/core/src/provider_registration.rs",
+    "crates/core/src/provider_registration/generic.rs",
+    "crates/core/src/provider_registration/deepseek.rs",
+    "crates/core/src/provider_registration/moonshot.rs",
     "crates/core/src/llm/adapter.rs",
     "crates/core/src/llm/payload.rs",
+    "crates/core/src/llm/providers/mod.rs",
+    "crates/core/src/llm/providers/deepseek.rs",
+    "crates/core/src/llm/providers/moonshot.rs",
     "crates/core/src/llm/stream.rs",
+    // This file's vendor references are confined to cfg(test) response-parser fixtures. Runtime
+    // request construction still resolves through the exact Adapter registration.
+    "crates/core/src/llm/transport.rs",
 ];
 
 const FORBIDDEN_GENERIC_PROVIDER_MARKERS: &[&str] = &[
     "ProviderProfileId::",
     "DeepSeek",
     "deepseek",
+    "Moonshot",
+    "moonshot",
+    "Kimi",
+    "kimi",
     "is_special_provider",
     "is_deepseek",
 ];

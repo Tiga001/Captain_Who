@@ -270,6 +270,21 @@ pub(crate) fn handle_request(
             request.id,
             mycopilot_core::provider_profile_ui_descriptors(),
         ),
+        STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD => {
+            response_success(request.id, mycopilot_core::provider_vendor_descriptors())
+        }
+        STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD => {
+            let input = match parse_params::<mycopilot_core::ProviderVendorModelPolicyInput>(
+                request.params,
+            ) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            response_success(
+                request.id,
+                mycopilot_core::resolve_provider_vendor_model_policy(&input),
+            )
+        }
         STORAGE_SAVE_MODEL_SETTINGS_METHOD => {
             let settings = match parse_params::<ModelSettingsSaveRequest>(request.params) {
                 Ok(settings) => settings,

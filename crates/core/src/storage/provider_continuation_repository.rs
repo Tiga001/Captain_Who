@@ -21,6 +21,64 @@ pub(crate) enum ProviderContinuationRecordState {
     Released,
 }
 
+/// Host-private durable projection identity for a provider-native ordinary Assistant turn.
+///
+/// Tool-bearing turns remain bound by their exact Runtime ToolCall identities. An ordinary turn
+/// instead owns either the terminal Assistant message or one exact narration item emitted while
+/// steering. This value is deliberately not part of any Renderer-facing DTO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)] // Explicit names mirror the durable projection namespace.
+pub(crate) enum ProviderContinuationProjection {
+    ConversationMessage,
+    ConversationTraceItem { sequence: u64, ordinal: u32 },
+    ConversationSteerBoundary { guidance_sequence: u64 },
+}
+
+impl ProviderContinuationProjection {
+    fn columns(self) -> (&'static str, Option<u64>, Option<u32>) {
+        match self {
+            Self::ConversationMessage => ("conversation_message", None, None),
+            Self::ConversationTraceItem { sequence, ordinal } => {
+                ("conversation_trace_item", Some(sequence), Some(ordinal))
+            }
+            Self::ConversationSteerBoundary { guidance_sequence } => {
+                ("conversation_steer_boundary", Some(guidance_sequence), None)
+            }
+        }
+    }
+
+    fn decode(
+        kind: Option<String>,
+        sequence: Option<u64>,
+        ordinal: Option<u32>,
+    ) -> rusqlite::Result<Option<Self>> {
+        match (kind.as_deref(), sequence, ordinal) {
+            (None, None, None) => Ok(None),
+            (Some("conversation_message"), None, None) => Ok(Some(Self::ConversationMessage)),
+            (Some("conversation_trace_item"), Some(sequence), Some(ordinal)) => {
+                Ok(Some(Self::ConversationTraceItem { sequence, ordinal }))
+            }
+            (Some("conversation_steer_boundary"), Some(guidance_sequence), None) => {
+                Ok(Some(Self::ConversationSteerBoundary { guidance_sequence }))
+            }
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+}
+
+/// A summary/fork boundary cursor. A trace cursor covers every model-context ordinal produced by
+/// that single durable trace item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ProviderContinuationProjectionCursor {
+    ConversationMessage {
+        assistant_message_id: String,
+    },
+    ConversationTraceItem {
+        assistant_message_id: String,
+        sequence: u64,
+    },
+}
+
 impl ProviderContinuationRecordState {
     fn parse(value: &str) -> rusqlite::Result<Self> {
         match value {
@@ -91,6 +149,7 @@ pub(crate) struct StoredProviderContinuationRecord {
     pub(crate) released_at: Option<i64>,
     /// `None` means ciphertext is sealed but not yet visible to replay/list/fork/approval.
     pub(crate) activated_at: Option<i64>,
+    pub(crate) projection: Option<ProviderContinuationProjection>,
 }
 
 impl std::fmt::Debug for StoredProviderContinuationRecord {
@@ -120,6 +179,12 @@ pub(crate) enum ProviderContinuationPromotionOutcome {
     AlreadyPromoted,
     Released,
     NotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProviderContinuationStartupReconciliationOutcome {
+    pub(crate) promoted: usize,
+    pub(crate) released_orphans: usize,
 }
 
 pub(crate) fn valid_continuation_id(value: &str) -> bool {
@@ -216,7 +281,24 @@ pub(crate) fn store_staged(
 ) -> rusqlite::Result<ProviderContinuationStoreOutcome> {
     validate_envelope(record)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let outcome = store_in_connection(&transaction, record, None)?;
+    let outcome = store_in_connection(&transaction, record, None, None)?;
+    transaction.commit()?;
+    Ok(outcome)
+}
+
+pub(crate) fn store_staged_with_projection(
+    connection: &mut Connection,
+    record: &ProviderContinuationEnvelopeRecord,
+    projection: ProviderContinuationProjection,
+) -> rusqlite::Result<ProviderContinuationStoreOutcome> {
+    if !record.runtime_tool_calls.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "ordinary provider continuation projection cannot own ToolCalls".to_string(),
+        ));
+    }
+    validate_envelope(record)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let outcome = store_in_connection(&transaction, record, Some(projection), None)?;
     transaction.commit()?;
     Ok(outcome)
 }
@@ -230,12 +312,31 @@ pub(crate) fn store_active_in_connection(
     connection: &Connection,
     record: &ProviderContinuationEnvelopeRecord,
 ) -> rusqlite::Result<ProviderContinuationStoreOutcome> {
-    store_in_connection(connection, record, Some(record.created_at))
+    store_in_connection(connection, record, None, Some(record.created_at))
+}
+
+pub(crate) fn store_active_with_projection_in_connection(
+    connection: &Connection,
+    record: &ProviderContinuationEnvelopeRecord,
+    projection: ProviderContinuationProjection,
+) -> rusqlite::Result<ProviderContinuationStoreOutcome> {
+    if !record.runtime_tool_calls.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "ordinary provider continuation projection cannot own ToolCalls".to_string(),
+        ));
+    }
+    store_in_connection(
+        connection,
+        record,
+        Some(projection),
+        Some(record.created_at),
+    )
 }
 
 fn store_in_connection(
     connection: &Connection,
     record: &ProviderContinuationEnvelopeRecord,
+    projection: Option<ProviderContinuationProjection>,
     activated_at: Option<i64>,
 ) -> rusqlite::Result<ProviderContinuationStoreOutcome> {
     validate_envelope(record)?;
@@ -258,6 +359,7 @@ fn store_in_connection(
             && existing.payload_digest.as_deref() == Some(record.payload_digest.as_str())
             && existing.decoded_bytes == Some(record.decoded_bytes)
             && existing.compressed_bytes == Some(record.compressed_bytes)
+            && existing.projection == projection
             && existing_runtime_tool_calls == record.runtime_tool_calls
         {
             return Ok(ProviderContinuationStoreOutcome::Idempotent {
@@ -267,6 +369,10 @@ fn store_in_connection(
         return Ok(ProviderContinuationStoreOutcome::Conflict);
     }
 
+    let (projection_kind, projection_sequence, projection_ordinal) = projection
+        .map(ProviderContinuationProjection::columns)
+        .unwrap_or(("", None, None));
+    let projection_kind = projection.map(|_| projection_kind);
     let inserted = connection.execute(
         "
         INSERT INTO provider_continuations (
@@ -275,10 +381,12 @@ fn store_in_connection(
             assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
             state, superseded_by, compression, encryption,
             payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
+            projection_kind, projection_sequence, projection_ordinal,
             created_at, updated_at, released_at, activated_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-            'active', NULL, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, NULL, ?19
+            'active', NULL, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, ?20, ?21, ?21, NULL, ?22
         )
         ",
         params![
@@ -299,6 +407,9 @@ fn store_in_connection(
             &record.ciphertext,
             record.decoded_bytes,
             record.compressed_bytes,
+            projection_kind,
+            projection_sequence,
+            projection_ordinal,
             record.created_at,
             activated_at,
         ],
@@ -402,7 +513,8 @@ pub(crate) fn load(
                    assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
                    state, superseded_by, compression, encryption,
                    payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
-                   created_at, updated_at, released_at, activated_at
+                   created_at, updated_at, released_at, activated_at,
+                   projection_kind, projection_sequence, projection_ordinal
             FROM provider_continuations
             WHERE continuation_id = ?1
             ",
@@ -446,7 +558,10 @@ pub(crate) fn list_replayable_for_conversation(
                continuation.created_at,
                continuation.updated_at,
                continuation.released_at,
-               continuation.activated_at
+               continuation.activated_at,
+               continuation.projection_kind,
+               continuation.projection_sequence,
+               continuation.projection_ordinal
         FROM provider_continuations AS continuation
         INNER JOIN messages AS owner
           ON owner.id = continuation.assistant_message_id
@@ -544,7 +659,8 @@ fn load_for_turn(
                    assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
                    state, superseded_by, compression, encryption,
                    payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
-                   created_at, updated_at, released_at, activated_at
+                   created_at, updated_at, released_at, activated_at,
+                   projection_kind, projection_sequence, projection_ordinal
             FROM provider_continuations
             WHERE conversation_id = ?1
               AND assistant_message_id = ?2
@@ -590,6 +706,11 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProviderContinu
         updated_at: row.get(20)?,
         released_at: row.get(21)?,
         activated_at: row.get(22)?,
+        projection: ProviderContinuationProjection::decode(
+            row.get(23)?,
+            row.get(24)?,
+            row.get(25)?,
+        )?,
     };
     validate_stored_record(&record)?;
     Ok(record)
@@ -675,6 +796,9 @@ pub(crate) fn promote_staged(
         transaction.commit()?;
         return Ok(ProviderContinuationPromotionOutcome::AlreadyPromoted);
     }
+    if !projection_is_durable(&transaction, &record)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let changed = transaction.execute(
         "UPDATE provider_continuations
          SET activated_at = MAX(?2, created_at), updated_at = MAX(?2, created_at)
@@ -708,6 +832,246 @@ pub(crate) fn promote_staged(
     Ok(ProviderContinuationPromotionOutcome::Promoted)
 }
 
+fn projection_is_durable(
+    connection: &Connection,
+    record: &StoredProviderContinuationRecord,
+) -> rusqlite::Result<bool> {
+    match record.projection {
+        Some(ProviderContinuationProjection::ConversationMessage) => connection.query_row(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM messages AS owner
+                 INNER JOIN conversation_turn_traces AS trace
+                   ON trace.assistant_message_id = owner.id
+                  AND trace.conversation_id = owner.conversation_id
+                 WHERE owner.id = ?1
+                   AND owner.conversation_id = ?2
+                   AND owner.role = 'assistant'
+                   AND owner.status != 'pending'
+                   AND trace.run_id = ?3
+                   AND trace.terminal_status = 'completed'
+             )",
+            params![
+                &record.assistant_message_id,
+                &record.conversation_id,
+                &record.run_id
+            ],
+            |row| row.get(0),
+        ),
+        Some(ProviderContinuationProjection::ConversationTraceItem { sequence, ordinal }) => {
+            connection.query_row(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM conversation_turn_traces AS trace
+                     INNER JOIN conversation_turn_trace_items AS trace_item
+                       ON trace_item.assistant_message_id = trace.assistant_message_id
+                      AND trace_item.sequence = ?1
+                      AND trace_item.item_kind = 'assistant_narration'
+                     INNER JOIN conversation_model_context_items AS model_item
+                       ON model_item.assistant_message_id = trace_item.assistant_message_id
+                      AND model_item.sequence = trace_item.sequence
+                      AND model_item.ordinal = ?2
+                     INNER JOIN messages AS owner
+                       ON owner.id = trace.assistant_message_id
+                      AND owner.conversation_id = trace.conversation_id
+                      AND owner.role = 'assistant'
+                     WHERE trace.assistant_message_id = ?3
+                       AND trace.conversation_id = ?4
+                       AND trace.run_id = ?5
+                 )",
+                params![
+                    sequence,
+                    ordinal,
+                    &record.assistant_message_id,
+                    &record.conversation_id,
+                    &record.run_id
+                ],
+                |row| row.get(0),
+            )
+        }
+        Some(ProviderContinuationProjection::ConversationSteerBoundary { guidance_sequence }) => {
+            connection.query_row(
+                "SELECT EXISTS (
+                 SELECT 1
+                 FROM conversation_turn_traces AS trace
+                 INNER JOIN conversation_turn_trace_items AS trace_item
+                   ON trace_item.assistant_message_id = trace.assistant_message_id
+                  AND trace_item.sequence = ?1
+                  AND trace_item.item_kind = 'user_guidance'
+                 INNER JOIN conversation_model_context_items AS model_item
+                   ON model_item.assistant_message_id = trace_item.assistant_message_id
+                  AND model_item.sequence = trace_item.sequence
+                  AND model_item.ordinal = 0
+                 INNER JOIN messages AS owner
+                   ON owner.id = trace.assistant_message_id
+                  AND owner.conversation_id = trace.conversation_id
+                  AND owner.role = 'assistant'
+                 WHERE trace.assistant_message_id = ?2
+                   AND trace.conversation_id = ?3
+                   AND trace.run_id = ?4
+             )",
+                params![
+                    guidance_sequence,
+                    &record.assistant_message_id,
+                    &record.conversation_id,
+                    &record.run_id
+                ],
+                |row| row.get(0),
+            )
+        }
+        None => {
+            let has_tool_calls = connection.query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM provider_continuation_tool_calls
+                     WHERE continuation_id = ?1
+                 )",
+                [&record.continuation_id],
+                |row| row.get(0),
+            )?;
+            Ok(has_tool_calls)
+        }
+    }
+}
+
+/// Promotes steer narration continuations in the same transaction that commits their exact
+/// trace/model-context projection. This is also safe to call repeatedly on an append-only prefix.
+pub(crate) fn promote_staged_trace_projections_in_connection(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    promoted_at: i64,
+) -> rusqlite::Result<usize> {
+    if !valid_identity(conversation_id)
+        || !valid_identity(assistant_message_id)
+        || !valid_identity(run_id)
+        || promoted_at < 0
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid provider continuation trace promotion scope".to_string(),
+        ));
+    }
+    connection.execute(
+        "UPDATE provider_continuations AS continuation
+         SET activated_at = MAX(?4, continuation.created_at),
+             updated_at = MAX(?4, continuation.created_at)
+         WHERE continuation.conversation_id = ?1
+           AND continuation.assistant_message_id = ?2
+           AND continuation.run_id = ?3
+           AND continuation.state IN ('active', 'superseded')
+           AND continuation.activated_at IS NULL
+           AND continuation.projection_kind IN (
+               'conversation_trace_item', 'conversation_steer_boundary'
+           )
+           AND EXISTS (
+               SELECT 1
+               FROM conversation_turn_traces AS trace
+               INNER JOIN conversation_turn_trace_items AS trace_item
+                 ON trace_item.assistant_message_id = trace.assistant_message_id
+                AND trace_item.sequence = continuation.projection_sequence
+               INNER JOIN conversation_model_context_items AS model_item
+                 ON model_item.assistant_message_id = trace_item.assistant_message_id
+                AND model_item.sequence = trace_item.sequence
+                AND model_item.ordinal = CASE continuation.projection_kind
+                    WHEN 'conversation_trace_item' THEN continuation.projection_ordinal
+                    WHEN 'conversation_steer_boundary' THEN 0
+                END
+               INNER JOIN messages AS owner
+                 ON owner.id = trace.assistant_message_id
+                AND owner.conversation_id = trace.conversation_id
+                AND owner.role = 'assistant'
+               WHERE trace.assistant_message_id = continuation.assistant_message_id
+                 AND trace.conversation_id = continuation.conversation_id
+                 AND trace.run_id = continuation.run_id
+                 AND (
+                     (continuation.projection_kind = 'conversation_trace_item'
+                      AND trace_item.item_kind = 'assistant_narration')
+                     OR
+                     (continuation.projection_kind = 'conversation_steer_boundary'
+                      AND trace_item.item_kind = 'user_guidance')
+                 )
+           )",
+        params![conversation_id, assistant_message_id, run_id, promoted_at],
+    )
+}
+
+/// Settles ordinary final-message continuations inside the Host's terminal visibility
+/// transaction. Completed turns are promoted only after exact durable owner/run validation;
+/// failed and cancelled turns destroy any matching staged ciphertext.
+pub(crate) fn settle_staged_conversation_message_in_connection(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    terminal_status: crate::ConversationTurnTraceTerminalStatus,
+    settled_at: i64,
+) -> rusqlite::Result<usize> {
+    if !valid_identity(conversation_id)
+        || !valid_identity(assistant_message_id)
+        || !valid_identity(run_id)
+        || !terminal_status.is_terminal()
+        || settled_at < 0
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid provider continuation terminal settlement".to_string(),
+        ));
+    }
+    let durable_owner = connection.query_row(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM messages AS owner
+             INNER JOIN conversation_turn_traces AS trace
+               ON trace.assistant_message_id = owner.id
+              AND trace.conversation_id = owner.conversation_id
+             WHERE owner.id = ?1
+               AND owner.conversation_id = ?2
+               AND owner.role = 'assistant'
+               AND owner.status != 'pending'
+               AND trace.run_id = ?3
+               AND trace.terminal_status = ?4
+         )",
+        params![
+            assistant_message_id,
+            conversation_id,
+            run_id,
+            terminal_status.as_str()
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !durable_owner {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    match terminal_status {
+        crate::ConversationTurnTraceTerminalStatus::Completed => connection.execute(
+            "UPDATE provider_continuations
+             SET activated_at = MAX(?4, created_at), updated_at = MAX(?4, created_at)
+             WHERE conversation_id = ?1
+               AND assistant_message_id = ?2
+               AND run_id = ?3
+               AND projection_kind = 'conversation_message'
+               AND state IN ('active', 'superseded')
+               AND activated_at IS NULL",
+            params![conversation_id, assistant_message_id, run_id, settled_at],
+        ),
+        crate::ConversationTurnTraceTerminalStatus::Failed
+        | crate::ConversationTurnTraceTerminalStatus::Cancelled => connection.execute(
+            "UPDATE provider_continuations
+             SET state = 'released', superseded_by = NULL,
+                 payload_digest = NULL, nonce = NULL, ciphertext = NULL,
+                 decoded_bytes = NULL, compressed_bytes = NULL,
+                 updated_at = MAX(?4, created_at), released_at = MAX(?4, created_at),
+                 activated_at = NULL
+             WHERE conversation_id = ?1
+               AND assistant_message_id = ?2
+               AND run_id = ?3
+               AND projection_kind = 'conversation_message'
+               AND state IN ('active', 'superseded')",
+            params![conversation_id, assistant_message_id, run_id, settled_at],
+        ),
+        crate::ConversationTurnTraceTerminalStatus::InProgress => unreachable!(),
+    }
+}
+
 /// Recovers the narrow crash window after a durable trace commit but before explicit promotion.
 /// A staged row becomes replayable once its exact owner trace contains any bound Runtime ToolCall.
 /// The full Provider Assistant Turn has crossed into visible history at that point even when a
@@ -719,12 +1083,13 @@ fn promote_recoverable_staged_for_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<usize> {
-    connection.execute(
+    let tool_rows = connection.execute(
         "UPDATE provider_continuations AS continuation
-         SET activated_at = created_at
+         SET activated_at = created_at, updated_at = MAX(updated_at, created_at)
          WHERE continuation.conversation_id = ?1
            AND continuation.state IN ('active', 'superseded')
            AND continuation.activated_at IS NULL
+           AND continuation.projection_kind IS NULL
            AND EXISTS (
                SELECT 1
                FROM conversation_turn_traces AS trace
@@ -743,7 +1108,126 @@ fn promote_recoverable_staged_for_conversation(
                WHERE expected_call.continuation_id = continuation.continuation_id
            )",
         [conversation_id],
-    )
+    )?;
+    let trace_rows = connection.execute(
+        "UPDATE provider_continuations AS continuation
+         SET activated_at = created_at, updated_at = MAX(updated_at, created_at)
+         WHERE continuation.conversation_id = ?1
+           AND continuation.state IN ('active', 'superseded')
+           AND continuation.activated_at IS NULL
+           AND continuation.projection_kind IN (
+               'conversation_trace_item', 'conversation_steer_boundary'
+           )
+           AND EXISTS (
+               SELECT 1
+               FROM conversation_turn_traces AS trace
+               INNER JOIN conversation_turn_trace_items AS trace_item
+                 ON trace_item.assistant_message_id = trace.assistant_message_id
+                AND trace_item.sequence = continuation.projection_sequence
+               INNER JOIN conversation_model_context_items AS model_item
+                 ON model_item.assistant_message_id = trace_item.assistant_message_id
+                AND model_item.sequence = trace_item.sequence
+                AND model_item.ordinal = CASE continuation.projection_kind
+                    WHEN 'conversation_trace_item' THEN continuation.projection_ordinal
+                    WHEN 'conversation_steer_boundary' THEN 0
+                END
+               INNER JOIN messages AS owner
+                 ON owner.id = trace.assistant_message_id
+                AND owner.conversation_id = trace.conversation_id
+                AND owner.role = 'assistant'
+               WHERE trace.assistant_message_id = continuation.assistant_message_id
+                 AND trace.conversation_id = continuation.conversation_id
+                 AND trace.run_id = continuation.run_id
+                 AND (
+                     (continuation.projection_kind = 'conversation_trace_item'
+                      AND trace_item.item_kind = 'assistant_narration')
+                     OR
+                     (continuation.projection_kind = 'conversation_steer_boundary'
+                      AND trace_item.item_kind = 'user_guidance')
+                 )
+           )",
+        [conversation_id],
+    )?;
+    let message_rows = connection.execute(
+        "UPDATE provider_continuations AS continuation
+         SET activated_at = created_at, updated_at = MAX(updated_at, created_at)
+         WHERE continuation.conversation_id = ?1
+           AND continuation.state IN ('active', 'superseded')
+           AND continuation.activated_at IS NULL
+           AND continuation.projection_kind = 'conversation_message'
+           AND EXISTS (
+               SELECT 1
+               FROM messages AS owner
+               INNER JOIN conversation_turn_traces AS trace
+                 ON trace.assistant_message_id = owner.id
+                AND trace.conversation_id = owner.conversation_id
+               WHERE owner.id = continuation.assistant_message_id
+                 AND owner.conversation_id = continuation.conversation_id
+                 AND owner.role = 'assistant'
+                 AND owner.status != 'pending'
+                 AND trace.run_id = continuation.run_id
+                 AND trace.terminal_status = 'completed'
+           )",
+        [conversation_id],
+    )?;
+    Ok(tool_rows
+        .saturating_add(trace_rows)
+        .saturating_add(message_rows))
+}
+
+/// Startup-only reconciliation for encrypted ordinary projections.
+///
+/// Exact durable owners are promoted first. Any remaining projection-bound staged ciphertext is
+/// a crash orphan and is irreversibly scrubbed. Legacy/tool-bound staged rows are intentionally
+/// untouched because their separate ToolCall recovery path may still need them.
+pub(crate) fn reconcile_staged_projections_at_startup(
+    connection: &mut Connection,
+    reconciled_at: i64,
+) -> rusqlite::Result<ProviderContinuationStartupReconciliationOutcome> {
+    if reconciled_at < 0 {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid provider continuation startup reconciliation timestamp".to_string(),
+        ));
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let conversation_ids = {
+        let mut statement = transaction.prepare(
+            "SELECT DISTINCT conversation_id
+             FROM provider_continuations
+             WHERE state IN ('active', 'superseded')
+               AND activated_at IS NULL
+               AND projection_kind IS NOT NULL
+             ORDER BY conversation_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut promoted = 0_usize;
+    for conversation_id in conversation_ids {
+        promoted = promoted.saturating_add(promote_recoverable_staged_for_conversation(
+            &transaction,
+            &conversation_id,
+        )?);
+    }
+    let released_orphans = transaction.execute(
+        "UPDATE provider_continuations
+         SET state = 'released', superseded_by = NULL,
+             payload_digest = NULL, nonce = NULL, ciphertext = NULL,
+             decoded_bytes = NULL, compressed_bytes = NULL,
+             updated_at = MAX(?1, created_at), released_at = MAX(?1, created_at),
+             activated_at = NULL
+         WHERE state IN ('active', 'superseded')
+           AND activated_at IS NULL
+           AND projection_kind IS NOT NULL",
+        [reconciled_at],
+    )?;
+    transaction.commit()?;
+    Ok(ProviderContinuationStartupReconciliationOutcome {
+        promoted,
+        released_orphans,
+    })
 }
 
 #[allow(dead_code)] // Exact-ref Vault release; compaction/edit use caller-owned transactions.
@@ -820,6 +1304,126 @@ pub(crate) fn release_for_messages(
     values.push(conversation_id.to_string().into());
     values.extend(message_ids.iter().cloned().map(Into::into));
     connection.execute(&sql, rusqlite::params_from_iter(values))
+}
+
+pub(crate) fn release_for_covered_projections(
+    connection: &Connection,
+    conversation_id: &str,
+    covered: &[ProviderContinuationProjectionCursor],
+    released_at: i64,
+) -> rusqlite::Result<usize> {
+    if covered.is_empty() {
+        return Ok(0);
+    }
+    validate_projection_cursors(conversation_id, covered, released_at)?;
+    let (predicate, cursor_values) = projection_cursor_predicate(covered);
+    let sql = format!(
+        "UPDATE provider_continuations
+         SET state = 'released', superseded_by = NULL,
+             payload_digest = NULL, nonce = NULL, ciphertext = NULL,
+             decoded_bytes = NULL, compressed_bytes = NULL,
+             updated_at = MAX(?, created_at), released_at = MAX(?, created_at),
+             activated_at = NULL
+         WHERE conversation_id = ?
+           AND state IN ('active', 'superseded')
+           AND projection_kind IS NOT NULL
+           AND ({predicate})"
+    );
+    let mut values = Vec::<rusqlite::types::Value>::with_capacity(cursor_values.len() + 3);
+    values.push(released_at.into());
+    values.push(released_at.into());
+    values.push(conversation_id.to_string().into());
+    values.extend(cursor_values);
+    connection.execute(&sql, rusqlite::params_from_iter(values))
+}
+
+pub(crate) fn has_released_for_covered_projections(
+    connection: &Connection,
+    conversation_id: &str,
+    covered: &[ProviderContinuationProjectionCursor],
+) -> rusqlite::Result<bool> {
+    if covered.is_empty() {
+        return Ok(false);
+    }
+    validate_projection_cursors(conversation_id, covered, 0)?;
+    let (predicate, mut values) = projection_cursor_predicate(covered);
+    let sql = format!(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM provider_continuations
+             WHERE conversation_id = ?
+               AND state = 'released'
+               AND projection_kind IS NOT NULL
+               AND ({predicate})
+             LIMIT 1
+         )"
+    );
+    values.insert(0, conversation_id.to_string().into());
+    connection.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))
+}
+
+fn validate_projection_cursors(
+    conversation_id: &str,
+    covered: &[ProviderContinuationProjectionCursor],
+    timestamp: i64,
+) -> rusqlite::Result<()> {
+    if !valid_identity(conversation_id)
+        || timestamp < 0
+        || covered.len() > MAX_RUNTIME_TOOL_CALLS
+        || covered.iter().any(|cursor| match cursor {
+            ProviderContinuationProjectionCursor::ConversationMessage {
+                assistant_message_id,
+            } => !valid_identity(assistant_message_id),
+            ProviderContinuationProjectionCursor::ConversationTraceItem {
+                assistant_message_id,
+                sequence,
+            } => !valid_identity(assistant_message_id) || i64::try_from(*sequence).is_err(),
+        })
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid provider continuation projection coverage".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn projection_cursor_predicate(
+    covered: &[ProviderContinuationProjectionCursor],
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut predicates = Vec::with_capacity(covered.len());
+    let mut values = Vec::with_capacity(covered.len().saturating_mul(2));
+    for cursor in covered {
+        match cursor {
+            ProviderContinuationProjectionCursor::ConversationMessage {
+                assistant_message_id,
+            } => {
+                predicates.push(
+                    "(projection_kind = 'conversation_message' AND assistant_message_id = ?)"
+                        .to_string(),
+                );
+                values.push(assistant_message_id.clone().into());
+            }
+            ProviderContinuationProjectionCursor::ConversationTraceItem {
+                assistant_message_id,
+                sequence,
+            } => {
+                predicates.push(
+                    "(projection_kind IN (\
+                         'conversation_trace_item', 'conversation_steer_boundary'\
+                     ) \
+                     AND assistant_message_id = ? AND projection_sequence = ?)"
+                        .to_string(),
+                );
+                values.push(assistant_message_id.clone().into());
+                values.push(
+                    i64::try_from(*sequence)
+                        .expect("validated projection sequence fits SQLite INTEGER")
+                        .into(),
+                );
+            }
+        }
+    }
+    (predicates.join(" OR "), values)
 }
 
 pub(crate) fn release_for_covered_runtime_tool_calls(
@@ -990,12 +1594,14 @@ pub(crate) fn has_released_for_messages(
 /// Reports whether a fork's raw-visible message prefix contains any released Provider turn not
 /// fully represented by the selected active compaction summary.
 ///
-/// A released row with no Tool-call identities is conservatively visible. Otherwise every child
-/// runtime call must be inside `summary_covered_runtime_tool_calls`; partial coverage is unsafe.
+/// A released ordinary row is safe only when its exact projection cursor is hidden by the selected
+/// summary. For a Tool-bearing row every child runtime call must be covered; partial coverage is
+/// unsafe. Legacy unbound ordinary rows always require adaptation.
 pub(crate) fn has_released_for_messages_outside_summary_coverage(
     connection: &Connection,
     conversation_id: &str,
     message_ids: &[String],
+    summary_covered_projections: &[ProviderContinuationProjectionCursor],
     summary_covered_runtime_tool_calls: &[(String, String)],
 ) -> rusqlite::Result<bool> {
     if message_ids.is_empty() {
@@ -1014,53 +1620,78 @@ pub(crate) fn has_released_for_messages_outside_summary_coverage(
             "invalid provider continuation fork summary coverage".to_string(),
         ));
     }
-    if summary_covered_runtime_tool_calls.is_empty() {
-        return has_released_for_messages(connection, conversation_id, message_ids);
-    }
+    validate_projection_cursors(conversation_id, summary_covered_projections, 0)?;
     let message_placeholders = std::iter::repeat_n("?", message_ids.len())
         .collect::<Vec<_>>()
         .join(", ");
-    let covered_predicates = std::iter::repeat_n(
-        "(provider_continuations.run_id = ? AND uncovered.runtime_call_id = ?)",
-        summary_covered_runtime_tool_calls.len(),
-    )
-    .collect::<Vec<_>>()
-    .join(" OR ");
     let sql = format!(
-        "SELECT EXISTS (
-             SELECT 1
-             FROM provider_continuations
-             WHERE conversation_id = ?
-               AND assistant_message_id IN ({message_placeholders})
-               AND state = 'released'
-               AND (
-                   NOT EXISTS (
-                       SELECT 1
-                       FROM provider_continuation_tool_calls AS any_call
-                       WHERE any_call.continuation_id = provider_continuations.continuation_id
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                       FROM provider_continuation_tool_calls AS uncovered
-                       WHERE uncovered.continuation_id = provider_continuations.continuation_id
-                         AND NOT ({covered_predicates})
-                   )
-               )
-             LIMIT 1
-         )"
+        "SELECT continuation_id, schema_version, envelope_version,
+                conversation_id, assistant_message_id, run_id, request_index,
+                assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
+                state, superseded_by, compression, encryption,
+                payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
+                created_at, updated_at, released_at, activated_at,
+                projection_kind, projection_sequence, projection_ordinal
+         FROM provider_continuations
+         WHERE conversation_id = ?
+           AND assistant_message_id IN ({message_placeholders})
+           AND state = 'released'"
     );
-    let mut values = Vec::<rusqlite::types::Value>::with_capacity(
-        1usize
-            .saturating_add(message_ids.len())
-            .saturating_add(summary_covered_runtime_tool_calls.len().saturating_mul(2)),
-    );
+    let mut values = Vec::<rusqlite::types::Value>::with_capacity(message_ids.len() + 1);
     values.push(conversation_id.to_string().into());
     values.extend(message_ids.iter().cloned().map(Into::into));
-    for (run_id, runtime_call_id) in summary_covered_runtime_tool_calls {
-        values.push(run_id.clone().into());
-        values.push(runtime_call_id.clone().into());
+    let records = {
+        let mut statement = connection.prepare(&sql)?;
+        let records = statement
+            .query_map(rusqlite::params_from_iter(values), decode_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        records
+    };
+    let covered_projections = summary_covered_projections
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let covered_calls = summary_covered_runtime_tool_calls
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    for record in records {
+        let tool_calls = load_runtime_tool_identities(connection, &record.continuation_id)?;
+        if !tool_calls.is_empty() {
+            if record.projection.is_some()
+                || tool_calls.iter().any(|call| {
+                    !covered_calls.contains(&(record.run_id.clone(), call.runtime_call_id.clone()))
+                })
+            {
+                return Ok(true);
+            }
+            continue;
+        }
+        let exact_cursor = match record.projection {
+            Some(ProviderContinuationProjection::ConversationMessage) => {
+                ProviderContinuationProjectionCursor::ConversationMessage {
+                    assistant_message_id: record.assistant_message_id,
+                }
+            }
+            Some(ProviderContinuationProjection::ConversationTraceItem { sequence, .. }) => {
+                ProviderContinuationProjectionCursor::ConversationTraceItem {
+                    assistant_message_id: record.assistant_message_id,
+                    sequence,
+                }
+            }
+            Some(ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence,
+            }) => ProviderContinuationProjectionCursor::ConversationTraceItem {
+                assistant_message_id: record.assistant_message_id,
+                sequence: guidance_sequence,
+            },
+            None => return Ok(true),
+        };
+        if !covered_projections.contains(&exact_cursor) {
+            return Ok(true);
+        }
     }
-    connection.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))
+    Ok(false)
 }
 
 pub(crate) fn delete_for_conversation(
@@ -1071,4 +1702,403 @@ pub(crate) fn delete_for_conversation(
         "DELETE FROM provider_continuations WHERE conversation_id = ?1",
         [conversation_id],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::migrations;
+
+    fn setup() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations (
+                     id, project_id, model_id, title, created_at, updated_at,
+                     pinned_at, archived_at, unread_at
+                 ) VALUES ('conversation-1', NULL, NULL, 'test', 1, 1, NULL, NULL, NULL);
+                 INSERT INTO messages (
+                     id, conversation_id, role, content, status, agent_run_json,
+                     ui_state_json, created_at, position
+                 ) VALUES (
+                     'assistant-1', 'conversation-1', 'assistant', '', 'pending',
+                     NULL, NULL, 1, 0
+                 );
+                 INSERT INTO conversation_turn_traces (
+                     assistant_message_id, conversation_id, run_id, schema_version,
+                     terminal_status, terminal_error, truncated, created_at, updated_at,
+                     completed_at
+                 ) VALUES (
+                     'assistant-1', 'conversation-1', 'run-1', 4,
+                     'in_progress', NULL, 0, 1, 1, NULL
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    fn record(request_index: u64) -> ProviderContinuationEnvelopeRecord {
+        ProviderContinuationEnvelopeRecord {
+            continuation_id: format!(
+                "{PROVIDER_CONTINUATION_REF_PREFIX}{}",
+                uuid::Uuid::new_v4().hyphenated()
+            ),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            run_id: "run-1".to_string(),
+            request_index,
+            assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+            assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+            provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+            payload_digest: format!("sha256:{}", "d".repeat(64)),
+            nonce: vec![1; 12],
+            ciphertext: vec![2; 17],
+            decoded_bytes: 1,
+            compressed_bytes: 1,
+            created_at: 2,
+            runtime_tool_calls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn staged_trace_projection_recovers_only_after_exact_trace_and_model_item_are_durable() {
+        let mut connection = setup();
+        let record = record(0);
+        store_staged_with_projection(
+            &mut connection,
+            &record,
+            ProviderContinuationProjection::ConversationTraceItem {
+                sequence: 7,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            list_replayable_for_conversation(&connection, "conversation-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        connection
+            .execute(
+                "INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (
+                     'assistant-1', 7, 'assistant_narration',
+                     '{\"type\":\"assistant_narration\",\"sequence\":7,\"content\":\"visible\",\"truncated\":false}'
+                 )",
+                [],
+            )
+            .unwrap();
+        assert!(
+            list_replayable_for_conversation(&connection, "conversation-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        connection
+            .execute(
+                "INSERT INTO conversation_model_context_items (
+                     assistant_message_id, sequence, ordinal, content_hash,
+                     uncompressed_bytes, compression, payload
+                 ) VALUES (
+                     'assistant-1', 7, 0, ?1, 1, 'zstd', X'01'
+                 )",
+                [format!("sha256:{}", "e".repeat(64))],
+            )
+            .unwrap();
+        let replayable = list_replayable_for_conversation(&connection, "conversation-1").unwrap();
+        assert_eq!(replayable.len(), 1);
+        assert_eq!(
+            replayable[0].projection,
+            Some(ProviderContinuationProjection::ConversationTraceItem {
+                sequence: 7,
+                ordinal: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn staged_message_projection_recovers_only_from_completed_exact_owner() {
+        let mut connection = setup();
+        let record = record(0);
+        store_staged_with_projection(
+            &mut connection,
+            &record,
+            ProviderContinuationProjection::ConversationMessage,
+        )
+        .unwrap();
+        assert!(
+            list_replayable_for_conversation(&connection, "conversation-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        connection
+            .execute_batch(
+                "UPDATE messages SET status = 'sent', content = 'done'
+                 WHERE id = 'assistant-1';
+                 UPDATE conversation_turn_traces
+                 SET terminal_status = 'completed', updated_at = 3, completed_at = 3
+                 WHERE assistant_message_id = 'assistant-1';",
+            )
+            .unwrap();
+        let replayable = list_replayable_for_conversation(&connection, "conversation-1").unwrap();
+        assert_eq!(replayable.len(), 1);
+        assert_eq!(
+            replayable[0].projection,
+            Some(ProviderContinuationProjection::ConversationMessage)
+        );
+    }
+
+    #[test]
+    fn staged_steer_boundary_requires_exact_guidance_and_first_model_projection() {
+        let mut connection = setup();
+        let record = record(0);
+        store_staged_with_projection(
+            &mut connection,
+            &record,
+            ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 7,
+            },
+        )
+        .unwrap();
+        assert!(
+            list_replayable_for_conversation(&connection, "conversation-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        connection
+            .execute(
+                "INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (
+                     'assistant-1', 7, 'user_guidance',
+                     '{\"type\":\"user_guidance\",\"sequence\":7}'
+                 )",
+                [],
+            )
+            .unwrap();
+        assert!(
+            list_replayable_for_conversation(&connection, "conversation-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        connection
+            .execute_batch(
+                "DELETE FROM conversation_turn_trace_items
+                 WHERE assistant_message_id = 'assistant-1' AND sequence = 7;
+                 INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (
+                     'assistant-1', 7, 'assistant_narration',
+                     '{\"type\":\"assistant_narration\",\"sequence\":7}'
+                 );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversation_model_context_items (
+                     assistant_message_id, sequence, ordinal, content_hash,
+                     uncompressed_bytes, compression, payload
+                 ) VALUES ('assistant-1', 7, 0, ?1, 1, 'zstd', X'01')",
+                [format!("sha256:{}", "e".repeat(64))],
+            )
+            .unwrap();
+        assert!(
+            list_replayable_for_conversation(&connection, "conversation-1")
+                .unwrap()
+                .is_empty()
+        );
+
+        connection
+            .execute_batch(
+                "DELETE FROM conversation_turn_trace_items
+                 WHERE assistant_message_id = 'assistant-1' AND sequence = 7;
+                 INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (
+                     'assistant-1', 7, 'user_guidance',
+                     '{\"type\":\"user_guidance\",\"sequence\":7}'
+                 );",
+            )
+            .unwrap();
+        let replayable = list_replayable_for_conversation(&connection, "conversation-1").unwrap();
+        assert_eq!(replayable.len(), 1);
+        assert_eq!(
+            replayable[0].projection,
+            Some(ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_promotes_exact_owners_scrubs_orphans_and_is_idempotent() {
+        let mut connection = setup();
+        let message_record = record(0);
+        let trace_record = record(1);
+        let boundary_record = record(2);
+        let orphan_record = record(3);
+        store_staged_with_projection(
+            &mut connection,
+            &message_record,
+            ProviderContinuationProjection::ConversationMessage,
+        )
+        .unwrap();
+        store_staged_with_projection(
+            &mut connection,
+            &trace_record,
+            ProviderContinuationProjection::ConversationTraceItem {
+                sequence: 7,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+        store_staged_with_projection(
+            &mut connection,
+            &boundary_record,
+            ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 8,
+            },
+        )
+        .unwrap();
+        store_staged_with_projection(
+            &mut connection,
+            &orphan_record,
+            ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 9,
+            },
+        )
+        .unwrap();
+        let mut tool_record = record(4);
+        tool_record.runtime_tool_calls = vec![ProviderContinuationRuntimeToolIdentity {
+            provider_tool_index: 0,
+            runtime_call_id: "orphan-tool-call".to_string(),
+        }];
+        store_staged(&mut connection, &tool_record).unwrap();
+
+        connection
+            .execute_batch(
+                "INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES
+                    ('assistant-1', 7, 'assistant_narration',
+                     '{\"type\":\"assistant_narration\",\"sequence\":7}'),
+                    ('assistant-1', 8, 'user_guidance',
+                     '{\"type\":\"user_guidance\",\"sequence\":8}');
+                 INSERT INTO conversation_model_context_items (
+                     assistant_message_id, sequence, ordinal, content_hash,
+                     uncompressed_bytes, compression, payload
+                 ) VALUES
+                    ('assistant-1', 7, 0,
+                     'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                     1, 'zstd', X'01'),
+                    ('assistant-1', 8, 0,
+                     'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                     1, 'zstd', X'02');
+                 UPDATE messages SET status = 'sent', content = 'done'
+                 WHERE id = 'assistant-1';
+                 UPDATE conversation_turn_traces
+                 SET terminal_status = 'completed', updated_at = 3, completed_at = 3
+                 WHERE assistant_message_id = 'assistant-1';",
+            )
+            .unwrap();
+
+        let first = reconcile_staged_projections_at_startup(&mut connection, 4).unwrap();
+        assert_eq!(
+            first,
+            ProviderContinuationStartupReconciliationOutcome {
+                promoted: 3,
+                released_orphans: 1,
+            }
+        );
+        for continuation_id in [
+            &message_record.continuation_id,
+            &trace_record.continuation_id,
+            &boundary_record.continuation_id,
+        ] {
+            assert!(load(&connection, continuation_id)
+                .unwrap()
+                .unwrap()
+                .activated_at
+                .is_some());
+        }
+        let orphan = load(&connection, &orphan_record.continuation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphan.state, ProviderContinuationRecordState::Released);
+        assert!(orphan.ciphertext.is_none());
+        let tool = load(&connection, &tool_record.continuation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tool.state, ProviderContinuationRecordState::Active);
+        assert!(tool.activated_at.is_none());
+        assert!(tool.ciphertext.is_some());
+
+        assert_eq!(
+            reconcile_staged_projections_at_startup(&mut connection, 5).unwrap(),
+            ProviderContinuationStartupReconciliationOutcome {
+                promoted: 0,
+                released_orphans: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn failed_terminal_settlement_releases_only_message_projection() {
+        let mut connection = setup();
+        let message_record = record(0);
+        let trace_record = record(1);
+        store_staged_with_projection(
+            &mut connection,
+            &message_record,
+            ProviderContinuationProjection::ConversationMessage,
+        )
+        .unwrap();
+        store_staged_with_projection(
+            &mut connection,
+            &trace_record,
+            ProviderContinuationProjection::ConversationTraceItem {
+                sequence: 7,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+        connection
+            .execute_batch(
+                "UPDATE messages SET status = 'error' WHERE id = 'assistant-1';
+                 UPDATE conversation_turn_traces
+                 SET terminal_status = 'failed', terminal_error = 'failed',
+                     updated_at = 3, completed_at = 3
+                 WHERE assistant_message_id = 'assistant-1';",
+            )
+            .unwrap();
+
+        settle_staged_conversation_message_in_connection(
+            &connection,
+            "conversation-1",
+            "assistant-1",
+            "run-1",
+            crate::ConversationTurnTraceTerminalStatus::Failed,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load(&connection, &message_record.continuation_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ProviderContinuationRecordState::Released
+        );
+        let trace = load(&connection, &trace_record.continuation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(trace.state, ProviderContinuationRecordState::Active);
+        assert!(trace.activated_at.is_none());
+    }
 }

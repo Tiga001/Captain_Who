@@ -1146,7 +1146,7 @@ fn provider_transition_change_reason(
         });
     if current_profile
         .as_ref()
-        .is_some_and(|profile| profile.profile != target_profile.profile)
+        .is_some_and(|profile| profile.profile() != target_profile.profile())
     {
         AgentProviderTransitionReason::ApiProviderChanged
     } else {

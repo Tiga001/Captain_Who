@@ -697,7 +697,7 @@ function parseReasoning(value: unknown): AutomationReasoningProjection {
     ),
     effort: expectEnum(
       record.effort,
-      ['provider_default', 'high', 'max'] as const,
+      ['provider_default', 'low', 'high', 'max'] as const,
       `${context}.effort`
     )
   }

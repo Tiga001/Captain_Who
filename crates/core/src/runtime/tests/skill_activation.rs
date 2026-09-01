@@ -430,7 +430,10 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
         }
     };
     if matches!(case, SkillApprovalResumeProviderCase::DeepSeekExactGrouped) {
-        provider_profile.reasoning = ReasoningPolicy {
+        let ProviderProfileConfig::V1(config) = &mut provider_profile else {
+            unreachable!("legacy DeepSeek constructor must produce schema v1")
+        };
+        config.reasoning = ReasoningPolicy {
             mode: ReasoningMode::Enabled,
             effort: ReasoningEffort::Max,
         };
@@ -856,7 +859,10 @@ async fn deepseek_grouped_activation_failure_settles_exposed_sibling_without_bou
             .unwrap(),
     );
     let mut provider_profile = ProviderProfileConfig::deepseek_v4_default();
-    provider_profile.reasoning = ReasoningPolicy {
+    let ProviderProfileConfig::V1(config) = &mut provider_profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning = ReasoningPolicy {
         mode: ReasoningMode::Enabled,
         effort: ReasoningEffort::Max,
     };

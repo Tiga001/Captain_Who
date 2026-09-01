@@ -40,6 +40,11 @@ function cloneDraft(draft: AutomationDraft): AutomationDraft {
   return JSON.parse(JSON.stringify(draft)) as AutomationDraft
 }
 
+function legacyReasoningProjection(model: ModelConfig | null) {
+  const config = model?.providerProfileConfig
+  return config?.schemaVersion === 1 ? config.reasoning : undefined
+}
+
 export function validateAutomationFormDraft(
   draft: AutomationDraft,
   modelIds: ReadonlySet<string>,
@@ -216,7 +221,7 @@ export function AutomationTaskForm({
   const reasoningProjection =
     taskNewChatDestination && taskNewChatDestination.modelId === newChatDestination?.modelId
       ? taskNewChatDestination.reasoning
-      : selectedModel?.providerProfileConfig.reasoning
+      : legacyReasoningProjection(selectedModel)
 
   const update = (patch: Partial<AutomationDraft>) => {
     setSubmitError(null)

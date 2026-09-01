@@ -2,6 +2,7 @@ mod adapter;
 mod payload;
 mod provider_cooldown;
 mod provider_error;
+mod providers;
 mod response;
 mod stream;
 mod tool_call_id;

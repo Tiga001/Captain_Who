@@ -742,6 +742,13 @@ fn commit_prefix_replacement_in_transaction(
         &covered_runtime_tool_calls,
         summary.created_at,
     )?;
+    let covered_projections = provider_projection_cursors(&expected_prefix.source_items);
+    provider_continuation_repository::release_for_covered_projections(
+        transaction,
+        &summary.conversation_id,
+        &covered_projections,
+        summary.created_at,
+    )?;
     Ok(summary)
 }
 
@@ -932,6 +939,17 @@ fn ensure_provider_replay_survives_summary_rollback(
     )? {
         return Err(ContextCompactionRepositoryError::Stale(
             "provider_context_boundary_required: 摘要覆盖范围内的 Provider replay 已安全释放，拒绝恢复残缺 Tool Exchange。"
+                .to_string(),
+        ));
+    }
+    let covered_projections = provider_projection_cursors(&entries[source_start..=active_index]);
+    if provider_continuation_repository::has_released_for_covered_projections(
+        connection,
+        &active.conversation_id,
+        &covered_projections,
+    )? {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "provider_context_boundary_required: 摘要覆盖范围内的普通 Provider replay 已安全释放，拒绝恢复残缺 Assistant Turn。"
                 .to_string(),
         ));
     }
@@ -1162,6 +1180,48 @@ pub(crate) fn covered_runtime_tool_calls_through_cursor(
             ContextCompactionSourceItem::Message { .. } => None,
         })
         .collect())
+}
+
+/// Returns exact Host-private ordinary Provider projection cursors hidden by a summary boundary.
+pub(crate) fn covered_provider_projection_cursors_through_cursor(
+    connection: &Connection,
+    conversation_id: &str,
+    covered_through: &ContextJournalCursor,
+) -> Result<
+    Vec<provider_continuation_repository::ProviderContinuationProjectionCursor>,
+    ContextCompactionRepositoryError,
+> {
+    let entries = list_journal_entries(connection, conversation_id)?;
+    let boundary_index = cursor_index(&entries, covered_through).ok_or_else(|| {
+        ContextCompactionRepositoryError::Invalid("摘要覆盖游标不属于目标会话日志。".to_string())
+    })?;
+    Ok(provider_projection_cursors(&entries[..=boundary_index]))
+}
+
+fn provider_projection_cursors(
+    entries: &[ContextCompactionSourceItem],
+) -> Vec<provider_continuation_repository::ProviderContinuationProjectionCursor> {
+    entries
+        .iter()
+        .filter_map(|item| match item {
+            ContextCompactionSourceItem::Message { cursor, role, .. } if role == "assistant" => {
+                Some(
+                    provider_continuation_repository::ProviderContinuationProjectionCursor::ConversationMessage {
+                        assistant_message_id: cursor.message_id().to_string(),
+                    },
+                )
+            }
+            ContextCompactionSourceItem::TraceItem { cursor, .. } => Some(
+                provider_continuation_repository::ProviderContinuationProjectionCursor::ConversationTraceItem {
+                    assistant_message_id: cursor.message_id().to_string(),
+                    sequence: cursor
+                        .trace_sequence()
+                        .expect("TraceItem source cursor always has a sequence"),
+                },
+            ),
+            ContextCompactionSourceItem::Message { .. } => None,
+        })
+        .collect()
 }
 
 pub(crate) fn source_revision_for_cursor(

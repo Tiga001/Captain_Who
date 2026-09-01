@@ -198,6 +198,72 @@ fn exact_enabled_deepseek_reasoning_is_frozen_for_high_and_max() {
 }
 
 #[test]
+fn v2_deepseek_reasoning_is_frozen_for_exact_legacy_agent_efforts() {
+    for (index, (requested, configured)) in [
+        (ReasoningEffort::High, ProviderReasoningEffort::High),
+        (ReasoningEffort::Max, ProviderReasoningEffort::Max),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = Fixture::new(Some("model-a"));
+        fixture
+            .service
+            .save_model_settings(model_settings(vec![deepseek_v2_model(
+                "deepseek-v4-flash",
+                true,
+                crate::ReasoningMode::Enabled,
+                configured,
+            )]))
+            .unwrap();
+        let mut input = spawn_input(
+            &format!("spawn-v2-deepseek-reasoning-{index}"),
+            &format!("v2_deepseek_reasoning_{index}"),
+        );
+        input.explicit_model_id = Some("deepseek-v4-flash".to_string());
+        input.reasoning_effort = Some(requested);
+
+        let spawn = fixture.service.create_child_agent(&input).unwrap();
+        assert_eq!(spawn.agent.reasoning_effort_snapshot, Some(requested));
+    }
+}
+
+#[test]
+fn v2_low_reasoning_never_enters_the_legacy_agent_effort_snapshot() {
+    let fixture = Fixture::new(Some("model-a"));
+    fixture
+        .service
+        .save_model_settings(model_settings(vec![deepseek_v2_model(
+            "deepseek-v4-flash",
+            true,
+            crate::ReasoningMode::Enabled,
+            ProviderReasoningEffort::Low,
+        )]))
+        .unwrap();
+
+    for (index, requested) in [ReasoningEffort::High, ReasoningEffort::Max]
+        .into_iter()
+        .enumerate()
+    {
+        let mut input = spawn_input(
+            &format!("spawn-v2-low-rejected-{index}"),
+            &format!("v2_low_rejected_{index}"),
+        );
+        input.explicit_model_id = Some("deepseek-v4-flash".to_string());
+        input.reasoning_effort = Some(requested);
+        assert_eq!(
+            fixture.service.create_child_agent(&input).unwrap_err(),
+            ChildAgentSpawnError::UnsupportedReasoningEffort(requested)
+        );
+    }
+    assert!(fixture
+        .service
+        .list_agent_children("agent-root", "agent-root")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn provider_default_disabled_and_mismatched_reasoning_are_rejected() {
     for (index, mode, configured, requested) in [
         (

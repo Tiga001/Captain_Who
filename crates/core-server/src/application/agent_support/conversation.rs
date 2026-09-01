@@ -304,8 +304,22 @@ fn prepare_conversation_turn_from_source(
         ..
     } = &source
     {
-        if provider_profile_config.reasoning.mode != mycopilot_core::ReasoningMode::Enabled
-            || provider_profile_config.reasoning.effort != *expected
+        let frozen_effort_matches = match expected {
+            mycopilot_core::ReasoningEffort::ProviderDefault => {
+                provider_profile_config.provider_reasoning_effort()
+                    == mycopilot_core::ProviderReasoningEffort::ProviderDefault
+            }
+            mycopilot_core::ReasoningEffort::High => {
+                provider_profile_config.provider_reasoning_effort()
+                    == mycopilot_core::ProviderReasoningEffort::High
+            }
+            mycopilot_core::ReasoningEffort::Max => {
+                provider_profile_config.provider_reasoning_effort()
+                    == mycopilot_core::ProviderReasoningEffort::Max
+            }
+        };
+        if provider_profile_config.reasoning_mode() != mycopilot_core::ReasoningMode::Enabled
+            || !frozen_effort_matches
         {
             return Err(format!(
                 "可信 Wake 的 reasoning effort 与 Agent 创建快照不一致：{expected:?}"

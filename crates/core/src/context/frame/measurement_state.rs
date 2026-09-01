@@ -203,6 +203,13 @@ impl ContextFrame {
         Ok(refs)
     }
 
+    pub(crate) fn has_tool_bearing_assistant_turns(&self) -> bool {
+        self.iter_items().any(|item| {
+            item.message.role() == LlmMessageRole::Assistant
+                && item.message.tool_calls().next().is_some()
+        })
+    }
+
     pub(crate) fn contains_trace_for_assistant_message(&self, assistant_message_id: &str) -> bool {
         self.iter_items().any(|item| {
             item.metadata
@@ -212,11 +219,81 @@ impl ContextFrame {
         })
     }
 
-    pub(crate) fn has_tool_bearing_assistant_turns(&self) -> bool {
+    pub(crate) fn contains_provider_continuation_projection(
+        &self,
+        assistant_message_id: &str,
+        projection: crate::ProviderContinuationProjection,
+    ) -> bool {
         self.iter_items().any(|item| {
-            item.message.role() == LlmMessageRole::Assistant
-                && item.message.tool_calls().next().is_some()
+            let Some(origin) = item.metadata.origin() else {
+                return false;
+            };
+            match projection {
+                crate::ProviderContinuationProjection::ConversationMessage => {
+                    item.message.role() == LlmMessageRole::Assistant
+                        && origin.kind() == ContextOriginKind::ConversationMessage
+                        && origin
+                            .journal_cursor()
+                            .is_some_and(|cursor| cursor.message_id() == assistant_message_id)
+                }
+                crate::ProviderContinuationProjection::ConversationTraceItem {
+                    sequence,
+                    ordinal,
+                } => {
+                    // An ordinary narration is the sole Assistant projection at ordinal zero for
+                    // its trace sequence. Other ordinals belong to split Tool Call projections
+                    // and must never be rebound as an ordinary Provider turn.
+                    item.message.role() == LlmMessageRole::Assistant
+                        && ordinal == 0
+                        && origin.kind() == ContextOriginKind::ConversationTraceItem
+                        && origin.journal_cursor().is_some_and(|cursor| {
+                            cursor.message_id() == assistant_message_id
+                                && cursor.trace_sequence() == Some(sequence)
+                        })
+                }
+                crate::ProviderContinuationProjection::ConversationSteerBoundary {
+                    guidance_sequence,
+                } => {
+                    item.message.role() == LlmMessageRole::User
+                        && origin.kind() == ContextOriginKind::ConversationTraceItem
+                        && origin.journal_cursor().is_some_and(|cursor| {
+                            cursor.message_id() == assistant_message_id
+                                && cursor.trace_sequence() == Some(guidance_sequence)
+                        })
+                }
+            }
         })
+    }
+
+    pub(crate) fn journal_provider_continuation_projections(
+        &self,
+    ) -> Vec<(String, crate::ProviderContinuationProjection)> {
+        let mut seen = std::collections::HashSet::new();
+        self.iter_items()
+            .filter_map(|item| {
+                let origin = item.metadata.origin()?;
+                let cursor = origin.journal_cursor()?;
+                let projection = match (item.message.role(), origin.kind()) {
+                    (LlmMessageRole::Assistant, ContextOriginKind::ConversationMessage) => {
+                        crate::ProviderContinuationProjection::ConversationMessage
+                    }
+                    (LlmMessageRole::Assistant, ContextOriginKind::ConversationTraceItem) => {
+                        crate::ProviderContinuationProjection::ConversationTraceItem {
+                            sequence: cursor.trace_sequence()?,
+                            ordinal: 0,
+                        }
+                    }
+                    (LlmMessageRole::User, ContextOriginKind::ConversationTraceItem) => {
+                        crate::ProviderContinuationProjection::ConversationSteerBoundary {
+                            guidance_sequence: cursor.trace_sequence()?,
+                        }
+                    }
+                    _ => return None,
+                };
+                let candidate = (cursor.message_id().to_string(), projection);
+                seen.insert(candidate.clone()).then_some(candidate)
+            })
+            .collect()
     }
 
     pub(crate) fn ensure_tool_bearing_turns_replayable(
@@ -260,12 +337,32 @@ impl ContextFrame {
     pub(crate) fn restore_provider_assistant_turn(
         &mut self,
         assistant_message_id: &str,
+        projection: Option<crate::ProviderContinuationProjection>,
         turn: LlmAssistantTurn,
     ) -> AgentResult<()> {
         if assistant_message_id.trim().is_empty() || turn.provider_continuation_ref().is_none() {
             return Err(provider_turn_restore_error(
                 "provider_continuation_corrupt",
                 "Provider Assistant Turn 恢复绑定无效。",
+            ));
+        }
+        if turn.provider_tool_calls().is_empty() {
+            let projection = projection.ok_or_else(|| {
+                provider_turn_restore_error(
+                    "provider_continuation_corrupt",
+                    "普通 Provider Assistant Turn 缺少精确持久化投影。",
+                )
+            })?;
+            return self.restore_ordinary_provider_assistant_turn(
+                assistant_message_id,
+                projection,
+                turn,
+            );
+        }
+        if projection.is_some() {
+            return Err(provider_turn_restore_error(
+                "provider_continuation_corrupt",
+                "Tool-bearing Provider Assistant Turn 不应绑定普通消息投影。",
             ));
         }
         let bindings = turn
@@ -404,6 +501,254 @@ impl ContextFrame {
             .with_checkpoint_message(LlmMessage::from_assistant_turn(checkpoint_turn));
         retained.insert(insertion_index, restored_item);
         self.items = retained;
+        self.measurement = None;
+        self.revision = self.revision.saturating_add(1);
+        self.persistent_revision = persistent_frame_revision(&self.items);
+        Ok(())
+    }
+
+    /// Restores private provider state for an ordinary (non-tool-bearing) assistant message.
+    ///
+    /// Durable conversation history contains only the visible assistant text. Provider-native
+    /// reasoning stays in the encrypted continuation vault and is reattached here only after the
+    /// exact terminal message or steer-narration projection has been authenticated.
+    fn restore_ordinary_provider_assistant_turn(
+        &mut self,
+        assistant_message_id: &str,
+        projection: crate::ProviderContinuationProjection,
+        turn: LlmAssistantTurn,
+    ) -> AgentResult<()> {
+        if turn
+            .runtime_tool_bindings()
+            .is_some_and(|bindings| !bindings.is_empty())
+        {
+            return Err(provider_turn_restore_error(
+                "provider_continuation_corrupt",
+                "普通 Provider Assistant Turn 不应包含 Tool Call 映射。",
+            ));
+        }
+        let continuation_ref = turn
+            .provider_continuation_ref()
+            .expect("validated provider continuation ref")
+            .clone();
+
+        self.materialize_baseline();
+        let (target_index, metadata, insert_before_target) = match projection {
+            crate::ProviderContinuationProjection::ConversationMessage => {
+                // The trace renderer appends a synthetic terminal Assistant with the same
+                // ConversationMessage origin as the real final message. It is an audit boundary,
+                // never the owner of provider-native state.
+                let mut message_indices =
+                    self.items.iter().enumerate().filter_map(|(index, item)| {
+                        (item.message.role() == LlmMessageRole::Assistant
+                            && !item
+                                .metadata
+                                .sources()
+                                .contains(&ContextSource::ConversationTrace)
+                            && item.metadata.origin().is_some_and(|origin| {
+                                origin.kind() == ContextOriginKind::ConversationMessage
+                                    && origin.journal_cursor().is_some_and(|cursor| {
+                                        cursor.message_id() == assistant_message_id
+                                    })
+                            }))
+                        .then_some(index)
+                    });
+                if let Some(index) = message_indices.next() {
+                    if message_indices.next().is_some() {
+                        return Err(provider_turn_restore_error(
+                            "provider_continuation_corrupt",
+                            "模型历史中的普通 Provider Assistant 投影不唯一。",
+                        ));
+                    }
+                    (index, self.items[index].metadata.clone(), false)
+                } else {
+                    // Empty assistant messages are intentionally omitted from ordinary history.
+                    // The durable terminal audit remains as a private ordering anchor, so retain
+                    // it and insert the restored empty provider turn immediately before it.
+                    if !turn.visible_text().trim().is_empty() {
+                        return Err(provider_turn_restore_error(
+                            "provider_continuation_missing",
+                            "模型历史中不存在与 Provider continuation 匹配的普通 Assistant Turn。",
+                        ));
+                    }
+                    let mut terminal_indices =
+                        self.items.iter().enumerate().filter_map(|(index, item)| {
+                            (item.message.role() == LlmMessageRole::Assistant
+                                && item
+                                    .metadata
+                                    .sources()
+                                    .contains(&ContextSource::ConversationTrace)
+                                && item.metadata.origin().is_some_and(|origin| {
+                                    origin.kind() == ContextOriginKind::ConversationMessage
+                                        && origin.journal_cursor().is_some_and(|cursor| {
+                                            cursor.message_id() == assistant_message_id
+                                        })
+                                }))
+                            .then_some(index)
+                        });
+                    let Some(index) = terminal_indices.next() else {
+                        return Err(provider_turn_restore_error(
+                            "provider_continuation_missing",
+                            "空的普通 Provider Assistant Turn 缺少精确终态边界。",
+                        ));
+                    };
+                    if terminal_indices.next().is_some() {
+                        return Err(provider_turn_restore_error(
+                            "provider_continuation_corrupt",
+                            "空的普通 Provider Assistant Turn 终态边界不唯一。",
+                        ));
+                    }
+                    (
+                        index,
+                        ContextMetadata::new(
+                            ContextSource::ConversationHistory,
+                            ContextScope::Conversation,
+                            ContextRetention::Retained,
+                        )
+                        .with_origin(ContextOrigin::conversation_message(assistant_message_id)),
+                        true,
+                    )
+                }
+            }
+            crate::ProviderContinuationProjection::ConversationTraceItem { sequence, ordinal } => {
+                let mut matching_indices =
+                    self.items.iter().enumerate().filter_map(|(index, item)| {
+                        (item.message.role() == LlmMessageRole::Assistant
+                            && ordinal == 0
+                            && item.metadata.origin().is_some_and(|origin| {
+                                origin.kind() == ContextOriginKind::ConversationTraceItem
+                                    && origin.journal_cursor().is_some_and(|cursor| {
+                                        cursor.message_id() == assistant_message_id
+                                            && cursor.trace_sequence() == Some(sequence)
+                                    })
+                            }))
+                        .then_some(index)
+                    });
+                let Some(index) = matching_indices.next() else {
+                    return Err(provider_turn_restore_error(
+                        "provider_continuation_missing",
+                        "模型历史中不存在与 Provider continuation 匹配的普通 Assistant Turn。",
+                    ));
+                };
+                if matching_indices.next().is_some() {
+                    return Err(provider_turn_restore_error(
+                        "provider_continuation_corrupt",
+                        "模型历史中的普通 Provider Assistant 投影不唯一。",
+                    ));
+                }
+                (index, self.items[index].metadata.clone(), false)
+            }
+            crate::ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence,
+            } => {
+                if !turn.visible_text().trim().is_empty() {
+                    return Err(provider_turn_restore_error(
+                        "provider_continuation_corrupt",
+                        "Steer 边界只能恢复无可见正文的普通 Provider Assistant Turn。",
+                    ));
+                }
+                let has_origin = |item: &ContextItem| {
+                    item.metadata.origin().is_some_and(|origin| {
+                        origin.kind() == ContextOriginKind::ConversationTraceItem
+                            && origin.journal_cursor().is_some_and(|cursor| {
+                                cursor.message_id() == assistant_message_id
+                                    && cursor.trace_sequence() == Some(guidance_sequence)
+                            })
+                    })
+                };
+                let guidance_indices = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        (item.message.role() == LlmMessageRole::User && has_origin(item))
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                let [guidance_index] = guidance_indices.as_slice() else {
+                    return Err(provider_turn_restore_error(
+                        if guidance_indices.is_empty() {
+                            "provider_continuation_missing"
+                        } else {
+                            "provider_continuation_corrupt"
+                        },
+                        "Steer Provider continuation 缺少唯一的 UserGuidance 边界。",
+                    ));
+                };
+                let assistant_indices = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        (item.message.role() == LlmMessageRole::Assistant && has_origin(item))
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                match assistant_indices.as_slice() {
+                    [] => (
+                        *guidance_index,
+                        ContextMetadata::new(
+                            ContextSource::ConversationTrace,
+                            ContextScope::Conversation,
+                            ContextRetention::Retained,
+                        )
+                        .with_origin(
+                            ContextOrigin::conversation_trace_item(
+                                assistant_message_id,
+                                guidance_sequence,
+                            ),
+                        ),
+                        true,
+                    ),
+                    [assistant_index]
+                        if assistant_index.checked_add(1) == Some(*guidance_index) =>
+                    {
+                        (
+                            *assistant_index,
+                            self.items[*assistant_index].metadata.clone(),
+                            false,
+                        )
+                    }
+                    _ => {
+                        return Err(provider_turn_restore_error(
+                            "provider_continuation_corrupt",
+                            "Steer Provider continuation 的 Assistant/UserGuidance 顺序无效。",
+                        ));
+                    }
+                }
+            }
+        };
+
+        if !insert_before_target {
+            let candidate = self.items[target_index]
+                .message
+                .assistant_turn()
+                .expect("the selected item is an assistant message");
+            if !candidate.provider_tool_calls().is_empty()
+                || candidate
+                    .runtime_tool_bindings()
+                    .is_some_and(|bindings| !bindings.is_empty())
+                || candidate
+                    .provider_continuation_ref()
+                    .is_some_and(|candidate_ref| candidate_ref != &continuation_ref)
+                || (candidate.provider_continuation().is_some()
+                    && candidate.provider_continuation_ref() != Some(&continuation_ref))
+            {
+                return Err(provider_turn_restore_error(
+                    "provider_continuation_corrupt",
+                    "普通 Provider Assistant Turn 与精确持久化投影冲突。",
+                ));
+            }
+        }
+
+        let checkpoint_turn = turn.without_raw_continuation_for_checkpoint();
+        let restored = ContextItem::new(LlmMessage::from_assistant_turn(turn), metadata)
+            .with_checkpoint_message(LlmMessage::from_assistant_turn(checkpoint_turn));
+        if insert_before_target {
+            self.items.insert(target_index, restored);
+        } else {
+            self.items[target_index] = restored;
+        }
         self.measurement = None;
         self.revision = self.revision.saturating_add(1);
         self.persistent_revision = persistent_frame_revision(&self.items);

@@ -252,7 +252,10 @@ fn save_deepseek_approval_provider(
     reasoning_mode: mycopilot_core::ReasoningMode,
 ) {
     let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning.mode = reasoning_mode;
+    let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning.mode = reasoning_mode;
     storage
         .save_model_settings(ModelSettingsRecord {
             api_url: api_url.to_string(),
@@ -282,7 +285,7 @@ enum RestartedApprovalDecision {
     Reject,
 }
 
-async fn run_deepseek_missing_reasoning_restart(
+async fn run_deepseek_restart(
     reasoning_mode: mycopilot_core::ReasoningMode,
     decision: RestartedApprovalDecision,
     response_reasoning: Option<&'static str>,
@@ -454,7 +457,7 @@ async fn run_deepseek_missing_reasoning_restart(
         assert_eq!(
             changed_settings.models[0]
                 .provider_profile_config
-                .profile
+                .profile()
                 .id,
             mycopilot_core::ProviderProfileId::GenericOpenAiChat
         );
@@ -720,7 +723,7 @@ async fn run_deepseek_missing_reasoning_restart(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deepseek_disabled_tool_turn_without_reasoning_survives_restart_and_approval() {
-    let (second_request, invocation_count) = run_deepseek_missing_reasoning_restart(
+    let (second_request, invocation_count) = run_deepseek_restart(
         mycopilot_core::ReasoningMode::Disabled,
         RestartedApprovalDecision::Approve,
         None,
@@ -734,11 +737,11 @@ async fn deepseek_disabled_tool_turn_without_reasoning_survives_restart_and_appr
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn deepseek_provider_default_tool_turn_without_reasoning_survives_restart_and_rejection() {
-    let (second_request, invocation_count) = run_deepseek_missing_reasoning_restart(
+async fn deepseek_provider_default_tool_turn_with_reasoning_survives_restart_and_rejection() {
+    let (second_request, invocation_count) = run_deepseek_restart(
         mycopilot_core::ReasoningMode::ProviderDefault,
         RestartedApprovalDecision::Reject,
-        None,
+        Some(REASONING_CANARY),
         false,
     )
     .await;
@@ -750,7 +753,7 @@ async fn deepseek_provider_default_tool_turn_without_reasoning_survives_restart_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deepseek_enabled_reasoning_restarts_privately_and_replays_byte_exact_with_budget_parity() {
-    let (second_request, invocation_count) = run_deepseek_missing_reasoning_restart(
+    let (second_request, invocation_count) = run_deepseek_restart(
         mycopilot_core::ReasoningMode::Enabled,
         RestartedApprovalDecision::Approve,
         Some(REASONING_CANARY),
@@ -763,7 +766,7 @@ async fn deepseek_enabled_reasoning_restarts_privately_and_replays_byte_exact_wi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pending_deepseek_run_stays_frozen_when_next_run_switches_to_generic() {
-    let (second_request, invocation_count) = run_deepseek_missing_reasoning_restart(
+    let (second_request, invocation_count) = run_deepseek_restart(
         mycopilot_core::ReasoningMode::Enabled,
         RestartedApprovalDecision::Approve,
         Some(REASONING_CANARY),
@@ -1070,7 +1073,10 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
         .as_mut()
         .unwrap();
     checkpoint.provider_protocol_key.profile.version = u32::MAX;
-    checkpoint.provider_profile_config.profile.version = u32::MAX;
+    match &mut checkpoint.provider_profile_config {
+        mycopilot_core::ProviderProfileConfig::V1(config) => config.profile.version = u32::MAX,
+        mycopilot_core::ProviderProfileConfig::V2(config) => config.profile.version = u32::MAX,
+    }
     let error = service
         .validate_provider_continuations_before_dispatch(&unknown_registration)
         .unwrap_err();

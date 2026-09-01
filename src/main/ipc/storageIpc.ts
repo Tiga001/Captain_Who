@@ -37,6 +37,12 @@ export function registerStorageIpc(
   ipcMain.handle(HOST_CHANNELS.storage.loadProviderProfileUiDescriptors, () =>
     coreServer.loadProviderProfileUiDescriptors()
   )
+  ipcMain.handle(HOST_CHANNELS.storage.loadProviderVendorDescriptors, () =>
+    coreServer.loadProviderVendorDescriptors()
+  )
+  ipcMain.handle(HOST_CHANNELS.storage.resolveProviderVendorModelPolicy, (_event, input) =>
+    coreServer.resolveProviderVendorModelPolicy(input)
+  )
   ipcMain.handle(HOST_CHANNELS.storage.saveModelSettings, (_event, settings) =>
     captureModelSettingsSaveInvocation(() => coreServer.saveModelSettings(settings))
   )

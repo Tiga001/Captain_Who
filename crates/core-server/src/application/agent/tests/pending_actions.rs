@@ -1616,7 +1616,10 @@ fn freeze_deepseek_tool_checkpoint(
     provider_continuation_refs: Vec<mycopilot_core::ProviderContinuationRef>,
 ) {
     let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-    profile.reasoning = mycopilot_core::ReasoningPolicy {
+    let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
+        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    };
+    config.reasoning = mycopilot_core::ReasoningPolicy {
         mode: mycopilot_core::ReasoningMode::Disabled,
         effort: mycopilot_core::ReasoningEffort::ProviderDefault,
     };
@@ -1723,7 +1726,10 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
         );
         let mut provider_settings = storage.load_model_settings().unwrap().unwrap();
         let mut deepseek_profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-        deepseek_profile.reasoning = mycopilot_core::ReasoningPolicy {
+        let mycopilot_core::ProviderProfileConfig::V1(config) = &mut deepseek_profile else {
+            unreachable!("legacy DeepSeek constructor must produce schema v1")
+        };
+        config.reasoning = mycopilot_core::ReasoningPolicy {
             mode: mycopilot_core::ReasoningMode::Disabled,
             effort: mycopilot_core::ReasoningEffort::ProviderDefault,
         };
@@ -7785,7 +7791,7 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
 
     let current = storage.load_model_settings().unwrap().unwrap();
     assert_eq!(
-        current.models[0].provider_profile_config.profile.id,
+        current.models[0].provider_profile_config.profile().id,
         mycopilot_core::ProviderProfileId::GenericOpenAiChat
     );
     let restored = restore_agent_input_secrets(&storage, frozen).unwrap();

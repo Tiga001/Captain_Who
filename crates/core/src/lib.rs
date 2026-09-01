@@ -120,26 +120,36 @@ pub use model_request_observation::{
     ProviderCacheTopology, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
+pub(crate) use provider_continuation_store::ProviderContinuationProjection;
 pub use provider_continuation_store::{
     ProviderContinuationStoreError, ProviderContinuationVault, ProviderContinuationVaultFactory,
     PROVIDER_CONTINUATION_CREDENTIAL_SERVICE,
 };
 pub use provider_profile::{
-    ProviderProfileConfig, ProviderProfileId, ProviderProfilePublicSettings, ProviderProfileRef,
-    ProviderProfileValidationError, ProviderProtocolDialect, ProviderProtocolKey, ReasoningEffort,
+    MoonshotK26ThinkingMode, ProviderFamilyReasoningPolicy, ProviderFamilySettings,
+    ProviderModelFamilyId, ProviderProfileConfig, ProviderProfileConfigV1, ProviderProfileConfigV2,
+    ProviderProfileId, ProviderProfilePublicSettings, ProviderProfileRef,
+    ProviderProfileValidationError, ProviderProtocolDialect, ProviderProtocolKey,
+    ProviderReasoningEffort, ProviderVendorId, ProviderVendorPublicSettings, ReasoningEffort,
     ReasoningMode, ReasoningPolicy, DEEPSEEK_V4_CHAT_PROFILE_VERSION,
-    GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION, GENERIC_OPENAI_CHAT_PROFILE_VERSION,
-    PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+    DEEPSEEK_V4_VISION_PROFILE_VERSION, GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION,
+    GENERIC_OPENAI_CHAT_PROFILE_VERSION, MOONSHOT_K2_6_CHAT_PROFILE_VERSION,
+    MOONSHOT_K2_7_CODE_CHAT_PROFILE_VERSION, MOONSHOT_K3_CHAT_PROFILE_VERSION,
+    PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION, PROVIDER_PROFILE_CONFIG_V2_SCHEMA_VERSION,
 };
 pub use provider_registration::{
-    provider_profile_ui_descriptors, resolve_provider_registration,
+    provider_profile_ui_descriptors, provider_vendor_descriptors, resolve_provider_registration,
     resolve_provider_registration_for_key, resolve_provider_runtime_capabilities,
+    resolve_provider_vendor_model_policy, resolve_provider_vendor_registration,
     resolve_ui_selectable_provider_registration, ProviderCheckpointPrivateArgumentsSemantics,
     ProviderContextProjectionSemantics, ProviderContinuationRequirement,
-    ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileSettingsKind,
-    ProviderProfileUiDescriptor, ProviderRegistration, ProviderRuntimeCapabilities,
-    ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics,
-    ProviderTurnRuntimePolicy, ProviderUsageSemantics,
+    ProviderFamilySettingsDescriptor, ProviderPartialTraceSemantics,
+    ProviderPrivateReplaySemantics, ProviderProfileSettingsKind, ProviderProfileUiDescriptor,
+    ProviderRegistration, ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics,
+    ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics, ProviderTurnRuntimePolicy,
+    ProviderUsageSemantics, ProviderVendorDescriptor, ProviderVendorModelPolicyDescriptor,
+    ProviderVendorModelPolicyInput, ProviderVendorModelUnsupportedReason,
+    ProviderVendorResolutionError, ProviderVendorSettingsKind,
 };
 
 /// Rebuilds the model-only projection for a result restored from an approval checkpoint.

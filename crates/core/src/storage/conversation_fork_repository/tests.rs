@@ -450,6 +450,222 @@ fn fork_omits_released_turn_only_when_the_selected_summary_covers_its_complete_e
 }
 
 #[test]
+fn fork_omits_released_ordinary_turn_only_when_summary_covers_its_message() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    let record = provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+        continuation_id: format!(
+            "{}{}",
+            provider_continuation_repository::PROVIDER_CONTINUATION_REF_PREFIX,
+            uuid::Uuid::new_v4().hyphenated()
+        ),
+        conversation_id: source.id.clone(),
+        assistant_message_id: "assistant-a".to_string(),
+        run_id: "run-source-0".to_string(),
+        request_index: 0,
+        assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+        assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+        provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+        payload_digest: format!("sha256:{}", "d".repeat(64)),
+        nonce: vec![1; 12],
+        ciphertext: vec![2; 17],
+        decoded_bytes: 1,
+        compressed_bytes: 1,
+        created_at: 2,
+        runtime_tool_calls: Vec::new(),
+    };
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &record,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationMessage,
+    )
+    .unwrap();
+    let prefix = context_compaction_repository::prepare_prefix(
+        &connection,
+        &source.id,
+        &ContextJournalCursor::message("assistant-a"),
+    )
+    .unwrap();
+    context_compaction_repository::commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        summary_draft(&prefix, "summary-covers-ordinary-a", 20),
+        "assistant-b",
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT state FROM provider_continuations WHERE continuation_id = ?1",
+                [&record.continuation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "released"
+    );
+
+    let before_summary = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-before-ordinary-summary",
+        &source.id,
+        "assistant-a",
+        30,
+    )
+    .unwrap();
+    assert!(before_summary.requires_context_adaptation);
+    assert!(before_summary.summaries.is_empty());
+
+    let after_summary = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-after-ordinary-summary",
+        &source.id,
+        "assistant-b",
+        40,
+    )
+    .unwrap();
+    assert_eq!(after_summary.summaries.len(), 1);
+    assert!(!after_summary.requires_context_adaptation);
+    assert!(after_summary.provider_continuation_mappings.is_empty());
+}
+
+#[test]
+fn fork_clone_preserves_the_exact_steer_boundary_projection() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-source-0".to_string(),
+        conversation_id: source.id.clone(),
+        assistant_message_id: "assistant-a".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::UserGuidance {
+            sequence: 0,
+            guidance_id: "guidance-fork-boundary".to_string(),
+            client_message_id: "client-fork-boundary".to_string(),
+            content: "continue privately".to_string(),
+            attachments: Vec::new(),
+            created_at: 15,
+            truncated: false,
+        }],
+    };
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 15, 20).unwrap();
+    conversation_model_context_repository::commit_items_in_connection(
+        &connection,
+        &source.id,
+        "assistant-a",
+        &[ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "user".to_string(),
+            content: "continue privately".to_string(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        }],
+    )
+    .unwrap();
+    let source_record = provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+        continuation_id: format!(
+            "{}{}",
+            provider_continuation_repository::PROVIDER_CONTINUATION_REF_PREFIX,
+            uuid::Uuid::new_v4().hyphenated()
+        ),
+        conversation_id: source.id.clone(),
+        assistant_message_id: "assistant-a".to_string(),
+        run_id: "run-source-0".to_string(),
+        request_index: 0,
+        assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+        assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+        provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+        payload_digest: format!("sha256:{}", "d".repeat(64)),
+        nonce: vec![1; 12],
+        ciphertext: vec![2; 17],
+        decoded_bytes: 1,
+        compressed_bytes: 1,
+        created_at: 20,
+        runtime_tool_calls: Vec::new(),
+    };
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &source_record,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationSteerBoundary {
+            guidance_sequence: 0,
+        },
+    )
+    .unwrap();
+
+    let plan = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-steer-boundary",
+        &source.id,
+        "assistant-a",
+        30,
+    )
+    .unwrap();
+    assert_eq!(plan.provider_continuation_mappings.len(), 1);
+    assert_eq!(
+        plan.provider_continuation_mappings[0]
+            .source_record
+            .projection,
+        Some(
+            provider_continuation_repository::ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 0,
+            }
+        )
+    );
+    let mapping = &plan.provider_continuation_mappings[0];
+    let source_ref =
+        ProviderContinuationRef::parse(1, source_record.continuation_id.clone()).unwrap();
+    let target_ref = ProviderContinuationRef::new();
+    let prepared = PreparedProviderContinuationClone {
+        source_ref,
+        target_ref: target_ref.clone(),
+        record: provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+            continuation_id: target_ref.id.clone(),
+            conversation_id: mapping.target_conversation_id.clone(),
+            assistant_message_id: mapping.target_assistant_message_id.clone(),
+            run_id: mapping.target_run_id.clone(),
+            request_index: mapping.request_index,
+            assistant_turn_id: source_record.assistant_turn_id.clone(),
+            assistant_turn_digest: source_record.assistant_turn_digest.clone(),
+            provider_protocol_digest: source_record.provider_protocol_digest.clone(),
+            payload_digest: source_record.payload_digest.clone(),
+            nonce: source_record.nonce.clone(),
+            ciphertext: source_record.ciphertext.clone(),
+            decoded_bytes: source_record.decoded_bytes,
+            compressed_bytes: source_record.compressed_bytes,
+            created_at: 30,
+            runtime_tool_calls: Vec::new(),
+        },
+    };
+    commit_fork_plan_with_provider_continuations(&mut connection, &plan, &[prepared]).unwrap();
+
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT projection_kind, projection_sequence, projection_ordinal
+                 FROM provider_continuations WHERE continuation_id = ?1",
+                [&target_ref.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, Option<u32>>(2)?,
+                    ))
+                },
+            )
+            .unwrap(),
+        ("conversation_steer_boundary".to_string(), 0, None)
+    );
+}
+
+#[test]
 fn explicit_timeline_points_separate_reply_from_transition_and_pin_boundary_model() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();

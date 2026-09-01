@@ -1905,6 +1905,13 @@ impl StorageService {
         if let Some(rewrite) = rewrite {
             conversation_turn_rewrite_repository::insert_in_transaction(&transaction, rewrite)
                 .map_err(storage_error)?;
+            provider_continuation_repository::release_for_messages(
+                &transaction,
+                &rewrite.conversation_id,
+                std::slice::from_ref(&rewrite.source_assistant_message_id),
+                rewrite.created_at,
+            )
+            .map_err(storage_error)?;
         }
         let automation_outcome = if let Some(admission) = automation_admission {
             if trusted_wake.is_some() || rewrite.is_some() {

@@ -144,6 +144,7 @@ pub enum AutomationReasoningModeDto {
 #[serde(rename_all = "snake_case")]
 pub enum AutomationReasoningEffortDto {
     ProviderDefault,
+    Low,
     High,
     Max,
 }

@@ -8,9 +8,10 @@ use crate::{
     AgentGraphError, AgentMailboxDeliveryStatus, AgentMailboxKind, AgentWakeStatus,
     ConversationMessageOrigin, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
     CreateAgentTemplateInput, EnqueueAgentMessageInput, EnsureRootAgentInput,
-    FinishAgentWakeWithResultInput, ProviderProfileConfig, ProviderProtocolDialect,
-    ReasoningEffort, SendAgentMessageRequest, UpdateAgentTemplateInput,
-    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    FinishAgentWakeWithResultInput, ProviderFamilyReasoningPolicy, ProviderFamilySettings,
+    ProviderProfileConfig, ProviderProfileConfigV1, ProviderProtocolDialect,
+    ProviderReasoningEffort, ProviderVendorId, ReasoningEffort, SendAgentMessageRequest,
+    UpdateAgentTemplateInput, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -109,11 +110,28 @@ fn deepseek_model(
     effort: ReasoningEffort,
 ) -> ModelConfigRecord {
     let mut model = model(id, enabled);
-    model.provider_profile_config = ProviderProfileConfig {
+    model.provider_profile_config = ProviderProfileConfig::V1(ProviderProfileConfigV1 {
         schema_version: crate::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
         profile: crate::ProviderProfileRef::deepseek_v4_chat(),
         reasoning: crate::ReasoningPolicy { mode, effort },
-    };
+    });
+    model
+}
+
+fn deepseek_v2_model(
+    id: &str,
+    enabled: bool,
+    mode: crate::ReasoningMode,
+    effort: ProviderReasoningEffort,
+) -> ModelConfigRecord {
+    let mut model = model(id, enabled);
+    model.provider_profile_config = ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::deepseek_v4_chat(),
+        ProviderVendorId::DeepSeek,
+        ProviderFamilySettings::DeepseekV4Chat {
+            reasoning: ProviderFamilyReasoningPolicy { mode, effort },
+        },
+    );
     model
 }
 

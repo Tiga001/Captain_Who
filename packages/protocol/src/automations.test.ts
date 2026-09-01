@@ -94,6 +94,24 @@ describe('Automation cross-language protocol', () => {
     )
   })
 
+  it('accepts the versioned provider low reasoning effort in model-owned snapshots', () => {
+    if (fixture.task.destination.kind !== 'new_chat') {
+      throw new Error('automation fixture must target a new chat')
+    }
+    const task = {
+      ...fixture.task,
+      destination: {
+        ...fixture.task.destination,
+        reasoning: { ...fixture.task.destination.reasoning, effort: 'low' as const }
+      }
+    }
+
+    const parsed = parseAutomationTask(task)
+    expect(parsed.destination.kind).toBe('new_chat')
+    if (parsed.destination.kind !== 'new_chat') throw new Error('expected new-chat destination')
+    expect(parsed.destination.reasoning.effort).toBe('low')
+  })
+
   it('normalizes nullable optional inputs and enforces custom frequency fields', () => {
     expect(parseAutomationListInput(fixture.nullableListInput)).toEqual({
       schemaVersion: 1,

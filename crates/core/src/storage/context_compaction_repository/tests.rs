@@ -377,6 +377,183 @@ fn summary_commit_releases_covered_provider_continuation_in_the_same_transaction
 }
 
 #[test]
+fn summary_commit_releases_ordinary_provider_turn_only_with_its_complete_message() {
+    let mut connection = setup();
+    let ordinary = provider_continuation_record("assistant-1", "run-1", 0, &[]);
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &ordinary,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationMessage,
+    )
+    .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("assistant-1"),
+    )
+    .unwrap();
+
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-ordinary-provider-release"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &ordinary.continuation_id),
+        ("released".to_string(), None)
+    );
+    let error = rollback_active_summary(
+        &mut connection,
+        "conversation-1",
+        "summary-ordinary-provider-release",
+        20,
+    )
+    .unwrap_err();
+    assert!(error.is_stale());
+    assert!(error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+}
+
+#[test]
+fn trace_only_summary_keeps_ordinary_provider_turn_for_later_message_boundary() {
+    let mut connection = setup();
+    let ordinary = provider_continuation_record("assistant-2", "run-2", 1, &[]);
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &ordinary,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationMessage,
+    )
+    .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-before-ordinary-message"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &ordinary.continuation_id).0,
+        "active"
+    );
+}
+
+#[test]
+fn trace_summary_releases_only_the_exact_ordinary_narration_projection() {
+    let mut connection = setup();
+    let mut trace =
+        conversation_trace_repository::get_trace_for_message(&connection, "assistant-2")
+            .unwrap()
+            .unwrap();
+    trace
+        .items
+        .push(ConversationTurnTraceItem::AssistantNarration {
+            sequence: 2,
+            content: "steered answer".to_string(),
+            truncated: false,
+        });
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 3, 5).unwrap();
+    let covered = provider_continuation_record("assistant-2", "run-2", 1, &[]);
+    let later_message = provider_continuation_record("assistant-2", "run-2", 2, &[]);
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &covered,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationTraceItem {
+            sequence: 2,
+            ordinal: 0,
+        },
+    )
+    .unwrap();
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &later_message,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationMessage,
+    )
+    .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 2),
+    )
+    .unwrap();
+
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-covers-steer-narration"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &covered.continuation_id),
+        ("released".to_string(), None)
+    );
+    assert_eq!(
+        provider_continuation_state(&connection, &later_message.continuation_id).0,
+        "active"
+    );
+}
+
+#[test]
+fn trace_summary_releases_the_exact_steer_boundary_projection() {
+    let mut connection = setup();
+    let mut trace =
+        conversation_trace_repository::get_trace_for_message(&connection, "assistant-2")
+            .unwrap()
+            .unwrap();
+    trace.items.push(ConversationTurnTraceItem::UserGuidance {
+        sequence: 2,
+        guidance_id: "guidance-summary-boundary".to_string(),
+        client_message_id: "client-summary-boundary".to_string(),
+        content: "continue without visible narration".to_string(),
+        attachments: Vec::new(),
+        created_at: 4,
+        truncated: false,
+    });
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 3, 5).unwrap();
+    let boundary = provider_continuation_record("assistant-2", "run-2", 1, &[]);
+    provider_continuation_repository::store_active_with_projection_in_connection(
+        &connection,
+        &boundary,
+        provider_continuation_repository::ProviderContinuationProjection::ConversationSteerBoundary {
+            guidance_sequence: 2,
+        },
+    )
+    .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 2),
+    )
+    .unwrap();
+
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-covers-steer-boundary"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &boundary.continuation_id),
+        ("released".to_string(), None)
+    );
+}
+
+#[test]
 fn rolled_back_summary_transaction_preserves_provider_continuation_ciphertext() {
     let mut connection = setup();
     let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);

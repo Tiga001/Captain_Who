@@ -164,6 +164,37 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
         .unwrap();
     let conversation_id = "conversation-rewrite-atomic";
     let (candidate, revision) = completed_source_turn(&service, conversation_id);
+    let source_continuation =
+        crate::storage::provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+            continuation_id: format!(
+                "{}{}",
+                crate::storage::provider_continuation_repository::PROVIDER_CONTINUATION_REF_PREFIX,
+                uuid::Uuid::new_v4().hyphenated()
+            ),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: "source-assistant".to_string(),
+            run_id: "source-run".to_string(),
+            request_index: 0,
+            assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+            assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+            provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+            payload_digest: format!("sha256:{}", "d".repeat(64)),
+            nonce: vec![1; 12],
+            ciphertext: vec![2; 17],
+            decoded_bytes: 1,
+            compressed_bytes: 1,
+            created_at: 4,
+            runtime_tool_calls: Vec::new(),
+        };
+    {
+        let connection = service.state.connection().unwrap();
+        crate::storage::provider_continuation_repository::store_active_with_projection_in_connection(
+            &connection,
+            &source_continuation,
+            crate::storage::provider_continuation_repository::ProviderContinuationProjection::ConversationMessage,
+        )
+        .unwrap();
+    }
     let initial_world_state = crate::WorldStateSnapshot::new(
         "rewrite-world-state-epoch",
         0,
@@ -301,6 +332,26 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
         )
         .unwrap();
     assert_eq!(counts, (2, 1, 1, 1));
+    let released_continuation = connection
+        .query_row(
+            "SELECT state, payload_digest, ciphertext, released_at, activated_at
+             FROM provider_continuations WHERE continuation_id = ?1",
+            [&source_continuation.continuation_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        released_continuation,
+        ("released".to_string(), None, None, Some(5), None)
+    );
     drop(connection);
 
     let active_world_state = service

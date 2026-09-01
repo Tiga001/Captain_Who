@@ -10,6 +10,7 @@ use crate::protocol::{AgentApiStyle, ProviderContinuationRef};
 use crate::provider_profile::{
     ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
 };
+use crate::ProviderContinuationProjection;
 use serde_json::json;
 
 #[test]
@@ -182,7 +183,7 @@ fn encrypted_provider_turn_replaces_split_durable_projection_without_leaking_pay
     ]);
 
     frame
-        .restore_provider_assistant_turn("assistant-deepseek", turn)
+        .restore_provider_assistant_turn("assistant-deepseek", None, turn)
         .unwrap();
     frame.validate_complete_tool_protocol().unwrap();
     let messages = frame.to_messages();
@@ -196,6 +197,434 @@ fn encrypted_provider_turn_replaces_split_durable_projection_without_leaking_pay
     assert_eq!(frame.provider_continuation_refs().unwrap().len(), 1);
     let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
     assert!(!checkpoint_json.contains("private-reasoning-canary"));
+}
+
+#[test]
+fn encrypted_ordinary_provider_turn_replaces_visible_history_projection() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-ordinary".to_string()),
+    )
+    .unwrap();
+    let mut turn =
+        LlmAssistantTurn::from_provider(protocol.clone(), "visible ordinary answer", Vec::new())
+            .unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01ordinary-private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+
+    let mut frame = ContextFrame::new(vec![ContextItem::new(
+        LlmMessage::text(LlmMessageRole::Assistant, "visible ordinary answer"),
+        ContextMetadata::new(
+            ContextSource::ConversationHistory,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        )
+        .with_origin(ContextOrigin::conversation_message("assistant-ordinary")),
+    )]);
+
+    frame
+        .restore_provider_assistant_turn(
+            "assistant-ordinary",
+            Some(ProviderContinuationProjection::ConversationMessage),
+            turn,
+        )
+        .unwrap();
+    let restored = frame.to_messages();
+    assert_eq!(restored.len(), 1);
+    let restored_turn = restored[0].assistant_turn().unwrap();
+    assert_eq!(restored_turn.visible_text(), "visible ordinary answer");
+    assert!(restored_turn.provider_continuation().is_some());
+    assert!(restored_turn.provider_continuation_ref().is_some());
+    assert_eq!(frame.provider_continuation_refs().unwrap().len(), 1);
+    let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
+    assert!(!checkpoint_json.contains("ordinary-private-reasoning-canary"));
+}
+
+#[test]
+fn encrypted_ordinary_provider_turn_binds_to_terminal_message_not_trace_text() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-terminal-owner".to_string()),
+    )
+    .unwrap();
+    let mut turn =
+        LlmAssistantTurn::from_provider(protocol.clone(), "provider final answer", Vec::new())
+            .unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01terminal-private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+
+    let mut frame = ContextFrame::new(vec![
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::Assistant, "sanitized trace text"),
+            ContextMetadata::new(
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_trace_item(
+                "assistant-terminal-owner",
+                7,
+            )),
+        ),
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::Assistant, "provider final answer"),
+            ContextMetadata::new(
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_message(
+                "assistant-terminal-owner",
+            )),
+        ),
+        ContextItem::new(
+            LlmMessage::text(
+                LlmMessageRole::Assistant,
+                "Historical agent activity terminal record",
+            ),
+            ContextMetadata::new(
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_message(
+                "assistant-terminal-owner",
+            )),
+        ),
+    ]);
+
+    frame
+        .restore_provider_assistant_turn(
+            "assistant-terminal-owner",
+            Some(ProviderContinuationProjection::ConversationMessage),
+            turn,
+        )
+        .unwrap();
+    let restored = frame.to_messages();
+    assert_eq!(restored[0].content(), "sanitized trace text");
+    let restored_turn = restored[1].assistant_turn().unwrap();
+    assert_eq!(
+        restored_turn.provider_visible_text(),
+        "provider final answer"
+    );
+    assert!(restored_turn.provider_continuation().is_some());
+    assert_eq!(
+        restored[2].content(),
+        "Historical agent activity terminal record"
+    );
+}
+
+#[test]
+fn encrypted_empty_final_provider_turn_is_inserted_before_terminal_audit() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-empty-terminal".to_string()),
+    )
+    .unwrap();
+    let mut turn = LlmAssistantTurn::from_provider(protocol.clone(), "", Vec::new()).unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01empty-terminal-private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+
+    let mut frame = ContextFrame::new(vec![ContextItem::new(
+        LlmMessage::text(
+            LlmMessageRole::Assistant,
+            "Historical agent activity terminal record",
+        ),
+        ContextMetadata::new(
+            ContextSource::ConversationTrace,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        )
+        .with_origin(ContextOrigin::conversation_message(
+            "assistant-empty-terminal",
+        )),
+    )]);
+
+    frame
+        .restore_provider_assistant_turn(
+            "assistant-empty-terminal",
+            Some(ProviderContinuationProjection::ConversationMessage),
+            turn,
+        )
+        .unwrap();
+    let restored = frame.to_messages();
+    assert_eq!(restored.len(), 2);
+    let restored_turn = restored[0].assistant_turn().unwrap();
+    assert_eq!(restored_turn.visible_text(), "");
+    assert!(restored_turn.provider_continuation().is_some());
+    assert_eq!(
+        restored[1].content(),
+        "Historical agent activity terminal record"
+    );
+    let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
+    assert!(!checkpoint_json.contains("empty-terminal-private-reasoning-canary"));
+}
+
+#[test]
+fn encrypted_ordinary_provider_turn_restores_exact_steer_narration_sequence() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-steer-owner".to_string()),
+    )
+    .unwrap();
+    let mut turn = LlmAssistantTurn::from_provider(
+        protocol.clone(),
+        "provider text is intentionally not used for selection",
+        Vec::new(),
+    )
+    .unwrap();
+    turn.set_runtime_visible_text("first sanitized narration");
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01steer-private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+
+    let trace_item = |sequence, content| {
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::Assistant, content),
+            ContextMetadata::new(
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_trace_item(
+                "assistant-steer-owner",
+                sequence,
+            )),
+        )
+    };
+    let mut frame = ContextFrame::new(vec![
+        trace_item(4, "duplicate visible text"),
+        trace_item(7, "duplicate visible text"),
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::Assistant, "terminal answer"),
+            ContextMetadata::new(
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_message("assistant-steer-owner")),
+        ),
+    ]);
+
+    frame
+        .restore_provider_assistant_turn(
+            "assistant-steer-owner",
+            Some(ProviderContinuationProjection::ConversationTraceItem {
+                sequence: 7,
+                ordinal: 0,
+            }),
+            turn,
+        )
+        .unwrap();
+    let restored = frame.to_messages();
+    assert!(restored[0]
+        .assistant_turn()
+        .unwrap()
+        .provider_continuation()
+        .is_none());
+    assert!(restored[1]
+        .assistant_turn()
+        .unwrap()
+        .provider_continuation()
+        .is_some());
+    assert!(restored[2]
+        .assistant_turn()
+        .unwrap()
+        .provider_continuation()
+        .is_none());
+    let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
+    assert!(!checkpoint_json.contains("steer-private-reasoning-canary"));
+}
+
+#[test]
+fn encrypted_empty_provider_turn_restores_immediately_before_exact_steer_boundary() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-empty-steer".to_string()),
+    )
+    .unwrap();
+    let mut turn = LlmAssistantTurn::from_provider(protocol.clone(), "", Vec::new()).unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01empty-steer-private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+
+    let mut frame = ContextFrame::new(vec![
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::User, "earlier guidance"),
+            ContextMetadata::new(
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_trace_item(
+                "assistant-empty-steer",
+                3,
+            )),
+        ),
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::User, "exact guidance"),
+            ContextMetadata::new(
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_trace_item(
+                "assistant-empty-steer",
+                8,
+            )),
+        ),
+    ]);
+
+    frame
+        .restore_provider_assistant_turn(
+            "assistant-empty-steer",
+            Some(ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 8,
+            }),
+            turn,
+        )
+        .unwrap();
+    let restored = frame.to_messages();
+    assert_eq!(restored.len(), 3);
+    assert_eq!(restored[0].content(), "earlier guidance");
+    let restored_turn = restored[1].assistant_turn().unwrap();
+    assert_eq!(restored_turn.visible_text(), "");
+    assert!(restored_turn.provider_continuation().is_some());
+    assert_eq!(restored[2].content(), "exact guidance");
+    let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
+    assert!(!checkpoint_json.contains("empty-steer-private-reasoning-canary"));
+}
+
+#[test]
+fn encrypted_empty_provider_turn_rejects_duplicate_steer_boundaries() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-duplicate-steer".to_string()),
+    )
+    .unwrap();
+    let mut turn = LlmAssistantTurn::from_provider(protocol.clone(), "", Vec::new()).unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01duplicate-steer-private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+    let guidance = || {
+        ContextItem::new(
+            LlmMessage::text(LlmMessageRole::User, "duplicate guidance"),
+            ContextMetadata::new(
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_trace_item(
+                "assistant-duplicate-steer",
+                5,
+            )),
+        )
+    };
+    let mut frame = ContextFrame::new(vec![guidance(), guidance()]);
+
+    let error = frame
+        .restore_provider_assistant_turn(
+            "assistant-duplicate-steer",
+            Some(ProviderContinuationProjection::ConversationSteerBoundary {
+                guidance_sequence: 5,
+            }),
+            turn,
+        )
+        .expect_err("duplicate durable guidance must fail closed");
+    assert_eq!(error.code(), Some("provider_continuation_corrupt"));
 }
 
 #[test]

@@ -246,6 +246,24 @@ impl StorageService {
                             format!("模型 {} 的 Provider 设置无效：{error}", requested.id)
                         })?
                 }
+                ProviderProfileUpdate::SelectVendor {
+                    vendor_id,
+                    settings: public_settings,
+                } => {
+                    let registration = crate::resolve_provider_vendor_registration(
+                        *vendor_id,
+                        &requested.id,
+                        dialect,
+                    )
+                    .map_err(|error| {
+                        format!("模型 {} 的 Provider 厂商选择无效：{error}", requested.id)
+                    })?;
+                    registration
+                        .config_from_vendor_settings(*public_settings)
+                        .map_err(|error| {
+                            format!("模型 {} 的 Provider 设置无效：{error}", requested.id)
+                        })?
+                }
             };
             models.push(requested.into_record(profile));
         }
@@ -493,12 +511,14 @@ fn validate_unchanged_profile(
     let exactly_preserved = existing_config == Some(config);
 
     match config.validate() {
-        Ok(()) => config.validate_for_dialect(dialect).map_err(|error| {
-            format!(
-                "模型 {} 的 Provider Profile 与当前接口协议不兼容：{error}",
-                model.id
-            )
-        }),
+        Ok(()) => config
+            .validate_for_model(&model.id, dialect)
+            .map_err(|error| {
+                format!(
+                    "模型 {} 的 Provider Profile 与当前接口协议不兼容：{error}",
+                    model.id
+                )
+            }),
         Err(_) if exactly_preserved => Ok(()),
         Err(error) => Err(format!(
             "模型 {} 的 Provider Profile 无效：{error}",

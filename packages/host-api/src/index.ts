@@ -165,6 +165,9 @@ import type {
   NotificationSettingsUpdateInput,
   NotificationSettingsUpdateOutput,
   ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput,
   ResourceFaviconRequest,
   ResourceFaviconResponse,
   ChatSearchInput,
@@ -330,6 +333,10 @@ export interface OfficeHostApi {
 export interface StorageHostApi {
   loadModelSettings(): Promise<StorageModelSettingsRecord | null>
   loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]>
+  loadProviderVendorDescriptors(): Promise<ProviderVendorDescriptor[]>
+  resolveProviderVendorModelPolicy(
+    input: ProviderVendorModelPolicyInput
+  ): Promise<ProviderVendorModelPolicyDescriptor>
   saveModelSettings(
     settings: StorageModelSettingsUpdateRecord
   ): Promise<HostInvocationResult<StorageModelSettingsRecord>>

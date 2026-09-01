@@ -120,6 +120,14 @@ impl StorageService {
                 }
             }
         }
+        provider_continuation_repository::promote_staged_trace_projections_in_connection(
+            &transaction,
+            &trace.conversation_id,
+            &trace.assistant_message_id,
+            &trace.run_id,
+            updated_at,
+        )
+        .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(changed || model_context_changed)
     }
@@ -316,6 +324,23 @@ impl StorageService {
         trace
             .validate_complete_model_context(&durable_model_context_items)
             .map_err(|error| format!("terminal Assistant model context is incomplete: {error}"))?;
+        provider_continuation_repository::promote_staged_trace_projections_in_connection(
+            &transaction,
+            conversation_id,
+            message_id,
+            &trace.run_id,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        provider_continuation_repository::settle_staged_conversation_message_in_connection(
+            &transaction,
+            conversation_id,
+            message_id,
+            &trace.run_id,
+            trace.terminal_status,
+            completed_at,
+        )
+        .map_err(storage_error)?;
         if let Some(usage) = usage {
             usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
         }

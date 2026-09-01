@@ -1,14 +1,14 @@
 import { X } from 'lucide-react'
 import { useEffect, useId, useRef, useState, type ComponentType } from 'react'
 import { createPortal } from 'react-dom'
-import type { ProviderReasoningEffort, ProviderReasoningMode } from '@mycopilot/protocol'
+import type { LegacyProviderReasoningEffort, ProviderReasoningMode } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { SettingsSelect, type SettingsSelectOption } from '../../components/SettingsSelect'
 
 export interface DeepSeekProviderSettingsDraft {
   reasoning: {
     mode: ProviderReasoningMode
-    effort: ProviderReasoningEffort
+    effort: LegacyProviderReasoningEffort
   }
 }
 
@@ -54,14 +54,15 @@ export function DeepSeekProviderSettingsEditor({
     { value: 'enabled', label: t('configuration.deepSeekSettings.thinkingEnabled') },
     { value: 'disabled', label: t('configuration.deepSeekSettings.thinkingDisabled') }
   ]
-  const reasoningEffortOptions: ReadonlyArray<SettingsSelectOption<ProviderReasoningEffort>> = [
-    {
-      value: 'provider_default',
-      label: t('configuration.deepSeekSettings.effortProviderDefault')
-    },
-    { value: 'high', label: t('configuration.deepSeekSettings.effortHigh') },
-    { value: 'max', label: t('configuration.deepSeekSettings.effortMax') }
-  ]
+  const reasoningEffortOptions: ReadonlyArray<SettingsSelectOption<LegacyProviderReasoningEffort>> =
+    [
+      {
+        value: 'provider_default',
+        label: t('configuration.deepSeekSettings.effortProviderDefault')
+      },
+      { value: 'high', label: t('configuration.deepSeekSettings.effortHigh') },
+      { value: 'max', label: t('configuration.deepSeekSettings.effortMax') }
+    ]
 
   useEffect(() => {
     previouslyFocusedRef.current =

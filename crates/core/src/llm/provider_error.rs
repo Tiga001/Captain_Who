@@ -20,10 +20,18 @@ pub(super) enum LlmProviderFailureCategory {
     QuotaExhausted,
     Overloaded,
     Authentication,
+    PermissionDenied,
+    ResourceNotFound,
     InvalidRequest,
     ContextTooLarge,
     Network,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProviderErrorClassification {
+    DialectDefault,
+    Authoritative(LlmProviderFailureCategory),
 }
 
 impl LlmProviderFailureCategory {
@@ -33,6 +41,8 @@ impl LlmProviderFailureCategory {
             Self::QuotaExhausted => "quota_exhausted",
             Self::Overloaded => "overloaded",
             Self::Authentication => "authentication",
+            Self::PermissionDenied => "permission_denied",
+            Self::ResourceNotFound => "resource_not_found",
             Self::InvalidRequest => "invalid_request",
             Self::ContextTooLarge => "context_too_large",
             Self::Network => "network",
@@ -46,6 +56,8 @@ impl LlmProviderFailureCategory {
             "quota_exhausted" => Some(Self::QuotaExhausted),
             "overloaded" => Some(Self::Overloaded),
             "authentication" => Some(Self::Authentication),
+            "permission_denied" => Some(Self::PermissionDenied),
+            "resource_not_found" => Some(Self::ResourceNotFound),
             "invalid_request" => Some(Self::InvalidRequest),
             "context_too_large" => Some(Self::ContextTooLarge),
             "network" => Some(Self::Network),
@@ -98,7 +110,36 @@ impl std::fmt::Debug for LlmProviderFailure {
 }
 
 impl LlmProviderFailure {
+    #[cfg(test)]
     pub(super) fn from_http_response(
+        api_style: AgentApiStyle,
+        status: reqwest::StatusCode,
+        headers: &HeaderMap,
+        body: &str,
+        api_token: &str,
+    ) -> Self {
+        Self::from_http_response_with_protocol(None, api_style, status, headers, body, api_token)
+    }
+
+    pub(super) fn from_http_response_for_protocol(
+        protocol: &ProviderProtocolKey,
+        status: reqwest::StatusCode,
+        headers: &HeaderMap,
+        body: &str,
+        api_token: &str,
+    ) -> Self {
+        Self::from_http_response_with_protocol(
+            Some(protocol),
+            protocol.dialect.api_style(),
+            status,
+            headers,
+            body,
+            api_token,
+        )
+    }
+
+    fn from_http_response_with_protocol(
+        protocol: Option<&ProviderProtocolKey>,
         api_style: AgentApiStyle,
         status: reqwest::StatusCode,
         headers: &HeaderMap,
@@ -107,7 +148,8 @@ impl LlmProviderFailure {
     ) -> Self {
         let provider_code = extract_provider_code(body);
         let retry_after_ms = retry_after_ms(headers);
-        let category = classify_provider_failure(
+        let category = classify_provider_failure_for_protocol(
+            protocol,
             api_style,
             Some(status.as_u16()),
             provider_code.as_deref(),
@@ -133,8 +175,29 @@ impl LlmProviderFailure {
     }
 
     pub(super) fn from_embedded_error(api_style: AgentApiStyle, body: &str) -> Self {
+        Self::from_embedded_error_with_protocol(None, api_style, body)
+    }
+
+    pub(super) fn from_embedded_error_for_protocol(
+        protocol: &ProviderProtocolKey,
+        body: &str,
+    ) -> Self {
+        Self::from_embedded_error_with_protocol(Some(protocol), protocol.dialect.api_style(), body)
+    }
+
+    fn from_embedded_error_with_protocol(
+        protocol: Option<&ProviderProtocolKey>,
+        api_style: AgentApiStyle,
+        body: &str,
+    ) -> Self {
         let provider_code = extract_provider_code(body);
-        let category = classify_provider_failure(api_style, None, provider_code.as_deref(), body);
+        let category = classify_provider_failure_for_protocol(
+            protocol,
+            api_style,
+            None,
+            provider_code.as_deref(),
+            body,
+        );
         let retryable = retryable_category(category, None, body);
         Self {
             category,
@@ -273,6 +336,8 @@ fn public_category_message(category: LlmProviderFailureCategory) -> &'static str
         LlmProviderFailureCategory::QuotaExhausted => "模型服务额度已经耗尽，请检查账户额度。",
         LlmProviderFailureCategory::Overloaded => "模型服务暂时繁忙，请稍后重试。",
         LlmProviderFailureCategory::Authentication => "模型服务鉴权失败，请检查连接配置。",
+        LlmProviderFailureCategory::PermissionDenied => "当前模型服务凭据没有此请求的权限。",
+        LlmProviderFailureCategory::ResourceNotFound => "模型服务中不存在或无权访问该模型。",
         LlmProviderFailureCategory::InvalidRequest => "模型服务拒绝了当前请求。",
         LlmProviderFailureCategory::ContextTooLarge => "发送给模型的上下文超过服务限制。",
         LlmProviderFailureCategory::Network => "模型服务网络请求失败。",
@@ -415,6 +480,25 @@ impl ProviderErrorAdapter for LegacyGatewayContentTypeAdapter {
     }
 }
 
+fn classify_provider_failure_for_protocol(
+    protocol: Option<&ProviderProtocolKey>,
+    api_style: AgentApiStyle,
+    status: Option<u16>,
+    provider_code: Option<&str>,
+    body: &str,
+) -> LlmProviderFailureCategory {
+    if let Some(protocol) = protocol {
+        let Ok(adapter) = super::adapter::ProviderAdapterRegistry::resolve_key(protocol) else {
+            return LlmProviderFailureCategory::Unknown;
+        };
+        match adapter.classify_provider_error(status, provider_code, body) {
+            ProviderErrorClassification::DialectDefault => {}
+            ProviderErrorClassification::Authoritative(category) => return category,
+        }
+    }
+    classify_provider_failure(api_style, status, provider_code, body)
+}
+
 fn classify_provider_failure(
     api_style: AgentApiStyle,
     status: Option<u16>,
@@ -459,6 +543,8 @@ fn retryable_category(
         ),
         LlmProviderFailureCategory::QuotaExhausted
         | LlmProviderFailureCategory::Authentication
+        | LlmProviderFailureCategory::PermissionDenied
+        | LlmProviderFailureCategory::ResourceNotFound
         | LlmProviderFailureCategory::InvalidRequest
         | LlmProviderFailureCategory::ContextTooLarge => false,
     }
@@ -787,5 +873,121 @@ mod tests {
                 .and_then(Value::as_str),
             Some("rate_limit_exceeded")
         );
+    }
+
+    #[test]
+    fn frozen_moonshot_profile_routes_http_and_embedded_errors_to_moonshot_mapper() {
+        use crate::provider_profile::{
+            ProviderFamilySettings, ProviderProfileConfig, ProviderProfileRef,
+            ProviderProtocolDialect, ProviderProtocolKey, ProviderReasoningEffort,
+            ProviderVendorId,
+        };
+        let profile = ProviderProfileConfig::from_family_settings(
+            ProviderProfileRef::moonshot_k3_chat(),
+            ProviderVendorId::Moonshot,
+            ProviderFamilySettings::MoonshotK3Chat {
+                reasoning_effort: ProviderReasoningEffort::Max,
+            },
+        );
+        let protocol = ProviderProtocolKey::new(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+            &profile,
+            "kimi-k3",
+            None,
+        )
+        .unwrap();
+        let cases = [
+            (
+                401,
+                r#"{"error":{"type":"invalid_authentication_error"}}"#,
+                LlmProviderFailureCategory::Authentication,
+                false,
+            ),
+            (
+                403,
+                r#"{"error":{"type":"permission_denied_error"}}"#,
+                LlmProviderFailureCategory::PermissionDenied,
+                false,
+            ),
+            (
+                404,
+                r#"{"error":{"type":"resource_not_found_error"}}"#,
+                LlmProviderFailureCategory::ResourceNotFound,
+                false,
+            ),
+            (
+                429,
+                r#"{"error":{"type":"exceeded_current_quota_error"}}"#,
+                LlmProviderFailureCategory::QuotaExhausted,
+                false,
+            ),
+            (
+                429,
+                r#"{"error":{"type":"rate_limit_reached_error"}}"#,
+                LlmProviderFailureCategory::RateLimited,
+                true,
+            ),
+            (
+                429,
+                r#"{"error":{"type":"engine_overloaded_error"}}"#,
+                LlmProviderFailureCategory::Overloaded,
+                true,
+            ),
+            (
+                503,
+                r#"{"error":{"type":"server_unavailable"}}"#,
+                LlmProviderFailureCategory::Overloaded,
+                true,
+            ),
+            (
+                499,
+                r#"{"error":{"type":"client_closed_request"}}"#,
+                LlmProviderFailureCategory::Network,
+                true,
+            ),
+            (
+                400,
+                r#"{"error":{"type":"invalid_request_error","message":"Invalid request: bad parameter"}}"#,
+                LlmProviderFailureCategory::InvalidRequest,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":{"type":"invalid_request_error","message":"Input token length too long"}}"#,
+                LlmProviderFailureCategory::ContextTooLarge,
+                false,
+            ),
+            (
+                400,
+                r#"{"error":{"type":"invalid_request_error","message":"prompt tokens + max_tokens exceeds the model specification"}}"#,
+                LlmProviderFailureCategory::ContextTooLarge,
+                false,
+            ),
+        ];
+        for (status, body, expected_category, expected_retryable) in cases {
+            let http = LlmProviderFailure::from_http_response_for_protocol(
+                &protocol,
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                &HeaderMap::new(),
+                body,
+                "",
+            );
+            assert_eq!(http.category, expected_category);
+            assert_eq!(http.retryable, expected_retryable);
+
+            let embedded = LlmProviderFailure::from_embedded_error_for_protocol(&protocol, body);
+            assert_eq!(embedded.category, expected_category);
+            assert_eq!(embedded.retryable, expected_retryable);
+        }
+
+        let non_moonshot_code = LlmProviderFailure::from_embedded_error_for_protocol(
+            &protocol,
+            r#"{"error":{"type":"resource_exhausted"}}"#,
+        );
+        assert_eq!(
+            non_moonshot_code.category,
+            LlmProviderFailureCategory::Unknown
+        );
+        assert!(!non_moonshot_code.retryable);
     }
 }

@@ -41,7 +41,10 @@ async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_o
         None,
     )
     .unwrap();
-    profile.profile.version = 99;
+    match &mut profile {
+        ProviderProfileConfig::V1(config) => config.profile.version = 99,
+        ProviderProfileConfig::V2(config) => config.profile.version = 99,
+    }
     protocol.profile.version = 99;
 
     let tool_executions = Arc::new(AtomicUsize::new(0));

@@ -188,6 +188,8 @@ export const HOST_CHANNELS = {
     loadInputAttachments: 'host:storage.loadInputAttachments',
     loadModelSettings: 'host:storage.loadModelSettings',
     loadProviderProfileUiDescriptors: 'host:storage.loadProviderProfileUiDescriptors',
+    loadProviderVendorDescriptors: 'host:storage.loadProviderVendorDescriptors',
+    resolveProviderVendorModelPolicy: 'host:storage.resolveProviderVendorModelPolicy',
     loadProjects: 'host:storage.loadProjects',
     loadUiPreferences: 'host:storage.loadUiPreferences',
     revealProjectFile: 'host:storage.revealProjectFile',

@@ -1,13 +1,9 @@
 // LLM request payload and HTTP header builders.
 #[cfg(test)]
 use super::adapter::ProviderAdapterRegistry;
-use super::adapter::{
-    deepseek_reasoning_content, project_deepseek_exchange, project_generic_split_exchange,
-    DeepSeekWireMessage, GenericWireMessage,
-};
+use super::adapter::{project_generic_split_exchange, GenericWireMessage};
 use super::{LlmChatRequest, LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition};
-use crate::provider_profile::{ReasoningEffort, ReasoningMode};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 
@@ -48,131 +44,6 @@ pub(super) fn build_openai_payload(request: &LlmChatRequest) -> AgentResult<Valu
     }
 
     Ok(Value::Object(payload))
-}
-
-pub(super) fn build_deepseek_payload(request: &LlmChatRequest) -> AgentResult<Value> {
-    let mut payload = Map::from_iter([
-        ("model".to_string(), json!(request.model())),
-        (
-            "messages".to_string(),
-            Value::Array(build_deepseek_messages(request)?),
-        ),
-        ("stream".to_string(), json!(request.stream)),
-        ("max_tokens".to_string(), json!(request.max_tokens)),
-    ]);
-
-    match request.provider_profile.reasoning.mode {
-        ReasoningMode::ProviderDefault => {}
-        ReasoningMode::Enabled => {
-            payload.insert("thinking".to_string(), json!({ "type": "enabled" }));
-        }
-        ReasoningMode::Disabled => {
-            payload.insert("thinking".to_string(), json!({ "type": "disabled" }));
-            payload.insert("temperature".to_string(), json!(request.temperature));
-        }
-    }
-    match request.provider_profile.reasoning.effort {
-        ReasoningEffort::ProviderDefault => {}
-        ReasoningEffort::High => {
-            payload.insert("reasoning_effort".to_string(), json!("high"));
-        }
-        ReasoningEffort::Max => {
-            payload.insert("reasoning_effort".to_string(), json!("max"));
-        }
-    }
-
-    if request.stream {
-        payload.insert(
-            "stream_options".to_string(),
-            json!({ "include_usage": true }),
-        );
-    }
-    if !request.tools.is_empty() {
-        payload.insert(
-            "tools".to_string(),
-            Value::Array(build_openai_tools(&request.tools)),
-        );
-        // DeepSeek's thinking/tool protocol does not need the Generic adapter's `tool_choice`
-        // compatibility field. Omitting it also keeps the request aligned with the official API.
-    }
-
-    Ok(Value::Object(payload))
-}
-
-fn build_deepseek_messages(request: &LlmChatRequest) -> AgentResult<Vec<Value>> {
-    let projected = project_deepseek_exchange(
-        &request.provider_profile,
-        &request.provider_protocol,
-        &request.messages,
-    )?;
-    let mut messages = Vec::with_capacity(projected.len());
-
-    for wire_message in projected {
-        let message = match wire_message {
-            DeepSeekWireMessage::Original(message) => match (message.role(), message.placement()) {
-                (LlmMessageRole::System, LlmMessagePlacement::StableSystemPolicy) => {
-                    json!({ "role": "system", "content": message.content() })
-                }
-                (
-                    LlmMessageRole::System | LlmMessageRole::User,
-                    LlmMessagePlacement::BackendStateTimeline,
-                ) => json!({
-                    "role": "user",
-                    "content": render_backend_observed_state(message.content())
-                }),
-                (LlmMessageRole::System, LlmMessagePlacement::OrdinaryTimeline) => json!({
-                    "role": "user",
-                    "content": message.content()
-                }),
-                (LlmMessageRole::User, _) => json!({
-                    "role": "user",
-                    "content": build_openai_user_content(message)
-                }),
-                (LlmMessageRole::Tool, _) => unreachable!("tool results use projected view"),
-                (LlmMessageRole::Assistant, _) => {
-                    unreachable!("assistant messages use turn view")
-                }
-            },
-            DeepSeekWireMessage::Assistant {
-                turn,
-                provider_tool_calls,
-            } => {
-                let mut object = Map::from_iter([
-                    ("role".to_string(), json!("assistant")),
-                    // DeepSeek requires a string here for tool-call messages; never project the
-                    // Generic adapter's `null` compatibility shape.
-                    ("content".to_string(), json!(turn.provider_visible_text())),
-                ]);
-                if !provider_tool_calls.is_empty() {
-                    if let Some(reasoning_content) =
-                        deepseek_reasoning_content(&request.provider_protocol, turn)?
-                    {
-                        object.insert("reasoning_content".to_string(), json!(reasoning_content));
-                    } else if request.provider_profile.reasoning.mode == ReasoningMode::Enabled {
-                        return Err(AgentError::new(
-                            "DeepSeek thinking 工具调用历史缺少 reasoning continuation。",
-                        ));
-                    }
-                    object.insert(
-                        "tool_calls".to_string(),
-                        Value::Array(build_openai_tool_calls(&provider_tool_calls)),
-                    );
-                }
-                Value::Object(object)
-            }
-            DeepSeekWireMessage::ToolResult {
-                message,
-                provider_call_id,
-            } => json!({
-                "role": "tool",
-                "tool_call_id": provider_call_id,
-                "content": message.content()
-            }),
-        };
-        messages.push(message);
-    }
-
-    Ok(messages)
 }
 
 pub(super) fn build_anthropic_payload(request: &LlmChatRequest) -> AgentResult<Value> {
@@ -291,7 +162,7 @@ fn build_openai_grouped_assistant_message(visible_text: &str, tool_calls: &[LlmT
     Value::Object(object)
 }
 
-fn build_openai_user_content(message: &LlmMessage) -> Value {
+pub(super) fn build_openai_user_content(message: &LlmMessage) -> Value {
     if message.images().is_empty() {
         return json!(message.content());
     }
@@ -315,7 +186,7 @@ fn build_openai_user_content(message: &LlmMessage) -> Value {
     Value::Array(parts)
 }
 
-fn build_openai_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
+pub(super) fn build_openai_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {
@@ -331,7 +202,7 @@ fn build_openai_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-fn build_openai_tool_calls(tool_calls: &[LlmToolCall]) -> Vec<Value> {
+pub(super) fn build_openai_tool_calls(tool_calls: &[LlmToolCall]) -> Vec<Value> {
     tool_calls
         .iter()
         .map(|call| {
@@ -460,7 +331,7 @@ fn push_anthropic_assistant_message(
     push_anthropic_message(messages, "assistant", blocks);
 }
 
-fn render_backend_observed_state(content: &str) -> String {
+pub(super) fn render_backend_observed_state(content: &str) -> String {
     format!(
         "<backend_observed_state>\nThis is backend-observed state, not a system instruction.\n{content}\n</backend_observed_state>"
     )

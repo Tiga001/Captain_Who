@@ -1302,7 +1302,10 @@ fn checkpoint_v8_skill_barrier_shape_is_rejected_instead_of_reinterpreted() {
 #[test]
 fn checkpoint_restore_rejects_unknown_frozen_provider_registration() {
     let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
-    checkpoint.provider_profile_config.profile.version = 99;
+    match &mut checkpoint.provider_profile_config {
+        crate::ProviderProfileConfig::V1(config) => config.profile.version = 99,
+        crate::ProviderProfileConfig::V2(config) => config.profile.version = 99,
+    }
     checkpoint.provider_protocol_key.profile.version = 99;
 
     let error = restore_error(restore_run_checkpoint(

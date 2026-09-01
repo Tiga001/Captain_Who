@@ -3,7 +3,8 @@ use crate::protocol::{
 };
 use crate::provider_profile::{
     ProviderProfileConfig, ProviderProfileId, ProviderProfilePublicSettings,
-    ProviderProfileValidationError, ProviderProtocolDialect,
+    ProviderProfileValidationError, ProviderProtocolDialect, ProviderVendorId,
+    ProviderVendorPublicSettings,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -98,6 +99,12 @@ pub enum ProviderProfileUpdate {
     SelectRegisteredProfile {
         profile_id: ProviderProfileId,
         settings: ProviderProfilePublicSettings,
+    },
+    /// Family-aware selection. Host resolves the exact Profile/version from vendor, model and
+    /// dialect; clients cannot submit either internal identity.
+    SelectVendor {
+        vendor_id: ProviderVendorId,
+        settings: ProviderVendorPublicSettings,
     },
 }
 
@@ -279,7 +286,8 @@ impl ModelConfigRecord {
         &self,
         dialect: ProviderProtocolDialect,
     ) -> Result<ProviderProfileConfig, ProviderProfileValidationError> {
-        self.provider_profile_config.validate_for_dialect(dialect)?;
+        self.provider_profile_config
+            .validate_for_model(&self.id, dialect)?;
         Ok(self.provider_profile_config.clone())
     }
 

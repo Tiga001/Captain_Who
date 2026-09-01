@@ -175,6 +175,9 @@ import type {
   NotificationSummaryInput,
   NotificationSummaryOutput,
   ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput,
   ChatSearchInput,
   ChatSearchResult,
   SkillInstallationCommitOutput,
@@ -489,6 +492,9 @@ const GIT_MUTATE_REVIEW_FILE_METHOD = 'git.mutateReviewFile'
 const STORAGE_LOAD_MODEL_SETTINGS_METHOD = 'storage.loadModelSettings'
 const STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD =
   'storage.loadProviderProfileUiDescriptors'
+const STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD = 'storage.loadProviderVendorDescriptors'
+const STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD =
+  'storage.resolveProviderVendorModelPolicy'
 const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
 const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.loadAgentPromptPreferences'
 const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.saveAgentPromptPreferences'
@@ -2324,6 +2330,21 @@ export class CoreServer {
   loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]> {
     return this.rpc.request<ProviderProfileUiDescriptor[]>(
       STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD
+    )
+  }
+
+  loadProviderVendorDescriptors(): Promise<ProviderVendorDescriptor[]> {
+    return this.rpc.request<ProviderVendorDescriptor[]>(
+      STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD
+    )
+  }
+
+  resolveProviderVendorModelPolicy(
+    input: ProviderVendorModelPolicyInput
+  ): Promise<ProviderVendorModelPolicyDescriptor> {
+    return this.rpc.request<ProviderVendorModelPolicyDescriptor, ProviderVendorModelPolicyInput>(
+      STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+      input
     )
   }
 

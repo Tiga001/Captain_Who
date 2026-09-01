@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { HostInvocationError } from '@mycopilot/host-api'
-import type { StorageModelSettingsRecord } from '@mycopilot/protocol'
+import type { ProviderProfileConfig, StorageModelSettingsRecord } from '@mycopilot/protocol'
 
 const storage = vi.hoisted(() => ({
   loadModelSettings: vi.fn(),
@@ -68,7 +68,7 @@ describe('model settings storage client', () => {
             schemaVersion: 999,
             profile: { id: 'deepseek_v4_chat', version: 999 },
             reasoning: { mode: 'enabled', effort: 'max' }
-          },
+          } as unknown as ProviderProfileConfig,
           providerProfileUpdate: { kind: 'select_generic' },
           inputPrice: '0',
           cachedInputPrice: '',

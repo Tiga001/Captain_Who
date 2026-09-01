@@ -990,14 +990,14 @@ mod tests {
             AgentApiStyle::OpenAiCompatible,
         );
         input.stream = Some(false);
-        let profile = ProviderProfileConfig {
+        let profile = ProviderProfileConfig::V1(crate::ProviderProfileConfigV1 {
             schema_version: crate::provider_profile::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
             profile: crate::provider_profile::ProviderProfileRef::deepseek_v4_chat(),
             reasoning: crate::provider_profile::ReasoningPolicy {
                 mode: crate::provider_profile::ReasoningMode::Enabled,
                 effort: crate::provider_profile::ReasoningEffort::High,
             },
-        };
+        });
         input.provider_configuration_revision =
             Some(format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()));
         input.provider_protocol_key = Some(

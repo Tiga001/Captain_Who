@@ -1,5 +1,8 @@
 import type {
   ProviderProfileUiDescriptor,
+  ProviderVendorDescriptor,
+  ProviderVendorModelPolicyDescriptor,
+  ProviderVendorModelPolicyInput,
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord
 } from '@mycopilot/protocol'
@@ -33,6 +36,42 @@ describe('CoreServer model settings client', () => {
 
     await expect(new CoreServer().loadProviderProfileUiDescriptors()).resolves.toBe(descriptors)
     expect(rpcRequest).toHaveBeenCalledWith('storage.loadProviderProfileUiDescriptors')
+  })
+
+  it('loads vendor descriptors and resolves a safe Host-authoritative model policy', async () => {
+    const descriptors: ProviderVendorDescriptor[] = [
+      { vendorId: 'generic', displayName: 'Generic', selectable: true },
+      { vendorId: 'deepseek', displayName: 'DeepSeek', selectable: true },
+      { vendorId: 'moonshot', displayName: 'Moonshot AI', selectable: true }
+    ]
+    rpcRequest.mockResolvedValueOnce(descriptors)
+
+    await expect(new CoreServer().loadProviderVendorDescriptors()).resolves.toBe(descriptors)
+    expect(rpcRequest).toHaveBeenNthCalledWith(1, 'storage.loadProviderVendorDescriptors')
+
+    const input: ProviderVendorModelPolicyInput = {
+      vendorId: 'moonshot',
+      modelId: 'kimi-k2.6',
+      dialect: 'openai_chat_completions'
+    }
+    const resolution: ProviderVendorModelPolicyDescriptor = {
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k2_6_chat',
+      settingsKind: 'moonshot',
+      settings: {
+        kind: 'moonshot_k2_6_chat',
+        thinkingModes: ['provider_default', 'enabled', 'disabled', 'enabled_keep_all'],
+        defaultSettings: {
+          kind: 'moonshot_k2_6_chat',
+          thinkingMode: 'provider_default'
+        }
+      }
+    }
+    rpcRequest.mockResolvedValueOnce(resolution)
+
+    await expect(new CoreServer().resolveProviderVendorModelPolicy(input)).resolves.toBe(resolution)
+    expect(rpcRequest).toHaveBeenNthCalledWith(2, 'storage.resolveProviderVendorModelPolicy', input)
   })
 
   it('returns the Host-authoritative normalized settings after an explicit profile update', async () => {

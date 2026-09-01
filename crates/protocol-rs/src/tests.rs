@@ -129,6 +129,18 @@ fn provider_profile_ui_descriptor_method_is_stable() {
 }
 
 #[test]
+fn provider_vendor_descriptor_and_policy_methods_are_stable() {
+    assert_eq!(
+        STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD,
+        "storage.loadProviderVendorDescriptors"
+    );
+    assert_eq!(
+        STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+        "storage.resolveProviderVendorModelPolicy"
+    );
+}
+
+#[test]
 fn notification_contract_fixture_matches_rust_protocol() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/notification-contract-v1.json"

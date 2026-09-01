@@ -362,6 +362,7 @@ mod command_and_attachments;
 mod compaction_and_tool_flow;
 mod conversation_context;
 mod deepseek_recovery;
+mod moonshot_recovery;
 mod skill_activation;
 mod steering_and_repair;
 mod trace_and_projection;

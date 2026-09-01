@@ -474,7 +474,7 @@ impl AgentService {
             .classify_turn(
                 has_provider_tool_calls,
                 !checkpoint.provider_continuation_refs.is_empty(),
-                checkpoint.provider_profile_config.reasoning.mode,
+                checkpoint.provider_profile_config.reasoning_mode(),
             )
             .requires_exact_approval_refs();
         if checkpoint.provider_continuation_refs.is_empty() {

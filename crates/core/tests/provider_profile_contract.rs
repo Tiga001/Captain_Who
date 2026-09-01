@@ -36,8 +36,8 @@ fn explicit_generic_profiles_validate_without_reasoning_wire_changes() {
     openai
         .validate_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions)
         .unwrap();
-    assert_eq!(openai.profile.id, ProviderProfileId::GenericOpenAiChat);
-    assert_eq!(openai.reasoning.mode, ReasoningMode::ProviderDefault);
+    assert_eq!(openai.profile().id, ProviderProfileId::GenericOpenAiChat);
+    assert_eq!(openai.reasoning_mode(), ReasoningMode::ProviderDefault);
 
     let anthropic =
         ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::AnthropicMessages);
@@ -45,10 +45,10 @@ fn explicit_generic_profiles_validate_without_reasoning_wire_changes() {
         .validate_for_dialect(ProviderProtocolDialect::AnthropicMessages)
         .unwrap();
     assert_eq!(
-        anthropic.profile.id,
+        anthropic.profile().id,
         ProviderProfileId::GenericAnthropicMessages
     );
-    assert_eq!(anthropic.reasoning.mode, ReasoningMode::ProviderDefault);
+    assert_eq!(anthropic.reasoning_mode(), ReasoningMode::ProviderDefault);
 }
 
 #[test]

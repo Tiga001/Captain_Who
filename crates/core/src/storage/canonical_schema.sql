@@ -752,11 +752,37 @@ CREATE TABLE provider_continuations (
             ciphertext BLOB,
             decoded_bytes INTEGER,
             compressed_bytes INTEGER,
+            projection_kind TEXT CHECK (
+                projection_kind IS NULL OR projection_kind IN (
+                    'conversation_message', 'conversation_trace_item',
+                    'conversation_steer_boundary'
+                )
+            ),
+            projection_sequence INTEGER CHECK (
+                projection_sequence IS NULL OR projection_sequence >= 0
+            ),
+            projection_ordinal INTEGER CHECK (
+                projection_ordinal IS NULL OR projection_ordinal >= 0
+            ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
             released_at INTEGER CHECK (released_at IS NULL OR released_at >= created_at),
             activated_at INTEGER CHECK (activated_at IS NULL OR activated_at >= created_at),
             UNIQUE (conversation_id, assistant_message_id, run_id, request_index),
+            CHECK (
+                (projection_kind IS NULL
+                    AND projection_sequence IS NULL
+                    AND projection_ordinal IS NULL)
+                OR (projection_kind = 'conversation_message'
+                    AND projection_sequence IS NULL
+                    AND projection_ordinal IS NULL)
+                OR (projection_kind = 'conversation_trace_item'
+                    AND projection_sequence IS NOT NULL
+                    AND projection_ordinal IS NOT NULL)
+                OR (projection_kind = 'conversation_steer_boundary'
+                    AND projection_sequence IS NOT NULL
+                    AND projection_ordinal IS NULL)
+            ),
             CHECK (
                 (
                     state IN ('active', 'superseded')
@@ -791,6 +817,15 @@ CREATE TABLE provider_continuations (
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
             FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
+CREATE UNIQUE INDEX provider_continuations_projection_identity
+            ON provider_continuations (
+                conversation_id,
+                assistant_message_id,
+                projection_kind,
+                COALESCE(projection_sequence, -1),
+                COALESCE(projection_ordinal, -1)
+            )
+            WHERE projection_kind IS NOT NULL;
 CREATE TABLE provider_continuation_tool_calls (
             continuation_id TEXT NOT NULL,
             provider_tool_index INTEGER NOT NULL CHECK (provider_tool_index >= 0),
@@ -802,6 +837,26 @@ CREATE TABLE provider_continuation_tool_calls (
             FOREIGN KEY (continuation_id)
                 REFERENCES provider_continuations(continuation_id) ON DELETE CASCADE
         );
+CREATE TRIGGER prevent_provider_continuation_projection_rewrite
+        BEFORE UPDATE OF projection_kind, projection_sequence, projection_ordinal
+        ON provider_continuations
+        WHEN NEW.projection_kind IS NOT OLD.projection_kind
+          OR NEW.projection_sequence IS NOT OLD.projection_sequence
+          OR NEW.projection_ordinal IS NOT OLD.projection_ordinal
+        BEGIN
+            SELECT RAISE(ABORT, 'Provider continuation projection identity is immutable');
+        END;
+CREATE TRIGGER validate_provider_continuation_tool_call_projection
+        BEFORE INSERT ON provider_continuation_tool_calls
+        WHEN EXISTS (
+            SELECT 1
+            FROM provider_continuations
+            WHERE continuation_id = NEW.continuation_id
+              AND projection_kind IS NOT NULL
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Ordinary provider continuation cannot own ToolCalls');
+        END;
 CREATE TABLE agent_file_changes (
             schema_version INTEGER NOT NULL CHECK (schema_version = 1),
             id TEXT PRIMARY KEY,

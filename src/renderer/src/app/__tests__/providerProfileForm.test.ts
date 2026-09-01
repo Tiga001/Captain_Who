@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { ProviderProfileConfig, ProviderProfileUiDescriptor } from '@mycopilot/protocol'
+import type {
+  LegacyProviderProfileConfigV1,
+  ProviderProfileConfig,
+  ProviderProfileUiDescriptor
+} from '@mycopilot/protocol'
 import { prepareModelsForGlobalApiUrlChange, type ModelConfig } from '../../config/modelConfig'
 import {
   initialProviderProfileFormState,
@@ -38,9 +42,9 @@ const descriptors: ProviderProfileUiDescriptor[] = [
 function profile(
   id: ProviderProfileConfig['profile']['id'],
   version: number,
-  mode: ProviderProfileConfig['reasoning']['mode'] = 'provider_default',
-  effort: ProviderProfileConfig['reasoning']['effort'] = 'provider_default'
-): ProviderProfileConfig {
+  mode: LegacyProviderProfileConfigV1['reasoning']['mode'] = 'provider_default',
+  effort: LegacyProviderProfileConfigV1['reasoning']['effort'] = 'provider_default'
+): LegacyProviderProfileConfigV1 {
   return { schemaVersion: 1, profile: { id, version }, reasoning: { mode, effort } }
 }
 
@@ -79,8 +83,10 @@ describe('Provider Profile model form state', () => {
   })
 
   it('treats an unknown config schema as unsupported even when its profile is registered', () => {
-    const future = profile('deepseek_v4_chat', 1, 'enabled', 'max')
-    future.schemaVersion = 99
+    const future = {
+      ...profile('deepseek_v4_chat', 1, 'enabled', 'max'),
+      schemaVersion: 99
+    } as unknown as ProviderProfileConfig
 
     const state = initialProviderProfileFormState(future, descriptors)
 
@@ -100,6 +106,58 @@ describe('Provider Profile model form state', () => {
     expect(state.selection).toBe('unsupported')
     expect(state.unsupportedProfile).toEqual({ id: 'future_vendor_chat', version: 7 })
     expect(state.update).toEqual({ kind: 'unchanged' })
+  })
+
+  it('preserves v2 DeepSeek state while keeping unexposed Moonshot profiles unsupported', () => {
+    const deepSeek = initialProviderProfileFormState(
+      {
+        schemaVersion: 2,
+        profile: { id: 'deepseek_v4_chat', version: 1 },
+        vendorId: 'deepseek',
+        settings: {
+          kind: 'deepseek_v4_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
+      },
+      descriptors
+    )
+    const moonshot = initialProviderProfileFormState(
+      {
+        schemaVersion: 2,
+        profile: { id: 'moonshot_k3_chat', version: 1 },
+        vendorId: 'moonshot',
+        settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+      },
+      descriptors
+    )
+    const mismatchedVendor = initialProviderProfileFormState(
+      {
+        schemaVersion: 2,
+        profile: { id: 'deepseek_v4_chat', version: 1 },
+        vendorId: 'moonshot',
+        settings: {
+          kind: 'deepseek_v4_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
+      },
+      descriptors
+    )
+
+    expect(deepSeek).toMatchObject({
+      selection: 'deepseek_v4_chat',
+      reasoning: { mode: 'enabled', effort: 'high' },
+      update: { kind: 'unchanged' }
+    })
+    expect(moonshot).toMatchObject({
+      selection: 'unsupported',
+      update: { kind: 'unchanged' },
+      unsupportedProfile: { id: 'moonshot_k3_chat', version: 1 }
+    })
+    expect(mismatchedVendor).toMatchObject({
+      selection: 'unsupported',
+      update: { kind: 'unchanged' },
+      unsupportedProfile: { id: 'deepseek_v4_chat', version: 1 }
+    })
   })
 
   it('normalizes disabled Thinking and emits only the public DeepSeek settings union', () => {
