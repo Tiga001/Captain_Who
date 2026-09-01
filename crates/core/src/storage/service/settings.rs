@@ -130,7 +130,10 @@ impl StorageService {
             .map_err(storage_error)
     }
 
-    pub fn list_image_generation_credential_cleanup(&self) -> Result<Vec<String>, String> {
+    pub fn list_image_generation_credential_cleanup(
+        &self,
+    ) -> Result<Vec<image_generation_repository::ImageGenerationCredentialCleanupRecord>, String>
+    {
         let connection = self.state.connection()?;
         image_generation_repository::list_image_generation_credential_cleanup(&connection)
             .map_err(storage_error)

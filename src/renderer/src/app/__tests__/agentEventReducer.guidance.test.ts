@@ -92,6 +92,7 @@ describe('agent guidance timeline projection', () => {
         guidanceId: 'guidance-1',
         status: 'applied',
         sequence: 4,
+        traceSequence: 4,
         attachments: [
           {
             id: 'attachment-1',
@@ -104,6 +105,67 @@ describe('agent guidance timeline projection', () => {
       })
     ])
     expect(JSON.stringify(replayedQueued.agentRun?.timeline)).not.toContain('aGVsbG8=')
+  })
+
+  it('moves guidance from its optimistic send position to its applied Trace position', () => {
+    const messageBeforeGuidance: ChatMessage = {
+      ...assistantMessage(),
+      agentRun: {
+        ...assistantMessage().agentRun!,
+        timeline: [
+          {
+            id: 'message-before',
+            type: 'message',
+            content: 'Before the user sent guidance.',
+            traceSequence: 0
+          }
+        ]
+      }
+    }
+    const optimistic = applyOptimisticGuidanceToChatMessage(
+      messageBeforeGuidance,
+      queuedMessage(),
+      'run-1'
+    )
+    if (!optimistic.agentRun) throw new Error('missing optimistic Agent Run')
+    const withLaterWork: ChatMessage = {
+      ...optimistic,
+      agentRun: {
+        ...optimistic.agentRun,
+        timeline: [
+          ...optimistic.agentRun.timeline,
+          {
+            id: 'tool-after-send',
+            type: 'tool_call',
+            callId: 'call-1',
+            traceSequence: 1
+          },
+          {
+            id: 'message-after-apply',
+            type: 'message',
+            content: 'After the guidance took effect.',
+            traceSequence: 5
+          }
+        ]
+      }
+    }
+
+    const applied = applyAgentEventToChatMessage(withLaterWork, guidanceEvent('guidance_applied'))
+
+    expect(applied.agentRun?.timeline.map((item) => item.id)).toEqual([
+      'message-before',
+      'tool-after-send',
+      'user-guidance-client-1',
+      'message-after-apply'
+    ])
+    expect(applied.agentRun?.timeline.filter((item) => item.type === 'user_guidance')).toHaveLength(
+      1
+    )
+
+    const replayed = applyAgentEventToChatMessage(applied, guidanceEvent('guidance_applied'))
+    expect(replayed.agentRun?.timeline.map((item) => item.id)).toEqual(
+      applied.agentRun?.timeline.map((item) => item.id)
+    )
   })
 
   it('removes rejected optimistic guidance from the timeline', () => {

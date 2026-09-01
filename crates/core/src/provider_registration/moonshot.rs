@@ -64,7 +64,8 @@ const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
         tool_exchange: ProviderToolExchangeSemantics::ExactProviderGrouped,
         private_replay: ProviderPrivateReplaySemantics::AdapterClassified,
         context_projection: ProviderContextProjectionSemantics::ExactProviderTurn,
-        // Moonshot usage is projected by its own adapter from provider-authoritative fields.
+        // Moonshot's provider-authoritative completion count already includes any reasoning. Its
+        // adapter preserves that aggregate without applying DeepSeek's visible/reasoning split.
         usage: ProviderUsageSemantics::StandardAdditive,
         partial_trace: ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
         tool_call_source: ProviderToolCallSourceSemantics::ProviderNativeOnly,

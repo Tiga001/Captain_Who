@@ -863,7 +863,8 @@ export function applyAgentEventToChatMessage(
       attachments: guidanceAttachments(agentEvent.attachments),
       status,
       createdAt: agentEvent.createdAt,
-      sequence: agentEvent.type === 'guidance_applied' ? agentEvent.sequence : undefined
+      sequence: agentEvent.type === 'guidance_applied' ? agentEvent.sequence : undefined,
+      traceSequence: agentEvent.type === 'guidance_applied' ? agentEvent.sequence : undefined
     }
     return {
       ...message,

@@ -107,6 +107,116 @@ fn persists_usage_for_failed_runs() {
 }
 
 #[test]
+fn moonshot_completion_usage_is_priced_persisted_and_summarized_as_output() {
+    const CONVERSATION_ID: &str = "conversation-moonshot-usage";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-moonshot-usage";
+    const RUN_ID: &str = "run-moonshot-usage";
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("kimi-k3".to_string()),
+            title: "Moonshot usage".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: "done".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let moonshot_usage_semantics = mycopilot_core::resolve_provider_vendor_registration(
+        mycopilot_core::ProviderVendorId::Moonshot,
+        "kimi-k3",
+        ProviderProtocolDialect::OpenAiChatCompletions,
+    )
+    .unwrap()
+    .runtime_capabilities()
+    .usage();
+    assert_eq!(
+        moonshot_usage_semantics,
+        ProviderUsageSemantics::StandardAdditive
+    );
+
+    let service = AgentService::new(Arc::clone(&storage));
+    service.register_usage_context(
+        RUN_ID,
+        AgentRunUsageContext {
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+            run_id: RUN_ID.to_string(),
+            project_id: None,
+            model_id: "kimi-k3".to_string(),
+            model_name: "Kimi K3".to_string(),
+            provider_usage_semantics: moonshot_usage_semantics,
+            input_price: Some("0.01".to_string()),
+            cached_input_price: Some("0.002".to_string()),
+            output_price: Some("0.02".to_string()),
+            started_at: 1,
+        },
+    );
+    service
+        .persist_run_usage(
+            RUN_ID,
+            AgentRunStatus::Completed,
+            Some(AgentUsage {
+                input_tokens: Some(1_000),
+                output_tokens: Some(250),
+                output_thinking_tokens: None,
+                total_tokens: Some(1_250),
+                cached_input_tokens: Some(400),
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(1),
+            }),
+            None,
+        )
+        .unwrap();
+
+    let persisted = storage
+        .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.output_tokens, Some(250));
+    assert_eq!(persisted.output_thinking_tokens, None);
+    assert_eq!(persisted.cached_input_tokens, Some(400));
+    assert_eq!(persisted.total_tokens, Some(1_250));
+    assert!(
+        (persisted.estimated_cost.unwrap() - 0.0118).abs() < f64::EPSILON,
+        "Moonshot completion output must contribute its 0.005 output-cost share"
+    );
+
+    let summary = service
+        .get_usage_summary(&AgentUsageSummaryInput {
+            range: AgentUsageSummaryRange::All,
+            from: None,
+            to: None,
+        })
+        .unwrap();
+    assert_eq!(summary.output_tokens, Some(250));
+    assert_eq!(summary.output_thinking_tokens, None);
+    assert_eq!(summary.cached_input_tokens, Some(400));
+    assert_eq!(summary.total_tokens, Some(1_250));
+    assert!((summary.estimated_cost.unwrap() - 0.0118).abs() < f64::EPSILON);
+    assert_eq!(summary.models.len(), 1);
+    assert_eq!(summary.models[0].model_id, "kimi-k3");
+    assert_eq!(summary.models[0].output_tokens, Some(250));
+    assert!((summary.models[0].estimated_cost.unwrap() - 0.0118).abs() < f64::EPSILON);
+}
+
+#[test]
 fn model_request_interruption_settles_visible_message_without_losing_failed_audit() {
     const CONVERSATION_ID: &str = "conversation-model-interruption";
     const ASSISTANT_MESSAGE_ID: &str = "assistant-model-interruption";

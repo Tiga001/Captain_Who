@@ -702,8 +702,17 @@ impl ImageGenerationConfigurationService {
             .storage
             .list_image_generation_credential_cleanup()
             .map_err(|_| ImageGenerationConfigurationError::StorageUnavailable)?;
-        for value in cleanup {
-            let reference = CredentialReference::parse(value.clone())
+        for cleanup_record in cleanup {
+            // A cleanup receipt can overlap an active profile after interrupted development
+            // maintenance or recovery from an older inconsistent database. The profile is the
+            // authority: retire the stale receipt without touching the credential it references.
+            if cleanup_record.is_active {
+                self.storage
+                    .complete_image_generation_credential_cleanup(&cleanup_record.credential_ref)
+                    .map_err(|_| ImageGenerationConfigurationError::StorageUnavailable)?;
+                continue;
+            }
+            let reference = CredentialReference::parse(cleanup_record.credential_ref.clone())
                 .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
             if self.credentials.supports_reference(&reference) {
                 self.credentials
@@ -711,7 +720,7 @@ impl ImageGenerationConfigurationService {
                     .map_err(map_credential_error)?;
             }
             self.storage
-                .complete_image_generation_credential_cleanup(&value)
+                .complete_image_generation_credential_cleanup(&cleanup_record.credential_ref)
                 .map_err(|_| ImageGenerationConfigurationError::StorageUnavailable)?;
             report.removed_retired_credentials += 1;
         }
@@ -1412,6 +1421,44 @@ mod tests {
         assert!(service
             .storage
             .list_image_generation_credential_staging()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn startup_cleanup_discards_an_active_receipt_without_deleting_its_credential() {
+        let (service, credentials, directory) = service();
+        service
+            .update_configuration(update("image-generation:v1:0", "active-secret"))
+            .unwrap();
+        let record = service.load_record().unwrap().unwrap();
+        let active_reference = CredentialReference::parse(record.credential_ref.unwrap()).unwrap();
+        let retired_reference = credentials.new_reference();
+        credentials
+            .replace(
+                &retired_reference,
+                CredentialSecret::new("retired-secret").unwrap(),
+            )
+            .unwrap();
+        let connection = rusqlite::Connection::open(directory.path().join("app.db")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO image_generation_credential_cleanup (
+                     credential_ref, created_at
+                 ) VALUES (?1, 1), (?2, 2)",
+                rusqlite::params![active_reference.as_str(), retired_reference.as_str()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let report = service.reconcile_credentials().unwrap();
+
+        assert_eq!(report.removed_retired_credentials, 1);
+        assert!(credentials.get(&active_reference).unwrap().is_some());
+        assert!(credentials.get(&retired_reference).unwrap().is_none());
+        assert!(service
+            .storage
+            .list_image_generation_credential_cleanup()
             .unwrap()
             .is_empty());
     }

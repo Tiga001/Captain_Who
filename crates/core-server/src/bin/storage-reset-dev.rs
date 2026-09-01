@@ -1538,6 +1538,10 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mycopilot_core::image_generation::{
+        CredentialSecret, CredentialStore, DevelopmentFileCredentialStore,
+        ImageGenerationConfigurationService,
+    };
     use mycopilot_core::storage::image_generation_repository::IMAGE_GENERATION_PROFILE_SCHEMA_VERSION;
     use mycopilot_core::storage::models::{
         BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, BrowserLinkOpenTarget,
@@ -1547,7 +1551,10 @@ mod tests {
         McpApprovalMode, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
         McpTransportConfig,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
@@ -1987,6 +1994,71 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(!report.render().contains(secret));
+    }
+
+    #[test]
+    fn confirmed_reset_preserves_a_development_image_credential_through_reconciliation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let storage = StorageService::open(&database).unwrap();
+        let credentials = Arc::new(
+            DevelopmentFileCredentialStore::new(
+                fixture
+                    .path()
+                    .join("image-generation-development-credentials-v1"),
+            )
+            .unwrap(),
+        );
+        let reference = credentials.new_reference();
+        credentials
+            .replace(
+                &reference,
+                CredentialSecret::new("temporary-reset-test-secret").unwrap(),
+            )
+            .unwrap();
+        let profile = ImageGenerationProfileRecord {
+            id: DEFAULT_IMAGE_GENERATION_PROFILE_ID.to_string(),
+            schema_version: IMAGE_GENERATION_PROFILE_SCHEMA_VERSION,
+            adapter_id: "smartmlSeedream".to_string(),
+            endpoint_url: "https://image.example.test/v1".to_string(),
+            model_id: "image-model".to_string(),
+            credential_ref: Some(reference.as_str().to_string()),
+            enabled: true,
+            text_to_image: true,
+            image_to_image: false,
+            default_size_preset: "2K".to_string(),
+            default_watermark: false,
+            generation: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(matches!(
+            storage
+                .compare_and_set_image_generation_profile(
+                    DEFAULT_IMAGE_GENERATION_PROFILE_ID,
+                    0,
+                    &profile,
+                )
+                .unwrap(),
+            image_generation_repository::ImageGenerationProfileCompareAndSetOutcome::Updated(_)
+        ));
+        drop(storage);
+        assert!(credentials.get(&reference).unwrap().is_some());
+
+        execute(options(fixture.path(), true)).unwrap();
+
+        let storage = Arc::new(StorageService::open(&database).unwrap());
+        let restored = storage
+            .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.credential_ref.as_deref(), Some(reference.as_str()));
+        let configuration = ImageGenerationConfigurationService::new(
+            Arc::clone(&storage),
+            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+        );
+        configuration.reconcile_credentials().unwrap();
+        assert!(credentials.get(&reference).unwrap().is_some());
     }
 
     #[test]

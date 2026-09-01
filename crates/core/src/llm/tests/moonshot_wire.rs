@@ -292,7 +292,7 @@ fn k27_nonstream_preserves_required_reasoning() {
 }
 
 #[test]
-fn moonshot_thinking_families_do_not_invent_visible_or_reasoning_usage() {
+fn moonshot_thinking_families_preserve_completion_without_inventing_reasoning_usage() {
     for (profile, model) in [
         (k3_profile(ProviderReasoningEffort::Max), "kimi-k3"),
         (k27_profile(), "kimi-k2.7-code"),
@@ -328,9 +328,47 @@ fn moonshot_thinking_families_do_not_invent_visible_or_reasoning_usage() {
         let usage = response.usage.unwrap();
         assert_eq!(usage.input_tokens, Some(11));
         assert_eq!(usage.total_tokens, Some(24));
-        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.output_tokens, Some(13));
         assert_eq!(usage.output_thinking_tokens, None);
+        let usage_semantics = crate::resolve_provider_runtime_capabilities(&provider_protocol)
+            .unwrap()
+            .usage();
+        assert_eq!(usage_semantics.billable_output_tokens(&usage), Some(13));
     }
+}
+
+#[test]
+fn moonshot_missing_completion_remains_unknown_for_output_and_billing() {
+    let profile = k3_profile(ProviderReasoningEffort::Max);
+    let provider_protocol = protocol(&profile, "kimi-k3");
+    let response = parse_non_stream_response_with_profile(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Visible.",
+                    "reasoning_content": "Private."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 11,
+                "total_tokens": 24
+            }
+        })
+        .to_string(),
+        &profile,
+        &provider_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.output_thinking_tokens, None);
+    let usage_semantics = crate::resolve_provider_runtime_capabilities(&provider_protocol)
+        .unwrap()
+        .usage();
+    assert_eq!(usage_semantics.billable_output_tokens(&usage), None);
 }
 
 #[test]
@@ -490,7 +528,7 @@ fn k3_nonstream_captures_and_replays_present_ordinary_reasoning_without_exposing
     )
     .unwrap();
     assert_eq!(response.content(), "Visible answer.");
-    assert_eq!(response.usage.as_ref().unwrap().output_tokens, None);
+    assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(7));
     assert_eq!(response.usage.as_ref().unwrap().total_tokens, Some(10));
     assert!(!response.content().contains(PRIVATE));
     assert_eq!(
@@ -1072,7 +1110,7 @@ fn k3_stream_hides_reasoning_and_preserves_it_for_replay() {
         event,
         LlmStreamEvent::Delta(delta) if delta.contains(PRIVATE)
     )));
-    assert_eq!(response.usage.as_ref().unwrap().output_tokens, None);
+    assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(5));
     assert_eq!(
         super::super::providers::moonshot::reasoning_content(
             &provider_protocol,

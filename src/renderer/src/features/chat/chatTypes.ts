@@ -108,6 +108,7 @@ export interface ChatGuidanceTimelineItem {
   recoverable?: boolean
   createdAt: number
   sequence?: number
+  traceSequence?: number
 }
 
 export interface ChatCommandOutputChunk {

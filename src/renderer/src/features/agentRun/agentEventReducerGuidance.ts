@@ -40,6 +40,9 @@ export function upsertGuidanceTimelineItem(
         (item.guidanceId && candidate.guidanceId === item.guidanceId))
   )
   if (!existing || existing.type !== 'user_guidance') {
+    if (item.status === 'applied') {
+      return insertAppliedGuidanceAtTracePosition(run.timeline, item)
+    }
     return appendTimelineItem(run, item)
   }
 
@@ -54,9 +57,35 @@ export function upsertGuidanceTimelineItem(
       : {
           ...existing,
           ...item,
+          id: existing.id,
           guidanceId: item.guidanceId ?? existing.guidanceId
         }
-  return run.timeline.map((candidate) => (candidate.id === existing.id ? nextItem : candidate))
+  if (item.status !== 'applied' || existing.status === 'applied') {
+    return run.timeline.map((candidate) => (candidate.id === existing.id ? nextItem : candidate))
+  }
+
+  return insertAppliedGuidanceAtTracePosition(
+    run.timeline.filter((candidate) => candidate.id !== existing.id),
+    nextItem
+  )
+}
+
+function insertAppliedGuidanceAtTracePosition(
+  timeline: ChatAgentTimelineItem[],
+  item: ChatGuidanceTimelineItem
+): ChatAgentTimelineItem[] {
+  const appliedSequence = item.traceSequence ?? item.sequence
+  if (appliedSequence === undefined) return [...timeline, item]
+
+  const insertionIndex = timeline.findIndex((candidate) => {
+    const candidateSequence =
+      candidate.traceSequence ??
+      (candidate.type === 'user_guidance' ? candidate.sequence : undefined)
+    return candidateSequence !== undefined && candidateSequence > appliedSequence
+  })
+
+  if (insertionIndex < 0) return [...timeline, item]
+  return [...timeline.slice(0, insertionIndex), item, ...timeline.slice(insertionIndex)]
 }
 
 export function applyOptimisticGuidanceToChatMessage(

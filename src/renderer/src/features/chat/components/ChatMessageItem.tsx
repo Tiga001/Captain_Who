@@ -830,6 +830,9 @@ function AgentRunView({
   }
 
   const hasGuidance = timeline.some((item) => item.type === 'user_guidance')
+  const guidanceItems = timeline.filter(
+    (item): item is ChatGuidanceTimelineItem => item.type === 'user_guidance'
+  )
   const timelineCollapsed = canToggleTimeline
     ? (timelineCollapsedOverride ?? message.uiState?.timelineCollapsed ?? !hasGuidance)
     : false
@@ -871,6 +874,11 @@ function AgentRunView({
           })
         }}
       />
+      {canToggleTimeline && timelineCollapsed
+        ? guidanceItems.map((item) => (
+            <GuidanceTimelineItemView item={item} key={`timeline-item:${item.id}`} />
+          ))
+        : null}
       {displayTimelineBlocks.flatMap((block) => {
         if (block.kind === 'final-answer') {
           return showFinalContent ? (

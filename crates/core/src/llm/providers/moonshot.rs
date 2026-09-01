@@ -876,8 +876,9 @@ fn provider_reasoning_boundary_required(reason: &'static str) -> AgentError {
     )
 }
 
-/// Moonshot Chat Completion usage does not publish a reliable visible/reasoning breakdown.
-/// Preserve provider-authoritative input and total counts, but never invent visible output.
+/// Moonshot Chat Completion publishes one provider-authoritative aggregate completion count but
+/// does not publish a reliable visible/reasoning breakdown. Preserve that aggregate as output so
+/// Usage and billing remain complete, while never inventing a separate thinking-token count.
 fn project_usage(profile: &ProviderProfileConfig, mut usage: AgentUsage) -> AgentUsage {
     let disabled_k2_6 = matches!(
         profile.family_settings(),
@@ -888,7 +889,6 @@ fn project_usage(profile: &ProviderProfileConfig, mut usage: AgentUsage) -> Agen
     if disabled_k2_6 {
         usage.output_thinking_tokens = Some(0);
     } else {
-        usage.output_tokens = None;
         usage.output_thinking_tokens = None;
     }
     usage

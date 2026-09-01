@@ -23,6 +23,12 @@ pub struct ImageGenerationCredentialStagingRecord {
     pub is_active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageGenerationCredentialCleanupRecord {
+    pub credential_ref: String,
+    pub is_active: bool,
+}
+
 pub fn load_image_generation_profile(
     connection: &Connection,
     profile_id: &str,
@@ -215,16 +221,27 @@ pub fn list_image_generation_credential_staging(
 
 pub fn list_image_generation_credential_cleanup(
     connection: &Connection,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<Vec<ImageGenerationCredentialCleanupRecord>> {
     let mut statement = connection.prepare(
-        "SELECT credential_ref
-         FROM image_generation_credential_cleanup
-         ORDER BY created_at ASC, credential_ref ASC",
+        "SELECT
+             cleanup.credential_ref,
+             EXISTS (
+                 SELECT 1
+                 FROM image_generation_profiles AS profile
+                 WHERE profile.credential_ref = cleanup.credential_ref
+             ) AS is_active
+         FROM image_generation_credential_cleanup AS cleanup
+         ORDER BY cleanup.created_at ASC, cleanup.credential_ref ASC",
     )?;
-    let references = statement
-        .query_map([], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>();
-    references
+    let records = statement
+        .query_map([], |row| {
+            Ok(ImageGenerationCredentialCleanupRecord {
+                credential_ref: row.get(0)?,
+                is_active: row.get(1)?,
+            })
+        })?
+        .collect();
+    records
 }
 
 pub fn complete_image_generation_credential_cleanup(
